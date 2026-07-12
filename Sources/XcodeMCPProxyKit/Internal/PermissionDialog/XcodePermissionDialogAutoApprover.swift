@@ -8,6 +8,7 @@ extension XcodePermissionDialog {
     final class AutoApprover: @unchecked Sendable {
         struct Dependencies: DependencyClient {
             var axClient: any XcodePermissionDialog.AXAccessing
+            var permissionDialogProcessIDs: @Sendable () -> [pid_t]
             var agentPathCandidates: @Sendable () -> Set<String>
             var assistantNameCandidates: @Sendable () -> Set<String>
             var serverProcessIDCandidates: @Sendable () -> Set<pid_t>
@@ -17,6 +18,7 @@ extension XcodePermissionDialog {
 
             init(
                 axClient: any XcodePermissionDialog.AXAccessing,
+                permissionDialogProcessIDs: @escaping @Sendable () -> [pid_t],
                 agentPathCandidates: @escaping @Sendable () -> Set<String>,
                 assistantNameCandidates: @escaping @Sendable () -> Set<String>,
                 serverProcessIDCandidates: @escaping @Sendable () -> Set<pid_t>,
@@ -25,6 +27,7 @@ extension XcodePermissionDialog {
                 logger: Logger
             ) {
                 self.axClient = axClient
+                self.permissionDialogProcessIDs = permissionDialogProcessIDs
                 self.agentPathCandidates = agentPathCandidates
                 self.assistantNameCandidates = assistantNameCandidates
                 self.serverProcessIDCandidates = serverProcessIDCandidates
@@ -34,6 +37,7 @@ extension XcodePermissionDialog {
             }
 
             static func live(
+                permissionDialogProcessIDs: @escaping @Sendable () -> [pid_t],
                 agentPathCandidates: @escaping @Sendable () -> Set<String> = {
                     XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates()
                 },
@@ -46,6 +50,7 @@ extension XcodePermissionDialog {
             ) -> Self {
                 Self(
                     axClient: XcodePermissionDialog.AXClient(),
+                    permissionDialogProcessIDs: permissionDialogProcessIDs,
                     agentPathCandidates: agentPathCandidates,
                     assistantNameCandidates: assistantNameCandidates,
                     serverProcessIDCandidates: serverProcessIDCandidates,
@@ -58,11 +63,12 @@ extension XcodePermissionDialog {
             }
 
             static var liveValue: Self {
-                live()
+                live(permissionDialogProcessIDs: { [] })
             }
 
             static let testValue = Self(
                 axClient: NoopXcodePermissionDialogAXClient(),
+                permissionDialogProcessIDs: { [] },
                 agentPathCandidates: { [] },
                 assistantNameCandidates: { [] },
                 serverProcessIDCandidates: { [] },
@@ -93,7 +99,7 @@ extension XcodePermissionDialog {
         private var state = State()
         private let retryIntervalNanoseconds: UInt64 = 500_000_000
 
-        init(dependencies: Dependencies = .live()) {
+        init(dependencies: Dependencies) {
             self.dependencies = dependencies
         }
 
@@ -248,8 +254,8 @@ extension XcodePermissionDialog {
             var visibleInspectionFingerprints: Set<String> = []
             var inspectedWindowTitles: [String] = []
             var matchedWindows: [MatchedWindow] = []
-            let processIDs = dependencies.axClient.runningXcodeProcessIDs()
-            let serverProcessIDCandidates = dependencies.serverProcessIDCandidates()
+            let processIDs = dependencies.permissionDialogProcessIDs()
+            var serverProcessIDCandidates: Set<pid_t>?
             let nowUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
 
             for processID in processIDs {
@@ -289,28 +295,36 @@ extension XcodePermissionDialog {
                     }
                     let isStructurallyEligible =
                         XcodePermissionDialog.Matcher.passesStructuralChecks(window.snapshot)
+                    guard isStructurallyEligible else {
+                        continue
+                    }
+                    if serverProcessIDCandidates == nil {
+                        serverProcessIDCandidates = dependencies.serverProcessIDCandidates()
+                    }
+                    guard let resolvedServerProcessIDCandidates = serverProcessIDCandidates else {
+                        preconditionFailure("server process PID candidates were not resolved")
+                    }
                     guard
                         let decision = XcodePermissionDialog.Matcher.decision(
                             for: window.snapshot,
                             processID: processID,
                             agentPathCandidates: agentPathCandidates,
                             assistantNameCandidates: assistantNameCandidates,
-                            serverProcessIDCandidates: serverProcessIDCandidates
+                            serverProcessIDCandidates: resolvedServerProcessIDCandidates
                         )
                     else {
-                        if isStructurallyEligible {
-                            visibleInspectionFingerprints.insert(
-                                inspectionFingerprint(
-                                    processID: processID, snapshot: window.snapshot)
-                            )
-                            logStructurallyEligibleWindowIfNeeded(
-                                processID: processID,
-                                snapshot: window.snapshot,
-                                agentPathCandidates: agentPathCandidates,
-                                assistantNameCandidates: assistantNameCandidates,
-                                dependencies: dependencies
-                            )
-                        }
+                        visibleInspectionFingerprints.insert(
+                            inspectionFingerprint(
+                                processID: processID, snapshot: window.snapshot)
+                        )
+                        logStructurallyEligibleWindowIfNeeded(
+                            processID: processID,
+                            snapshot: window.snapshot,
+                            agentPathCandidates: agentPathCandidates,
+                            assistantNameCandidates: assistantNameCandidates,
+                            serverProcessIDCandidates: resolvedServerProcessIDCandidates,
+                            dependencies: dependencies
+                        )
                         continue
                     }
 
@@ -333,8 +347,13 @@ extension XcodePermissionDialog {
                     }
             }
 
+            let resolvedServerProcessIDCandidates = serverProcessIDCandidates ?? []
             for matchedWindow in matchedWindows {
-                logMatchedWindowIfNeeded(matchedWindow, dependencies: dependencies)
+                logMatchedWindowIfNeeded(
+                    matchedWindow,
+                    serverProcessIDCandidates: resolvedServerProcessIDCandidates,
+                    dependencies: dependencies
+                )
 
                 let shouldPress = stateLock.withLock { () -> Bool in
                     if let lastAttempt = state.lastAttemptUptimeByFingerprint[
@@ -364,7 +383,7 @@ extension XcodePermissionDialog {
                             "pid": "\(matchedWindow.processID)",
                             "button": .string(matchedWindow.decision.defaultButtonTitle),
                             "server_pid_candidates": .string(
-                                serverProcessIDCandidates.map(String.init).sorted().joined(
+                                resolvedServerProcessIDCandidates.map(String.init).sorted().joined(
                                     separator: ",")
                             ),
                         ]
@@ -425,6 +444,7 @@ extension XcodePermissionDialog {
             snapshot: XcodePermissionDialog.WindowSnapshot,
             agentPathCandidates: Set<String>,
             assistantNameCandidates: Set<String>,
+            serverProcessIDCandidates: Set<pid_t>,
             dependencies: Dependencies
         ) {
             let fingerprint = inspectionFingerprint(processID: processID, snapshot: snapshot)
@@ -442,13 +462,14 @@ extension XcodePermissionDialog {
                     snapshot: snapshot,
                     agentPathCandidates: agentPathCandidates,
                     assistantNameCandidates: assistantNameCandidates,
-                    serverProcessIDCandidates: dependencies.serverProcessIDCandidates()
+                    serverProcessIDCandidates: serverProcessIDCandidates
                 )
             )
         }
 
         private func logMatchedWindowIfNeeded(
             _ matchedWindow: MatchedWindow,
+            serverProcessIDCandidates: Set<pid_t>,
             dependencies: Dependencies
         ) {
             let shouldLog = stateLock.withLock {
@@ -467,7 +488,7 @@ extension XcodePermissionDialog {
                     snapshot: snapshot,
                     agentPathCandidates: dependencies.agentPathCandidates(),
                     assistantNameCandidates: dependencies.assistantNameCandidates(),
-                    serverProcessIDCandidates: dependencies.serverProcessIDCandidates()
+                    serverProcessIDCandidates: serverProcessIDCandidates
                 )
             )
         }
@@ -536,10 +557,6 @@ extension XcodePermissionDialog {
 private struct NoopXcodePermissionDialogAXClient: XcodePermissionDialog.AXAccessing {
     func authorizationStatus(promptIfNeeded _: Bool) -> XcodePermissionDialog.AccessibilityStatus {
         .untrusted
-    }
-
-    func runningXcodeProcessIDs() -> [pid_t] {
-        []
     }
 
     func openWindows(for _: pid_t) throws -> [XcodePermissionDialog.AXWindow] {

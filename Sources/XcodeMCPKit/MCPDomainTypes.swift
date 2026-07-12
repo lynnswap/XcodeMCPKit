@@ -80,6 +80,14 @@ public enum MCPContent: Codable, Equatable, Sendable {
     /// Content that is not recognized by this package.
     case raw(MCPJSONValue)
 
+    /// Creates a text content item with its canonical MCP wire representation.
+    public static func text(_ value: String) -> Self {
+        .text(value, raw: .object([
+            "type": .string("text"),
+            "text": .string(value),
+        ]))
+    }
+
     /// Decodes a content item from raw MCP JSON.
     public init(from decoder: Decoder) throws {
         let value = try MCPJSONValue(from: decoder)
@@ -128,6 +136,14 @@ public struct MCPToolResult: Codable, Equatable, Sendable {
     /// This preserves dynamic fields and future MCP extensions that are not
     /// modeled as first-class properties.
     public var raw: MCPJSONValue
+
+    /// Text content joined with newlines. Non-text content is ignored.
+    public var text: String {
+        content.compactMap { content in
+            guard case .text(let value, _) = content else { return nil }
+            return value
+        }.joined(separator: "\n")
+    }
 
     /// Creates a tool result value.
     ///

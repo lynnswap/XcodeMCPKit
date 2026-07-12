@@ -144,7 +144,7 @@ extension ProxyDebug {
         let controlPlane: ControlPlane.DebugSnapshot?
         let upstreams: [ProxyDebug.UpstreamSnapshot]
         let processRoutes: [ProxyDebug.ProcessRouteSnapshot]
-        let processToolCatalogs: [ProcessToolSurfaceStore.DebugSnapshot]
+        let processToolCatalogs: [ProcessControlPlaneAuthority.CatalogDebugSnapshot]
         let recentTraffic: [ProxyDebug.TrafficEvent]
         let sessions: [SessionRequestPipeline.DebugSnapshot]
         let leases: [LeaseManager.DebugSnapshot]
@@ -158,7 +158,7 @@ extension ProxyDebug {
             controlPlane: ControlPlane.DebugSnapshot? = nil,
             upstreams: [ProxyDebug.UpstreamSnapshot],
             processRoutes: [ProxyDebug.ProcessRouteSnapshot] = [],
-            processToolCatalogs: [ProcessToolSurfaceStore.DebugSnapshot] = [],
+            processToolCatalogs: [ProcessControlPlaneAuthority.CatalogDebugSnapshot] = [],
             recentTraffic: [ProxyDebug.TrafficEvent],
             sessions: [SessionRequestPipeline.DebugSnapshot],
             leases: [LeaseManager.DebugSnapshot],

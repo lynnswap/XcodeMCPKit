@@ -159,6 +159,7 @@ package enum TestResourceGate {
     ) async throws -> T {
         try await processHeavyStdioAdapterGate.withAccess(operation)
     }
+
 }
 
 private final class AsyncResourceGate: @unchecked Sendable {
@@ -327,12 +328,19 @@ package final class TestClock: Clock, @unchecked Sendable {
         let continuation: CheckedContinuation<Void, Error>
     }
 
+    private struct DeadlineSuspensionWaiter {
+        let deadline: Instant
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     private struct State {
         var now: Instant
         var sleepers: [UInt64: SleepWaiter] = [:]
         var nextSleepToken: UInt64 = 0
         var suspensionWaiters: [UInt64: SuspensionWaiter] = [:]
         var nextSuspensionToken: UInt64 = 0
+        var deadlineSuspensionWaiters: [UInt64: DeadlineSuspensionWaiter] = [:]
+        var nextDeadlineSuspensionToken: UInt64 = 0
     }
 
     private let state: NIOLockedValueBox<State>
@@ -379,6 +387,7 @@ package final class TestClock: Clock, @unchecked Sendable {
                     }
                     state.sleepers[token] = SleepWaiter(deadline: deadline, continuation: continuation)
                     return Self.resumeReadySuspensionWaiters(state: &state)
+                        + Self.resumeReadyDeadlineSuspensionWaiters(state: &state)
                 }
                 if shouldCancel {
                     continuation.resume(throwing: CancellationError())
@@ -424,6 +433,23 @@ package final class TestClock: Clock, @unchecked Sendable {
             ?? "timed out waiting for \(minimumSleepers) suspended fake clock sleeper(s)"
         try await waitWithTimeout(description, timeout: timeout) {
             try await self.waitUntilSuspendedBy(minimumSleepers)
+        }
+    }
+
+    package func sleep(
+        untilSuspendedFor duration: Duration,
+        timeout: Duration = .seconds(5),
+        onWaiterRegistered: @escaping @Sendable () -> Void = {}
+    ) async throws {
+        let deadline = now.advanced(by: duration)
+        try await waitWithTimeout(
+            "timed out waiting for a fake clock sleeper with duration \(duration)",
+            timeout: timeout
+        ) {
+            try await self.waitUntilSuspended(
+                at: deadline,
+                onWaiterRegistered: onWaiterRegistered
+            )
         }
     }
 
@@ -476,6 +502,58 @@ package final class TestClock: Clock, @unchecked Sendable {
         }
     }
 
+    private func waitUntilSuspended(
+        at deadline: Instant,
+        onWaiterRegistered: @escaping @Sendable () -> Void
+    ) async throws {
+        let token = state.withLockedValue { state -> UInt64? in
+            guard state.sleepers.values.contains(where: { $0.deadline == deadline }) == false else {
+                return nil
+            }
+            let token = state.nextDeadlineSuspensionToken
+            state.nextDeadlineSuspensionToken &+= 1
+            return token
+        }
+
+        guard let token else {
+            onWaiterRegistered()
+            return
+        }
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                var shouldCancel = false
+                let shouldResume = state.withLockedValue { state in
+                    if state.sleepers.values.contains(where: { $0.deadline == deadline }) {
+                        return true
+                    }
+                    guard Task.isCancelled == false else {
+                        shouldCancel = true
+                        return false
+                    }
+                    state.deadlineSuspensionWaiters[token] = DeadlineSuspensionWaiter(
+                        deadline: deadline,
+                        continuation: continuation
+                    )
+                    return false
+                }
+                if shouldCancel {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    onWaiterRegistered()
+                    if shouldResume {
+                        continuation.resume(returning: ())
+                    }
+                }
+            }
+        } onCancel: {
+            let waiter = state.withLockedValue { state in
+                state.deadlineSuspensionWaiters.removeValue(forKey: token)
+            }
+            waiter?.continuation.resume(throwing: CancellationError())
+        }
+    }
+
     private static func resumeReadySuspensionWaiters(
         state: inout State
     ) -> [CheckedContinuation<Void, Error>] {
@@ -483,6 +561,17 @@ package final class TestClock: Clock, @unchecked Sendable {
             state.sleepers.count >= waiter.minimumSleepers ? token : nil
         }
         return readyTokens.compactMap { state.suspensionWaiters.removeValue(forKey: $0)?.continuation }
+    }
+
+    private static func resumeReadyDeadlineSuspensionWaiters(
+        state: inout State
+    ) -> [CheckedContinuation<Void, Error>] {
+        let readyTokens = state.deadlineSuspensionWaiters.compactMap { token, waiter in
+            state.sleepers.values.contains(where: { $0.deadline == waiter.deadline }) ? token : nil
+        }
+        return readyTokens.compactMap {
+            state.deadlineSuspensionWaiters.removeValue(forKey: $0)?.continuation
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import NIOHTTP1
+import XcodeMCPKit
 
 enum HTTPRequestValidationFailure: Error {
     case notAcceptable
@@ -12,10 +13,6 @@ enum HTTPRequestValidator {
 
     static func sessionID(from headers: HTTPHeaders) -> String? {
         headers.first(name: sessionHeader)
-    }
-
-    static func protocolVersion(from headers: HTTPHeaders) -> String? {
-        headers.first(name: protocolVersionHeader)
     }
 
     static func acceptsEventStream(_ headers: HTTPHeaders) -> Bool {
@@ -57,5 +54,39 @@ enum HTTPRequestValidator {
             }
             .map(\.value)
             .joined(separator: ",")
+    }
+}
+
+enum HTTPRequestProtocolVersionResolver {
+    enum Resolution: Equatable, Sendable {
+        case accepted(String)
+        case rejected
+    }
+
+    static let specificationDefault = "2025-03-26"
+
+    static func resolve(
+        headers: HTTPHeaders,
+        negotiatedVersion: String?
+    ) -> Resolution {
+        let expectedVersion = negotiatedVersion ?? specificationDefault
+        guard MCP.ProtocolVersion.isSupported(expectedVersion) else {
+            return .rejected
+        }
+
+        let explicitVersions = headers[HTTPRequestValidator.protocolVersionHeader]
+        guard explicitVersions.count <= 1 else {
+            return .rejected
+        }
+        guard let explicitVersion = explicitVersions.first else {
+            return .accepted(expectedVersion)
+        }
+        guard explicitVersion.isEmpty == false,
+            MCP.ProtocolVersion.isSupported(explicitVersion),
+            explicitVersion == expectedVersion
+        else {
+            return .rejected
+        }
+        return .accepted(explicitVersion)
     }
 }

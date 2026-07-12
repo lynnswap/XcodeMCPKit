@@ -32,19 +32,8 @@ extension RuntimeCoordinator {
         case ownerDiscovery
     }
 
-    private enum XcodeListWindowsRoutingEligibility {
-        case localOnly
-        case forwardWholeBatch
-        case reject
-    }
-
-    private struct OwnerResolutionConflict: Sendable {
-        let request: ToolRoutingRequest
-        let message: String
-    }
-
     private enum CachedOwnerResolution: Sendable {
-        case resolved(processID: pid_t, ownerLabel: String)
+        case resolved(processID: pid_t, ownerLabel: String, proof: WindowRouteProof)
         case unresolved
         case conflict(String)
     }
@@ -63,10 +52,10 @@ extension RuntimeCoordinator {
         }
         let usableProcessIDs = Set(usableRoutes.map(\.target.processID))
         let catalogedProcessIDs =
-            processToolSurfaceStore.processIDsWithCatalog()
+            processControlPlane.processIDsWithCatalog()
             .intersection(usableProcessIDs)
         let catalogProcessIDs =
-            processToolSurfaceStore.processIDsHavingTool("XcodeListWindows")
+            processControlPlane.processIDsHavingTool("XcodeListWindows")
             .intersection(usableProcessIDs)
         let routes = usableRoutes.filter {
             includesXcodeListWindowsRoute(
@@ -255,7 +244,7 @@ extension RuntimeCoordinator {
     }
 
     func unavailableXcodeProcessIDs() -> Set<pid_t> {
-        processRouteStore.unavailableProcessIDs(nowUptimeNs: nowUptimeNanoseconds())
+        processControlPlane.unavailableProcessIDs(nowUptimeNs: nowUptimeNanoseconds())
     }
 
     func markXcodeProcessRouteUnavailable(
@@ -286,12 +275,12 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         reason: String,
         cooldownNanoseconds: UInt64,
-        scope: ProcessRouteStore.CooldownScope
+        scope: ProcessControlPlaneAuthority.CooldownScope
     ) {
         let nowUptimeNs = nowUptimeNanoseconds()
         let unavailableUntil = nowUptimeNs
             &+ cooldownNanoseconds
-        guard let unavailable = processRouteStore.markUnavailable(
+        guard let unavailable = processControlPlane.markUnavailable(
             upstreamIndex: upstreamIndex,
             scope: scope,
             nowUptimeNs: nowUptimeNs,
@@ -300,15 +289,11 @@ extension RuntimeCoordinator {
             return
         }
         let route = unavailable.route
-        processRouteReadinessStore.removePendingCatalogRefresh(processID: route.target.processID)
-        cancelScheduledProcessToolsCatalogRetry(processID: route.target.processID)
-        if unavailable.didChangeExposure {
-            applyToolCatalogSurfaceMutation {
-                removeProcessToolCatalogAfterExposureLoss(
-                    processID: route.target.processID
-                )
-            }
-        }
+        applyProcessControlPlaneTransition(unavailable.transition)
+        scheduleXcodeProcessCooldownExpiration(
+            lease: unavailable.cooldownLease,
+            delayNanoseconds: cooldownNanoseconds
+        )
         removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         logger.debug(
             "Temporarily ignoring Xcode process route",
@@ -325,14 +310,57 @@ extension RuntimeCoordinator {
     }
 
     func markXcodeProcessRouteAvailable(upstreamIndex: Int) {
-        _ = processRouteStore.markRouteAvailable(
+        applyProcessControlPlaneTransition(processControlPlane.markAvailable(
             upstreamIndex: upstreamIndex,
+            scope: .route,
             nowUptimeNs: nowUptimeNanoseconds()
-        )
+        ))
+        _ = processRouteExposure(policy: .toolsCatalog)
     }
 
     func markXcodeProcessRouteCatalogAvailable(upstreamIndex: Int) {
-        _ = processRouteStore.markCatalogAvailable(upstreamIndex: upstreamIndex)
+        applyProcessControlPlaneTransition(processControlPlane.markAvailable(
+            upstreamIndex: upstreamIndex,
+            scope: .catalog,
+            nowUptimeNs: nowUptimeNanoseconds()
+        ))
+    }
+
+    private func scheduleXcodeProcessCooldownExpiration(
+        lease: ProcessControlPlaneAuthority.CooldownLease,
+        delayNanoseconds: UInt64
+    ) {
+        let timeout = scheduleRuntimeTimeout(
+            .nanoseconds(Int64(clamping: delayNanoseconds))
+        ) { [weak self] in
+            self?.handleXcodeProcessCooldownExpiration(lease: lease)
+        }
+        applyProcessControlPlaneTransition(
+            processControlPlane.attachCooldownTimeout(timeout, to: lease)
+        )
+    }
+
+    private func handleXcodeProcessCooldownExpiration(
+        lease: ProcessControlPlaneAuthority.CooldownLease
+    ) {
+        let nowUptimeNs = nowUptimeNanoseconds()
+        if nowUptimeNs < lease.deadlineUptimeNs {
+            let timeout = scheduleRuntimeTimeout(
+                .nanoseconds(Int64(clamping: lease.deadlineUptimeNs - nowUptimeNs))
+            ) { [weak self] in
+                self?.handleXcodeProcessCooldownExpiration(lease: lease)
+            }
+            applyProcessControlPlaneTransition(
+                processControlPlane.attachCooldownTimeout(timeout, to: lease)
+            )
+            return
+        }
+        guard let transition = processControlPlane.expireCooldown(
+            lease,
+            nowUptimeNs: nowUptimeNs
+        ) else { return }
+        applyProcessControlPlaneTransition(transition)
+        retryPendingProcessRouteReadiness(reason: "cooldown_expired")
     }
 
     func removeXcodeWindowOwners(forUpstreamIndex upstreamIndex: Int) {
@@ -343,33 +371,11 @@ extension RuntimeCoordinator {
     }
 
     func removeXcodeWindowOwners(forProcessID processID: pid_t) {
-        let changed = windowOwnerIndex.withLockedValue { index in
-            index.remove(processID: processID)
-        }
-        if changed {
-            invalidateControlPlane(
-                reason: "xcode_window_owners_updated",
-                clearInitialize: false,
-                clearToolsCatalog: true
-            )
-        }
+        _ = windowOwnershipAuthority.remove(processID: processID)
     }
 
     func clearXcodeWindowOwners() {
-        let changed = windowOwnerIndex.withLockedValue { index in
-            guard index.isEmpty == false else {
-                return false
-            }
-            index.removeAll()
-            return true
-        }
-        if changed {
-            invalidateControlPlane(
-                reason: "xcode_window_owners_updated",
-                clearInitialize: false,
-                clearToolsCatalog: true
-            )
-        }
+        _ = windowOwnershipAuthority.removeAll()
     }
 
     func documentationUpstreamIndex(for target: XcodeProcessTarget) -> Int? {
@@ -393,34 +399,33 @@ extension RuntimeCoordinator {
     }
 
     func processRouteExposure(
-        policy: ProcessRouteStore.ExposureSnapshot.Policy
-    ) -> ProcessRouteStore.ExposureSnapshot {
+        policy: ProcessControlPlaneAuthority.ExposurePolicy
+    ) -> ProcessControlPlaneAuthority.RoutingSnapshot {
         let nowUptimeNs = nowUptimeNanoseconds()
         let upstreamUsability = processRouteUpstreamUsabilitySnapshot(
             policy: policy,
             nowUptimeNs: nowUptimeNs
         )
-        return processRouteStore.exposure(
-            policy: policy,
-            upstreamUsability: upstreamUsability,
-            nowUptimeNs: nowUptimeNs
+        applyProcessControlPlaneTransition(
+            processControlPlane.updateUsability(upstreamUsability, nowUptimeNs: nowUptimeNs)
         )
+        return processControlPlane.routingSnapshot(policy: policy, nowUptimeNs: nowUptimeNs)
     }
 
     func processRouteUpstreamUsabilitySnapshot(
-        policy: ProcessRouteStore.ExposureSnapshot.Policy,
+        policy: ProcessControlPlaneAuthority.ExposurePolicy,
         nowUptimeNs: UInt64
-    ) -> ProcessRouteStore.UpstreamUsabilitySnapshot {
-        let states = upstreamHealthManager.statesSnapshot()
-        let snapshotUsable = Set(states.indices.filter { upstreamIndex in
-            guard states[upstreamIndex].isInitialized else {
-                return false
+    ) -> ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot {
+        let states = upstreamHealthManager.activeStatesSnapshot()
+        let snapshotUsable = Set(states.compactMap { upstreamID, state -> Int? in
+            guard state.isInitialized else {
+                return nil
             }
-            switch states[upstreamIndex].healthState {
+            switch state.healthState {
             case .healthy, .degraded:
-                return true
+                return upstreamID.rawValue
             case .quarantined:
-                return false
+                return nil
             }
         })
 
@@ -428,34 +433,33 @@ extension RuntimeCoordinator {
         switch policy {
         case .toolsCatalog:
             var effects: [UpstreamHealthManager.Effect] = []
-            recoveryAwareUsable = Set(states.indices.filter { upstreamIndex in
+            recoveryAwareUsable = Set(states.compactMap { upstreamID, _ -> Int? in
                 let evaluation = upstreamHealthManager.evaluateUsableInitialized(
-                    index: upstreamIndex,
+                    index: upstreamID.rawValue,
                     nowUptimeNs: nowUptimeNs
                 )
                 effects.append(contentsOf: evaluation.effects)
-                return evaluation.isUsable
+                return evaluation.isUsable ? upstreamID.rawValue : nil
             })
             applyHealthEffects(effects)
         case .ownerRouting, .windowDiscovery, .initialization:
             break
         }
 
-        return ProcessRouteStore.UpstreamUsabilitySnapshot(
-            snapshotUsableUpstreamIndices: snapshotUsable,
-            recoveryAwareUsableUpstreamIndices: recoveryAwareUsable
+        return ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot(
+            snapshotUsableUpstreamIDs: Set(snapshotUsable.map(UpstreamSlotID.init(rawValue:))),
+            recoveryAwareUsableUpstreamIDs: Set(
+                recoveryAwareUsable.map(UpstreamSlotID.init(rawValue:))
+            )
         )
     }
 
     func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
-        guard processRoutingEnabled else {
+        guard processRoutingEnabled,
+              let object = requestJSON as? [String: Any] else {
             return nil
         }
-        let indices = preferredUpstreamIndices(in: requestJSON)
-        guard indices.count == 1 else {
-            return nil
-        }
-        return indices.first
+        return preferredUpstreamIndex(in: object)
     }
 
     func toolRoutingDecision(
@@ -475,34 +479,16 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled else {
             return .forward(preferredUpstreamIndex: nil)
         }
-        let requests = toolRoutingRequests(in: requestJSON)
-        let xcodeListWindowsRequests = requests.filter {
-            $0.id != nil && $0.toolName == "XcodeListWindows"
+        guard let object = requestJSON as? [String: Any],
+              let request = toolRoutingRequest(in: object) else {
+            return .forward(preferredUpstreamIndex: nil)
         }
-        if xcodeListWindowsRequests.isEmpty == false {
-            switch xcodeListWindowsRoutingEligibility(in: requestJSON) {
-            case .localOnly:
-                return .localXcodeListWindows
-            case .forwardWholeBatch:
-                break
-            case .reject:
-                return .reject(
-                    errors: toolRoutingErrors(
-                        for: requests,
-                        message: "XcodeListWindows must be resolved locally before forwarding mixed batches"
-                    ),
-                    forceBatchArray: requestJSON is [Any]
-                )
-            }
+        if request.id != nil, request.toolName == "XcodeListWindows" {
+            return .localXcodeListWindows
         }
-        let ownerBoundRequests = requests.filter {
-            isOwnerBoundRoutingRequest($0)
-        }
-        guard ownerBoundRequests.isEmpty == false else {
+        guard isOwnerBoundRoutingRequest(request) else {
             if let catalogDecision = catalogToolRoutingDecision(
-                for: requests,
-                requiredProcessID: nil,
-                forceBatchArray: requestJSON is [Any]
+                for: request
             ) {
                 return catalogDecision
             }
@@ -515,122 +501,188 @@ extension RuntimeCoordinator {
         for requestJSON: Any,
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision {
-        let requests = toolRoutingRequests(in: requestJSON)
-        let ownerBoundRequests = requests.filter {
-            isOwnerBoundRoutingRequest($0)
+        guard let object = requestJSON as? [String: Any],
+              let request = toolRoutingRequest(in: object) else {
+            return .forward(preferredUpstreamIndex: nil)
         }
 
-        var ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
+        var ownerResolution = cachedOwnerResolution(for: request)
         var inferredOwnerProcessID =
             inferredUnambiguousOwnerProcessID(
-                for: requests,
-                unresolvedOwnerBoundRequests: ownerResolution.unresolved
+                for: request,
+                ownerResolution: ownerResolution
             )
         let needsOwnerRefresh =
-            ownerResolution.conflicts.isEmpty == false
-            || (ownerResolution.unresolved.isEmpty == false && inferredOwnerProcessID == nil)
+            if case .conflict = ownerResolution {
+                true
+            } else if case .unresolved = ownerResolution {
+                inferredOwnerProcessID == nil
+            } else {
+                false
+            }
         if needsOwnerRefresh {
             _ = try? await refreshXcodeWindowOwnersForRouting(
                 requestTimeoutOverride: requestTimeoutOverride
             )
-            ownerResolution = resolvedOwnerProcessIDs(for: ownerBoundRequests)
+            ownerResolution = cachedOwnerResolution(for: request)
             inferredOwnerProcessID =
                 inferredUnambiguousOwnerProcessID(
-                    for: requests,
-                    unresolvedOwnerBoundRequests: ownerResolution.unresolved
+                    for: request,
+                    ownerResolution: ownerResolution
                 )
         }
 
-        if ownerResolution.conflicts.isEmpty == false {
-            let errors = ownerResolution.conflicts.compactMap { conflict -> ToolRoutingError? in
-                guard let id = conflict.request.id else { return nil }
-                return ToolRoutingError(id: id, message: conflict.message)
+        testHooks.ownerRouteProofsResolved?()
+        if case .resolved(_, _, let proof) = ownerResolution,
+           (windowOwnershipAuthority.validate(proof.windowEpoch) == false
+            || processControlPlane.admit(proof.route) == nil) {
+            ownerResolution = cachedOwnerResolution(for: request)
+            inferredOwnerProcessID = inferredUnambiguousOwnerProcessID(
+                for: request,
+                ownerResolution: ownerResolution
+            )
+        }
+
+        let ownerProcessID: pid_t
+        switch ownerResolution {
+        case .resolved(let processID, _, _):
+            ownerProcessID = processID
+        case .conflict(let message):
+            return .reject(errors: toolRoutingErrors(for: request, message: message))
+        case .unresolved:
+            guard let inferredOwnerProcessID else {
+                return .reject(
+                    errors: toolRoutingErrors(
+                        for: request,
+                        message: "unable to resolve Xcode window owner for tool"
+                    )
+                )
             }
-            return .reject(
-                errors: errors.isEmpty
-                    ? toolRoutingErrors(
-                        for: requests,
-                        message: "conflicting Xcode window owners for one or more tools"
-                    )
-                    : errors,
-                forceBatchArray: requestJSON is [Any]
-            )
+            ownerProcessID = inferredOwnerProcessID
         }
-
-        if ownerResolution.unresolved.isEmpty == false, inferredOwnerProcessID == nil {
+        guard let ownerRoute = processControlPlane.route(forProcessID: ownerProcessID) else {
             return .reject(
                 errors: toolRoutingErrors(
-                    for: requests,
-                    message: "unable to resolve Xcode window owner for one or more tools"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                    for: request,
+                    message: "Xcode process that owns the tool is no longer available"
+                )
             )
         }
-
-        var distinctOwners = Set(ownerResolution.resolved.map(\.processID))
-        if let inferredOwnerProcessID {
-            distinctOwners.insert(inferredOwnerProcessID)
-        }
-        if distinctOwners.count > 1 {
-            return .reject(
-                errors: requests.compactMap { request in
-                    guard let id = request.id else { return nil }
-                    return ToolRoutingError(
-                        id: id,
-                        message: "mixed Xcode window owners in one batch are not supported"
+        let owners = windowOwnershipAuthority.snapshot()
+        let windowProof: WindowRouteProof
+        if case .resolved(let resolvedProcessID, _, let resolvedProof) = ownerResolution {
+            guard resolvedProcessID == ownerProcessID,
+                  resolvedProof.route.routeID == ownerRoute.id,
+                  resolvedProof.windowEpoch == owners.epoch else {
+                return .reject(
+                    errors: toolRoutingErrors(
+                        for: request,
+                        message: "Xcode window ownership changed while routing the request"
                     )
-                },
-                forceBatchArray: true
-            )
+                )
+            }
+            windowProof = resolvedProof
+        } else {
+            guard let routeProof = processControlPlane.routeProof(routeID: ownerRoute.id) else {
+                return .reject(
+                    errors: toolRoutingErrors(
+                        for: request,
+                        message: "Xcode process route changed while routing the request"
+                    )
+                )
+            }
+            windowProof = WindowRouteProof(windowEpoch: owners.epoch, route: routeProof)
         }
-
-        guard let ownerProcessID = distinctOwners.first else {
-            return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
-        }
-        guard let ownerRoute = xcodeProcessRoutes.first(where: {
-            $0.target.processID == ownerProcessID
-        }) else {
+        guard windowOwnershipAuthority.validate(windowProof.windowEpoch),
+              let routeAdmission = processControlPlane.admit(windowProof.route) else {
             return .reject(
                 errors: toolRoutingErrors(
-                    for: requests,
-                    message: "Xcode process that owns one or more tools is no longer available"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                    for: request,
+                    message: "Xcode window ownership changed while routing the request"
+                )
             )
         }
+        let rewritePlan = ownerBoundRequestRewritePlan(
+            processID: ownerProcessID,
+            request: request,
+            owners: owners
+        )
         let ownerUpstreamIndices = usableInitializedUpstreamIndices(in: ownerRoute)
 
-        let hasMissingTools = requests.contains { request in
-            guard processToolSurfaceStore.catalog(forProcessID: ownerProcessID) != nil,
-                  processToolSurfaceStore.hasTool(
-                      request.toolName,
-                      processID: ownerProcessID
-                  ) == false else {
-                return false
-            }
-            return true
-        }
-        if hasMissingTools {
+        if processControlPlane.catalog(forProcessID: ownerProcessID) != nil,
+           processControlPlane.hasTool(
+            request.toolName,
+            processID: ownerProcessID
+           ) == false {
             return .reject(
                 errors: toolRoutingErrors(
-                    for: requests,
-                    message: "one or more tools are not available in the selected Xcode process"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                    for: request,
+                    message: "tool is not available in the selected Xcode process"
+                )
             )
         }
 
         guard ownerUpstreamIndices.isEmpty == false else {
             return .reject(
                 errors: toolRoutingErrors(
-                    for: requests,
-                    message: "no available upstream for Xcode process that owns one or more tools"
-                ),
-                forceBatchArray: requestJSON is [Any]
+                    for: request,
+                    message: "no available upstream for the Xcode process that owns the tool"
+                )
             )
         }
 
-        return .forwardAny(preferredUpstreamIndices: ownerUpstreamIndices)
+        let topology = upstreamTopology.snapshot()
+        let upstreamProofs = ownerUpstreamIndices.compactMap { topology.proof(
+            UpstreamSlotID(rawValue: $0)
+        ) }
+        guard upstreamProofs.count == ownerUpstreamIndices.count else {
+            return .reject(
+                errors: toolRoutingErrors(
+                    for: request,
+                    message: "Xcode upstream topology changed while routing the request"
+                )
+            )
+        }
+        return .forwardAdmitted(
+            preferredUpstreamIndices: ownerUpstreamIndices,
+            admission: RouteForwardingAdmission(
+                route: routeAdmission,
+                upstreamProofs: upstreamProofs,
+                window: WindowRouteAdmission(
+                    proof: windowProof,
+                    route: routeAdmission,
+                    rewritePlan: rewritePlan
+                )
+            )
+        )
+    }
+
+    private func ownerBoundRequestRewritePlan(
+        processID: pid_t,
+        request: ToolRoutingRequest,
+        owners: WindowOwnershipSnapshot
+    ) -> OwnerBoundRequestRewritePlan {
+        let identities = owners.identities.filter { $0.processID == processID }
+        let rawByProxy = Dictionary(uniqueKeysWithValues: identities.map {
+            ($0.proxyTabIdentifier, $0.rawTabIdentifier)
+        })
+        let byWorkspace = Dictionary(grouping: identities, by: \.workspacePath)
+        let singleRawByWorkspace: [String: String] = byWorkspace.compactMapValues {
+            identities -> String? in
+            guard identities.count == 1 else { return nil }
+            return identities[0].rawTabIdentifier
+        }
+        let requiringTabIdentifier: Set<String> = processControlPlane.tool(
+            request.toolName,
+            processID: processID,
+            requiresArgument: "tabIdentifier"
+        ) ? [request.toolName] : []
+        return OwnerBoundRequestRewritePlan(
+            processID: processID,
+            rawTabIdentifierByProxyIdentifier: rawByProxy,
+            singleRawTabIdentifierByWorkspacePath: singleRawByWorkspace,
+            toolsRequiringTabIdentifier: requiringTabIdentifier
+        )
     }
 
     private func refreshXcodeWindowOwnersForRouting(
@@ -650,11 +702,11 @@ extension RuntimeCoordinator {
     }
 
     private func inferredUnambiguousOwnerProcessID(
-        for requests: [ToolRoutingRequest],
-        unresolvedOwnerBoundRequests: [ToolRoutingRequest]
+        for request: ToolRoutingRequest,
+        ownerResolution: CachedOwnerResolution
     ) -> pid_t? {
-        guard unresolvedOwnerBoundRequests.isEmpty == false,
-              unresolvedOwnerBoundRequests.allSatisfy({ hasNoOwnerHint($0) }) else {
+        guard case .unresolved = ownerResolution,
+              hasNoOwnerHint(request) else {
             return nil
         }
         let usableRoutes = xcodeProcessRoutes.filter {
@@ -665,18 +717,10 @@ extension RuntimeCoordinator {
             return usableRoutes[0].target.processID
         }
 
-        let processIDSets = Set(requests.map(\.toolName)).compactMap { toolName -> Set<pid_t>? in
-            let processIDs = processToolSurfaceStore.processIDsHavingTool(toolName)
-            return processIDs.isEmpty ? nil : processIDs
-        }
-        guard processIDSets.isEmpty == false else {
-            return nil
-        }
-        let candidateProcessIDs = processIDSets.dropFirst().reduce(processIDSets[0]) {
-            $0.intersection($1)
-        }
         let usableProcessIDs = Set(usableRoutes.map(\.target.processID))
-        let usableCandidates = candidateProcessIDs.intersection(usableProcessIDs)
+        let usableCandidates = processControlPlane
+            .processIDsHavingTool(request.toolName)
+            .intersection(usableProcessIDs)
         guard usableCandidates.count == 1 else {
             return nil
         }
@@ -699,65 +743,56 @@ extension RuntimeCoordinator {
     }
 
     private func toolRoutingErrors(
-        for requests: [ToolRoutingRequest],
+        for request: ToolRoutingRequest,
         message: String
     ) -> [ToolRoutingError] {
-        requests.compactMap { request in
-            guard let id = request.id else { return nil }
-            return ToolRoutingError(id: id, message: message)
-        }
+        guard let id = request.id else { return [] }
+        return [ToolRoutingError(id: id, message: message)]
     }
 
     private func catalogToolRoutingDecision(
-        for requests: [ToolRoutingRequest],
-        requiredProcessID: pid_t?,
-        forceBatchArray: Bool
+        for request: ToolRoutingRequest
     ) -> ToolRoutingDecision? {
-        let processIDSets = Set(requests.map(\.toolName)).compactMap { toolName -> Set<pid_t>? in
-            let processIDs = processToolSurfaceStore.processIDsHavingTool(toolName)
-            return processIDs.isEmpty ? nil : processIDs
-        }
-        guard processIDSets.isEmpty == false else {
+        let candidateProcessIDs = processControlPlane.processIDsHavingTool(request.toolName)
+        guard candidateProcessIDs.isEmpty == false else {
             return nil
         }
-
-        let candidateProcessIDs = processIDSets.dropFirst().reduce(processIDSets[0]) {
-            $0.intersection($1)
-        }
-        let effectiveCandidates: Set<pid_t>
-        if let requiredProcessID {
-            effectiveCandidates = candidateProcessIDs.contains(requiredProcessID)
-                ? [requiredProcessID]
-                : []
-        } else {
-            effectiveCandidates = candidateProcessIDs
-        }
-        guard effectiveCandidates.isEmpty == false else {
+        guard let route = preferredAvailableRoute(in: candidateProcessIDs) else {
             return .reject(
-                errors: requests.compactMap { request in
-                    guard let id = request.id else { return nil }
-                    return ToolRoutingError(
-                        id: id,
-                        message: "no single Xcode process provides all requested tools"
-                    )
-                },
-                forceBatchArray: forceBatchArray
+                errors: toolRoutingErrors(
+                    for: request,
+                    message: "no available upstream for an Xcode process that provides tool '\(request.toolName)'"
+                )
             )
         }
-        guard let route = preferredAvailableRoute(in: effectiveCandidates) else {
+        let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+        let topology = upstreamTopology.snapshot()
+        guard let routeProof = processControlPlane.routeProof(routeID: route.id),
+              let routeAdmission = processControlPlane.admit(routeProof) else {
             return .reject(
-                errors: requests.compactMap { request in
-                    guard let id = request.id else { return nil }
-                    return ToolRoutingError(
-                        id: id,
-                        message: "no available upstream for an Xcode process that provides tool '\(request.toolName)'"
-                    )
-                },
-                forceBatchArray: forceBatchArray
+                errors: toolRoutingErrors(
+                    for: request,
+                    message: "Xcode process route changed while routing the request"
+                )
             )
         }
-        return .forwardAny(
-            preferredUpstreamIndices: usableInitializedUpstreamIndices(in: route)
+        let upstreamProofs = upstreamIndices.compactMap {
+            topology.proof(UpstreamSlotID(rawValue: $0))
+        }
+        guard upstreamProofs.count == upstreamIndices.count else {
+            return .reject(
+                errors: toolRoutingErrors(
+                    for: request,
+                    message: "Xcode upstream topology changed while routing the request"
+                )
+            )
+        }
+        return .forwardAdmitted(
+            preferredUpstreamIndices: upstreamIndices,
+            admission: RouteForwardingAdmission(
+                route: routeAdmission,
+                upstreamProofs: upstreamProofs
+            )
         )
     }
 
@@ -808,22 +843,12 @@ extension RuntimeCoordinator {
                 }
                 return (processID, Self.windowEntries(in: result.result))
             }
-        let changed = windowOwnerIndex.withLockedValue { index in
-            let before = index
-            for processID in processIDs {
-                index.remove(processID: processID)
-            }
-            for entry in entriesByProcessID {
-                index.record(processID: entry.processID, entries: entry.entries)
-            }
-            return index != before
-        }
-        if changed {
-            invalidateControlPlane(
-                reason: "xcode_window_owners_updated",
-                clearInitialize: false,
-                clearToolsCatalog: true
-            )
+        let entries = Dictionary(uniqueKeysWithValues: entriesByProcessID.map {
+            ($0.processID, $0.entries)
+        })
+        _ = windowOwnershipAuthority.replace(entries)
+        for processID in processIDs where entries[processID] == nil {
+            _ = windowOwnershipAuthority.remove(processID: processID)
         }
     }
 
@@ -838,21 +863,8 @@ extension RuntimeCoordinator {
             return false
         }
         let entries = Self.windowEntries(in: result)
-        let changed = windowOwnerIndex.withLockedValue { index in
-            let before = index
-            if removeExistingOwners {
-                index.remove(processID: processID)
-            }
-            index.record(processID: processID, entries: entries)
-            return index != before
-        }
-        if changed {
-            invalidateControlPlane(
-                reason: "xcode_window_owners_updated",
-                clearInitialize: false,
-                clearToolsCatalog: true
-            )
-        }
+        _ = removeExistingOwners
+        _ = windowOwnershipAuthority.record(processID: processID, entries: entries)
         return entries.isEmpty == false
     }
 
@@ -903,7 +915,8 @@ extension RuntimeCoordinator {
         guard entries.isEmpty == false else {
             return result
         }
-        let message = windowOwnerIndex.withLockedValue { index in
+        let index = windowOwnershipAuthority.snapshot()
+        let message = {
             entries.map { entry in
                 let proxyTabIdentifier = index.proxyTabIdentifier(
                     processID: processID,
@@ -913,7 +926,7 @@ extension RuntimeCoordinator {
                 return "* tabIdentifier: \(proxyTabIdentifier), workspacePath: \(entry.workspacePath)"
             }
             .joined(separator: "\n")
-        }
+        }()
         return Self.xcodeListWindowsResult(message: message)
     }
 
@@ -940,22 +953,8 @@ extension RuntimeCoordinator {
         ])
     }
 
-    private func preferredUpstreamIndices(in value: Any) -> Set<Int> {
-        if let object = value as? [String: Any] {
-            return Set(preferredUpstreamIndex(in: object).map { [$0] } ?? [])
-        }
-        guard let array = value as? [Any] else {
-            return []
-        }
-        return array.reduce(into: Set<Int>()) { result, item in
-            for upstreamIndex in preferredUpstreamIndices(in: item) {
-                result.insert(upstreamIndex)
-            }
-        }
-    }
-
     func xcodeProcessRoute(forUpstreamIndex upstreamIndex: Int) -> XcodeProcessRoute? {
-        processRouteStore.route(forUpstreamIndex: upstreamIndex)
+        processControlPlane.route(forUpstreamIndex: upstreamIndex)
     }
 
     func isActiveProcessBoundUpstream(_ upstreamIndex: Int) -> Bool {
@@ -965,14 +964,14 @@ extension RuntimeCoordinator {
 
     func activeProcessBoundUpstreamIndices() -> Set<Int> {
         guard processRoutingEnabled else {
-            return Set(upstreams.indices)
+            return Set(upstreamSlotIDs.map(\.rawValue))
         }
         return Set(xcodeProcessRoutes.flatMap(\.upstreamIndices))
     }
 
     func routableProcessBoundUpstreamIndices() -> Set<Int> {
         guard processRoutingEnabled else {
-            return Set(upstreams.indices)
+            return Set(upstreamSlotIDs.map(\.rawValue))
         }
         let unavailable = unavailableXcodeProcessIDs()
         return Set(
@@ -984,13 +983,15 @@ extension RuntimeCoordinator {
 
     func inactiveProcessBoundUpstreamIndices() -> Set<Int> {
         guard processRoutingEnabled else { return [] }
-        return Set(upstreams.indices).subtracting(routableProcessBoundUpstreamIndices())
+        return Set(upstreamSlotIDs.map(\.rawValue)).subtracting(
+            routableProcessBoundUpstreamIndices()
+        )
     }
 
     func secondaryUpstreamIndices(excluding upstreamIndex: Int) -> [Int] {
         let candidates = processRoutingEnabled
             ? xcodeProcessRoutes.flatMap(\.upstreamIndices)
-            : Array(upstreams.indices)
+            : upstreamSlotIDs.map(\.rawValue)
         return candidates.filter { $0 != upstreamIndex }
     }
 
@@ -998,10 +999,10 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled else {
             return upstreamHealthManager.initializedHealthyishCount()
         }
-        let states = upstreamHealthManager.statesSnapshot()
         return routableProcessBoundUpstreamIndices().reduce(into: 0) { count, upstreamIndex in
-            guard upstreamIndex >= 0, upstreamIndex < states.count else { return }
-            let upstream = states[upstreamIndex]
+            guard let upstream = upstreamHealthManager.state(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            ) else { return }
             guard upstream.isInitialized else { return }
             switch upstream.healthState {
             case .healthy, .degraded:
@@ -1016,10 +1017,10 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled else {
             return upstreamHealthManager.anyInitialized()
         }
-        let states = upstreamHealthManager.statesSnapshot()
         return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
-            guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
-            return states[upstreamIndex].isInitialized
+            upstreamHealthManager.state(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            )?.isInitialized == true
         }
     }
 
@@ -1027,10 +1028,10 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled else {
             return upstreamHealthManager.anyRecoveryInFlight()
         }
-        let states = upstreamHealthManager.statesSnapshot()
         return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
-            guard upstreamIndex >= 0, upstreamIndex < states.count else { return false }
-            let upstream = states[upstreamIndex]
+            guard let upstream = upstreamHealthManager.state(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            ) else { return false }
             return upstream.initInFlight || upstream.healthProbeInFlight
         }
     }
@@ -1048,10 +1049,10 @@ extension RuntimeCoordinator {
               let processID = processID(forUpstreamIndex: upstreamIndex) else {
             return (bodyData, parsedRequestJSON)
         }
-        let rewritten = rewriteOwnerBoundRequestJSON(
-            parsedRequestJSON,
-            processID: processID
-        )
+        guard let object = parsedRequestJSON as? [String: Any] else {
+            return (bodyData, parsedRequestJSON)
+        }
+        let rewritten = rewriteOwnerBoundRequestObject(object, processID: processID)
         guard rewritten.changed else {
             return (bodyData, parsedRequestJSON)
         }
@@ -1065,26 +1066,58 @@ extension RuntimeCoordinator {
         return (data, rewritten.value)
     }
 
-    private func rewriteOwnerBoundRequestJSON(
-        _ value: Any,
-        processID: pid_t
-    ) -> (value: Any, changed: Bool) {
-        if let object = value as? [String: Any] {
-            return rewriteOwnerBoundRequestObject(object, processID: processID)
+    func rewriteOwnerBoundRequest(
+        bodyData: Data,
+        parsedRequestJSON: Any,
+        operationLease: UpstreamOperationLease,
+        admission: RouteForwardingAdmission?
+    ) -> (bodyData: Data, parsedRequestJSON: Any) {
+        guard upstreamTopology.validate(operationLease),
+              let rewritePlan = admission?.window?.rewritePlan,
+              let object = parsedRequestJSON as? [String: Any] else {
+            return (bodyData, parsedRequestJSON)
         }
-        guard let array = value as? [Any] else {
-            return (value, false)
+        let rewritten = rewriteOwnerBoundRequestObject(object, plan: rewritePlan)
+        guard rewritten.changed,
+              JSONSerialization.isValidJSONObject(rewritten.value),
+              let data = try? JSONSerialization.data(
+                withJSONObject: rewritten.value,
+                options: []
+              ) else {
+            return (bodyData, parsedRequestJSON)
         }
-        var changed = false
-        let rewritten = array.map { item -> Any in
-            guard let object = item as? [String: Any] else {
-                return item
-            }
-            let result = rewriteOwnerBoundRequestObject(object, processID: processID)
-            changed = changed || result.changed
-            return result.value
+        return (data, rewritten.value)
+    }
+
+    private func rewriteOwnerBoundRequestObject(
+        _ object: [String: Any],
+        plan: OwnerBoundRequestRewritePlan
+    ) -> (value: [String: Any], changed: Bool) {
+        guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
+              var params = object["params"] as? [String: Any],
+              let toolName = params["name"] as? String,
+              var arguments = params["arguments"] as? [String: Any] else {
+            return (object, false)
         }
-        return (rewritten, changed)
+
+        var rawTabIdentifier: String?
+        if let proxyIdentifier = arguments["tabIdentifier"] as? String,
+           proxyIdentifier.isEmpty == false {
+            rawTabIdentifier = plan.rawTabIdentifierByProxyIdentifier[proxyIdentifier]
+        } else if let workspacePath = arguments["workspacePath"] as? String,
+                  workspacePath.isEmpty == false,
+                  plan.toolsRequiringTabIdentifier.contains(toolName) {
+            rawTabIdentifier = plan.singleRawTabIdentifierByWorkspacePath[workspacePath]
+        }
+        guard let rawTabIdentifier,
+              arguments["tabIdentifier"] as? String != rawTabIdentifier else {
+            return (object, false)
+        }
+        arguments["tabIdentifier"] = rawTabIdentifier
+        params["arguments"] = arguments
+        var rewritten = object
+        rewritten["params"] = params
+        return (rewritten, true)
     }
 
     private func rewriteOwnerBoundRequestObject(
@@ -1111,7 +1144,7 @@ extension RuntimeCoordinator {
         } else if (arguments["tabIdentifier"] as? String)?.isEmpty ?? true,
                   let workspacePath = arguments["workspacePath"] as? String,
                   workspacePath.isEmpty == false,
-                  processToolSurfaceStore.tool(
+                  processControlPlane.tool(
                     toolName,
                     processID: processID,
                     requiresArgument: "tabIdentifier"
@@ -1137,29 +1170,22 @@ extension RuntimeCoordinator {
         tabIdentifier: String,
         processID: pid_t
     ) -> String? {
-        windowOwnerIndex.withLockedValue { index in
-            guard let identity = index.identity(forProxyTabIdentifier: tabIdentifier),
-                  identity.processID == processID else {
-                return nil
-            }
-            return identity.rawTabIdentifier
-        }
+        let index = windowOwnershipAuthority.snapshot()
+        guard let identity = index.identity(forProxyTabIdentifier: tabIdentifier),
+              identity.processID == processID else { return nil }
+        return identity.rawTabIdentifier
     }
 
     private func singleRawTabIdentifier(
         workspacePath: String,
         processID: pid_t
     ) -> String? {
-        windowOwnerIndex.withLockedValue { index in
-            let identities = index.identities(
-                workspacePath: workspacePath,
-                processID: processID
-            )
-            guard identities.count == 1 else {
-                return nil
-            }
-            return identities[0].rawTabIdentifier
-        }
+        let identities = windowOwnershipAuthority.snapshot().identities(
+            workspacePath: workspacePath,
+            processID: processID
+        )
+        guard identities.count == 1 else { return nil }
+        return identities[0].rawTabIdentifier
     }
 
     private func preferredUpstreamIndex(in object: [String: Any]) -> Int? {
@@ -1179,7 +1205,7 @@ extension RuntimeCoordinator {
             $0.isEmpty ? nil : $0
         }
         guard tabIdentifier != nil || workspacePath != nil,
-              case .resolved(let processID, _) = cachedOwnerResolution(
+              case .resolved(let processID, _, _) = cachedOwnerResolution(
                   tabIdentifier: tabIdentifier,
                   workspacePath: workspacePath
               ),
@@ -1189,62 +1215,6 @@ extension RuntimeCoordinator {
             return nil
         }
         return firstUsableInitializedUpstreamIndex(in: route)
-    }
-
-    private func toolRoutingRequests(in value: Any) -> [ToolRoutingRequest] {
-        if let object = value as? [String: Any] {
-            return toolRoutingRequest(in: object).map { [$0] } ?? []
-        }
-        guard let array = value as? [Any] else {
-            return []
-        }
-        return array.compactMap { item in
-            guard let object = item as? [String: Any] else { return nil }
-            return toolRoutingRequest(in: object)
-        }
-    }
-
-    private func xcodeListWindowsRoutingEligibility(
-        in value: Any
-    ) -> XcodeListWindowsRoutingEligibility {
-        if let object = value as? [String: Any] {
-            return JSONRPC.Message.Inspector.requestID(from: object) != nil
-                && isXcodeListWindowsToolCall(object)
-                ? .localOnly
-                : .reject
-        }
-        guard let array = value as? [Any],
-              array.isEmpty == false else {
-            return .reject
-        }
-        var sawResponseBearingItem = false
-        var sawNotificationOrUnroutedItem = false
-        for item in array {
-            guard let object = item as? [String: Any] else {
-                return .reject
-            }
-            guard JSONRPC.Message.Inspector.requestID(from: object) != nil else {
-                sawNotificationOrUnroutedItem = true
-                continue
-            }
-            sawResponseBearingItem = true
-            guard isXcodeListWindowsToolCall(object) else {
-                return .reject
-            }
-        }
-        guard sawResponseBearingItem else {
-            return .reject
-        }
-        return sawNotificationOrUnroutedItem ? .forwardWholeBatch : .localOnly
-    }
-
-    private func isXcodeListWindowsToolCall(_ object: [String: Any]) -> Bool {
-        guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
-              let params = object["params"] as? [String: Any],
-              params["name"] as? String == "XcodeListWindows" else {
-            return false
-        }
-        return true
     }
 
     private func toolRoutingRequest(in object: [String: Any]) -> ToolRoutingRequest? {
@@ -1273,188 +1243,43 @@ extension RuntimeCoordinator {
         tabIdentifier: String?,
         workspacePath: String?
     ) -> CachedOwnerResolution {
-        let eligibleProcessIDs = ownerRoutingEligibleProcessIDs()
-        return windowOwnerIndex.withLockedValue { index in
-            let nonEmptyWorkspacePath = workspacePath.flatMap { $0.isEmpty ? nil : $0 }
-            let nonEmptyTabIdentifier = tabIdentifier.flatMap { $0.isEmpty ? nil : $0 }
-
-            func proxyTabResolution(
-                tabIdentifier: String,
-                workspacePath: String?
-            ) -> CachedOwnerResolution? {
-                guard tabIdentifier.hasPrefix(WindowOwnerIndex.proxyTabIdentifierPrefix) else {
-                    return nil
-                }
-                guard let identity = index.identity(forProxyTabIdentifier: tabIdentifier) else {
-                    return .conflict(
-                        "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
-                    )
-                }
-                guard eligibleProcessIDs.contains(identity.processID) else {
-                    return .conflict(
-                        "stale or unavailable XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
-                    )
-                }
-                if let workspacePath, identity.workspacePath != workspacePath {
-                    return .conflict(
-                        "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath"
-                            + " '\(workspacePath)'"
-                    )
+        let query = WindowOwnerQuery(
+            tabIdentifier: tabIdentifier,
+            workspacePath: workspacePath
+        )
+        for _ in 0..<2 {
+            let owners = windowOwnershipAuthority.snapshot()
+            let routes = processRouteExposure(policy: .ownerRouting)
+            switch windowRoutingResolver.resolve(query, owners: owners, routes: routes) {
+            case .resolved(let processID, let ownerLabel, let proof):
+                guard windowOwnershipAuthority.validate(proof.windowEpoch),
+                      processControlPlane.admit(proof.route) != nil else {
+                    continue
                 }
                 return .resolved(
-                    processID: identity.processID,
-                    ownerLabel: identity.proxyTabIdentifier
+                    processID: processID,
+                    ownerLabel: ownerLabel,
+                    proof: proof
                 )
-            }
-
-            if let workspacePath = nonEmptyWorkspacePath {
-                if let tabIdentifier = nonEmptyTabIdentifier,
-                   let resolution = proxyTabResolution(
-                       tabIdentifier: tabIdentifier,
-                       workspacePath: workspacePath
-                   ) {
-                    return resolution
-                }
-
-                switch index.owner(
-                    forWorkspacePath: workspacePath,
-                    eligibleProcessIDs: eligibleProcessIDs
-                ) {
-                case .resolved(let processID):
-                    if let tabIdentifier = nonEmptyTabIdentifier,
-                       let conflict = tabConflictMessage(
-                           tabIdentifier: tabIdentifier,
-                           workspacePath: workspacePath,
-                           ownerProcessID: processID,
-                           index: index,
-                           eligibleProcessIDs: eligibleProcessIDs
-                       ) {
-                        return CachedOwnerResolution.conflict(conflict)
-                    }
-                    return .resolved(processID: processID, ownerLabel: workspacePath)
-                case .conflicting(let processIDs):
-                    let candidates = processIDs.map(String.init).sorted().joined(separator: ",")
-                    return .conflict(
-                        "conflicting Xcode window owners for workspacePath '\(workspacePath)'"
-                            + " (processes: \(candidates))"
-                    )
-                case .unresolved:
-                    if let tabIdentifier = nonEmptyTabIdentifier {
-                        if index.identity(forProxyTabIdentifier: tabIdentifier) != nil {
-                            return .conflict(
-                                "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath '\(workspacePath)'"
-                            )
-                        }
-                        if tabIdentifier.hasPrefix(WindowOwnerIndex.proxyTabIdentifierPrefix) {
-                            return .conflict(
-                                "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
-                            )
-                        }
-                    }
-                    return .unresolved
-                }
-            }
-
-            guard let tabIdentifier = nonEmptyTabIdentifier else {
-                return .unresolved
-            }
-            if let resolution = proxyTabResolution(
-                tabIdentifier: tabIdentifier,
-                workspacePath: nil
-            ) {
-                return resolution
-            }
-
-            let rawIdentities = index.identities(
-                forRawTabIdentifier: tabIdentifier,
-                eligibleProcessIDs: eligibleProcessIDs
-            )
-            switch rawIdentities.count {
-            case 0:
-                return .unresolved
-            case 1:
-                return .resolved(processID: rawIdentities[0].processID, ownerLabel: tabIdentifier)
-            default:
-                let processIDs = Set(rawIdentities.map(\.processID))
-                let candidates = processIDs.map(String.init).sorted().joined(separator: ",")
-                return .conflict(
-                    "ambiguous raw Xcode tabIdentifier '\(tabIdentifier)'"
-                        + " (processes: \(candidates))"
-                )
-            }
-        }
-    }
-
-    private func ownerRoutingEligibleProcessIDs() -> Set<pid_t> {
-        processRouteExposure(policy: .ownerRouting).processIDs
-    }
-
-    private func tabConflictMessage(
-        tabIdentifier: String,
-        workspacePath: String,
-        ownerProcessID: pid_t,
-        index: WindowOwnerIndex,
-        eligibleProcessIDs: Set<pid_t>
-    ) -> String? {
-        if let identity = index.identity(forProxyTabIdentifier: tabIdentifier) {
-            guard identity.processID == ownerProcessID,
-                  identity.workspacePath == workspacePath else {
-                return "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath '\(workspacePath)'"
-            }
-            return nil
-        }
-        if tabIdentifier.hasPrefix(WindowOwnerIndex.proxyTabIdentifierPrefix) {
-            return "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
-        }
-        let rawIdentities = index.identities(
-            forRawTabIdentifier: tabIdentifier,
-            eligibleProcessIDs: eligibleProcessIDs
-        )
-        guard rawIdentities.isEmpty == false else {
-            return nil
-        }
-        let matchesWorkspaceOwner = rawIdentities.contains {
-            $0.processID == ownerProcessID && $0.workspacePath == workspacePath
-        }
-        return matchesWorkspaceOwner
-            ? nil
-            : "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath '\(workspacePath)'"
-    }
-
-    private func resolvedOwnerProcessIDs(
-        for requests: [ToolRoutingRequest]
-    ) -> (
-        resolved: [(request: ToolRoutingRequest, processID: pid_t, ownerLabel: String)],
-        unresolved: [ToolRoutingRequest],
-        conflicts: [OwnerResolutionConflict]
-    ) {
-        var resolved: [(request: ToolRoutingRequest, processID: pid_t, ownerLabel: String)] = []
-        var unresolved: [ToolRoutingRequest] = []
-        var conflicts: [OwnerResolutionConflict] = []
-        for request in requests {
-            switch cachedOwnerResolution(for: request) {
-            case .resolved(let processID, let ownerLabel):
-                resolved.append((request, processID, ownerLabel))
             case .unresolved:
-                unresolved.append(request)
+                return .unresolved
             case .conflict(let message):
-                conflicts.append(OwnerResolutionConflict(request: request, message: message))
+                return .conflict(message)
             }
         }
-        return (resolved, unresolved, conflicts)
+        return .unresolved
     }
-
     private func cachedOwnerBoundToolNames() -> Set<String> {
-        let toolsByName = ProcessToolSurfaceStore.toolsByName(in: cachedToolsListResult())
+        let toolsByName = ProcessToolCatalogCodec.toolsByName(in: cachedToolsListResult())
         return Set(
             toolsByName.compactMap { name, tool in
-                ProcessToolSurfaceStore.isOwnerBoundTool(tool) ? name : nil
+                ProcessToolCatalogCodec.isOwnerBoundTool(tool) ? name : nil
             }
         )
     }
 
     private func isKnownOwnerBoundTool(_ toolName: String) -> Bool {
-        if processToolSurfaceStore.isOwnerBoundTool(toolName) {
+        if processControlPlane.isOwnerBoundTool(toolName) {
             return true
         }
         guard processRoutingEnabled == false else {

@@ -11,7 +11,7 @@ final class HTTPControlService: Sendable {
         let controlPlane: ControlPlane.DebugSnapshot?
         let upstreams: [ProxyDebug.UpstreamSnapshot]
         let processRoutes: [ProxyDebug.ProcessRouteSnapshot]
-        let processToolCatalogs: [ProcessToolSurfaceStore.DebugSnapshot]
+        let processToolCatalogs: [ProcessControlPlaneAuthority.CatalogDebugSnapshot]
         let recentTraffic: [ProxyDebug.TrafficEvent]
         let sessions: [SessionRequestPipeline.DebugSnapshot]
         let leases: [LeaseManager.DebugSnapshot]
@@ -98,6 +98,10 @@ final class HTTPControlService: Sendable {
 
     func hasSession(id sessionID: String) -> Bool {
         runtimeCoordinator.hasSession(id: sessionID)
+    }
+
+    func isSessionInitialized(id sessionID: String) -> Bool {
+        runtimeCoordinator.isSessionInitialized(id: sessionID)
     }
 
     func negotiatedProtocolVersion(id sessionID: String) -> String? {

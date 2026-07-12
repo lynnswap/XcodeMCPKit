@@ -2,18 +2,6 @@ import Foundation
 import XcodeMCPKit
 
 struct ProxyConfig: Sendable {
-    enum Transport: String, CaseIterable, Sendable {
-        case http
-        case stdio
-    }
-
-    enum StdioUpstreamSource: String, Sendable {
-        case explicit
-        case environment
-        case discovery
-        case fallback
-    }
-
     enum RefreshCodeIssuesMode: String, Sendable {
         case proxy
         case upstream
@@ -41,9 +29,6 @@ struct ProxyConfig: Sendable {
     var maxBodyBytes: Int
     var requestTimeout: TimeInterval
     var configPath: String?
-    var transport: ProxyConfig.Transport
-    var stdioUpstreamURL: URL?
-    var stdioUpstreamSource: ProxyConfig.StdioUpstreamSource?
     var discoveryFileURL: URL?
     var prewarmToolsList: Bool
     var autoApproveXcodeDialog: Bool
@@ -61,9 +46,6 @@ struct ProxyConfig: Sendable {
         maxBodyBytes: Int,
         requestTimeout: TimeInterval,
         configPath: String? = nil,
-        transport: ProxyConfig.Transport = .http,
-        stdioUpstreamURL: URL? = nil,
-        stdioUpstreamSource: ProxyConfig.StdioUpstreamSource? = nil,
         discoveryFileURL: URL? = nil,
         prewarmToolsList: Bool = true,
         autoApproveXcodeDialog: Bool = false,
@@ -80,18 +62,12 @@ struct ProxyConfig: Sendable {
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
         self.configPath = configPath
-        self.transport = transport
-        self.stdioUpstreamURL = stdioUpstreamURL
-        self.stdioUpstreamSource = stdioUpstreamSource
         self.discoveryFileURL = discoveryFileURL
         self.prewarmToolsList = prewarmToolsList
         self.autoApproveXcodeDialog = autoApproveXcodeDialog
         self.refreshCodeIssuesMode = refreshCodeIssuesMode
         self.disabledToolNames = []
         self.initializeParamsOverride = nil
-        if configPath != nil {
-            loadFileConfig()
-        }
         if let disabledToolNames {
             self.disabledToolNames = Self.normalizedToolNames(disabledToolNames)
         }
@@ -100,25 +76,9 @@ struct ProxyConfig: Sendable {
         }
     }
 
-    /// Reads the TOML file config (disabled tools, initialize-params
-    /// override) from `configPath` and stores the decoded values. This is
-    /// the only place the file is read; consumers use the stored values.
-    mutating func loadFileConfig() {
-        loadFileConfig(preserveDisabledToolNames: false)
-    }
-
-    private mutating func loadFileConfig(preserveDisabledToolNames: Bool) {
-        let logger = ProxyLogging.make("config")
-        if preserveDisabledToolNames == false {
-            disabledToolNames = ProxyConfig.File.Loader.loadDisabledToolNames(
-                configPath: configPath,
-                logger: logger
-            )
-        }
-        initializeParamsOverride = ProxyConfig.File.Loader.loadInitializeParamsOverride(
-            configPath: configPath,
-            logger: logger
-        )
+    mutating func applyFileConfiguration(_ configuration: File.LoadedConfiguration) {
+        disabledToolNames = configuration.disabledToolNames
+        initializeParamsOverride = configuration.initializeParamsOverride
     }
 
     mutating func applyInitializeParamsOverride(

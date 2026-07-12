@@ -12,14 +12,16 @@ The public API is intentionally small:
 
 - `XcodeMCP`, the top-level async client
 - `XcodeMCPConfiguration`, for transport and initialize settings
+- `XcodeMCPRequestOptions`, for per-operation deadlines and safe replay policy
+- `XcodeMCPConnectionSnapshot`, for atomic lifecycle observation
 - `MCPJSONValue`, for dynamic MCP payloads
 - `MCPTool`, `MCPToolResult`, `MCPContent`, and `MCPProgress`
 - `XcodeMCPError`
 
 Xcode decides the available tools at runtime, so the SDK does not provide
 tool-specific Swift wrappers. Use `listTools()` to discover tools, `callTool`
-to call them, and `request(_:params:)` or `notify(_:params:)` for dynamic MCP
-methods outside `tools/call`.
+to call them, and `request(_:params:)` for dynamic MCP methods outside
+`tools/call`.
 
 Use `XcodeMCPKitTesting` when tests need deterministic tool catalogs, progress
 notifications, and tool results through the same `XcodeMCP` API without
@@ -96,19 +98,21 @@ let config = XcodeMCPConfiguration(
 ## Dynamic Tools And Raw Values
 
 The Xcode MCP server decides which tools are available at runtime. Call
-`listTools()` to discover names, descriptions, and input schemas, then pass the
-selected tool name to `callTool(_:arguments:onProgress:)`.
+`listTools(options:)` to load every page of the catalog, then pass the selected
+tool name to `callTool(_:arguments:options:onProgress:)`. A pagination failure
+never returns a partial catalog, and a cursor cycle is treated as an invalid
+response.
 
 Arguments and dynamic response fields use `MCPJSONValue` so clients can send and
 inspect MCP data that this package does not model as a fixed Swift type. Domain
 models keep raw values for unknown fields and future MCP extensions. Use public
 accessors such as `objectValue`, `arrayValue`, `stringValue`, `boolValue`,
 `integerValue`, `doubleValue`, and `isNull` when inspecting dynamic responses.
-Use `MCPJSONValue(jsonObject:)`, `MCPJSONValue(encoding:)`, and `jsonObject` to
+Use `MCPJSONValue(jsonObject:)`, `MCPJSONValue(_:)`, and `jsonObject` to
 bridge between Foundation or Codable values and raw MCP JSON.
 
-For dynamic MCP methods that are not tool calls, use the raw request and
-notification escape hatches:
+For dynamic MCP methods that are not tool calls, use the raw request escape
+hatch:
 
 ```swift
 struct SymbolParams: Encodable {
@@ -118,15 +122,10 @@ struct SymbolParams: Encodable {
 
 let symbols = try await xcode.request(
     "workspace/symbols",
-    params: try MCPJSONValue(encoding: SymbolParams(
+    params: try MCPJSONValue(SymbolParams(
         query: "NavigationStack",
         limit: 5
     ))
-)
-
-try await xcode.notify(
-    "notifications/custom",
-    params: try MCPJSONValue(jsonObject: ["enabled": true])
 )
 ```
 
@@ -140,7 +139,21 @@ try await xcode.notify(
 - Use `.localBridge(.custom(command:arguments:environment:))` only when
   embedding a non-default bridge command.
 - `clientName`, `clientVersion`, and `capabilities` are sent in `initialize`.
-- `requestTimeout` bounds requests when non-`nil`.
+- `requestTimeout: Duration?` is the default logical deadline. `nil` disables
+  the default timeout; nonpositive durations are rejected.
+
+Each request can override the default with `XcodeMCPRequestOptions.Timeout`:
+
+```swift
+let tools = try await xcode.listTools(
+    options: .init(timeout: .after(.seconds(30)))
+)
+```
+
+The same absolute deadline covers the initial send, session recovery, one safe
+replay, and all pagination requests. `.disabled` is the explicit per-operation
+opt-out. Replay is limited to a request that the HTTP server rejected before
+processing; delivery-unknown failures are never replayed.
 
 Capabilities that require server-to-client handlers are filtered because this
 v1 API does not expose those handlers. For Streamable HTTP, the transport
@@ -150,10 +163,30 @@ long-lived SSE GET parsing, and best-effort session DELETE during `close()`.
 ## Lifecycle
 
 Create one `XcodeMCP` per MCP session. The async initializer connects the
-transport and completes initialization before returning. `callTool` returns the
-final MCP result; progress is callback-only and the underlying event stream is
-not public API. Call `close()` when finished. Closing is idempotent and rejects
-future requests.
+transport and completes initialization before returning. A typed HTTP session
+expiry starts one shared recovery handshake; concurrent callers join it and a
+safe operation is replayed at most once. After recovery fails, normal requests
+remain unavailable until `reconnect(options:)` succeeds.
+
+Use `connectionState()` for one atomic snapshot or `connectionStates()` for an
+independent stream. Every stream starts with the current snapshot, uses
+`bufferingNewest(1)`, and finishes after the terminal `closed` state. A gap in
+`sequence` means an intermediate state was coalesced; `generation` changes when
+a fresh transport becomes current.
+
+`callTool` drains accepted progress callbacks before returning, so a callback
+never runs after the result is delivered and may safely make another request
+through the same client. Timeout and caller cancellation send a best-effort MCP
+cancellation notification for the original request ID; server errors do not.
+
+Call `close()` when finished. It is the graceful completion boundary: close is
+idempotent, rejects future requests, cancels and awaits owned work, closes the
+transport, then publishes the terminal state. Deinitialization is only a
+synchronous cancellation backstop.
+
+`XcodeMCPError` conforms to `LocalizedError`. Use `errorDescription` and
+`recoverySuggestion` for consumer-facing diagnostics; missing or stale proxy
+discovery is reported as `transportUnavailable`, not as an invalid request.
 
 ## Testing
 
@@ -168,10 +201,7 @@ let runtime = XcodeMCPTestRuntime()
 await runtime.setToolResult(
     MCPToolResult(
         content: [
-            .text(
-                "Result text",
-                raw: ["type": "text", "text": "Result text"]
-            )
+            .text("Result text")
         ]
     ),
     forToolNamed: "DocumentationSearch"
@@ -186,8 +216,9 @@ await xcode.close()
 ```
 
 The runtime provides the fake transport and JSON-RPC response loop. Tests can
-read `recordedMessages()` to assert request shape while keeping production code
-on the public SDK surface.
+read `recordedMessages()` and `recordedToolCalls()` to assert request shape while
+keeping production code on the public SDK surface. A non-default transport in
+`makeClient(configuration:)` is rejected instead of being silently ignored.
 
 See [`XcodeMCPKitTesting`](../XcodeMCPKitTesting/README.md) for the focused
 testing API guide.

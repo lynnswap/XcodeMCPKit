@@ -44,7 +44,6 @@ extension ControlPlaneCoordinator {
                 requestDeadlineUptimeNs: current.requestDeadlineUptimeNs,
                 rpcHandle: current.rpcHandle,
                 task: current.task,
-                startGeneration: current.startGeneration,
                 waiters: [:]
             ),
             error: CancellationError()
@@ -159,16 +158,17 @@ extension ControlPlaneCoordinator {
     }
 
     func syncDebug() {
-        let brokerSnapshot = brokerState.snapshot()
+        let handshakeSnapshot = handshakeState.snapshot()
+        let cachedTools = cachedToolsCatalog()
         let snapshot = ControlPlane.DebugSnapshot(
             phase: currentPhase().rawValue,
-            canonicalInitializeSourceUpstream: brokerSnapshot.initializeSourceUpstream,
-            canonicalToolsSourceUpstream: brokerSnapshot.toolsSourceUpstream,
-            canonicalReady: brokerSnapshot.canonicalReady,
+            canonicalInitializeSourceUpstream: handshakeSnapshot.initializeSourceUpstream,
+            canonicalToolsSourceUpstream: canonicalToolsSource(),
+            canonicalReady: handshakeSnapshot.isInitialized && cachedTools != nil,
             upstreamHandshakeStates: upstreamHandshakeStates(),
             waiterCounts: currentWaiterCounts(),
             inFlightControlPlaneRequests: currentInFlightRequestLabels(),
-            lastIncompatibility: brokerSnapshot.lastIncompatibility
+            lastIncompatibility: handshakeSnapshot.lastIncompatibility
         )
         debugMirror.overwrite(snapshot)
     }

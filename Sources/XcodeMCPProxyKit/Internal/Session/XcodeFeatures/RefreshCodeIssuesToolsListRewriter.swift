@@ -37,79 +37,21 @@ extension RefreshCodeIssues {
     static func rewriteResponseDataIfNeeded(
         _ responseData: Data,
         method: String? = nil,
-        responseMethodsByIDKey: [String: String] = [:],
         mode: ProxyConfig.RefreshCodeIssuesMode,
         hiddenToolNames: Set<String> = []
     ) -> Data {
-        guard let payload = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
-            return responseData
-        }
-
-        if let object = payload as? [String: Any] {
-            guard responseMethod(for: object, explicitMethod: method, responseMethodsByIDKey: responseMethodsByIDKey) == "tools/list",
-                let rewrittenObject = rewriteResponseObject(
-                    object,
-                    mode: mode,
-                    hiddenToolNames: hiddenToolNames
-                ),
-                JSONSerialization.isValidJSONObject(rewrittenObject),
-                let rewrittenData = try? JSONSerialization.data(
-                    withJSONObject: rewrittenObject,
-                    options: []
-                )
-            else {
-                return responseData
-            }
-            return rewrittenData
-        }
-
-        guard let array = payload as? [Any] else {
-            return responseData
-        }
-
-        var rewroteAny = false
-        let rewrittenArray = array.map { item -> Any in
-            guard let object = item as? [String: Any],
-                responseMethod(
-                    for: object,
-                    explicitMethod: nil,
-                    responseMethodsByIDKey: responseMethodsByIDKey
-                ) == "tools/list",
-                let rewrittenObject = rewriteResponseObject(
-                    object,
-                    mode: mode,
-                    hiddenToolNames: hiddenToolNames
-                )
-            else {
-                return item
-            }
-            rewroteAny = true
-            return rewrittenObject
-        }
-        guard rewroteAny,
-            JSONSerialization.isValidJSONObject(rewrittenArray),
-            let rewrittenData = try? JSONSerialization.data(
-                withJSONObject: rewrittenArray,
-                options: []
-            )
+        guard method == "tools/list",
+            let object = try? JSONRPC.Wire.object(fromData: responseData),
+            let rewrittenObject = rewriteResponseObject(
+                object,
+                mode: mode,
+                hiddenToolNames: hiddenToolNames
+            ),
+            let rewrittenData = try? JSONRPC.Wire.data(from: rewrittenObject)
         else {
             return responseData
         }
         return rewrittenData
-    }
-
-    private static func responseMethod(
-        for object: [String: Any],
-        explicitMethod: String?,
-        responseMethodsByIDKey: [String: String]
-    ) -> String? {
-        if let explicitMethod {
-            return explicitMethod
-        }
-        guard let responseID = JSONRPC.Message.Inspector.responseID(from: object) else {
-            return nil
-        }
-        return responseMethodsByIDKey[responseID.key]
     }
 
     private static func rewriteResponseObject(

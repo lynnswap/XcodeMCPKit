@@ -2280,9 +2280,9 @@ actor SessionBackedDocumentationProviderTransport: DocumentationProviderRouting 
     private func trackBackgroundSessionStop(_ stopTask: Task<Void, Never>) {
         let id = UUID()
         backgroundSessionStops[id] = stopTask
-        Task { [weak self] in
+        Task { [self] in
             await stopTask.value
-            await self?.finishBackgroundSessionStop(id)
+            finishBackgroundSessionStop(id)
         }
     }
 

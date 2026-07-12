@@ -11,10 +11,7 @@ struct ToolSurface: Sendable {
     private let callNormalizer: ToolCallNormalizer
     private let hiddenToolNames: Set<String>
 
-    init(
-        config: ProxyConfig,
-        sessionManager: any RuntimeToolsCatalogPort
-    ) {
+    init(config: ProxyConfig, sessionManager: any RuntimeToolsCatalogPort) {
         self.refreshCodeIssuesMode = config.refreshCodeIssuesMode
         self.callNormalizer = ToolCallNormalizer(sessionManager: sessionManager)
         self.hiddenToolNames = config.disabledToolNames
@@ -24,152 +21,60 @@ struct ToolSurface: Sendable {
         method: String?,
         toolName: String?,
         originalID: JSONRPC.ID?,
-        responseMethodsByIDKey: [String: String] = [:],
-        responseToolNamesByIDKey: [String: String] = [:],
-        responseOriginalIDsByKey: [String: JSONRPC.ID] = [:],
-        normalizationToolsListResponseIDKey: String? = nil,
-        cacheableToolsListResponseIDKey: String? = nil,
+        cachesToolsListResult: Bool = false,
         upstreamIndex: Int? = nil,
         upstreamData: Data
     ) -> ToolSurface.RewriteResult {
-        let rewrittenResourcesData = rewriteUnsupportedResourcesListResponseIfNeeded(
+        let resourcesData = rewriteUnsupportedResourcesListResponseIfNeeded(
             method: method,
             originalID: originalID,
-            responseMethodsByIDKey: responseMethodsByIDKey,
-            responseOriginalIDsByKey: responseOriginalIDsByKey,
             upstreamData: upstreamData
         )
-        let cacheableToolsListData = rewriteToolsListResponseIfNeeded(
-            rewrittenResourcesData,
-            method: method,
-            responseMethodsByIDKey: responseMethodsByIDKey
-        )
-        let normalizationToolsListResult = normalizationToolsListResponseIDKey.flatMap { responseIDKey in
-            extractToolsListResult(
-                from: cacheableToolsListData,
-                matching: responseIDKey
-            )
-        }
-        let cacheableToolsListResult = cacheableToolsListResponseIDKey.flatMap { _ in
-            normalizationToolsListResult
-        }
-        let normalizedToolsCallData = callNormalizer.normalizeResponseDataIfNeeded(
+        let toolsListData = rewriteToolsListResponseIfNeeded(resourcesData, method: method)
+        let toolsListResult = method == "tools/list"
+            ? extractToolsListResult(from: toolsListData)
+            : nil
+        let normalizedToolCallData = callNormalizer.normalizeResponseDataIfNeeded(
             method: method,
             toolName: toolName,
-            responseMethodsByIDKey: responseMethodsByIDKey,
-            responseToolNamesByIDKey: responseToolNamesByIDKey,
-            toolsCatalogOverride: normalizationToolsListResult,
+            toolsCatalogOverride: toolsListResult,
             upstreamIndex: upstreamIndex,
-            upstreamData: cacheableToolsListData
+            upstreamData: toolsListData
         )
         let responseData = rewriteToolsListResponseIfNeeded(
-            normalizedToolsCallData,
+            normalizedToolCallData,
             method: method,
-            responseMethodsByIDKey: responseMethodsByIDKey,
             hiddenToolNames: hiddenToolNames
         )
         return ToolSurface.RewriteResult(
             responseData: responseData,
-            cacheableToolsListResult: cacheableToolsListResult
+            cacheableToolsListResult: cachesToolsListResult ? toolsListResult : nil
         )
     }
 
     func shouldNotifyUpstreamSuccess(for responseData: Data) -> Bool {
-        guard let any = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
-            return true
+        guard let object = try? JSONRPC.Wire.object(fromData: responseData) else {
+            return false
         }
-
-        if let object = any as? [String: Any] {
-            return isUpstreamOverloadedErrorResponse(object) == false
-        }
-
-        if let array = any as? [Any] {
-            let objects = array.compactMap { $0 as? [String: Any] }
-            guard objects.isEmpty == false else {
-                return true
-            }
-            return objects.allSatisfy(isUpstreamOverloadedErrorResponse) == false
-        }
-
-        return true
+        return isUpstreamOverloadedErrorResponse(object) == false
     }
 
     private func rewriteUnsupportedResourcesListResponseIfNeeded(
         method: String?,
         originalID: JSONRPC.ID?,
-        responseMethodsByIDKey: [String: String],
-        responseOriginalIDsByKey: [String: JSONRPC.ID],
         upstreamData: Data
     ) -> Data {
-        guard let payload = try? JSONSerialization.jsonObject(with: upstreamData, options: []) else {
-            return upstreamData
-        }
-
-        if let object = payload as? [String: Any] {
-            let resolvedRequest: (method: String, originalID: JSONRPC.ID)? = {
-                if let method, let originalID {
-                    return (method, originalID)
-                }
-                guard let responseID = JSONRPC.Message.Inspector.responseID(from: object),
-                    let method = responseMethodsByIDKey[responseID.key],
-                    let originalID = responseOriginalIDsByKey[responseID.key]
-                else {
-                    return nil
-                }
-                return (method, originalID)
-            }()
-            guard let resolvedRequest else { return upstreamData }
-            let rewrittenObject = rewriteUnsupportedResourcesListResponseObjectIfNeeded(
-                object,
-                method: resolvedRequest.method,
-                originalID: resolvedRequest.originalID
-            )
-            guard JSONSerialization.isValidJSONObject(rewrittenObject),
-                let rewrittenData = try? JSONSerialization.data(
-                    withJSONObject: rewrittenObject,
-                    options: []
-                )
-            else {
-                return upstreamData
-            }
-            return rewrittenData
-        }
-
-        guard let array = payload as? [Any] else {
-            return upstreamData
-        }
-
-        var rewroteAny = false
-        let rewrittenArray = array.map { item -> Any in
-            guard let object = item as? [String: Any],
-                let responseID = JSONRPC.Message.Inspector.responseID(from: object),
-                let method = responseMethodsByIDKey[responseID.key],
-                let originalID = responseOriginalIDsByKey[responseID.key]
-            else {
-                return item
-            }
-
-            guard method == "resources/list" || method == "resources/templates/list" else {
-                return item
-            }
-
-            rewroteAny = true
-            return rewriteUnsupportedResourcesListResponseObjectIfNeeded(
-                object,
-                method: method,
-                originalID: originalID
-            )
-        }
-        guard rewroteAny,
-            JSONSerialization.isValidJSONObject(rewrittenArray),
-            let rewrittenData = try? JSONSerialization.data(
-                withJSONObject: rewrittenArray,
-                options: []
-            )
+        guard let method, let originalID,
+            let object = try? JSONRPC.Wire.object(fromData: upstreamData)
         else {
             return upstreamData
         }
-        return rewrittenData
+        let rewritten = rewriteUnsupportedResourcesListResponseObjectIfNeeded(
+            object,
+            method: method,
+            originalID: originalID
+        )
+        return (try? JSONRPC.Wire.data(from: rewritten)) ?? upstreamData
     }
 
     private func rewriteUnsupportedResourcesListResponseObjectIfNeeded(
@@ -182,28 +87,26 @@ struct ToolSurface: Sendable {
         }
 
         let expectedKey = method == "resources/list" ? "resources" : "resourceTemplates"
-        let result = object["result"]
-
-        if let resultObject = result as? [String: Any], resultObject[expectedKey] is [Any] {
+        if let result = object["result"] as? [String: Any], result[expectedKey] is [Any] {
             return object
         }
-
         if let error = object["error"] as? [String: Any] {
             let code = (error["code"] as? NSNumber)?.intValue ?? (error["code"] as? Int)
-            guard code == -32601 else {
-                return object
-            }
+            guard code == -32601 else { return object }
             return emptyResourcesListResponseObject(method: method, originalID: originalID)
         }
-
-        if let result, isNonStandardUnsupportedResourcesResult(result, method: method) {
+        if let result = object["result"],
+            isNonStandardUnsupportedResourcesResult(result, method: method)
+        {
             return emptyResourcesListResponseObject(method: method, originalID: originalID)
         }
-
         return object
     }
 
-    private func emptyResourcesListResponseObject(method: String, originalID: JSONRPC.ID) -> [String: Any] {
+    private func emptyResourcesListResponseObject(
+        method: String,
+        originalID: JSONRPC.ID
+    ) -> [String: Any] {
         let result: [String: Any] = method == "resources/list"
             ? ["resources": [Any]()]
             : ["resourceTemplates": [Any]()]
@@ -214,56 +117,42 @@ struct ToolSurface: Sendable {
     }
 
     private func isNonStandardUnsupportedResourcesResult(_ result: Any, method: String) -> Bool {
-        guard let resultObject = result as? [String: Any] else {
+        guard let resultObject = result as? [String: Any],
+            resultObject["isError"] as? Bool == true,
+            let content = resultObject["content"] as? [Any],
+            content.isEmpty == false
+        else {
             return false
         }
-        guard let isError = resultObject["isError"] as? Bool, isError else {
-            return false
-        }
-        guard let content = resultObject["content"] as? [Any], !content.isEmpty else {
-            return false
-        }
-
         let methodToken = method.lowercased()
-        for item in content {
-            guard let contentObject = item as? [String: Any],
-                let text = contentObject["text"] as? String
+        return content.contains { item in
+            guard let object = item as? [String: Any],
+                let text = object["text"] as? String
             else {
-                continue
+                return false
             }
             let normalized = text.lowercased()
-            if normalized.contains("unknown method"), normalized.contains(methodToken) {
-                return true
-            }
+            return normalized.contains("unknown method") && normalized.contains(methodToken)
         }
-        return false
     }
 
-    private func extractToolsListResult(
-        from responseData: Data,
-        matching responseIDKey: String
-    ) -> JSONValue? {
-        guard let object = Self.responseObject(
-            from: responseData,
-            matching: responseIDKey
-        ),
-            let resultAny = object["result"]
+    private func extractToolsListResult(from responseData: Data) -> JSONValue? {
+        guard let object = try? JSONRPC.Wire.object(fromData: responseData),
+            let result = object["result"]
         else {
             return nil
         }
-        return JSONValue(any: resultAny)
+        return JSONValue(any: result)
     }
 
     private func rewriteToolsListResponseIfNeeded(
         _ responseData: Data,
-        method: String? = nil,
-        responseMethodsByIDKey: [String: String] = [:],
+        method: String?,
         hiddenToolNames: Set<String> = []
     ) -> Data {
         RefreshCodeIssues.ToolsListRewriter.rewriteResponseDataIfNeeded(
             responseData,
             method: method,
-            responseMethodsByIDKey: responseMethodsByIDKey,
             mode: refreshCodeIssuesMode,
             hiddenToolNames: hiddenToolNames
         )
@@ -273,40 +162,17 @@ struct ToolSurface: Sendable {
         from responseData: Data,
         matching responseIDKey: String
     ) -> [String: Any]? {
-        guard let payload = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
+        guard let object = try? JSONRPC.Wire.object(fromData: responseData),
+            JSONRPC.Message.Inspector.responseID(from: object)?.key == responseIDKey
+        else {
             return nil
         }
-        if let object = payload as? [String: Any] {
-            guard let responseID = JSONRPC.Message.Inspector.responseID(from: object),
-                responseID.key == responseIDKey
-            else {
-                return nil
-            }
-            return object
-        }
-        guard let array = payload as? [Any] else {
-            return nil
-        }
-        for item in array {
-            guard let object = item as? [String: Any],
-                let responseID = JSONRPC.Message.Inspector.responseID(from: object),
-                responseID.key == responseIDKey
-            else {
-                continue
-            }
-            return object
-        }
-        return nil
+        return object
     }
 
     private func isUpstreamOverloadedErrorResponse(_ object: [String: Any]) -> Bool {
-        guard let error = object["error"] as? [String: Any] else {
-            return false
-        }
+        guard let error = object["error"] as? [String: Any] else { return false }
         let code = (error["code"] as? NSNumber)?.intValue ?? (error["code"] as? Int)
-        guard code == -32002 else {
-            return false
-        }
-        return (error["message"] as? String) == "upstream overloaded"
+        return code == -32002 && error["message"] as? String == "upstream overloaded"
     }
 }

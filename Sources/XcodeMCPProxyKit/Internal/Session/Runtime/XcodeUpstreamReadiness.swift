@@ -7,53 +7,20 @@ extension UpstreamReadinessGate {
     /// Any other upstream invocation gets the always-ready gate.
     static func liveDefault(
         config: ProxyConfig,
-        clock: ClockClient
+        clock: ClockClient,
+        processEventMonitor: any XcodeProcessEventMonitoring
     ) -> UpstreamReadinessGate {
         guard XcrunArguments.isDefaultMCPBridgeInvocation(config: config) else {
-            return .alwaysReady(uptimeNanoseconds: clock.uptimeNanoseconds)
+            return .alwaysReady()
         }
 
         let processRunner = ProcessRunner()
         return .xcodeMCPBridge(
-            uptimeNanoseconds: clock.uptimeNanoseconds,
             sleepNanoseconds: { nanoseconds in
                 await clock.sleep(.nanoseconds(Int64(clamping: nanoseconds)))
             },
-            runProcess: { request in
-                try await processRunner.run(request)
-            }
-        )
-    }
-
-    static func xcodeMCPBridge(
-        uptimeNanoseconds: @escaping @Sendable () -> UInt64,
-        sleepNanoseconds: @escaping @Sendable (UInt64) async -> Void,
-        runProcess: @escaping @Sendable (ProcessRequest) async throws -> ProcessOutput
-    ) -> Self {
-        Self(
-            isEnabled: true,
-            targetName: "mcpbridge",
-            pollIntervalNanoseconds: 1_000_000_000,
-            progressLogIntervalNanoseconds: 5_000_000_000,
-            launchRetryIntervalNanoseconds: 5_000_000_000,
-            initialRetryBackoffNanoseconds: 1_000_000_000,
-            maxRetryBackoffNanoseconds: 8_000_000_000,
-            uptimeNanoseconds: uptimeNanoseconds,
-            sleepNanoseconds: sleepNanoseconds,
-            isAvailable: {
-                let output = try? await runProcess(
-                    ProcessRequest(
-                        label: "detect-xcode-process",
-                        executablePath: "/usr/bin/pgrep",
-                        arguments: ["-x", "Xcode"],
-                        input: nil
-                    )
-                )
-                guard let output else { return false }
-                return XcodeReadinessProbe.processIDs(fromPGrepOutput: output).isEmpty == false
-            },
-            launchIfUnavailable: {
-                let output = try? await runProcess(
+            launchXcode: {
+                let output = try? await processRunner.run(
                     ProcessRequest(
                         label: "launch-xcode",
                         executablePath: "/usr/bin/open",
@@ -63,34 +30,30 @@ extension UpstreamReadinessGate {
                 )
                 return output?.terminationStatus == 0
             },
-            isReady: {
-                let output = try? await runProcess(
-                    ProcessRequest(
-                        label: "detect-xcode-process",
-                        executablePath: "/usr/bin/pgrep",
-                        arguments: ["-x", "Xcode"],
-                        input: nil
-                    )
-                )
-                guard let output else { return false }
-                let processIDs = XcodeReadinessProbe.processIDs(fromPGrepOutput: output)
-                return XcodeReadinessProbe.isReady(xcodeProcessIDs: processIDs)
+            snapshot: {
+                processEventMonitor.readinessSnapshot()
+            },
+            waitForChange: { generation in
+                await processEventMonitor.waitForReadinessChange(after: generation)
             }
         )
     }
-}
 
-enum XcodeReadinessProbe {
-    static func processIDs(fromPGrepOutput output: ProcessOutput) -> Set<pid_t> {
-        guard output.terminationStatus == 0 else { return [] }
-        return Set(
-            output.stdout
-                .split(whereSeparator: \.isNewline)
-                .compactMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    static func xcodeMCPBridge(
+        sleepNanoseconds: @escaping @Sendable (UInt64) async -> Void,
+        launchXcode: @escaping @Sendable () async -> Bool,
+        snapshot: @escaping @Sendable () async -> UpstreamReadinessSnapshot,
+        waitForChange: @escaping @Sendable (_ generation: UInt64) async -> Void
+    ) -> Self {
+        Self(
+            isEnabled: true,
+            targetName: "mcpbridge",
+            initialRetryBackoffNanoseconds: 1_000_000_000,
+            maxRetryBackoffNanoseconds: 8_000_000_000,
+            sleepNanoseconds: sleepNanoseconds,
+            launchIfUnavailable: launchXcode,
+            snapshot: snapshot,
+            waitForChange: waitForChange
         )
-    }
-
-    static func isReady(xcodeProcessIDs: Set<pid_t>) -> Bool {
-        xcodeProcessIDs.isEmpty == false
     }
 }

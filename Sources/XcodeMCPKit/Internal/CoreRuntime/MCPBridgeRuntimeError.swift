@@ -4,5 +4,6 @@ package enum MCPBridgeRuntimeError: Error, Equatable, Sendable {
     case invalidResponse(String)
     case requestTimedOut(method: String)
     case serverError(code: Int, message: String, data: JSONValue?)
+    case httpStatus(code: Int, body: String)
     case transportUnavailable(String)
 }

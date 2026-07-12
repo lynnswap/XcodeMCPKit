@@ -1,0 +1,1395 @@
+import Foundation
+import NIO
+import NIOConcurrencyHelpers
+import Testing
+import XcodeMCPKit
+import XcodeMCPProxyTestSupport
+@testable import XcodeMCPProxyInternalTestSupport
+@testable import XcodeMCPProxyKit
+
+func testTopologyProof(_ upstreamIndex: Int, generation: UInt64 = 1) -> UpstreamTopologyProof {
+    UpstreamTopologyProof(
+        slotID: UpstreamSlotID(rawValue: upstreamIndex),
+        slotGeneration: generation
+    )
+}
+
+func testOperationLease(_ upstreamIndex: Int, generation: UInt64 = 1) -> UpstreamOperationLease {
+    UpstreamOperationLease(
+        proof: testTopologyProof(upstreamIndex, generation: generation),
+        slot: TestUpstreamClient()
+    )
+}
+
+@Suite(.serialized, .asyncTestCleanup)
+struct ControlPlaneAuthorityTests {
+    @Test func catalogCommitPublishesProcessAndCanonicalStateAtomically() throws {
+        let target = xcodeProcessTarget(processID: 41001, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 1
+        ))
+
+        let commit = authority.completeCatalog(
+            .usable(catalog("BuildProject"), source: testTopologyProof(0)),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        )
+
+        guard case .accepted(let snapshot, _) = commit else {
+            Issue.record("expected catalog commit to be accepted")
+            return
+        }
+        #expect(snapshot.catalogProcessIDs == [target.processID])
+        #expect(snapshot.canonicalToolsCatalogRaw != nil)
+        #expect(snapshot.canonicalSourceUpstream == 0)
+    }
+
+    @Test func routeMembershipChangeInvalidatesLeaseAndCatalogTogether() throws {
+        let target = xcodeProcessTarget(processID: 41002, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let initialEpoch = authority.currentCatalogEpoch()
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 1
+        ))
+
+        _ = authority.reconcileRoutes(
+            [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            reason: "membership_changed",
+            nowUptimeNs: 2,
+            usability: usability([1])
+        )
+
+        let replacement = try #require(authority.route(forProcessID: target.processID))
+        #expect(replacement.id != route.id)
+        #expect(authority.currentCatalogEpoch() == initialEpoch)
+        guard case .discarded(let reason, _) = authority.completeCatalog(
+            .usable(catalog("StaleTool"), source: testTopologyProof(0)),
+            lease: lease,
+            nowUptimeNanoseconds: 3
+        ) else {
+            Issue.record("expected old membership lease to be discarded")
+            return
+        }
+        #expect(reason == .routeRetired)
+        #expect(authority.catalog(forProcessID: target.processID) == nil)
+        #expect(authority.canonicalToolsCatalogRaw() == nil)
+    }
+
+    @Test func supersededAttemptCannotMutateNewAttempt() throws {
+        let target = xcodeProcessTarget(processID: 41003, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let (oldLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 1
+        ))
+        _ = authority.resetAttempt(processID: target.processID)
+        let (newLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 2
+        ))
+
+        guard case .discarded(let reason, _) = authority.completeCatalog(
+            .usable(catalog("OldTool"), source: testTopologyProof(0)),
+            lease: oldLease,
+            nowUptimeNanoseconds: 3
+        ) else {
+            Issue.record("expected superseded attempt to be discarded")
+            return
+        }
+        #expect(reason == .attemptSuperseded)
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("NewTool"), source: testTopologyProof(0)),
+            lease: newLease,
+            nowUptimeNanoseconds: 4
+        ) else {
+            Issue.record("expected current attempt to commit")
+            return
+        }
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["NewTool"])
+    }
+
+    @Test func logicalCatalogLoadsHaveDistinctLeasesAndStaleSiblingReturnsSnapshot() throws {
+        let target = xcodeProcessTarget(processID: 41013, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let (foreground, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 1
+        ))
+        let (background, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 2
+        ))
+        #expect(foreground.attempt == background.attempt)
+        #expect(foreground != background)
+
+        let foregroundRPC = ControlPlane.RPCHandle()
+        let backgroundRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(foregroundRPC), to: foreground)
+        _ = authority.attach(.rpc(backgroundRPC), to: background)
+        foregroundRPC.markFinished()
+        guard case .accepted(_, let transition) = authority.completeCatalog(
+            .usable(catalog("Foreground"), source: testTopologyProof(0)),
+            lease: foreground,
+            nowUptimeNanoseconds: 3
+        ) else {
+            Issue.record("first logical load should commit")
+            return
+        }
+        for effect in transition.effects {
+            if case .cancelRPC(let handle) = effect {
+                handle.cancel()
+            }
+        }
+        #expect(foregroundRPC.isCancelled() == false)
+        #expect(backgroundRPC.isCancelled())
+        #expect(authority.validateCatalogLoad(background) == false)
+        guard case .discarded(let reason, _) = authority.completeCatalog(
+            .usable(catalog("Background"), source: testTopologyProof(0)),
+            lease: background,
+            nowUptimeNanoseconds: 4
+        ) else {
+            Issue.record("sibling completion should be stale")
+            return
+        }
+        #expect(reason == .attemptNotLoading)
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["Foreground"])
+    }
+
+    @Test func catalogCommitUsesActualFallbackResponseProof() throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 41016, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let preferredProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: 0)
+            )?.proof
+        )
+        let actualProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: 1)
+            )?.proof
+        )
+        manager.applyProcessControlPlaneTransition(
+            manager.processControlPlane.updateUsability(
+                usability([0, 1]),
+                nowUptimeNs: 0
+            )
+        )
+        let route = try #require(manager.processControlPlane.route(forProcessID: target.processID))
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: preferredProof,
+                nowUptimeNanoseconds: 1
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+
+        guard case .accepted = manager.commitProcessCatalog(
+            .usable(catalog("FallbackTool"), source: actualProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected fallback response to commit")
+            return
+        }
+
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID)?.upstreamProof == actualProof)
+        #expect(manager.processControlPlane.canonicalSourceProof() == actualProof)
+        #expect(actualProof != preferredProof)
+    }
+
+    @Test func supportEligibilityKeepsSiblingFallbackLoadAlive() throws {
+        let target = xcodeProcessTarget(processID: 41019, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let lostProof = testTopologyProof(0)
+        let fallbackProof = testTopologyProof(1)
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: lostProof,
+            nowUptimeNanoseconds: 1
+        ))
+        let lostRPC = ControlPlane.RPCHandle()
+        let fallbackRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(lostRPC), to: lease)
+        _ = authority.attach(.rpc(fallbackRPC), to: lease)
+        #expect(lostRPC.markRegistered(
+            registrationToken: UUID(),
+            operationLease: testOperationLease(0)
+        ))
+        #expect(fallbackRPC.markRegistered(
+            registrationToken: UUID(),
+            operationLease: testOperationLease(1)
+        ))
+
+        let eligibility = authority.applySupportEligibility(
+            usability: usability([1]),
+            newlyIneligibleProofs: [lostProof],
+            nowUptimeNs: 2
+        )
+        for effect in eligibility.transition.effects {
+            guard case .cancelRPC(let handle) = effect else { continue }
+            handle.cancel()
+        }
+
+        #expect(lostRPC.isCancelled())
+        #expect(fallbackRPC.isCancelled() == false)
+        #expect(authority.validateCatalogLoad(lease))
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("FallbackTool"), source: fallbackProof),
+            lease: lease,
+            nowUptimeNanoseconds: 3
+        ) else {
+            Issue.record("healthy sibling should complete the retained catalog load")
+            return
+        }
+        #expect(authority.catalog(forProcessID: target.processID)?.upstreamProof == fallbackProof)
+    }
+
+    @Test func catalogEligibilityMilestoneSurvivesQuarantineUntilRetireOrReset() throws {
+        let older = xcodeProcessTarget(processID: 41020, xcodeVersion: "26.6")
+        let latest = xcodeProcessTarget(processID: 41021, xcodeVersion: "27.0")
+        let authority = ProcessControlPlaneAuthority(initialRoutes: [
+            XcodeProcessRoute(target: older, upstreamIndices: [0]),
+            XcodeProcessRoute(target: latest, upstreamIndices: [1]),
+        ])
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs.isEmpty)
+        #expect(authority.snapshot().catalogRequiredProcessIDs.isEmpty)
+
+        _ = authority.updateUsability(usability([0]), nowUptimeNs: 1)
+        try commit(catalog("OlderTool"), processID: older.processID, upstream: 0, to: authority)
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [older.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [older.processID])
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+
+        _ = authority.updateUsability(usability([0, 1]), nowUptimeNs: 2)
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.canonicalToolsCatalogRaw() == nil)
+
+        _ = authority.applySupportEligibility(
+            usability: usability([0]),
+            newlyIneligibleProofs: [testTopologyProof(1)],
+            nowUptimeNs: 3
+        )
+
+        #expect(authority.catalog(forProcessID: older.processID) != nil)
+        #expect(authority.catalog(forProcessID: latest.processID) == nil)
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.canonicalToolsCatalogRaw() == nil)
+        #expect(authority.canonicalSourceProof() == nil)
+
+        let latestRoute = try #require(authority.route(forProcessID: latest.processID))
+        _ = authority.retireRoute(
+            routeID: latestRoute.id,
+            reason: "test_retire_health_hidden_route",
+            nowUptimeNs: 4
+        )
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [older.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [older.processID])
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+
+        _ = authority.reset()
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs.isEmpty)
+        #expect(authority.snapshot().catalogRequiredProcessIDs.isEmpty)
+
+        _ = authority.updateUsability(usability([0]), nowUptimeNs: 5)
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [older.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [older.processID])
+    }
+
+    @Test func exactCooldownExpiryWithdrawsPartialProjectionUntilFreshCatalog() throws {
+        let older = xcodeProcessTarget(processID: 41022, xcodeVersion: "26.6")
+        let latest = xcodeProcessTarget(processID: 41023, xcodeVersion: "27.0")
+        let authority = makeAuthority([
+            (older, [0]),
+            (latest, [1]),
+        ])
+        try commit(catalog("OlderTool"), processID: older.processID, upstream: 0, to: authority)
+        try commit(catalog("LatestTool"), processID: latest.processID, upstream: 1, to: authority)
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["LatestTool", "OlderTool"])
+
+        let unavailable = try #require(authority.markUnavailable(
+            upstreamIndex: 1,
+            scope: .catalog,
+            nowUptimeNs: 10,
+            unavailableUntilUptimeNs: 100
+        ))
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [older.processID])
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+        let extended = try #require(authority.markUnavailable(
+            upstreamIndex: 1,
+            scope: .catalog,
+            nowUptimeNs: 50,
+            unavailableUntilUptimeNs: 200
+        ))
+        #expect(authority.expireCooldown(
+            unavailable.cooldownLease,
+            nowUptimeNs: 100
+        ) == nil)
+        #expect(authority.unavailableProcessIDs(nowUptimeNs: 201).contains(latest.processID))
+        #expect(
+            authority.routingSnapshot(policy: .toolsCatalog, nowUptimeNs: 201)
+                .processIDs.contains(latest.processID) == false
+        )
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+
+        _ = try #require(authority.expireCooldown(
+            extended.cooldownLease,
+            nowUptimeNs: 200
+        ))
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [
+            older.processID,
+            latest.processID,
+        ])
+        #expect(authority.canonicalToolsCatalogRaw() == nil)
+        #expect(authority.canonicalSourceProof() == nil)
+
+        try commit(catalog("LatestFresh"), processID: latest.processID, upstream: 1, to: authority)
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["LatestFresh", "OlderTool"])
+    }
+
+    @Test func cooldownTimerAttachmentBelongsToExactAuthorityLease() throws {
+        let target = xcodeProcessTarget(processID: 41026, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+
+        let first = try #require(authority.markUnavailable(
+            upstreamIndex: 0,
+            scope: .catalog,
+            nowUptimeNs: 0,
+            unavailableUntilUptimeNs: 100
+        ))
+        let firstCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { firstCancelled.withLockedValue { $0 = true } },
+            to: first.cooldownLease
+        ))
+        #expect(firstCancelled.withLockedValue { $0 } == false)
+
+        let extended = try #require(authority.markUnavailable(
+            upstreamIndex: 0,
+            scope: .catalog,
+            nowUptimeNs: 1,
+            unavailableUntilUptimeNs: 200
+        ))
+        applyEffects(extended.transition)
+        #expect(firstCancelled.withLockedValue { $0 })
+
+        let staleFirstCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { staleFirstCancelled.withLockedValue { $0 = true } },
+            to: first.cooldownLease
+        ))
+        #expect(staleFirstCancelled.withLockedValue { $0 })
+
+        let extendedCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { extendedCancelled.withLockedValue { $0 = true } },
+            to: extended.cooldownLease
+        ))
+        #expect(extendedCancelled.withLockedValue { $0 } == false)
+
+        // Detach the old timer, but deliberately delay delivery of its cancel effect.
+        let available = authority.markAvailable(
+            upstreamIndex: 0,
+            scope: .catalog,
+            nowUptimeNs: 2
+        )
+        let replacement = try #require(authority.markUnavailable(
+            upstreamIndex: 0,
+            scope: .catalog,
+            nowUptimeNs: 2,
+            unavailableUntilUptimeNs: 200
+        ))
+        #expect(replacement.cooldownLease.generation != extended.cooldownLease.generation)
+        let replacementCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { replacementCancelled.withLockedValue { $0 = true } },
+            to: replacement.cooldownLease
+        ))
+
+        applyEffects(available)
+        #expect(extendedCancelled.withLockedValue { $0 })
+        #expect(replacementCancelled.withLockedValue { $0 } == false)
+
+        let reset = authority.reset()
+        let preResetLeaseCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCooldownTimeout(
+            RuntimeScheduledTimeout { preResetLeaseCancelled.withLockedValue { $0 = true } },
+            to: replacement.cooldownLease
+        ))
+        #expect(preResetLeaseCancelled.withLockedValue { $0 })
+        applyEffects(reset)
+        #expect(replacementCancelled.withLockedValue { $0 })
+    }
+
+    @Test func membershipReplacementEstablishesCatalogEligibilityFromNewUsableSlot() throws {
+        let target = xcodeProcessTarget(processID: 41024, xcodeVersion: "27.0")
+        let authority = ProcessControlPlaneAuthority(initialRoutes: [
+            XcodeProcessRoute(target: target, upstreamIndices: [0]),
+        ])
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs.isEmpty)
+
+        _ = authority.reconcileRoutes(
+            [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            reason: "replace_with_usable_slot",
+            nowUptimeNs: 1,
+            usability: usability([1])
+        )
+
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [target.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [target.processID])
+    }
+
+    @Test func membershipReplacementPreservesEstablishedCatalogEligibility() throws {
+        let target = xcodeProcessTarget(processID: 41025, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+
+        _ = authority.reconcileRoutes(
+            [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            reason: "replace_with_unusable_slot",
+            nowUptimeNs: 1,
+            usability: usability([])
+        )
+
+        #expect(authority.snapshot().catalogEligibilityEstablishedProcessIDs == [target.processID])
+        #expect(authority.snapshot().catalogRequiredProcessIDs == [target.processID])
+    }
+
+    @Test func catalogSourceInvalidationRequiresExactProof() throws {
+        let target = xcodeProcessTarget(processID: 41019, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let sourceProof = testTopologyProof(0)
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: sourceProof,
+            nowUptimeNanoseconds: 1
+        ))
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("SourceBoundTool"), source: sourceProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected catalog commit to be accepted")
+            return
+        }
+
+        let staleTransition = authority.invalidateCatalogSource(
+            processID: target.processID,
+            source: testTopologyProof(0, generation: 2)
+        )
+        #expect(staleTransition.publishesToolsListChanged == false)
+        #expect(authority.catalog(forProcessID: target.processID) != nil)
+        #expect(authority.canonicalSourceProof() == sourceProof)
+
+        let (lateLease, lateTransition) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: sourceProof,
+            nowUptimeNanoseconds: 3
+        ))
+        #expect(lateTransition.effects.isEmpty)
+        let lateRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(lateRPC), to: lateLease)
+
+        let invalidation = authority.invalidateCatalogSource(
+            processID: target.processID,
+            source: sourceProof
+        )
+        #expect(invalidation.publishesToolsListChanged)
+        #expect(invalidation.effects.count == 1)
+        #expect(authority.validateCatalogLoad(lateLease) == false)
+        guard case .discarded(.attemptSuperseded, _) = authority.completeCatalog(
+            .usable(catalog("LateStaleTool"), source: sourceProof),
+            lease: lateLease,
+            nowUptimeNanoseconds: 4
+        ) else {
+            Issue.record("source invalidation must reject a late load from the cleared proof")
+            return
+        }
+        #expect(authority.catalog(forProcessID: target.processID) == nil)
+        #expect(authority.canonicalToolsCatalogRaw() == nil)
+        #expect(authority.canonicalSourceProof() == nil)
+    }
+
+    @Test func catalogCommitRejectsTopologicallyCurrentButClearedResponseSource() throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 41020, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let clearedProof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        let preferredProof = manager.operationLeaseForTest(upstreamIndex: 1).proof
+        let route = try #require(
+            manager.processControlPlane.route(forProcessID: target.processID)
+        )
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: preferredProof,
+                nowUptimeNanoseconds: 1
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+        _ = try #require(manager.upstreamHealthManager.clearUpstreamState(clearedProof))
+
+        guard case .discarded(let reason, _) = manager.commitProcessCatalog(
+            .usable(catalog("LateClearedTool"), source: clearedProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("cleared source must not commit a late catalog response")
+            return
+        }
+
+        #expect(reason == .upstreamReplaced)
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processControlPlane.canonicalToolsCatalogRaw() == nil)
+    }
+
+    @Test func catalogCommitRejectsActualResponseFromReplacedGeneration() throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let target = xcodeProcessTarget(processID: 41017, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient()],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0]),
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        let oldProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: 0)
+            )?.proof
+        )
+        let route = try #require(manager.processControlPlane.route(forProcessID: target.processID))
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: oldProof,
+                nowUptimeNanoseconds: 1
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+        _ = try #require(
+            manager.upstreamTopology.replace(oldProof, with: TestUpstreamClient())
+        )
+
+        guard case .discarded(let reason, _) = manager.commitProcessCatalog(
+            .usable(catalog("StaleTool"), source: oldProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected replaced response generation to be rejected")
+            return
+        }
+
+        #expect(reason == .upstreamReplaced)
+        #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
+        #expect(manager.processControlPlane.canonicalToolsCatalogRaw() == nil)
+    }
+
+    @Test func unrelatedRouteAdditionDoesNotInvalidateInFlightCatalogLoad() throws {
+        let first = xcodeProcessTarget(processID: 41014, xcodeVersion: "27.0")
+        let second = xcodeProcessTarget(processID: 41015, xcodeVersion: "26.4")
+        let authority = makeAuthority([(first, [0])])
+        let route = try #require(authority.route(forProcessID: first.processID))
+        let epoch = authority.currentCatalogEpoch()
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 1
+        ))
+        let rpc = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(rpc), to: lease)
+
+        _ = authority.reconcileRoutes(
+            [
+                XcodeProcessRoute(target: first, upstreamIndices: [0]),
+                XcodeProcessRoute(target: second, upstreamIndices: [1]),
+            ],
+            reason: "add_unrelated_route",
+            nowUptimeNs: 2,
+            usability: usability([0, 1])
+        )
+
+        #expect(authority.currentCatalogEpoch() == epoch)
+        #expect(authority.validateCatalogLoad(lease))
+        #expect(rpc.isCancelled() == false)
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("StillCurrent"), source: testTopologyProof(0)),
+            lease: lease,
+            nowUptimeNanoseconds: 3
+        ) else {
+            Issue.record("unrelated route addition must preserve the load")
+            return
+        }
+    }
+
+    @Test func supersededReadinessReservationCannotStartNewAttempt() throws {
+        let target = xcodeProcessTarget(processID: 41012, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let oldToken = UpstreamReadinessWaiterToken()
+        let oldReservation = try #require(authority.reserveActivation(
+            routeID: route.id,
+            upstreamProof: testTopologyProof(0),
+            nowUptimeNs: 1,
+            readinessToken: oldToken
+        )).0
+        #expect(authority.reserveActivation(
+            routeID: route.id,
+            upstreamProof: testTopologyProof(0),
+            nowUptimeNs: 2,
+            readinessToken: UpstreamReadinessWaiterToken()
+        ) == nil)
+        let pending = try #require(authority.attemptSnapshot(processID: target.processID))
+        #expect(pending.phase == .pending)
+        #expect(pending.readinessWaiterCount == 1)
+
+        let reset = authority.resetAttempt(processID: target.processID)
+        for effect in reset.effects {
+            if case .cancelReadinessWaiter(let token) = effect {
+                token.cancel()
+            }
+        }
+        #expect(oldToken.isCancelled)
+
+        let newReservation = try #require(authority.reserveActivation(
+            routeID: route.id,
+            upstreamProof: testTopologyProof(0),
+            nowUptimeNs: 3,
+            readinessToken: UpstreamReadinessWaiterToken()
+        )).0
+        #expect(authority.beginAttaching(oldReservation, nowUptimeNs: 4) == nil)
+        let stillPending = try #require(authority.attemptSnapshot(processID: target.processID))
+        #expect(stillPending.attemptID.rawValue == 2)
+        #expect(stillPending.phase == .pending)
+        #expect(stillPending.readinessWaiterCount == 1)
+
+        _ = try #require(authority.beginAttaching(newReservation, nowUptimeNs: 5))
+        let attaching = try #require(authority.attemptSnapshot(processID: target.processID))
+        #expect(attaching.attemptID.rawValue == 2)
+        #expect(attaching.phase == .attaching)
+        #expect(attaching.readinessWaiterCount == 0)
+    }
+
+    @Test func windowUpdatesDoNotInvalidateCatalogLease() throws {
+        let target = xcodeProcessTarget(processID: 41004, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 1
+        ))
+        let catalogEpoch = authority.currentCatalogEpoch()
+        let windows = WindowOwnershipAuthority()
+
+        _ = windows.record(
+            processID: target.processID,
+            entries: [XcodeListWindowsEntry(tabIdentifier: "tab", workspacePath: "/tmp/App.xcworkspace")]
+        )
+
+        #expect(authority.currentCatalogEpoch() == catalogEpoch)
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("WindowTool"), source: testTopologyProof(0)),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("window epoch must not stale catalog lease")
+            return
+        }
+    }
+
+    @Test func retiringRouteReprojectsRemainingCatalog() throws {
+        let newer = xcodeProcessTarget(processID: 41005, xcodeVersion: "27.0")
+        let older = xcodeProcessTarget(processID: 41006, xcodeVersion: "26.4")
+        let authority = makeAuthority([(newer, [0]), (older, [1])])
+        try commit(catalog("NewerTool"), processID: newer.processID, upstream: 0, to: authority)
+        try commit(catalog("OlderTool"), processID: older.processID, upstream: 1, to: authority)
+        #expect(Set(toolNames(authority.canonicalToolsCatalogRaw())) == ["NewerTool", "OlderTool"])
+
+        _ = authority.reconcileRoutes(
+            [XcodeProcessRoute(target: older, upstreamIndices: [1])],
+            reason: "retire_newer",
+            nowUptimeNs: 3,
+            usability: usability([1])
+        )
+
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+        #expect(authority.processIDsWithCatalog() == [older.processID])
+    }
+
+    @Test func windowRecordIsOrderIndependentAndDeduplicated() {
+        let authority = WindowOwnershipAuthority()
+        let first = authority.record(
+            processID: 41007,
+            entries: [
+                XcodeListWindowsEntry(tabIdentifier: "b", workspacePath: "/tmp/B.xcworkspace"),
+                XcodeListWindowsEntry(tabIdentifier: "a", workspacePath: "/tmp/A.xcworkspace"),
+                XcodeListWindowsEntry(tabIdentifier: "a", workspacePath: "/tmp/A.xcworkspace"),
+            ]
+        )
+        let second = authority.record(
+            processID: 41007,
+            entries: [
+                XcodeListWindowsEntry(tabIdentifier: "a", workspacePath: "/tmp/A.xcworkspace"),
+                XcodeListWindowsEntry(tabIdentifier: "b", workspacePath: "/tmp/B.xcworkspace"),
+            ]
+        )
+
+        #expect(first.didChange)
+        #expect(second.didChange == false)
+        #expect(first.epoch == second.epoch)
+        #expect(authority.snapshot().identities.map(\.rawTabIdentifier) == ["a", "b"])
+    }
+
+    @Test func topologyReplacementAndRetirementRejectOldState() throws {
+        let first = TestUpstreamClient()
+        let second = TestUpstreamClient()
+        let topology = UpstreamTopologyAuthority([first, second])
+        let initial = topology.snapshot()
+        let oldProof = try #require(initial.proof(UpstreamSlotID(rawValue: 0)))
+        let router = UpstreamRouter(upstreamCount: 2)
+        let health = UpstreamHealthManager()
+        router.applyTopology(initial)
+        health.applyTopology(initial)
+        let requestID = try #require(router.assign(
+            proof: oldProof,
+            sessionID: "session",
+            originalID: JSONRPC.ID(any: 1)!,
+            isInitialize: false
+        ))
+        #expect(requestID != 0)
+        #expect(health.claimWarmInitialize(upstreamIndex: 0) != nil)
+
+        let replacement = try #require(topology.replace(
+            oldProof,
+            with: TestUpstreamClient()
+        ))
+        let replacementProof = try #require(
+            replacement.snapshot.proof(UpstreamSlotID(rawValue: 0))
+        )
+        router.applyTopology(replacement.snapshot)
+        health.applyTopology(replacement.snapshot)
+
+        #expect(topology.validate(oldProof) == false)
+        #expect(topology.validate(replacementProof))
+        var replacementEventCount = 0
+        if topology.validate(oldProof) {
+            replacementEventCount += 1
+        }
+        #expect(replacementEventCount == 0)
+        #expect(router.consume(proof: oldProof, upstreamID: requestID) == nil)
+        #expect(
+            health.activeStatesSnapshot().first { $0.id == UpstreamSlotID(rawValue: 0) }?
+                .state.initInFlight == false
+        )
+        let replacementInitializeID = try #require(
+            router.assignInitialize(proof: replacementProof)
+        )
+        let replacementClaim = try #require(health.claimWarmInitialize(upstreamIndex: 0))
+        #expect(router.consume(proof: oldProof, upstreamID: replacementInitializeID) == nil)
+        #expect(health.markProtocolViolation(oldProof, nowUptimeNs: 1) == nil)
+        #expect(health.validate(replacementClaim))
+        #expect(
+            router.consume(
+                proof: replacementProof,
+                upstreamID: replacementInitializeID
+            )?.isInitialize == true
+        )
+
+        let retired = topology.retire([UpstreamSlotID(rawValue: 1)])
+        router.applyTopology(retired.snapshot)
+        health.applyTopology(retired.snapshot)
+        #expect(health.activeStatesSnapshot().map(\.id) == [UpstreamSlotID(rawValue: 0)])
+        #expect(retired.snapshot.proof(UpstreamSlotID(rawValue: 1)) == nil)
+
+        let appended = topology.append([TestUpstreamClient()])
+        health.applyTopology(appended.snapshot)
+        #expect(
+            health.activeStatesSnapshot().map(\.id)
+                == [UpstreamSlotID(rawValue: 0), UpstreamSlotID(rawValue: 2)]
+        )
+        #expect(health.state(for: UpstreamSlotID(rawValue: 1)) == nil)
+
+        let staleTimeout = health.markRequestTimedOut(oldProof, nowUptimeNs: 0)
+        #expect(staleTimeout.timeoutCount == 0)
+        guard case .healthy = health.state(
+            for: UpstreamSlotID(rawValue: 0)
+        )?.healthState else {
+            Issue.record("stale topology proof must not mutate the replacement health state")
+            return
+        }
+    }
+
+    @Test func schedulerRejectsReservedLeaseAfterSameSlotGenerationReplacement() async throws {
+        let oldSlot = TestUpstreamClient()
+        let replacementSlot = TestUpstreamClient()
+        let topology = UpstreamTopologyAuthority([oldSlot])
+        let oldProof = try #require(
+            topology.snapshot().proof(UpstreamSlotID(rawValue: 0))
+        )
+        let eventLoop = EmbeddedEventLoop()
+        let started = NIOLockedValueBox<[UpstreamTopologyProof]>([])
+        let failedUnavailable = NIOLockedValueBox(0)
+        let scheduler = UpstreamSlotScheduler(
+            canUseUpstream: { _ in .init(proof: oldProof, effects: []) },
+            selectUpstream: { _ in .init(proof: oldProof, effects: []) },
+            operationLease: { topology.operationLease(for: $0) },
+            validateOperationLease: { topology.validate($0) }
+        )
+        scheduler.enqueueRequest(
+            leaseID: UUID(),
+            descriptor: .init(
+                sessionID: "generation-race",
+                label: "tools/list",
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            ),
+            on: eventLoop,
+            starter: { lease in
+                started.withLockedValue { $0.append(lease.proof) }
+            },
+            failUnavailable: {
+                failedUnavailable.withLockedValue { $0 += 1 }
+            },
+            failCancelled: {
+                Issue.record("generation replacement is unavailable, not cancellation")
+            }
+        )
+
+        _ = try #require(topology.replace(oldProof, with: replacementSlot))
+        eventLoop.run()
+
+        #expect(started.withLockedValue { $0 }.isEmpty)
+        #expect(failedUnavailable.withLockedValue { $0 } == 1)
+        #expect(await oldSlot.sentCount() == 0)
+        #expect(await replacementSlot.sentCount() == 0)
+        #expect(scheduler.debugSnapshot().activeLeaseCountByUpstream.isEmpty)
+    }
+
+    @Test func observerCannotBindRetiredSlotEventsToCurrentGeneration() async throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: group.next(),
+            upstreams: [],
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        let retiredSlot = TestUpstreamClient()
+        let currentSlot = TestUpstreamClient()
+        let appended = manager.upstreamTopology.append([retiredSlot])
+        manager.publishUpstreamTopology(appended.snapshot)
+        let retiredLease = try #require(
+            appended.snapshot.operationLease(UpstreamSlotID(rawValue: 0))
+        )
+        let replacement = try #require(
+            manager.upstreamTopology.replace(retiredLease.proof, with: currentSlot)
+        )
+        manager.publishUpstreamTopology(replacement.snapshot)
+        manager.observeUpstreamEvents(retiredLease)
+
+        await retiredSlot.yield(.stdoutProtocolViolation(.init(
+            reason: .invalidJSON,
+            bufferedByteCount: 7,
+            preview: "{stale"
+        )))
+        await retiredSlot.stop()
+        await manager.shutdown()
+
+        guard case .healthy = manager.upstreamHealthManager.state(
+            for: UpstreamSlotID(rawValue: 0)
+        )?.healthState else {
+            Issue.record("retired slot event must not quarantine the replacement generation")
+            return
+        }
+    }
+
+    @Test func serverResponseFromOldGenerationCannotSendThroughReplacementSlot() async throws {
+        let oldSlot = TestUpstreamClient()
+        let replacementSlot = TestUpstreamClient()
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: eventLoop,
+            upstreams: [oldSlot],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        let operationLease = try #require(
+            manager.upstreamTopology.operationLease(for: UpstreamSlotID(rawValue: 0))
+        )
+        let sessionID = "old-generation-server-response"
+        let session = manager.session(id: sessionID)
+        let clientID = session.serverRequestTracker.record(
+            upstreamID: JSONRPC.ID(any: 91)!,
+            operationLease: operationLease
+        )
+        _ = try #require(
+            manager.upstreamTopology.replace(operationLease.proof, with: replacementSlot)
+        )
+        let response = try JSONRPC.Wire.data(from: [
+            "jsonrpc": "2.0",
+            "id": clientID.value.foundationObject,
+            "result": ["ok": true],
+        ])
+
+        let result = try await manager.forwardServerRequestResponse(
+            responseData: response,
+            sessionID: sessionID,
+            responseID: clientID,
+            on: eventLoop
+        ).get()
+
+        #expect(result == .upstreamUnavailable)
+        #expect(await oldSlot.sentCount() == 0)
+        #expect(await replacementSlot.sentCount() == 0)
+        #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
+    }
+
+    @Test func catalogActivationSuccessAndTimeoutHaveSingleTerminalWinner() throws {
+        let topology = UpstreamTopologyAuthority([TestUpstreamClient()])
+        let snapshot = topology.snapshot()
+        let proof = try #require(snapshot.proof(UpstreamSlotID(rawValue: 0)))
+        let health = UpstreamHealthManager()
+        health.applyTopology(snapshot)
+        let claim = try #require(health.claimWarmInitialize(
+            upstreamIndex: 0,
+            owner: .processRouteActivation
+        ))
+        #expect(health.beginInitializeSend(claim))
+        #expect(health.setWarmInitializeUpstreamID(41, for: claim))
+        #expect(health.transferInitializeResponse(claim, expectedUpstreamID: 41))
+        #expect(health.markInitializedNotificationSent(claim, expectedUpstreamID: 41))
+        _ = try #require(health.markInitialized(
+            claim,
+            expectedUpstreamID: 41,
+            commit: { true }
+        ))
+
+        let terminalWinners = NIOLockedValueBox<[String]>([])
+        DispatchQueue.concurrentPerform(iterations: 2) { contender in
+            _ = topology.withValidated(proof) {
+                if contender == 0 {
+                    switch health.commitCatalogActivation(
+                        claim,
+                        sourceProof: proof,
+                        commit: { _ in .complete }
+                    ) {
+                    case .completed:
+                        terminalWinners.withLockedValue { $0.append("success") }
+                    case .notOwned, .kept:
+                        break
+                    }
+                    return
+                }
+                if health.timeoutCatalogActivation(claim, commit: { _ in true }) != nil {
+                    terminalWinners.withLockedValue { $0.append("timeout") }
+                }
+            }
+        }
+
+        #expect(terminalWinners.withLockedValue(\.count) == 1)
+    }
+
+    @Test func forwardingAdmissionRejectsRouteAndTopologyChangesIndependently() throws {
+        let target = xcodeProcessTarget(processID: 41008, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let routeProof = try #require(authority.routeProof(routeID: route.id))
+        let routeLease = try #require(authority.admit(routeProof))
+        let topology = UpstreamTopologyAuthority([TestUpstreamClient()])
+        let topologyProof = try #require(
+            topology.snapshot().proof(UpstreamSlotID(rawValue: 0))
+        )
+
+        #expect(authority.validate(routeLease))
+        #expect(topology.validate(topologyProof))
+
+        _ = authority.reconcileRoutes(
+            [],
+            reason: "route_retired",
+            nowUptimeNs: 1,
+            usability: .empty
+        )
+        #expect(authority.validate(routeLease) == false)
+        #expect(topology.validate(topologyProof))
+
+        let replacementAuthority = makeAuthority([(target, [0])])
+        let replacementRoute = try #require(
+            replacementAuthority.route(forProcessID: target.processID)
+        )
+        let replacementRouteProof = try #require(
+            replacementAuthority.routeProof(routeID: replacementRoute.id)
+        )
+        let replacementRouteLease = try #require(
+            replacementAuthority.admit(replacementRouteProof)
+        )
+        _ = try #require(topology.replace(
+            topologyProof,
+            with: TestUpstreamClient()
+        ))
+        #expect(replacementAuthority.validate(replacementRouteLease))
+        #expect(topology.validate(topologyProof) == false)
+    }
+
+    @Test func routeAdmissionLeaseIsInvalidatedOnlyByItsRoute() throws {
+        let targetA = xcodeProcessTarget(processID: 41009, xcodeVersion: "27.0")
+        let targetB = xcodeProcessTarget(processID: 41010, xcodeVersion: "26.4")
+        let authority = makeAuthority([(targetA, [0]), (targetB, [1])])
+        let routeA = try #require(authority.route(forProcessID: targetA.processID))
+        let proofA = try #require(authority.routeProof(routeID: routeA.id))
+        let leaseA = try #require(authority.admit(proofA))
+
+        _ = authority.markUnavailable(
+            upstreamIndex: 1,
+            scope: .route,
+            nowUptimeNs: 1,
+            unavailableUntilUptimeNs: 100
+        )
+        #expect(authority.validate(leaseA))
+
+        _ = authority.reconcileRoutes(
+            [
+                XcodeProcessRoute(target: targetA, upstreamIndices: [0]),
+                XcodeProcessRoute(target: targetB, upstreamIndices: [2]),
+            ],
+            reason: "replace_unrelated_route",
+            nowUptimeNs: 2,
+            usability: usability([0, 2])
+        )
+        #expect(authority.validate(leaseA))
+
+        _ = authority.reconcileRoutes(
+            [
+                XcodeProcessRoute(target: targetA, upstreamIndices: [3]),
+                XcodeProcessRoute(target: targetB, upstreamIndices: [2]),
+            ],
+            reason: "replace_admitted_route",
+            nowUptimeNs: 3,
+            usability: usability([2, 3])
+        )
+        #expect(authority.validate(leaseA) == false)
+
+        let replacementA = try #require(authority.route(forProcessID: targetA.processID))
+        let replacementProofA = try #require(authority.routeProof(routeID: replacementA.id))
+        let replacementLeaseA = try #require(authority.admit(replacementProofA))
+        _ = authority.reconcileRoutes(
+            [XcodeProcessRoute(target: targetB, upstreamIndices: [2])],
+            reason: "retire_admitted_route",
+            nowUptimeNs: 4,
+            usability: usability([2])
+        )
+        #expect(authority.validate(replacementLeaseA) == false)
+
+        let availabilityAuthority = makeAuthority([(targetA, [0])])
+        let availabilityRoute = try #require(
+            availabilityAuthority.route(forProcessID: targetA.processID)
+        )
+        let availabilityProof = try #require(
+            availabilityAuthority.routeProof(routeID: availabilityRoute.id)
+        )
+        let availabilityLease = try #require(availabilityAuthority.admit(availabilityProof))
+        _ = availabilityAuthority.markUnavailable(
+            upstreamIndex: 0,
+            scope: .route,
+            nowUptimeNs: 1,
+            unavailableUntilUptimeNs: 100
+        )
+        #expect(availabilityAuthority.validate(availabilityLease) == false)
+    }
+
+    @Test func sendBoundaryRejectsRouteReplacedWhileRuntimeTaskIsSuspended() async throws {
+        let target = xcodeProcessTarget(processID: 41011, xcodeVersion: "27.0")
+        let upstream = StartGateUpstreamClient()
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 1),
+            eventLoop: group.next(),
+            upstreams: [upstream],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [0])],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        _ = manager.processControlPlane.updateUsability(
+            usability([0]),
+            nowUptimeNs: 0
+        )
+        let route = try #require(manager.processControlPlane.route(forProcessID: target.processID))
+        let routeProof = try #require(manager.processControlPlane.routeProof(routeID: route.id))
+        let routeLease = try #require(manager.processControlPlane.admit(routeProof))
+        let topologyProof = try #require(
+            manager.upstreamTopology.snapshot().proof(UpstreamSlotID(rawValue: 0))
+        )
+        let admission = RouteForwardingAdmission(
+            route: routeLease,
+            upstreamProofs: [topologyProof]
+        )
+
+        manager.sendUpstream(
+            try makeToolListRequest(id: 1),
+            upstreamIndex: 0,
+            ensureRunning: true,
+            admission: admission
+        )
+        try await upstream.waitForStart()
+        _ = manager.processControlPlane.reconcileRoutes(
+            [XcodeProcessRoute(target: target, upstreamIndices: [0, 1])],
+            reason: "replace_during_send",
+            nowUptimeNs: 1,
+            usability: usability([0])
+        )
+        await upstream.releaseStart()
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(await upstream.sendCount() == 0)
+    }
+
+    @Test func taskASourceInventoryHasNoLegacyMutableOwnersOrSequencingHooks() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let repository = testsDirectory.deletingLastPathComponent().deletingLastPathComponent()
+        let roots = [
+            repository.appendingPathComponent("Sources/XcodeMCPProxyKit"),
+            repository.appendingPathComponent("Tests/ProxyRuntimeCoordinatorTests"),
+        ]
+        let productionRoot = roots[0]
+        let forbidden = [
+            "ProcessRouteStore",
+            "ProcessRouteReadinessStore",
+            "ProcessToolSurfaceStore",
+            "WindowOwnerIndex",
+            "CanonicalBrokerState",
+            "upstreamsBox",
+            "appendUpstreams",
+            "cacheableAsCanonical",
+            "processToolsCatalogLoadedBeforeRecord",
+            "processToolsCatalogFailureCleanupBeforeApply",
+            "processToolCatalogSurfaceUpdatePassedInitialGenerationCheck",
+            "processRouteActivationEvent",
+            "initializedNotificationStaleIgnored",
+            "activeUpstreamIndices",
+            "generationByUpstream",
+            "setCachedToolsListResult",
+            "processToolSurfaceMutationLock",
+            "availableToolsCatalogRefreshKeys",
+            "cancelLoadsStartedBeforeGeneration",
+            "recordAvailableToolsCatalog",
+            "func recordCatalog(",
+            "xcodeProcessCooldownSchedules",
+        ]
+        let manager = FileManager.default
+        var source = ""
+        var productionSource = ""
+        for root in roots {
+            let enumerator = try #require(manager.enumerator(at: root, includingPropertiesForKeys: nil))
+            for case let url as URL in enumerator where url.pathExtension == "swift" {
+                guard url.path != #filePath else { continue }
+                let fileSource = try String(contentsOf: url, encoding: .utf8)
+                source += fileSource
+                if url.path.hasPrefix(productionRoot.path) {
+                    productionSource += fileSource
+                }
+            }
+        }
+        for symbol in forbidden {
+            #expect(source.contains(symbol) == false, "legacy Task A symbol remains: \(symbol)")
+        }
+        let prooflessProductionFragments = [
+            "proof suppliedProof: UpstreamTopologyProof?",
+            "upstreamTopology.snapshot().proof",
+        ]
+        for fragment in prooflessProductionFragments {
+            #expect(
+                productionSource.contains(fragment) == false,
+                "production remints current topology proof: \(fragment)"
+            )
+        }
+        let indexOnlyMutationPatterns = [
+            #"func\s+(?:markRequestSucceeded|markUpstreamOverloaded|markRequestTimedOut|markProtocolViolation|quarantineIncompatibleUpstream|markToolsListRefreshSucceeded|markToolsListRefreshFailed|clearUpstreamState|markInitialized)\s*\(\s*upstreamIndex\s*:"#,
+            #"func\s+(?:assign|assignInitialize|consume|remove|reset)\s*\(\s*upstreamIndex\s*:"#,
+            #"func\s+sendUpstream\s*\([^)]*upstreamIndex\s*:"#,
+        ]
+        for pattern in indexOnlyMutationPatterns {
+            let expression = try NSRegularExpression(
+                pattern: pattern,
+                options: [.dotMatchesLineSeparators]
+            )
+            let range = NSRange(productionSource.startIndex..., in: productionSource)
+            #expect(
+                expression.firstMatch(in: productionSource, range: range) == nil,
+                "production index-only topology mutation remains: \(pattern)"
+            )
+        }
+    }
+
+    private func makeAuthority(
+        _ entries: [(target: XcodeProcessTarget, upstreams: [Int])]
+    ) -> ProcessControlPlaneAuthority {
+        let authority = ProcessControlPlaneAuthority(
+            initialRoutes: entries.map {
+                XcodeProcessRoute(target: $0.target, upstreamIndices: $0.upstreams)
+            },
+            nowUptimeNs: 0
+        )
+        _ = authority.updateUsability(
+            usability(entries.flatMap(\.upstreams)),
+            nowUptimeNs: 0
+        )
+        return authority
+    }
+
+    private func usability(
+        _ upstreams: [Int]
+    ) -> ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot {
+        let ids = Set(upstreams.map(UpstreamSlotID.init(rawValue:)))
+        return .init(
+            snapshotUsableUpstreamIDs: ids,
+            recoveryAwareUsableUpstreamIDs: ids
+        )
+    }
+
+    private func catalog(_ name: String) -> JSONValue {
+        .object([
+            "tools": .array([
+                .object(["name": .string(name)]),
+            ]),
+        ])
+    }
+
+    private func toolNames(_ catalog: JSONValue?) -> [String] {
+        ProcessToolCatalogCodec.toolsByName(in: catalog).keys.sorted()
+    }
+
+    private func commit(
+        _ catalog: JSONValue,
+        processID: pid_t,
+        upstream: Int,
+        to authority: ProcessControlPlaneAuthority
+    ) throws {
+        let route = try #require(authority.route(forProcessID: processID))
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(upstream),
+            nowUptimeNanoseconds: 1
+        ))
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog, source: testTopologyProof(upstream)),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("failed to seed process catalog")
+            return
+        }
+    }
+
+    private func applyEffects(_ transition: ProcessControlPlaneTransition) {
+        for effect in transition.effects {
+            if case .cancelTimeout(let timeout) = effect {
+                timeout.cancel()
+            }
+        }
+    }
+}
+
+private actor StartGateUpstreamClient: UpstreamSlotControlling {
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private let startSignal = TestSignal()
+    private var startContinuation: CheckedContinuation<Void, Never>?
+    private var sentCountValue = 0
+
+    init() {
+        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
+        events = AsyncStream { streamContinuation = $0 }
+        continuation = streamContinuation
+    }
+
+    func start() async {
+        startSignal.signal()
+        await withCheckedContinuation { startContinuation = $0 }
+    }
+
+    func stop() async {
+        releaseStart()
+        continuation.finish()
+    }
+
+    func send(_: Data) async -> Upstream.SendResult {
+        sentCountValue += 1
+        return .accepted
+    }
+
+    func waitForStart() async throws {
+        if startContinuation != nil { return }
+        try await startSignal.wait(description: "waiting for gated upstream start")
+    }
+
+    func releaseStart() {
+        startContinuation?.resume()
+        startContinuation = nil
+    }
+
+    func sendCount() -> Int {
+        sentCountValue
+    }
+}

@@ -65,21 +65,7 @@ extension XcodeMCPProxyStdioAdapter {
 }
 
 extension XcodeMCPProxyInstaller {
-    /// Runs the `xcode-mcp-proxy-install` command-line facade.
-    ///
-    /// This helper parses the same arguments and environment accepted by the
-    /// executable, executes the normalized install plan, and returns a
-    /// process-style exit code. Output that belongs on standard output or
-    /// standard error is delivered through the supplied callbacks.
-    ///
-    /// - Parameters:
-    ///   - arguments: Command-line arguments, including the executable name.
-    ///   - environment: Environment variables used for install resolution.
-    ///   - stdout: Callback for standard output lines.
-    ///   - stderr: Callback for standard error lines.
-    /// - Returns: `0` for success, or a nonzero exit code for launch or
-    ///   validation failures.
-    public static func run(
+    package static func run(
         arguments: [String],
         environment: [String: String],
         stdout: @escaping @Sendable (String) -> Void,

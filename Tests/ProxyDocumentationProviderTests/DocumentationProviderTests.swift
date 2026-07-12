@@ -254,7 +254,7 @@ private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
     )
 }
 
-@Suite(.serialized)
+@Suite(.serialized, .asyncTestCleanup)
 struct DocumentationProviderTests {
     @Test func documentationProviderConnectionCancelsEventReaderOnDeinit() async throws {
         let terminated = TestSignal()
@@ -304,6 +304,44 @@ struct DocumentationProviderTests {
         #expect(await session.stopCount() == 1)
         await stopGate.signal()
         await closeTask.value
+    }
+
+    @Test func sessionBackedDocumentationProviderDetachedStopRetainsTransportUntilCompletion()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 121, xcodeVersion: "27.0")
+        let stopStarted = TestSignal()
+        let stopGate = AsyncGate()
+        let session = BlockingStopDocumentationSession(
+            serverVersion: "27.0",
+            stopStarted: stopStarted,
+            stopGate: stopGate
+        )
+        var transport: SessionBackedDocumentationProviderTransport? =
+            SessionBackedDocumentationProviderTransport(
+                sessionFactory: FixedDocumentationSessionFactory(session: session)
+            )
+        let retainedTransport = WeakDocumentationProviderTransportReference(transport)
+        do {
+            let transport = try #require(transport)
+            let route = try await transport.openRoute(
+                for: target,
+                requestTimeout: .seconds(1),
+                initializeParams: [:]
+            )
+
+            await transport.close(route: route)
+        }
+        try await stopStarted.wait(description: "waiting for detached provider session stop")
+        transport = nil
+
+        #expect(retainedTransport.value != nil)
+        await stopGate.signal()
+        try await waitWithTimeout("waiting for detached stop to release provider transport") {
+            while retainedTransport.value != nil {
+                await Task.yield()
+            }
+        }
     }
 
     @Test func sessionBackedDocumentationProviderShutdownWaitsForDetachedSessionStopDrain()
@@ -1286,6 +1324,46 @@ struct DocumentationProviderTests {
         #expect(await upstream.sentCount() == 2)
     }
 
+    @Test func runtimeDocumentationTransportDoesNotFallbackWhileUpstreamRouteIsInitializing()
+        async throws
+    {
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 739, xcodeVersion: "27.0")
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let openStarted = TestSignal()
+        let openGate = AsyncGate()
+        await openGate.signal()
+        let fallback = BlockingFallbackDocumentationProviderTransport(
+            openStarted: openStarted,
+            openGate: openGate
+        )
+        let providerManager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: RuntimeDocumentationProviderTransport(
+                runtimeBox: runtimeBox,
+                fallback: fallback
+            ),
+            providerSelectionTimeout: .seconds(1)
+        )
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
+            documentationProviderManager: providerManager,
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { fixture.shutdownAndWait() }
+
+        let update = await providerManager.startBackgroundDiscovery(requestTimeout: .seconds(1))
+
+        guard case .unavailable = update else {
+            Issue.record("expected unavailable update while the upstream route initializes")
+            return
+        }
+        #expect(await fallback.openCount() == 0)
+        #expect(await upstream.startCount() == 0)
+    }
+
     @Test func runtimeDocumentationTransportFallsBackForReusedRouteToolsListFailure()
         async throws
     {
@@ -1688,7 +1766,6 @@ struct DocumentationProviderTests {
         let activeDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-active",
             label: "tools/call:LongRunning",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: true
         )
@@ -1700,11 +1777,11 @@ struct DocumentationProviderTests {
             descriptor: activeDescriptor,
             on: eventLoop,
             preferredUpstreamIndex: 0
-        ) { selectedUpstreamIndex in
+        ) { selectedOperationLease in
             manager.activateRequestLease(
                 activeLeaseID,
                 requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex,
+                upstreamIndex: selectedOperationLease.upstreamIndex,
                 timeout: nil
             )
             return activePromise.futureResult
@@ -2349,7 +2426,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     [
@@ -2390,7 +2467,7 @@ struct DocumentationProviderTests {
         )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     [
@@ -2440,7 +2517,7 @@ struct DocumentationProviderTests {
         )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     [
@@ -2491,7 +2568,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     documentationDescriptor(version: "26.6").foundationObject,
@@ -2532,7 +2609,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     documentationDescriptor(version: "26.6").foundationObject,
@@ -2590,7 +2667,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     documentationDescriptor(version: "27.0").foundationObject,
@@ -2648,7 +2725,7 @@ struct DocumentationProviderTests {
                 documentationDescriptor(version: "27.0").foundationObject,
             ],
         ])
-        manager.setCachedToolsListResult(cachedTools, sourceUpstream: 0)
+        manager.seedCanonicalToolsCatalog(cachedTools, sourceUpstream: 0)
 
         let outcome = try await manager.callDocumentationSearch(
             requestData: makeDocumentationSearchRequest(id: 43, query: "not enabled error"),
@@ -2679,7 +2756,7 @@ struct DocumentationProviderTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
-        manager.setCachedToolsListResult(
+        manager.seedCanonicalToolsCatalog(
             try jsonValue([
                 "tools": [
                     [
@@ -2731,14 +2808,205 @@ struct DocumentationProviderTests {
         #expect(await documentationProvider.toolListUpdateCount() == 0)
     }
 
-    @Test func startupPollsDocumentationProviderUntilAvailable() async throws {
-        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
+    @Test func processRoutingDefersStartupDocumentationPrewarmUntilUpstreamIsInitialized()
+        async throws
+    {
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 752, xcodeVersion: "27.0")
+        let documentationProvider = StubDocumentationProviderManager(
+            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
+        )
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
+            documentationProviderManager: documentationProvider,
+            prewarmDocumentationProviderOnStartup: true
+        )
+        defer { fixture.shutdownAndWait() }
+
+        #expect(fixture.manager.documentationProviderDiscoveryState.withLockedValue { state in
+            state.task == nil && state.retryTimeout == nil
+        })
+        #expect(await documentationProvider.prewarmCount() == 0)
+
+        try await fixture.completeInitialize(on: upstream)
+
+        try await waitWithTimeout("waiting for initialized-route documentation prewarm") {
+            try await documentationProvider.waitForPrewarmCount(1)
+        }
+        #expect(await documentationProvider.prewarmCount() == 1)
+    }
+
+    @Test func unavailableDocumentationProviderRetriesWithoutProcessRescan() async throws {
+        let upstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+
+        fixture.manager.prewarmDocumentationProvider()
+        try await waitWithTimeout("waiting for documentation provider retry") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout == nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(
+            timeoutScheduler.delay(at: 0)?.nanoseconds
+                == TimeAmount.seconds(2).nanoseconds
+        )
+
+        await documentationProvider.setToolListUpdate(
+            .available(documentationDescriptor(version: "27.0"))
+        )
+        #expect(timeoutScheduler.fire(at: 0))
+        try await waitWithTimeout("waiting for documentation provider retry recovery") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout != nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        #expect(await documentationProvider.prewarmCount() == 2)
+        #expect(timeoutScheduler.scheduledCount() == 1)
+    }
+
+    @Test func staleDocumentationProviderRetryCannotReplaceNewerSuccess() async throws {
+        let upstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+
+        fixture.manager.prewarmDocumentationProvider()
+        try await waitWithTimeout("waiting for stale documentation provider retry") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout == nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        await documentationProvider.setToolListUpdate(
+            .available(documentationDescriptor(version: "27.0"))
+        )
+        fixture.manager.prewarmDocumentationProvider()
+        try await waitWithTimeout("waiting for newer documentation provider success") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout != nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        #expect(timeoutScheduler.isCancelled(at: 0))
+        #expect(timeoutScheduler.fireIgnoringCancellation(at: 0))
+        #expect(await documentationProvider.prewarmCount() == 2)
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(fixture.manager.documentationProviderDiscoveryState.withLockedValue { state in
+            state.task == nil && state.retryTimeout == nil
+        })
+    }
+
+    @Test func shutdownRejectsDeliveredDocumentationProviderRetry() async throws {
+        let upstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            documentationProviderManager: documentationProvider,
+            startImmediately: false
+        )
+
+        fixture.manager.prewarmDocumentationProvider()
+        try await waitWithTimeout("waiting for documentation provider retry before shutdown") {
+            while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
+                state.task != nil || state.retryTimeout == nil
+            }) {
+                await Task.yield()
+            }
+        }
+
+        await fixture.manager.shutdown()
+
+        #expect(timeoutScheduler.isCancelled(at: 0))
+        #expect(timeoutScheduler.fireIgnoringCancellation(at: 0))
+        #expect(await documentationProvider.prewarmCount() == 1)
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(fixture.manager.documentationProviderDiscoveryState.withLockedValue { state in
+            state.isClosed && state.task == nil && state.retryTimeout == nil
+        })
+    }
+
+    @Test func xcodeInventoryChangePrewarmsUnavailableDocumentationProviderAgain() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let upstream = TestUpstreamClient()
+        let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
+        let processEventMonitor = StubDocumentationProcessEventMonitor()
+        let target = xcodeProcessTarget(processID: 753, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 300),
+            eventLoop: group.next(),
+            upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
+            processRoutingEnabled: true,
+            xcodeProcessEventMonitor: processEventMonitor,
+            documentationProviderManager: documentationProvider,
+            prewarmDocumentationProviderOnStartup: true
+        )
+        defer { manager.shutdownAndWait() }
+
+        #expect(manager.documentationProviderDiscoveryState.withLockedValue { state in
+            state.task == nil && state.retryTimeout == nil
+        })
+        #expect(await documentationProvider.prewarmCount() == 0)
+
+        let initializeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeRequestID = try extractUpstreamID(from: initializeRequest)
+        await yieldMessage(
+            try makeInitializeResponse(id: initializeRequestID),
+            to: upstream
+        )
+        try await waitWithTimeout("waiting for initialized-route documentation prewarm") {
+            try await documentationProvider.waitForPrewarmCount(1)
+        }
+        await documentationProvider.setToolListUpdate(
+            .available(documentationDescriptor(version: "27.0"))
+        )
+        processEventMonitor.emitInventoryChange()
+        try await waitWithTimeout("waiting for inventory-change documentation prewarm") {
+            try await documentationProvider.waitForPrewarmCount(2)
+        }
+
+        let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
+        #expect(observedTimeout.nanoseconds == TimeAmount.seconds(10).nanoseconds)
+        #expect(await documentationProvider.toolListUpdateCount() == 0)
+    }
+
+    @Test func upstreamInitializationPrewarmsUnavailableDocumentationProviderAgain() async throws {
         let upstream = TestUpstreamClient()
         let documentationProvider = StubDocumentationProviderManager(toolListUpdate: .unavailable)
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
             upstreams: [upstream],
-            clock: clock,
             documentationProviderManager: documentationProvider,
             prewarmDocumentationProviderOnStartup: true
         )
@@ -2750,18 +3018,14 @@ struct DocumentationProviderTests {
         await documentationProvider.setToolListUpdate(
             .available(documentationDescriptor(version: "27.0"))
         )
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: timeoutClock,
-            uptimeClock: uptimeClock,
-            by: RuntimeCoordinator.documentationProviderDiscoveryPollInterval
-        )
-        try await waitWithTimeout("waiting for documentation provider poll") {
+
+        fixture.manager.noteUpstreamInitializationSucceeded()
+
+        try await waitWithTimeout("waiting for initialized-upstream documentation prewarm") {
             try await documentationProvider.waitForPrewarmCount(2)
         }
-
         let observedTimeout = try #require(await documentationProvider.lastPrewarmTimeout())
         #expect(observedTimeout.nanoseconds == TimeAmount.seconds(10).nanoseconds)
-        #expect(await documentationProvider.toolListUpdateCount() == 0)
     }
 
     @Test func shutdownCancelsPendingDocumentationProviderStartupPrewarm() async throws {
@@ -5790,6 +6054,45 @@ struct DocumentationProviderTests {
     }
 }
 
+private final class StubDocumentationProcessEventMonitor:
+    XcodeProcessEventMonitoring,
+    @unchecked Sendable
+{
+    private let changeHandler =
+        NIOLockedValueBox<(@Sendable (_ reason: String) -> Void)?>(nil)
+
+    func start() {}
+
+    func setChangeHandler(
+        _ handler: @escaping @Sendable (_ reason: String) -> Void
+    ) {
+        changeHandler.withLockedValue { $0 = handler }
+    }
+
+    func runningXcodeTargets() -> [XcodeProcessTarget] {
+        []
+    }
+
+    func permissionDialogProcessIDs() -> [pid_t] {
+        []
+    }
+
+    func readinessSnapshot() -> UpstreamReadinessSnapshot {
+        UpstreamReadinessSnapshot(isReady: false, generation: 0)
+    }
+
+    func waitForReadinessChange(after _: UInt64) async {}
+
+    func stop() {
+        changeHandler.withLockedValue { $0 = nil }
+    }
+
+    func emitInventoryChange() {
+        let handler = changeHandler.withLockedValue { $0 }
+        handler?("test_inventory_changed")
+    }
+}
+
 private actor RecordingDocumentationProviderTransport: DocumentationProviderRouting {
     private let responseData: Data
     private var documentationSearchTimeoutValues: [TimeAmount?] = []
@@ -5836,6 +6139,18 @@ private actor RecordingDocumentationProviderTransport: DocumentationProviderRout
     }
 }
 
+private final class WeakDocumentationProviderTransportReference: @unchecked Sendable {
+    private weak var storage: SessionBackedDocumentationProviderTransport?
+
+    init(_ value: SessionBackedDocumentationProviderTransport?) {
+        storage = value
+    }
+
+    var value: SessionBackedDocumentationProviderTransport? {
+        storage
+    }
+}
+
 private actor FixedDocumentationSessionFactory: DocumentationProviderSessionMaking {
     private let session: any UpstreamSession
 
@@ -5870,6 +6185,8 @@ private actor BlockingStopDocumentationSession: UpstreamSession {
         }
         self.continuation = streamContinuation
     }
+
+    nonisolated func cancel() {}
 
     func send(_ data: Data) async -> Upstream.SendResult {
         guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
@@ -5958,6 +6275,8 @@ private actor HangingDocumentationEventSession: UpstreamSession {
         }
         self.continuation = streamContinuation
     }
+
+    nonisolated func cancel() {}
 
     func send(_: Data) async -> Upstream.SendResult {
         .accepted

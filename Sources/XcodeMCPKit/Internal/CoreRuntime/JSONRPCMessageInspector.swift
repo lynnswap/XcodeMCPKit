@@ -102,35 +102,6 @@ extension JSONRPC {
             package static func isResponse(_ object: [String: Any]) -> Bool {
                 responseID(from: object) != nil
             }
-
-            package static func requestMetadata(fromParsed json: Any?) -> JSONRPC.Request.Metadata {
-                guard let json else {
-                    return JSONRPC.Request.Metadata(ids: [], isBatch: false)
-                }
-                if let object = json as? [String: Any] {
-                    return JSONRPC.Request.Metadata(
-                        ids: requestID(from: object).map { [$0] } ?? [],
-                        isBatch: false
-                    )
-                }
-                if let array = json as? [Any] {
-                    let ids = array.compactMap { item -> JSONRPC.ID? in
-                        guard let object = item as? [String: Any] else {
-                            return nil
-                        }
-                        return requestID(from: object)
-                    }
-                    return JSONRPC.Request.Metadata(ids: ids, isBatch: true)
-                }
-                return JSONRPC.Request.Metadata(ids: [], isBatch: false)
-            }
-        }
-    }
-
-    package enum Request {
-        package struct Metadata: Sendable {
-            package let ids: [JSONRPC.ID]
-            package let isBatch: Bool
         }
     }
 }

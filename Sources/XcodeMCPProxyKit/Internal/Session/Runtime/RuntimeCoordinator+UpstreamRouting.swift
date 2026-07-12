@@ -31,7 +31,7 @@ extension RuntimeCoordinator {
 
         func routedData(
             for session: SessionContext,
-            upstreamIndex: Int
+            operationLease: UpstreamOperationLease
         ) -> Data? {
             guard case .request(_, let upstreamID) =
                 JSONRPC.Message.Inspector.kind(of: object)
@@ -40,22 +40,38 @@ extension RuntimeCoordinator {
             }
             let clientID = session.serverRequestTracker.record(
                 upstreamID: upstreamID,
-                upstreamIndex: upstreamIndex
+                operationLease: operationLease
             )
             return try? JSONRPC.Wire.dataByReplacingID(in: object, with: clientID)
         }
     }
 
-    func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+    func routeUpstreamMessage(
+        _ data: Data,
+        upstreamIndex: Int,
+        proof: UpstreamTopologyProof
+    ) {
+        let slotID = UpstreamSlotID(rawValue: upstreamIndex)
+        guard proof.slotID == slotID,
+              let operationLease = upstreamTopology.operationLease(for: proof) else { return }
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+            guard upstreamTopology.validate(proof) else { return }
+            routeUnmappedUpstreamMessage(data, operationLease: operationLease)
             return
         }
 
         if let object = json as? [String: Any] {
-            switch mappedResponseRoutingOutcome(object, upstreamIndex: upstreamIndex) {
+            switch mappedResponseRoutingOutcome(
+                object,
+                upstreamIndex: upstreamIndex,
+                proof: proof
+            ) {
             case .routed(let sessionID, let object):
-                if deliverClientResponseObjects([object], sessionID: sessionID, upstreamIndex: upstreamIndex) {
+                if deliverClientResponseObject(
+                    object,
+                    sessionID: sessionID,
+                    upstreamIndex: upstreamIndex
+                ) {
                     return
                 }
             case .handled, .late:
@@ -63,96 +79,17 @@ extension RuntimeCoordinator {
             case .unmappedResponse, .notResponse:
                 break
             }
-            routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+            guard upstreamTopology.validate(proof) else { return }
+            routeUnmappedUpstreamMessage(data, operationLease: operationLease)
             return
         }
 
-        if let array = json as? [Any] {
-            routeUpstreamBatch(array, originalData: data, upstreamIndex: upstreamIndex)
-            return
-        }
-
-        routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
+        routeUnmappedUpstreamMessage(data, operationLease: operationLease)
     }
-
-    private func routeUpstreamBatch(
-        _ array: [Any],
-        originalData: Data,
-        upstreamIndex: Int
-    ) {
-        var responseObjectsBySessionID: [String: [Any]] = [:]
-        var mappedSessionIDs = Set<String>()
-        var serverInitiatedPayloads: [ServerInitiatedPayload] = []
-        var unmappedItems: [Any] = []
-        var droppedLateResponse = false
-
-        for item in array {
-            guard let object = item as? [String: Any] else {
-                unmappedItems.append(item)
-                continue
-            }
-
-            switch mappedResponseRoutingOutcome(object, upstreamIndex: upstreamIndex) {
-            case .routed(let sessionID, let object):
-                responseObjectsBySessionID[sessionID, default: []].append(object)
-                mappedSessionIDs.insert(sessionID)
-            case .handled:
-                continue
-            case .late:
-                droppedLateResponse = true
-            case .unmappedResponse:
-                unmappedItems.append(item)
-            case .notResponse:
-                if let payload = serverInitiatedPayload(from: object) {
-                    serverInitiatedPayloads.append(payload)
-                } else {
-                    unmappedItems.append(item)
-                }
-            }
-        }
-
-        let owningTargetOverride: SessionContext? = {
-            guard mappedSessionIDs.count == 1,
-                let sessionID = mappedSessionIDs.first
-            else {
-                return nil
-            }
-            return sessionRegistry.contextIfPresent(id: sessionID)
-        }()
-        let routedServerInitiated = routeServerInitiatedPayloads(
-            serverInitiatedPayloads,
-            upstreamIndex: upstreamIndex,
-            sourceByteCount: originalData.count,
-            owningTargetOverride: owningTargetOverride
-        )
-        let routedClientResponses = routeClientResponses(
-            responseObjectsBySessionID,
-            upstreamIndex: upstreamIndex
-        )
-
-        if unmappedItems.isEmpty {
-            if droppedLateResponse && !routedClientResponses && !routedServerInitiated {
-                logger.debug(
-                    "Dropping late upstream batch response",
-                    metadata: [
-                        "upstream": .string("\(upstreamIndex)"),
-                    ]
-                )
-            }
-            return
-        }
-
-        if routedClientResponses || routedServerInitiated || droppedLateResponse {
-            routeUnmappedBatchItems(unmappedItems, upstreamIndex: upstreamIndex)
-            return
-        }
-
-        routeUnmappedUpstreamMessage(originalData, upstreamIndex: upstreamIndex)
-    }
-
     private func mappedResponseRoutingOutcome(
         _ object: [String: Any],
-        upstreamIndex: Int
+        upstreamIndex: Int,
+        proof: UpstreamTopologyProof
     ) -> MappedResponseRoutingOutcome {
         guard let responseID = JSONRPC.Message.Inspector.responseCorrelationID(from: object),
             let upstreamID = upstreamID(from: responseID)
@@ -161,11 +98,11 @@ extension RuntimeCoordinator {
         }
 
         guard let mapping = upstreamRouter.consume(
-            upstreamIndex: upstreamIndex,
+            proof: proof,
             upstreamID: upstreamID
         ) else {
             if upstreamRouter.consumeReleasedResponseMarker(
-                upstreamIndex: upstreamIndex,
+                proof: proof,
                 upstreamID: upstreamID
             ) {
                 logger.debug(
@@ -178,6 +115,7 @@ extension RuntimeCoordinator {
                 debugRecorder.recordLateResponse(upstreamIndex: upstreamIndex)
                 return .late
             }
+            guard upstreamTopology.validate(proof) else { return .late }
             return .unmappedResponse
         }
 
@@ -211,33 +149,12 @@ extension RuntimeCoordinator {
         return JSONRPC.Wire.objectByReplacingID(in: object, with: originalID)
     }
 
-    private func routeClientResponses(
-        _ responseObjectsBySessionID: [String: [Any]],
-        upstreamIndex: Int
-    ) -> Bool {
-        var routedAny = false
-        for (sessionID, objects) in responseObjectsBySessionID {
-            if deliverClientResponseObjects(
-                objects,
-                sessionID: sessionID,
-                upstreamIndex: upstreamIndex
-            ) {
-                routedAny = true
-            }
-        }
-        return routedAny
-    }
-
-    private func deliverClientResponseObjects(
-        _ objects: [Any],
+    private func deliverClientResponseObject(
+        _ object: [String: Any],
         sessionID: String,
         upstreamIndex: Int
     ) -> Bool {
-        guard !objects.isEmpty else {
-            return false
-        }
-        let payload: Any = objects.count == 1 ? objects[0] : objects
-        guard let data = try? JSONRPC.Wire.data(from: payload) else {
+        guard let data = try? JSONRPC.Wire.data(from: object) else {
             return false
         }
         recordTraffic(
@@ -250,15 +167,15 @@ extension RuntimeCoordinator {
         return true
     }
 
-    /// The staleness rule for the canonical tools catalog: it must not
-    /// survive losing the upstream it came from unless another initialized
-    /// upstream can still vouch for an equivalent catalog.
-    func toolsCatalogLostItsSource(_ upstreamIndex: Int) -> Bool {
-        canonicalBrokerState.toolsSourceUpstream() == upstreamIndex
-            && !anyActiveInitializedUpstream()
-    }
-
-    func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
+    func handleUpstreamExit(
+        _ status: Int32,
+        upstreamIndex: Int,
+        proof: UpstreamTopologyProof
+    ) {
+        let slotID = UpstreamSlotID(rawValue: upstreamIndex)
+        guard proof.slotID == slotID,
+              upstreamTopology.validate(proof) else { return }
+        guard clearUpstreamState(proof: proof) else { return }
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
         let suppressProcessRouteWarmRestart =
@@ -268,18 +185,16 @@ extension RuntimeCoordinator {
             globalInit.primaryInitUpstreamIndex == upstreamIndex && globalInit.wasInFlight
         if exitedActivePrimaryInitialize {
             if let upstreamID = globalInit.primaryInitUpstreamID {
-                upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+                upstreamRouter.remove(proof: proof, upstreamID: upstreamID)
             }
         }
-
-        clearUpstreamState(upstreamIndex: upstreamIndex)
         if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
             markXcodeProcessRouteUnavailable(
                 upstreamIndex: upstreamIndex,
                 reason: "upstream_exit_\(status)"
             )
         }
-        upstreamRouter.reset(upstreamIndex: upstreamIndex)
+        upstreamRouter.reset(proof: proof)
         releaseLeases(
             leaseManager.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
@@ -295,9 +210,12 @@ extension RuntimeCoordinator {
             ) {
                 return
             }
-            globalInit.timeout?.cancel()
-            _ = initializeManager.completePrimaryInitializeFailure()
-            for item in globalInit.pending {
+            guard let failure = initializeManager.completePrimaryInitializeFailure() else {
+                return
+            }
+            failure.timeout?.cancel()
+            failure.recoveryTimeout?.cancel()
+            for item in failure.pending {
                 removePendingInitializeSessionIfCurrent(item)
                 item.eventLoop.execute {
                     item.promise.fail(TimeoutError())
@@ -307,24 +225,18 @@ extension RuntimeCoordinator {
 
         let shouldResetGlobalInit: Bool
         if globalInit.hadGlobalInit {
-            shouldResetGlobalInit = !anyActiveInitializedUpstream()
+            shouldResetGlobalInit = canonicalHandshakeState.initializeResult() == nil
+                && canonicalHandshakeState.hasInitializeParticipants() == false
+                && anyActiveRecoveryInFlight() == false
         } else {
             shouldResetGlobalInit = false
         }
-        let shouldClearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
-        if shouldResetGlobalInit || shouldClearToolsCatalog {
-            if shouldResetGlobalInit {
-                initializeManager.resetWarmSecondaryForRetry()
-            }
-            invalidateControlPlane(
-                reason: "upstream_exit_\(upstreamIndex)",
-                clearInitialize: shouldResetGlobalInit,
-                clearToolsCatalog: shouldClearToolsCatalog
-            )
+        if shouldResetGlobalInit {
+            initializeManager.resetWarmSecondaryForRetry()
         }
 
         let primaryUpstreamIndex = globalInit.primaryInitUpstreamIndex
-            ?? canonicalBrokerState.initializeSourceUpstream()
+            ?? canonicalHandshakeState.initializeSourceUpstream()
             ?? 0
         if upstreamIndex == primaryUpstreamIndex {
             if shouldResetGlobalInit || !globalInit.hadGlobalInit {
@@ -335,6 +247,9 @@ extension RuntimeCoordinator {
         } else if globalInit.hadGlobalInit {
             if shouldResetGlobalInit {
                 let primaryInitInFlight = initializeManager.snapshot().initInFlight
+                    || upstreamHealthManager.state(
+                        for: UpstreamSlotID(rawValue: primaryUpstreamIndex)
+                    )?.initInFlight == true
                 if primaryInitInFlight {
                     initializeManager
                         .setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
@@ -348,44 +263,108 @@ extension RuntimeCoordinator {
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             }
         }
+
+        if canonicalHandshakeState.initializeResult() == nil,
+           anyActiveInitializedUpstream() == false {
+            if anyActiveRecoveryInFlight() {
+                initializeManager
+                    .setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
+            } else {
+                startEagerInitializePrimary(applyBackoff: true)
+            }
+        }
     }
 
-    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64 {
+    func assignUpstreamID(
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        operationLease: UpstreamOperationLease
+    ) -> Int64? {
         upstreamRouter.assign(
-            upstreamIndex: upstreamIndex, sessionID: sessionID, originalID: originalID,
-            isInitialize: false)
+            proof: operationLease.proof,
+            sessionID: sessionID,
+            originalID: originalID,
+            isInitialize: false
+        )
     }
 
-    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func removeUpstreamIDMapping(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         _ = upstreamRouter.remove(
-            upstreamIndex: upstreamIndex,
+            proof: operationLease.proof,
             sessionID: sessionID,
             requestIDKey: requestIDKey
         )
     }
 
-    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func onRequestTimeout(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         removeUpstreamIDMapping(
-            sessionID: sessionID, requestIDKey: requestIDKey, upstreamIndex: upstreamIndex)
-        markRequestTimedOut(upstreamIndex: upstreamIndex)
+            sessionID: sessionID,
+            requestIDKey: requestIDKey,
+            operationLease: operationLease
+        )
+        markRequestTimedOut(operationLease)
     }
 
-    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func onRequestSucceeded(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         _ = sessionID
         _ = requestIDKey
-        markRequestSucceeded(upstreamIndex: upstreamIndex)
+        markRequestSucceeded(operationLease)
     }
 
-    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool = false) {
-        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
-            return
+    @discardableResult
+    func sendUpstream(
+        _ data: Data,
+        operationLease: UpstreamOperationLease,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission?,
+        onRejected: @escaping @Sendable () -> Void
+    ) -> Bool {
+        let upstreamIndex = operationLease.upstreamIndex
+        guard upstreamTopology.validate(operationLease) else {
+            onRejected()
+            return false
         }
-        addRuntimeTask { [weak self] in
+        if let admission {
+            guard processControlPlane.validate(admission.route),
+                  admission.proof(for: upstreamIndex) == operationLease.proof else {
+                onRejected()
+                return false
+            }
+        }
+        addRuntimeTask { [weak self, operationLease, admission, onRejected] in
             guard let self else { return }
             if ensureRunning {
-                await self.upstreams[upstreamIndex].start()
+                await operationLease.slot.start()
             }
-            switch await self.upstreams[upstreamIndex].send(data) {
+            guard self.upstreamTopology.validate(operationLease) else {
+                onRejected()
+                return
+            }
+            if let admission {
+                guard self.processControlPlane.validate(admission.route),
+                      admission.proof(for: upstreamIndex) == operationLease.proof else {
+                    onRejected()
+                    return
+                }
+            }
+            let result = await operationLease.slot.send(data)
+            guard self.upstreamTopology.validate(operationLease) else {
+                onRejected()
+                return
+            }
+            switch result {
             case .accepted:
                 self.recordTraffic(
                     upstreamIndex: upstreamIndex,
@@ -393,37 +372,37 @@ extension RuntimeCoordinator {
                     data: data
                 )
             case .backpressure:
-                self.markUpstreamOverloaded(upstreamIndex: upstreamIndex)
+                self.markUpstreamOverloaded(operationLease.proof)
                 self.failPendingSend(
                     originalRequestData: data,
-                    upstreamIndex: upstreamIndex,
+                    proof: operationLease.proof,
                     code: -32002,
                     message: "upstream overloaded"
                 )
             case .unavailable(let reason):
-                // The exit/quarantine machinery owns health for a dead slot;
-                // a send into it must not be misdiagnosed as overload.
                 self.failPendingSend(
                     originalRequestData: data,
-                    upstreamIndex: upstreamIndex,
+                    proof: operationLease.proof,
                     code: -32001,
                     message: "upstream unavailable"
                 )
                 self.handleUnavailableUpstreamSend(
-                    upstreamIndex: upstreamIndex,
+                    operationLease: operationLease,
                     reason: reason
                 )
             }
         }
+        return true
     }
 
     private func handleUnavailableUpstreamSend(
-        upstreamIndex: Int,
+        operationLease: UpstreamOperationLease,
         reason: Upstream.UnavailableReason
     ) {
+        let upstreamIndex = operationLease.upstreamIndex
         switch reason {
         case .terminated, .notStarted, .startFailed:
-            clearUpstreamState(upstreamIndex: upstreamIndex)
+            guard clearUpstreamState(proof: operationLease.proof) else { return }
             if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
                 markXcodeProcessRouteUnavailable(
                     upstreamIndex: upstreamIndex,
@@ -493,7 +472,7 @@ extension RuntimeCoordinator {
 
         switch await sendServerRequestResponseUpstream(
             upstreamData,
-            upstreamIndex: route.upstreamIndex
+            operationLease: route.operationLease
         ) {
         case .accepted:
             _ = session.serverRequestTracker.complete(clientID: responseID, route: route)
@@ -505,21 +484,25 @@ extension RuntimeCoordinator {
 
     private func sendServerRequestResponseUpstream(
         _ data: Data,
-        upstreamIndex: Int
+        operationLease: UpstreamOperationLease
     ) async -> Upstream.SendResult {
-        guard upstreamIndex >= 0, upstreamIndex < upstreams.count else {
+        guard upstreamTopology.validate(operationLease) else {
             return .unavailable(.notStarted)
         }
-        switch await upstreams[upstreamIndex].send(data) {
+        let result = await operationLease.slot.send(data)
+        guard upstreamTopology.validate(operationLease) else {
+            return .unavailable(.notStarted)
+        }
+        switch result {
         case .accepted:
             recordTraffic(
-                upstreamIndex: upstreamIndex,
+                upstreamIndex: operationLease.upstreamIndex,
                 direction: "outbound",
                 data: data
             )
             return .accepted
         case .backpressure:
-            markUpstreamOverloaded(upstreamIndex: upstreamIndex)
+            markUpstreamOverloaded(operationLease.proof)
             return .backpressure
         case .unavailable(let reason):
             return .unavailable(reason)
@@ -539,52 +522,31 @@ extension RuntimeCoordinator {
 
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         let initSnapshot = initializeManager.snapshot()
-        let brokerSnapshot = canonicalBrokerState.snapshot()
+        let processSnapshot = processControlPlane.snapshot()
         let controlPlaneSnapshot = controlPlaneDebugMirror.snapshot()
-        let upstreamStates = upstreamHealthManager.statesSnapshot()
+        let upstreamStates = upstreamHealthManager.activeStatesSnapshot().map {
+            (index: $0.id.rawValue, state: $0.state)
+        }
         let leaseSnapshots = leaseManager.debugSnapshots()
         let sessionSnapshots = leaseManager.sessionDebugSnapshots(
             allSessionIDs: sessionRegistry.sessionIDs()
         )
         let schedulerSnapshot = upstreamSlotScheduler.debugSnapshot()
-        let processToolCatalogs = processToolSurfaceStore.debugSnapshots(
-            exposedCatalog: brokerSnapshot.toolsCatalogRaw,
-            canonicalSourceUpstream: brokerSnapshot.toolsSourceUpstream,
-            tabOwnerCountsByProcessID: windowOwnerIndex.withLockedValue {
-                $0.tabOwnerCountsByProcessID()
-            },
-            workspaceOwnerCountsByProcessID: windowOwnerIndex.withLockedValue {
-                $0.workspaceOwnerCountsByProcessID()
-            }
+        let processToolCatalogs = processControlPlane.debugCatalogSnapshots(
+            exposedCatalog: processSnapshot.canonicalToolsCatalogRaw,
+            tabOwnerCountsByProcessID: windowOwnershipAuthority.snapshot()
+                .tabOwnerCountsByProcessID(),
+            workspaceOwnerCountsByProcessID: windowOwnershipAuthority.snapshot()
+                .workspaceOwnerCountsByProcessID()
         )
-        let processIDsWithToolCatalog = Set(processToolCatalogs.map(\.processID))
-        let pendingToolCatalogProcessIDs =
-            processRouteReadinessStore.pendingCatalogRefreshProcessIDsSnapshot()
-        let unavailableProcessIDs = unavailableXcodeProcessIDs()
-
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
-            cachedToolsListAvailable: brokerSnapshot.toolsCatalogRaw != nil,
+            cachedToolsListAvailable: processSnapshot.canonicalToolsCatalogRaw != nil,
             controlPlane: controlPlaneSnapshot,
-            processRoutes: processRouteStore.debugSnapshots(
+            processRoutes: processControlPlane.debugRouteSnapshots(
                 usableSlotCount: { [weak self] route in
                     guard let self else { return 0 }
                     return self.usableInitializedUpstreamIndices(in: route).count
-                },
-                toolsCatalogState: { route, routeState in
-                    guard routeState == "active" else {
-                        return "retired"
-                    }
-                    if processIDsWithToolCatalog.contains(route.target.processID) {
-                        return "available"
-                    }
-                    if unavailableProcessIDs.contains(route.target.processID) {
-                        return "unavailable"
-                    }
-                    if pendingToolCatalogProcessIDs.contains(route.target.processID) {
-                        return "pending"
-                    }
-                    return "missing"
                 }
             ),
             processToolCatalogs: processToolCatalogs,
@@ -644,19 +606,19 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int
+        operationLease: UpstreamOperationLease
     ) {
         if let first = requestIDKeys.first {
             onRequestTimeout(
                 sessionID: sessionID,
                 requestIDKey: first,
-                upstreamIndex: upstreamIndex
+                operationLease: operationLease
             )
             for requestIDKey in requestIDKeys.dropFirst() {
                 removeUpstreamIDMapping(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    operationLease: operationLease
                 )
             }
         }
@@ -667,14 +629,14 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int?
+        operationLease: UpstreamOperationLease?
     ) {
-        if let upstreamIndex {
+        if let operationLease {
             for requestIDKey in requestIDKeys {
                 removeUpstreamIDMapping(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    operationLease: operationLease
                 )
             }
         }
@@ -690,12 +652,13 @@ extension RuntimeCoordinator {
 
     func testStateSnapshot() -> TestSnapshot {
         let initSnapshot = initializeManager.snapshot()
-        let upstreams = upstreamHealthManager.statesSnapshot().map { upstream in
-                TestSnapshot.Upstream(
-                    isInitialized: upstream.isInitialized,
-                    initInFlight: upstream.initInFlight,
-                    healthState: upstream.healthState
-                )
+        let upstreams = upstreamHealthManager.activeStatesSnapshot().map { id, upstream in
+            TestSnapshot.Upstream(
+                id: id.rawValue,
+                isInitialized: upstream.isInitialized,
+                initInFlight: upstream.initInFlight,
+                healthState: upstream.healthState
+            )
         }
         return TestSnapshot(
             hasInitResult: initSnapshot.hasInitResult,
@@ -715,10 +678,11 @@ extension RuntimeCoordinator {
     /// the matching JSON-RPC error responses back through the router.
     func failPendingSend(
         originalRequestData: Data,
-        upstreamIndex: Int,
+        proof: UpstreamTopologyProof,
         code: Int,
         message: String
     ) {
+        let upstreamIndex = proof.slotID.rawValue
         guard let any = try? JSONSerialization.jsonObject(with: originalRequestData, options: [])
         else {
             return
@@ -726,35 +690,16 @@ extension RuntimeCoordinator {
 
         let overloadError = JSONRPC.Wire.ErrorPayload(code: code, message: message)
 
-        let responseAny: Any? = {
-            if let object = any as? [String: Any] {
-                guard let id = JSONRPC.Message.Inspector.requestID(from: object) else { return nil }
-                return JSONRPC.Wire.errorResponseObject(id: id, error: overloadError)
-            }
-            if let array = any as? [Any] {
-                let objects = array.compactMap { item -> [String: Any]? in
-                    guard let object = item as? [String: Any],
-                        let id = JSONRPC.Message.Inspector.requestID(from: object)
-                    else {
-                        return nil
-                    }
-                    return JSONRPC.Wire.errorResponseObject(id: id, error: overloadError)
-                }
-                if objects.isEmpty {
-                    return nil
-                }
-                return objects
-            }
-            return nil
-        }()
-
-        guard let responseAny,
-            let data = try? JSONRPC.Wire.data(from: responseAny)
+        guard let object = any as? [String: Any],
+            let id = JSONRPC.Message.Inspector.requestID(from: object),
+            let data = try? JSONRPC.Wire.data(
+                from: JSONRPC.Wire.errorResponseObject(id: id, error: overloadError)
+            )
         else {
             return
         }
 
-        routeUpstreamMessage(data, upstreamIndex: upstreamIndex)
+        routeUpstreamMessage(data, upstreamIndex: upstreamIndex, proof: proof)
     }
 
     func upstreamID(from value: Any?) -> Int64? {
@@ -771,30 +716,11 @@ extension RuntimeCoordinator {
         upstreamID(from: id.value.foundationObject)
     }
 
-    func isServerInitiatedMessage(_ value: Any) -> Bool {
-        if let object = value as? [String: Any] {
-            switch JSONRPC.Message.Inspector.kind(of: object) {
-            case .request, .notification:
-                return true
-            case .response, .malformed, .other:
-                return false
-            }
-        }
-        if let array = value as? [Any] {
-            return array.contains { item in
-                guard let object = item as? [String: Any] else { return false }
-                switch JSONRPC.Message.Inspector.kind(of: object) {
-                case .request, .notification:
-                    return true
-                case .response, .malformed, .other:
-                    return false
-                }
-            }
-        }
-        return false
-    }
-
-    func routeUnmappedUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+    func routeUnmappedUpstreamMessage(
+        _ data: Data,
+        operationLease: UpstreamOperationLease
+    ) {
+        let upstreamIndex = operationLease.upstreamIndex
         recordTraffic(
             upstreamIndex: upstreamIndex,
             direction: "inbound_unmapped",
@@ -811,9 +737,11 @@ extension RuntimeCoordinator {
             return
         }
 
-        let serverInitiatedPayloads = serverInitiatedPayloads(from: any, originalData: data)
-
-        guard !serverInitiatedPayloads.isEmpty else {
+        guard let object = any as? [String: Any],
+              let serverInitiatedPayload = serverInitiatedPayload(
+                from: object,
+                originalData: data
+              ) else {
             logger.debug(
                 "Dropping unmapped upstream response",
                 metadata: [
@@ -824,9 +752,9 @@ extension RuntimeCoordinator {
             return
         }
 
-        if routeServerInitiatedPayloads(
-            serverInitiatedPayloads,
-            upstreamIndex: upstreamIndex,
+        if routeServerInitiatedPayload(
+            serverInitiatedPayload,
+            operationLease: operationLease,
             sourceByteCount: data.count,
             owningTargetOverride: nil
         ) {
@@ -834,74 +762,29 @@ extension RuntimeCoordinator {
         }
     }
 
-    private func serverInitiatedPayload(from object: [String: Any]) -> ServerInitiatedPayload? {
-        guard let encoded = try? JSONRPC.Wire.data(from: object) else {
-            return nil
-        }
+    private func serverInitiatedPayload(
+        from object: [String: Any],
+        originalData: Data
+    ) -> ServerInitiatedPayload? {
         let kind = JSONRPC.Message.Inspector.kind(of: object)
         guard kind.isServerInitiated else {
             return nil
         }
         return ServerInitiatedPayload(
-            data: encoded,
+            data: originalData,
             object: object,
             expectsResponse: kind.requestID != nil
         )
     }
 
-    private func serverInitiatedPayloads(
-        from any: Any,
-        originalData: Data
-    ) -> [ServerInitiatedPayload] {
-        if let object = any as? [String: Any] {
-            let kind = JSONRPC.Message.Inspector.kind(of: object)
-            guard kind.isServerInitiated else { return [] }
-            return [
-                ServerInitiatedPayload(
-                    data: originalData,
-                    object: object,
-                    expectsResponse: kind.requestID != nil
-                )
-            ]
-        }
-        if let array = any as? [Any] {
-            var payloads: [ServerInitiatedPayload] = []
-            payloads.reserveCapacity(array.count)
-            for item in array {
-                guard let object = item as? [String: Any],
-                    let payload = serverInitiatedPayload(from: object)
-                else {
-                    continue
-                }
-                payloads.append(payload)
-            }
-            return payloads
-        }
-        return []
-    }
-
-    private func routeUnmappedBatchItems(_ items: [Any], upstreamIndex: Int) {
-        guard !items.isEmpty else {
-            return
-        }
-        let payload: Any = items.count == 1 ? items[0] : items
-        guard let data = try? JSONRPC.Wire.data(from: payload) else {
-            return
-        }
-        routeUnmappedUpstreamMessage(data, upstreamIndex: upstreamIndex)
-    }
-
     @discardableResult
-    private func routeServerInitiatedPayloads(
-        _ serverInitiatedPayloads: [ServerInitiatedPayload],
-        upstreamIndex: Int,
+    private func routeServerInitiatedPayload(
+        _ serverInitiatedPayload: ServerInitiatedPayload,
+        operationLease: UpstreamOperationLease,
         sourceByteCount: Int,
         owningTargetOverride: SessionContext?
     ) -> Bool {
-        guard !serverInitiatedPayloads.isEmpty else {
-            return false
-        }
-
+        let upstreamIndex = operationLease.upstreamIndex
         var routedTargets: [SessionContext] = []
         var routedSessionIDs = Set<String>()
         var pendingInitializeTargets: [SessionContext] = []
@@ -938,35 +821,33 @@ extension RuntimeCoordinator {
 
         let owningTarget =
             owningTargetOverride ?? activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
-        var routedAnyPayload = false
-
-        for payload in serverInitiatedPayloads {
-            let payloadTargets = serverInitiatedTargets(
-                expectsResponse: payload.expectsResponse,
-                owningTarget: owningTarget,
-                pendingInitializeTargets: pendingInitializeTargets,
-                routedTargets: routedTargets
+        let payloadTargets = serverInitiatedTargets(
+            expectsResponse: serverInitiatedPayload.expectsResponse,
+            owningTarget: owningTarget,
+            pendingInitializeTargets: pendingInitializeTargets,
+            routedTargets: routedTargets
+        )
+        if serverInitiatedPayload.expectsResponse && payloadTargets.isEmpty {
+            logger.debug(
+                "Dropping response-requiring server request without an owning session",
+                metadata: [
+                    "upstream": .string("\(upstreamIndex)"),
+                    "bytes": .string("\(serverInitiatedPayload.data.count)"),
+                ]
             )
-            if payload.expectsResponse && payloadTargets.isEmpty {
-                logger.debug(
-                    "Dropping response-requiring server request without an owning session",
-                    metadata: [
-                        "upstream": .string("\(upstreamIndex)"),
-                        "bytes": .string("\(payload.data.count)"),
-                    ]
-                )
+            return false
+        }
+
+        var routedAnyPayload = false
+        for session in payloadTargets {
+            guard let routedData = serverInitiatedPayload.routedData(
+                for: session,
+                operationLease: operationLease
+            ) else {
                 continue
             }
-            for session in payloadTargets {
-                guard let routedData = payload.routedData(
-                    for: session,
-                    upstreamIndex: upstreamIndex
-                ) else {
-                    continue
-                }
-                session.router.handleIncoming(routedData)
-                routedAnyPayload = true
-            }
+            session.router.handleIncoming(routedData)
+            routedAnyPayload = true
         }
 
         guard routedAnyPayload else {
@@ -1047,19 +928,31 @@ extension RuntimeCoordinator {
 
     func handleUpstreamProtocolViolation(
         _ protocolViolation: StdioFramer.ProtocolViolation,
-        upstreamIndex: Int
+        upstreamIndex: Int,
+        proof: UpstreamTopologyProof
     ) {
+        let slotID = UpstreamSlotID(rawValue: upstreamIndex)
+        guard proof.slotID == slotID,
+              upstreamTopology.validate(proof) else { return }
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
         let nowUptimeNs = nowUptimeNanoseconds()
         let initSnapshot = initializeManager.snapshot()
-        let transition = upstreamHealthManager.markProtocolViolation(
-            upstreamIndex: upstreamIndex,
-            nowUptimeNs: nowUptimeNs
-        )
-        transition?.cancelledInitTimeout?.cancel()
+        let wasCanonicalSource = canonicalHandshakeState.initializeSourceUpstream()
+            == upstreamIndex
+        guard let transition = commitVerifiedHealthSupportMutation(
+            proof: proof,
+            detachedProof: proof,
+            mutation: {
+                upstreamHealthManager.markProtocolViolation(
+                    proof,
+                    nowUptimeNs: nowUptimeNs
+                )
+            }
+        ) else { return }
+        transition.cancelledInitTimeout?.cancel()
         let violatedActivePrimaryInitialize =
             initSnapshot.activePrimaryUpstreamIndex == upstreamIndex && initSnapshot.initInFlight
-        upstreamRouter.reset(upstreamIndex: upstreamIndex)
+        upstreamRouter.reset(proof: proof)
         releaseLeases(
             leaseManager.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
@@ -1067,27 +960,19 @@ extension RuntimeCoordinator {
             )
         )
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-        if let quarantineUntil = transition?.quarantineUntil {
-            logger.warning(
-                "Upstream quarantined after stdout protocol violation",
-                metadata: [
-                    "upstream": .string("\(upstreamIndex)"),
-                    "quarantine_until_uptime_ns": .string("\(quarantineUntil)"),
-                    "uptime_ns": .string("\(nowUptimeNs)"),
-                ]
-            )
+        let quarantineUntil = transition.quarantineUntil
+        logger.warning(
+            "Upstream quarantined after stdout protocol violation",
+            metadata: [
+                "upstream": .string("\(upstreamIndex)"),
+                "quarantine_until_uptime_ns": .string("\(quarantineUntil)"),
+                "uptime_ns": .string("\(nowUptimeNs)"),
+            ]
+        )
+        if processRoutingEnabled,
+           let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) {
+            startProcessRouteActivation(for: route)
         }
-        let clearInitialize = violatedActivePrimaryInitialize
-            && initSnapshot.hasInitResult == false
-        let clearToolsCatalog = toolsCatalogLostItsSource(upstreamIndex)
-        if clearInitialize || clearToolsCatalog {
-            invalidateControlPlane(
-                reason: "protocol_violation_\(upstreamIndex)",
-                clearInitialize: clearInitialize,
-                clearToolsCatalog: clearToolsCatalog
-            )
-        }
-
         if violatedActivePrimaryInitialize {
             if retryPrimaryInitializeOnAlternativeUpstream(
                 failedUpstreamIndex: upstreamIndex,
@@ -1099,11 +984,12 @@ extension RuntimeCoordinator {
             failInitPending(error: TimeoutError())
         }
 
-        let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex
-            ?? canonicalBrokerState.initializeSourceUpstream()
-            ?? 0
+        if processRoutingEnabled {
+            return
+        }
+        let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex ?? 0
         if upstreamIndex == primaryUpstreamIndex {
-            if initSnapshot.hasInitResult {
+            if initSnapshot.hasInitResult || wasCanonicalSource {
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             } else {
                 startEagerInitializePrimary(applyBackoff: true)

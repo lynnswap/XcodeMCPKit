@@ -6,19 +6,17 @@ import XcodeMCPKit
 extension RefreshCodeIssues.Workflow {
     static func makeToolResponseData(
         id: JSONRPC.ID,
-        result: [String: Any],
-        forceBatchArray: Bool
+        result: [String: Any]
     ) -> Data? {
         let response: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id.value.foundationObject,
             "result": result,
         ]
-        let payload: Any = forceBatchArray ? [response] : response
-        guard JSONSerialization.isValidJSONObject(payload) else {
+        guard JSONSerialization.isValidJSONObject(response) else {
             return nil
         }
-        return try? JSONSerialization.data(withJSONObject: payload, options: [])
+        return try? JSONSerialization.data(withJSONObject: response, options: [])
     }
 
     static func filterNavigatorIssuesResult(
@@ -81,21 +79,11 @@ extension RefreshCodeIssues.Workflow {
         guard let payload = try? JSONSerialization.jsonObject(with: responseData, options: []) else {
             return false
         }
-        if let object = payload as? [String: Any] {
-            return containsRetryableRefreshCodeIssuesFailure(
-                in: object,
-                retryableErrorText: retryableErrorText
-            )
-        }
-        guard let array = payload as? [[String: Any]] else {
-            return false
-        }
-        return array.contains {
-            containsRetryableRefreshCodeIssuesFailure(
-                in: $0,
-                retryableErrorText: retryableErrorText
-            )
-        }
+        guard let object = payload as? [String: Any] else { return false }
+        return containsRetryableRefreshCodeIssuesFailure(
+            in: object,
+            retryableErrorText: retryableErrorText
+        )
     }
 
     static func timeoutDescription(_ timeout: TimeAmount?) -> String {

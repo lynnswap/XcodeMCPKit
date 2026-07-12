@@ -43,10 +43,8 @@ extension ClientMCPRequestExecutor {
         )
         case mcpError(
             id: JSONRPC.ID?,
-            ids: [JSONRPC.ID],
             code: Int,
             message: String,
-            forceBatchArray: Bool,
             sessionID: String?,
             prefersEventStream: Bool
         )
@@ -66,20 +64,6 @@ extension ClientMCPRequestExecutor {
         let cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
     }
 
-    struct RefreshRoute: Sendable {
-        let request: RefreshCodeIssues.Request
-        let bodyData: Data
-        let requestIDs: [JSONRPC.ID]
-        let requestIsBatch: Bool
-    }
-
-    struct RefreshRouting: Sendable {
-        let refreshRoutes: [ClientMCPRequestExecutor.RefreshRoute]
-        let remainingBodyData: Data?
-        let remainingRequestIDs: [JSONRPC.ID]
-        let remainingLocalResponseData: Data?
-    }
-
     enum CancellationSource: String, Sendable {
         case channelInactive
         case responseWriteFailure
@@ -88,7 +72,7 @@ extension ClientMCPRequestExecutor {
     final class CancellationHandle: @unchecked Sendable {
         private struct State: Sendable {
             var requestIDKeys: [String]
-            var upstreamIndex: Int?
+            var operationLease: UpstreamOperationLease?
             var routerPendingToken: UUID?
             var refreshTask: Task<Void, Never>?
             var childHandles: [ClientMCPRequestExecutor.CancellationHandle] = []
@@ -119,10 +103,10 @@ extension ClientMCPRequestExecutor {
             state.withLockedValue { $0.isTerminal }
         }
 
-        func activate(upstreamIndex: Int) {
+        func activate(operationLease: UpstreamOperationLease) {
             state.withLockedValue { state in
                 guard !state.isTerminal else { return }
-                state.upstreamIndex = upstreamIndex
+                state.operationLease = operationLease
             }
         }
 
@@ -171,13 +155,13 @@ extension ClientMCPRequestExecutor {
         func cancel(using runtime: any RuntimeSessionRegistryPort & RuntimeRequestLeasePort) {
             let snapshot = state.withLockedValue {
                 state -> (
-                    Int?, UUID?, Task<Void, Never>?, [ClientMCPRequestExecutor.CancellationHandle], [String]
+                    UpstreamOperationLease?, UUID?, Task<Void, Never>?, [ClientMCPRequestExecutor.CancellationHandle], [String]
                 )?
                 in
                 guard !state.isTerminal else { return nil }
                 state.isTerminal = true
                 let snapshot = (
-                    state.upstreamIndex,
+                    state.operationLease,
                     state.routerPendingToken,
                     state.refreshTask,
                     state.childHandles,
@@ -199,7 +183,7 @@ extension ClientMCPRequestExecutor {
                 leaseID,
                 sessionID: sessionID,
                 requestIDKeys: snapshot.4,
-                upstreamIndex: snapshot.0
+                operationLease: snapshot.0
             )
         }
     }

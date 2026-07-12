@@ -37,8 +37,7 @@ extension RefreshCodeIssues.Workflow {
     func runProxyRefresh(
         refreshRequest: RefreshCodeIssues.Request,
         sessionID: String,
-        requestIDs: [JSONRPC.ID],
-        requestIsBatch: Bool,
+        responseID: JSONRPC.ID,
         eventLoop: EventLoop,
         baseMetadata: Logger.Metadata,
         executionBudget: ExecutionBudget,
@@ -211,12 +210,10 @@ extension RefreshCodeIssues.Workflow {
             step: .proxyEncodeResponse,
             metadata: ["resolved_target": target.resolvedFilePath]
         )
-        guard let responseID = requestIDs.first,
-            let responseData = Self.makeToolResponseData(
-                id: responseID,
-                result: filteredNavigatorResult,
-                forceBatchArray: requestIsBatch
-            )
+        guard let responseData = Self.makeToolResponseData(
+            id: responseID,
+            result: filteredNavigatorResult
+        )
         else {
             return fallBackToUpstream(
                 reason: "invalid proxy response encoding",
@@ -244,8 +241,7 @@ extension RefreshCodeIssues.Workflow {
     func runForwardAttempts(
         bodyData: Data,
         sessionID: String,
-        requestIDs: [JSONRPC.ID],
-        requestIsBatch: Bool,
+        responseID: JSONRPC.ID,
         eventLoop: EventLoop,
         baseMetadata: Logger.Metadata,
         executionBudget: ExecutionBudget,
@@ -263,7 +259,7 @@ extension RefreshCodeIssues.Workflow {
                     step: .upstreamExecutionBudgetExhausted,
                     state: .timedOut
                 )
-                finalResult = .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
+                finalResult = .timeout(responseID: responseID)
                 break resultLoop
             }
 
@@ -281,8 +277,7 @@ extension RefreshCodeIssues.Workflow {
             let result = await forwarder(
                 bodyData,
                 sessionID,
-                requestIDs,
-                requestIsBatch,
+                responseID,
                 {
                     guard let retryDelayNanos else { return false }
                     return executionBudget.canDelay(retryDelayNanos)
@@ -322,7 +317,7 @@ extension RefreshCodeIssues.Workflow {
                             step: .cancelled,
                             state: .cancelled
                         )
-                        finalResult = .cancelled(responseIDs: requestIDs, isBatch: requestIsBatch)
+                        finalResult = .cancelled(responseID: responseID)
                         break resultLoop
                     }
                     continue

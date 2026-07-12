@@ -4,12 +4,6 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 
 
-private func makeTempDiscoveryURL() -> URL {
-    FileManager.default.temporaryDirectory
-        .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        .appendingPathComponent("endpoint.json")
-}
-
 @Suite
 struct CLIParserTests {
     @Test func cliUsesCanonicalDefaultMCPBridgeInvocation() async throws {
@@ -47,6 +41,42 @@ struct CLIParserTests {
         )
         #expect(config.listenHost == "localhost")
         #expect(config.listenPort == 0)
+    }
+
+    @Test func cliTreatsOnlyZeroRequestTimeoutAsDisabled() throws {
+        let disabled = try CLIParser.parse(
+            args: ["xcode-mcp-proxy", "--request-timeout", "0"],
+            environment: [:]
+        )
+        #expect(disabled.requestTimeout == 0)
+
+        for invalid in ["-1", "nan", "inf", "-inf", "not-a-number"] {
+            #expect(throws: CLIError.self) {
+                _ = try CLIParser.parse(
+                    args: ["xcode-mcp-proxy", "--request-timeout", invalid],
+                    environment: [:]
+                )
+            }
+        }
+    }
+
+    @Test func cliRejectsInvalidExplicitPortAndBodyLimit() throws {
+        for invalidPort in ["-1", "65536", "not-a-port"] {
+            #expect(throws: CLIError.self) {
+                _ = try CLIParser.parse(
+                    args: ["xcode-mcp-proxy", "--port", invalidPort],
+                    environment: [:]
+                )
+            }
+        }
+        for invalidBodyLimit in ["0", "-1", "not-a-size"] {
+            #expect(throws: CLIError.self) {
+                _ = try CLIParser.parse(
+                    args: ["xcode-mcp-proxy", "--max-body-bytes", invalidBodyLimit],
+                    environment: [:]
+                )
+            }
+        }
     }
 
     @Test func cliRejectsRemovedLazyInit() async throws {
@@ -123,9 +153,13 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = try CLIParser.parse(
+        let parsed = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--config", configPath],
             environment: [:]
+        )
+        #expect(parsed.disabledToolNames.isEmpty)
+        let config = try ProxyConfig.resolving(
+            XcodeMCPProxyServerConfiguration(serverProxyConfig: parsed)
         )
 
         #expect(config.disabledToolNames == ["RunAllTests", "RunSomeTests"])
@@ -140,15 +174,18 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = try CLIParser.parse(
+        let parsed = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--config", configPath],
             environment: [:]
+        )
+        let config = try ProxyConfig.resolving(
+            XcodeMCPProxyServerConfiguration(serverProxyConfig: parsed)
         )
 
         #expect(config.disabledToolNames == ["RunAllTests", "RunSomeTests"])
     }
 
-    @Test func cliIgnoresInvalidDisabledToolNamesConfig() async throws {
+    @Test func strictServerConfigRejectsInvalidDisabledToolNames() async throws {
         let configPath = try makeTempConfigFile(
             """
             [tools]
@@ -157,12 +194,17 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = try CLIParser.parse(
+        let parsed = try CLIParser.parse(
             args: ["xcode-mcp-proxy", "--config", configPath],
             environment: [:]
         )
 
-        #expect(config.disabledToolNames.isEmpty)
+        #expect(parsed.disabledToolNames.isEmpty)
+        #expect(throws: ProxyConfig.File.LoadError.self) {
+            _ = try ProxyConfig.resolving(
+                XcodeMCPProxyServerConfiguration(serverProxyConfig: parsed)
+            )
+        }
     }
 
     @Test func configLoadsHandshakeOverrideWhenDisabledToolsAreExplicit() throws {
@@ -177,7 +219,7 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = ProxyConfig(
+        var config = ProxyConfig(
             listenHost: "localhost",
             listenPort: 0,
             upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
@@ -187,6 +229,12 @@ struct CLIParserTests {
             configPath: configPath,
             disabledToolNames: ["ExplicitTool"]
         )
+        let loaded = try ProxyConfig.File.Loader.loadStrict(
+            configURL: URL(fileURLWithPath: configPath)
+        )
+        let explicitDisabledToolNames = config.disabledToolNames
+        config.applyFileConfiguration(loaded)
+        config.disabledToolNames = explicitDisabledToolNames
 
         #expect(config.disabledToolNames == ["ExplicitTool"])
         #expect(config.initializeParamsOverride?.clientName == "custom-client")
@@ -201,7 +249,7 @@ struct CLIParserTests {
         )
         defer { try? FileManager.default.removeItem(atPath: configPath) }
 
-        let config = ProxyConfig(
+        var config = ProxyConfig(
             listenHost: "localhost",
             listenPort: 0,
             upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
@@ -209,6 +257,11 @@ struct CLIParserTests {
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             configPath: configPath
+        )
+        config.applyFileConfiguration(
+            try ProxyConfig.File.Loader.loadStrict(
+                configURL: URL(fileURLWithPath: configPath)
+            )
         )
 
         #expect(config.initializeParamsOverride?.protocolVersion == "2025-03-26")
@@ -321,175 +374,13 @@ struct CLIParserTests {
         #expect(config.refreshCodeIssuesMode == .proxy)
     }
 
-    @Test func cliParsesStdioUpstream() async throws {
-        let config = try CLIParser.parse(
-            args: [
-                "xcode-mcp-proxy",
-                "--stdio",
-                "http://localhost:8765/mcp",
-            ],
-            environment: [:]
-        )
-        #expect(config.transport == .stdio)
-        #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:8765/mcp")
-        #expect(config.stdioUpstreamSource == .explicit)
-    }
-
-    @Test func cliDefaultsStdioUpstreamFallback() async throws {
-        let tempURL = makeTempDiscoveryURL()
-        let config = try CLIParser.parse(
-            args: [
-                "xcode-mcp-proxy",
-                "--stdio",
-            ],
-            environment: [:],
-            discoveryOverrideURL: tempURL
-        )
-        #expect(config.transport == .stdio)
-        #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:8765/mcp")
-        #expect(config.stdioUpstreamSource == .fallback)
-    }
-
-    @Test func cliDefaultsStdioUpstreamFromDiscovery() async throws {
-        let tempURL = makeTempDiscoveryURL()
-        let record = DiscoveryRecord(
-            url: "http://localhost:5555/mcp",
-            host: "localhost",
-            port: 5555,
-            pid: Int(ProcessInfo.processInfo.processIdentifier),
-            updatedAt: Date()
-        )
-        try Discovery.write(record: record, overrideURL: tempURL)
-        let config = try CLIParser.parse(
-            args: [
-                "xcode-mcp-proxy",
-                "--stdio",
-            ],
-            environment: [:],
-            discoveryOverrideURL: tempURL
-        )
-        #expect(config.transport == .stdio)
-        #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:5555/mcp")
-        #expect(config.stdioUpstreamSource == .discovery)
-    }
-
-    @Test func cliDefaultsStdioUpstreamFromExpandedIPv6Discovery() async throws {
-        let tempURL = makeTempDiscoveryURL()
-        let record = DiscoveryRecord(
-            url: "http://[0:0:0:0:0:0:0:1]:5555/mcp",
-            host: "0:0:0:0:0:0:0:1",
-            port: 5555,
-            pid: Int(ProcessInfo.processInfo.processIdentifier),
-            updatedAt: Date()
-        )
-        try Discovery.write(record: record, overrideURL: tempURL)
-        let config = try CLIParser.parse(
-            args: [
-                "xcode-mcp-proxy",
-                "--stdio",
-            ],
-            environment: [:],
-            discoveryOverrideURL: tempURL
-        )
-        #expect(config.transport == .stdio)
-        #expect(config.stdioUpstreamURL?.absoluteString == "http://[0:0:0:0:0:0:0:1]:5555/mcp")
-        #expect(config.stdioUpstreamSource == .discovery)
-    }
-
-    @Test func cliIgnoresNonLoopbackDiscoveryEndpoint() async throws {
-        let tempURL = makeTempDiscoveryURL()
-        let record = DiscoveryRecord(
-            url: "http://example.com:5555/mcp",
-            host: "example.com",
-            port: 5555,
-            pid: Int(ProcessInfo.processInfo.processIdentifier),
-            updatedAt: Date()
-        )
-        try Discovery.write(record: record, overrideURL: tempURL)
-        let config = try CLIParser.parse(
-            args: [
-                "xcode-mcp-proxy",
-                "--stdio",
-            ],
-            environment: [:],
-            discoveryOverrideURL: tempURL
-        )
-        #expect(config.transport == .stdio)
-        #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:8765/mcp")
-        #expect(config.stdioUpstreamSource == .fallback)
-    }
-
-    @Test func cliDefaultsStdioUpstreamFromEnvironment() async throws {
-        let tempURL = makeTempDiscoveryURL()
-        let config = try CLIParser.parse(
-            args: [
-                "xcode-mcp-proxy",
-                "--stdio",
-            ],
-            environment: [
-                "XCODE_MCP_PROXY_ENDPOINT": "http://localhost:9000/mcp"
-            ],
-            discoveryOverrideURL: tempURL
-        )
-        #expect(config.transport == .stdio)
-        #expect(config.stdioUpstreamURL?.absoluteString == "http://localhost:9000/mcp")
-        #expect(config.stdioUpstreamSource == .environment)
-    }
-
-    @Test func cliDefaultsToHTTP() async throws {
-        let config = try CLIParser.parse(
-            args: ["xcode-mcp-proxy"],
-            environment: [:]
-        )
-        #expect(config.transport == .http)
-        #expect(config.stdioUpstreamURL == nil)
-        #expect(config.listenPort == 0)
-    }
-
-    @Test func adapterEndpointResolverUsesExplicitEnvironmentDiscoveryFallbackOrder() async throws {
-        let tempURL = makeTempDiscoveryURL()
-        let record = DiscoveryRecord(
-            url: "http://localhost:5555/mcp",
-            host: "localhost",
-            port: 5555,
-            pid: Int(ProcessInfo.processInfo.processIdentifier),
-            updatedAt: Date()
-        )
-        try Discovery.write(record: record, overrideURL: tempURL)
-
-        let resolver = XcodeMCPProxyAdapterEndpointResolver()
-        let environment = [
-            "XCODE_MCP_PROXY_ENDPOINT": "http://localhost:6666/mcp"
-        ]
-
-        let explicit = try resolver.resolve(
-            .init(
-                explicitURL: "http://localhost:7777/mcp",
-                explicitURLLabel: "--url",
-                environment: environment,
-                discoveryFileURL: tempURL
+    @Test func cliRejectsRemovedStdioMode() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(
+                args: ["xcode-mcp-proxy", "--stdio"],
+                environment: [:]
             )
-        )
-        #expect(explicit.url.absoluteString == "http://localhost:7777/mcp")
-        #expect(explicit.source == .explicit)
-
-        let env = try resolver.resolve(
-            .init(environment: environment, discoveryFileURL: tempURL)
-        )
-        #expect(env.url.absoluteString == "http://localhost:6666/mcp")
-        #expect(env.source == .environment)
-
-        let discovery = try resolver.resolve(
-            .init(environment: [:], discoveryFileURL: tempURL)
-        )
-        #expect(discovery.url.absoluteString == "http://localhost:5555/mcp")
-        #expect(discovery.source == .discovery)
-
-        let fallback = try resolver.resolve(
-            .init(environment: [:], discoveryFileURL: makeTempDiscoveryURL())
-        )
-        #expect(fallback.url.absoluteString == "http://localhost:8765/mcp")
-        #expect(fallback.source == .fallback)
+        }
     }
 }
 

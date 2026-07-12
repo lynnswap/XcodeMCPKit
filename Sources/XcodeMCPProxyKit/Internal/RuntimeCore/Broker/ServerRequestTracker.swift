@@ -5,8 +5,10 @@ import NIOConcurrencyHelpers
 
 final class ServerRequestTracker: Sendable {
     struct Route: Sendable {
-        let upstreamIndex: Int
+        let operationLease: UpstreamOperationLease
         let upstreamID: JSONRPC.ID
+
+        var upstreamIndex: Int { operationLease.upstreamIndex }
     }
 
     private struct StoredRoute: Sendable {
@@ -34,7 +36,7 @@ final class ServerRequestTracker: Sendable {
 
     func record(
         upstreamID: JSONRPC.ID,
-        upstreamIndex: Int,
+        operationLease: UpstreamOperationLease,
         now: Date = Date()
     ) -> JSONRPC.ID {
         state.withLockedValue { state in
@@ -45,7 +47,7 @@ final class ServerRequestTracker: Sendable {
             )!
             state.routesByClientIDKey[clientID.key] = StoredRoute(
                 route: ServerRequestTracker.Route(
-                    upstreamIndex: upstreamIndex,
+                    operationLease: operationLease,
                     upstreamID: upstreamID
                 ),
                 expiresAt: Self.expirationDate(now: now, timeout: routeTimeout)
@@ -83,7 +85,7 @@ final class ServerRequestTracker: Sendable {
         state.withLockedValue { state in
             Self.removeExpiredRoutes(now: now, state: &state)
             guard let stored = state.routesByClientIDKey[clientID.key],
-                stored.route.upstreamIndex == route.upstreamIndex,
+                stored.route.operationLease.proof == route.operationLease.proof,
                 stored.route.upstreamID.key == route.upstreamID.key
             else {
                 return false

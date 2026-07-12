@@ -8,7 +8,31 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyInternalTestSupport
 import XcodeMCPProxyTestSupport
 
-@Suite(.serialized)
+private func seedCanonicalInitializeForTesting(
+    on manager: RuntimeCoordinator,
+    result: JSONValue,
+    sourceUpstream: Int
+) {
+    let slotID = UpstreamSlotID(rawValue: sourceUpstream)
+    guard let health = manager.upstreamHealthManager.state(for: slotID),
+          health.isInitialized,
+          case .healthy = health.healthState else {
+        preconditionFailure("canonical initialize fixture requires a healthy initialized source")
+    }
+    let proof = manager.operationLeaseForTest(upstreamIndex: sourceUpstream).proof
+    guard case .accepted(let participant) = manager.canonicalHandshakeState
+        .offerInitializeResult(result, sourceProof: proof) else {
+        preconditionFailure("canonical initialize fixture result is incompatible")
+    }
+    switch manager.canonicalHandshakeState.commitInitializeParticipant(participant) {
+    case .published, .joined:
+        return
+    case .incompatible, .stale:
+        preconditionFailure("canonical initialize fixture commit was rejected")
+    }
+}
+
+@Suite(.serialized, .asyncTestCleanup)
 struct HTTPConcurrencyTests {
     @Test func httpConcurrentInitializeRequests() async throws {
         let server = try TestHTTPServer.start()
@@ -198,8 +222,9 @@ struct HTTPConcurrencyTests {
             negotiatedProtocolVersion: MCP.ProtocolVersion.current
         )
         sessionManager.markUpstreamInitialized(upstreamIndex: 0)
-        sessionManager.canonicalBrokerState.syncCanonicalInitialize(
-            try #require(
+        seedCanonicalInitializeForTesting(
+            on: sessionManager,
+            result: try #require(
                 JSONValue(any: [
                     "protocolVersion": MCP.ProtocolVersion.current,
                     "capabilities": [String: Any](),
@@ -207,14 +232,14 @@ struct HTTPConcurrencyTests {
             ),
             sourceUpstream: 0
         )
-        sessionManager.setCachedToolsListResult(executeSnippetToolsCatalog(), sourceUpstream: 0)
+        sessionManager.seedCanonicalToolsCatalog(executeSnippetToolsCatalog(), sourceUpstream: 0)
         upstream.clearRecordedRequests()
 
         let firstOperation = try handlePost(
             executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1")
         )
         eventLoop.run()
-        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        await sessionManager.drainRuntimeTasksForTesting()
         let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
@@ -238,7 +263,7 @@ struct HTTPConcurrencyTests {
         #expect(firstObject["error"] == nil)
 
         eventLoop.run()
-        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        await sessionManager.drainRuntimeTasksForTesting()
         let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
@@ -255,7 +280,7 @@ struct HTTPConcurrencyTests {
         #expect(secondObject["error"] == nil)
     }
 
-    @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() throws {
+    @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() async throws {
         let upstream = EmbeddedControlledUpstreamClient()
         let config = makeEmbeddedConfig(requestTimeout: 0.15)
         let firstChannel = EmbeddedChannel()
@@ -291,8 +316,9 @@ struct HTTPConcurrencyTests {
             negotiatedProtocolVersion: MCP.ProtocolVersion.current
         )
         sessionManager.markUpstreamInitialized(upstreamIndex: 0)
-        sessionManager.canonicalBrokerState.syncCanonicalInitialize(
-            try #require(
+        seedCanonicalInitializeForTesting(
+            on: sessionManager,
+            result: try #require(
                 JSONValue(any: [
                     "protocolVersion": MCP.ProtocolVersion.current,
                     "capabilities": [String: Any](),
@@ -300,7 +326,7 @@ struct HTTPConcurrencyTests {
             ),
             sourceUpstream: 0
         )
-        sessionManager.setCachedToolsListResult(executeSnippetToolsCatalog(), sourceUpstream: 0)
+        sessionManager.seedCanonicalToolsCatalog(executeSnippetToolsCatalog(), sourceUpstream: 0)
         upstream.clearRecordedRequests()
 
         try postEmbeddedJSON(
@@ -309,7 +335,7 @@ struct HTTPConcurrencyTests {
             to: firstChannel
         )
         firstChannel.embeddedEventLoop.run()
-        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        await sessionManager.drainRuntimeTasksForTesting()
         let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
@@ -329,7 +355,7 @@ struct HTTPConcurrencyTests {
         #expect((firstObject["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
 
         secondChannel.embeddedEventLoop.run()
-        sessionManager.drainRuntimeTasksAndWaitForTesting()
+        await sessionManager.drainRuntimeTasksForTesting()
         let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",

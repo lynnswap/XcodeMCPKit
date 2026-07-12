@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import NIO
@@ -31,6 +32,14 @@ struct LiveMCPBridgeTests {
         let directMCPBridgeProcessID = session.processIdentifier
         let approver = XcodePermissionDialog.AutoApprover(
             dependencies: .live(
+                permissionDialogProcessIDs: {
+                    NSWorkspace.shared.runningApplications.compactMap { application in
+                        guard application.bundleIdentifier == "com.apple.dt.Xcode",
+                              application.isTerminated == false
+                        else { return nil }
+                        return application.processIdentifier
+                    }
+                },
                 agentPathCandidates: {
                     XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
                         additionalExecutableCandidates: [mcpbridgePath]
@@ -95,12 +104,19 @@ struct LiveMCPBridgeTests {
             throw LiveMCPBridgeTestError.mcpbridgeNotFound
         }
 
-        let pgrepResult = try runProcess("/usr/bin/pgrep", ["-x", "Xcode"])
-        guard pgrepResult.terminationStatus == 0 else {
+        let xcodeProcessIDs = NSWorkspace.shared.runningApplications.compactMap {
+            application -> pid_t? in
+            guard application.bundleIdentifier == "com.apple.dt.Xcode",
+                  application.isTerminated == false
+            else {
+                return nil
+            }
+            return application.processIdentifier
+        }
+        guard xcodeProcessIDs.isEmpty == false else {
             Issue.record("no running Xcode process found; open Xcode first")
             throw LiveMCPBridgeTestError.xcodeProcessNotFound
         }
-        let xcodeProcessIDs = pgrepResult.stdout.split(whereSeparator: \.isNewline)
         guard xcodeProcessIDs.count == 1 else {
             Issue.record(
                 "expected exactly one running Xcode process for auto-resolved mcpbridge, found \(xcodeProcessIDs.count)"
@@ -141,7 +157,7 @@ struct LiveMCPBridgeTests {
         }
 
         do {
-            let address = try server.startAndWriteDiscovery()
+            let address = try await server.start()
             let discoveryRecord = try readDiscoveryRecord(from: discoveryFile)
             #expect(discoveryRecord.port == address.port)
 

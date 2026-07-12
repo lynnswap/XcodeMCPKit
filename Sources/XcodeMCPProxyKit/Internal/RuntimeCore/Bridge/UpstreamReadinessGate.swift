@@ -140,21 +140,17 @@ final class UpstreamReadinessCoordinator: Sendable {
 
     private func waitUntilReady(epoch: UInt64) async {
         var didLogWaiting = false
-        var lastUnavailableLaunchUptimeNs: UInt64?
-        var didLogRunningWait = false
-        var lastProgressLogUptimeNs: UInt64?
-        var indicatorIndex = 0
-        let indicators = ["exploring.", "exploring..", "exploring..."]
+        var didAttemptLaunch = false
 
         while Task.isCancelled == false {
             guard pruneCancelledWaitersAndKeepWaiting(epoch: epoch) else { return }
 
-            if await gate.isReady() {
+            let snapshot = await gate.snapshot()
+            if snapshot.isReady {
                 scheduleReadyWaiters(didWait: didLogWaiting, epoch: epoch)
                 return
             }
 
-            let nowUptimeNs = gate.uptimeNanoseconds()
             if didLogWaiting == false {
                 logger.info(
                     "Waiting for Xcode before starting mcpbridge",
@@ -163,64 +159,16 @@ final class UpstreamReadinessCoordinator: Sendable {
                     ]
                 )
                 didLogWaiting = true
-                lastProgressLogUptimeNs = nowUptimeNs
-            } else if let lastProgress = lastProgressLogUptimeNs,
-                      nowUptimeNs &- lastProgress >= gate.progressLogIntervalNanoseconds
-            {
-                logger.info(
-                    "Still waiting for Xcode",
-                    metadata: [
-                        "target": .string(gate.targetName),
-                        "indicator": .string(indicators[indicatorIndex % indicators.count]),
-                    ]
-                )
-                indicatorIndex &+= 1
-                lastProgressLogUptimeNs = nowUptimeNs
             }
 
-            let launchState = await updateLaunchStateIfNeeded(
-                lastUnavailableLaunchUptimeNs: lastUnavailableLaunchUptimeNs,
-                didLogRunningWait: didLogRunningWait,
-                nowUptimeNs: nowUptimeNs
-            )
-            lastUnavailableLaunchUptimeNs = launchState.lastUnavailableLaunchUptimeNs
-            didLogRunningWait = launchState.didLogRunningWait
-
-            await gate.sleepNanoseconds(gate.pollIntervalNanoseconds)
+            if didAttemptLaunch == false {
+                didAttemptLaunch = true
+                _ = await launchUnavailableTarget()
+            }
+            await gate.waitForChange(snapshot.generation)
         }
 
         clearWaitTask(epoch: epoch)
-    }
-
-    private func updateLaunchStateIfNeeded(
-        lastUnavailableLaunchUptimeNs: UInt64?,
-        didLogRunningWait: Bool,
-        nowUptimeNs: UInt64
-    ) async -> (lastUnavailableLaunchUptimeNs: UInt64?, didLogRunningWait: Bool) {
-        guard gate.launchIfUnavailable != nil else {
-            return (lastUnavailableLaunchUptimeNs, didLogRunningWait)
-        }
-
-        let canObserveAvailability = gate.isAvailable != nil
-        if let isAvailable = gate.isAvailable, await isAvailable() {
-            if didLogRunningWait == false {
-                logger.info(
-                    "Xcode is running; waiting for it to become ready before starting mcpbridge",
-                    metadata: [
-                        "target": .string(gate.targetName)
-                    ]
-                )
-            }
-            return (nil, true)
-        }
-
-        if let lastLaunch = lastUnavailableLaunchUptimeNs,
-           (canObserveAvailability == false
-            || nowUptimeNs &- lastLaunch < gate.launchRetryIntervalNanoseconds) {
-            return (lastUnavailableLaunchUptimeNs, didLogRunningWait)
-        }
-        let didLaunch = await launchUnavailableTarget()
-        return (didLaunch ? gate.uptimeNanoseconds() : nil, didLogRunningWait)
     }
 
     private func launchUnavailableTarget() async -> Bool {
@@ -311,7 +259,7 @@ final class UpstreamReadinessCoordinator: Sendable {
         }
         guard shouldContinue else { return }
 
-        if await gate.isReady() {
+        if await gate.snapshot().isReady {
             fireReadyWaiters(epoch: epoch)
         } else {
             startWaitTaskIfNeeded()

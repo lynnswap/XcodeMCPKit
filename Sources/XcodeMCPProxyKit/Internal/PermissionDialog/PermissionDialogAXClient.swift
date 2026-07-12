@@ -7,7 +7,6 @@ import XcodeMCPKit
 extension XcodePermissionDialog {
     protocol AXAccessing: Sendable {
         func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialog.AccessibilityStatus
-        func runningXcodeProcessIDs() -> [pid_t]
         func openWindows(for processID: pid_t) throws -> [XcodePermissionDialog.AXWindow]
         func pressDefaultButton(in window: XcodePermissionDialog.AXWindow) throws
     }
@@ -88,25 +87,6 @@ extension XcodePermissionDialog {
             }
             return AXIsProcessTrusted() ? .trusted : .untrusted
         }
-
-        func runningXcodeProcessIDs() -> [pid_t] {
-            let bundleIdentifiers: Set<String> = [
-                "com.apple.dt.Xcode",
-                "com.apple.dt.ExternalViewService",
-                "com.apple.dt.Xcode.DeveloperSystemPolicyService",
-            ]
-            var processIDs = Set(NSWorkspace.shared.runningApplications.compactMap { application -> pid_t? in
-                guard let bundleIdentifier = application.bundleIdentifier else {
-                    return nil
-                }
-                guard bundleIdentifiers.contains(bundleIdentifier), application.isTerminated == false else {
-                    return nil
-                }
-                return application.processIdentifier
-            })
-        processIDs.formUnion(ProcessEnumeration.processIDs(named: "Xcode"))
-        return processIDs.sorted()
-    }
 
     func openWindows(for processID: pid_t) throws -> [XcodePermissionDialog.AXWindow] {
         let app = AXUIElementCreateApplication(processID)

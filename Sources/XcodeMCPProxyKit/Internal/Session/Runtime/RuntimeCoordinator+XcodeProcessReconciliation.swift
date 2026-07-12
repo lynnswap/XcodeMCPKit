@@ -37,83 +37,6 @@ extension RuntimeCoordinator {
         }
     }
 
-    func startXcodeProcessReconciliationLoop() {
-        guard processRoutingEnabled, xcodeTargetDiscovery != nil else {
-            return
-        }
-        let generation = xcodeProcessReconciliationLoopState.withLockedValue { state -> UInt64? in
-            guard state.isRunning == false else {
-                return nil
-            }
-            state.generation &+= 1
-            state.isRunning = true
-            return state.generation
-        }
-        guard let generation else { return }
-        let accepted = addRuntimeTask { [weak self, generation] in
-            guard let self else { return }
-            await self.runXcodeProcessReconciliationLoop(generation: generation)
-        }
-        if accepted == false {
-            finishXcodeProcessReconciliationLoop(generation: generation)
-        }
-    }
-
-    func restartXcodeProcessReconciliationLoopAfterRuntimeTaskReset() {
-        guard processRoutingEnabled else {
-            return
-        }
-        invalidateXcodeProcessReconciliationLoop()
-        startXcodeProcessReconciliationLoop()
-    }
-
-    private func runXcodeProcessReconciliationLoop(generation: UInt64) async {
-        defer {
-            finishXcodeProcessReconciliationLoop(generation: generation)
-        }
-        while !Task.isCancelled, isCurrentXcodeProcessReconciliationLoop(generation: generation) {
-            let hasPendingProcessToolsCatalogRefresh =
-                processRouteReadinessStore.pendingCatalogRefreshIsEmpty() == false
-            let isRecovering =
-                activeInitializedHealthyishCount() == 0
-                || anyActiveRecoveryInFlight()
-                || hasPendingProcessToolsCatalogRefresh
-            let interval: Duration = xcodeProcessRoutes.isEmpty
-                || isRecovering
-                ? .seconds(2)
-                : .seconds(30)
-            await clock.sleep(interval)
-            guard !Task.isCancelled,
-                  isCurrentXcodeProcessReconciliationLoop(generation: generation)
-            else {
-                return
-            }
-            triggerXcodeProcessReconcile(reason: "periodic_scan")
-        }
-    }
-
-    private func invalidateXcodeProcessReconciliationLoop() {
-        xcodeProcessReconciliationLoopState.withLockedValue { state in
-            state.generation &+= 1
-            state.isRunning = false
-        }
-    }
-
-    private func isCurrentXcodeProcessReconciliationLoop(generation: UInt64) -> Bool {
-        xcodeProcessReconciliationLoopState.withLockedValue { state in
-            state.isRunning && state.generation == generation
-        }
-    }
-
-    private func finishXcodeProcessReconciliationLoop(generation: UInt64) {
-        xcodeProcessReconciliationLoopState.withLockedValue { state in
-            guard state.generation == generation else {
-                return
-            }
-            state.isRunning = false
-        }
-    }
-
     private func runScheduledXcodeProcessReconciles(
         discovery: any XcodeTargetDiscovering
     ) {
@@ -160,15 +83,25 @@ extension RuntimeCoordinator {
         reason: String
     ) {
         guard processRoutingEnabled else { return }
-        let result = processRouteStore.reconcile(
-            targets: targets,
+        let existingRoutes = processControlPlane.activeRoutes()
+        let observedRoutes = MCPBridgeRuntime.orderedXcodeTargets(targets).map { target in
+            existingRoutes.first(where: {
+                $0.target == target && $0.upstreamIndices.isEmpty == false
+            })
+                ?? appendProcessBoundRoute(for: target)
+        }
+        let usability = processRouteUpstreamUsabilitySnapshot(
+            policy: .toolsCatalog,
+            nowUptimeNs: nowUptimeNanoseconds()
+        )
+        let result = processControlPlane.reconcileRoutes(
+            observedRoutes,
             reason: reason,
             nowUptimeNs: nowUptimeNanoseconds(),
-            makeRoute: { target in
-                self.appendProcessBoundRoute(for: target)
-            }
+            usability: usability
         )
-        guard result.didChange else {
+        applyProcessControlPlaneTransition(result)
+        guard result.didChangeRoutes else {
             retryPendingProcessRouteReadiness(reason: reason)
             return
         }
@@ -178,24 +111,7 @@ extension RuntimeCoordinator {
         }
 
         if result.addedRoutes.isEmpty == false {
-            for route in result.addedRoutes {
-                processRouteReadinessStore.insertPendingCatalogRefresh(
-                    processID: route.target.processID
-                )
-            }
-            for route in result.addedRoutes {
-                processRouteStore.removeUnavailableState(processID: route.target.processID)
-            }
-            for route in result.addedRoutes {
-                observeXcodeProcessExit(route.target.processID)
-            }
-            invalidateControlPlane(
-                reason: "xcode_process_added",
-                clearInitialize: false,
-                clearToolsCatalog: true
-            )
             startInitializationForAddedProcessRoutes(result.addedRoutes)
-            publishToolsListChangedNotification()
         }
 
         retryPendingProcessRouteReadiness(reason: reason)
@@ -205,11 +121,6 @@ extension RuntimeCoordinator {
         for target: XcodeProcessTarget
     ) -> XcodeProcessRoute {
         let slots = dynamicUpstreamFactory?(target) ?? []
-        let startIndex = upstreamsBox.withLockedValue { upstreams -> Int in
-            let startIndex = upstreams.count
-            upstreams.append(contentsOf: slots)
-            return startIndex
-        }
         guard slots.isEmpty == false else {
             logger.warning(
                 "Discovered Xcode process without a dynamic upstream factory",
@@ -221,13 +132,12 @@ extension RuntimeCoordinator {
             return XcodeProcessRoute(target: target, upstreamIndices: [])
         }
 
-        upstreamRouter.appendUpstreams(count: slots.count)
-        upstreamHealthManager.appendUpstreams(count: slots.count)
-        debugRecorder.appendUpstreams(count: slots.count)
-
-        let upstreamIndices = Array(startIndex..<(startIndex + slots.count))
-        for (offset, upstream) in slots.enumerated() {
-            observeUpstreamEvents(upstream, upstreamIndex: startIndex + offset)
+        let transition = upstreamTopology.append(slots)
+        publishUpstreamTopology(transition.snapshot)
+        let upstreamIndices = transition.addedIDs.map(\.rawValue)
+        for id in transition.addedIDs {
+            guard let operationLease = transition.snapshot.operationLease(id) else { continue }
+            observeUpstreamEvents(operationLease)
         }
         logger.info(
             "Added Xcode process route",
@@ -245,37 +155,29 @@ extension RuntimeCoordinator {
         _ route: XcodeProcessRoute,
         reason: String
     ) {
-        processRouteStore.removeUnavailableState(processID: route.target.processID)
-        xcodeProcessEventMonitor.removeExitObserver(processID: route.target.processID)
-        processRouteReadinessStore.removePendingCatalogRefresh(processID: route.target.processID)
-        cancelScheduledProcessToolsCatalogRetry(processID: route.target.processID)
         removeXcodeWindowOwners(forProcessID: route.target.processID)
-        resetProcessRouteActivation(
-            processID: route.target.processID,
-            reason: "route_retired_\(reason)"
-        )
 
-        applyToolCatalogSurfaceMutation {
-            removeProcessToolCatalogAfterExposureLoss(
-                processID: route.target.processID
-            )
-        }
-
-        var resetInitialize = false
+        let hadGlobalInitialize = isInitialized()
         for upstreamIndex in route.upstreamIndices {
+            guard let operationLease = upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+            ) else { continue }
             retireProcessBoundUpstream(
-                upstreamIndex: upstreamIndex,
-                reason: reason,
-                resetInitialize: &resetInitialize
+                operationLease: operationLease,
+                reason: reason
             )
         }
-
-        invalidateControlPlane(
-            reason: "xcode_process_removed",
-            clearInitialize: resetInitialize,
-            clearToolsCatalog: false
+        let topologyTransition = upstreamTopology.retire(
+            Set(route.upstreamIndices.map(UpstreamSlotID.init(rawValue:)))
         )
+        publishUpstreamTopology(topologyTransition.snapshot)
+
+        let resetInitialize = hadGlobalInitialize
+            && canonicalHandshakeState.initializeResult() == nil
+            && canonicalHandshakeState.hasInitializeParticipants() == false
+            && anyActiveRecoveryInFlight() == false
         if resetInitialize {
+            initializeManager.resetWarmSecondaryForRetry()
             restartPrimaryInitializeAfterRetiringCachedProcessRoute()
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
@@ -291,36 +193,26 @@ extension RuntimeCoordinator {
     }
 
     private func retireProcessBoundUpstream(
-        upstreamIndex: Int,
-        reason: String,
-        resetInitialize: inout Bool
+        operationLease: UpstreamOperationLease,
+        reason: String
     ) {
+        let upstreamIndex = operationLease.upstreamIndex
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         if globalInit?.primaryInitUpstreamIndex == upstreamIndex,
            let upstreamID = globalInit?.primaryInitUpstreamID {
-            upstreamRouter.remove(upstreamIndex: upstreamIndex, upstreamID: upstreamID)
+            upstreamRouter.remove(proof: operationLease.proof, upstreamID: upstreamID)
         }
 
-        clearUpstreamState(upstreamIndex: upstreamIndex)
-        upstreamRouter.reset(upstreamIndex: upstreamIndex)
+        clearUpstreamState(proof: operationLease.proof)
+        upstreamRouter.reset(proof: operationLease.proof)
         releaseLeases(
             leaseManager.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
                 reason: .upstreamExit
             )
         )
-        let upstreamToStop = upstreamsBox.withLockedValue { upstreams in
-            upstreamIndex >= 0 && upstreamIndex < upstreams.count ? upstreams[upstreamIndex] : nil
-        }
-        if let upstreamToStop {
-            addRuntimeTask {
-                await upstreamToStop.stop()
-            }
-        }
-
-        if globalInit?.hadGlobalInit == true, anyActiveInitializedUpstream() == false {
-            resetInitialize = true
-            initializeManager.resetWarmSecondaryForRetry()
+        addRuntimeTask {
+            await operationLease.slot.stop()
         }
 
         let retiredPrimaryInitialize =
@@ -344,25 +236,7 @@ extension RuntimeCoordinator {
             return
         }
 
-        clearActiveWarmInitializesBeforePrimaryRestart()
         startEagerInitializePrimary(applyBackoff: true)
-    }
-
-    private func clearActiveWarmInitializesBeforePrimaryRestart() {
-        let activePrimaryUpstreamIndex = initializeManager.activePrimaryInitializeUpstreamIndex()
-        let states = upstreamHealthManager.statesSnapshot()
-        for upstreamIndex in activeProcessBoundUpstreamIndices().sorted() {
-            guard upstreamIndex != activePrimaryUpstreamIndex,
-                  upstreamIndex >= 0,
-                  upstreamIndex < states.count else {
-                continue
-            }
-            let state = states[upstreamIndex]
-            guard state.initInFlight, state.isInitialized == false else {
-                continue
-            }
-            clearUpstreamState(upstreamIndex: upstreamIndex)
-        }
     }
 
     private func startInitializationForAddedProcessRoutes(_ routes: [XcodeProcessRoute]) {
@@ -370,55 +244,64 @@ extension RuntimeCoordinator {
         guard routesWithUpstreams.isEmpty == false else {
             return
         }
-        guard isInitialized() else {
-            startProcessRouteActivation(for: routesWithUpstreams[0])
-            return
-        }
+        startProcessRouteAttachments(routesWithUpstreams)
         for route in routesWithUpstreams {
             startProcessRouteActivation(for: route)
         }
     }
 
-    private func retryPendingProcessRouteReadiness(reason: String) {
+    func startProcessRouteAttachments(_ routes: [XcodeProcessRoute]) {
+        // Route membership starts one bridge per Xcode independently. Each
+        // route then owns its own protocol activation; only the compatible
+        // canonical result publication is globally arbitrated.
+        for route in routes {
+            guard let upstreamIndex = route.primaryUpstreamIndex else { continue }
+            runWhenUpstreamReady(
+                reason: "xcode_process_attach_\(route.target.processID)"
+            ) { [weak self, route, upstreamIndex] in
+                guard let self,
+                      self.unavailableXcodeProcessIDs().contains(
+                          route.target.processID
+                      ) == false,
+                      self.xcodeProcessRoutes.contains(where: {
+                          $0.id == route.id && $0.primaryUpstreamIndex == upstreamIndex
+                      })
+                else {
+                    return
+                }
+                self.startUpstreamSlot(upstreamIndex)
+            }
+        }
+    }
+
+    func retryPendingProcessRouteReadiness(reason: String) {
         let activeRoutes = xcodeProcessRoutes
         let activeProcessIDs = Set(activeRoutes.map(\.target.processID))
         let unavailableProcessIDs = unavailableXcodeProcessIDs()
         let missingCatalogProcessIDs = Set(activeRoutes.compactMap { route -> pid_t? in
             guard unavailableProcessIDs.contains(route.target.processID) == false,
-                  processToolSurfaceStore.catalog(forProcessID: route.target.processID) == nil
+                  processControlPlane.catalog(forProcessID: route.target.processID) == nil
             else {
                 return nil
             }
             return route.target.processID
         })
-        let pendingProcessIDs = processRouteReadinessStore
-            .pendingCatalogRefreshProcessIDsSnapshot()
+        let pendingProcessIDs = processControlPlane
+            .pendingCatalogProcessIDs(nowUptimeNs: nowUptimeNanoseconds())
             .union(missingCatalogProcessIDs)
             .filter { processID in
                 activeProcessIDs.contains(processID)
                     && unavailableProcessIDs.contains(processID) == false
-                    && processToolSurfaceStore.catalog(forProcessID: processID) == nil
+                    && processControlPlane.catalog(forProcessID: processID) == nil
             }
-        processRouteReadinessStore.replacePendingCatalogRefreshes(pendingProcessIDs)
         guard pendingProcessIDs.isEmpty == false else {
-            return
-        }
-
-        guard isInitialized() else {
-            guard initializeManager.snapshot().initInFlight == false else {
-                return
-            }
-            if let route = activeRoutes.first(where: {
-                pendingProcessIDs.contains($0.target.processID)
-            }) {
-                startProcessRouteActivation(for: route)
-            }
             return
         }
 
         for route in activeRoutes where pendingProcessIDs.contains(route.target.processID) {
             startProcessRouteActivation(for: route)
         }
+        guard isInitialized() else { return }
         refreshMissingProcessToolsCatalogsIfNeeded(
             reason: "pending_process_route_\(reason)",
             processIDs: pendingProcessIDs
@@ -436,9 +319,9 @@ extension RuntimeCoordinator {
         guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
-        let shouldRefresh = processRouteReadinessStore.hasPendingCatalogRefresh(
-            processID: route.target.processID
-        )
+        let shouldRefresh = processControlPlane.pendingCatalogProcessIDs(
+            nowUptimeNs: nowUptimeNanoseconds()
+        ).contains(route.target.processID)
         guard shouldRefresh else {
             return
         }
@@ -464,9 +347,4 @@ extension RuntimeCoordinator {
         }
     }
 
-    private func observeXcodeProcessExit(_ processID: pid_t) {
-        xcodeProcessEventMonitor.observeExit(processID: processID) { [weak self] reason in
-            self?.triggerXcodeProcessReconcile(reason: reason)
-        }
-    }
 }

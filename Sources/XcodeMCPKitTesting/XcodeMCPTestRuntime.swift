@@ -158,6 +158,11 @@ public actor XcodeMCPTestRuntime {
     public func makeClient(
         configuration: XcodeMCPConfiguration = XcodeMCPConfiguration()
     ) async throws -> XcodeMCP {
+        guard configuration.transport == .localBridge() else {
+            throw XcodeMCPError.invalidRequest(
+                "XcodeMCPTestRuntime requires the default localBridge transport configuration"
+            )
+        }
         let transport = XcodeMCPTestTransport(runtime: self)
         transportContinuations[transport.id] = transport.continuation
         return try await XcodeMCP(configuration: configuration, transport: transport)
@@ -211,6 +216,26 @@ public actor XcodeMCPTestRuntime {
     /// Returns all JSON-RPC messages sent by the client.
     public func recordedMessages() -> [RecordedMessage] {
         messages
+    }
+
+    /// Returns all decoded `tools/call` messages received by the runtime.
+    public func recordedToolCalls() -> [ToolCall] {
+        messages.compactMap { message in
+            guard message.method == "tools/call",
+                  let params = message.params,
+                  let object = params.objectValue,
+                  let name = object["name"]?.stringValue,
+                  name.isEmpty == false
+            else {
+                return nil
+            }
+            return ToolCall(
+                name: name,
+                arguments: object["arguments"]?.objectValue ?? [:],
+                progressToken: object["_meta"]?.objectValue?["progressToken"]?.stringValue,
+                rawParams: params
+            )
+        }
     }
 
     /// Returns how many times the backing transport was closed.
@@ -296,7 +321,7 @@ public actor XcodeMCPTestRuntime {
             return initializeResult
         case "tools/list":
             return .object([
-                "tools": try MCPJSONValue(encoding: tools)
+                "tools": try MCPJSONValue(tools)
             ])
         case "tools/call":
             let call = try decodeToolCall(params)
@@ -441,14 +466,25 @@ package actor XcodeMCPTestTransport: XcodeMCPTransport {
         self.runtime = runtime
     }
 
-    package func send(_ data: Data) async throws {
+    package func send(
+        _ data: Data,
+        headers: MCPConnectionHeaders,
+        deadline: Deadline?
+    ) async throws {
+        _ = headers
+        _ = deadline
         guard closed == false else {
             throw XcodeMCPError.closed
         }
         try await runtime.receive(data, from: id)
     }
 
-    package func close() async {
+    package func startEventStream(headers: MCPConnectionHeaders) async {
+        _ = headers
+    }
+
+    package func close(headers: MCPConnectionHeaders) async {
+        _ = headers
         guard closed == false else {
             return
         }

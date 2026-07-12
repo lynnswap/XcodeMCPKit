@@ -34,18 +34,8 @@ extension RefreshCodeIssues {
             )
         }
 
-        /// Unwraps a single request object, accepting a batch of exactly one.
         static func singleRequestObject(from requestJSON: Any) -> [String: Any]? {
-            if let object = requestJSON as? [String: Any] {
-                return object
-            }
-            guard let requests = requestJSON as? [Any],
-                requests.count == 1,
-                let object = requests.first as? [String: Any]
-            else {
-                return nil
-            }
-            return object
+            requestJSON as? [String: Any]
         }
 
         var queueKey: String {
@@ -61,9 +51,9 @@ extension RefreshCodeIssues {
     struct Workflow {
         enum ForwardAttemptResult: Sendable {
             case success(Data)
-            case timeout(responseIDs: [JSONRPC.ID], isBatch: Bool)
-            case upstreamUnavailable(responseIDs: [JSONRPC.ID], isBatch: Bool)
-            case cancelled(responseIDs: [JSONRPC.ID], isBatch: Bool)
+            case timeout(responseID: JSONRPC.ID)
+            case upstreamUnavailable(responseID: JSONRPC.ID)
+            case cancelled(responseID: JSONRPC.ID)
             case invalidRequest
             case invalidUpstreamResponse
         }
@@ -96,8 +86,7 @@ extension RefreshCodeIssues {
             @Sendable (
                 _ bodyData: Data,
                 _ sessionID: String,
-                _ requestIDs: [JSONRPC.ID],
-                _ requestIsBatch: Bool,
+                _ responseID: JSONRPC.ID,
                 _ shouldRequeueLeaseOnRetryableFailure: @Sendable () -> Bool,
                 _ eventLoop: EventLoop,
                 _ requestTimeoutOverride: TimeAmount?
@@ -240,8 +229,7 @@ extension RefreshCodeIssues {
             refreshRequest: RefreshCodeIssues.Request,
             bodyData: Data,
             sessionID: String,
-            requestIDs: [JSONRPC.ID],
-            requestIsBatch: Bool,
+            responseID: JSONRPC.ID,
             requestTimeoutOverride: TimeAmount? = nil,
             eventLoop: EventLoop,
             windowsProvider: @escaping WindowsProvider,
@@ -278,7 +266,7 @@ extension RefreshCodeIssues {
                     requestID: debugRequestID,
                     outcome: .timeout
                 )
-                return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
+                return .timeout(responseID: responseID)
             }
 
             do {
@@ -331,7 +319,7 @@ extension RefreshCodeIssues {
                             requestID: debugRequestID,
                             outcome: .timeout
                         )
-                        return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
+                        return .timeout(responseID: responseID)
                     }
                     debugState.updateStep(
                         requestID: debugRequestID,
@@ -348,8 +336,7 @@ extension RefreshCodeIssues {
                         let proxyResponseData = try await runProxyRefresh(
                             refreshRequest: refreshRequest,
                             sessionID: sessionID,
-                            requestIDs: requestIDs,
-                            requestIsBatch: requestIsBatch,
+                            responseID: responseID,
                             eventLoop: eventLoop,
                             baseMetadata: baseMetadata,
                             executionBudget: executionBudget,
@@ -372,8 +359,7 @@ extension RefreshCodeIssues {
                         result = await runForwardAttempts(
                             bodyData: bodyData,
                             sessionID: sessionID,
-                            requestIDs: requestIDs,
-                            requestIsBatch: requestIsBatch,
+                            responseID: responseID,
                             eventLoop: eventLoop,
                             baseMetadata: baseMetadata,
                             executionBudget: executionBudget,
@@ -406,7 +392,7 @@ extension RefreshCodeIssues {
                     requestID: debugRequestID,
                     outcome: .timeout
                 )
-                return .timeout(responseIDs: requestIDs, isBatch: requestIsBatch)
+                return .timeout(responseID: responseID)
             } catch is CancellationError {
                 logger.debug(
                     "Cancelled queued refresh code issues request",
@@ -426,7 +412,7 @@ extension RefreshCodeIssues {
                     requestID: debugRequestID,
                     outcome: .cancelled
                 )
-                return .cancelled(responseIDs: requestIDs, isBatch: requestIsBatch)
+                return .cancelled(responseID: responseID)
             } catch {
                 debugState.updateStep(
                     requestID: debugRequestID,

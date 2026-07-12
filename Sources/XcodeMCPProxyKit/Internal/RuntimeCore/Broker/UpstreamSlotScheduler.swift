@@ -48,15 +48,17 @@ final class UpstreamSlotScheduler: Sendable {
         let descriptor: SessionRequestPipeline.Descriptor
         let eventLoop: EventLoop
         let preferredUpstreamIndices: [Int]
-        let start: @Sendable (Int) -> Void
+        let start: @Sendable (UpstreamOperationLease) -> Void
         let failUnavailable: @Sendable () -> Void
         let failCancelled: @Sendable () -> Void
     }
 
     private struct Reservation: Sendable {
         let request: PendingRequest
-        let upstreamIndex: Int
+        let operationLease: UpstreamOperationLease
         var hasStarted = false
+
+        var upstreamIndex: Int { operationLease.upstreamIndex }
     }
 
     private struct State: Sendable {
@@ -70,6 +72,9 @@ final class UpstreamSlotScheduler: Sendable {
     private let state: NIOLockedValueBox<State>
     private let canUseUpstream: @Sendable (Int) -> UpstreamHealthManager.UseEvaluation
     private let selectUpstream: @Sendable (Set<Int>) -> UpstreamHealthManager.SelectionResult
+    private let operationLease:
+        @Sendable (UpstreamTopologyProof) -> UpstreamOperationLease?
+    private let validateOperationLease: @Sendable (UpstreamOperationLease) -> Bool
     private let applyHealthEffects: @Sendable ([UpstreamHealthManager.Effect]) -> Void
     private let testHooks: UpstreamSlotSchedulerTestHooks
 
@@ -77,12 +82,16 @@ final class UpstreamSlotScheduler: Sendable {
         logger: Logger = XcodeMCPRuntimeLogging.make("upstream.scheduler"),
         canUseUpstream: @escaping @Sendable (Int) -> UpstreamHealthManager.UseEvaluation,
         selectUpstream: @escaping @Sendable (Set<Int>) -> UpstreamHealthManager.SelectionResult,
+        operationLease: @escaping @Sendable (UpstreamTopologyProof) -> UpstreamOperationLease?,
+        validateOperationLease: @escaping @Sendable (UpstreamOperationLease) -> Bool,
         applyHealthEffects: @escaping @Sendable ([UpstreamHealthManager.Effect]) -> Void = { _ in },
         testHooks: UpstreamSlotSchedulerTestHooks = .noop
     ) {
         self.logger = logger
         self.canUseUpstream = canUseUpstream
         self.selectUpstream = selectUpstream
+        self.operationLease = operationLease
+        self.validateOperationLease = validateOperationLease
         self.applyHealthEffects = applyHealthEffects
         self.testHooks = testHooks
         self.state = NIOLockedValueBox(
@@ -98,7 +107,7 @@ final class UpstreamSlotScheduler: Sendable {
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndex: Int? = nil,
-        starter: @escaping @Sendable (Int) -> Void,
+        starter: @escaping @Sendable (UpstreamOperationLease) -> Void,
         failUnavailable: @escaping @Sendable () -> Void,
         failCancelled: @escaping @Sendable () -> Void
     ) {
@@ -118,7 +127,7 @@ final class UpstreamSlotScheduler: Sendable {
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndices: [Int],
-        starter: @escaping @Sendable (Int) -> Void,
+        starter: @escaping @Sendable (UpstreamOperationLease) -> Void,
         failUnavailable: @escaping @Sendable () -> Void,
         failCancelled: @escaping @Sendable () -> Void
     ) {
@@ -330,18 +339,18 @@ final class UpstreamSlotScheduler: Sendable {
     private func dispatchQueuedRequestsIfPossible() {
         let dispatch = state.withLockedValue {
             state -> (
-                starts: [(PendingRequest, Int)],
+                starts: [(PendingRequest, UpstreamOperationLease)],
                 unavailable: [PendingRequest],
                 healthEffects: [UpstreamHealthManager.Effect]
             ) in
-            var ready: [(PendingRequest, Int)] = []
+            var ready: [(PendingRequest, UpstreamOperationLease)] = []
             var unavailable: [PendingRequest] = []
             var healthEffects: [UpstreamHealthManager.Effect] = []
 
             while state.pendingRequests.isEmpty == false {
                 let occupied = Set(state.activeLeaseIDsByUpstream.keys)
                 var chosenPendingIndex: Int?
-                var chosenUpstreamIndex: Int?
+                var chosenOperationLease: UpstreamOperationLease?
                 var unavailablePendingIndex: Int?
 
                 for (pendingIndex, request) in state.pendingRequests.enumerated() {
@@ -368,8 +377,10 @@ final class UpstreamSlotScheduler: Sendable {
                             guard evaluation.isUsable else {
                                 continue
                             }
+                            guard let proof = evaluation.proof,
+                                  let lease = operationLease(proof) else { continue }
                             chosenPendingIndex = pendingIndex
-                            chosenUpstreamIndex = preferredUpstreamIndex
+                            chosenOperationLease = lease
                             break
                         }
                         if chosenPendingIndex != nil {
@@ -384,14 +395,16 @@ final class UpstreamSlotScheduler: Sendable {
 
                     let selection = selectUpstream(occupied)
                     healthEffects.append(contentsOf: selection.effects)
-                    guard let selectedUpstreamIndex = selection.upstreamIndex else {
+                    guard let proof = selection.proof,
+                          let selectedLease = operationLease(proof) else {
                         break
                     }
+                    let selectedUpstreamIndex = selectedLease.upstreamIndex
                     guard state.activeLeaseIDsByUpstream[selectedUpstreamIndex] == nil else {
                         break
                     }
                     chosenPendingIndex = pendingIndex
-                    chosenUpstreamIndex = selectedUpstreamIndex
+                    chosenOperationLease = selectedLease
                     break
                 }
 
@@ -401,22 +414,22 @@ final class UpstreamSlotScheduler: Sendable {
                     continue
                 }
 
-                guard let chosenPendingIndex, let chosenUpstreamIndex else {
+                guard let chosenPendingIndex, let chosenOperationLease else {
                     break
                 }
 
                 let pendingRequest = state.pendingRequests.remove(at: chosenPendingIndex)
-                let upstreamIndex = chosenUpstreamIndex
+                let upstreamIndex = chosenOperationLease.upstreamIndex
                 state.activeLeaseIDsByUpstream[upstreamIndex] = pendingRequest.leaseID
                 state.reservationsByLeaseID[pendingRequest.leaseID] = Reservation(
                     request: pendingRequest,
-                    upstreamIndex: upstreamIndex
+                    operationLease: chosenOperationLease
                 )
                 if pendingRequest.descriptor.isTopLevelClientRequest {
                     state.activeTopLevelLeaseIDsBySession[pendingRequest.descriptor.sessionID] =
                         pendingRequest.leaseID
                 }
-                ready.append((pendingRequest, upstreamIndex))
+                ready.append((pendingRequest, chosenOperationLease))
             }
 
             return (ready, unavailable, healthEffects)
@@ -439,7 +452,8 @@ final class UpstreamSlotScheduler: Sendable {
             }
         }
 
-        for (request, upstreamIndex) in dispatch.starts {
+        for (request, operationLease) in dispatch.starts {
+            let upstreamIndex = operationLease.upstreamIndex
             logger.debug(
                 "Dispatching queued request to upstream slot",
                 metadata: [
@@ -451,7 +465,7 @@ final class UpstreamSlotScheduler: Sendable {
             request.eventLoop.execute {
                 let shouldStart = self.state.withLockedValue { state -> Bool in
                     guard var reservation = state.reservationsByLeaseID[request.leaseID],
-                        reservation.upstreamIndex == upstreamIndex
+                        reservation.operationLease.proof == operationLease.proof
                     else {
                         return false
                     }
@@ -460,7 +474,15 @@ final class UpstreamSlotScheduler: Sendable {
                     return true
                 }
                 guard shouldStart else { return }
-                request.start(upstreamIndex)
+                guard self.validateOperationLease(operationLease) else {
+                    self.releaseUpstreamSlot(
+                        upstreamIndex: upstreamIndex,
+                        leaseID: request.leaseID
+                    )
+                    request.failUnavailable()
+                    return
+                }
+                request.start(operationLease)
             }
         }
     }

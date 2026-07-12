@@ -169,7 +169,7 @@ struct ToolSurfaceTests {
         #expect((issues[1]["line"] as? NSNumber)?.intValue == 0)
     }
 
-    @Test func toolSurfaceRewritesToolsListAndExtractsCanonicalCatalog() throws {
+    @Test func toolSurfaceRewritesToolsList() throws {
         var config = makeToolSurfaceConfig()
         config.disabledToolNames = ["RunAllTests"]
         let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: config)
@@ -195,16 +195,12 @@ struct ToolSurfaceTests {
             options: []
         )
         let rewritten = surface.rewriteForwardedResponse(
-            method: nil,
+            method: "tools/list",
             toolName: nil,
-            originalID: nil,
-            responseMethodsByIDKey: ["1": "tools/list"],
-            normalizationToolsListResponseIDKey: "1",
-            cacheableToolsListResponseIDKey: "1",
+            originalID: JSONRPC.ID(any: NSNumber(value: 1)),
+            cachesToolsListResult: true,
             upstreamData: upstreamData
         )
-
-        #expect(rewritten.cacheableToolsListResult != nil)
 
         let payload = try #require(
             JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
@@ -239,16 +235,12 @@ struct ToolSurfaceTests {
             options: []
         )
         let rewritten = surface.rewriteForwardedResponse(
-            method: nil,
+            method: "tools/list",
             toolName: nil,
-            originalID: nil,
-            responseMethodsByIDKey: ["1": "tools/list"],
-            normalizationToolsListResponseIDKey: "1",
-            cacheableToolsListResponseIDKey: "1",
+            originalID: JSONRPC.ID(any: NSNumber(value: 1)),
+            cachesToolsListResult: true,
             upstreamData: upstreamData
         )
-
-        #expect(rewritten.cacheableToolsListResult != nil)
 
         let payload = try #require(
             JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
@@ -256,132 +248,6 @@ struct ToolSurfaceTests {
         let result = try #require(payload["result"] as? [String: Any])
         let tools = try #require(result["tools"] as? [[String: Any]])
         #expect(tools.isEmpty)
-    }
-
-    @Test func toolSurfaceNormalizesMixedBatchUsingCatalogFromSamePayload() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
-        let surface = ToolSurface(
-            config: makeToolSurfaceConfig(),
-            sessionManager: sessionManager
-        )
-
-        let upstreamData = try JSONSerialization.data(
-            withJSONObject: [
-                [
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": [
-                        "tools": [
-                            [
-                                "name": "DocumentationSearch",
-                                "outputSchema": [
-                                    "type": "object",
-                                ],
-                            ],
-                        ],
-                    ],
-                ],
-                [
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "result": [
-                        "content": [
-                            [
-                                "type": "text",
-                                "text": "{\"answer\":\"ok\"}",
-                            ],
-                        ],
-                    ],
-                ],
-            ],
-            options: []
-        )
-        let rewritten = surface.rewriteForwardedResponse(
-            method: nil,
-            toolName: nil,
-            originalID: nil,
-            responseMethodsByIDKey: [
-                "1": "tools/list",
-                "2": "tools/call",
-            ],
-            responseToolNamesByIDKey: [
-                "2": "DocumentationSearch",
-            ],
-            normalizationToolsListResponseIDKey: "1",
-            upstreamData: upstreamData
-        )
-
-        #expect(rewritten.cacheableToolsListResult == nil)
-
-        let payload = try #require(
-            JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [[String: Any]]
-        )
-        let callResult = try #require(payload.last?["result"] as? [String: Any])
-        let structuredContent = try #require(callResult["structuredContent"] as? [String: Any])
-        #expect(structuredContent["answer"] as? String == "ok")
-    }
-
-    @Test func toolSurfaceSeedsCanonicalCatalogFromFirstToolsListInBatch() throws {
-        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
-        let surface = ToolSurface(
-            config: makeToolSurfaceConfig(),
-            sessionManager: sessionManager
-        )
-
-        let upstreamData = try JSONSerialization.data(
-            withJSONObject: [
-                [
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": [
-                        "tools": [
-                            [
-                                "name": "DocumentationSearch",
-                                "outputSchema": [
-                                    "type": "object",
-                                ],
-                            ],
-                        ],
-                    ],
-                ],
-                [
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "result": [
-                        "tools": [
-                            [
-                                "name": "OtherTool",
-                            ],
-                        ],
-                    ],
-                ],
-            ],
-            options: []
-        )
-        let rewritten = surface.rewriteForwardedResponse(
-            method: nil,
-            toolName: nil,
-            originalID: nil,
-            responseMethodsByIDKey: [
-                "1": "tools/list",
-                "2": "tools/list",
-            ],
-            normalizationToolsListResponseIDKey: "1",
-            cacheableToolsListResponseIDKey: "1",
-            upstreamData: upstreamData
-        )
-
-        let result = try #require(rewritten.cacheableToolsListResult)
-        guard case .object(let resultObject) = result,
-            case .array(let tools) = resultObject["tools"],
-            case .object(let firstTool) = try #require(tools.first),
-            case .string(let name) = firstTool["name"]
-        else {
-            Issue.record("expected first tools/list result to seed canonical catalog")
-            return
-        }
-
-        #expect(name == "DocumentationSearch")
     }
 
     @Test func toolSurfaceNormalizesUsingSourceProcessCatalog() throws {
@@ -561,26 +427,48 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
 
     func hasDocumentationSearchService() -> Bool { false }
 
-    func chooseUpstreamIndex() -> Int? { nil }
+    func chooseUpstreamOperationLease() -> UpstreamOperationLease? { nil }
 
     func enqueueOnUpstreamSlot<Output>(
         leaseID: LeaseManager.ID,
         descriptor: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndices: [Int]?,
-        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+        starter: @escaping @Sendable (UpstreamOperationLease) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> where Output : Sendable {
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex: Int) -> Int64 {
+    func assignUpstreamID(
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        operationLease: UpstreamOperationLease
+    ) -> Int64? {
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
-    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
-    func onRequestSucceeded(sessionID: String, requestIDKey: String, upstreamIndex: Int) {}
-    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool) {}
+    func removeUpstreamIDMapping(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {}
+    func onRequestTimeout(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {}
+    func onRequestSucceeded(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {}
+    func sendUpstream(
+        _ data: Data,
+        operationLease: UpstreamOperationLease,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission?,
+        onRejected: @escaping @Sendable () -> Void
+    ) -> Bool { false }
     func debugSnapshot() -> ProxyDebug.Snapshot { fatalError("unused in ToolSurfaceTests") }
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         fatalError("unused in ToolSurfaceTests")
@@ -610,13 +498,13 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int
+        operationLease: UpstreamOperationLease
     ) {}
 
     func abandonRequestLease(
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int?
+        operationLease: UpstreamOperationLease?
     ) {}
 }

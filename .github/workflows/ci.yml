@@ -22,9 +22,21 @@ concurrency:
 
 jobs:
   package-tests:
-    name: Package Tests (macOS)
+    name: Package Tests (macOS, ${{ matrix.shard }})
     runs-on: macos-26
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - RuntimeCoordinatorProcessRoutingTests
+          - RuntimeCoordinatorInitializationTests
+          - RuntimeCoordinatorRecoveryTests
+          - RuntimeCoordinatorCatalogTests
+          - RuntimeCoordinatorWindowCatalogTests
+          - RuntimeCoordinatorWindowRoutingTests
+          - RuntimeCoordinatorSchedulingTests
+          - remaining
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -41,11 +53,29 @@ jobs:
 
       - name: Run package tests
         run: |
+          case "${{ matrix.shard }}" in
+            remaining)
+              ./scripts/ci-test-watchdog.sh swift test \
+                --no-parallel \
+                --filter 'ControlPlaneAuthorityTests|JSONRPCResponseRouterTests|ManagedUpstreamSlotTests|ProxyUpstreamRequestRuntimeTests|ToolCatalogStartupLogFormatterTests|UpstreamReadinessTests' \
+                -Xswiftc -strict-concurrency=minimal
+              ./scripts/ci-test-watchdog.sh swift test \
+                --no-parallel \
+                --skip ProxyRuntimeCoordinatorTests \
+                -Xswiftc -strict-concurrency=minimal
+              exit 0
+              ;;
+            *)
+              filter='${{ matrix.shard }}'
+              ;;
+          esac
           ./scripts/ci-test-watchdog.sh swift test \
             --no-parallel \
+            --filter "${filter}" \
             -Xswiftc -strict-concurrency=minimal
 
       - name: Run process tests
+        if: matrix.shard == 'remaining'
         run: |
           XCODE_MCP_RUN_PROCESS_TESTS=1 ./scripts/ci-test-watchdog.sh swift test \
             --no-parallel \

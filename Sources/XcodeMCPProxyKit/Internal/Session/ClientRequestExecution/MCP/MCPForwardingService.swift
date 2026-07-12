@@ -9,6 +9,7 @@ struct MCPForwardingService: Sendable {
     enum ResponseResolution: Sendable {
         case success(Data)
         case timeout
+        case upstreamUnavailable
         case invalidUpstreamResponse
     }
 
@@ -28,13 +29,15 @@ struct MCPForwardingService: Sendable {
         bodyData: Data,
         parsedRequestJSON: Any,
         sessionID: String,
-        upstreamIndexOverride: Int? = nil
+        operationLeaseOverride: UpstreamOperationLease? = nil,
+        admission: RouteForwardingAdmission? = nil
     ) throws -> PreparedRequest? {
         try upstreamRuntime.prepareRequest(
             bodyData: bodyData,
             parsedRequestJSON: parsedRequestJSON,
             sessionID: sessionID,
-            upstreamIndexOverride: upstreamIndexOverride
+            operationLeaseOverride: operationLeaseOverride,
+            admission: admission
         )
     }
 
@@ -60,7 +63,7 @@ struct MCPForwardingService: Sendable {
             requestTimeout: requestTimeout,
             leaseID: leaseID,
             onRegistered: { registration in
-                cancellationHandle?.activate(upstreamIndex: registration.upstreamIndex)
+                cancellationHandle?.activate(operationLease: registration.operationLease)
                 cancellationHandle?.bindRouterPendingToken(registration.routerPendingToken)
             },
             onTimeout: onTimeout
@@ -84,21 +87,11 @@ struct MCPForwardingService: Sendable {
                 method: started.transform.method,
                 toolName: started.transform.toolName,
                 originalID: started.transform.originalID,
-                responseMethodsByIDKey: started.transform.responseMethodsByIDKey,
-                responseToolNamesByIDKey: started.transform.responseToolNamesByIDKey,
-                responseOriginalIDsByKey: started.transform.responseOriginalIDsByKey,
-                normalizationToolsListResponseIDKey: started.transform.normalizationToolsListResponseIDKey,
-                cacheableToolsListResponseIDKey: started.transform.cacheableToolsListResponseIDKey,
+                cachesToolsListResult: started.transform.isCacheableToolsListRequest,
                 upstreamIndex: started.upstreamIndex,
                 upstreamData: data
             )
             let responseData = rewritten.responseData
-            if let result = rewritten.cacheableToolsListResult {
-                sessionManager.setCachedToolsListResult(
-                    result,
-                    sourceUpstream: started.upstreamIndex
-                )
-            }
             if accountSuccess, toolSurface.shouldNotifyUpstreamSuccess(for: responseData) {
                 upstreamRuntime.recordRequestSucceeded(
                     sessionID: sessionID,
@@ -107,12 +100,21 @@ struct MCPForwardingService: Sendable {
             }
             return .success(responseData)
 
-        case .failure:
+        case .failure(let error):
+            let staleUpstreamTopology: Bool
+            if case ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology = error {
+                staleUpstreamTopology = true
+            } else {
+                staleUpstreamTopology = false
+            }
             upstreamRuntime.recordRequestTimedOut(
                 sessionID: sessionID,
                 started: started,
-                accountTimeout: accountTimeout
+                accountTimeout: accountTimeout && staleUpstreamTopology == false
             )
+            if staleUpstreamTopology {
+                return .upstreamUnavailable
+            }
             return .timeout
         }
     }
@@ -171,8 +173,10 @@ struct MCPForwardingService: Sendable {
         }
 
         let preferredUpstreamIndices: [Int]?
+        let admission: RouteForwardingAdmission?
         if let upstreamIndexOverride {
             preferredUpstreamIndices = [upstreamIndexOverride]
+            admission = nil
         } else {
             switch await sessionManager.toolRoutingDecision(
                 for: requestObject,
@@ -180,8 +184,13 @@ struct MCPForwardingService: Sendable {
             ) {
             case .forward(let resolvedUpstreamIndex):
                 preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
+                admission = nil
             case .forwardAny(let resolvedUpstreamIndices):
                 preferredUpstreamIndices = resolvedUpstreamIndices
+                admission = nil
+            case .forwardAdmitted(let resolvedUpstreamIndices, let resolvedAdmission):
+                preferredUpstreamIndices = resolvedUpstreamIndices
+                admission = resolvedAdmission
             case .localXcodeListWindows:
                 return .unavailable
             case .reject:
@@ -192,7 +201,6 @@ struct MCPForwardingService: Sendable {
         let descriptor = SessionRequestPipeline.Descriptor(
             sessionID: sessionID,
             label: "tools/call:\(name)",
-            isBatch: false,
             expectsResponse: true,
             isTopLevelClientRequest: false
         )
@@ -211,8 +219,8 @@ struct MCPForwardingService: Sendable {
                 descriptor: descriptor,
                 on: eventLoop,
                 preferredUpstreamIndices: preferredUpstreamIndices
-            ) { selectedUpstreamIndex in
-                internalCancellationHandle.activate(upstreamIndex: selectedUpstreamIndex)
+            ) { selectedOperationLease in
+                internalCancellationHandle.activate(operationLease: selectedOperationLease)
                 let parsedRequestJSON = parsedRequestJSONValue.foundationObject
                 let prepared: PreparedRequest
                 do {
@@ -220,13 +228,14 @@ struct MCPForwardingService: Sendable {
                         bodyData: bodyData,
                         parsedRequestJSON: parsedRequestJSON,
                         sessionID: sessionID,
-                        upstreamIndexOverride: selectedUpstreamIndex
+                        operationLeaseOverride: selectedOperationLease,
+                        admission: admission
                     ) else {
                         return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                     }
                     prepared = candidate
                     internalCancellationHandle.bindRequestIDKeys(
-                        prepared.transform.responseIDs.map(\.key)
+                        prepared.transform.responseID.map { [$0.key] } ?? []
                     )
                     if let cancellationHandle,
                         cancellationHandle.bindChildHandle(internalCancellationHandle) == false
@@ -234,6 +243,8 @@ struct MCPForwardingService: Sendable {
                         internalCancellationHandle.cancel(using: sessionManager)
                         return eventLoop.makeFailedFuture(CancellationError())
                     }
+                } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
+                    return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {
                     return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                 }
@@ -251,11 +262,13 @@ struct MCPForwardingService: Sendable {
                             self.sessionManager.handleRequestLeaseTimeout(
                                 leaseID,
                                 sessionID: sessionID,
-                                requestIDKeys: prepared.transform.responseIDs.map(\.key),
-                                upstreamIndex: prepared.upstreamIndex
+                                requestIDKeys: prepared.transform.responseID.map { [$0.key] } ?? [],
+                                operationLease: prepared.operationLease
                             )
                         }
                     )
+                } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
+                    return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {
                     return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                 }
@@ -281,6 +294,7 @@ struct MCPForwardingService: Sendable {
             internalCancellationHandle.cancel(using: sessionManager)
             return .cancelled
         } catch {
+            internalCancellationHandle.markCompleted()
             sessionManager.failRequestLease(
                 leaseID,
                 terminalState: .failed,
@@ -313,6 +327,14 @@ struct MCPForwardingService: Sendable {
                 reason: .timedOut
             )
             return .timeout
+        case .upstreamUnavailable:
+            internalCancellationHandle.markCompleted()
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .upstreamUnavailable
+            )
+            return .unavailable
         case .invalidUpstreamResponse:
             internalCancellationHandle.markCompleted()
             sessionManager.failRequestLease(

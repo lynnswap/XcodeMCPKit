@@ -20,6 +20,14 @@ private let embeddedCompletionExecutors = NIOLockedValueBox<
     [ObjectIdentifier: EmbeddedEventLoopCompletionExecutor]
 >([:])
 
+private actor HTTPTestUpstreamSlot: UpstreamSlotControlling {
+    nonisolated let events: AsyncStream<Upstream.Event> = AsyncStream { _ in }
+
+    func start() async {}
+    func stop() async {}
+    func send(_ data: Data) async -> Upstream.SendResult { .accepted }
+}
+
 private final class EmbeddedEventLoopCompletionExecutor: @unchecked Sendable {
     private let lock = NSLock()
     private var operations: [() -> Void] = []
@@ -127,6 +135,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
 
         var sessions: [String: SessionContext] = [:]
+        var initializedSessionIDs: Set<String> = []
         var sessionProtocolVersions: [String: String] = [:]
         var nextUpstreamID: Int64 = 1
         var assignUpstreamIDCount = 0
@@ -150,6 +159,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var toolRoutingStarted: TestSignal?
         var toolRoutingGate: AsyncGate?
         var requeuedLeaseCount = 0
+        var rejectNextUpstreamSend = false
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
     }
 
@@ -167,6 +177,9 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ requestData: Data) async throws -> Data)?
     private let cancelAfterStartingEnqueueRequest: Bool
     private let requestLeaseRegistry = LeaseManager()
+    private let upstreamTopology = UpstreamTopologyAuthority(
+        (0..<64).map { _ in HTTPTestUpstreamSlot() as any UpstreamSlotControlling }
+    )
 
     init(
         config: ProxyConfig,
@@ -220,6 +233,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             }
             let context = SessionContext(id: id, config: config)
             state.sessions[id] = context
+            state.initializedSessionIDs.insert(id)
             state.sessionProtocolVersions[id] = MCP.ProtocolVersion.current
             return context
         }
@@ -228,11 +242,23 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func uninitializedSession(id: String) -> SessionContext {
         state.withLockedValue { state in
             if let existing = state.sessions[id] {
+                state.initializedSessionIDs.remove(id)
                 state.sessionProtocolVersions.removeValue(forKey: id)
                 return existing
             }
             let context = SessionContext(id: id, config: config)
             state.sessions[id] = context
+            state.initializedSessionIDs.remove(id)
+            state.sessionProtocolVersions.removeValue(forKey: id)
+            return context
+        }
+    }
+
+    func initializedSessionWithoutProtocolVersion(id: String) -> SessionContext {
+        state.withLockedValue { state in
+            let context = state.sessions[id] ?? SessionContext(id: id, config: config)
+            state.sessions[id] = context
+            state.initializedSessionIDs.insert(id)
             state.sessionProtocolVersions.removeValue(forKey: id)
             return context
         }
@@ -244,6 +270,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
+    func isSessionInitialized(id: String) -> Bool {
+        state.withLockedValue { state in
+            state.initializedSessionIDs.contains(id)
+        }
+    }
+
     func negotiatedProtocolVersion(id: String) -> String? {
         state.withLockedValue { state in
             state.sessionProtocolVersions[id]
@@ -252,6 +284,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func removeSession(id: String) {
         let context = state.withLockedValue { state in
+            state.initializedSessionIDs.remove(id)
             state.sessionProtocolVersions.removeValue(forKey: id)
             return state.sessions.removeValue(forKey: id)
         }
@@ -261,6 +294,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func debugReset() {
         state.withLockedValue { state in
             state.sessions.removeAll()
+            state.initializedSessionIDs.removeAll()
             state.sessionProtocolVersions.removeAll()
             state.cachedToolsList = nil
             state.pendingResponses.removeAll()
@@ -306,6 +340,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ = session(id: sessionID)
         state.withLockedValue { state in
             state.initialized = true
+            state.initializedSessionIDs.insert(sessionID)
             state.sessionProtocolVersions[sessionID] = negotiatedProtocolVersion
         }
         _ = chooseUpstreamIndex()
@@ -394,8 +429,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     }
 
 
-    func chooseUpstreamIndex() -> Int? {
-        state.withLockedValue { state in
+    func chooseUpstreamOperationLease() -> UpstreamOperationLease? {
+        let upstreamIndex = state.withLockedValue { state in
             state.chooseUpstreamCalls.append(
                 ChooseUpstreamCall(sessionID: nil)
             )
@@ -404,6 +439,13 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             }
             return state.availableUpstreamIndex
         }
+        return upstreamIndex.flatMap {
+            upstreamTopology.operationLease(for: UpstreamSlotID(rawValue: $0))
+        }
+    }
+
+    func chooseUpstreamIndex() -> Int? {
+        chooseUpstreamOperationLease()?.upstreamIndex
     }
 
     func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
@@ -444,7 +486,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         descriptor _: SessionRequestPipeline.Descriptor,
         on eventLoop: EventLoop,
         preferredUpstreamIndices: [Int]?,
-        starter: @escaping @Sendable (Int) -> EventLoopFuture<Output>
+        starter: @escaping @Sendable (UpstreamOperationLease) -> EventLoopFuture<Output>
     ) -> EventLoopFuture<Output> {
         let upstreamIndex: Int?
         if let preferredUpstreamIndices, preferredUpstreamIndices.isEmpty == false {
@@ -455,21 +497,32 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
                 return preferredUpstreamIndices.first { usable.contains($0) }
             }
         } else {
-            upstreamIndex = chooseUpstreamIndex()
+            upstreamIndex = chooseUpstreamOperationLease()?.upstreamIndex
         }
         guard let upstreamIndex else {
             return eventLoop.makeFailedFuture(
                 UpstreamSlotScheduler.AcquisitionError.unavailable
             )
         }
+        guard let operationLease = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        ) else {
+            return eventLoop.makeFailedFuture(
+                UpstreamSlotScheduler.AcquisitionError.unavailable
+            )
+        }
         if cancelAfterStartingEnqueueRequest {
-            _ = starter(upstreamIndex)
+            _ = starter(operationLease)
             return eventLoop.makeFailedFuture(CancellationError())
         }
-        return starter(upstreamIndex)
+        return starter(operationLease)
     }
 
-    func assignUpstreamID(sessionID: String, originalID: JSONRPC.ID, upstreamIndex _: Int) -> Int64 {
+    func assignUpstreamID(
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        operationLease _: UpstreamOperationLease
+    ) -> Int64? {
         state.withLockedValue { state in
             state.assignUpstreamIDCount += 1
             let id = state.nextUpstreamID
@@ -480,7 +533,11 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
-    func removeUpstreamIDMapping(sessionID: String, requestIDKey: String, upstreamIndex _: Int) {
+    func removeUpstreamIDMapping(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease _: UpstreamOperationLease
+    ) {
         state.withLockedValue { state in
             let removed = state.upstreamIDMapping.first { _, mapping in
                 mapping.sessionID == sessionID && mapping.originalID.key == requestIDKey
@@ -491,39 +548,61 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
     }
 
-    func onRequestTimeout(sessionID: String, requestIDKey: String, upstreamIndex: Int) {
+    func onRequestTimeout(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) {
         state.withLockedValue { state in
             state.requestTimeoutNotifications += 1
         }
         removeUpstreamIDMapping(
-            sessionID: sessionID, requestIDKey: requestIDKey, upstreamIndex: upstreamIndex)
+            sessionID: sessionID,
+            requestIDKey: requestIDKey,
+            operationLease: operationLease
+        )
     }
 
-    func onRequestSucceeded(sessionID _: String, requestIDKey _: String, upstreamIndex _: Int) {
+    func onRequestSucceeded(
+        sessionID _: String,
+        requestIDKey _: String,
+        operationLease _: UpstreamOperationLease
+    ) {
         state.withLockedValue { state in
             state.requestSuccessNotifications += 1
         }
     }
 
-    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool) {
+    func sendUpstream(
+        _ data: Data,
+        operationLease: UpstreamOperationLease,
+        ensureRunning: Bool,
+        admission _: RouteForwardingAdmission?,
+        onRejected: @escaping @Sendable () -> Void
+    ) -> Bool {
+        let upstreamIndex = operationLease.upstreamIndex
         _ = ensureRunning
-        let sentCount = state.withLockedValue { state in
+        let sendUpdate = state.withLockedValue { state -> (accepted: Bool, count: Int) in
+            if state.rejectNextUpstreamSend {
+                state.rejectNextUpstreamSend = false
+                return (false, state.upstreamSendCount)
+            }
             state.upstreamSendCount += 1
             state.sentUpstreamPayloads.append(data)
-            return state.upstreamSendCount
+            return (true, state.upstreamSendCount)
         }
-        sentUpstreamCountRecords.append(sentCount)
+        guard sendUpdate.accepted else {
+            onRejected()
+            return false
+        }
+        sentUpstreamCountRecords.append(sendUpdate.count)
 
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return
+            return true
         }
-        if let object = json as? [String: Any] {
-            handleSingleUpstreamRequest(object, upstreamIndex: upstreamIndex)
-            return
-        }
-        if let array = json as? [Any] {
-            handleBatchUpstreamRequest(array, upstreamIndex: upstreamIndex)
-        }
+        guard let object = json as? [String: Any] else { return true }
+        handleSingleUpstreamRequest(object, upstreamIndex: upstreamIndex)
+        return true
     }
 
     func forwardServerRequestResponse(
@@ -620,69 +699,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         } else {
             deliverResponse()
         }
-    }
-
-    private func handleBatchUpstreamRequest(_ array: [Any], upstreamIndex: Int) {
-        var sessionID: String?
-        var responseObjects: [Any] = []
-
-        for item in array {
-            guard let object = item as? [String: Any],
-                let method = object["method"] as? String
-            else {
-                continue
-            }
-            let toolName = ((object["params"] as? [String: Any])?["name"] as? String)
-            state.withLockedValue { state in
-                state.sentRequests.append(
-                    SentRequest(
-                        method: method,
-                        toolName: toolName,
-                        upstreamIndex: upstreamIndex
-                    )
-                )
-            }
-
-            guard let upstreamIDValue = object["id"] else {
-                continue
-            }
-            let upstreamID =
-                (upstreamIDValue as? NSNumber)?.int64Value ?? (upstreamIDValue as? Int64)
-            guard let upstreamID,
-                let mapping = state.withLockedValue({ $0.upstreamIDMapping[upstreamID] })
-            else {
-                continue
-            }
-            sessionID = mapping.sessionID
-
-            let planned = responsePlan(
-                method: method,
-                toolName: toolName,
-                originalID: mapping.originalID
-            )
-            guard planned.deliverManually == false,
-                let responseObject = try? JSONSerialization.jsonObject(
-                    with: planned.data,
-                    options: []
-                )
-            else {
-                return
-            }
-            responseObjects.append(responseObject)
-        }
-
-        guard let sessionID,
-            responseObjects.isEmpty == false,
-            let responseData = try? JSONSerialization.data(
-                withJSONObject: responseObjects,
-                options: []
-            )
-        else {
-            return
-        }
-
-        let session = self.session(id: sessionID)
-        session.router.handleIncoming(responseData)
     }
 
     private func responsePlan(
@@ -806,20 +822,20 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int
+        operationLease: UpstreamOperationLease
     ) {
         _ = leaseID
         if let first = requestIDKeys.first {
             onRequestTimeout(
                 sessionID: sessionID,
                 requestIDKey: first,
-                upstreamIndex: upstreamIndex
+                operationLease: operationLease
             )
             for requestIDKey in requestIDKeys.dropFirst() {
                 removeUpstreamIDMapping(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    operationLease: operationLease
                 )
             }
         }
@@ -830,14 +846,14 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        upstreamIndex: Int?
+        operationLease: UpstreamOperationLease?
     ) {
-        if let upstreamIndex {
+        if let operationLease {
             for requestIDKey in requestIDKeys {
                 removeUpstreamIDMapping(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    upstreamIndex: upstreamIndex
+                    operationLease: operationLease
                 )
             }
         }
@@ -940,6 +956,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func mappedUpstreamRequestCount() -> Int {
         state.withLockedValue { $0.upstreamIDMapping.count }
+    }
+
+    func rejectNextUpstreamSend() {
+        state.withLockedValue { $0.rejectNextUpstreamSend = true }
     }
 
     func setAvailableUpstreamIndex(_ value: Int?) {

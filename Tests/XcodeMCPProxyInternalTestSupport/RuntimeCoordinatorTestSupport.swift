@@ -8,48 +8,333 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 import XcodeMCPProxyTestSupport
 
+extension UpstreamHealthManager {
+    func markRequestTimedOut(
+        upstreamIndex: Int,
+        nowUptimeNs: UInt64
+    ) -> (shouldClearPins: Bool, timeoutCount: Int) {
+        guard let proof = topologyProof(for: upstreamIndex) else { return (false, 0) }
+        return markRequestTimedOut(proof, nowUptimeNs: nowUptimeNs)
+    }
+
+    func beginWarmInitialize(upstreamIndex: Int) -> Bool {
+        claimWarmInitialize(upstreamIndex: upstreamIndex) != nil
+    }
+
+    func markInitInFlight(upstreamIndex: Int, upstreamID: Int64) {
+        guard let claim = claimWarmInitialize(upstreamIndex: upstreamIndex) else { return }
+        guard beginInitializeSend(claim) else { return }
+        _ = setWarmInitializeUpstreamID(upstreamID, for: claim)
+    }
+
+    func clearUpstreamState(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64? = nil
+    ) -> (
+        timeout: RuntimeScheduledTimeout?,
+        initUpstreamID: Int64?,
+        didReceiveInitializeResponse: Bool,
+        didSendInitialized: Bool
+    )? {
+        guard let proof = topologyProof(for: upstreamIndex) else { return nil }
+        return clearUpstreamState(proof, expectedUpstreamID: expectedUpstreamID)
+    }
+
+    func markInitialized(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64? = nil
+    ) -> UpstreamHealthManager.MarkInitializedTransition? {
+        guard let proof = topologyProof(for: upstreamIndex) else { return nil }
+        return markInitialized(proof, expectedUpstreamID: expectedUpstreamID)
+    }
+}
+
 extension RuntimeCoordinator {
-    /// Test-only synchronous teardown for defer blocks; production code
-    /// awaits shutdown() directly.
-    func shutdownAndWait() {
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) { [self] in
-            await shutdown()
-            semaphore.signal()
+    func operationLeaseForTest(upstreamIndex: Int) -> UpstreamOperationLease {
+        guard let lease = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        ) else {
+            preconditionFailure("missing test upstream lease \(upstreamIndex)")
         }
-        waitForTestSemaphore(
-            semaphore,
-            description: "timed out waiting for RuntimeCoordinator.shutdown()"
+        return lease
+    }
+
+    func routeUpstreamMessage(_ data: Data, upstreamIndex: Int) {
+        routeUpstreamMessage(
+            data,
+            upstreamIndex: upstreamIndex,
+            proof: operationLeaseForTest(upstreamIndex: upstreamIndex).proof
         )
     }
 
-    func drainRuntimeTasksAndWaitForTesting() {
-        let drain = runtimeTasks.drainCurrentTasks()
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached(priority: .userInitiated) {
-            await drain.wait()
-            semaphore.signal()
+    func handleUpstreamExit(_ status: Int32, upstreamIndex: Int) {
+        handleUpstreamExit(
+            status,
+            upstreamIndex: upstreamIndex,
+            proof: operationLeaseForTest(upstreamIndex: upstreamIndex).proof
+        )
+    }
+
+    func handleUpstreamProtocolViolation(
+        _ protocolViolation: StdioFramer.ProtocolViolation,
+        upstreamIndex: Int
+    ) {
+        handleUpstreamProtocolViolation(
+            protocolViolation,
+            upstreamIndex: upstreamIndex,
+            proof: operationLeaseForTest(upstreamIndex: upstreamIndex).proof
+        )
+    }
+
+    @discardableResult
+    func clearUpstreamState(upstreamIndex: Int, expectedUpstreamID: Int64? = nil) -> Bool {
+        clearUpstreamState(
+            proof: operationLeaseForTest(upstreamIndex: upstreamIndex).proof,
+            expectedUpstreamID: expectedUpstreamID
+        )
+    }
+
+    func assignUpstreamID(
+        sessionID: String,
+        originalID: JSONRPC.ID,
+        upstreamIndex: Int
+    ) -> Int64 {
+        guard let id = assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex)
+        ) else {
+            preconditionFailure("failed to assign test upstream id")
         }
-        waitForTestSemaphore(
-            semaphore,
-            description: "timed out waiting for RuntimeCoordinator runtime task drain"
+        return id
+    }
+
+    func sendUpstream(_ data: Data, upstreamIndex: Int, ensureRunning: Bool = false) {
+        _ = sendUpstream(
+            data,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex),
+            ensureRunning: ensureRunning,
+            admission: nil,
+            onRejected: {}
+        )
+    }
+
+    func sendUpstream(
+        _ data: Data,
+        upstreamIndex: Int,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission
+    ) {
+        _ = sendUpstream(
+            data,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex),
+            ensureRunning: ensureRunning,
+            admission: admission,
+            onRejected: {}
+        )
+    }
+
+    func markToolsListRefreshFailed(
+        upstreamIndex: Int,
+        nowUptimeNs: UInt64,
+        reason: String
+    ) {
+        markToolsListRefreshFailed(
+            operationLeaseForTest(upstreamIndex: upstreamIndex).proof,
+            nowUptimeNs: nowUptimeNs,
+            reason: reason
+        )
+    }
+
+    func onRequestTimeout(
+        sessionID: String,
+        requestIDKey: String,
+        upstreamIndex: Int
+    ) {
+        onRequestTimeout(
+            sessionID: sessionID,
+            requestIDKey: requestIDKey,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex)
+        )
+    }
+
+    func handleRequestLeaseTimeout(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int
+    ) {
+        handleRequestLeaseTimeout(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex)
+        )
+    }
+
+    func abandonRequestLease(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        upstreamIndex: Int?
+    ) {
+        abandonRequestLease(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: upstreamIndex.map(operationLeaseForTest(upstreamIndex:))
+        )
+    }
+
+    func handleInitializedNotificationSendOverload(
+        upstreamIndex: Int,
+        expectedUpstreamID: Int64,
+        treatsAsPrimary: Bool = false
+    ) {
+        guard clearUpstreamState(
+            upstreamIndex: upstreamIndex,
+            expectedUpstreamID: expectedUpstreamID
+        ) else { return }
+        recoverFromInitializedNotificationFailure(
+            upstreamIndex: upstreamIndex,
+            treatsAsPrimary: treatsAsPrimary
+        )
+    }
+
+    func markUpstreamInitialized(upstreamIndex: Int) {
+        guard let proof = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        )?.proof,
+              let result = upstreamHealthManager.markInitialized(proof) else { return }
+        result.timeout?.cancel()
+        markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
+        markProcessRouteActivationInitialized(proof: proof)
+        testHooks.upstreamInitialized?(upstreamIndex)
+        noteUpstreamInitializationSucceeded()
+    }
+
+    /// Test-only `defer` hook that requires an `AsyncTestCleanupTrait` scope.
+    func shutdownAndWait() {
+        precondition(
+            registerAsyncTestCleanup(
+                description: "RuntimeCoordinator shutdown failed",
+                operation: { [self] in await shutdown() }
+            ),
+            "shutdownAndWait requires an AsyncTestCleanupTrait scope"
         )
     }
 
     func drainRuntimeTasksForTesting() async {
         await runtimeTasks.drainCurrentTasks().wait()
     }
+
+    func seedCanonicalToolsCatalog(_ result: JSONValue, sourceUpstream: Int) {
+        do {
+            let source = UpstreamSlotID(rawValue: sourceUpstream)
+            let lease: CatalogLease
+            if let route = processControlPlane.route(forUpstreamIndex: sourceUpstream) {
+                let slotIDs = Set(xcodeProcessRoutes.flatMap(\.upstreamIndices).map {
+                    UpstreamSlotID(rawValue: $0)
+                })
+                applyProcessControlPlaneTransition(processControlPlane.updateUsability(
+                    .init(
+                        snapshotUsableUpstreamIDs: slotIDs,
+                        recoveryAwareUsableUpstreamIDs: slotIDs
+                    ),
+                    nowUptimeNs: nowUptimeNanoseconds()
+                ))
+                let preferredProof = try #require(
+                    upstreamTopology.operationLease(for: source)?.proof
+                )
+                let started = try #require(processControlPlane.beginCatalogAttempt(
+                    routeID: route.id,
+                    preferredUpstreamProof: preferredProof,
+                    nowUptimeNanoseconds: nowUptimeNanoseconds()
+                ))
+                lease = started.0
+                applyProcessControlPlaneTransition(started.1)
+            } else {
+                let started = processControlPlane.beginUnboundCatalogAttempt(
+                    preferredUpstreamProof: try #require(
+                        upstreamTopology.operationLease(for: source)?.proof
+                    ),
+                    nowUptimeNanoseconds: nowUptimeNanoseconds()
+                )
+                lease = started.0
+                applyProcessControlPlaneTransition(started.1)
+            }
+            let sourceProof = try #require(
+                upstreamTopology.operationLease(for: source)?.proof
+            )
+            applyCatalogCommit(processControlPlane.completeCatalog(
+                .usable(result, source: sourceProof),
+                lease: lease,
+                nowUptimeNanoseconds: nowUptimeNanoseconds()
+            ))
+        } catch {
+            Issue.record("failed to seed canonical tools catalog: \(error)")
+        }
+    }
+
+    func clearCanonicalToolsCatalogForTesting() {
+        applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
+    }
+
+    @discardableResult
+    func beginProcessRouteAttachingForTesting(
+        processID: pid_t,
+        upstreamIndex: Int,
+        nowUptimeNs: UInt64
+    ) -> ProcessControlPlaneAuthority.ActivationStart? {
+        let readinessToken = UpstreamReadinessWaiterToken()
+        guard let route = processControlPlane.route(forProcessID: processID),
+              let upstreamProof = upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: upstreamIndex)
+              )?.proof,
+              let reserved = processControlPlane.reserveActivation(
+                  routeID: route.id,
+                  upstreamProof: upstreamProof,
+                  nowUptimeNs: nowUptimeNs,
+                  readinessToken: readinessToken
+              ) else {
+            Issue.record("failed to begin process route attempt for \(processID)")
+            return nil
+        }
+        applyProcessControlPlaneTransition(reserved.1)
+        guard let started = processControlPlane.beginAttaching(
+            reserved.0,
+            nowUptimeNs: nowUptimeNs
+        ) else {
+            Issue.record("failed to attach process route attempt for \(processID)")
+            return nil
+        }
+        applyProcessControlPlaneTransition(started.1)
+        return started.0
+    }
 }
 
 func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler {
-    UpstreamSlotScheduler(
-        canUseUpstream: { _ in UpstreamHealthManager.UseEvaluation(isUsable: true, effects: []) },
-        selectUpstream: { occupied in
-            UpstreamHealthManager.SelectionResult(
-                upstreamIndex: (0..<upstreamCount).first { occupied.contains($0) == false },
+    let topology = UpstreamTopologyAuthority(
+        (0..<upstreamCount).map { _ in TestUpstreamClient() as any UpstreamSlotControlling }
+    )
+    return UpstreamSlotScheduler(
+        canUseUpstream: { upstreamIndex in
+            UpstreamHealthManager.UseEvaluation(
+                proof: topology.snapshot().proof(UpstreamSlotID(rawValue: upstreamIndex)),
                 effects: []
             )
-        }
+        },
+        selectUpstream: { occupied in
+            let selectedID = topology.snapshot().slotIDs.first {
+                occupied.contains($0.rawValue) == false
+            }
+            return UpstreamHealthManager.SelectionResult(
+                proof: selectedID.flatMap { topology.snapshot().proof($0) },
+                effects: []
+            )
+        },
+        operationLease: { topology.operationLease(for: $0) },
+        validateOperationLease: { topology.validate($0) }
     )
 }
 
@@ -267,20 +552,48 @@ func seedProcessToolCatalogs(
     on manager: RuntimeCoordinator,
     entries: [(target: XcodeProcessTarget, upstreamIndex: Int, tools: [[String: Any]])]
 ) throws {
+    let slotIDs = Set(manager.xcodeProcessRoutes.flatMap(\.upstreamIndices).map {
+        UpstreamSlotID(rawValue: $0)
+    })
+    manager.applyProcessControlPlaneTransition(
+        manager.processControlPlane.updateUsability(
+            .init(
+                snapshotUsableUpstreamIDs: slotIDs,
+                recoveryAwareUsableUpstreamIDs: slotIDs
+            ),
+            nowUptimeNs: manager.nowUptimeNanoseconds()
+        )
+    )
     for entry in entries {
         let result = try jsonValue([
             "tools": entry.tools,
         ])
-        manager.processToolSurfaceStore.record(
-            target: entry.target,
-            upstreamIndex: entry.upstreamIndex,
-            rawResult: result
+        let route = try #require(manager.processControlPlane.route(forProcessID: entry.target.processID))
+        let preferredProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: entry.upstreamIndex)
+            )?.proof
         )
-    }
-    if let surface = manager.processToolSurfaceStore.availableToolCatalogSurface(),
-       let sourceUpstream = surface.sourceUpstream
-    {
-        manager.setCachedToolsListResult(surface.rawResult, sourceUpstream: sourceUpstream)
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: preferredProof,
+                nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+        let sourceProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: entry.upstreamIndex)
+            )?.proof
+        )
+        manager.applyCatalogCommit(
+            manager.processControlPlane.completeCatalog(
+                .usable(result, source: sourceProof),
+                lease: lease,
+                nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+            )
+        )
     }
 }
 
@@ -1082,6 +1395,8 @@ actor ScriptedDocumentationSession: UpstreamSession {
         self.continuation = streamContinuation
     }
 
+    nonisolated func cancel() {}
+
     func send(_ data: Data) async -> Upstream.SendResult {
         guard let object = try? JSONSerialization.jsonObject(with: data, options: [])
             as? [String: Any],
@@ -1643,98 +1958,121 @@ actor ToggleableOverloadUpstreamClient: UpstreamSlotControlling {
 }
 
 actor ReadinessFlag {
-    private struct Waiter {
+    private struct CheckWaiter {
+        let id: UUID
         let index: Int
         let continuation: CheckedContinuation<Int, Error>
     }
 
+    private struct ChangeWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     private var ready: Bool
+    private var generation: UInt64 = 0
     private var checks = 0
-    private var waiters: [Waiter] = []
+    private var checkWaiters: [CheckWaiter] = []
+    private var changeWaiters: [ChangeWaiter] = []
+    private let observedChangeWaits = LockedRecordedValues<UInt64>()
 
     init(isReady: Bool) {
         self.ready = isReady
     }
 
     func setReady(_ value: Bool) {
+        guard ready != value else { return }
         ready = value
+        generation &+= 1
+        let waiters = changeWaiters
+        changeWaiters.removeAll()
+        for waiter in waiters {
+            waiter.continuation.resume()
+        }
     }
 
-    func isReady() -> Bool {
+    func snapshot() -> UpstreamReadinessSnapshot {
         checks += 1
-        resumeReadyWaiters()
-        return ready
+        resumeCheckWaiters()
+        return UpstreamReadinessSnapshot(isReady: ready, generation: generation)
+    }
+
+    func waitForChange(after observedGeneration: UInt64) async {
+        guard generation == observedGeneration, Task.isCancelled == false else { return }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard generation == observedGeneration,
+                      Task.isCancelled == false
+                else {
+                    continuation.resume()
+                    return
+                }
+                changeWaiters.append(
+                    ChangeWaiter(
+                        id: id,
+                        continuation: continuation
+                    )
+                )
+                observedChangeWaits.append(observedGeneration)
+            }
+        } onCancel: {
+            Task { await self.cancelChangeWaiter(id: id) }
+        }
     }
 
     func checkCount() -> Int {
         checks
     }
 
-    func nextCheck(at index: Int) async throws -> Int {
-        if checks > index {
-            return checks
-        }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiters.append(Waiter(index: index, continuation: continuation))
-        }
-    }
-
-    private func resumeReadyWaiters() {
-        var remaining: [Waiter] = []
-        for waiter in waiters {
-            if checks > waiter.index {
-                waiter.continuation.resume(returning: checks)
-            } else {
-                remaining.append(waiter)
-            }
-        }
-        waiters = remaining
-    }
-}
-
-actor AvailabilityFlag {
-    private struct Waiter {
-        let index: Int
-        let continuation: CheckedContinuation<Int, Error>
-    }
-
-    private var available: Bool
-    private var checks = 0
-    private var waiters: [Waiter] = []
-
-    init(isAvailable: Bool) {
-        self.available = isAvailable
-    }
-
-    func setAvailable(_ value: Bool) {
-        available = value
-    }
-
-    func isAvailable() -> Bool {
-        checks += 1
-        resumeReadyWaiters()
-        return available
+    func nextChangeWait(at index: Int) async throws -> UInt64 {
+        try await observedChangeWaits.nextValue(at: index)
     }
 
     func nextCheck(at index: Int) async throws -> Int {
         if checks > index {
             return checks
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiters.append(Waiter(index: index, continuation: continuation))
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if checks > index {
+                    continuation.resume(returning: checks)
+                    return
+                }
+                guard Task.isCancelled == false else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                checkWaiters.append(
+                    CheckWaiter(id: id, index: index, continuation: continuation)
+                )
+            }
+        } onCancel: {
+            Task { await self.cancelCheckWaiter(id: id) }
         }
     }
 
-    private func resumeReadyWaiters() {
-        var remaining: [Waiter] = []
-        for waiter in waiters {
+    private func resumeCheckWaiters() {
+        var remaining: [CheckWaiter] = []
+        for waiter in checkWaiters {
             if checks > waiter.index {
                 waiter.continuation.resume(returning: checks)
             } else {
                 remaining.append(waiter)
             }
         }
-        waiters = remaining
+        checkWaiters = remaining
+    }
+
+    private func cancelCheckWaiter(id: UUID) {
+        guard let index = checkWaiters.firstIndex(where: { $0.id == id }) else { return }
+        checkWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
+    }
+
+    private func cancelChangeWaiter(id: UUID) {
+        guard let index = changeWaiters.firstIndex(where: { $0.id == id }) else { return }
+        changeWaiters.remove(at: index).continuation.resume()
     }
 }
 
@@ -1883,10 +2221,7 @@ actor XcodeLaunchRecorder {
 
 func makeTestReadinessGate(
     readiness: ReadinessFlag,
-    availability: AvailabilityFlag? = nil,
     sleepRecorder: ControlledReadinessSleep? = nil,
-    recordPollSleeps: Bool = false,
-    launchRetryIntervalNanoseconds: UInt64 = 5_000_000_000,
     launchRecorder: XcodeLaunchRecorder? = nil
 ) -> UpstreamReadinessGate {
     let launchIfUnavailable: (@Sendable () async -> Bool)?
@@ -1898,39 +2233,23 @@ func makeTestReadinessGate(
         launchIfUnavailable = nil
     }
 
-    let isAvailable: (@Sendable () async -> Bool)?
-    if let availability {
-        isAvailable = {
-            await availability.isAvailable()
-        }
-    } else {
-        isAvailable = nil
-    }
-
     return UpstreamReadinessGate(
         isEnabled: true,
         targetName: "mcpbridge",
-        pollIntervalNanoseconds: 1_000_000,
-        progressLogIntervalNanoseconds: 5_000_000_000,
-        launchRetryIntervalNanoseconds: launchRetryIntervalNanoseconds,
         initialRetryBackoffNanoseconds: 1_000_000_000,
         maxRetryBackoffNanoseconds: 8_000_000_000,
-        uptimeNanoseconds: {
-            DispatchTime.now().uptimeNanoseconds
-        },
         sleepNanoseconds: { nanoseconds in
             guard let sleepRecorder else {
-                preconditionFailure("Readiness tests must control sleep explicitly")
-            }
-            guard recordPollSleeps || nanoseconds >= 1_000_000_000 else {
-                preconditionFailure("Readiness poll sleeps must be recorded explicitly")
+                preconditionFailure("Readiness backoff tests must control sleep explicitly")
             }
             await sleepRecorder.sleep(nanoseconds: nanoseconds)
         },
-        isAvailable: isAvailable,
         launchIfUnavailable: launchIfUnavailable,
-        isReady: {
-            await readiness.isReady()
+        snapshot: {
+            await readiness.snapshot()
+        },
+        waitForChange: { generation in
+            await readiness.waitForChange(after: generation)
         }
     )
 }
@@ -2002,7 +2321,6 @@ extension ToggleableOverloadUpstreamClient: InitializableTestUpstream {}
 extension BlockingInitializedNotificationUpstreamClient: InitializableTestUpstream {}
 
 struct RuntimeCoordinatorFixture {
-    let group: MultiThreadedEventLoopGroup
     let eventLoop: EventLoop
     let manager: RuntimeCoordinator
 
@@ -2026,9 +2344,9 @@ struct RuntimeCoordinatorFixture {
         startImmediately: Bool = true,
         runtimeBox: WeakRuntimeCoordinatorBox? = nil
     ) {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let eventLoop = group.next()
-        self.group = group
+        // RuntimeCoordinator owns its tasks, but not the injected event loop. Reuse NIO's
+        // process-scoped group so the package suite does not create hundreds of kernel threads.
+        let eventLoop = MultiThreadedEventLoopGroup.singleton.next()
         self.eventLoop = eventLoop
         self.manager = RuntimeCoordinator(
             config: config,
@@ -2052,7 +2370,6 @@ struct RuntimeCoordinatorFixture {
 
     func shutdownAndWait() {
         manager.shutdownAndWait()
-        XcodeMCPProxyTestSupport.shutdownAndWait(group)
     }
 
     func registerInitialize(
@@ -2114,7 +2431,12 @@ struct RuntimeCoordinatorFixture {
             serverName: serverName,
             timeout: timeout
         )
-        return try await future.get()
+        return try await waitWithTimeout(
+            "waiting for primary initialize response",
+            timeout: timeout
+        ) {
+            try await future.get()
+        }
     }
 }
 
@@ -2252,6 +2574,21 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
             guard operations.indices.contains(index), operations[index].isCancelled == false else {
                 return nil
             }
+            return operations[index].operation
+        }
+        guard let operation else {
+            return false
+        }
+        operation()
+        return true
+    }
+
+    /// Delivers a recorded callback even after cancellation, modeling an already-enqueued timer
+    /// callback that races with its owner's lifecycle transition.
+    @discardableResult
+    func fireIgnoringCancellation(at index: Int) -> Bool {
+        let operation: (@Sendable () -> Void)? = operations.withLockedValue { operations in
+            guard operations.indices.contains(index) else { return nil }
             return operations[index].operation
         }
         guard let operation else {

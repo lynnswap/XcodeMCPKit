@@ -36,7 +36,7 @@ struct InstallerFacadeTests {
     }
 
     @Test func installerLaunchPlanParsesOptionsAndPrefersBindir() throws {
-        let plan = try XcodeMCPProxyInstaller.resolveLaunchPlan(
+        let action = try XcodeMCPProxyInstaller.resolveLaunchAction(
             arguments: [
                 "xcode-mcp-proxy-install",
                 "--prefix", "/tmp/prefix",
@@ -45,7 +45,10 @@ struct InstallerFacadeTests {
             ],
             environment: [:]
         )
-        let options = try #require(plan.configuration)
+        guard case .install(let options) = action else {
+            Issue.record("expected install action")
+            return
+        }
 
         #expect(options.prefix == "/tmp/prefix")
         #expect(options.binaryDirectory == "/tmp/bin")
