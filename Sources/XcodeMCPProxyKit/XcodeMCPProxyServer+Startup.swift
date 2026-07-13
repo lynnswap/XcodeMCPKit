@@ -125,8 +125,9 @@ extension XcodeMCPProxyServer {
                 throw LifecycleError.shutdownInProgress
             }
 
-            acquired.autoApprover?.start()
             acquired.runtime.start()
+            acquired.autoApprover?.start()
+            logStartupSummary(for: acquired)
             phase = .running
             return acquired.endpoint
         }
@@ -274,6 +275,20 @@ extension XcodeMCPProxyServer {
             }
         }
 
+        private func logStartupSummary(for resources: Resources) {
+            let displayHost =
+                resources.config.listenHost == "localhost"
+                ? "localhost"
+                : resources.endpoint.host
+            let summary = XcodeMCPProxyServer.startupSummary(
+                displayHost: displayHost,
+                port: resources.endpoint.port,
+                config: resources.config,
+                xcodeTargets: resources.runtime.inventorySnapshot().xcodeTargets
+            )
+            logger.info("\(summary)")
+        }
+
         isolated deinit {
             startupTask?.cancel()
             shutdownTask?.cancel()
@@ -312,15 +327,6 @@ extension XcodeMCPProxyServer {
                     configuredHost: config.listenHost,
                     dependencies: dependencies
                 )
-
-                let displayHost = config.listenHost == "localhost" ? "localhost" : resolvedHost
-                let summary = XcodeMCPProxyServer.startupSummary(
-                    displayHost: displayHost,
-                    port: resolvedPort,
-                    config: config,
-                    xcodeTargets: runtime.inventorySnapshot().xcodeTargets
-                )
-                logger.info("\(summary)")
 
                 return Resources(
                     config: config,

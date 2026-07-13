@@ -276,6 +276,25 @@ struct XcodeMCPProxyServerTests {
         try await shutdown(blockerGroup)
     }
 
+    @Test func startupSummaryReadsInventoryAfterRuntimeStarts() async throws {
+        let runtime = StartupInventoryRuntime()
+        let server = XcodeMCPProxyServer(
+            configuration: .init(
+                bindAddress: .init(host: "127.0.0.1", port: 0),
+                discovery: .disabled
+            ),
+            dependencies: .init(
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in runtime }
+            )
+        )
+
+        _ = try await server.start()
+        #expect(runtime.inventoryReadCount > 0)
+        #expect(runtime.readInventoryBeforeStart == false)
+        try await server.shutdown()
+    }
+
     @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {
         let autoApprover = RecordingAutoApprover()
         let upstream = RecordingUpstreamSlot()
@@ -616,6 +635,84 @@ private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermi
     }
 
     func stop() {}
+}
+
+private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeServing {
+    private struct State {
+        var started = false
+        var inventoryReadCount = 0
+        var readInventoryBeforeStart = false
+    }
+
+    private let state = NIOLockedValueBox(State())
+
+    var inventoryReadCount: Int {
+        state.withLockedValue(\.inventoryReadCount)
+    }
+
+    var readInventoryBeforeStart: Bool {
+        state.withLockedValue(\.readInventoryBeforeStart)
+    }
+
+    func start() {
+        state.withLockedValue { $0.started = true }
+    }
+
+    func cancelForDeinit() {}
+
+    func shutdown() async {}
+
+    func subscribeToEvents(
+        _ receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void
+    ) -> @Sendable () -> Void {
+        {}
+    }
+
+    func beginRequest(
+        _ message: ProxyRuntimeRequest,
+        in sessionID: ProxySessionID?
+    ) -> any ProxyRuntimeRequestOperating {
+        fatalError("startup lifecycle test does not admit requests")
+    }
+
+    func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState {
+        .missing
+    }
+
+    func removeSession(_ id: ProxySessionID) {}
+
+    func snapshot() -> ProxyRuntimeSnapshot {
+        ProxyRuntimeSnapshot(
+            generatedAt: Date(),
+            proxyInitialized: false,
+            catalogAvailable: false,
+            queuedRequestCount: 0,
+            upstreams: []
+        )
+    }
+
+    func inventorySnapshot() -> ProxyRuntimeInventorySnapshot {
+        state.withLockedValue { state in
+            state.inventoryReadCount += 1
+            state.readInventoryBeforeStart = state.readInventoryBeforeStart || state.started == false
+        }
+        return ProxyRuntimeInventorySnapshot(
+            xcodeTargets: [
+                ProxyRuntimeInventorySnapshot.XcodeTarget(
+                    processID: 42,
+                    appPath: "/Applications/Xcode.app",
+                    mcpBridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge"
+                )
+            ],
+            permissionDialogProcessIDs: [42]
+        )
+    }
+
+    func debugSnapshotData(includeSensitivePayloads: Bool) -> Data? {
+        nil
+    }
+
+    func reset() async {}
 }
 
 private final class WeakRuntimeReference: @unchecked Sendable {
