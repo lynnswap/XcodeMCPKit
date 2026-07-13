@@ -635,6 +635,21 @@ extension RuntimeCoordinator {
                     ),
                 ]
             )
+            let clientVisibleResult = toolsListResultWithConfiguredOverlay(
+                baseResult: result.rawResult,
+                metadata: [
+                    "origin": .string("process_catalog_log"),
+                    "pid": .string("\(route.target.processID)"),
+                ]
+            )
+            let summary = ToolCatalogStartupLogFormatter.summary(
+                from: clientVisibleResult,
+                process: ToolCatalogStartupLogFormatter.Process(
+                    appPath: route.target.appPath,
+                    processID: route.target.processID
+                )
+            )
+            logger.info("\(summary)")
             if let raw = snapshot.canonicalToolsCatalogRaw {
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: raw,

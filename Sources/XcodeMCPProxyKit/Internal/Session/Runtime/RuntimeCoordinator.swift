@@ -395,7 +395,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
     let documentationProviderDiscoveryState =
         NIOLockedValueBox(DocumentationProviderDiscoveryState())
-    let toolCatalogSummaryLoggedBox = NIOLockedValueBox(false)
+    let unboundToolCatalogSummaryLoggedBox = NIOLockedValueBox(false)
     let debugRecorder: ProxyDebugRecorder
     let leaseManager: LeaseManager
     let eventLoop: EventLoop
@@ -1085,7 +1085,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 requestTimeout: self.timeAmount(until: deadline),
                 metadata: ["origin": .string("prewarm")]
             )
-            self.logToolCatalogSummaryIfNeeded(finalResult)
+            self.logUnboundToolCatalogSummaryIfNeeded(finalResult)
         }
     }
 
@@ -1497,7 +1497,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             requestTimeout: timeAmount(until: deadline),
             metadata: ["session": .string(sessionID)]
         )
-        logToolCatalogSummaryIfNeeded(finalResult)
+        logUnboundToolCatalogSummaryIfNeeded(finalResult)
         return finalResult
     }
 
@@ -1575,8 +1575,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         documentationProviderManager != nil
     }
 
-    private func logToolCatalogSummaryIfNeeded(_ result: JSONValue) {
-        let shouldLog = toolCatalogSummaryLoggedBox.withLockedValue { logged in
+    private func logUnboundToolCatalogSummaryIfNeeded(_ result: JSONValue) {
+        guard processRoutingEnabled == false else { return }
+        let shouldLog = unboundToolCatalogSummaryLoggedBox.withLockedValue { logged in
             if logged {
                 return false
             }
@@ -1588,27 +1589,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
 
         let summary = ToolCatalogStartupLogFormatter.summary(
-            from: result,
-            process: toolCatalogSourceProcess(),
-            exposurePolicy: processRoutingEnabled
-                ? "available_route_catalog_surface"
-                : nil
+            from: result
         )
         logger.info("\(summary)")
-    }
-
-    private func toolCatalogSourceProcess() -> ToolCatalogStartupLogFormatter.Process? {
-        guard let upstreamIndex = processControlPlane.canonicalSourceUpstream(),
-              let route = xcodeProcessRoutes.first(where: {
-                  $0.upstreamIndices.contains(upstreamIndex)
-              })
-        else {
-            return nil
-        }
-        return ToolCatalogStartupLogFormatter.Process(
-            appPath: route.target.appPath,
-            processID: route.target.processID
-        )
     }
 
     private func toolsListResultWithDocumentationOverlay(
@@ -1616,10 +1599,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         requestTimeout _: TimeAmount?,
         metadata: Logger.Metadata
     ) async -> JSONValue {
-        guard documentationProviderManager != nil else {
-            return baseResult
-        }
-        return toolsListResultExposingProxyOwnedDocumentationSearch(
+        toolsListResultWithConfiguredOverlay(
             baseResult: baseResult,
             metadata: metadata
         )
@@ -1630,19 +1610,19 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         requestTimeout _: TimeAmount?,
         metadata: Logger.Metadata
     ) async -> JSONValue {
-        guard documentationProviderManager != nil else {
-            return baseResult
-        }
-        return toolsListResultExposingProxyOwnedDocumentationSearch(
+        toolsListResultWithConfiguredOverlay(
             baseResult: baseResult,
             metadata: metadata
         )
     }
 
-    private func toolsListResultExposingProxyOwnedDocumentationSearch(
+    func toolsListResultWithConfiguredOverlay(
         baseResult: JSONValue,
         metadata: Logger.Metadata
     ) -> JSONValue {
+        guard documentationProviderManager != nil else {
+            return baseResult
+        }
         logger.debug(
             "Applied proxy-owned DocumentationSearch tools/list overlay",
             metadata: metadata
