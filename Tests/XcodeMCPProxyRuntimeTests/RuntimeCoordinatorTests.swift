@@ -12833,13 +12833,15 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
+        let upstreamInitialized = TestSignal()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
+                upstreamEventHandled: { upstreamEvents.append($0) },
+                upstreamInitialized: { _ in upstreamInitialized.signal() }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -12849,6 +12851,9 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let initID = try extractUpstreamID(from: initMessages[0])
         await upstream.yield(.message(try makeInitializeResponse(id: initID)))
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        try await upstreamInitialized.wait(
+            description: "waiting for upstream initialization commit"
+        )
 
         let sessionID = "session-debug"
         let session = manager.session(id: sessionID)
@@ -12940,6 +12945,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let upstreamEvents = LockedRecordedValues<Int>()
         let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
         let toolsListPrewarmCompletions = LockedRecordedValues<Void>()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         var config = makeConfig(requestTimeout: 2)
         config.prewarmToolsList = true
         let manager = RuntimeCoordinator(
@@ -12949,7 +12955,8 @@ struct RuntimeCoordinatorWindowRoutingTests {
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamEventHandled: { upstreamEvents.append($0) },
                 toolsListRefreshCompleted: { toolsListRefreshes.append(($0, $1)) },
-                toolsListPrewarmCompleted: { toolsListPrewarmCompletions.append(()) }
+                toolsListPrewarmCompleted: { toolsListPrewarmCompletions.append(()) },
+                upstreamInitialized: { initializedUpstreams.append($0) }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -12960,19 +12967,18 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let init0ID = try extractUpstreamID(from: init0[0])
         await upstream0.yield(.message(try makeInitializeResponse(id: init0ID)))
 
-        // Warm init -> upstream1.
-        try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
-        let init1 = await upstream1.sent()
-        let init1ID = try extractUpstreamID(from: init1[0])
-        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
-
-        // Wait for per-upstream notifications/initialized.
+        // The primary commit starts the first tools/list prewarm and the secondary warm initialize.
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
-        try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+        #expect(
+            try await waitForRecordedValue(
+                initializedUpstreams,
+                at: 0,
+                description: "waiting for primary upstream initialization commit"
+            ) == 0
+        )
 
         // Fail tools/list warmup on upstream0 to mark it unhealthy.
         let warmup0CompletionIndex = toolsListPrewarmCompletions.count()
-        manager.refreshToolsListIfNeeded()
         let warmup0 = try await sentMessage(
             from: upstream0,
             matching: { methodName(from: $0) == "tools/list" },
@@ -12998,15 +13004,24 @@ struct RuntimeCoordinatorWindowRoutingTests {
             at: warmup0CompletionIndex,
             description: "waiting for first tools/list prewarm completion"
         )
-        let upstream0Health = try #require(
-            manager.testStateSnapshot().upstream(id: 0)?.healthState
-        )
-        switch upstream0Health {
-        case .healthy:
-            Issue.record("upstream0 should be degraded after invalid tools/list warmup")
-        case .degraded, .quarantined:
-            break
+        guard case .quarantined = manager.testStateSnapshot().upstream(id: 0)?.healthState else {
+            Issue.record("upstream0 should be quarantined after invalid tools/list warmup")
+            return
         }
+
+        // Complete the secondary warm initialize before asking it to own the next prewarm.
+        try await waitForSentCount(upstream1, count: 1, timeoutSeconds: 2)
+        let init1 = await upstream1.sent()
+        let init1ID = try extractUpstreamID(from: init1[0])
+        await upstream1.yield(.message(try makeInitializeResponse(id: init1ID)))
+        try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+        #expect(
+            try await waitForRecordedValue(
+                initializedUpstreams,
+                at: 1,
+                description: "waiting for secondary upstream initialization commit"
+            ) == 1
+        )
 
         // Trigger another warmup; it should prefer upstream1 and fail there too so no healthy upstream exists.
         let warmup1CompletionIndex = toolsListPrewarmCompletions.count()
@@ -13036,6 +13051,10 @@ struct RuntimeCoordinatorWindowRoutingTests {
             at: warmup1CompletionIndex,
             description: "waiting for second tools/list prewarm completion"
         )
+        guard case .quarantined = manager.testStateSnapshot().upstream(id: 1)?.healthState else {
+            Issue.record("upstream1 should be quarantined after invalid tools/list warmup")
+            return
+        }
 
         let chosen = manager.chooseUpstreamIndex()
         #expect(chosen == nil)
