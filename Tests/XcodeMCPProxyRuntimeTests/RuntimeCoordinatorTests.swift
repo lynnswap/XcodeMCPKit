@@ -5390,6 +5390,11 @@ struct RuntimeCoordinatorRecoveryTests {
             _ = try await firstTask.value
         }
 
+        _ = try await waitWithTimeout("waiting for timed-out tools/list load cleanup") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 0 && $0.inFlightControlPlaneRequests.isEmpty
+            }
+        }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let secondTask = Task {
@@ -5959,6 +5964,11 @@ struct RuntimeCoordinatorRecoveryTests {
             _ = try await firstTask.value
         }
 
+        _ = try await waitWithTimeout("waiting for timed-out XcodeListWindows load cleanup") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.windows == 0 && $0.inFlightControlPlaneRequests.isEmpty
+            }
+        }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let secondTask = Task {
