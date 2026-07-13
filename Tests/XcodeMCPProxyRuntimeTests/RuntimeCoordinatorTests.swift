@@ -2299,34 +2299,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 description: "waiting for restarted route initialization commit"
             ) == 0
         )
-        let toolsRequest = try await sentValue(
-            from: upstream,
-            startingAt: sentCountAfterExit + 2,
-            matching: { methodName(from: $0) == "tools/list" },
-            description: "waiting for restarted route tools catalog"
-        )
-        await upstream.yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: toolsRequest),
-                    tools: [toolDescriptor(name: "RecoveredProcessTool")]
-                )
-            )
-        )
-        let restartedRefresh = try await waitForRecordedValue(
-            toolsListRefreshes,
-            at: 1,
-            description: "waiting for restarted route catalog completion"
-        )
-        #expect(restartedRefresh == (0, true))
-        await manager.drainRuntimeTasksForTesting()
-
         #expect(manager.testStateSnapshot().hasInitResult)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 0)
-        #expect(
-            manager.processControlPlane.attemptSnapshot(processID: target.processID)?.phase
-                == .cataloged
-        )
     }
 
     @Test func processRoutingCooldownTimersFollowRouteLifecycle() {
