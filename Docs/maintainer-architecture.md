@@ -53,15 +53,21 @@
   - Rejects JSON-RPC batch arrays at the HTTP boundary without invoking the
     session or upstream.
   - Tool-specific response shaping lives in dedicated surface helpers, not inline in forwarding hot paths.
+- CLI commands
+  - `ProxyServerCommand`, `ProxyAdapterCommand`, and `ProxyInstallCommand` own
+    the `swift-argument-parser` option, help, version, and input-validation
+    contracts. Each invocation is parsed once into typed values.
+  - Server environment and file configuration precedence is resolved after
+    parsing and before the existing launcher/runtime lifecycle begins.
 
 ## Dependency Direction
 
 - `XcodeMCPKit` owns SDK protocol/runtime primitives and must not depend on
   proxy-only modules. Avoid introducing gateway/session/Xcode proxy knowledge
   here.
-- `XcodeMCPProxyKit` depends on `XcodeMCPKit` and owns proxy session/config
-  state, public proxy facades, CLI composition, installer helpers, and HTTP
-  gateway internals. Low-level proxy implementation files live under
+- `XcodeMCPProxyKit` depends on `XcodeMCPKit` and `ArgumentParser`, and owns
+  proxy session/config state, public proxy facades, CLI composition, installer
+  helpers, and HTTP gateway internals. Low-level proxy implementation files live under
   `Sources/XcodeMCPProxyKit/Internal`, including session implementation files
   under `Sources/XcodeMCPProxyKit/Internal/Session`.
 - `XcodeMCPProxyCLI`, `XcodeMCPProxyServer`, and `XcodeMCPProxyInstall` depend on

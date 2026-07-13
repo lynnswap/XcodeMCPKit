@@ -116,7 +116,8 @@ private enum AdapterEndpointResolver {
             return try validate(url, label: "endpoint")
         case .discoveryFile(let fileURL):
             guard let record = Discovery.read(overrideURL: fileURL),
-                  let url = URL(string: record.url) else {
+                let url = URL(string: record.url)
+            else {
                 throw XcodeMCPError.transportUnavailable(
                     "Proxy discovery file is missing or invalid: \(fileURL.path)"
                 )
@@ -133,7 +134,8 @@ private enum AdapterEndpointResolver {
             }
             let discoveryFile = Discovery.defaultFileURL(environment: environment)
             if let record = Discovery.read(overrideURL: discoveryFile),
-               let url = URL(string: record.url) {
+                let url = URL(string: record.url)
+            {
                 return try validate(url, label: "proxy discovery endpoint")
             }
             return fallbackURL
@@ -142,7 +144,8 @@ private enum AdapterEndpointResolver {
 
     private static func validate(_ url: URL, label: String) throws -> URL {
         guard let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else {
+            scheme == "http" || scheme == "https"
+        else {
             throw XcodeMCPError.invalidRequest("\(label) must be an http/https URL")
         }
         return url
@@ -150,7 +153,8 @@ private enum AdapterEndpointResolver {
 
     private static func nonEmpty(_ value: String?) -> String? {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              value.isEmpty == false else { return nil }
+            value.isEmpty == false
+        else { return nil }
         return value
     }
 }
@@ -163,20 +167,22 @@ extension XcodeMCPProxyStdioAdapter {
 
     package struct Launcher {
         package struct Dependencies {
-            package var makeAdapter: (
-                XcodeMCPProxyStdioAdapterConfiguration,
-                FileHandle,
-                FileHandle
-            ) throws -> any LaunchAdapter
+            package var makeAdapter:
+                (
+                    XcodeMCPProxyStdioAdapterConfiguration,
+                    FileHandle,
+                    FileHandle
+                ) throws -> any LaunchAdapter
             package var input: FileHandle
             package var output: FileHandle
 
             package init(
-                makeAdapter: @escaping (
-                    XcodeMCPProxyStdioAdapterConfiguration,
-                    FileHandle,
-                    FileHandle
-                ) throws -> any LaunchAdapter,
+                makeAdapter:
+                    @escaping (
+                        XcodeMCPProxyStdioAdapterConfiguration,
+                        FileHandle,
+                        FileHandle
+                    ) throws -> any LaunchAdapter,
                 input: FileHandle,
                 output: FileHandle
             ) {
@@ -200,30 +206,6 @@ extension XcodeMCPProxyStdioAdapter {
             }
         }
 
-        private enum Action {
-            case showHelp(String)
-            case showVersion(String)
-            case start(XcodeMCPProxyStdioAdapterConfiguration)
-        }
-
-        private struct LaunchError: Error, CustomStringConvertible {
-            enum Presentation {
-                case plain
-                case usage
-                case serverOnlyFlagHint
-            }
-
-            let description: String
-            let presentation: Presentation
-        }
-
-        private static let serverOnlyFlags: Set<String> = [
-            "--config", "--auto-approve", "--listen", "--host", "--port",
-            "--max-body-bytes", "--upstream-command", "--upstream-args",
-            "--upstream-arg", "--upstream-processes", "--session-id",
-            "--refresh-code-issues-mode",
-        ]
-
         private let dependencies: Dependencies
 
         package init(dependencies: Dependencies = .live) {
@@ -237,201 +219,36 @@ extension XcodeMCPProxyStdioAdapter {
             stderr: @escaping @Sendable (String) -> Void
         ) async -> Int32 {
             do {
-                switch try parseAction(arguments: arguments, environment: environment) {
-                case .showHelp(let usage):
-                    stdout(usage)
+                let command: ProxyAdapterCommand
+                switch try CLICommandParser.parse(ProxyAdapterCommand.self, arguments: arguments) {
+                case .cleanExit(let message):
+                    stdout(message)
                     return 0
-                case .showVersion(let version):
-                    stdout(version)
-                    return 0
-                case .start(let configuration):
-                    let adapter = try dependencies.makeAdapter(
-                        configuration,
-                        dependencies.input,
-                        dependencies.output
-                    )
-                    try await adapter.start()
-                    await adapter.waitUntilStopped()
-                    return 0
+                case .command(let parsedCommand):
+                    command = parsedCommand
                 }
-            } catch let error as LaunchError {
+
+                let configuration = XcodeMCPProxyStdioAdapterConfiguration(
+                    endpoint: command.url.map { .url($0.url) }
+                        ?? .proxyDefault(environment: environment),
+                    requestTimeout: command.requestTimeout.map { $0.duration }
+                        ?? .seconds(300)
+                )
+                let adapter = try dependencies.makeAdapter(
+                    configuration,
+                    dependencies.input,
+                    dependencies.output
+                )
+                try await adapter.start()
+                await adapter.waitUntilStopped()
+                return 0
+            } catch let error as CLICommandError {
                 stderr(error.description)
-                switch error.presentation {
-                case .plain:
-                    break
-                case .usage:
-                    stderr(Self.usage(environment: environment))
-                case .serverOnlyFlagHint:
-                    stderr("Run: xcode-mcp-proxy-server --help")
-                }
-                return 1
+                return error.exitCode
             } catch {
                 stderr("error: \(error.localizedDescription)")
                 return 1
             }
-        }
-
-        private func parseAction(
-            arguments: [String],
-            environment: [String: String]
-        ) throws -> Action {
-            let executable = executableName(arguments)
-            let usage = Self.usage(environment: environment)
-            let values = Array(arguments.dropFirst())
-            if values.contains("-h") || values.contains("--help") {
-                return .showHelp(usage)
-            }
-            if values.contains("--version") {
-                return .showVersion(
-                    XcodeMCPProxyServer.productMetadata.versionLine(
-                        arguments: arguments,
-                        defaultExecutableName: executable
-                    )
-                )
-            }
-
-            var endpoint: XcodeMCPProxyStdioAdapterConfiguration.Endpoint =
-                .proxyDefault(environment: environment)
-            var requestTimeout: Duration? = .seconds(300)
-            var didReadURL = false
-            var index = 1
-            while index < arguments.count {
-                let argument = arguments[index]
-                switch argument {
-                case "--request-timeout":
-                    guard index + 1 < arguments.count else {
-                        throw LaunchError(
-                            description: "--request-timeout requires seconds",
-                            presentation: .usage
-                        )
-                    }
-                    requestTimeout = try Self.requestTimeout(arguments[index + 1])
-                    index += 2
-                case "--url":
-                    guard didReadURL == false else {
-                        throw LaunchError(
-                            description: "--url may only be specified once.",
-                            presentation: .usage
-                        )
-                    }
-                    guard index + 1 < arguments.count,
-                          arguments[index + 1].hasPrefix("-") == false else {
-                        throw LaunchError(
-                            description: "--url requires a value (http/https URL).",
-                            presentation: .usage
-                        )
-                    }
-                    endpoint = .url(try Self.url(arguments[index + 1], label: "--url"))
-                    didReadURL = true
-                    index += 2
-                case let value where value.hasPrefix("--url="):
-                    guard didReadURL == false else {
-                        throw LaunchError(
-                            description: "--url may only be specified once.",
-                            presentation: .usage
-                        )
-                    }
-                    let raw = String(value.dropFirst("--url=".count))
-                    guard raw.isEmpty == false else {
-                        throw LaunchError(
-                            description: "--url requires a value (http/https URL).",
-                            presentation: .usage
-                        )
-                    }
-                    endpoint = .url(try Self.url(raw, label: "--url"))
-                    didReadURL = true
-                    index += 1
-                case "url", "--print-url":
-                    throw LaunchError(
-                        description: "url helper mode was removed; configure your HTTP client with a concrete URL.",
-                        presentation: .plain
-                    )
-                case "--lazy-init":
-                    throw LaunchError(
-                        description: XcodeMCPProxyServer.removedLazyInitializationMessage,
-                        presentation: .plain
-                    )
-                case "--xcode-pid":
-                    throw LaunchError(
-                        description: XcodeMCPProxyServer.removedXcodePIDMessage,
-                        presentation: .plain
-                    )
-                case let flag where Self.serverOnlyFlags.contains(flag):
-                    throw LaunchError(
-                        description: "This option is only supported by xcode-mcp-proxy-server (proxy server).",
-                        presentation: .serverOnlyFlagHint
-                    )
-                default:
-                    throw LaunchError(
-                        description: "Unknown argument: \(argument)",
-                        presentation: .usage
-                    )
-                }
-            }
-            return .start(.init(endpoint: endpoint, requestTimeout: requestTimeout))
-        }
-
-        private static func requestTimeout(_ raw: String) throws -> Duration? {
-            guard let seconds = Double(raw), seconds.isFinite, seconds >= 0 else {
-                throw LaunchError(
-                    description: "--request-timeout must be a finite number greater than or equal to zero",
-                    presentation: .usage
-                )
-            }
-            guard seconds > 0 else { return nil }
-            let nanoseconds = (seconds * 1_000_000_000).rounded(.up)
-            guard nanoseconds <= Double(Int64.max) else {
-                throw LaunchError(
-                    description: "--request-timeout is too large",
-                    presentation: .usage
-                )
-            }
-            return .nanoseconds(Int64(nanoseconds))
-        }
-
-        private static func url(_ raw: String, label: String) throws -> URL {
-            guard let url = URL(string: raw),
-                  let scheme = url.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https" else {
-                throw LaunchError(
-                    description: "\(label) must be an http/https URL",
-                    presentation: .usage
-                )
-            }
-            return url
-        }
-
-        private static func usage(environment: [String: String]) -> String {
-            let discoveryFile = Discovery.defaultFileURL(environment: environment)
-            return """
-                Usage:
-                  xcode-mcp-proxy [options]
-
-                Description:
-                  STDIO compatibility adapter that forwards MCP traffic to a running xcode-mcp-proxy-server (Streamable HTTP).
-
-                Options:
-                  --request-timeout seconds  Request timeout (default: 300, 0 disables)
-                  --url url                  Explicit upstream URL (default: env/discovery/http://localhost:8765/mcp)
-                  --version                  Show version
-                  -h, --help                 Show help
-
-                Environment:
-                  XCODE_MCP_PROXY_ENDPOINT   Upstream proxy URL (overrides discovery)
-
-                Notes:
-                  - Proxy server: xcode-mcp-proxy-server
-                  - --config is only supported by xcode-mcp-proxy-server
-                  - Discovery file: \(discoveryFile.path)
-                """
-        }
-
-        private func executableName(_ arguments: [String]) -> String {
-            guard let raw = arguments.first, raw.isEmpty == false else {
-                return "xcode-mcp-proxy"
-            }
-            let name = URL(fileURLWithPath: raw).lastPathComponent
-            return name.isEmpty ? "xcode-mcp-proxy" : name
         }
     }
 }

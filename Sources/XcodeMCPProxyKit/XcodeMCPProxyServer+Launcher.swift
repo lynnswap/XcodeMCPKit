@@ -15,11 +15,12 @@ extension XcodeMCPProxyServer {
             package init(
                 makeServer: @escaping (PreparedConfiguration) -> any LaunchServer,
                 isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool,
-                forceRestartExistingServer: @escaping (
-                    _ host: String,
-                    _ port: Int,
-                    _ stderr: (String) -> Void
-                ) -> Bool = { _, _, _ in false },
+                forceRestartExistingServer:
+                    @escaping (
+                        _ host: String,
+                        _ port: Int,
+                        _ stderr: (String) -> Void
+                    ) -> Bool = { _, _, _ in false },
                 detectExistingServerProcessIDs: @escaping (_ host: String, _ port: Int) -> [Int] = { _, _ in [] }
             ) {
                 self.makeServer = makeServer
@@ -67,11 +68,8 @@ extension XcodeMCPProxyServer {
                 )
 
                 switch action {
-                case .showHelp(let usage):
-                    stdout(usage)
-                    return 0
-                case .showVersion(let versionLine):
-                    stdout(versionLine)
+                case .display(let message):
+                    stdout(message)
                     return 0
                 case .dryRun(let commandLine):
                     stdout(commandLine)
@@ -83,16 +81,9 @@ extension XcodeMCPProxyServer {
                         stderr: stderr
                     )
                 }
-            } catch let error as XcodeMCPProxyServer.LaunchResolutionError {
-                switch error.presentation {
-                case .conciseUsageHint:
-                    stderr("error: \(error.description)")
-                    stderr("run with --help for usage")
-                case .fullUsage:
-                    stderr(error.description)
-                    stderr(XcodeMCPProxyServer.serverUsage)
-                }
-                return 1
+            } catch let error as CLICommandError {
+                stderr(error.description)
+                return error.exitCode
             } catch {
                 stderr("error: \(error)")
                 return 1

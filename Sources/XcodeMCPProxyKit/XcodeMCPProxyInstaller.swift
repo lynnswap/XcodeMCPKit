@@ -27,8 +27,7 @@ package struct XcodeMCPProxyInstallerConfiguration: Equatable, Sendable {
 package struct XcodeMCPProxyInstaller: Sendable {
     /// Top-level action for an installer invocation.
     package enum LaunchAction: Equatable, Sendable {
-        case showHelp(String)
-        case showVersion(String)
+        case display(String)
         case install(XcodeMCPProxyInstallerConfiguration)
     }
 
@@ -110,87 +109,25 @@ package struct XcodeMCPProxyInstaller: Sendable {
 
     /// CLI usage for `xcode-mcp-proxy-install`.
     package static var installUsage: String {
-        """
-        Usage:
-          xcode-mcp-proxy-install [--bindir path] [--prefix path] [--dry-run]
-
-        Options:
-          --bindir path   Install to this directory (overrides --prefix)
-          --prefix path   Install to <prefix>/bin (default: ~/.local)
-          --dry-run       Print actions without copying files
-          --version       Show version
-          -h, --help      Show this help
-
-        Examples:
-          swift run -c release xcode-mcp-proxy-install
-          swift run -c release xcode-mcp-proxy-install --bindir "$HOME/bin"
-        """
-    }
-
-    /// Formats a CLI-compatible installer version line.
-    package static func installVersionLine(arguments: [String]) -> String {
-        XcodeMCPProxyServer.productMetadata.versionLine(
-            arguments: arguments,
-            defaultExecutableName: "xcode-mcp-proxy-install"
-        )
+        ProxyInstallCommand.helpMessage()
     }
 
     package static func resolveLaunchAction(
         arguments: [String],
         environment: [String: String]
     ) throws -> LaunchAction {
-        let scan = ProxyCLIInvocationScanner.scanInstall(arguments)
-        let versionLine = installVersionLine(arguments: arguments)
-
-        if scan.showHelp {
-            return .showHelp(installUsage)
+        switch try CLICommandParser.parse(ProxyInstallCommand.self, arguments: arguments) {
+        case .cleanExit(let message):
+            return .display(message)
+        case .command(let command):
+            return .install(
+                XcodeMCPProxyInstallerConfiguration(
+                    prefix: command.prefix ?? environment["PREFIX"],
+                    binaryDirectory: command.bindir ?? environment["BINDIR"],
+                    dryRun: command.dryRun
+                )
+            )
         }
-        if scan.showVersion {
-            return .showVersion(versionLine)
-        }
-
-        return .install(
-            try parseLaunchConfiguration(arguments, environment: environment)
-        )
-    }
-
-    package static func parseLaunchConfiguration(
-        _ arguments: [String],
-        environment: [String: String]
-    ) throws -> XcodeMCPProxyInstallerConfiguration {
-        var configuration = XcodeMCPProxyInstallerConfiguration(
-            prefix: environment["PREFIX"],
-            binaryDirectory: environment["BINDIR"],
-            dryRun: false
-        )
-
-        var index = 1
-        while index < arguments.count {
-            let argument = arguments[index]
-            switch argument {
-            case "-h", "--help", "--version":
-                index += 1
-            case "--prefix":
-                guard index + 1 < arguments.count else {
-                    throw Error.message("\(argument) requires a value")
-                }
-                configuration.prefix = arguments[index + 1]
-                index += 2
-            case "--bindir":
-                guard index + 1 < arguments.count else {
-                    throw Error.message("\(argument) requires a value")
-                }
-                configuration.binaryDirectory = arguments[index + 1]
-                index += 2
-            case "--dry-run":
-                configuration.dryRun = true
-                index += 1
-            default:
-                throw Error.message("unknown option: \(argument)")
-            }
-        }
-
-        return configuration
     }
 
     /// Resolves the file operations that would be performed for an install.
@@ -324,16 +261,16 @@ extension XcodeMCPProxyInstaller {
     package struct Launcher {
         package struct Dependencies {
             package var executableURL: () -> URL?
-            package var install:
-                (XcodeMCPProxyInstallerConfiguration, URL, (String) -> Void) throws -> Void
+            package var install: (XcodeMCPProxyInstallerConfiguration, URL, (String) -> Void) throws -> Void
 
             package init(
                 executableURL: @escaping () -> URL?,
-                install: @escaping (
-                    XcodeMCPProxyInstallerConfiguration,
-                    URL,
-                    (String) -> Void
-                ) throws -> Void
+                install:
+                    @escaping (
+                        XcodeMCPProxyInstallerConfiguration,
+                        URL,
+                        (String) -> Void
+                    ) throws -> Void
             ) {
                 self.executableURL = executableURL
                 self.install = install
@@ -371,11 +308,8 @@ extension XcodeMCPProxyInstaller {
                 )
 
                 switch action {
-                case .showHelp(let usage):
-                    stdout(usage)
-                    return 0
-                case .showVersion(let versionLine):
-                    stdout(versionLine)
+                case .display(let message):
+                    stdout(message)
                     return 0
                 case .install(let configuration):
                     guard let executableURL = dependencies.executableURL() else {
@@ -386,6 +320,9 @@ extension XcodeMCPProxyInstaller {
                     try dependencies.install(configuration, executableURL, stdout)
                     return 0
                 }
+            } catch let error as CLICommandError {
+                stderr(error.description)
+                return error.exitCode
             } catch let error as XcodeMCPProxyInstaller.Error {
                 stderr("error: \(error.description)")
                 stderr("run with --help for usage")
