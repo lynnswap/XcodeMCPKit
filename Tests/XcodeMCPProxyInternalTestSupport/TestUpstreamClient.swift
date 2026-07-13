@@ -82,8 +82,16 @@ actor TestUpstreamClient: UpstreamSlotControlling {
         stopCountValue
     }
 
-    func nextStopCount(at index: Int = 0) async throws -> Int {
-        try await stopEvents.nextValue(at: index)
+    func nextStopCount(
+        at index: Int = 0,
+        timeout: Duration = .seconds(2)
+    ) async throws -> Int {
+        try await waitWithTimeout(
+            "waiting for upstream stop event at index \(index)",
+            timeout: timeout
+        ) {
+            try await self.stopEvents.nextValue(at: index)
+        }
     }
 }
 

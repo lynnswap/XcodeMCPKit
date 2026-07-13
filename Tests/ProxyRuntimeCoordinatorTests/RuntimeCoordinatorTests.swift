@@ -2199,7 +2199,31 @@ struct RuntimeCoordinatorProcessRoutingTests {
         )
         let initializedNotification = try await upstream.nextSent(at: sentCountAfterExit + 1)
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
-        await manager.drainRuntimeTasksForTesting()
+        let toolsRequest = try await waitWithTimeout(
+            "waiting for restarted route tools catalog",
+            timeout: .seconds(2)
+        ) {
+            try await upstream.nextSent(
+                startingAt: sentCountAfterExit + 2,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: toolsRequest),
+                    tools: [toolDescriptor(name: "RecoveredProcessTool")]
+                )
+            )
+        )
+        _ = try await waitWithTimeout(
+            "waiting for restarted route catalog completion",
+            timeout: .seconds(2)
+        ) {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 0
+            }
+        }
 
         #expect(manager.testStateSnapshot().hasInitResult)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 0)
