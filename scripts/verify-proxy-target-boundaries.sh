@@ -1,10 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-if ! command -v rg > /dev/null 2>&1; then
-    echo "error: verify-proxy-target-boundaries requires rg" >&2
-    exit 2
-fi
 if ! command -v jq > /dev/null 2>&1; then
     echo "error: verify-proxy-target-boundaries requires jq" >&2
     exit 2
@@ -18,7 +14,7 @@ reject_matches() {
     local output
     local status
     set +e
-    output="$(rg -n "${pattern}" "$@" 2>&1)"
+    output="$(LC_ALL=C grep -E -n -r "${pattern}" "$@" 2>&1)"
     status=$?
     set -e
 
@@ -41,7 +37,7 @@ reject_matches \
 
 reject_matches \
     "XcodeMCPProxyRuntime must not own the facade aggregate configuration" \
-    '\bProxyConfig\b|listenHost|listenPort|discoveryFileURL|configPath' \
+    '(^|[^[:alnum:]_])ProxyConfig([^[:alnum:]_]|$)|listenHost|listenPort|discoveryFileURL|configPath' \
     Sources/XcodeMCPProxyRuntime
 
 reject_matches \
@@ -51,7 +47,7 @@ reject_matches \
 
 reject_matches \
     "XcodeMCPProxyHTTP references a Runtime implementation type" \
-    'ProcessControlPlaneAuthority|\bControlPlane\b|LeaseManager|\bUpstream[A-Za-z0-9_]*\b|SessionContext|RuntimeCoordinator|DocumentationProvider|RefreshCodeIssues' \
+    'ProcessControlPlaneAuthority|(^|[^[:alnum:]_])ControlPlane([^[:alnum:]_]|$)|LeaseManager|(^|[^[:alnum:]_])Upstream[A-Za-z0-9_]*([^[:alnum:]_]|$)|SessionContext|RuntimeCoordinator|DocumentationProvider|RefreshCodeIssues' \
     Sources/XcodeMCPProxyHTTP
 
 reject_matches \
