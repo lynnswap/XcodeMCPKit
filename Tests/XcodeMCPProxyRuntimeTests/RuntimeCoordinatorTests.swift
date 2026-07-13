@@ -12968,11 +12968,13 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let warmup0RefreshIndex = toolsListRefreshes.count()
         await upstream0.yield(
             .message(try JSONSerialization.data(withJSONObject: warmup0Response, options: [])))
-        _ = try await waitForRecordedValue(
+        let firstRefresh = try await waitForRecordedValue(
             toolsListRefreshes,
             at: warmup0RefreshIndex,
             description: "waiting for first tools/list warmup failure"
         )
+        #expect(firstRefresh == (0, false))
+        await manager.drainRuntimeTasksForTesting()
         let upstream0Health = try #require(
             manager.testStateSnapshot().upstream(id: 0)?.healthState
         )
@@ -12999,11 +13001,13 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let warmup1RefreshIndex = toolsListRefreshes.count()
         await upstream1.yield(
             .message(try JSONSerialization.data(withJSONObject: warmup1Response, options: [])))
-        _ = try await waitForRecordedValue(
+        let secondRefresh = try await waitForRecordedValue(
             toolsListRefreshes,
             at: warmup1RefreshIndex,
             description: "waiting for second tools/list warmup failure"
         )
+        #expect(secondRefresh == (1, false))
+        await manager.drainRuntimeTasksForTesting()
 
         let chosen = manager.chooseUpstreamIndex()
         #expect(chosen == nil)
