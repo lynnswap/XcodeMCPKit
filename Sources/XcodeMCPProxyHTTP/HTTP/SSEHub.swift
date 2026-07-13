@@ -7,6 +7,18 @@ import XcodeMCPKit
 import XcodeMCPProxyRuntime
 
 final class SSEHub: Sendable {
+    enum AddResult {
+        case firstActiveClient
+        case additionalActiveClient
+        case inactive
+    }
+
+    enum BroadcastResult {
+        case scheduled
+        case unavailable
+        case discardedInvalidPayload
+    }
+
     private struct Waiter: Sendable {
         let id: UUID
         let continuation: CheckedContinuation<Void, Error>
@@ -18,12 +30,17 @@ final class SSEHub: Sendable {
         var nextClientIndex = 0
         var waiters: [Waiter] = []
 
-        mutating func add(_ channel: Channel) {
+        mutating func add(_ channel: Channel) -> Bool {
             let id = ObjectIdentifier(channel)
+            guard channel.isActive else {
+                remove(id: id)
+                return false
+            }
             if clients[id] == nil {
                 clientOrder.append(id)
             }
             clients[id] = channel
+            return true
         }
 
         mutating func remove(_ channel: Channel) {
@@ -66,29 +83,47 @@ final class SSEHub: Sendable {
             }
             return nil
         }
+
+        mutating func hasActiveClients() -> Bool {
+            let inactiveClientIDs = clientOrder.filter { id in
+                clients[id]?.isActive != true
+            }
+            for id in inactiveClientIDs {
+                remove(id: id)
+            }
+            return clients.isEmpty == false
+        }
     }
 
     private let state = NIOLockedValueBox(State())
     private let logger: Logger = ProxyLogging.make("sse")
 
-    var hasClients: Bool {
-        state.withLockedValue { !$0.clients.isEmpty }
+    var hasActiveClients: Bool {
+        state.withLockedValue { $0.hasActiveClients() }
     }
 
-    func add(_ channel: Channel) {
-        let waiters = state.withLockedValue { state -> [Waiter] in
-            state.add(channel)
+    @discardableResult
+    func add(_ channel: Channel) -> AddResult {
+        let (result, waiters) = state.withLockedValue { state -> (AddResult, [Waiter]) in
+            let hadActiveClients = state.hasActiveClients()
+            guard state.add(channel) else {
+                return (.inactive, [])
+            }
             let waiters = state.waiters
             state.waiters.removeAll()
-            return waiters
+            return (
+                hadActiveClients ? .additionalActiveClient : .firstActiveClient,
+                waiters
+            )
         }
         for waiter in waiters {
             waiter.continuation.resume(returning: ())
         }
+        return result
     }
 
     func waitForClient() async throws {
-        if hasClients {
+        if hasActiveClients {
             return
         }
 
@@ -96,7 +131,7 @@ final class SSEHub: Sendable {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let shouldResume = state.withLockedValue { state in
-                    guard state.clients.isEmpty else { return true }
+                    guard state.hasActiveClients() == false else { return true }
                     state.waiters.append(Waiter(id: waiterID, continuation: continuation))
                     return false
                 }
@@ -115,28 +150,43 @@ final class SSEHub: Sendable {
         }
     }
 
-    func broadcast(_ data: Data) {
+    @discardableResult
+    func broadcast(
+        _ data: Data,
+        onUndelivered: @escaping @Sendable () -> Void = {}
+    ) -> BroadcastResult {
         guard let payload = SSECodec.encodeDataEvent(data) else {
             logger.warning("Dropping non-UTF8 SSE payload", metadata: ["bytes": "\(data.count)"])
-            return
+            return .discardedInvalidPayload
         }
         guard let channel = state.withLockedValue({ $0.nextActiveClient() }) else {
-            return
+            return .unavailable
         }
-        channel.eventLoop.execute {
-            guard channel.isActive else { return }
+
+        channel.eventLoop.execute { [weak self] in
+            guard channel.isActive else {
+                self?.remove(channel)
+                onUndelivered()
+                return
+            }
             var buffer = channel.allocator.buffer(capacity: payload.utf8.count)
             buffer.writeString(payload)
-            _ = channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buffer)))
+            channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buffer))).whenFailure {
+                [weak self] _ in
+                self?.remove(channel)
+                onUndelivered()
+            }
         }
+        return .scheduled
     }
 
     func closeAll() {
-        let channels = state.withLockedValue { Array($0.clients.values) }
-        state.withLockedValue { state in
+        let channels = state.withLockedValue { state -> [Channel] in
+            let channels = Array(state.clients.values)
             state.clients.removeAll()
             state.clientOrder.removeAll()
             state.nextClientIndex = 0
+            return channels
         }
         for channel in channels {
             channel.eventLoop.execute {
