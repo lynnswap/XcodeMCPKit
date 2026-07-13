@@ -2144,6 +2144,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let upstream = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
+        let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
         let target = xcodeProcessTarget(processID: 27013, xcodeVersion: "27.0")
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
@@ -2153,7 +2154,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 XcodeProcessRoute(target: target, upstreamIndices: [0]),
             ],
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
+                upstreamEventHandled: { upstreamEvents.append($0) },
+                toolsListRefreshCompleted: { toolsListRefreshes.append(($0, $1)) }
             ),
             startImmediately: false
         )
@@ -2161,12 +2163,33 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let manager = fixture.manager
 
         _ = try await fixture.initializePrimary(on: upstream)
-        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
-        try seedProcessToolCatalogs(
-            on: manager,
-            entries: [
-                (target, 0, [toolDescriptor(name: "RecoveredProcessTool")]),
-            ]
+        let initialToolsRequest = try await waitWithTimeout(
+            "waiting for initial route tools catalog",
+            timeout: .seconds(2)
+        ) {
+            try await upstream.nextSent(
+                startingAt: 2,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: initialToolsRequest),
+                    tools: [toolDescriptor(name: "RecoveredProcessTool")]
+                )
+            )
+        )
+        let initialRefresh = try await waitForRecordedValue(
+            toolsListRefreshes,
+            at: 0,
+            description: "waiting for initial route catalog completion"
+        )
+        #expect(initialRefresh == (0, true))
+        await manager.drainRuntimeTasksForTesting()
+        #expect(
+            manager.processControlPlane.attemptSnapshot(processID: target.processID)?.phase
+                == .cataloged
         )
 
         let timeoutCountBeforeExit = timeoutScheduler.scheduledCount()
@@ -2216,17 +2239,20 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 )
             )
         )
-        _ = try await waitWithTimeout(
-            "waiting for restarted route catalog completion",
-            timeout: .seconds(2)
-        ) {
-            try await manager.controlPlaneDebugMirror.waitForSnapshot {
-                $0.canonicalToolsSourceUpstream == 0
-            }
-        }
+        let restartedRefresh = try await waitForRecordedValue(
+            toolsListRefreshes,
+            at: 1,
+            description: "waiting for restarted route catalog completion"
+        )
+        #expect(restartedRefresh == (0, true))
+        await manager.drainRuntimeTasksForTesting()
 
         #expect(manager.testStateSnapshot().hasInitResult)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 0)
+        #expect(
+            manager.processControlPlane.attemptSnapshot(processID: target.processID)?.phase
+                == .cataloged
+        )
     }
 
     @Test func processRoutingCooldownTimersFollowRouteLifecycle() {
