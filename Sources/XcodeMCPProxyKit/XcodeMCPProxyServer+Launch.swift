@@ -219,7 +219,12 @@ private extension ProxyServerCommand {
         if let sessionID = configuration.upstream.sessionID {
             arguments += ["--session-id", sessionID]
         }
-        if configuration.featurePolicy.refreshCodeIssuesMode != .proxy {
+        if let refreshCodeIssuesMode {
+            arguments += [
+                "--refresh-code-issues-mode",
+                refreshCodeIssuesMode.rawValue,
+            ]
+        } else if configuration.featurePolicy.refreshCodeIssuesMode != .proxy {
             arguments += [
                 "--refresh-code-issues-mode",
                 configuration.featurePolicy.refreshCodeIssuesMode.rawValue,

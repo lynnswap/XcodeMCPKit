@@ -317,6 +317,22 @@ struct ServerRunnerTests {
         #expect(line.contains("--auto-approve"))
     }
 
+    @Test func serverRunnerDryRunPreservesExplicitProxyRefreshMode() async throws {
+        let result = await runServer(
+            arguments: [
+                "xcode-mcp-proxy-server",
+                "--refresh-code-issues-mode", "proxy",
+                "--dry-run",
+            ],
+            environment: ["MCP_XCODE_REFRESH_CODE_ISSUES_MODE": "upstream"]
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        let line = try #require(result.stdout.first)
+        #expect(line.contains("--refresh-code-issues-mode proxy"))
+    }
+
     @Test func serverLaunchPlanHonorsDryRunEnvironment() throws {
         for value in ["1", "true", "TRUE", "yes", "on", " ON "] {
             let action = try XcodeMCPProxyServer.resolveLaunchAction(
