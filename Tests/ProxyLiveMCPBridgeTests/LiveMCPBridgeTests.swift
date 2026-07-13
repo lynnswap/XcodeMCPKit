@@ -4,6 +4,7 @@ import Foundation
 import NIO
 import Testing
 import XcodeMCPKit
+@testable import XcodeMCPProxyRuntime
 @testable import XcodeMCPProxyKit
 
 

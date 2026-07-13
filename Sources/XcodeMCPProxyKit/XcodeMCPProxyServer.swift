@@ -1,8 +1,8 @@
 import Foundation
 import Logging
-import NIO
-import NIOHTTP1
 import XcodeMCPKit
+import XcodeMCPProxyHTTP
+import XcodeMCPProxyRuntime
 
 /// Public configuration for an embedded Xcode MCP proxy server.
 ///
@@ -473,14 +473,17 @@ public final class XcodeMCPProxyServer: Sendable {
         var discoveryClient: DiscoveryClient
         var executableLookupClient: ExecutableLookupClient
         var processID: @Sendable () -> Int
-        var runningXcodeTargets: @Sendable () -> [XcodeProcessTarget]
         var loadFileConfiguration:
             @Sendable (URL) throws -> ProxyConfig.File.LoadedConfiguration
-        var makeEventLoopGroup: @Sendable () -> EventLoopGroup
-        var shutdownEventLoopGroup: @Sendable (EventLoopGroup) async throws -> Void
-        var makeAutoApprover: @Sendable (ProxyConfig) -> any ProxyServerPermissionDialogAutoApprover
-        var makeRuntimeCoordinator:
-            @Sendable (_ config: ProxyConfig, _ eventLoop: EventLoop) -> any RuntimeCoordinating
+        var makeAutoApprover:
+            @Sendable (ProxyConfig, any ProxyRuntimeServing) -> any ProxyServerPermissionDialogAutoApprover
+        var makeRuntime: @Sendable (ProxyRuntimeConfiguration) -> any ProxyRuntimeServing
+        var makeHTTPGateway:
+            @Sendable (
+                ProxyHTTPConfiguration,
+                any ProxyRuntimeServing,
+                Logger
+            ) -> any ProxyHTTPGatewayServing
 
         init(
             discoveryClient: DiscoveryClient = .liveValue,
@@ -488,52 +491,41 @@ public final class XcodeMCPProxyServer: Sendable {
             processID: @escaping @Sendable () -> Int = {
                 Int(ProcessInfo.processInfo.processIdentifier)
             },
-            runningXcodeTargets: @escaping @Sendable () -> [XcodeProcessTarget] = {
-                []
-            },
             loadFileConfiguration: @escaping @Sendable (URL) throws ->
                 ProxyConfig.File.LoadedConfiguration = {
                     try ProxyConfig.File.Loader.loadStrict(configURL: $0)
                 },
-            makeEventLoopGroup: @escaping @Sendable () -> EventLoopGroup = {
-                MultiThreadedEventLoopGroup(numberOfThreads: 1)
-            },
-            shutdownEventLoopGroup: @escaping @Sendable (EventLoopGroup) async throws -> Void = {
-                group in
-                try await withCheckedThrowingContinuation {
-                    (continuation: CheckedContinuation<Void, any Error>) in
-                    group.shutdownGracefully { error in
-                        if let error {
-                            continuation.resume(throwing: error)
-                        } else {
-                            continuation.resume()
-                        }
-                    }
-                }
-            },
-            makeAutoApprover: @escaping @Sendable (ProxyConfig) -> any ProxyServerPermissionDialogAutoApprover,
-            makeRuntimeCoordinator: @escaping @Sendable (_ config: ProxyConfig, _ eventLoop: EventLoop) -> any RuntimeCoordinating
+            makeAutoApprover: @escaping @Sendable (
+                ProxyConfig,
+                any ProxyRuntimeServing
+            ) -> any ProxyServerPermissionDialogAutoApprover,
+            makeRuntime: @escaping @Sendable (ProxyRuntimeConfiguration) -> any ProxyRuntimeServing,
+            makeHTTPGateway: @escaping @Sendable (
+                ProxyHTTPConfiguration,
+                any ProxyRuntimeServing,
+                Logger
+            ) -> any ProxyHTTPGatewayServing = { configuration, runtime, logger in
+                ProxyHTTPGateway(
+                    configuration: configuration,
+                    runtime: runtime,
+                    logger: logger
+                )
+            }
         ) {
             self.discoveryClient = discoveryClient
             self.executableLookupClient = executableLookupClient
             self.processID = processID
-            self.runningXcodeTargets = runningXcodeTargets
             self.loadFileConfiguration = loadFileConfiguration
-            self.makeEventLoopGroup = makeEventLoopGroup
-            self.shutdownEventLoopGroup = shutdownEventLoopGroup
             self.makeAutoApprover = makeAutoApprover
-            self.makeRuntimeCoordinator = makeRuntimeCoordinator
+            self.makeRuntime = makeRuntime
+            self.makeHTTPGateway = makeHTTPGateway
         }
 
         static var live: Self {
             let executableLookupClient = ExecutableLookupClient.liveValue
-            let xcodeProcessEventMonitor = XcodeProcessEventMonitor()
             return Self(
                 executableLookupClient: executableLookupClient,
-                runningXcodeTargets: {
-                    xcodeProcessEventMonitor.runningXcodeTargets()
-                },
-                makeAutoApprover: { config in
+                makeAutoApprover: { config, runtime in
                     let additionalCandidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(
                         config: config,
                         executableLookupClient: executableLookupClient
@@ -541,12 +533,11 @@ public final class XcodeMCPProxyServer: Sendable {
                     return XcodePermissionDialog.AutoApprover(
                         dependencies: .live(
                             permissionDialogProcessIDs: {
-                                xcodeProcessEventMonitor.permissionDialogProcessIDs()
+                                runtime.inventorySnapshot().permissionDialogProcessIDs
                             },
                             agentPathCandidates: {
-                                let processBoundCandidates = xcodeProcessEventMonitor
-                                    .runningXcodeTargets()
-                                    .map(\.mcpbridgePath)
+                                let processBoundCandidates = runtime.inventorySnapshot()
+                                    .xcodeTargets.map(\.mcpBridgePath)
                                 return XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
                                     additionalExecutableCandidates:
                                         additionalCandidates + processBoundCandidates
@@ -558,20 +549,8 @@ public final class XcodeMCPProxyServer: Sendable {
                         )
                     )
                 },
-                makeRuntimeCoordinator: { config, eventLoop in
-                    xcodeProcessEventMonitor.start()
-                    return RuntimeCoordinator(
-                        config: config,
-                        eventLoop: eventLoop,
-                        upstreamReadinessGate: .liveDefault(
-                            config: config,
-                            clock: .liveValue,
-                            processEventMonitor: xcodeProcessEventMonitor
-                        ),
-                        xcodeTargetDiscovery: xcodeProcessEventMonitor,
-                        xcodeProcessEventMonitor: xcodeProcessEventMonitor,
-                        startImmediately: false
-                    )
+                makeRuntime: { config in
+                    ProxyRuntime(configuration: config)
                 }
             )
         }
@@ -677,12 +656,14 @@ public final class XcodeMCPProxyServer: Sendable {
         displayHost: String,
         port: Int,
         config: ProxyConfig,
-        xcodeTargets: [XcodeProcessTarget]
+        xcodeTargets: [ProxyRuntimeInventorySnapshot.XcodeTarget]
     ) -> String {
         let upstreamsPerXcode = max(1, min(config.upstreamProcessCount, 10))
         let processRoutingActive =
             xcodeTargets.isEmpty == false
-            && XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
+            && ProxyRuntime.supportsProcessBoundRouting(
+                configuration: config.runtimeConfiguration
+            )
         let upstreamProcessCount =
             processRoutingActive
             ? upstreamsPerXcode * xcodeTargets.count
@@ -727,7 +708,9 @@ public final class XcodeMCPProxyServer: Sendable {
     }
 
     private static func documentationSearchStartupStatus(config: ProxyConfig) -> String {
-        if RuntimeCoordinator.documentationProviderServiceIsConfigured(config: config) {
+        if ProxyRuntime.documentationSearchIsConfigured(
+            configuration: config.runtimeConfiguration
+        ) {
             return "pending"
         }
         return "disabled"
@@ -884,44 +867,6 @@ private extension XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode {
         case .upstream:
             self = .upstream
         }
-    }
-}
-
-final class ProxyAcceptedChannelTracker: @unchecked Sendable {
-    private let lock = NSLock()
-    private var channels: [ObjectIdentifier: Channel] = [:]
-
-    func register(_ channel: Channel) {
-        let id = ObjectIdentifier(channel)
-        lock.withLock {
-            channels[id] = channel
-        }
-        channel.closeFuture.whenComplete { [weak self] _ in
-            guard let self else { return }
-            _ = lock.withLock {
-                channels.removeValue(forKey: id)
-            }
-        }
-    }
-
-    func snapshot() -> [Channel] {
-        lock.withLock { Array(channels.values) }
-    }
-}
-
-final class ProxyAcceptedChannelHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = Channel
-
-    private let tracker: ProxyAcceptedChannelTracker
-
-    init(tracker: ProxyAcceptedChannelTracker) {
-        self.tracker = tracker
-    }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let channel = unwrapInboundIn(data)
-        tracker.register(channel)
-        context.fireChannelRead(data)
     }
 }
 

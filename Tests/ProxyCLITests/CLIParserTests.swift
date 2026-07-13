@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import XcodeMCPKit
 @testable import XcodeMCPProxyKit
+import XcodeMCPProxyRuntime
 
 
 @Suite

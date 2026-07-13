@@ -3,6 +3,7 @@ import Foundation
 import Testing
 
 @testable import XcodeMCPProxyKit
+import XcodeMCPProxyRuntime
 
 @Suite(.serialized)
 struct XcodePermissionDialogAutoApproverTests {

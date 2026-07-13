@@ -2,7 +2,8 @@ import Foundation
 import NIO
 import NIOHTTP1
 import XcodeMCPKit
-@testable import XcodeMCPProxyKit
+@testable import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyHTTP
 import Testing
 import XcodeMCPProxyTestSupport
 
@@ -145,24 +146,29 @@ private struct StressHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 4)
         let childChannelTracker = HTTPTestServerChannelTracker()
-        let config: ProxyConfig = {
-            var config = ProxyConfig(
-                listenHost: "127.0.0.1",
-                listenPort: 0,
+        let listenHost = "127.0.0.1"
+        let listenPort = 0
+        let maxBodyBytes = 1_048_576
+        let config = ProxyRuntimeConfiguration(
                 upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
                 upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
                 upstreamSessionID: nil,
-                maxBodyBytes: 1_048_576,
-                requestTimeout: 60
+                maxMessageBytes: maxBodyBytes,
+                requestTimeout: 60,
+                prewarmToolsList: false
             )
-            config.prewarmToolsList = false
-            return config
-        }()
         let sessionManager = RuntimeCoordinator(
             config: config,
             eventLoop: group.next(),
             upstreams: [upstream]
         )
+        let runtime = ProxyRuntime(
+            config: config,
+            coordinator: sessionManager,
+            eventLoop: group.next(),
+            eventSource: ProxyRuntimeEventSource()
+        )
+        let controlService = HTTPControlService(runtime: runtime)
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 1024)
@@ -171,20 +177,24 @@ private struct StressHTTPServer {
                 channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
                     channel.pipeline.addHandler(
                         HTTPHandler(
-                            config: config,
-                            sessionManager: sessionManager
+                            config: ProxyHTTPConfiguration(
+                                listenHost: listenHost,
+                                listenPort: listenPort,
+                                maxBodyBytes: maxBodyBytes
+                            ),
+                            controlService: controlService
                         )
                     )
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
-        let channel = try bootstrap.bind(host: config.listenHost, port: config.listenPort).wait()
+        let channel = try bootstrap.bind(host: listenHost, port: listenPort).wait()
         try channel.pipeline.addHandler(
             HTTPTestServerAcceptedChannelHandler(tracker: childChannelTracker)
         ).wait()
-        let port = channel.localAddress?.port ?? config.listenPort
-        let url = URL(string: "http://\(config.listenHost):\(port)/mcp")!
+        let port = channel.localAddress?.port ?? listenPort
+        let url = URL(string: "http://\(listenHost):\(port)/mcp")!
         return StressHTTPServer(
             group: group,
             channel: channel,
