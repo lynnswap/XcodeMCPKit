@@ -49,6 +49,7 @@ final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
 struct RuntimeCoordinatorTestHooks: Sendable {
     var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
+    var toolsListPrewarmCompleted: (@Sendable () -> Void)?
     var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var upstreamRequestQueued:
         (
@@ -64,6 +65,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     init(
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
+        toolsListPrewarmCompleted: (@Sendable () -> Void)? = nil,
         upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         upstreamRequestQueued:
             (
@@ -78,6 +80,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     ) {
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
+        self.toolsListPrewarmCompleted = toolsListPrewarmCompleted
         self.upstreamInitialized = upstreamInitialized
         self.upstreamRequestQueued = upstreamRequestQueued
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
@@ -1084,7 +1087,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
         )
         addRuntimeTask { [weak self] in
-            guard let self,
+            guard let self else { return }
+            defer { self.testHooks.toolsListPrewarmCompleted?() }
+            guard
                 let baseResult = await self.controlPlaneCoordinator.prewarmToolsCatalogIfNeeded(
                     deadlineUptimeNs: deadline
                 )

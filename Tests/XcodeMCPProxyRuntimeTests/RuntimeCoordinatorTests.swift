@@ -2197,6 +2197,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let upstream = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
         let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let target = xcodeProcessTarget(processID: 27013, xcodeVersion: "27.0")
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
@@ -2207,7 +2208,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ],
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamEventHandled: { upstreamEvents.append($0) },
-                toolsListRefreshCompleted: { toolsListRefreshes.append(($0, $1)) }
+                toolsListRefreshCompleted: { toolsListRefreshes.append(($0, $1)) },
+                upstreamInitialized: { initializedUpstreams.append($0) }
             ),
             startImmediately: false
         )
@@ -2215,6 +2217,13 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let manager = fixture.manager
 
         _ = try await fixture.initializePrimary(on: upstream)
+        #expect(
+            try await waitForRecordedValue(
+                initializedUpstreams,
+                at: 0,
+                description: "waiting for initial route initialization commit"
+            ) == 0
+        )
         let initialToolsRequest = try await waitWithTimeout(
             "waiting for initial route tools catalog",
             timeout: .seconds(2)
@@ -2274,6 +2283,13 @@ struct RuntimeCoordinatorProcessRoutingTests {
         )
         let initializedNotification = try await upstream.nextSent(at: sentCountAfterExit + 1)
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
+        #expect(
+            try await waitForRecordedValue(
+                initializedUpstreams,
+                at: 1,
+                description: "waiting for restarted route initialization commit"
+            ) == 0
+        )
         let toolsRequest = try await waitWithTimeout(
             "waiting for restarted route tools catalog",
             timeout: .seconds(2)
@@ -12923,6 +12939,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
         let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
+        let toolsListPrewarmCompletions = LockedRecordedValues<Void>()
         var config = makeConfig(requestTimeout: 2)
         config.prewarmToolsList = true
         let manager = RuntimeCoordinator(
@@ -12931,7 +12948,8 @@ struct RuntimeCoordinatorWindowRoutingTests {
             upstreams: [upstream0, upstream1],
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamEventHandled: { upstreamEvents.append($0) },
-                toolsListRefreshCompleted: { toolsListRefreshes.append(($0, $1)) }
+                toolsListRefreshCompleted: { toolsListRefreshes.append(($0, $1)) },
+                toolsListPrewarmCompleted: { toolsListPrewarmCompletions.append(()) }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -12953,6 +12971,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
 
         // Fail tools/list warmup on upstream0 to mark it unhealthy.
+        let warmup0CompletionIndex = toolsListPrewarmCompletions.count()
         manager.refreshToolsListIfNeeded()
         let warmup0 = try await sentMessage(
             from: upstream0,
@@ -12974,7 +12993,11 @@ struct RuntimeCoordinatorWindowRoutingTests {
             description: "waiting for first tools/list warmup failure"
         )
         #expect(firstRefresh == (0, false))
-        await manager.drainRuntimeTasksForTesting()
+        _ = try await waitForRecordedValue(
+            toolsListPrewarmCompletions,
+            at: warmup0CompletionIndex,
+            description: "waiting for first tools/list prewarm completion"
+        )
         let upstream0Health = try #require(
             manager.testStateSnapshot().upstream(id: 0)?.healthState
         )
@@ -12986,6 +13009,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         }
 
         // Trigger another warmup; it should prefer upstream1 and fail there too so no healthy upstream exists.
+        let warmup1CompletionIndex = toolsListPrewarmCompletions.count()
         manager.refreshToolsListIfNeeded()
         let warmup1 = try await sentMessage(
             from: upstream1,
@@ -13007,7 +13031,11 @@ struct RuntimeCoordinatorWindowRoutingTests {
             description: "waiting for second tools/list warmup failure"
         )
         #expect(secondRefresh == (1, false))
-        await manager.drainRuntimeTasksForTesting()
+        _ = try await waitForRecordedValue(
+            toolsListPrewarmCompletions,
+            at: warmup1CompletionIndex,
+            description: "waiting for second tools/list prewarm completion"
+        )
 
         let chosen = manager.chooseUpstreamIndex()
         #expect(chosen == nil)
