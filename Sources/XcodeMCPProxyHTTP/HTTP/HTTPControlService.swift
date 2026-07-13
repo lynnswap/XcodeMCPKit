@@ -5,10 +5,6 @@ import NIOConcurrencyHelpers
 import XcodeMCPProxyRuntime
 
 final class HTTPEventDeliveryStore: Sendable {
-    struct OpenResult {
-        let bufferedNotifications: [Data]
-    }
-
     private struct SessionDelivery: Sendable {
         let hub = SSEHub()
         var bufferedNotifications: [Data] = []
@@ -33,19 +29,26 @@ final class HTTPEventDeliveryStore: Sendable {
         }
     }
 
-    func open(sessionID: ProxySessionID, channel: Channel) -> OpenResult {
+    func open(sessionID: ProxySessionID, channel: Channel) {
         sessions.withLockedValue { sessions in
             var delivery = sessions[sessionID] ?? SessionDelivery()
-            let buffered: [Data]
             switch delivery.hub.add(channel) {
             case .firstActiveClient:
-                buffered = delivery.bufferedNotifications
+                let bufferedNotifications = delivery.bufferedNotifications
                 delivery.bufferedNotifications.removeAll(keepingCapacity: true)
+                for data in bufferedNotifications {
+                    if case .unavailable = broadcast(
+                        data,
+                        sessionID: sessionID,
+                        hub: delivery.hub
+                    ) {
+                        delivery.bufferedNotifications.append(data)
+                    }
+                }
             case .additionalActiveClient, .inactive:
-                buffered = []
+                break
             }
             sessions[sessionID] = delivery
-            return OpenResult(bufferedNotifications: buffered)
         }
     }
 
@@ -84,53 +87,28 @@ final class HTTPEventDeliveryStore: Sendable {
         sessionID: ProxySessionID,
         expectedHub: SSEHub?
     ) {
-        guard let hub = sessions.withLockedValue({ sessions -> SSEHub? in
+        var droppedNotificationCount = 0
+        sessions.withLockedValue { sessions in
             let currentDelivery = sessions[sessionID]
             if let expectedHub {
                 guard let currentDelivery, currentDelivery.hub === expectedHub else {
-                    return nil
+                    return
                 }
             }
 
-            let delivery = currentDelivery ?? SessionDelivery()
-            sessions[sessionID] = delivery
-            return delivery.hub
-        }) else {
-            return
-        }
-
-        let result = hub.broadcast(data) { [weak self] in
-            self?.deliverOrBuffer(
+            var delivery = currentDelivery ?? SessionDelivery()
+            if case .unavailable = broadcast(
                 data,
                 sessionID: sessionID,
-                expectedHub: hub
-            )
-        }
-        guard case .unavailable = result else {
-            return
-        }
-
-        var shouldRetryDelivery = false
-        var droppedNotificationCount = 0
-        sessions.withLockedValue { sessions in
-            guard var delivery = sessions[sessionID], delivery.hub === hub else {
-                return
-            }
-            if hub.hasActiveClients {
-                shouldRetryDelivery = true
-                return
-            }
-
-            delivery.bufferedNotifications.append(data)
-            if delivery.bufferedNotifications.count > bufferLimit {
-                droppedNotificationCount = delivery.bufferedNotifications.count - bufferLimit
-                delivery.bufferedNotifications.removeFirst(droppedNotificationCount)
+                hub: delivery.hub
+            ) {
+                delivery.bufferedNotifications.append(data)
+                if delivery.bufferedNotifications.count > bufferLimit {
+                    droppedNotificationCount = delivery.bufferedNotifications.count - bufferLimit
+                    delivery.bufferedNotifications.removeFirst(droppedNotificationCount)
+                }
             }
             sessions[sessionID] = delivery
-        }
-        if shouldRetryDelivery {
-            deliverOrBuffer(data, sessionID: sessionID, expectedHub: hub)
-            return
         }
         if droppedNotificationCount > 0 {
             logger.warning(
@@ -139,6 +117,20 @@ final class HTTPEventDeliveryStore: Sendable {
                     "session": .string(sessionID.rawValue),
                     "dropped_notifications": .string("\(droppedNotificationCount)"),
                 ]
+            )
+        }
+    }
+
+    private func broadcast(
+        _ data: Data,
+        sessionID: ProxySessionID,
+        hub: SSEHub
+    ) -> SSEHub.BroadcastResult {
+        hub.broadcast(data) { [weak self] in
+            self?.deliverOrBuffer(
+                data,
+                sessionID: sessionID,
+                expectedHub: hub
             )
         }
     }
@@ -186,7 +178,7 @@ final class HTTPControlService: Sendable {
         )
     }
 
-    func openSSE(sessionID: ProxySessionID, channel: Channel) -> HTTPEventDeliveryStore.OpenResult {
+    func openSSE(sessionID: ProxySessionID, channel: Channel) {
         deliveryStore.open(sessionID: sessionID, channel: channel)
     }
 

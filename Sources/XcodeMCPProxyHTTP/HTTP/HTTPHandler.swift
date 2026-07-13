@@ -321,11 +321,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             state.isSSE = true
             state.sseSessionID = sessionID
         }
-        let openResult = controlService.openSSE(
-            sessionID: ProxySessionID(rawValue: sessionID),
-            channel: context.channel
-        )
-
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/event-stream")
         headers.add(name: "Cache-Control", value: "no-cache")
@@ -340,9 +335,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         buffer.writeString(": ok\n\n")
         context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
 
-        for data in openResult.bufferedNotifications {
-            sendSSE(to: context.channel, data: data)
-        }
+        controlService.openSSE(
+            sessionID: ProxySessionID(rawValue: sessionID),
+            channel: context.channel
+        )
 
         if let remote = requestLog.remoteAddress {
             logger.info("SSE connected", metadata: ["remote": .string(remote), "session": .string(sessionID)])

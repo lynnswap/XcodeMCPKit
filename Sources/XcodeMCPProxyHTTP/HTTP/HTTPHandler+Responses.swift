@@ -170,10 +170,6 @@ extension HTTPHandler {
         )
     }
 
-    func sendSSE(to channel: Channel, data: Data) {
-        responseWriter.sendSSE(to: channel, data: data)
-    }
-
     func logRequest(_ request: RequestLogContext) {
         responseWriter.logRequest(request)
     }

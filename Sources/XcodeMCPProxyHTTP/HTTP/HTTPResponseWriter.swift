@@ -141,19 +141,6 @@ struct HTTPResponseWriter: Sendable {
         )
     }
 
-    func sendSSE(to channel: Channel, data: Data) {
-        guard let payload = SSECodec.encodeDataEvent(data) else {
-            logger.warning("Dropping non-UTF8 SSE payload", metadata: ["bytes": "\(data.count)"])
-            return
-        }
-        channel.eventLoop.execute {
-            guard channel.isActive else { return }
-            var buffer = channel.allocator.buffer(capacity: payload.utf8.count)
-            buffer.writeString(payload)
-            _ = channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buffer)))
-        }
-    }
-
     func logRequest(_ request: HTTPHandler.RequestLogContext) {
         var metadata: Logger.Metadata = [
             "id": .string(request.id),

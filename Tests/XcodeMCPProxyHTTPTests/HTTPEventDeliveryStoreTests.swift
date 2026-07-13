@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import NIOEmbedded
+import NIOHTTP1
 import Testing
 
 @testable import XcodeMCPProxyHTTP
@@ -24,13 +25,19 @@ struct HTTPEventDeliveryStoreTests {
         try activate(secondChannel, port: 2)
 
         store.receive(.notification(sessionID: sessionID, data: buffered))
-        let firstOpen = store.open(sessionID: sessionID, channel: firstChannel)
-        #expect(firstOpen.bufferedNotifications == [buffered])
+        store.open(sessionID: sessionID, channel: firstChannel)
+        firstChannel.embeddedEventLoop.run()
+        let firstBodies = try drainSSEBodies(from: firstChannel)
+        #expect(firstBodies.count == 1)
+        #expect(firstBodies[0].contains(String(decoding: buffered, as: UTF8.self)))
 
         store.close(sessionID: sessionID, channel: firstChannel)
         store.receive(.notification(sessionID: sessionID, data: afterDisconnect))
-        let secondOpen = store.open(sessionID: sessionID, channel: secondChannel)
-        #expect(secondOpen.bufferedNotifications == [afterDisconnect])
+        store.open(sessionID: sessionID, channel: secondChannel)
+        secondChannel.embeddedEventLoop.run()
+        let secondBodies = try drainSSEBodies(from: secondChannel)
+        #expect(secondBodies.count == 1)
+        #expect(secondBodies[0].contains(String(decoding: afterDisconnect, as: UTF8.self)))
     }
 
     @Test func notificationBufferDropsOldestPayloadPastItsLimit() throws {
@@ -50,8 +57,12 @@ struct HTTPEventDeliveryStoreTests {
         store.receive(.notification(sessionID: sessionID, data: second))
         store.receive(.notification(sessionID: sessionID, data: third))
 
-        let open = store.open(sessionID: sessionID, channel: channel)
-        #expect(open.bufferedNotifications == [second, third])
+        store.open(sessionID: sessionID, channel: channel)
+        channel.embeddedEventLoop.run()
+        let bodies = try drainSSEBodies(from: channel)
+        #expect(bodies.count == 2)
+        #expect(bodies[0].contains(String(decoding: second, as: UTF8.self)))
+        #expect(bodies[1].contains(String(decoding: third, as: UTF8.self)))
     }
 
     @Test func notificationBuffersWhileChannelInactiveCallbackIsPending() throws {
@@ -68,13 +79,15 @@ struct HTTPEventDeliveryStoreTests {
         try activate(disconnectedChannel, port: 4)
         try activate(reconnectedChannel, port: 5)
 
-        _ = store.open(sessionID: sessionID, channel: disconnectedChannel)
+        store.open(sessionID: sessionID, channel: disconnectedChannel)
         try disconnectedChannel.close().wait()
 
         store.receive(.notification(sessionID: sessionID, data: notification))
-        let open = store.open(sessionID: sessionID, channel: reconnectedChannel)
-
-        #expect(open.bufferedNotifications == [notification])
+        store.open(sessionID: sessionID, channel: reconnectedChannel)
+        reconnectedChannel.embeddedEventLoop.run()
+        let bodies = try drainSSEBodies(from: reconnectedChannel)
+        #expect(bodies.count == 1)
+        #expect(bodies[0].contains(String(decoding: notification, as: UTF8.self)))
     }
 
     @Test func notificationReturnsToBufferWhenSelectedChannelClosesBeforeWrite() throws {
@@ -91,13 +104,42 @@ struct HTTPEventDeliveryStoreTests {
         try activate(disconnectedChannel, port: 6)
         try activate(reconnectedChannel, port: 7)
 
-        _ = store.open(sessionID: sessionID, channel: disconnectedChannel)
+        store.open(sessionID: sessionID, channel: disconnectedChannel)
         store.receive(.notification(sessionID: sessionID, data: notification))
         try disconnectedChannel.close().wait()
         disconnectedChannel.embeddedEventLoop.run()
 
-        let open = store.open(sessionID: sessionID, channel: reconnectedChannel)
-        #expect(open.bufferedNotifications == [notification])
+        store.open(sessionID: sessionID, channel: reconnectedChannel)
+        reconnectedChannel.embeddedEventLoop.run()
+        let bodies = try drainSSEBodies(from: reconnectedChannel)
+        #expect(bodies.count == 1)
+        #expect(bodies[0].contains(String(decoding: notification, as: UTF8.self)))
+    }
+
+    @Test func bufferedNotificationsPrecedeEventsArrivingDuringReconnect() throws {
+        let store = HTTPEventDeliveryStore()
+        let sessionID = ProxySessionID(rawValue: "session-reconnect-order")
+        let first = Data(#"{"jsonrpc":"2.0","method":"first"}"#.utf8)
+        let second = Data(#"{"jsonrpc":"2.0","method":"second"}"#.utf8)
+        let duringReconnect = Data(#"{"jsonrpc":"2.0","method":"during-reconnect"}"#.utf8)
+        let channel = EmbeddedChannel()
+        defer {
+            store.closeAll()
+            _ = try? channel.finish()
+        }
+        try activate(channel, port: 8)
+
+        store.receive(.notification(sessionID: sessionID, data: first))
+        store.receive(.notification(sessionID: sessionID, data: second))
+        store.open(sessionID: sessionID, channel: channel)
+        store.receive(.notification(sessionID: sessionID, data: duringReconnect))
+        channel.embeddedEventLoop.run()
+
+        let bodies = try drainSSEBodies(from: channel)
+        #expect(bodies.count == 3)
+        #expect(bodies[0].contains(String(decoding: first, as: UTF8.self)))
+        #expect(bodies[1].contains(String(decoding: second, as: UTF8.self)))
+        #expect(bodies[2].contains(String(decoding: duringReconnect, as: UTF8.self)))
     }
 
     @Test func sessionClosureClosesItsSSEChannels() throws {
@@ -108,8 +150,8 @@ struct HTTPEventDeliveryStoreTests {
             store.closeAll()
             _ = try? channel.finish()
         }
-        try activate(channel, port: 8)
-        _ = store.open(sessionID: sessionID, channel: channel)
+        try activate(channel, port: 9)
+        store.open(sessionID: sessionID, channel: channel)
 
         store.receive(.sessionClosed(sessionID: sessionID))
         channel.embeddedEventLoop.run()
@@ -120,4 +162,16 @@ struct HTTPEventDeliveryStoreTests {
 
 private func activate(_ channel: EmbeddedChannel, port: Int) throws {
     try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: port)).wait()
+}
+
+private func drainSSEBodies(from channel: EmbeddedChannel) throws -> [String] {
+    var bodies: [String] = []
+    while let part = try channel.readOutbound(as: HTTPServerResponsePart.self) {
+        guard case .body(let body) = part else { continue }
+        guard case .byteBuffer(var buffer) = body else { continue }
+        if let string = buffer.readString(length: buffer.readableBytes) {
+            bodies.append(string)
+        }
+    }
+    return bodies
 }
