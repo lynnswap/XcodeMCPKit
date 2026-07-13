@@ -1,6 +1,6 @@
 # Proxy Target Rearchitecture 2026-07 — Canonical Design
 
-- Status: **APPROVED / IN PROGRESS**
+- Status: **APPROVED / IMPLEMENTED / VERIFIED**
 - Approved: 2026-07-13
 - Design baseline: `4b3c2ca493154091b267fd7beb0c1c20d9ff6438`
 - Toolchain: Swift 6.3.3 / language mode 6 / strict memory safety / macOS 15.4+
@@ -75,7 +75,7 @@ Owns:
 - Existing public server/adapter types and configurations.
 - Public-to-internal configuration projection.
 - Discovery publication, executable-facing run facades, installer composition, logging bootstrap, permission automation, and live OS adapters.
-- Start/shutdown ordering across HTTP, Runtime, discovery, permission automation, and event-loop resources.
+- Start/shutdown ordering across HTTP, Runtime, discovery, and permission automation. HTTP owns and releases its NIO resources behind `ProxyHTTPGateway`.
 
 Does not own route, catalog, upstream, JSON-RPC correlation, HTTP request, or SSE connection state.
 
@@ -134,27 +134,33 @@ package enum ProxyRuntimeEvent: Sendable {
     case sessionClosed(sessionID: ProxySessionID)
 }
 
-package protocol ProxyRuntimeServing: Sendable {
-    // Hot, single-consumer stream. Runtime produces; HTTP consumes and buffers
-    // per session. Runtime shutdown terminates the stream after admitted work.
-    var events: AsyncStream<ProxyRuntimeEvent> { get }
+package protocol ProxyRuntimeRequestOperation: Sendable {
+    func whenComplete(
+        _ completion: @escaping @Sendable (Result<ProxyRuntimeReply, any Error>) -> Void
+    )
+    func cancel(reason: ProxyRuntimeCancellationReason)
+}
 
-    func registerSession(_ id: ProxySessionID)
-    func handle(
-        _ message: MCPClientEnvelope,
-        in sessionID: ProxySessionID,
-        deadline: ContinuousClock.Instant?
-    ) async throws -> ProxyRuntimeReply
-    func removeSession(_ id: ProxySessionID) async
-    func snapshot(
-        options: ProxyRuntimeSnapshotOptions
-    ) async -> ProxyRuntimeSnapshot
+package protocol ProxyRuntimeServing: Sendable {
+    // Single HTTP consumer. Delivery is synchronous so this boundary owns no
+    // second queue; the returned cancellation closure detaches the consumer.
+    func subscribeToEvents(
+        _ receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void
+    ) -> @Sendable () -> Void
+
+    func beginRequest(
+        _ message: ProxyRuntimeRequest,
+        in sessionID: ProxySessionID?
+    ) -> any ProxyRuntimeRequestOperation
+    func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState
+    func removeSession(_ id: ProxySessionID)
+    func snapshot() -> ProxyRuntimeSnapshot
     func reset() async
 }
 
 package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
-    package init(configuration: ProxyRuntimeConfiguration, dependencies: Dependencies)
-    package func start() async throws
+    package init(configuration: ProxyRuntimeConfiguration)
+    package func start()
     package func shutdown() async
 }
 
@@ -168,7 +174,14 @@ package final class ProxyHTTPGateway: Sendable {
 }
 ```
 
-The implementation may use NIO internally. `EventLoop`, `EventLoopFuture`, `Channel`, runtime authority types, and cancellation-handle implementation types must not appear in the Runtime–HTTP package API. The event stream has one HTTP gateway consumer, preserves production order, uses an explicit bounded buffer owned by HTTP, and terminates on runtime shutdown. `ProxyHTTPGateway.shutdown()` cancels and awaits its event-consumer task before returning.
+The implementation may use NIO internally. `EventLoop`, `EventLoopFuture`, `Channel`, runtime authority types, and cancellation-handle implementation types must not appear in the Runtime–HTTP package API. Runtime events have one HTTP gateway consumer and cross the target boundary synchronously in production order. This avoids both an unbounded inter-target queue and a lossy global bounded queue. HTTP alone owns the bounded per-session notification buffer and cancels the subscription before closing that store during shutdown.
+
+`ProxyRuntimeRequestOperation` is the admission/cancellation boundary. HTTP may
+cancel it when the channel closes or a response write fails, but it cannot
+inspect the underlying request lease, upstream operation, router token, or
+refresh task. `ProxyRuntimeSessionState` exposes only existence,
+initialization, and negotiated protocol version; it does not expose
+`SessionContext`.
 
 ## 5. Public API and consumer code
 
@@ -202,7 +215,7 @@ All declarations in `XcodeMCPProxyRuntime` and `XcodeMCPProxyHTTP` are `package`
 |---|---|---|
 | Downstream transport | `XcodeMCPProxyHTTP` target plus `ProxyRuntimeServing` | Add one adapter target/type and compose it in the facade; Runtime files do not change |
 | Live/test runtime | `ProxyRuntimeServing` witness | Add one fake in HTTP tests; production HTTP files do not branch |
-| Xcode process inventory | Runtime-owned inventory port implemented by facade live adapter | Add one witness and inject it; route owners do not inspect environment |
+| Xcode process inventory | Runtime-owned `XcodeProcessEventMonitor` and sanitized inventory snapshot | Add one Runtime witness and inject it; facade and HTTP do not inspect route owners |
 | Tool behavior | Existing runtime feature/handler owners | Add the feature/handler and its registration; HTTP routing does not branch by tool |
 | CI execution class | Workflow lane: default, process/pipe, live/stress, external contract | Add one lane/filter; production targets do not change |
 
@@ -229,9 +242,9 @@ All declarations in `XcodeMCPProxyRuntime` and `XcodeMCPProxyHTTP` are `package`
 
 ## 9. Test topology
 
-- `XcodeMCPProxyRuntimeTests`: RuntimeCoordinator, control plane, upstream runtime, DocumentationProvider, tool surface, feature workflow, and process inventory contracts.
-- `XcodeMCPProxyHTTPTests`: security, routing, headers/status, session/SSE delivery, channel cancellation, and fake-runtime adapter contracts.
-- `XcodeMCPProxyKitTests`: public facades, CLI/configuration, discovery, permission automation, installer, logging, and composition lifecycle.
+- `XcodeMCPProxyRuntimeTests`: RuntimeCoordinator, control plane, upstream runtime, DocumentationProvider, tool surface, feature workflow, process inventory, and retained end-to-end Runtime/HTTP characterization contracts.
+- `XcodeMCPProxyHTTPTests`: gateway lifecycle, SSE delivery, and transport-owned buffering against the narrow Runtime port. New transport behavior belongs here and uses a fake `ProxyRuntimeServing` witness.
+- `ProxyIntegrationTests` and `ProxyCLITests`: public facades, CLI/configuration, discovery, permission automation, installer, logging, and composition lifecycle.
 - Process/pipe, live, stress, and external-product tests remain isolated only when their execution environment or failure boundary differs.
 - Runtime owner tests may `@testable import XcodeMCPProxyRuntime`; HTTP tests may `@testable import XcodeMCPProxyHTTP`. A support target may not use `@testable` to re-export another target’s internals.
 - Async completion uses owner snapshots, fake clocks, recorded values with bounded waits, task handles, or explicit continuations. Wall-clock sleeps and unbounded `nextValue()` calls are not completion proof.
@@ -240,7 +253,7 @@ Characterization coverage before movement:
 
 1. HTTP Origin/security rejection occurs before Runtime invocation.
 2. Initialize creates exactly one HTTP session and exposes the negotiated protocol version.
-3. Runtime notifications buffer while no SSE client exists and drain once to the first SSE client.
+3. Runtime notifications buffer while no SSE client exists and drain once to the next SSE client, including after reconnect gaps.
 4. Channel termination cancels the admitted Runtime operation.
 5. Server shutdown stops admission, HTTP channels, Runtime work, permission automation, discovery, and event-loop resources before returning.
 6. Per-Xcode process catalog completion/logging remains independent across attached processes.
@@ -248,13 +261,13 @@ Characterization coverage before movement:
 ## 10. CI build/cache design
 
 1. Select and fingerprint Xcode/Swift before cache restore.
-2. Restore a SwiftPM dependency cache and `.build` using a key containing cache schema, runner OS/architecture, toolchain fingerprint, `Package.swift`/`Package.resolved` hash, build-mode/flag fingerprint, and `github.sha`.
+2. Restore `.build` using a key containing cache schema, runner OS/architecture, toolchain fingerprint, `Package.swift`/`Package.resolved` hash, build-mode/flag fingerprint, and `github.sha`.
 3. Use a restore prefix that removes only the final SHA, so the latest compatible successful cache becomes the incremental base.
-4. Always run `swift build --build-tests --no-parallel -Xswiftc -strict-concurrency=minimal` after restore.
+4. Restore tracked build-input mtimes from their Git blob identities, invalidate the Git-derived build-info output, and always run `swift build --build-tests -Xswiftc -strict-concurrency=minimal` after restore.
 5. Run default, process, and STDIO tests with `swift test --skip-build` and the exact same scratch path/flags.
 6. Keep the watchdog, but remove ten-second completion polling latency and retain its stall diagnostics.
 7. Give the external consumer fixture a stable path and scratch directory under the workspace so repeated positive/negative builds and subsequent CI runs reuse compiled dependencies.
-8. Record cache hit/miss, build duration, and one diagnostic incremental-build run. Add source-mtime restoration only if measurement shows unchanged Swift inputs are still recompiled after `.build` restore.
+8. Record cache hit/miss, build duration, and one diagnostic incremental-build run. Content-derived mtimes let Swift's incremental build record distinguish changed inputs without recompiling unchanged inputs after checkout.
 9. Pin every external `uses:` reference to a full commit SHA with a version comment and verify its JavaScript runtime.
 
 ## 11. Findings-to-design mapping
@@ -284,4 +297,43 @@ Characterization coverage before movement:
 - CI builds tests once per job/source state and all post-build invocations use `--skip-build`.
 - Cache keys include toolchain, dependency, flags, and source-state dimensions; all action refs are full-SHA pinned.
 - Before/after measurements report target graph, public/package/open distribution, testable imports, RuntimeCoordinator stored properties, largest files, default-suite duration, contract-fixture duration, cold build, and compatible-cache build.
-- `codex-review` reports no unresolved findings.
+- `codex-review` reports no accepted unresolved findings; disputed findings include executable evidence.
+
+## 13. Implementation and verification result
+
+### Enforced graph and surface
+
+- Package graph: `XcodeMCPProxyRuntime -> XcodeMCPKit`; `XcodeMCPProxyHTTP -> XcodeMCPProxyRuntime + XcodeMCPKit`; `XcodeMCPProxyKit -> XcodeMCPProxyHTTP + XcodeMCPProxyRuntime + XcodeMCPKit`.
+- Public symbol graph: `XcodeMCPProxyKit` 127 symbols; `XcodeMCPProxyRuntime` 0; `XcodeMCPProxyHTTP` 0.
+- Boundary script rejects Runtime HTTP imports/configuration leakage, facade listener ownership, HTTP concrete Runtime references, and restoration of the deleted target/support graph.
+- `RuntimeCoordinator` direct stored-property inventory is unchanged from the baseline (the same source heuristic reports 41 declarations in both revisions, including one computed property; the design audit's direct stored-property count remains 40). No mirror runtime state was introduced.
+- Largest semantic owners remain in Runtime: `DocumentationProvider.swift` 4,247 lines, `ProcessControlPlaneAuthority.swift` 2,582, and `RuntimeCoordinator.swift` 1,738. They moved to the semantic target without a file-bucket target or facade wrapper.
+
+### Test ownership and coverage
+
+- The second-order `XcodeMCPProxyInternalTestSupport` import chain is deleted.
+- `@testable import XcodeMCPProxyKit` falls from 42 baseline files to 17. Current owner imports are 29 Runtime, 10 HTTP, 17 facade, 5 `XcodeMCPKit`, and 2 core-test-support occurrences across 50 files; files may import more than one module for retained end-to-end characterization.
+- CI's seven major Runtime suites are explicit shards. The Runtime remainder is computed as the whole Runtime test target minus those seven suites, so a newly added suite cannot silently fall outside the matrix. The verified partition is 48/46/41/20/20/41/41 major tests, 386 Runtime remainder tests, and 288 tests in other targets.
+- Final default suite: 933 tests / 61 suites in 13.485 seconds, compared with 926 / 59 in 40.091 seconds at baseline.
+- Process lane: 24 tests / 5 suites. STDIO lane: 7 tests / 1 suite.
+- Stable external product contract repeat: 6.549 seconds, compared with 32.561 seconds at baseline.
+
+### Build and cache
+
+- Isolated cold `swift build --build-tests -Xswiftc -strict-concurrency=minimal`: 48.45 seconds wall clock.
+- Compatible restored-cache incremental build after the normalized cache seed: 5.17 seconds wall clock. Only the deliberately invalidated build-info source and its owning module were recompiled; the first normalization pass rebuilt the pre-normalization local cache in 52.95 seconds.
+- Git-derived build info is explicitly invalidated after cache restore; tracked input mtimes are deterministically derived from Git blob identity before the mandatory incremental build.
+- Checkout/cache actions are full-SHA pinned, `actionlint` and `shellcheck` pass, and every test shard restores the exact build artifact and uses `--skip-build`.
+
+### Review closure
+
+Accepted review findings fixed at their owners:
+
+1. SSE notifications now buffer whenever no client is connected, including reconnect gaps.
+2. The Runtime-to-HTTP queue was deleted; synchronous subscription leaves bounded per-session storage in HTTP only.
+3. Permission-dialog inventory starts even when custom upstream configuration disables process routing.
+4. Failed request operations terminalize their cancellation handles before crossing the Runtime boundary.
+5. CI Runtime remainder is a complete difference set rather than a hand-maintained allow-list.
+6. Session close events originate at `SessionRegistry`, covering DELETE, debug reset, and internal removal paths exactly once.
+
+One finding is disputed: process-bound routing does start the live process monitor because `RuntimeCoordinator.start()` installs the change handler and `XcodeProcessEventMonitor.setChangeHandler` calls `start()`. The startup reconcile loop consumes changes that arrive during the initial snapshot. `processRoutingStartupConsumesInventoryChangeBeforeEagerInitialization`, `startCachesTheInitialRunningApplicationSnapshot`, and `launchAndTerminationReplaceTheTargetCache` pass as executable evidence.
