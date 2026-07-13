@@ -986,15 +986,16 @@ struct RuntimeCoordinatorProcessRoutingTests {
             try await upstream.nextSent(at: 1)
         }
         #expect(try await nextRecordedValue(initializedUpstreams, at: 0) == 0)
-        let firstCatalog = try await waitWithTimeout(
-            "waiting for initial route catalog",
-            timeout: .seconds(2)
-        ) {
-            try await upstream.nextSent(
-                startingAt: 2,
-                matching: { methodName(from: $0) == "tools/list" }
-            )
-        }
+        #expect(
+            manager.processControlPlane.attemptSnapshot(processID: target.processID)?.phase
+                == .loadingCatalog
+        )
+        let firstCatalog = try await sentValue(
+            from: upstream,
+            startingAt: 2,
+            matching: { methodName(from: $0) == "tools/list" },
+            description: "waiting for initial route catalog"
+        )
         await upstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -1040,15 +1041,16 @@ struct RuntimeCoordinatorProcessRoutingTests {
             )
         }
         #expect(try await nextRecordedValue(initializedUpstreams, at: 1) == 0)
-        let freshCatalog = try await waitWithTimeout(
-            "waiting for republished route fresh catalog",
-            timeout: .seconds(2)
-        ) {
-            try await upstream.nextSent(
-                startingAt: 5,
-                matching: { methodName(from: $0) == "tools/list" }
-            )
-        }
+        #expect(
+            manager.processControlPlane.attemptSnapshot(processID: target.processID)?.phase
+                == .loadingCatalog
+        )
+        let freshCatalog = try await sentValue(
+            from: upstream,
+            startingAt: 5,
+            matching: { methodName(from: $0) == "tools/list" },
+            description: "waiting for republished route fresh catalog"
+        )
         #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
         await upstream.yield(
             .message(
