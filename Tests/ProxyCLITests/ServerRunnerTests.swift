@@ -192,6 +192,21 @@ struct ServerRunnerTests {
         }
     }
 
+    @Test func serverRunnerRejectsRemovedLazyInitEnvironment() async {
+        let result = await runServer(
+            arguments: ["xcode-mcp-proxy-server", "--dry-run"],
+            environment: ["LAZY_INIT": "true"]
+        )
+
+        #expect(result.exitCode == 64)
+        #expect(result.stdout.isEmpty)
+        #expect(
+            result.stderr.first?.contains(
+                "The proxy always uses eager initialization; --lazy-init has been removed."
+            ) == true
+        )
+    }
+
     @Test func serverLauncherInvokesForceRestartBeforeStartingInjectedServer() async throws {
         let restarted = CapturedLines()
         let fakeServer = RecordingProxyServer()

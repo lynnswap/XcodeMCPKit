@@ -55,6 +55,13 @@ extension XcodeMCPProxyServer {
             command = parsedCommand
         }
 
+        if isTruthy(environment["LAZY_INIT"]) {
+            throw CLICommandParser.validationError(
+                for: ProxyServerCommand.self,
+                message: removedLazyInitializationMessage
+            )
+        }
+
         let proxyConfig: ProxyConfig
         do {
             proxyConfig = try command.resolveConfiguration(environment: environment)
@@ -252,6 +259,9 @@ private func isTruthy(_ value: String?) -> Bool {
     }
     return ["1", "true", "yes", "on"].contains(value.lowercased())
 }
+
+private let removedLazyInitializationMessage =
+    "The proxy always uses eager initialization; --lazy-init has been removed."
 
 private func shellQuoted(_ value: String) -> String {
     let safeCharacters = CharacterSet.alphanumerics.union(
