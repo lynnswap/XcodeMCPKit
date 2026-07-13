@@ -2143,6 +2143,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let target = xcodeProcessTarget(processID: 27012, xcodeVersion: "27.0")
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
@@ -2152,6 +2153,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 createdUpstreams.withLockedValue { $0.append(upstream) }
                 return [upstream]
             },
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { initializedUpstreams.append($0) }
+            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -2180,7 +2184,13 @@ struct RuntimeCoordinatorProcessRoutingTests {
         )
         let initializedNotification = try await replacement.nextSent(at: 1)
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
-        await manager.drainRuntimeTasksForTesting()
+        #expect(
+            try await waitForRecordedValue(
+                initializedUpstreams,
+                at: 0,
+                description: "waiting for retried primary initialize publication"
+            ) == 0
+        )
 
         #expect(manager.testStateSnapshot().hasInitResult)
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 0)
