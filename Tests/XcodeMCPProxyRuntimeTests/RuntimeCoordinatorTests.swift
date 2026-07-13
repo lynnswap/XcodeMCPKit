@@ -2236,15 +2236,12 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 description: "waiting for initial route initialization commit"
             ) == 0
         )
-        let initialToolsRequest = try await waitWithTimeout(
-            "waiting for initial route tools catalog",
-            timeout: .seconds(2)
-        ) {
-            try await upstream.nextSent(
-                startingAt: 2,
-                matching: { methodName(from: $0) == "tools/list" }
-            )
-        }
+        let initialToolsRequest = try await sentValue(
+            from: upstream,
+            startingAt: 2,
+            matching: { methodName(from: $0) == "tools/list" },
+            description: "waiting for initial route tools catalog"
+        )
         await upstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -2302,15 +2299,12 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 description: "waiting for restarted route initialization commit"
             ) == 0
         )
-        let toolsRequest = try await waitWithTimeout(
-            "waiting for restarted route tools catalog",
-            timeout: .seconds(2)
-        ) {
-            try await upstream.nextSent(
-                startingAt: sentCountAfterExit + 2,
-                matching: { methodName(from: $0) == "tools/list" }
-            )
-        }
+        let toolsRequest = try await sentValue(
+            from: upstream,
+            startingAt: sentCountAfterExit + 2,
+            matching: { methodName(from: $0) == "tools/list" },
+            description: "waiting for restarted route tools catalog"
+        )
         await upstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
