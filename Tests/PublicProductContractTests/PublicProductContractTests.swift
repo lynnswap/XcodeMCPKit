@@ -19,21 +19,26 @@ struct PublicProductContractTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let fixture = try TemporaryDirectory()
-        defer { fixture.cleanup() }
+        let fixtureURL = repositoryRoot
+            .appendingPathComponent(".build", isDirectory: true)
+            .appendingPathComponent("public-product-contract-fixture", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: fixtureURL,
+            withIntermediateDirectories: true
+        )
 
-        try makeFixturePackage(at: fixture.url, repositoryRoot: repositoryRoot)
+        try makeFixturePackage(at: fixtureURL, repositoryRoot: repositoryRoot)
 
         let result = try runSwiftBuild(
-            packageURL: fixture.url,
-            logURL: fixture.url.appendingPathComponent("swift-build.log")
+            packageURL: fixtureURL,
+            logURL: fixtureURL.appendingPathComponent("swift-build.log")
         )
         expectBuildSucceeded(result, context: "public product fixture build")
 
         for check in lowLevelImportChecks {
             let result = try runSwiftBuild(
-                packageURL: fixture.url,
-                logURL: fixture.url.appendingPathComponent("\(check.targetName)-swift-build.log"),
+                packageURL: fixtureURL,
+                logURL: fixtureURL.appendingPathComponent("\(check.targetName)-swift-build.log"),
                 targets: [check.targetName]
             )
             expectBuildFailedBecauseModuleIsUnavailable(
@@ -45,8 +50,8 @@ struct PublicProductContractTests {
 
         for check in removedSurfaceChecks {
             let result = try runSwiftBuild(
-                packageURL: fixture.url,
-                logURL: fixture.url.appendingPathComponent("\(check.targetName)-swift-build.log"),
+                packageURL: fixtureURL,
+                logURL: fixtureURL.appendingPathComponent("\(check.targetName)-swift-build.log"),
                 targets: [check.targetName]
             )
             expectBuildFailed(
@@ -73,51 +78,45 @@ struct PublicProductContractTests {
             )
         }
 
-        try packageManifest(repositoryRoot: repositoryRoot)
-            .write(
-                to: packageURL.appendingPathComponent("Package.swift"),
-                atomically: true,
-                encoding: .utf8
-            )
-        try xcodeMCPKitClientSource
-            .write(
-                to: packageURL.appendingPathComponent("Sources/XcodeMCPKitClient/Contract.swift"),
-                atomically: true,
-                encoding: .utf8
-            )
-        try xcodeMCPProxyKitClientSource
-            .write(
-                to: packageURL.appendingPathComponent("Sources/XcodeMCPProxyKitClient/Contract.swift"),
-                atomically: true,
-                encoding: .utf8
-            )
-        try xcodeMCPProxyKitOnlyClientSource
-            .write(
-                to: packageURL.appendingPathComponent("Sources/XcodeMCPProxyKitOnlyClient/Contract.swift"),
-                atomically: true,
-                encoding: .utf8
-            )
-        try xcodeMCPKitTestingClientSource
-            .write(
-                to: packageURL.appendingPathComponent("Sources/XcodeMCPKitTestingClient/Contract.swift"),
-                atomically: true,
-                encoding: .utf8
-            )
+        try writeIfChanged(
+            packageManifest(repositoryRoot: repositoryRoot),
+            to: packageURL.appendingPathComponent("Package.swift")
+        )
+        try writeIfChanged(
+            xcodeMCPKitClientSource,
+            to: packageURL.appendingPathComponent("Sources/XcodeMCPKitClient/Contract.swift")
+        )
+        try writeIfChanged(
+            xcodeMCPProxyKitClientSource,
+            to: packageURL.appendingPathComponent("Sources/XcodeMCPProxyKitClient/Contract.swift")
+        )
+        try writeIfChanged(
+            xcodeMCPProxyKitOnlyClientSource,
+            to: packageURL.appendingPathComponent("Sources/XcodeMCPProxyKitOnlyClient/Contract.swift")
+        )
+        try writeIfChanged(
+            xcodeMCPKitTestingClientSource,
+            to: packageURL.appendingPathComponent("Sources/XcodeMCPKitTestingClient/Contract.swift")
+        )
         for check in lowLevelImportChecks {
-            try lowLevelImportClientSource(moduleName: check.moduleName)
-                .write(
-                    to: packageURL.appendingPathComponent("Sources/\(check.targetName)/Contract.swift"),
-                    atomically: true,
-                    encoding: .utf8
-                )
+            try writeIfChanged(
+                lowLevelImportClientSource(moduleName: check.moduleName),
+                to: packageURL.appendingPathComponent("Sources/\(check.targetName)/Contract.swift")
+            )
         }
         for check in removedSurfaceChecks {
-            try check.source.write(
-                to: packageURL.appendingPathComponent("Sources/\(check.targetName)/Contract.swift"),
-                atomically: true,
-                encoding: .utf8
+            try writeIfChanged(
+                check.source,
+                to: packageURL.appendingPathComponent("Sources/\(check.targetName)/Contract.swift")
             )
         }
+    }
+
+    private func writeIfChanged(_ contents: String, to url: URL) throws {
+        if (try? String(contentsOf: url, encoding: .utf8)) == contents {
+            return
+        }
+        try contents.write(to: url, atomically: true, encoding: .utf8)
     }
 
     private func packageManifest(repositoryRoot: URL) -> String {

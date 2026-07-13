@@ -48,12 +48,15 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .build
-          key: spm-build-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          key: spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
           restore-keys: |
-            spm-build-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+            spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
 
       - name: Restore source modification times
         run: ./scripts/restore-source-mtimes.sh
+
+      - name: Verify proxy target boundaries
+        run: ./scripts/verify-proxy-target-boundaries.sh
 
       - name: Build package tests
         run: swift build --build-tests -Xswiftc -strict-concurrency=minimal
@@ -96,7 +99,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .build
-          key: spm-build-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+          key: spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
           fail-on-cache-miss: true
 
       - name: Run package tests
@@ -106,12 +109,13 @@ jobs:
               ./scripts/ci-test-watchdog.sh swift test \
                 --skip-build \
                 --no-parallel \
-                --filter 'ControlPlaneAuthorityTests|JSONRPCResponseRouterTests|ManagedUpstreamSlotTests|ProxyUpstreamRequestRuntimeTests|ToolCatalogStartupLogFormatterTests|UpstreamReadinessTests' \
+                --filter XcodeMCPProxyRuntimeTests \
+                --skip 'RuntimeCoordinatorProcessRoutingTests|RuntimeCoordinatorInitializationTests|RuntimeCoordinatorRecoveryTests|RuntimeCoordinatorCatalogTests|RuntimeCoordinatorWindowCatalogTests|RuntimeCoordinatorWindowRoutingTests|RuntimeCoordinatorSchedulingTests' \
                 -Xswiftc -strict-concurrency=minimal
               ./scripts/ci-test-watchdog.sh swift test \
                 --skip-build \
                 --no-parallel \
-                --skip ProxyRuntimeCoordinatorTests \
+                --skip XcodeMCPProxyRuntimeTests \
                 -Xswiftc -strict-concurrency=minimal
               exit 0
               ;;

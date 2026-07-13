@@ -1,6 +1,7 @@
 import Testing
 import XcodeMCPKit
 @testable import XcodeMCPProxyKit
+import XcodeMCPProxyRuntime
 
 
 @Suite
@@ -28,7 +29,13 @@ struct XcodeMCPProxyServerBuildInfoTests {
             displayHost: "localhost",
             port: 8765,
             config: config,
-            xcodeTargets: [target]
+            xcodeTargets: [
+                ProxyRuntimeInventorySnapshot.XcodeTarget(
+                    processID: target.processID,
+                    appPath: target.appPath,
+                    mcpBridgePath: target.mcpbridgePath
+                )
+            ]
         )
 
         #expect(summary == """

@@ -1,4 +1,5 @@
 import Logging
+import XcodeMCPProxyRuntime
 
 package enum XcodeMCPProxyLogging {
     package static func bootstrap(environment: [String: String]) {

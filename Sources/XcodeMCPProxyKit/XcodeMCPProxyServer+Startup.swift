@@ -1,7 +1,7 @@
 import Foundation
 import Logging
-import NIO
-import NIOHTTP1
+import XcodeMCPProxyHTTP
+import XcodeMCPProxyRuntime
 
 extension XcodeMCPProxyServer {
     actor Lifecycle {
@@ -15,29 +15,20 @@ extension XcodeMCPProxyServer {
 
         private final class Resources: @unchecked Sendable {
             let config: ProxyConfig
-            let group: EventLoopGroup
-            let shutdownEventLoopGroup: @Sendable (EventLoopGroup) async throws -> Void
-            let acceptedChannelTracker: ProxyAcceptedChannelTracker
-            let listenChannels: [Channel]
-            let runtime: any RuntimeCoordinating
+            let httpGateway: any ProxyHTTPGatewayServing
+            let runtime: any ProxyRuntimeServing
             let autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
             let endpoint: Endpoint
 
             init(
                 config: ProxyConfig,
-                group: EventLoopGroup,
-                shutdownEventLoopGroup: @escaping @Sendable (EventLoopGroup) async throws -> Void,
-                acceptedChannelTracker: ProxyAcceptedChannelTracker,
-                listenChannels: [Channel],
-                runtime: any RuntimeCoordinating,
+                httpGateway: any ProxyHTTPGatewayServing,
+                runtime: any ProxyRuntimeServing,
                 autoApprover: (any ProxyServerPermissionDialogAutoApprover)?,
                 endpoint: Endpoint
             ) {
                 self.config = config
-                self.group = group
-                self.shutdownEventLoopGroup = shutdownEventLoopGroup
-                self.acceptedChannelTracker = acceptedChannelTracker
-                self.listenChannels = listenChannels
+                self.httpGateway = httpGateway
                 self.runtime = runtime
                 self.autoApprover = autoApprover
                 self.endpoint = endpoint
@@ -45,14 +36,8 @@ extension XcodeMCPProxyServer {
 
             func signalCancellation() {
                 autoApprover?.stop()
+                httpGateway.cancelForDeinit()
                 runtime.cancelForDeinit()
-                for channel in listenChannels {
-                    channel.close(mode: .all, promise: nil)
-                }
-                for channel in acceptedChannelTracker.snapshot() {
-                    channel.close(mode: .all, promise: nil)
-                }
-                group.shutdownGracefully { _ in }
             }
         }
 
@@ -171,25 +156,25 @@ extension XcodeMCPProxyServer {
                 )
             }
 
-            let debug = resources.runtime.debugSnapshot()
-            let upstreams = debug.upstreams.map { upstream in
+            let runtimeSnapshot = resources.runtime.snapshot()
+            let upstreams = runtimeSnapshot.upstreams.map { upstream in
                 Status.Upstream(
-                    id: upstream.upstreamIndex,
+                    id: upstream.id,
                     health: Self.publicHealth(
                         debugHealth: upstream.healthState,
                         isInitialized: upstream.isInitialized
                     ),
                     isInitialized: upstream.isInitialized,
-                    activeRequestCount: upstream.activeCorrelatedRequestCount
+                    activeRequestCount: upstream.activeRequestCount
                 )
             }
             return Status(
-                generatedAt: debug.generatedAt,
+                generatedAt: runtimeSnapshot.generatedAt,
                 phase: publicPhase,
                 endpoint: resources.endpoint,
-                proxyInitialized: debug.proxyInitialized,
-                catalogAvailable: debug.cachedToolsListAvailable,
-                queuedRequestCount: debug.queuedRequestCount,
+                proxyInitialized: runtimeSnapshot.proxyInitialized,
+                catalogAvailable: runtimeSnapshot.catalogAvailable,
+                queuedRequestCount: runtimeSnapshot.queuedRequestCount,
                 upstreams: upstreams
             )
         }
@@ -271,7 +256,7 @@ extension XcodeMCPProxyServer {
                 return
             }
             phase = .stopping
-            terminalUpstreams = Self.stoppedUpstreams(from: resources.runtime.debugSnapshot())
+            terminalUpstreams = Self.stoppedUpstreams(from: resources.runtime.snapshot())
             let task = Task {
                 try await Self.release(resources)
             }
@@ -301,57 +286,24 @@ extension XcodeMCPProxyServer {
             dependencies: Dependencies,
             logger: Logger
         ) async throws -> Resources {
-            let group = dependencies.makeEventLoopGroup()
-            let tracker = ProxyAcceptedChannelTracker()
-            let refreshCoordinator = RefreshCodeIssues.Coordinator.makeDefault()
-            let refreshTargetResolver = RefreshCodeIssues.TargetResolver()
-            let refreshDebugState = RefreshCodeIssues.DebugState(
-                defaultRequestTimeoutSeconds: config.requestTimeout
-            )
-            let runtime = dependencies.makeRuntimeCoordinator(config, group.next())
+            let runtime = dependencies.makeRuntime(config.runtimeConfiguration)
             let autoApprover = config.autoApproveXcodeDialog
-                ? dependencies.makeAutoApprover(config)
+                ? dependencies.makeAutoApprover(config, runtime)
                 : nil
-            var boundChannels: [Channel] = []
+            let httpGateway = dependencies.makeHTTPGateway(
+                ProxyHTTPConfiguration(
+                    listenHost: config.listenHost,
+                    listenPort: config.listenPort,
+                    maxBodyBytes: config.maxBodyBytes
+                ),
+                runtime,
+                logger
+            )
 
             do {
-                let childInitializer = ProxyHTTPChildChannelInitializer(
-                    config: config,
-                    sessionManager: runtime,
-                    refreshCodeIssuesCoordinator: refreshCoordinator,
-                    refreshCodeIssuesTargetResolver: refreshTargetResolver,
-                    refreshCodeIssuesDebugState: refreshDebugState,
-                    logger: logger
-                )
-                var bootstrap = ServerBootstrap(group: group)
-                bootstrap = bootstrap.serverChannelOption(ChannelOptions.backlog, value: 256)
-                bootstrap = bootstrap.serverChannelOption(
-                    ChannelOptions.socketOption(.so_reuseaddr),
-                    value: 1
-                )
-                bootstrap = bootstrap.serverChannelInitializer { channel in
-                    channel.pipeline.addHandler(ProxyAcceptedChannelHandler(tracker: tracker))
-                }
-                bootstrap = bootstrap.childChannelInitializer { channel in
-                    childInitializer.initialize(channel)
-                }
-                bootstrap = bootstrap.childChannelOption(
-                    ChannelOptions.socketOption(.so_reuseaddr),
-                    value: 1
-                )
-
-                boundChannels = try await bindChannels(
-                    using: bootstrap,
-                    host: config.listenHost,
-                    port: config.listenPort,
-                    logger: logger
-                )
-                guard let first = boundChannels.first else {
-                    throw LifecycleError.failedToBind
-                }
-
-                let resolvedHost = first.localAddress?.ipAddress ?? config.listenHost
-                let resolvedPort = first.localAddress?.port ?? config.listenPort
+                let resolvedEndpoint = try await httpGateway.start()
+                let resolvedHost = resolvedEndpoint.host
+                let resolvedPort = resolvedEndpoint.port
                 let endpoint = Endpoint(host: resolvedHost, port: resolvedPort)
                 try writeDiscovery(
                     configuration.discovery,
@@ -366,67 +318,22 @@ extension XcodeMCPProxyServer {
                     displayHost: displayHost,
                     port: resolvedPort,
                     config: config,
-                    xcodeTargets: dependencies.runningXcodeTargets()
+                    xcodeTargets: runtime.inventorySnapshot().xcodeTargets
                 )
                 logger.info("\(summary)")
 
                 return Resources(
                     config: config,
-                    group: group,
-                    shutdownEventLoopGroup: dependencies.shutdownEventLoopGroup,
-                    acceptedChannelTracker: tracker,
-                    listenChannels: boundChannels,
+                    httpGateway: httpGateway,
                     runtime: runtime,
                     autoApprover: autoApprover,
                     endpoint: endpoint
                 )
             } catch {
                 autoApprover?.stop()
-                for channel in boundChannels {
-                    channel.close(mode: .all, promise: nil)
-                }
-                if boundChannels.isEmpty == false {
-                    try? await EventLoopFuture.andAllSucceed(
-                        boundChannels.map(\.closeFuture),
-                        on: group.next()
-                    ).get()
-                }
+                try? await httpGateway.shutdown()
                 await runtime.shutdown()
-                try? await dependencies.shutdownEventLoopGroup(group)
                 throw error
-            }
-        }
-
-        private static func bindChannels(
-            using bootstrap: ServerBootstrap,
-            host: String,
-            port: Int,
-            logger: Logger
-        ) async throws -> [Channel] {
-            if host != "localhost" {
-                return [try await bootstrap.bind(host: host, port: port).get()]
-            }
-
-            do {
-                let v4 = try await bootstrap.bind(host: "127.0.0.1", port: port).get()
-                let v4Port = v4.localAddress?.port ?? port
-                guard v4Port > 0 else { return [v4] }
-                do {
-                    let v6 = try await bootstrap.bind(host: "::1", port: v4Port).get()
-                    return [v4, v6]
-                } catch {
-                    logger.warning(
-                        "Failed to bind IPv6 loopback; continuing with IPv4 only",
-                        metadata: ["error": "\(error)"]
-                    )
-                    return [v4]
-                }
-            } catch {
-                logger.warning(
-                    "Failed to bind IPv4 loopback; attempting IPv6 only",
-                    metadata: ["error": "\(error)"]
-                )
-                return [try await bootstrap.bind(host: "::1", port: port).get()]
             }
         }
 
@@ -466,10 +373,7 @@ extension XcodeMCPProxyServer {
         }
 
         private static func waitForListenerClose(_ resources: Resources) async throws {
-            try await EventLoopFuture.andAllSucceed(
-                resources.listenChannels.map(\.closeFuture),
-                on: resources.group.next()
-            ).get()
+            try await resources.httpGateway.waitUntilShutdown()
         }
 
         private static func release(_ resources: Resources) async throws {
@@ -477,37 +381,12 @@ extension XcodeMCPProxyServer {
             var firstError: (any Error)?
 
             do {
-                for channel in resources.listenChannels {
-                    channel.close(mode: .all, promise: nil)
-                }
-                try await EventLoopFuture.andAllSucceed(
-                    resources.listenChannels.map(\.closeFuture),
-                    on: resources.group.next()
-                ).get()
-
-                while true {
-                    let accepted = resources.acceptedChannelTracker.snapshot()
-                    guard accepted.isEmpty == false else { break }
-                    for channel in accepted {
-                        channel.close(mode: .all, promise: nil)
-                    }
-                    try await EventLoopFuture.andAllSucceed(
-                        accepted.map(\.closeFuture),
-                        on: resources.group.next()
-                    ).get()
-                }
+                try await resources.httpGateway.shutdown()
             } catch {
                 firstError = error
             }
 
             await resources.runtime.shutdown()
-            do {
-                try await resources.shutdownEventLoopGroup(resources.group)
-            } catch {
-                if firstError == nil {
-                    firstError = error
-                }
-            }
 
             if let firstError {
                 throw firstError
@@ -528,11 +407,11 @@ extension XcodeMCPProxyServer {
         }
 
         private static func stoppedUpstreams(
-            from debug: ProxyDebug.Snapshot
+            from snapshot: ProxyRuntimeSnapshot
         ) -> [Status.Upstream] {
-            debug.upstreams.map { upstream in
+            snapshot.upstreams.map { upstream in
                 Status.Upstream(
-                    id: upstream.upstreamIndex,
+                    id: upstream.id,
                     health: .stopped,
                     isInitialized: upstream.isInitialized,
                     activeRequestCount: 0

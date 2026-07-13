@@ -1,5 +1,6 @@
 import Foundation
 import XcodeMCPKit
+import XcodeMCPProxyRuntime
 
 enum CLIError: Error, CustomStringConvertible {
     case message(String)

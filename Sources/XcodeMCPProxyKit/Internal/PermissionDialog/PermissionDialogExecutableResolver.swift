@@ -1,5 +1,6 @@
 import Foundation
 import XcodeMCPKit
+import XcodeMCPProxyRuntime
 
 enum PermissionDialogExecutableResolver {
     static func additionalExecutableCandidates(

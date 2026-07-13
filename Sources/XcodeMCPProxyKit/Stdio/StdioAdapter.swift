@@ -2,6 +2,7 @@ import Foundation
 import Logging
 import Synchronization
 import XcodeMCPKit
+import XcodeMCPProxyRuntime
 
 private final class StdioReadTaskActivation: Sendable {
     private struct State {

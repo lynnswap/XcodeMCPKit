@@ -3,9 +3,9 @@ import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPKit
 @testable import XcodeMCPProxyKit
+@testable import XcodeMCPProxyRuntime
 import Testing
 import XcodeMCPProxyTestSupport
-
 
 struct XcodeMCPProxyServerTests {
     @Test func endpointURLBracketsIPv6LiteralHosts() {
@@ -188,13 +188,13 @@ struct XcodeMCPProxyServerTests {
                 switch (launchPath, arguments) {
                 case ("/usr/sbin/lsof", ["-nP", "-iTCP:8765", "-sTCP:LISTEN", "-Fpn"]):
                     return """
-                    p456
-                    f9
-                    n127.0.0.1:8765
-                    p789
-                    f9
-                    n127.0.0.1:8765
-                    """
+                        p456
+                        f9
+                        n127.0.0.1:8765
+                        p789
+                        f9
+                        n127.0.0.1:8765
+                        """
                 case ("/bin/ps", ["-ww", "-p", "123", "-o", "command="]):
                     return "/tmp/xcode-mcp-proxy-server --listen localhost:8765\n"
                 case ("/bin/ps", ["-ww", "-p", "456", "-o", "command="]):
@@ -256,14 +256,9 @@ struct XcodeMCPProxyServerTests {
             proxyConfig: config,
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _ in autoApprover },
-                makeRuntimeCoordinator: { config, eventLoop in
-                    RuntimeCoordinator(
-                        config: config,
-                        eventLoop: eventLoop,
-                        upstreams: [upstream],
-                        startImmediately: false
-                    )
+                makeAutoApprover: { _, _ in autoApprover },
+                makeRuntime: { config in
+                    makeServerTestRuntime(config: config, upstream: upstream)
                 }
             )
         )
@@ -297,14 +292,9 @@ struct XcodeMCPProxyServerTests {
             proxyConfig: config,
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _ in autoApprover },
-                makeRuntimeCoordinator: { config, eventLoop in
-                    RuntimeCoordinator(
-                        config: config,
-                        eventLoop: eventLoop,
-                        upstreams: [upstream],
-                        startImmediately: false
-                    )
+                makeAutoApprover: { _, _ in autoApprover },
+                makeRuntime: { config in
+                    makeServerTestRuntime(config: config, upstream: upstream)
                 }
             )
         )
@@ -326,31 +316,30 @@ struct XcodeMCPProxyServerTests {
         #expect((await server.snapshot()).phase == .stopped)
     }
 
-    @Test func unstartedServerDoesNotCreateEventLoopThreads() async throws {
-        let groupCreationCount = NIOLockedValueBox(0)
+    @Test func unstartedServerDoesNotCreateHTTPGateway() async throws {
+        let gatewayCreationCount = NIOLockedValueBox(0)
         let server = XcodeMCPProxyServer(
             configuration: .init(discovery: .disabled),
             dependencies: .init(
-                makeEventLoopGroup: {
-                    groupCreationCount.withLockedValue { $0 += 1 }
-                    return MultiThreadedEventLoopGroup(numberOfThreads: 1)
-                },
-                makeAutoApprover: { _ in RecordingAutoApprover() },
-                makeRuntimeCoordinator: { _, _ in
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in
                     fatalError("an unstarted server must not create a runtime")
+                },
+                makeHTTPGateway: { _, _, _ in
+                    gatewayCreationCount.withLockedValue { $0 += 1 }
+                    fatalError("an unstarted server must not create an HTTP gateway")
                 }
             )
         )
 
-        #expect(groupCreationCount.withLockedValue { $0 } == 0)
+        #expect(gatewayCreationCount.withLockedValue { $0 } == 0)
         #expect((await server.snapshot()).phase == .idle)
         try await server.shutdown()
-        #expect(groupCreationCount.withLockedValue { $0 } == 0)
+        #expect(gatewayCreationCount.withLockedValue { $0 } == 0)
     }
 
     @Test func startedServerDeinitSynchronouslyCancelsRuntimeRetainTasks() async throws {
         let runtimeReference = WeakRuntimeReference()
-        let eventLoopGroup = NIOLockedValueBox<MultiThreadedEventLoopGroup?>(nil)
         let upstream = RecordingUpstreamSlot()
         var server: XcodeMCPProxyServer? = XcodeMCPProxyServer(
             configuration: .init(
@@ -359,21 +348,13 @@ struct XcodeMCPProxyServerTests {
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeEventLoopGroup: {
-                    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-                    eventLoopGroup.withLockedValue { $0 = group }
-                    return group
-                },
-                makeAutoApprover: { _ in RecordingAutoApprover() },
-                makeRuntimeCoordinator: { config, eventLoop in
-                    let runtime = RuntimeCoordinator(
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { config in
+                    makeServerTestRuntime(
                         config: config,
-                        eventLoop: eventLoop,
-                        upstreams: [upstream],
-                        startImmediately: false
+                        upstream: upstream,
+                        runtimeReference: runtimeReference
                     )
-                    runtimeReference.value = runtime
-                    return runtime
                 }
             )
         )
@@ -393,13 +374,11 @@ struct XcodeMCPProxyServerTests {
         }
 
         // This test deliberately omits the server's explicit shutdown contract.
-        // Deinit guarantees cancellation signaling, not synchronous runtime
-        // destruction. The injected event-loop group remains test-owned.
-        try await shutdown(try #require(eventLoopGroup.withLockedValue { $0 }))
+        // Deinit guarantees cancellation signaling rather than awaiting teardown.
     }
 
     @Test func explicitConfigurationReadFailurePrecedesResourceAcquisition() async throws {
-        let groupCreationCount = NIOLockedValueBox(0)
+        let gatewayCreationCount = NIOLockedValueBox(0)
         let missingURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("missing-\(UUID().uuidString).toml")
         let server = XcodeMCPProxyServer(
@@ -408,13 +387,13 @@ struct XcodeMCPProxyServerTests {
                 discovery: .disabled
             ),
             dependencies: .init(
-                makeEventLoopGroup: {
-                    groupCreationCount.withLockedValue { $0 += 1 }
-                    return MultiThreadedEventLoopGroup(numberOfThreads: 1)
-                },
-                makeAutoApprover: { _ in RecordingAutoApprover() },
-                makeRuntimeCoordinator: { _, _ in
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in
                     fatalError("invalid configuration must not create a runtime")
+                },
+                makeHTTPGateway: { _, _, _ in
+                    gatewayCreationCount.withLockedValue { $0 += 1 }
+                    fatalError("invalid configuration must not create an HTTP gateway")
                 }
             )
         )
@@ -422,7 +401,7 @@ struct XcodeMCPProxyServerTests {
         await #expect(throws: ProxyConfig.File.LoadError.self) {
             _ = try await server.start()
         }
-        #expect(groupCreationCount.withLockedValue { $0 } == 0)
+        #expect(gatewayCreationCount.withLockedValue { $0 } == 0)
         #expect((await server.snapshot()).phase == .stopped)
         await #expect(throws: XcodeMCPProxyServer.LifecycleError.alreadyStarted) {
             _ = try await server.start()
@@ -457,14 +436,9 @@ struct XcodeMCPProxyServerTests {
             preparedConfiguration: preparedConfiguration,
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _ in RecordingAutoApprover() },
-                makeRuntimeCoordinator: { config, eventLoop in
-                    RuntimeCoordinator(
-                        config: config,
-                        eventLoop: eventLoop,
-                        upstreams: [upstream],
-                        startImmediately: false
-                    )
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { config in
+                    makeServerTestRuntime(config: config, upstream: upstream)
                 }
             )
         )
@@ -475,20 +449,20 @@ struct XcodeMCPProxyServerTests {
     }
 
     @Test func zeroRequestTimeoutFailsBeforeResourceAcquisition() async throws {
-        let groupCreationCount = NIOLockedValueBox(0)
+        let gatewayCreationCount = NIOLockedValueBox(0)
         let server = XcodeMCPProxyServer(
             configuration: .init(
                 requestTimeout: .zero,
                 discovery: .disabled
             ),
             dependencies: .init(
-                makeEventLoopGroup: {
-                    groupCreationCount.withLockedValue { $0 += 1 }
-                    return MultiThreadedEventLoopGroup(numberOfThreads: 1)
-                },
-                makeAutoApprover: { _ in RecordingAutoApprover() },
-                makeRuntimeCoordinator: { _, _ in
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in
                     fatalError("invalid configuration must not create a runtime")
+                },
+                makeHTTPGateway: { _, _, _ in
+                    gatewayCreationCount.withLockedValue { $0 += 1 }
+                    fatalError("invalid configuration must not create an HTTP gateway")
                 }
             )
         )
@@ -496,13 +470,11 @@ struct XcodeMCPProxyServerTests {
         await #expect(throws: XcodeMCPProxyServer.LifecycleError.self) {
             _ = try await server.start()
         }
-        #expect(groupCreationCount.withLockedValue { $0 } == 0)
+        #expect(gatewayCreationCount.withLockedValue { $0 } == 0)
     }
 
     @Test func discoveryWriteFailureUnwindsListenerAndRuntime() async throws {
         let recordedPort = NIOLockedValueBox<Int?>(nil)
-        let eventLoopGroup = NIOLockedValueBox<MultiThreadedEventLoopGroup?>(nil)
-        let eventLoopShutdownCount = NIOLockedValueBox(0)
         var discoveryClient = DiscoveryClient.testValue
         discoveryClient.write = { record, _ in
             recordedPort.withLockedValue { $0 = record.port }
@@ -516,23 +488,9 @@ struct XcodeMCPProxyServerTests {
             ),
             dependencies: .init(
                 discoveryClient: discoveryClient,
-                makeEventLoopGroup: {
-                    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-                    eventLoopGroup.withLockedValue { $0 = group }
-                    return group
-                },
-                shutdownEventLoopGroup: { group in
-                    eventLoopShutdownCount.withLockedValue { $0 += 1 }
-                    try await shutdown(group)
-                },
-                makeAutoApprover: { _ in RecordingAutoApprover() },
-                makeRuntimeCoordinator: { config, eventLoop in
-                    RuntimeCoordinator(
-                        config: config,
-                        eventLoop: eventLoop,
-                        upstreams: [upstream],
-                        startImmediately: false
-                    )
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { config in
+                    makeServerTestRuntime(config: config, upstream: upstream)
                 }
             )
         )
@@ -542,8 +500,6 @@ struct XcodeMCPProxyServerTests {
         }
         #expect(upstream.startCount == 0)
         #expect(upstream.stopCount == 1)
-        _ = try #require(eventLoopGroup.withLockedValue { $0 })
-        #expect(eventLoopShutdownCount.withLockedValue { $0 } == 1)
         #expect((await server.snapshot()).phase == .stopped)
 
         let port = try #require(recordedPort.withLockedValue { $0 })
@@ -569,14 +525,9 @@ struct XcodeMCPProxyServerTests {
             proxyConfig: config,
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _ in RecordingAutoApprover() },
-                makeRuntimeCoordinator: { config, eventLoop in
-                    RuntimeCoordinator(
-                        config: config,
-                        eventLoop: eventLoop,
-                        upstreams: [upstream],
-                        startImmediately: false
-                    )
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { config in
+                    makeServerTestRuntime(config: config, upstream: upstream)
                 }
             )
         )
@@ -590,22 +541,21 @@ struct XcodeMCPProxyServerTests {
         #expect(status.upstreams.allSatisfy { $0.activeRequestCount == 0 })
 
         let labels = Set(Mirror(reflecting: status).children.compactMap(\.label))
-        #expect(labels == [
-            "phase",
-            "endpoint",
-            "proxyInitialized",
-            "catalogAvailable",
-            "queuedRequestCount",
-            "upstreams",
-            "generatedAt",
-        ])
+        #expect(
+            labels == [
+                "phase",
+                "endpoint",
+                "proxyInitialized",
+                "catalogAvailable",
+                "queuedRequestCount",
+                "upstreams",
+                "generatedAt",
+            ])
 
         try await server.shutdown()
     }
 
     @Test func concurrentShutdownCompletesAllOwnedResourcesExactlyOnce() async throws {
-        let eventLoopGroup = NIOLockedValueBox<MultiThreadedEventLoopGroup?>(nil)
-        let eventLoopShutdownCount = NIOLockedValueBox(0)
         let upstream = RecordingUpstreamSlot()
         let server = XcodeMCPProxyServer(
             configuration: .init(
@@ -614,23 +564,9 @@ struct XcodeMCPProxyServerTests {
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeEventLoopGroup: {
-                    let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-                    eventLoopGroup.withLockedValue { $0 = group }
-                    return group
-                },
-                shutdownEventLoopGroup: { group in
-                    eventLoopShutdownCount.withLockedValue { $0 += 1 }
-                    try await shutdown(group)
-                },
-                makeAutoApprover: { _ in RecordingAutoApprover() },
-                makeRuntimeCoordinator: { config, eventLoop in
-                    RuntimeCoordinator(
-                        config: config,
-                        eventLoop: eventLoop,
-                        upstreams: [upstream],
-                        startImmediately: false
-                    )
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { config in
+                    makeServerTestRuntime(config: config, upstream: upstream)
                 }
             )
         )
@@ -648,8 +584,6 @@ struct XcodeMCPProxyServerTests {
         try await acceptedClient.closeFuture.get()
 
         #expect(upstream.stopCount == 1)
-        _ = try #require(eventLoopGroup.withLockedValue { $0 })
-        #expect(eventLoopShutdownCount.withLockedValue { $0 } == 1)
         let status = await server.snapshot()
         #expect(status.phase == .stopped)
         #expect(status.upstreams.map(\.health) == [.stopped])
@@ -724,6 +658,28 @@ private final class WeakRuntimeReference: @unchecked Sendable {
     }
 }
 
+private func makeServerTestRuntime(
+    config: ProxyRuntimeConfiguration,
+    upstream: any UpstreamSlotControlling,
+    runtimeReference: WeakRuntimeReference? = nil
+) -> ProxyRuntime {
+    ProxyRuntime.testing(configuration: config) {
+        eventLoop,
+        notificationSink,
+        sessionClosedSink in
+        let coordinator = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            notificationSink: notificationSink,
+            sessionClosedSink: sessionClosedSink,
+            startImmediately: false
+        )
+        runtimeReference?.value = coordinator
+        return coordinator
+    }
+}
+
 private final class RecordingUpstreamSlot: @unchecked Sendable, UpstreamSlotControlling {
     private let startCountBox = NIOLockedValueBox(0)
     private let stopCountBox = NIOLockedValueBox(0)
@@ -778,19 +734,19 @@ private func makeXcrunFixture() throws -> XcrunFixture {
     let toolPath = directoryURL.appendingPathComponent("fake-mcpbridge").path
     let wrapperPath = directoryURL.appendingPathComponent("xcrun").path
     let script = """
-    #!/bin/sh
-    if [ "$1" = "--sdk" ]; then
-      shift 2
-    fi
-    if [ "$1" = "--log" ]; then
-      shift
-    fi
-    if [ "$1" = "--find" ] && [ "$2" = "mcpbridge" ]; then
-      echo "\(toolPath)"
-      exit 0
-    fi
-    exit 1
-    """
+        #!/bin/sh
+        if [ "$1" = "--sdk" ]; then
+          shift 2
+        fi
+        if [ "$1" = "--log" ]; then
+          shift
+        fi
+        if [ "$1" = "--find" ] && [ "$2" = "mcpbridge" ]; then
+          echo "\(toolPath)"
+          exit 0
+        fi
+        exit 1
+        """
     try script.write(to: URL(fileURLWithPath: wrapperPath), atomically: true, encoding: .utf8)
     try fileManager.setAttributes(
         [.posixPermissions: NSNumber(value: Int16(0o755))],

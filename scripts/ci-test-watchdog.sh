@@ -9,7 +9,7 @@
 set -uo pipefail
 
 STALL_SECONDS="${STALL_SECONDS:-120}"
-POLL_SECONDS=10
+POLL_SECONDS=1
 RESUME_RECHECK_SECONDS=5
 
 log="$(mktemp -t ci-test-watchdog)"
@@ -52,7 +52,7 @@ wait_for_output_or_exit() {
 
 dump_hang_diagnostics() {
     echo "::error::test run produced no output for ${STALL_SECONDS}s; dumping thread backtraces"
-    ps -ef | grep -E 'swift|xctest' | grep -v grep || true
+    pgrep -lf 'swift|xctest' || true
     local pids
     pids=$(pgrep -f 'swiftpm-testing-helper|PackageTests|xctest' || true)
     for pid in ${pids}; do

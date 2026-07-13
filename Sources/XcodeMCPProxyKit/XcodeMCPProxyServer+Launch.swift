@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPProxyRuntime
 
 package struct XcodeMCPProxyProductMetadata: Equatable, Sendable {
     package let name: String
