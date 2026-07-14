@@ -160,16 +160,16 @@ disabled = ["RunAllTests", "RunSomeTests"]
 
 ## Migration
 
-### v0.14.0 breaking Swift API redesign
+### v0.14.0
 
-The Swift client and embedded proxy APIs now use typed connection state,
-`Duration` deadlines, explicit async lifecycle completion, and a smaller
-server/adapter public surface. Deprecated wrappers are not retained. CLI users
-keep the normal server and adapter commands, but the adapter's old `--stdio`
-alias is removed in favor of `--url`.
-
-See the [v0.14.0 migration guide](Docs/migration-2026-07.md) for the complete
-old-to-new symbol and behavior mapping.
+- The Swift client and embedded proxy APIs now use typed connection state,
+  `Duration` deadlines, explicit async lifecycle completion, and a smaller
+  server/adapter public surface.
+- Deprecated wrappers are not retained.
+- CLI users can keep the normal server and adapter commands, but must replace
+  the adapter's old `--stdio` alias with `--url`.
+- See the [v0.14.0 migration guide](Docs/migration-2026-07.md) for the complete
+  old-to-new symbol and behavior mapping.
 
 ### v0.11.0
 
