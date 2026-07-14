@@ -2571,6 +2571,10 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
         operations.withLockedValue(\.count)
     }
 
+    func scheduledEventCount() -> Int {
+        scheduledIndices.count()
+    }
+
     func nextScheduled(at index: Int) async throws -> Int {
         try await scheduledIndices.nextValue(at: index)
     }
@@ -2604,7 +2608,7 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
 
     func nextActiveTimeoutIndex(
         delay: TimeAmount,
-        startingAt startIndex: Int = 0
+        startingAtEventIndex startIndex: Int = 0
     ) async throws -> Int {
         var scheduledValueIndex = startIndex
         while true {

@@ -868,7 +868,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             matching: { methodName(from: $0) == "initialize" },
             description: "waiting for sibling bridge initialize"
         )
-        let catalogTimeoutSearchIndex = timeoutScheduler.scheduledCount()
+        let catalogTimeoutSearchIndex = timeoutScheduler.scheduledEventCount()
         await activationUpstream.yield(
             .message(
                 try makeInitializeResponse(
@@ -895,7 +895,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         ) {
             try await timeoutScheduler.nextActiveTimeoutIndex(
                 delay: .seconds(10),
-                startingAt: catalogTimeoutSearchIndex
+                startingAtEventIndex: catalogTimeoutSearchIndex
             )
         }
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
@@ -946,7 +946,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         }
         #expect(recoveryBackoff == 1_000_000_000)
         #expect(await replacementUpstream.sentCount() == 0)
-        let firstRecoveryTimeoutSearchIndex = timeoutScheduler.scheduledCount()
+        let firstRecoveryTimeoutSearchIndex = timeoutScheduler.scheduledEventCount()
         await readinessSleep.resumeNext()
         _ = try await sentValue(
             from: replacementUpstream,
@@ -960,7 +960,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         ) {
             try await timeoutScheduler.nextActiveTimeoutIndex(
                 delay: .seconds(3),
-                startingAt: firstRecoveryTimeoutSearchIndex
+                startingAtEventIndex: firstRecoveryTimeoutSearchIndex
             )
         }
         #expect(timeoutScheduler.fire(at: recoveryTimeoutIndex))
@@ -1097,7 +1097,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             timeoutScheduler.activeTimeoutIndex(delay: .seconds(10))
         )
 
-        let retryScheduleIndex = timeoutScheduler.scheduledCount()
+        let retryScheduleIndex = timeoutScheduler.scheduledEventCount()
         await activationUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
