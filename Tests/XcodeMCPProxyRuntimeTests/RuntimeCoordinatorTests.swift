@@ -868,6 +868,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             matching: { methodName(from: $0) == "initialize" },
             description: "waiting for sibling bridge initialize"
         )
+        let catalogTimeoutSearchIndex = timeoutScheduler.scheduledEventCount()
         await activationUpstream.yield(
             .message(
                 try makeInitializeResponse(
@@ -888,9 +889,15 @@ struct RuntimeCoordinatorProcessRoutingTests {
             matching: { methodName(from: $0) == "tools/list" },
             description: "waiting for activation bridge catalog"
         )
-        let catalogTimeoutIndex = try #require(
-            timeoutScheduler.activeTimeoutIndex(delay: .seconds(10))
-        )
+        let catalogTimeoutIndex = try await waitWithTimeout(
+            "waiting for activation catalog timeout registration",
+            timeout: .seconds(2)
+        ) {
+            try await timeoutScheduler.nextActiveTimeoutIndex(
+                delay: .seconds(10),
+                startingAtEventIndex: catalogTimeoutSearchIndex
+            )
+        }
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
         let replacementPool = try #require(createdPools.withLockedValue { $0.dropFirst().first })
         let replacementUpstream = replacementPool[0]
@@ -939,20 +946,23 @@ struct RuntimeCoordinatorProcessRoutingTests {
         }
         #expect(recoveryBackoff == 1_000_000_000)
         #expect(await replacementUpstream.sentCount() == 0)
-        let firstRecoveryTimeoutSearchIndex = timeoutScheduler.scheduledCount()
+        let firstRecoveryTimeoutSearchIndex = timeoutScheduler.scheduledEventCount()
         await readinessSleep.resumeNext()
-        let replacementInitialize = try await sentValue(
+        _ = try await sentValue(
             from: replacementUpstream,
             startingAt: 0,
             matching: { methodName(from: $0) == "initialize" },
             description: "waiting for process owner to restore replacement bridge"
         )
-        let recoveryTimeoutIndex = try #require(
-            timeoutScheduler.activeTimeoutIndex(
+        let recoveryTimeoutIndex = try await waitWithTimeout(
+            "waiting for bridge recovery timeout registration",
+            timeout: .seconds(2)
+        ) {
+            try await timeoutScheduler.nextActiveTimeoutIndex(
                 delay: .seconds(3),
-                startingAt: firstRecoveryTimeoutSearchIndex
+                startingAtEventIndex: firstRecoveryTimeoutSearchIndex
             )
-        )
+        }
         #expect(timeoutScheduler.fire(at: recoveryTimeoutIndex))
         #expect(try await replacementUpstream.nextStopCount() == 1)
 
@@ -1087,7 +1097,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             timeoutScheduler.activeTimeoutIndex(delay: .seconds(10))
         )
 
-        let retryScheduleIndex = timeoutScheduler.scheduledCount()
+        let retryScheduleIndex = timeoutScheduler.scheduledEventCount()
         await activationUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -5709,6 +5719,9 @@ struct RuntimeCoordinatorRecoveryTests {
             try await manager.controlPlaneDebugMirror.waitForSnapshot {
                 $0.waiterCounts.toolsCatalog == 0 && $0.inFlightControlPlaneRequests.isEmpty
             }
+        }
+        _ = try await waitWithTimeout("waiting for timed-out tools/list request cleanup") {
+            await manager.drainControlPlaneLoadsForTesting()
         }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
