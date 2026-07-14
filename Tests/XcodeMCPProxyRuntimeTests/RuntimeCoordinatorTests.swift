@@ -532,12 +532,16 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(5).nanoseconds)
         #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.seconds(5).nanoseconds)
         #expect(timeoutScheduler.fire(at: 1))
-        #expect(timeoutScheduler.scheduledCount() == 3)
 
         let replacement = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
         #expect(try await upstream.nextStopCount() == 1)
-        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
-        #expect(timeoutScheduler.fire(at: 2))
+        let retryTimeoutIndex = try #require(
+            timeoutScheduler.activeTimeoutIndex(
+                delay: .milliseconds(250),
+                startingAt: 2
+            )
+        )
+        #expect(timeoutScheduler.fire(at: retryTimeoutIndex))
         _ = try await replacement.nextSent(at: 0)
 
         timeoutScheduler.fire(at: 0)
@@ -574,10 +578,56 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
     }
 
-    @Test func processRouteActivationCatalogTimeoutReplacesSlotAndDropsStaleCatalog()
+    @Test func processRouteActivationPreservesDisabledCatalogTimeout() async throws {
+        var config = makeConfig(requestTimeout: 0)
+        config.usesPermissionDialogAutomation = true
+        let target = xcodeProcessTarget(processID: 27025, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            config: config,
+            upstreams: [],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let upstream = TestUpstreamClient()
+                createdUpstreams.withLockedValue { $0.append(upstream) }
+                return [upstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+
+        fixture.manager.reconcileXcodeProcessTargets(
+            [target],
+            reason: "test_disabled_catalog_timeout"
+        )
+        let upstream = try #require(createdUpstreams.withLockedValue { $0.first })
+        let initialize = try await sentValue(
+            from: upstream,
+            startingAt: 0,
+            matching: { methodName(from: $0) == "initialize" },
+            description: "waiting for activation initialize"
+        )
+        await upstream.yield(
+            .message(try makeInitializeResponse(id: try extractUpstreamID(from: initialize)))
+        )
+        _ = try await sentValue(
+            from: upstream,
+            startingAt: 1,
+            matching: { methodName(from: $0) == "tools/list" },
+            description: "waiting for activation catalog"
+        )
+
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
+        #expect(timeoutScheduler.isCancelled(at: 0))
+    }
+
+    @Test func processRouteActivationCatalogTimeoutStaysBoundedAndReplacesSlot()
         async throws
     {
-        var config = makeConfig(requestTimeout: 20)
+        var config = makeConfig(requestTimeout: 300)
         config.usesPermissionDialogAutomation = true
         let olderUpstream = TestUpstreamClient()
         let olderTarget = xcodeProcessTarget(processID: 26626, xcodeVersion: "26.6")
@@ -660,7 +710,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         #expect(timeoutScheduler.scheduledCount() == 3)
         #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
-        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(20).nanoseconds)
+        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(timeoutScheduler.fire(at: 2))
         #expect(
             try await waitWithTimeout(
@@ -669,14 +719,18 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ) {
                 try await firstAttempt.nextStopCount()
             } == 1)
-        #expect(timeoutScheduler.scheduledCount() == 4)
-        #expect(timeoutScheduler.delay(at: 3)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
         #expect(createdUpstreams.withLockedValue(\.count) == 2)
 
-        #expect(timeoutScheduler.fire(at: 3))
         let retryAttempt = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
+        let retryTimeoutIndex = try #require(
+            timeoutScheduler.activeTimeoutIndex(
+                delay: .milliseconds(250),
+                startingAt: 3
+            )
+        )
+        #expect(timeoutScheduler.fire(at: retryTimeoutIndex))
         let retryInitialize = try await waitWithTimeout(
-            "waiting for retry activation initialize",
+            "waiting for activation retry initialize",
             timeout: .seconds(2)
         ) {
             try await retryAttempt.nextSent(at: 0)
@@ -743,6 +797,212 @@ struct RuntimeCoordinatorProcessRoutingTests {
                     olderTarget.processID,
                     newerTarget.processID,
                 ]))
+    }
+
+    @Test func processOwnerRestoresTimedOutBridgeWhenSiblingCatalogWins()
+        async throws
+    {
+        var config = makeConfig(requestTimeout: 300)
+        config.usesPermissionDialogAutomation = true
+        let existingUpstream = TestUpstreamClient()
+        let existingTarget = xcodeProcessTarget(processID: 26627, xcodeVersion: "26.6")
+        let recoveringTarget = xcodeProcessTarget(processID: 27027, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let readiness = ReadinessFlag(isReady: true)
+        let readinessSleep = ControlledReadinessSleep()
+        let createdPools = NIOLockedValueBox<[[TestUpstreamClient]]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            config: config,
+            upstreams: [existingUpstream],
+            upstreamReadinessGate: makeTestReadinessGate(
+                readiness: readiness,
+                sleepRecorder: readinessSleep
+            ),
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: existingTarget, upstreamIndices: [0])
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let pool = [TestUpstreamClient(), TestUpstreamClient()]
+                createdPools.withLockedValue { $0.append(pool) }
+                return pool
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-source"],
+            ]),
+            sourceUpstream: 0
+        )
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (existingTarget, 0, [toolDescriptor(name: "Only26")])
+            ]
+        )
+
+        manager.reconcileXcodeProcessTargets(
+            [existingTarget, recoveringTarget],
+            reason: "test_two_bridge_owner_recovery"
+        )
+        let initialPool = try #require(createdPools.withLockedValue { $0.first })
+        let activationUpstream = initialPool[0]
+        let siblingUpstream = initialPool[1]
+        let activationInitialize = try await sentValue(
+            from: activationUpstream,
+            startingAt: 0,
+            matching: { methodName(from: $0) == "initialize" },
+            description: "waiting for activation bridge initialize"
+        )
+        let siblingInitialize = try await sentValue(
+            from: siblingUpstream,
+            startingAt: 0,
+            matching: { methodName(from: $0) == "initialize" },
+            description: "waiting for sibling bridge initialize"
+        )
+        await activationUpstream.yield(
+            .message(
+                try makeInitializeResponse(
+                    id: try extractUpstreamID(from: activationInitialize),
+                    serverName: "recovering"
+                ))
+        )
+        await siblingUpstream.yield(
+            .message(
+                try makeInitializeResponse(
+                    id: try extractUpstreamID(from: siblingInitialize),
+                    serverName: "recovering"
+                ))
+        )
+        _ = try await sentValue(
+            from: activationUpstream,
+            startingAt: 1,
+            matching: { methodName(from: $0) == "tools/list" },
+            description: "waiting for activation bridge catalog"
+        )
+        let catalogTimeoutIndex = try #require(
+            timeoutScheduler.activeTimeoutIndex(delay: .seconds(10))
+        )
+        #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
+        let replacementPool = try #require(createdPools.withLockedValue { $0.dropFirst().first })
+        let replacementUpstream = replacementPool[0]
+        #expect(try await activationUpstream.nextStopCount() == 1)
+        #expect(await replacementUpstream.sentCount() == 0)
+        let retryTimeoutIndex = try #require(
+            timeoutScheduler.activeTimeoutIndex(delay: .milliseconds(250))
+        )
+
+        let siblingCatalogStartIndex = await siblingUpstream.sentCount()
+        manager.refreshPendingProcessToolsCatalogForReadyUpstream(
+            upstreamIndex: 2,
+            reason: "test_sibling_catalog_wins"
+        )
+        let siblingCatalog = try await sentValue(
+            from: siblingUpstream,
+            startingAt: siblingCatalogStartIndex,
+            matching: { methodName(from: $0) == "tools/list" },
+            description: "waiting for sibling bridge catalog"
+        )
+        await siblingUpstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: siblingCatalog),
+                    tools: [toolDescriptor(name: "Only27")]
+                ))
+        )
+
+        _ = try await waitWithTimeout(
+            "waiting for sibling catalog to win",
+            timeout: .seconds(2)
+        ) {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.canonicalToolsSourceUpstream == 2
+            }
+        }
+        #expect(await replacementUpstream.sentCount() == 0)
+        #expect(timeoutScheduler.isCancelled(at: retryTimeoutIndex))
+        #expect(timeoutScheduler.fire(at: retryTimeoutIndex) == false)
+
+        let recoveryBackoff = try await waitWithTimeout(
+            "waiting for bridge-pool recovery backoff",
+            timeout: .seconds(2)
+        ) {
+            try await readinessSleep.nextSleep(at: 0)
+        }
+        #expect(recoveryBackoff == 1_000_000_000)
+        #expect(await replacementUpstream.sentCount() == 0)
+        let firstRecoveryTimeoutSearchIndex = timeoutScheduler.scheduledCount()
+        await readinessSleep.resumeNext()
+        let replacementInitialize = try await sentValue(
+            from: replacementUpstream,
+            startingAt: 0,
+            matching: { methodName(from: $0) == "initialize" },
+            description: "waiting for process owner to restore replacement bridge"
+        )
+        let recoveryTimeoutIndex = try #require(
+            timeoutScheduler.activeTimeoutIndex(
+                delay: .seconds(3),
+                startingAt: firstRecoveryTimeoutSearchIndex
+            )
+        )
+        #expect(timeoutScheduler.fire(at: recoveryTimeoutIndex))
+        #expect(try await replacementUpstream.nextStopCount() == 1)
+
+        let secondReplacementPool = try #require(
+            createdPools.withLockedValue { $0.dropFirst(2).first }
+        )
+        let secondReplacementUpstream = secondReplacementPool[0]
+        let secondRecoveryBackoff = try await waitWithTimeout(
+            "waiting for repeated bridge-pool recovery backoff",
+            timeout: .seconds(2)
+        ) {
+            try await readinessSleep.nextSleep(at: 1)
+        }
+        #expect(secondRecoveryBackoff == 2_000_000_000)
+        #expect(await secondReplacementUpstream.sentCount() == 0)
+
+        await readinessSleep.resumeNext()
+        let secondReplacementInitialize = try await sentValue(
+            from: secondReplacementUpstream,
+            startingAt: 0,
+            matching: { methodName(from: $0) == "initialize" },
+            description: "waiting for repeated process-owner bridge recovery"
+        )
+        await secondReplacementUpstream.yield(
+            .message(
+                try makeInitializeResponse(
+                    id: try extractUpstreamID(from: secondReplacementInitialize),
+                    serverName: "recovering"
+                ))
+        )
+        _ = try await sentValue(
+            from: secondReplacementUpstream,
+            startingAt: 1,
+            matching: { methodName(from: $0) == "notifications/initialized" },
+            description: "waiting for replacement bridge initialized notification"
+        )
+        #expect(await replacementUpstream.sentCount() == 1)
+        await manager.drainRuntimeTasksForTesting()
+
+        let route = try #require(
+            manager.debugSnapshot().processRoutes.first {
+                $0.processID == recoveringTarget.processID
+            }
+        )
+        #expect(route.upstreamIndices == [1, 2])
+        #expect(route.usableSlotCount == 2)
+        #expect(
+            manager.processControlPlane.catalog(forProcessID: recoveringTarget.processID)?
+                .upstreamIndex == 2
+        )
     }
 
     @Test func processRouteActivationEmptyCatalogRetryPreservesCatalogTimeout()
@@ -824,10 +1084,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
             )
         }
         let catalogTimeoutIndex = try #require(
-            (0..<timeoutScheduler.scheduledCount()).first {
-                timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(20).nanoseconds
-                    && timeoutScheduler.isCancelled(at: $0) == false
-            })
+            timeoutScheduler.activeTimeoutIndex(delay: .seconds(10))
+        )
 
         let retryScheduleIndex = timeoutScheduler.scheduledCount()
         await activationUpstream.yield(
@@ -2091,7 +2349,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         _ = try await newerUpstream.nextSent(at: 0)
         #expect(timeoutScheduler.scheduledCount() == 2)
         #expect(timeoutScheduler.fire(at: 1))
-        #expect(timeoutScheduler.scheduledCount() == 3)
         #expect(try await newerUpstream.nextStopCount() == 1)
         let pendingSnapshot = manager.debugSnapshot()
         #expect(
@@ -2101,18 +2358,27 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ])
 
         let replacementUpstream = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
-        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
+        let retryTimeoutIndex = try #require(
+            timeoutScheduler.activeTimeoutIndex(
+                delay: .milliseconds(250),
+                startingAt: 2
+            )
+        )
+        let scheduledBeforeReconcile = timeoutScheduler.scheduledCount()
         manager.reconcileXcodeProcessTargets(
             [olderTarget, newerTarget],
             reason: "test_spurious_reconcile_before_activation_retry"
         )
         await manager.drainRuntimeTasksForTesting()
-        #expect(timeoutScheduler.scheduledCount() == 3)
+        #expect(timeoutScheduler.scheduledCount() == scheduledBeforeReconcile)
         #expect(await replacementUpstream.sentCount() == 0)
-        #expect(timeoutScheduler.fire(at: 2))
-        let retriedInitialize = try await replacementUpstream.nextSent(at: 0)
+        #expect(timeoutScheduler.fire(at: retryTimeoutIndex))
+        let replacementInitialize = try await replacementUpstream.nextSent(at: 0)
         await replacementUpstream.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retriedInitialize)))
+            .message(
+                try makeInitializeResponse(
+                    id: try extractUpstreamID(from: replacementInitialize)
+                ))
         )
         _ = try await replacementUpstream.nextSent(at: 1)
         let toolsRequest = try await replacementUpstream.nextSent(
@@ -2181,18 +2447,25 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         #expect(timeoutScheduler.scheduledCount() == 2)
         #expect(timeoutScheduler.fire(at: 1))
-        #expect(timeoutScheduler.scheduledCount() == 3)
         #expect(try await upstream.nextStopCount() == 1)
         #expect(manager.testStateSnapshot().hasInitResult == false)
 
         let replacement = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
-        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.milliseconds(250).nanoseconds)
-        #expect(timeoutScheduler.fire(at: 2))
-        let retriedInitialize = try await replacement.nextSent(at: 0)
-        #expect(methodName(from: retriedInitialize) == "initialize")
+        let retryTimeoutIndex = try #require(
+            timeoutScheduler.activeTimeoutIndex(
+                delay: .milliseconds(250),
+                startingAt: 2
+            )
+        )
+        #expect(timeoutScheduler.fire(at: retryTimeoutIndex))
+        let replacementInitialize = try await replacement.nextSent(at: 0)
+        #expect(methodName(from: replacementInitialize) == "initialize")
 
         await replacement.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retriedInitialize)))
+            .message(
+                try makeInitializeResponse(
+                    id: try extractUpstreamID(from: replacementInitialize)
+                ))
         )
         let initializedNotification = try await replacement.nextSent(at: 1)
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
@@ -2430,6 +2703,42 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(await oldUpstream.sentCount() == oldSentCountAfterRetire)
     }
 
+    @Test func processOwnerRetiresEveryBridgeWhenXcodeCrashes() async throws {
+        let oldBridges = [TestUpstreamClient(), TestUpstreamClient()]
+        let oldTarget = xcodeProcessTarget(processID: 26652, xcodeVersion: "26.6")
+        let relaunchedTarget = xcodeProcessTarget(processID: 26653, xcodeVersion: "26.6")
+        let createdPools = NIOLockedValueBox<[[TestUpstreamClient]]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: oldBridges,
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: oldTarget, upstreamIndices: [0, 1])
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let pool = [TestUpstreamClient(), TestUpstreamClient()]
+                createdPools.withLockedValue { $0.append(pool) }
+                return pool
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+
+        fixture.manager.reconcileXcodeProcessTargets(
+            [relaunchedTarget],
+            reason: "test_xcode_owner_relaunch"
+        )
+
+        #expect(try await oldBridges[0].nextStopCount() == 1)
+        #expect(try await oldBridges[1].nextStopCount() == 1)
+        #expect(createdPools.withLockedValue(\.count) == 1)
+        let routes = fixture.manager.debugSnapshot().processRoutes
+        #expect(routes.first { $0.processID == oldTarget.processID }?.state == "retired")
+        #expect(
+            routes.first { $0.processID == relaunchedTarget.processID }?.upstreamIndices
+                == [2, 3]
+        )
+    }
+
     @Test func processRoutingRetriesRelaunchedProcessCatalogAfterWorkspaceBecomesReady()
         async throws
     {
@@ -2521,11 +2830,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
             return
         }
         let retryIndex = try #require(
-            (0..<timeoutScheduler.scheduledCount()).first {
-                timeoutScheduler.delay(at: $0)?.nanoseconds
-                    == TimeAmount.milliseconds(250).nanoseconds
-                    && timeoutScheduler.isCancelled(at: $0) == false
-            })
+            timeoutScheduler.activeTimeoutIndex(delay: .milliseconds(250))
+        )
         #expect(timeoutScheduler.fire(at: retryIndex))
         let readyCatalogRequest = try await relaunchedUpstream.nextSent(
             startingAt: 3,
@@ -2685,10 +2991,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
         }
 
         let catalogTimeoutIndex = try #require(
-            (0..<timeoutScheduler.scheduledCount()).first {
-                timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(20).nanoseconds
-                    && timeoutScheduler.isCancelled(at: $0) == false
-            })
+            timeoutScheduler.activeTimeoutIndex(delay: .seconds(10))
+        )
         let scheduledBeforeCatalogTimeout = timeoutScheduler.scheduledCount()
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
         #expect(
@@ -2702,12 +3006,21 @@ struct RuntimeCoordinatorProcessRoutingTests {
             manager.unavailableXcodeProcessIDs().contains(
                 relaunched26Target.processID
             ) == false)
-        #expect(timeoutScheduler.scheduledCount() == scheduledBeforeCatalogTimeout + 1)
-        #expect(
-            timeoutScheduler.delay(at: scheduledBeforeCatalogTimeout)?.nanoseconds
-                == TimeAmount.milliseconds(250).nanoseconds
-        )
         #expect(createdUpstreams.withLockedValue(\.count) == 2)
+        let retryTimeoutIndex = try #require(
+            timeoutScheduler.activeTimeoutIndex(
+                delay: .milliseconds(250),
+                startingAt: scheduledBeforeCatalogTimeout
+            )
+        )
+        let retryAttempt = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
+        #expect(timeoutScheduler.fire(at: retryTimeoutIndex))
+        let retryInitialize = try await waitWithTimeout(
+            "waiting for activation-retried relaunched 26 initialize",
+            timeout: .seconds(2)
+        ) {
+            try await retryAttempt.nextSent(at: 0)
+        }
 
         await firstAttempt.yield(
             .message(
@@ -2724,14 +3037,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 forProcessID: relaunched26Target.processID
             ) == nil)
 
-        #expect(timeoutScheduler.fire(at: scheduledBeforeCatalogTimeout))
-        let retryAttempt = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
-        let retryInitialize = try await waitWithTimeout(
-            "waiting for relaunched 26 retry initialize",
-            timeout: .seconds(2)
-        ) {
-            try await retryAttempt.nextSent(at: 0)
-        }
         let catalogCommitIndex = catalogCommits.count()
         await retryAttempt.yield(
             .message(

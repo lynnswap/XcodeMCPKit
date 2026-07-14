@@ -74,6 +74,17 @@ enum ProcessControlPlaneEffect: Sendable {
     case cancelTimeout(RuntimeScheduledTimeout)
     case cancelRPC(ControlPlane.RPCHandle)
     case cancelReadinessWaiter(UpstreamReadinessWaiterToken)
+    case restoreBridgePool(ProcessBridgePoolRecovery)
+}
+
+struct ProcessBridgePoolRecovery: Sendable {
+    let routeID: ProcessRouteID
+    let upstreamIDs: [UpstreamSlotID]
+}
+
+struct ProcessBridgeRecovery: Sendable {
+    let routeID: ProcessRouteID
+    let topologyProof: UpstreamTopologyProof
 }
 
 struct ProcessControlPlaneTransition: Sendable {
@@ -99,7 +110,7 @@ enum CatalogCommit: Sendable {
     case discarded(StaleCatalogReason, ProcessControlPlaneTransition)
 }
 
-/// Owns every process-route fact that participates in catalog validity.
+/// Owns each Xcode process's route identity, bridge-pool membership, and catalog validity.
 ///
 /// The lock protects only synchronous state transitions. Timers and RPC handles
 /// are detached as effects and are cancelled by `RuntimeCoordinator` after the
@@ -425,7 +436,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
     }
 
-    private struct RouteRecord: Sendable {
+    private struct XcodeProcessOwner: Sendable {
         let key: InstanceKey
         var route: XcodeProcessRoute
         var state: RouteState
@@ -438,6 +449,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var catalogCooldown: Cooldown
         var admissionRevision: UInt64
         var catalogEligibilityEstablished: Bool
+        var pendingBridgeRecoveryUpstreamIDs: Set<UpstreamSlotID>
         var nextAttemptID: Int
         var attempt: Attempt?
 
@@ -480,7 +492,7 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     private struct State: Sendable {
-        var recordsByKey: [InstanceKey: RouteRecord] = [:]
+        var recordsByKey: [InstanceKey: XcodeProcessOwner] = [:]
         var order: [InstanceKey] = []
         var routeGeneration: UInt64 = 0
         var exposureEpoch: UInt64 = 0
@@ -519,6 +531,33 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func activeRoutes() -> [XcodeProcessRoute] {
         state.withLockedValue { state in Self.activeRoutes(in: state) }
+    }
+
+    func requestBridgePoolRecovery(
+        routeID: ProcessRouteID,
+        upstreamID: UpstreamSlotID
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            guard let key = Self.key(routeID: routeID, in: state),
+                  var owner = state.recordsByKey[key],
+                  owner.state == .active,
+                  owner.route.upstreamIndices.contains(upstreamID.rawValue)
+            else {
+                return .none
+            }
+            owner.pendingBridgeRecoveryUpstreamIDs.insert(upstreamID)
+            let effects: [ProcessControlPlaneEffect]
+            if state.catalogsByProcessID[owner.route.target.processID] != nil {
+                effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
+            } else {
+                effects = []
+            }
+            state.recordsByKey[key] = owner
+            return ProcessControlPlaneTransition(
+                addedRoutes: [], retiredRoutes: [], effects: effects,
+                publishesToolsListChanged: false
+            )
+        }
     }
 
     func currentCatalogEpoch() -> CatalogEpoch {
@@ -702,6 +741,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                             effects.append(contentsOf: attempt.detachedEffects())
                             record.attempt = nil
                         }
+                        record.pendingBridgeRecoveryUpstreamIDs.removeAll()
                         Self.removeCatalog(
                             processID: record.route.target.processID,
                             from: &state
@@ -1469,6 +1509,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 }
                 effects.append(contentsOf: record.clearAllCooldowns().effects)
                 attempt.phase = .cataloged
+                effects.append(contentsOf: Self.takeBridgePoolRecoveryEffects(owner: &record))
             case .unusable:
                 effects = attempt.loads.removeValue(forKey: lease.loadID)?
                     .detachedEffects() ?? []
@@ -1972,7 +2013,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         usableSlotCount: @Sendable (XcodeProcessRoute) -> Int
     ) -> [ProxyDebug.ProcessRouteSnapshot] {
         let records = state.withLockedValue { state in
-            state.order.compactMap { key -> (RouteRecord, Bool, UInt64)? in
+            state.order.compactMap { key -> (XcodeProcessOwner, Bool, UInt64)? in
                 guard let record = state.recordsByKey[key] else { return nil }
                 let hasCatalog = state.catalogsByProcessID[record.route.target.processID] != nil
                 return (record, hasCatalog, state.nowUptimeNs)
@@ -2089,7 +2130,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             upstreamIndices: candidate.upstreamIndices
         )
         let key = InstanceKey(target: candidate.target)
-        state.recordsByKey[key] = RouteRecord(
+        state.recordsByKey[key] = XcodeProcessOwner(
             key: key,
             route: route,
             state: .active,
@@ -2104,6 +2145,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             catalogEligibilityEstablished: Set(
                 route.upstreamIndices.map(UpstreamSlotID.init(rawValue:))
             ).isDisjoint(with: state.usability.recoveryAwareUsableUpstreamIDs) == false,
+            pendingBridgeRecoveryUpstreamIDs: [],
             nextAttemptID: 0,
             attempt: nil
         )
@@ -2120,7 +2162,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         activeRecords(in: state).map(\.route)
     }
 
-    private static func activeRecords(in state: State) -> [RouteRecord] {
+    private static func activeRecords(in state: State) -> [XcodeProcessOwner] {
         state.order.compactMap { key in
             guard let record = state.recordsByKey[key], record.state == .active else { return nil }
             return record
@@ -2166,9 +2208,25 @@ final class ProcessControlPlaneAuthority: Sendable {
         activeRecords(in: state).first { $0.route.id == routeID }?.key
     }
 
-    private static func record(routeID: ProcessRouteID, in state: State) -> RouteRecord? {
+    private static func record(routeID: ProcessRouteID, in state: State) -> XcodeProcessOwner? {
         guard let key = key(routeID: routeID, in: state) else { return nil }
         return state.recordsByKey[key]
+    }
+
+    private static func takeBridgePoolRecoveryEffects(
+        owner: inout XcodeProcessOwner
+    ) -> [ProcessControlPlaneEffect] {
+        guard owner.pendingBridgeRecoveryUpstreamIDs.isEmpty == false else { return [] }
+        let upstreamIDs = owner.pendingBridgeRecoveryUpstreamIDs.sorted {
+            $0.rawValue < $1.rawValue
+        }
+        owner.pendingBridgeRecoveryUpstreamIDs.removeAll()
+        return [
+            .restoreBridgePool(ProcessBridgePoolRecovery(
+                routeID: owner.route.id,
+                upstreamIDs: upstreamIDs
+            ))
+        ]
     }
 
     private static func routingSnapshot(

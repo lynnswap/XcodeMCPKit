@@ -309,6 +309,42 @@ extension RuntimeCoordinator {
         )
     }
 
+    func restoreProcessBridgePool(_ recovery: ProcessBridgePoolRecovery) {
+        guard let route = xcodeProcessRoutes.first(where: { $0.id == recovery.routeID }) else {
+            return
+        }
+        let routeUpstreamIDs = Set(
+            route.upstreamIndices.map(UpstreamSlotID.init(rawValue:))
+        )
+        let recoveries = recovery.upstreamIDs.compactMap { upstreamID -> ProcessBridgeRecovery? in
+            guard routeUpstreamIDs.contains(upstreamID),
+                  let proof = upstreamTopology.operationLease(for: upstreamID)?.proof,
+                  let health = upstreamHealthManager.state(for: upstreamID),
+                  health.isInitialized == false,
+                  health.initInFlight == false
+            else { return nil }
+            return ProcessBridgeRecovery(routeID: recovery.routeID, topologyProof: proof)
+        }
+        guard recoveries.isEmpty == false else { return }
+        logger.info(
+            "bridge_pool_recovery_started",
+            metadata: [
+                "pid": .string("\(route.target.processID)"),
+                "upstreams": .string(
+                    recoveries.map { String($0.topologyProof.slotID.rawValue) }
+                        .joined(separator: ",")
+                ),
+            ]
+        )
+        for recovery in recoveries {
+            startUpstreamWarmInitialize(
+                upstreamIndex: recovery.topologyProof.slotID.rawValue,
+                applyBackoff: true,
+                mode: .processBridgeRecovery(recovery)
+            )
+        }
+    }
+
     func refreshPendingProcessToolsCatalogAfterWarmInitialize(upstreamIndex: Int) {
         refreshPendingProcessToolsCatalogForReadyUpstream(
             upstreamIndex: upstreamIndex,

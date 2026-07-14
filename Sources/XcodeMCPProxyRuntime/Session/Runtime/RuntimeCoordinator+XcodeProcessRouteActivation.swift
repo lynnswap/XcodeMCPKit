@@ -204,7 +204,7 @@ extension RuntimeCoordinator {
                 "pid": .string("\(processID)"),
                 "upstream": .string("\(upstreamIndex)"),
                 "catalog_timeout_ms": .string(
-                    processRouteToolsCatalogTimeoutMillisecondsDescription()
+                    processRouteActivationCatalogTimeoutMillisecondsDescription()
                 ),
             ]
         )
@@ -239,7 +239,7 @@ extension RuntimeCoordinator {
                 "pid": .string("\(route.target.processID)"),
                 "upstream": .string("\(upstreamIndex)"),
                 "catalog_timeout_ms": .string(
-                    processRouteToolsCatalogTimeoutMillisecondsDescription()
+                    processRouteActivationCatalogTimeoutMillisecondsDescription()
                 ),
             ]
         )
@@ -387,7 +387,7 @@ extension RuntimeCoordinator {
         attempt: Int,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
-        guard let timeoutAmount = processRouteToolsCatalogRequestTimeoutAmount() else {
+        guard let timeoutAmount = processRouteActivationCatalogTimeoutAmount() else {
             return
         }
         let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
@@ -407,6 +407,11 @@ extension RuntimeCoordinator {
             return
         }
         attachment.replaced?.cancel()
+    }
+
+    private func processRouteActivationCatalogTimeoutAmount() -> TimeAmount? {
+        guard config.requestTimeout > 0 else { return nil }
+        return MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
     }
 
     private func handleProcessRouteActivationCatalogTimeout(
@@ -464,7 +469,7 @@ extension RuntimeCoordinator {
                 "attempt": .string("\(attempt)"),
                 "phase": .string("catalog"),
                 "timeout_ms": .string(
-                    processRouteToolsCatalogTimeoutMillisecondsDescription()
+                    processRouteActivationCatalogTimeoutMillisecondsDescription()
                 ),
                 "retry_delay_ms": .string("\(timeout.retry.delayMilliseconds)"),
             ]
@@ -478,8 +483,8 @@ extension RuntimeCoordinator {
         )
     }
 
-    private func processRouteToolsCatalogTimeoutMillisecondsDescription() -> String {
-        processRouteToolsCatalogRequestTimeoutAmount().map {
+    private func processRouteActivationCatalogTimeoutMillisecondsDescription() -> String {
+        processRouteActivationCatalogTimeoutAmount().map {
             String($0.nanoseconds / 1_000_000)
         } ?? "disabled"
     }
@@ -548,6 +553,12 @@ extension RuntimeCoordinator {
                 for unused in replacements.dropFirst() {
                     addRuntimeTask { await unused.stop() }
                 }
+                applyProcessControlPlaneTransition(
+                    processControlPlane.requestBridgePoolRecovery(
+                        routeID: route.id,
+                        upstreamID: replacementLease.proof.slotID
+                    )
+                )
                 return true
             }
             for unused in replacements {

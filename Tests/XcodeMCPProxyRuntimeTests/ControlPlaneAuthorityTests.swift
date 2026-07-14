@@ -47,6 +47,57 @@ struct ControlPlaneAuthorityTests {
         #expect(snapshot.canonicalSourceUpstream == 0)
     }
 
+    @Test func bridgeRecoveryWaitsForCatalogAndThenUsesProcessOwnerEffect() throws {
+        let target = xcodeProcessTarget(processID: 41031, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+
+        let pending = authority.requestBridgePoolRecovery(
+            routeID: route.id,
+            upstreamID: UpstreamSlotID(rawValue: 0)
+        )
+        #expect(pending.effects.isEmpty)
+
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(1),
+            nowUptimeNanoseconds: 1
+        ))
+        guard case .accepted(_, let catalogTransition) = authority.completeCatalog(
+            .usable(catalog("BuildProject"), source: testTopologyProof(1)),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected sibling catalog to be accepted")
+            return
+        }
+        let deferredEffect = try #require(catalogTransition.effects.first { effect in
+            if case .restoreBridgePool = effect { return true }
+            return false
+        })
+        guard case .restoreBridgePool(let deferredRecovery) = deferredEffect else {
+            Issue.record("expected deferred bridge recovery effect")
+            return
+        }
+        #expect(deferredRecovery.routeID == route.id)
+        #expect(deferredRecovery.upstreamIDs == [UpstreamSlotID(rawValue: 0)])
+
+        let immediate = authority.requestBridgePoolRecovery(
+            routeID: route.id,
+            upstreamID: UpstreamSlotID(rawValue: 0)
+        )
+        let immediateEffect = try #require(immediate.effects.first { effect in
+            if case .restoreBridgePool = effect { return true }
+            return false
+        })
+        guard case .restoreBridgePool(let immediateRecovery) = immediateEffect else {
+            Issue.record("expected immediate bridge recovery effect")
+            return
+        }
+        #expect(immediateRecovery.routeID == route.id)
+        #expect(immediateRecovery.upstreamIDs == [UpstreamSlotID(rawValue: 0)])
+    }
+
     @Test func routeMembershipChangeInvalidatesLeaseAndCatalogTogether() throws {
         let target = xcodeProcessTarget(processID: 41002, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0])])

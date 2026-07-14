@@ -1082,6 +1082,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 handle.cancel()
             case .cancelReadinessWaiter(let token):
                 cancelUpstreamReadinessWaiter(token)
+            case .restoreBridgePool(let recovery):
+                restoreProcessBridgePool(recovery)
             }
         }
         if transition.publishesToolsListChanged {
