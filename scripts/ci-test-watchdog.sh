@@ -14,7 +14,13 @@ RESUME_RECHECK_SECONDS=5
 
 log="$(mktemp -t ci-test-watchdog)"
 
-"$@" > >(tee "$log") 2>&1 &
+# Swift Testing captures stdout and stderr until a test completes. Give tests
+# with legitimately long child processes a direct progress channel that is
+# still included in the watchdog's observed log.
+CI_TEST_WATCHDOG_HEARTBEAT_FD=3 "$@" \
+    > >(tee -a "$log") \
+    2>&1 \
+    3> >(tee -a "$log") &
 runner=$!
 
 sample_process() {
