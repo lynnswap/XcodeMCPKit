@@ -806,15 +806,17 @@ extension RuntimeCoordinator {
         ownership: InitializeResponseOwnership,
         upstreamIndex: Int
     ) {
-        if ownership.initializeClaim.owner == .regular {
+        switch ownership.initializeClaim.owner {
+        case .regular:
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+        case .processRouteActivation:
+            guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
+                  unavailableXcodeProcessIDs().contains(route.target.processID) == false
+            else { return }
+            startProcessRouteActivation(for: route)
+        case .processBridgeRecovery:
             return
         }
-        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-              unavailableXcodeProcessIDs().contains(route.target.processID) == false else {
-            return
-        }
-        startProcessRouteActivation(for: route)
     }
 
     private func hasOtherInitializeRouteInFlight(excluding upstreamIndex: Int) -> Bool {

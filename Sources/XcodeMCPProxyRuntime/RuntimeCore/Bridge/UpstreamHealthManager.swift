@@ -7,6 +7,7 @@ final class UpstreamHealthManager: Sendable {
     enum InitializeClaimOwner: Sendable, Hashable {
         case regular
         case processRouteActivation
+        case processBridgeRecovery
     }
 
     enum InitializeClaimPhase: Sendable, Equatable {

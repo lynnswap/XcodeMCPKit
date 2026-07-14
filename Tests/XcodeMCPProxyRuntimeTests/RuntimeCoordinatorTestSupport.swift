@@ -2574,6 +2574,19 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
         }
     }
 
+    func activeTimeoutIndex(
+        delay: TimeAmount,
+        startingAt startIndex: Int = 0
+    ) -> Int? {
+        operations.withLockedValue { operations in
+            guard startIndex <= operations.count else { return nil }
+            return operations.indices[startIndex...].first { index in
+                operations[index].isCancelled == false
+                    && operations[index].delay.nanoseconds == delay.nanoseconds
+            }
+        }
+    }
+
     @discardableResult
     func fire(at index: Int) -> Bool {
         let operation: (@Sendable () -> Void)? = operations.withLockedValue { operations in

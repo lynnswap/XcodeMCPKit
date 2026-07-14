@@ -7,13 +7,25 @@ extension RuntimeCoordinator {
     enum WarmInitializeMode: Sendable {
         case regular
         case processRouteActivation(ProcessControlPlaneAuthority.ActivationReservation)
+        case processBridgeRecovery(ProcessBridgeRecovery)
 
         var readinessToken: UpstreamReadinessWaiterToken? {
             switch self {
-            case .regular:
+            case .regular, .processBridgeRecovery:
                 return nil
             case .processRouteActivation(let reservation):
                 return reservation.readinessToken
+            }
+        }
+
+        var claimOwner: UpstreamHealthManager.InitializeClaimOwner {
+            switch self {
+            case .regular:
+                return .regular
+            case .processRouteActivation:
+                return .processRouteActivation
+            case .processBridgeRecovery:
+                return .processBridgeRecovery
             }
         }
     }
@@ -390,6 +402,14 @@ extension RuntimeCoordinator {
         mode: WarmInitializeMode
     ) {
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
+        if case .processBridgeRecovery(let recovery) = mode {
+            guard recovery.topologyProof.slotID.rawValue == upstreamIndex,
+                  upstreamTopology.operationLease(
+                    for: recovery.topologyProof.slotID
+                  )?.proof == recovery.topologyProof,
+                  xcodeProcessRoute(forUpstreamIndex: upstreamIndex)?.id == recovery.routeID
+            else { return }
+        }
         let activationStart = beginProcessRouteActivationIfNeeded(
             mode: mode,
             upstreamIndex: upstreamIndex
@@ -406,7 +426,7 @@ extension RuntimeCoordinator {
         }
         guard let initializeClaim = upstreamHealthManager.claimWarmInitialize(
             upstreamIndex: upstreamIndex,
-            owner: activationStart == nil ? .regular : .processRouteActivation
+            owner: mode.claimOwner
         ) else {
             if let activationStart {
                 applyProcessControlPlaneTransition(
@@ -448,8 +468,16 @@ extension RuntimeCoordinator {
                 operationLease: operationLease,
                 ensureRunning: true,
                 admission: nil,
-                onRejected: { [weak self] in
-                    self?.clearUpstreamState(initializeClaim: initializeClaim)
+                onRejected: { [weak self, mode] in
+                    guard let self else { return }
+                    if case .processBridgeRecovery(let recovery) = mode {
+                        self.handleProcessBridgeRecoveryChannelTimeout(
+                            recovery: recovery,
+                            initializeClaim: initializeClaim
+                        )
+                    } else {
+                        self.clearUpstreamState(initializeClaim: initializeClaim)
+                    }
                 }
             )
         } else {
@@ -478,6 +506,11 @@ extension RuntimeCoordinator {
                     lease: activationStart.lease,
                     initializeClaim: initializeClaim
                 )
+            case .processBridgeRecovery(let recovery):
+                self.handleProcessBridgeRecoveryChannelTimeout(
+                    recovery: recovery,
+                    initializeClaim: initializeClaim
+                )
             }
         }
         if case .processRouteActivation = mode {
@@ -501,7 +534,7 @@ extension RuntimeCoordinator {
         switch mode {
         case .regular:
             return MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)
-        case .processRouteActivation:
+        case .processRouteActivation, .processBridgeRecovery:
             guard config.usesPermissionDialogAutomation else {
                 return MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)
             }
@@ -524,5 +557,28 @@ extension RuntimeCoordinator {
             }
         }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+    }
+
+    func handleProcessBridgeRecoveryChannelTimeout(
+        recovery: ProcessBridgeRecovery,
+        initializeClaim: UpstreamHealthManager.InitializeClaim
+    ) {
+        guard initializeClaim.owner == .processBridgeRecovery,
+              initializeClaim.topologyProof == recovery.topologyProof,
+              clearUpstreamState(
+                initializeClaim: initializeClaim,
+                resetsProcessRouteActivation: false,
+                replacesInitializedChannel: false
+              )
+        else { return }
+        logger.info(
+            "bridge_pool_recovery_timeout",
+            metadata: [
+                "pid": .string("\(recovery.routeID.processID)"),
+                "upstream": .string("\(initializeClaim.upstreamIndex)"),
+                "phase": .string("initialize"),
+            ]
+        )
+        _ = replaceOrRetireInitializeChannel(initializeClaim)
     }
 }
