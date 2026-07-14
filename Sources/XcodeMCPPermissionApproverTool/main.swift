@@ -78,6 +78,15 @@ struct XcodeMCPPermissionApproverCommand: AsyncParsableCommand {
             )
         let assistantNameCandidates = Set(assistantNames.filter { $0.isEmpty == false })
 
+        let xcodeProcessInventory = try Self.makeExplicitProcessInventory(
+            processIDs: xcodeProcessIDs,
+            optionName: "--xcode-pid"
+        )
+        let agentProcessInventory = try Self.makeExplicitProcessInventory(
+            processIDs: rootAgentProcessIDs,
+            optionName: "--agent-pid"
+        )
+
         try Self.validateXcodeProcesses(xcodeProcessIDs) { processID in
             guard let application = NSRunningApplication(processIdentifier: processID),
                 application.isTerminated == false
@@ -91,6 +100,12 @@ struct XcodeMCPPermissionApproverCommand: AsyncParsableCommand {
             let result = kill(processID, 0)
             return result == 0 || errno == EPERM
         }
+        guard Set(xcodeProcessInventory.runningProcessIDs()) == xcodeProcessIDs else {
+            throw ValidationError("--xcode-pid process identity changed during validation")
+        }
+        guard Set(agentProcessInventory.runningProcessIDs()) == rootAgentProcessIDs else {
+            throw ValidationError("--agent-pid process identity changed during validation")
+        }
 
         LoggingSystem.bootstrap { label in
             var handler = StreamLogHandler.standardError(label: label)
@@ -100,11 +115,15 @@ struct XcodeMCPPermissionApproverCommand: AsyncParsableCommand {
         let logger = Logger(label: "XcodeMCPPermissionApprover")
         let approver = XcodePermissionDialogAutomation.AutoApprover(
             configuration: .init(
-                permissionDialogProcessIDs: { xcodeProcessIDs.sorted() },
+                permissionDialogProcessIDs: {
+                    xcodeProcessInventory.runningProcessIDs()
+                },
                 agentPathCandidates: { agentPathCandidates },
                 assistantNameCandidates: { assistantNameCandidates },
                 agentProcessIDCandidates: {
-                    rootAgentProcessIDs.reduce(into: Set<pid_t>()) { candidates, processID in
+                    agentProcessInventory.runningProcessIDs().reduce(
+                        into: Set<pid_t>()
+                    ) { candidates, processID in
                         candidates.formUnion(
                             XcodePermissionDialogAutomation.AutoApprover
                                 .descendantProcessIDCandidates(of: processID)
@@ -127,7 +146,7 @@ struct XcodeMCPPermissionApproverCommand: AsyncParsableCommand {
 
         await terminationSignal.wait()
         terminationSignal.cancel()
-        await approver.shutdown()
+        approver.cancel()
     }
 
     static func validateXcodeProcesses(
@@ -155,6 +174,76 @@ struct XcodeMCPPermissionApproverCommand: AsyncParsableCommand {
             guard isRunning(processID) else {
                 throw ValidationError("--agent-pid \(processID) is not running")
             }
+        }
+    }
+
+    static func makeExplicitProcessInventory(
+        processIDs: Set<pid_t>,
+        optionName: String,
+        currentIdentity: @escaping @Sendable (pid_t) -> ExplicitProcessIdentity? =
+            ExplicitProcessIdentity.current
+    ) throws -> ExplicitProcessInventory {
+        let identities = try processIDs.sorted().map { processID in
+            guard let identity = currentIdentity(processID) else {
+                throw ValidationError("\(optionName) \(processID) is not running")
+            }
+            return identity
+        }
+        return ExplicitProcessInventory(
+            identities: identities,
+            currentIdentity: currentIdentity
+        )
+    }
+}
+
+struct ExplicitProcessIdentity: Equatable, Sendable {
+    let processID: pid_t
+    let startTimeSeconds: UInt64
+    let startTimeMicroseconds: UInt64
+
+    static func current(processID: pid_t) -> Self? {
+        guard processID > 0 else {
+            return nil
+        }
+
+        var processInfo = proc_bsdinfo()
+        let expectedSize = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let copiedSize = withUnsafeMutablePointer(to: &processInfo) { buffer in
+            unsafe proc_pidinfo(
+                processID,
+                PROC_PIDTBSDINFO,
+                0,
+                buffer,
+                expectedSize
+            )
+        }
+        guard copiedSize == expectedSize, processInfo.pbi_pid == UInt32(processID) else {
+            return nil
+        }
+
+        return Self(
+            processID: processID,
+            startTimeSeconds: processInfo.pbi_start_tvsec,
+            startTimeMicroseconds: processInfo.pbi_start_tvusec
+        )
+    }
+}
+
+struct ExplicitProcessInventory: Sendable {
+    private let identities: [ExplicitProcessIdentity]
+    private let currentIdentity: @Sendable (pid_t) -> ExplicitProcessIdentity?
+
+    init(
+        identities: [ExplicitProcessIdentity],
+        currentIdentity: @escaping @Sendable (pid_t) -> ExplicitProcessIdentity?
+    ) {
+        self.identities = identities
+        self.currentIdentity = currentIdentity
+    }
+
+    func runningProcessIDs() -> [pid_t] {
+        identities.compactMap { identity in
+            currentIdentity(identity.processID) == identity ? identity.processID : nil
         }
     }
 }

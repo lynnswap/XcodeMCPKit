@@ -183,6 +183,13 @@ extension XcodePermissionDialogAutomation {
         ) async {
             var monitors: [pid_t: ProcessMonitor] = [:]
 
+            if dependencies.axClient.authorizationStatus(promptIfNeeded: false) != .trusted {
+                scannerSharedState.requestAccessibilityPermissionIfNeeded(
+                    axClient: dependencies.axClient,
+                    logger: dependencies.logger
+                )
+            }
+
             while Task.isCancelled == false {
                 let processIDs = Set(
                     configuration.permissionDialogProcessIDs().filter { $0 > 0 }

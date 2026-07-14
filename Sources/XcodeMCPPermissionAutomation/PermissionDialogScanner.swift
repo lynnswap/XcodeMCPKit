@@ -68,14 +68,25 @@ struct PermissionDialogScanner {
         private let lock = NSLock()
         private var state = State()
 
-        func takeAccessibilityPermissionPrompt() -> Bool {
-            lock.withLock {
+        func requestAccessibilityPermissionIfNeeded(
+            axClient: any XcodePermissionDialogAutomation.AXAccessing,
+            logger: Logger
+        ) {
+            let shouldRequest = lock.withLock {
                 guard state.didRequestAccessibilityPermission == false else {
                     return false
                 }
                 state.didRequestAccessibilityPermission = true
                 return true
             }
+            guard shouldRequest else {
+                return
+            }
+
+            _ = axClient.authorizationStatus(promptIfNeeded: true)
+            logger.warning(
+                "Accessibility permission is required to auto-approve the Xcode permission dialog; requested the system prompt and will keep waiting for permission."
+            )
         }
 
         func monitoringAction(pathCandidateText: String) -> MonitoringAction {
@@ -105,7 +116,10 @@ struct PermissionDialogScanner {
     mutating func scanAndApprove(processIDs explicitProcessIDs: [pid_t]? = nil) -> ScanResult {
         let scanStartedAt = dependencies.uptimeNanoseconds()
         guard dependencies.axClient.authorizationStatus(promptIfNeeded: false) == .trusted else {
-            requestAccessibilityPermissionIfNeeded()
+            dependencies.sharedState.requestAccessibilityPermissionIfNeeded(
+                axClient: dependencies.axClient,
+                logger: dependencies.logger
+            )
             return .untrusted
         }
 
@@ -298,16 +312,6 @@ struct PermissionDialogScanner {
             inspectedWindowCount: inspectedWindowCount,
             matchedWindowCount: matchedWindows.count,
             approvedWindowCount: approvedWindowCount
-        )
-    }
-
-    private mutating func requestAccessibilityPermissionIfNeeded() {
-        guard dependencies.sharedState.takeAccessibilityPermissionPrompt() else {
-            return
-        }
-        _ = dependencies.axClient.authorizationStatus(promptIfNeeded: true)
-        dependencies.logger.warning(
-            "Accessibility permission is required to auto-approve the Xcode permission dialog; requested the system prompt and will keep waiting for permission."
         )
     }
 

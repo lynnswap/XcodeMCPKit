@@ -1,4 +1,5 @@
 import ArgumentParser
+import Foundation
 import Testing
 @testable import XcodeMCPPermissionApproverTool
 
@@ -47,6 +48,35 @@ struct PermissionApproverCommandTests {
         }
     }
 
+    @Test func explicitProcessInventoryRejectsExitedAndReusedProcessIDs() throws {
+        let originalIdentity = ExplicitProcessIdentity(
+            processID: 42,
+            startTimeSeconds: 100,
+            startTimeMicroseconds: 200
+        )
+        let identities = MutableProcessIdentities([42: originalIdentity])
+        let inventory = ExplicitProcessInventory(
+            identities: [originalIdentity],
+            currentIdentity: { processID in
+                identities.identity(for: processID)
+            }
+        )
+
+        #expect(inventory.runningProcessIDs() == [42])
+
+        identities.replace(with: [:])
+        #expect(inventory.runningProcessIDs().isEmpty)
+
+        identities.replace(with: [
+            42: ExplicitProcessIdentity(
+                processID: 42,
+                startTimeSeconds: 101,
+                startTimeMicroseconds: 0
+            )
+        ])
+        #expect(inventory.runningProcessIDs().isEmpty)
+    }
+
     private func parseFailure(_ arguments: [String]) -> String {
         do {
             _ = try XcodeMCPPermissionApproverCommand.parse(arguments)
@@ -55,5 +85,26 @@ struct PermissionApproverCommandTests {
         } catch {
             return String(describing: error)
         }
+    }
+}
+
+private final class MutableProcessIdentities: @unchecked Sendable {
+    private let lock = NSLock()
+    private var identities: [pid_t: ExplicitProcessIdentity]
+
+    init(_ identities: [pid_t: ExplicitProcessIdentity]) {
+        self.identities = identities
+    }
+
+    func identity(for processID: pid_t) -> ExplicitProcessIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        return identities[processID]
+    }
+
+    func replace(with identities: [pid_t: ExplicitProcessIdentity]) {
+        lock.lock()
+        self.identities = identities
+        lock.unlock()
     }
 }

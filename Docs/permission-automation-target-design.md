@@ -143,6 +143,8 @@ swift run xcode-mcp-permission-approver \
 
 The command requires at least one Xcode PID and one exact agent identity candidate. It monitors until interrupted and performs no process launch. Supplying a PID that is not a live allowed Xcode/helper process fails fast.
 
+The diagnostic snapshots each explicit process's PID and launch time at startup. Every poll accepts only that exact live identity, so an exited process is removed and a later process that reuses the same PID is never treated as caller-authorized. SIGINT and SIGTERM send cancellation without awaiting synchronous AX inspection because process termination is the diagnostic command's completion boundary.
+
 ## Access-control plan
 
 Package declarations are limited to:
@@ -193,6 +195,8 @@ All AX elements, snapshots, errors, matching evidence, scanner operations, clock
 - A remove/re-add fixture proves that a cancelled but AX-blocked PID monitor is not overlapped by a replacement.
 - Proxy integration tests keep a recording approver at the composition boundary and verify start/shutdown/cancel ownership.
 - Diagnostic CLI tests validate required exact PIDs/identity candidates and verify that no child process is launched.
+- Diagnostic CLI tests verify that exited and PID-reused explicit identities are excluded.
+- An empty process inventory still requests Accessibility authorization immediately when automation starts.
 - Run `swift test -Xswiftc -strict-concurrency=minimal`, process suites, `scripts/check.sh`, and `codex-review`.
 - Run one freshly built normal proxy on an alternate port with Xcode 26.6 and 27.0 open and `--auto-approve`; verify both PIDs reach `route_activation_cataloged`. Do not run `mcpbridge` directly.
 

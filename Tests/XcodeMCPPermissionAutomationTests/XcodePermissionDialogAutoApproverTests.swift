@@ -774,6 +774,35 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(axClient.snapshot().promptCalls == 1)
     }
 
+    @Test func autoApproverPromptsAccessibilityBeforeAnyProcessAppears() async throws {
+        let axClient = RecordingAXClient(status: .untrusted)
+        let clock = TestClock()
+        let approver = XcodePermissionDialogAutomation.AutoApprover(
+            configuration: .init(
+                permissionDialogProcessIDs: { [] },
+                agentPathCandidates: { [] },
+                assistantNameCandidates: { ["XcodeMCPKit"] },
+                agentProcessIDCandidates: { [] },
+                pollInterval: .seconds(1)
+            ),
+            dependencies: .init(
+                axClient: axClient,
+                sleep: { duration in
+                    try await clock.sleep(for: duration)
+                },
+                uptimeNanoseconds: { 0 },
+                logger: Logger(label: "tests.permission")
+            )
+        )
+
+        approver.start()
+        try await clock.sleep(untilSuspendedBy: 1)
+        await approver.shutdown()
+
+        #expect(axClient.snapshot().promptCalls == 1)
+        #expect(axClient.snapshot().windowScanCalls == 0)
+    }
+
     @Test func autoApproverPollTaskDoesNotRetainItsOwner() async throws {
         let axClient = RecordingAXClient(status: .trusted)
         let clock = TestClock()
