@@ -228,6 +228,10 @@ extension RuntimeCoordinator {
         await runtimeTasks.waitUntilIdle()
     }
 
+    func drainControlPlaneLoadsForTesting() async {
+        await controlPlaneCoordinator.drainLoadsForTesting()
+    }
+
     func seedCanonicalToolsCatalog(_ result: JSONValue, sourceUpstream: Int) {
         do {
             let source = UpstreamSlotID(rawValue: sourceUpstream)
@@ -594,6 +598,17 @@ func seedProcessToolCatalogs(
                 nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
             )
         )
+    }
+}
+
+extension ControlPlaneCoordinator {
+    func drainLoadsForTesting() async {
+        while completionTasks.isEmpty == false {
+            let tasks = Array(completionTasks.values)
+            for task in tasks {
+                await task.value
+            }
+        }
     }
 }
 
@@ -2583,6 +2598,21 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
             return operations.indices[startIndex...].first { index in
                 operations[index].isCancelled == false
                     && operations[index].delay.nanoseconds == delay.nanoseconds
+            }
+        }
+    }
+
+    func nextActiveTimeoutIndex(
+        delay: TimeAmount,
+        startingAt startIndex: Int = 0
+    ) async throws -> Int {
+        var scheduledValueIndex = startIndex
+        while true {
+            let operationIndex = try await nextScheduled(at: scheduledValueIndex)
+            scheduledValueIndex += 1
+            if isCancelled(at: operationIndex) == false,
+               self.delay(at: operationIndex)?.nanoseconds == delay.nanoseconds {
+                return operationIndex
             }
         }
     }
