@@ -103,10 +103,11 @@ extension ClientMCPRequestExecutor {
             state.withLockedValue { $0.isTerminal }
         }
 
-        func activate(operationLease: UpstreamOperationLease) {
+        func activate(operationLease: UpstreamOperationLease) -> Bool {
             state.withLockedValue { state in
-                guard !state.isTerminal else { return }
+                guard !state.isTerminal else { return false }
                 state.operationLease = operationLease
+                return true
             }
         }
 

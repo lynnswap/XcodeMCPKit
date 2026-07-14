@@ -341,7 +341,9 @@ final class ClientMCPRequestExecutor: Sendable {
                     on: eventLoop,
                     preferredUpstreamIndices: preferredUpstreamIndices
                 ) { operationLease in
-                    cancellationHandle.activate(operationLease: operationLease)
+                    guard cancellationHandle.activate(operationLease: operationLease) else {
+                        return eventLoop.makeFailedFuture(CancellationError())
+                    }
                     self.sessionManager.activateRequestLease(
                         leaseID,
                         requestIDKey: nil,

@@ -63,7 +63,7 @@ struct MCPForwardingService: Sendable {
             requestTimeout: requestTimeout,
             leaseID: leaseID,
             onRegistered: { registration in
-                cancellationHandle?.activate(operationLease: registration.operationLease)
+                _ = cancellationHandle?.activate(operationLease: registration.operationLease)
                 cancellationHandle?.bindRouterPendingToken(registration.routerPendingToken)
             },
             onTimeout: onTimeout
@@ -219,8 +219,12 @@ struct MCPForwardingService: Sendable {
                 descriptor: descriptor,
                 on: eventLoop,
                 preferredUpstreamIndices: preferredUpstreamIndices
-            ) { selectedOperationLease in
-                internalCancellationHandle.activate(operationLease: selectedOperationLease)
+            ) { selectedOperationLease -> EventLoopFuture<ResponseResolution> in
+                guard internalCancellationHandle.activate(
+                    operationLease: selectedOperationLease
+                ) else {
+                    return eventLoop.makeFailedFuture(CancellationError())
+                }
                 let parsedRequestJSON = parsedRequestJSONValue.foundationObject
                 let prepared: PreparedRequest
                 do {

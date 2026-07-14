@@ -11809,6 +11809,94 @@ struct RuntimeCoordinatorWindowRoutingTests {
         }
     }
 
+    @Test func topLevelRequestCancelBeforeLeaseActivationDoesNotSendUpstream()
+        async throws
+    {
+        let config = makeConfig(requestTimeout: 5)
+        let upstream = TestUpstreamClient()
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let sessionID = "session-top-level-pre-activation-cancel"
+        let parentCancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
+            leaseID: UUID(),
+            sessionID: sessionID,
+            requestIDKeys: []
+        )
+        let fixture = RuntimeCoordinatorFixture(
+            config: config,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamRequestWillStart: { _, descriptor in
+                    guard descriptor.label == "resources/list" else { return }
+                    guard let manager = runtimeBox.value else {
+                        preconditionFailure("runtime unavailable during request start")
+                    }
+                    parentCancellationHandle.cancel(using: manager)
+                }
+            ),
+            runtimeBox: runtimeBox
+        )
+        defer { fixture.shutdownAndWait() }
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
+
+        let executor = ClientMCPRequestExecutor(
+            config: config,
+            sessionManager: fixture.manager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
+                defaultRequestTimeoutSeconds: config.requestTimeout
+            )
+        )
+        let requestData = try JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
+            id: 2,
+            method: "resources/list"
+        ))
+        let sentCountBeforeRequest = await upstream.sentCount()
+        let operation = executor.handle(
+            bodyData: requestData,
+            headerSessionID: sessionID,
+            headerSessionExists: true,
+            prefersEventStream: false,
+            eventLoop: fixture.eventLoop,
+            parentCancellationHandle: parentCancellationHandle
+        )
+
+        await #expect(throws: CancellationError.self) {
+            try await operation.future.get()
+        }
+        #expect(await upstream.sentCount() == sentCountBeforeRequest)
+        #expect(
+            fixture.manager.upstreamSlotScheduler.debugSnapshot()
+                .activeLeaseCountByUpstream.isEmpty
+        )
+
+        let followUp = executor.handle(
+            bodyData: requestData,
+            headerSessionID: sessionID,
+            headerSessionExists: true,
+            prefersEventStream: false,
+            eventLoop: fixture.eventLoop
+        )
+        let followUpRequest = try await sentValue(
+            from: upstream,
+            at: sentCountBeforeRequest,
+            timeout: .seconds(2)
+        )
+        await upstream.yield(.message(try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": try extractUpstreamID(from: followUpRequest),
+                "result": ["resources": []],
+            ],
+            options: []
+        )))
+        _ = try await waitWithTimeout(
+            "waiting for request after pre-activation cancellation",
+            timeout: .seconds(2)
+        ) {
+            try await followUp.future.get()
+        }
+    }
+
     @Test func controlPlaneRPCHandleCancelAfterRegisterCapturesRegistrationState() {
         let handle = ControlPlane.RPCHandle()
         let cancellation = NIOLockedValueBox<ControlPlane.RPCCancelSnapshot?>(nil)
