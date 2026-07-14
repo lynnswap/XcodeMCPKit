@@ -4,6 +4,7 @@ import Foundation
 import NIO
 import Testing
 import XcodeMCPKit
+import XcodeMCPPermissionAutomation
 @testable import XcodeMCPProxyRuntime
 @testable import XcodeMCPProxyKit
 
@@ -31,8 +32,8 @@ struct LiveMCPBridgeTests {
 
         let assistantName = "XcodeMCPKitLiveDirectTest"
         let directMCPBridgeProcessID = session.processIdentifier
-        let approver = XcodePermissionDialog.AutoApprover(
-            dependencies: .live(
+        let approver = XcodePermissionDialogAutomation.AutoApprover(
+            configuration: .init(
                 permissionDialogProcessIDs: {
                     NSWorkspace.shared.runningApplications.compactMap { application in
                         guard application.bundleIdentifier == "com.apple.dt.Xcode",
@@ -42,21 +43,22 @@ struct LiveMCPBridgeTests {
                     }
                 },
                 agentPathCandidates: {
-                    XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
-                        additionalExecutableCandidates: [mcpbridgePath]
+                    XcodePermissionDialogAutomation.AutoApprover.executablePathCandidates(
+                        additional: [mcpbridgePath]
                     )
                 },
                 assistantNameCandidates: {
                     ["XcodeMCPKit", assistantName]
                 },
-                serverProcessIDCandidates: {
-                    XcodePermissionDialog.AutoApprover.defaultServerProcessIDCandidates()
+                agentProcessIDCandidates: {
+                    XcodePermissionDialogAutomation.AutoApprover.descendantProcessIDCandidates()
                         .union([directMCPBridgeProcessID])
                 }
-            )
+            ),
+            logger: ProxyLogging.make("tests.permission")
         )
         approver.start()
-        defer { approver.stop() }
+        defer { approver.cancel() }
 
         let initialize = try session.request(
             [

@@ -51,12 +51,23 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
     var toolsListPrewarmCompleted: (@Sendable () -> Void)?
     var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
+    var processRouteCatalogCommitted:
+        (@Sendable (_ processID: pid_t, _ upstreamIndex: Int) -> Void)?
+    var xcodeProcessReconcileCompleted: (@Sendable (_ reason: String) -> Void)?
+    var controlPlaneRPCWillEnqueue: (@Sendable () -> Void)?
     var upstreamRequestQueued:
         (
             @Sendable (
                 _ leaseID: LeaseManager.ID,
                 _ descriptor: SessionRequestPipeline.Descriptor,
                 _ queuedRequestCount: Int
+            ) -> Void
+        )?
+    var upstreamRequestWillStart:
+        (
+            @Sendable (
+                _ leaseID: LeaseManager.ID,
+                _ descriptor: SessionRequestPipeline.Descriptor
             ) -> Void
         )?
     var primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)?
@@ -67,12 +78,23 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
         toolsListPrewarmCompleted: (@Sendable () -> Void)? = nil,
         upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
+        processRouteCatalogCommitted:
+            (@Sendable (_ processID: pid_t, _ upstreamIndex: Int) -> Void)? = nil,
+        xcodeProcessReconcileCompleted: (@Sendable (_ reason: String) -> Void)? = nil,
+        controlPlaneRPCWillEnqueue: (@Sendable () -> Void)? = nil,
         upstreamRequestQueued:
             (
                 @Sendable (
                     _ leaseID: LeaseManager.ID,
                     _ descriptor: SessionRequestPipeline.Descriptor,
                     _ queuedRequestCount: Int
+                ) -> Void
+            )? = nil,
+        upstreamRequestWillStart:
+            (
+                @Sendable (
+                    _ leaseID: LeaseManager.ID,
+                    _ descriptor: SessionRequestPipeline.Descriptor
                 ) -> Void
             )? = nil,
         primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)? = nil,
@@ -82,7 +104,11 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
         self.toolsListPrewarmCompleted = toolsListPrewarmCompleted
         self.upstreamInitialized = upstreamInitialized
+        self.processRouteCatalogCommitted = processRouteCatalogCommitted
+        self.xcodeProcessReconcileCompleted = xcodeProcessReconcileCompleted
+        self.controlPlaneRPCWillEnqueue = controlPlaneRPCWillEnqueue
         self.upstreamRequestQueued = upstreamRequestQueued
+        self.upstreamRequestWillStart = upstreamRequestWillStart
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
         self.ownerRouteProofsResolved = ownerRouteProofsResolved
     }
@@ -696,6 +722,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             testHooks: UpstreamSlotSchedulerTestHooks(
                 requestQueued: { leaseID, descriptor, queuedRequestCount in
                     testHooks.upstreamRequestQueued?(leaseID, descriptor, queuedRequestCount)
+                },
+                requestWillStart: { leaseID, descriptor in
+                    testHooks.upstreamRequestWillStart?(leaseID, descriptor)
                 }
             )
         )

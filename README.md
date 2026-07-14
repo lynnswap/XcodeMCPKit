@@ -197,6 +197,17 @@ XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapte
 scripts/check.sh
 ```
 
+To diagnose Xcode permission dialogs without launching `mcpbridge`, run the
+package-only maintainer tool with explicit existing process identities:
+
+```bash
+swift run xcode-mcp-permission-approver \
+  --xcode-pid <xcode-pid> \
+  --agent-pid <proxy-server-pid> \
+  --agent-path <proxy-server-path> \
+  --assistant-name XcodeMCPKit
+```
+
 Release:
 
 ```bash
@@ -217,6 +228,7 @@ Edit the draft release notes, then publish the release manually.
 - [Troubleshooting](Docs/troubleshooting.md)
 - [MCP / Xcode MCP Benchmark Notes](Docs/mcp-benchmark.md)
 - [MCP Connection Permission Dialog Investigation](Docs/mcp-permission-dialog-investigation.md)
+- [Permission Automation Target Design](Docs/permission-automation-target-design.md)
 - [Xcode 27 mcpbridge Tool Additions](Docs/xcode-27-mcpbridge-tools.md)
 
 ## License

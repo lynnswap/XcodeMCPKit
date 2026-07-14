@@ -63,8 +63,13 @@ struct MCPForwardingService: Sendable {
             requestTimeout: requestTimeout,
             leaseID: leaseID,
             onRegistered: { registration in
-                cancellationHandle?.activate(operationLease: registration.operationLease)
-                cancellationHandle?.bindRouterPendingToken(registration.routerPendingToken)
+                guard let cancellationHandle else { return }
+                guard cancellationHandle.bindStartedRegistration(
+                    operationLease: registration.operationLease,
+                    routerPendingToken: registration.routerPendingToken
+                ) else {
+                    throw CancellationError()
+                }
             },
             onTimeout: onTimeout
         )
@@ -219,8 +224,12 @@ struct MCPForwardingService: Sendable {
                 descriptor: descriptor,
                 on: eventLoop,
                 preferredUpstreamIndices: preferredUpstreamIndices
-            ) { selectedOperationLease in
-                internalCancellationHandle.activate(operationLease: selectedOperationLease)
+            ) { selectedOperationLease -> EventLoopFuture<ResponseResolution> in
+                guard internalCancellationHandle.activate(
+                    operationLease: selectedOperationLease
+                ) else {
+                    return eventLoop.makeFailedFuture(CancellationError())
+                }
                 let parsedRequestJSON = parsedRequestJSONValue.foundationObject
                 let prepared: PreparedRequest
                 do {
@@ -243,6 +252,8 @@ struct MCPForwardingService: Sendable {
                         internalCancellationHandle.cancel(using: sessionManager)
                         return eventLoop.makeFailedFuture(CancellationError())
                     }
+                } catch is CancellationError {
+                    return eventLoop.makeFailedFuture(CancellationError())
                 } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
                     return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {
@@ -267,6 +278,8 @@ struct MCPForwardingService: Sendable {
                             )
                         }
                     )
+                } catch is CancellationError {
+                    return eventLoop.makeFailedFuture(CancellationError())
                 } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
                     return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {

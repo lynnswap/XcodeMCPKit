@@ -8,11 +8,6 @@ on:
         required: false
         type: string
         default: ""
-      run_process_tests:
-        description: Run opt-in process integration tests.
-        required: false
-        type: boolean
-        default: false
   push:
     branches:
       - main
@@ -139,50 +134,4 @@ jobs:
             --skip-build \
             --no-parallel \
             --filter "${filter}" \
-            -Xswiftc -strict-concurrency=minimal
-
-  process-tests:
-    name: Process Tests (macOS, ${{ matrix.suite }})
-    if: ${{ inputs.run_process_tests }}
-    needs: package-build
-    runs-on: macos-26
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        suite:
-          - XcodeMCPProcessRuntimeTests
-          - ProxyStdioAdapterTests
-    steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-
-      - name: Select latest Xcode
-        id: toolchain
-        run: |
-          set -euo pipefail
-          xcode_path="$(
-            ruby -e 'candidates = Dir["/Applications/Xcode*.app"].filter_map { |path| version = File.basename(path)[/\AXcode[_-](\d+(?:\.\d+)*)\.app\z/, 1]; version ? [version.split(".").map(&:to_i), path] : nil }; abort "No versioned Xcode apps found" if candidates.empty?; puts candidates.max_by(&:first).last'
-          )"
-          sudo xcode-select -s "${xcode_path}/Contents/Developer"
-          xcodebuild -version
-          swift --version
-          cache_id="$(xcodebuild -version | tr '\n ' '--' | tr -cd '[:alnum:]._-')"
-          echo "cache-id=${cache_id}" >> "$GITHUB_OUTPUT"
-
-      - name: Restore built package tests
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .build
-          key: spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
-          fail-on-cache-miss: true
-
-      - name: Run process tests
-        env:
-          XCODE_MCP_RUN_PROCESS_TESTS: "1"
-        run: |
-          ./scripts/ci-test-watchdog.sh swift test \
-            --skip-build \
-            --no-parallel \
-            --filter "${{ matrix.suite }}" \
             -Xswiftc -strict-concurrency=minimal

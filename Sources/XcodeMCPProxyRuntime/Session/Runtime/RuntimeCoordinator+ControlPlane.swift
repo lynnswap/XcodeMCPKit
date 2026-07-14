@@ -487,9 +487,7 @@ extension RuntimeCoordinator {
                 ),
             ]
         )
-        let requestTimeout = MCP.MethodDispatcher.timeoutForControlPlane(
-            defaultSeconds: config.requestTimeout
-        )
+        let requestTimeout = processRouteToolsCatalogRequestTimeoutAmount()
         addRuntimeTask { [weak self] in
             guard let self else { return }
             let startedAt = self.nowUptimeNanoseconds()
@@ -511,6 +509,13 @@ extension RuntimeCoordinator {
                 )
             }
         }
+    }
+
+    func processRouteToolsCatalogRequestTimeoutAmount() -> TimeAmount? {
+        MCP.MethodDispatcher.timeoutForMethod(
+            "tools/list",
+            defaultSeconds: config.requestTimeout
+        )
     }
 
     func scheduleMissingProcessToolsCatalogRetry(
@@ -625,6 +630,10 @@ extension RuntimeCoordinator {
         case .accepted(let snapshot, let transition):
             applyProcessControlPlaneTransition(transition)
             markXcodeProcessRouteCatalogAvailable(upstreamIndex: sourceUpstream)
+            testHooks.processRouteCatalogCommitted?(
+                route.target.processID,
+                sourceUpstream
+            )
             logger.info(
                 "route_activation_cataloged",
                 metadata: [
@@ -932,6 +941,7 @@ extension RuntimeCoordinator {
         }
 
         do {
+            testHooks.controlPlaneRPCWillEnqueue?()
             let future: EventLoopFuture<ControlPlane.RPCResponse> = enqueueOnUpstreamSlot(
                 leaseID: leaseID,
                 descriptor: descriptor,
@@ -1096,6 +1106,14 @@ extension RuntimeCoordinator {
                         underlying: error
                     )
                 }
+            }
+            if rpcHandle?.isCancelled() == true {
+                abandonRequestLease(
+                    leaseID,
+                    sessionID: internalSessionID,
+                    requestIDKeys: [originalID.key],
+                    operationLease: nil
+                )
             }
             let response = try await withTaskCancellationHandler {
                 try await waitForEventLoopFuture(

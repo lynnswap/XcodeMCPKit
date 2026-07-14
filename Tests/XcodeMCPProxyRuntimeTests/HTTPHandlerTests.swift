@@ -2728,6 +2728,58 @@ struct HTTPHandlerTests {
         #expect(resources.isEmpty)
     }
 
+    @Test func forwardingServiceRejectsCancelledRegistrationBeforeSending() throws {
+        let config = makeHTTPConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        let forwardingService = MCPForwardingService(
+            configuration: config.runtime,
+            sessionManager: sessionManager
+        )
+        let sessionID = "session-cancelled-registration"
+        let operationLease = try #require(sessionManager.chooseUpstreamOperationLease())
+        let leaseID = sessionManager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: sessionID,
+                label: "resources/list",
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        let cancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
+            leaseID: leaseID,
+            sessionID: sessionID,
+            requestIDKeys: ["91"]
+        )
+        #expect(cancellationHandle.activate(operationLease: operationLease))
+        cancellationHandle.cancel(using: sessionManager)
+
+        let requestObject = JSONRPC.Wire.requestObject(
+            id: 91,
+            method: "resources/list"
+        )
+        let requestData = try JSONRPC.Wire.data(from: requestObject)
+        let prepared = try #require(
+            try forwardingService.prepareRequest(
+                bodyData: requestData,
+                parsedRequestJSON: requestObject,
+                sessionID: sessionID,
+                operationLeaseOverride: operationLease
+            )
+        )
+
+        #expect(throws: CancellationError.self) {
+            _ = try forwardingService.startRequest(
+                prepared,
+                session: sessionManager.session(id: sessionID),
+                on: EmbeddedEventLoop(),
+                leaseID: leaseID,
+                cancellationHandle: cancellationHandle
+            )
+        }
+        #expect(sessionManager.sentUpstreamCount() == 0)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+    }
+
     @Test func httpResourceTemplatesListReturnsEmptyArray() async throws {
         let config = makeHTTPConfig()
         let channel = EmbeddedChannel()

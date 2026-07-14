@@ -2555,6 +2555,58 @@ extension HTTPHandlerTests {
         #expect(sessionManager.requestTimeoutNotificationCount() == 0)
     }
 
+    @Test func forwardingServiceInternalToolPreservesCancellationDuringRequestRegistration()
+        async throws
+    {
+        let config = makeHTTPConfig(requestTimeout: 2)
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
+        let eventLoop = eventLoopGroup.next()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: nil
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([0])
+
+        let parentLeaseID = sessionManager.createRequestLease(
+            descriptor: .init(
+                sessionID: "session-registration-cancellation",
+                label: "parent",
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        let parentCancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
+            leaseID: parentLeaseID,
+            sessionID: "session-registration-cancellation",
+            requestIDKeys: []
+        )
+        sessionManager.setRequestLeaseActivationHook {
+            parentCancellationHandle.cancel(using: sessionManager)
+        }
+
+        let forwardingService = MCPForwardingService(
+            configuration: config.runtime,
+            sessionManager: sessionManager
+        )
+        let result = await forwardingService.callInternalTool(
+            name: "XcodeListNavigatorIssues",
+            arguments: ["tabIdentifier": "windowtab-registration-cancellation"],
+            sessionID: "session-registration-cancellation",
+            eventLoop: eventLoop,
+            cancellationHandle: parentCancellationHandle,
+            upstreamIndexOverride: 0
+        )
+
+        guard case .cancelled = result else {
+            Issue.record("expected registration cancellation to remain cancelled")
+            return
+        }
+        #expect(sessionManager.sentUpstreamCount() == 0)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+    }
+
     @Test func forwardingServiceInternalXcodeListWindowsUsesLiveWindowAggregation()
         async throws
     {

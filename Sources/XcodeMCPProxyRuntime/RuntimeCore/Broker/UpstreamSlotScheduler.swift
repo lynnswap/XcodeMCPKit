@@ -11,15 +11,25 @@ struct UpstreamSlotSchedulerTestHooks: Sendable {
             _ descriptor: SessionRequestPipeline.Descriptor,
             _ queuedRequestCount: Int
         ) -> Void
+    var requestWillStart:
+        @Sendable (
+            _ leaseID: LeaseManager.ID,
+            _ descriptor: SessionRequestPipeline.Descriptor
+        ) -> Void
 
     init(
         requestQueued: @escaping @Sendable (
             _ leaseID: LeaseManager.ID,
             _ descriptor: SessionRequestPipeline.Descriptor,
             _ queuedRequestCount: Int
-        ) -> Void = { _, _, _ in }
+        ) -> Void = { _, _, _ in },
+        requestWillStart: @escaping @Sendable (
+            _ leaseID: LeaseManager.ID,
+            _ descriptor: SessionRequestPipeline.Descriptor
+        ) -> Void = { _, _ in }
     ) {
         self.requestQueued = requestQueued
+        self.requestWillStart = requestWillStart
     }
 
     static let noop = Self()
@@ -162,9 +172,12 @@ final class UpstreamSlotScheduler: Sendable {
         }
     }
 
-    func releaseUpstreamSlot(upstreamIndex: Int, leaseID: LeaseManager.ID) {
-        let released = state.withLockedValue { state -> Bool in
-            guard state.activeLeaseIDsByUpstream[upstreamIndex] == leaseID else { return false }
+    func releaseUpstreamSlot(upstreamIndex: Int? = nil, leaseID: LeaseManager.ID) {
+        let releasedUpstreamIndex = state.withLockedValue { state -> Int? in
+            guard let upstreamIndex = upstreamIndex
+                    ?? state.reservationsByLeaseID[leaseID]?.upstreamIndex,
+                  state.activeLeaseIDsByUpstream[upstreamIndex] == leaseID
+            else { return nil }
             state.activeLeaseIDsByUpstream.removeValue(forKey: upstreamIndex)
             if let reservation = state.reservationsByLeaseID.removeValue(forKey: leaseID),
                 reservation.request.descriptor.isTopLevelClientRequest,
@@ -175,14 +188,14 @@ final class UpstreamSlotScheduler: Sendable {
                     forKey: reservation.request.descriptor.sessionID
                 )
             }
-            return true
+            return upstreamIndex
         }
-        guard released else { return }
+        guard let releasedUpstreamIndex else { return }
         logger.debug(
             "Released upstream slot",
             metadata: [
                 "lease_id": .string(leaseID.uuidString),
-                "upstream": .string("\(upstreamIndex)"),
+                "upstream": .string("\(releasedUpstreamIndex)"),
             ]
         )
         dispatchQueuedRequestsIfPossible()
@@ -474,6 +487,7 @@ final class UpstreamSlotScheduler: Sendable {
                     return true
                 }
                 guard shouldStart else { return }
+                self.testHooks.requestWillStart(request.leaseID, request.descriptor)
                 guard self.validateOperationLease(operationLease) else {
                     self.releaseUpstreamSlot(
                         upstreamIndex: upstreamIndex,

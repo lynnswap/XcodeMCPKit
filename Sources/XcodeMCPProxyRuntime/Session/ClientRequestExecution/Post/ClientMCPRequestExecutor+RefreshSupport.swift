@@ -75,8 +75,12 @@ extension ClientMCPRequestExecutor {
                 descriptor: descriptor,
                 on: eventLoop,
                 preferredUpstreamIndices: preferredUpstreamIndices
-            ) { selectedOperationLease in
-                cancellationHandle?.activate(operationLease: selectedOperationLease)
+            ) { selectedOperationLease -> EventLoopFuture<MCPForwardingService.ResponseResolution> in
+                if let cancellationHandle,
+                    cancellationHandle.activate(operationLease: selectedOperationLease) == false
+                {
+                    return eventLoop.makeFailedFuture(CancellationError())
+                }
                 guard let attemptRequestObject = try? JSONRPC.Wire.object(
                     fromData: bodyData
                 ) else {
@@ -126,6 +130,8 @@ extension ClientMCPRequestExecutor {
                             )
                         }
                     )
+                } catch is CancellationError {
+                    return eventLoop.makeFailedFuture(CancellationError())
                 } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
                     return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {

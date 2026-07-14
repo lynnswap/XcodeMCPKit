@@ -178,6 +178,49 @@ struct ProxyUpstreamRequestRuntimeTests {
         #expect(alreadyAccountedPort.removals().map(\.requestIDKey) == ["1"])
     }
 
+    @Test func rejectedRegistrationRollsBackWithoutSending() throws {
+        let port = RecordingUpstreamRuntimePort(chosenUpstreamIndex: 0)
+        let runtime = ProxyUpstreamRequestRuntime(port: port)
+        let requestData = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "id": "cancelled-registration",
+                "method": "tools/list",
+            ],
+            options: []
+        )
+        let parsed = try JSONSerialization.jsonObject(with: requestData, options: [])
+        let prepared = try #require(
+            try runtime.prepareRequest(
+                bodyData: requestData,
+                parsedRequestJSON: parsed,
+                sessionID: "session-cancelled-registration"
+            )
+        )
+
+        #expect(throws: CancellationError.self) {
+            _ = try runtime.startRequest(
+                prepared,
+                router: JSONRPCResponseRouter(
+                    requestTimeout: nil,
+                    hasActiveClients: { false },
+                    sendNotification: { _ in }
+                ),
+                on: EmbeddedEventLoop(),
+                requestTimeout: nil,
+                onRegistered: { _ in
+                    throw CancellationError()
+                }
+            )
+        }
+
+        #expect(port.sentRequests().isEmpty)
+        let removal = try #require(port.removals().first)
+        #expect(removal.sessionID == "session-cancelled-registration")
+        #expect(removal.requestIDKey == "cancelled-registration")
+        #expect(removal.proof == prepared.operationLease.proof)
+    }
+
     @Test func rejectedSendRollsBackMappingWithPreparedOperationLease() throws {
         let port = RecordingUpstreamRuntimePort(
             chosenUpstreamIndex: 1,

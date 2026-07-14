@@ -1,11 +1,22 @@
-import AppKit
-import ApplicationServices
 import Foundation
-import Logging
 
-enum XcodePermissionDialog {}
+package enum XcodePermissionDialogAutomation {}
 
-extension XcodePermissionDialog {
+extension XcodePermissionDialogAutomation {
+    private static let allowedProcessBundleIdentifiers: Set<String> = [
+        "com.apple.dt.xcode",
+        "com.apple.dt.externalviewservice",
+        "com.apple.dt.xcode.developersystempolicyservice",
+    ]
+
+    package static func isAllowedProcessBundleIdentifier(_ identifier: String?) -> Bool {
+        guard let identifier else {
+            return false
+        }
+        let normalized = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return allowedProcessBundleIdentifiers.contains(normalized)
+    }
+
     enum AccessibilityStatus: Sendable {
         case trusted
         case untrusted
@@ -43,8 +54,8 @@ extension XcodePermissionDialog {
         let document: String?
         let childCount: Int
         let hasProxy: Bool
-        let defaultButton: XcodePermissionDialog.ButtonSnapshot?
-        let cancelButton: XcodePermissionDialog.ButtonSnapshot?
+        let defaultButton: XcodePermissionDialogAutomation.ButtonSnapshot?
+        let cancelButton: XcodePermissionDialogAutomation.ButtonSnapshot?
 
         init(
             processBundleIdentifier: String? = nil,
@@ -59,8 +70,8 @@ extension XcodePermissionDialog {
             document: String? = nil,
             childCount: Int = 0,
             hasProxy: Bool = false,
-            defaultButton: XcodePermissionDialog.ButtonSnapshot? = nil,
-            cancelButton: XcodePermissionDialog.ButtonSnapshot? = nil
+            defaultButton: XcodePermissionDialogAutomation.ButtonSnapshot? = nil,
+            cancelButton: XcodePermissionDialogAutomation.ButtonSnapshot? = nil
         ) {
             self.processBundleIdentifier = processBundleIdentifier
             self.title = title

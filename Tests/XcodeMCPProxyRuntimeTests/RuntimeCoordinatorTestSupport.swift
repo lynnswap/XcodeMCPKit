@@ -225,7 +225,7 @@ extension RuntimeCoordinator {
     }
 
     func drainRuntimeTasksForTesting() async {
-        await runtimeTasks.drainCurrentTasks().wait()
+        await runtimeTasks.waitUntilIdle()
     }
 
     func seedCanonicalToolsCatalog(_ result: JSONValue, sourceUpstream: Int) {
@@ -2533,6 +2533,7 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
     }
 
     private let operations = NIOLockedValueBox<[Operation]>([])
+    private let scheduledIndices = LockedRecordedValues<Int>()
 
     func scheduler() -> @Sendable (TimeAmount, @escaping @Sendable () -> Void) -> RuntimeScheduledTimeout {
         { delay, operation in
@@ -2541,6 +2542,7 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
                 operations.append(Operation(delay: delay, operation: operation))
                 return index
             }
+            self.scheduledIndices.append(index)
             return RuntimeScheduledTimeout {
                 self.operations.withLockedValue { operations in
                     guard operations.indices.contains(index) else { return }
@@ -2552,6 +2554,10 @@ final class RecordingRuntimeTimeoutScheduler: @unchecked Sendable {
 
     func scheduledCount() -> Int {
         operations.withLockedValue(\.count)
+    }
+
+    func nextScheduled(at index: Int) async throws -> Int {
+        try await scheduledIndices.nextValue(at: index)
     }
 
     func isCancelled(at index: Int) -> Bool {

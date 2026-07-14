@@ -203,6 +203,9 @@ extension RuntimeCoordinator {
             metadata: [
                 "pid": .string("\(processID)"),
                 "upstream": .string("\(upstreamIndex)"),
+                "catalog_timeout_ms": .string(
+                    processRouteToolsCatalogTimeoutMillisecondsDescription()
+                ),
             ]
         )
         if let existingCatalog = processControlPlane.catalog(forProcessID: processID) {
@@ -235,6 +238,9 @@ extension RuntimeCoordinator {
             metadata: [
                 "pid": .string("\(route.target.processID)"),
                 "upstream": .string("\(upstreamIndex)"),
+                "catalog_timeout_ms": .string(
+                    processRouteToolsCatalogTimeoutMillisecondsDescription()
+                ),
             ]
         )
         if let existingCatalog = processControlPlane.catalog(
@@ -381,7 +387,7 @@ extension RuntimeCoordinator {
         attempt: Int,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
-        guard let timeoutAmount = processRouteActivationCatalogTimeoutAmount() else {
+        guard let timeoutAmount = processRouteToolsCatalogRequestTimeoutAmount() else {
             return
         }
         let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
@@ -401,10 +407,6 @@ extension RuntimeCoordinator {
             return
         }
         attachment.replaced?.cancel()
-    }
-
-    private func processRouteActivationCatalogTimeoutAmount() -> TimeAmount? {
-        MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
     }
 
     private func handleProcessRouteActivationCatalogTimeout(
@@ -461,6 +463,9 @@ extension RuntimeCoordinator {
                 "upstream": .string("\(upstreamIndex)"),
                 "attempt": .string("\(attempt)"),
                 "phase": .string("catalog"),
+                "timeout_ms": .string(
+                    processRouteToolsCatalogTimeoutMillisecondsDescription()
+                ),
                 "retry_delay_ms": .string("\(timeout.retry.delayMilliseconds)"),
             ]
         )
@@ -471,6 +476,12 @@ extension RuntimeCoordinator {
             lease: timeout.activationLease,
             reason: "catalog_timeout"
         )
+    }
+
+    private func processRouteToolsCatalogTimeoutMillisecondsDescription() -> String {
+        processRouteToolsCatalogRequestTimeoutAmount().map {
+            String($0.nanoseconds / 1_000_000)
+        } ?? "disabled"
     }
 
     func handleProcessRouteActivationChannelTimeout(

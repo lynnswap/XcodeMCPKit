@@ -115,6 +115,20 @@ creates an XPC listener, and accepts connections from `mcpbridge`.
 - `Tool provider initialized successfully` (`0x8eb510`)
 - `Session initialized with context: %s` (`0x8eb670`)
 
+### Xcode 27 bridge trigger evidence
+
+Static inspection of Xcode 27's `mcpbridge` found that it waits for the MCP
+`notifications/initialized` notification before creating the tool-service
+connection. Its diagnostic strings describe receiving that notification and
+then creating the connection to the tool service. `IDEIntelligenceMessaging`
+also contains the corresponding MCP bridge service/connection activation
+symbols. This is a useful route-activation boundary, but it is not an AX dialog
+appearance contract: the dialog may be owned by Xcode,
+`ExternalViewService`, or `DeveloperSystemPolicyService`, and their AX timing is
+independent. Permission automation therefore remains driven by the public AX
+surface and isolates inspection per eligible PID instead of coupling the
+reusable target to Xcode-private bridge events.
+
 ## MCP Request Log Strings (xref)
 - `listTools called` (`0x8eae90`)
 - `Received listTools request` (`0x8eb4a0`)

@@ -35,7 +35,7 @@ extension XcodeMCPProxyServer {
             }
 
             func signalCancellation() {
-                autoApprover?.stop()
+                autoApprover?.cancel()
                 httpGateway.cancelForDeinit()
                 runtime.cancelForDeinit()
             }
@@ -336,7 +336,7 @@ extension XcodeMCPProxyServer {
                     endpoint: endpoint
                 )
             } catch {
-                autoApprover?.stop()
+                autoApprover?.cancel()
                 try? await httpGateway.shutdown()
                 await runtime.shutdown()
                 throw error
@@ -383,7 +383,7 @@ extension XcodeMCPProxyServer {
         }
 
         private static func release(_ resources: Resources) async throws {
-            resources.autoApprover?.stop()
+            resources.autoApprover?.cancel()
             var firstError: (any Error)?
 
             do {

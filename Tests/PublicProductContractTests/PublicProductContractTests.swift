@@ -298,11 +298,10 @@ struct PublicProductContractTests {
             timeoutSeconds: timeoutSeconds,
             heartbeatInterval: 30
         ) { elapsedSeconds in
-            print(
+            reportWatchdogHeartbeat(
                 "PublicProductContractTests: swift build still running after \(Int(elapsedSeconds))s "
                     + "for \(targetDescription); log: \(logURL.path)"
             )
-            unsafe fflush(stdout)
         }
 
         return CommandResult(
@@ -402,6 +401,43 @@ struct PublicProductContractTests {
         #expect(reportedExpectedFailure)
     }
 
+}
+
+private func reportWatchdogHeartbeat(_ message: String) {
+    if let descriptor = ProcessInfo.processInfo.environment["CI_TEST_WATCHDOG_HEARTBEAT_FD"]
+        .flatMap(CInt.init),
+       writeAll(message + "\n", to: descriptor) {
+        return
+    }
+
+    print(message)
+    unsafe fflush(stdout)
+}
+
+private func writeAll(_ message: String, to descriptor: CInt) -> Bool {
+    let bytes = Array(message.utf8)
+    return bytes.withUnsafeBytes { buffer in
+        guard let baseAddress = buffer.baseAddress else {
+            return true
+        }
+
+        var offset = 0
+        while offset < buffer.count {
+            let written = unsafe write(
+                descriptor,
+                baseAddress.advanced(by: offset),
+                buffer.count - offset
+            )
+            if written > 0 {
+                offset += written
+            } else if written == -1, errno == EINTR {
+                continue
+            } else {
+                return false
+            }
+        }
+        return true
+    }
 }
 
 private final class SpawnedProcessGroup: @unchecked Sendable {

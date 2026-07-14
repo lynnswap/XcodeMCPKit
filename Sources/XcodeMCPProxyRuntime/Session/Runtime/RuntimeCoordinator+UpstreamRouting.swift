@@ -343,7 +343,7 @@ extension RuntimeCoordinator {
                 return false
             }
         }
-        addRuntimeTask { [weak self, operationLease, admission, onRejected] in
+        let scheduled = addRuntimeTask { [weak self, operationLease, admission, onRejected] in
             guard let self else { return }
             if ensureRunning {
                 await operationLease.slot.start()
@@ -392,7 +392,10 @@ extension RuntimeCoordinator {
                 )
             }
         }
-        return true
+        if scheduled == false {
+            onRejected()
+        }
+        return scheduled
     }
 
     private func handleUnavailableUpstreamSend(
@@ -641,6 +644,7 @@ extension RuntimeCoordinator {
             }
         }
         upstreamSlotScheduler.cancelQueuedRequest(leaseID: leaseID)
+        upstreamSlotScheduler.releaseUpstreamSlot(leaseID: leaseID)
         releaseLeases(
             [leaseManager.failLease(
                 leaseID,
@@ -1011,12 +1015,10 @@ extension RuntimeCoordinator {
 
     func releaseLeases(_ actions: [LeaseManager.ReleaseAction]) {
         for action in actions {
-            if let upstreamIndex = action.upstreamIndex {
-                upstreamSlotScheduler.releaseUpstreamSlot(
-                    upstreamIndex: upstreamIndex,
-                    leaseID: action.leaseID
-                )
-            }
+            upstreamSlotScheduler.releaseUpstreamSlot(
+                upstreamIndex: action.upstreamIndex,
+                leaseID: action.leaseID
+            )
             failPendingRequestIfNeeded(for: action)
         }
     }
