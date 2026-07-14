@@ -16,14 +16,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-release:
-    name: Build Release
-    runs-on: macos-26
-    timeout-minutes: 10
+  verify-release:
+    name: Verify Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
-    outputs:
-      archive_sha256: ${{ steps.release_digests.outputs.archive_sha256 }}
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -77,6 +75,31 @@ jobs:
             echo "Existing draft release will be repaired: ${RELEASE_VERSION}"
           fi
 
+  package-checks:
+    name: Package Checks
+    needs: verify-release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      concurrency_group: release-package-checks-${{ inputs.version }}
+      run_process_tests: true
+
+  build-release:
+    name: Build Release
+    needs: package-checks
+    runs-on: macos-26
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      archive_sha256: ${{ steps.release_digests.outputs.archive_sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+
       - name: Select latest Xcode
         run: |
           set -euo pipefail
@@ -86,9 +109,6 @@ jobs:
           sudo xcode-select -s "${xcode_path}/Contents/Developer"
           xcodebuild -version
           swift --version
-
-      - name: Run package checks
-        run: scripts/check.sh
 
       - name: Build release binaries
         env:
