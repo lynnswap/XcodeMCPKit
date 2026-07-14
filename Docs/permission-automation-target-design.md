@@ -59,7 +59,7 @@ This is an internal target rather than a separate package because all consumers 
 | AX authorization and window/button I/O | `XcodeMCPPermissionAutomation.AXClient` |
 | Dialog structural and ownership match policy | `XcodeMCPPermissionAutomation.Matcher` |
 | One scan's match, retry suppression, press, and diagnostics | `XcodeMCPPermissionAutomation.Scanner` |
-| Poll task lifecycle | `XcodeMCPPermissionAutomation.AutoApprover` |
+| Per-process poll task lifecycle | `XcodeMCPPermissionAutomation.AutoApprover` |
 | Diagnostic CLI argument validation and signals | `XcodeMCPPermissionApproverTool` |
 | Route activation/catalog deadline | `ProcessControlPlaneAuthority` / runtime activation |
 
@@ -102,6 +102,10 @@ package enum XcodePermissionDialogAutomation {
 ```
 
 `start()` is idempotent and one-shot. `shutdown()` is the graceful completion boundary and awaits the poll task. `cancel()` is the synchronous unwinding/deinitialization backstop.
+
+`AutoApprover` reconciles the caller-owned process inventory and gives every Xcode/helper PID an independent scanner task. A slow or temporarily unresponsive AX call for one helper must not delay approval of a dialog owned by another Xcode or helper process. Authorization prompting and monitoring-log state are shared across those scanners; retry suppression and window evidence remain process-local.
+
+Cancellation does not interrupt a synchronous AX call. The supervisor therefore retains a removed PID's monitor until that task has actually finished and does not create a replacement for a re-added PID in the meantime. This keeps the one-scanner-per-PID invariant across transient inventory snapshots.
 
 The internal designated initializer accepts the AX client and clock used by target-local tests. The package initializer always constructs the live AX client and live clock, so proxy and CLI consumers cannot accidentally install test behavior.
 
@@ -185,6 +189,8 @@ All AX elements, snapshots, errors, matching evidence, scanner operations, clock
 - Scanner unit tests invoke exactly one scan and assert its result directly, including a two-Xcode fixture where both matching dialogs are approved in one scan.
 - AX failure classification and retry suppression are tested by explicit scanner inputs and a fake monotonic clock.
 - Poll lifecycle tests use `TestClock.sleep(untilSuspendedBy:)`, then await `shutdown()`. There is no scheduler-yield or wall-clock polling loop.
+- A blocking fake helper AX client proves that another Xcode PID is approved while the helper inspection remains blocked.
+- A remove/re-add fixture proves that a cancelled but AX-blocked PID monitor is not overlapped by a replacement.
 - Proxy integration tests keep a recording approver at the composition boundary and verify start/shutdown/cancel ownership.
 - Diagnostic CLI tests validate required exact PIDs/identity candidates and verify that no child process is launched.
 - Run `swift test -Xswiftc -strict-concurrency=minimal`, process suites, `scripts/check.sh`, and `codex-review`.

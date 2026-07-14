@@ -8,6 +8,21 @@ struct PermissionDialogScanner {
         let axClient: any XcodePermissionDialogAutomation.AXAccessing
         let uptimeNanoseconds: @Sendable () -> UInt64
         let logger: Logger
+        let sharedState: SharedState
+
+        init(
+            configuration: XcodePermissionDialogAutomation.Configuration,
+            axClient: any XcodePermissionDialogAutomation.AXAccessing,
+            uptimeNanoseconds: @escaping @Sendable () -> UInt64,
+            logger: Logger,
+            sharedState: SharedState = SharedState()
+        ) {
+            self.configuration = configuration
+            self.axClient = axClient
+            self.uptimeNanoseconds = uptimeNanoseconds
+            self.logger = logger
+            self.sharedState = sharedState
+        }
     }
 
     struct ScanResult: Equatable, Sendable {
@@ -31,12 +46,52 @@ struct PermissionDialogScanner {
     }
 
     private struct State {
-        var didRequestAccessibilityPermission = false
-        var didLogTrustedMonitoring = false
-        var loggedPathCandidateText: String?
         var lastAttemptUptimeByFingerprint: [String: UInt64] = [:]
         var loggedInspectionFingerprints: Set<String> = []
         var didLogNoMatch = false
+        var didLogSlowInspection = false
+    }
+
+    final class SharedState: @unchecked Sendable {
+        enum MonitoringAction {
+            case first
+            case changed
+            case unchanged
+        }
+
+        private struct State {
+            var didRequestAccessibilityPermission = false
+            var didLogTrustedMonitoring = false
+            var loggedPathCandidateText: String?
+        }
+
+        private let lock = NSLock()
+        private var state = State()
+
+        func takeAccessibilityPermissionPrompt() -> Bool {
+            lock.withLock {
+                guard state.didRequestAccessibilityPermission == false else {
+                    return false
+                }
+                state.didRequestAccessibilityPermission = true
+                return true
+            }
+        }
+
+        func monitoringAction(pathCandidateText: String) -> MonitoringAction {
+            lock.withLock {
+                guard state.didLogTrustedMonitoring else {
+                    state.didLogTrustedMonitoring = true
+                    state.loggedPathCandidateText = pathCandidateText
+                    return .first
+                }
+                guard state.loggedPathCandidateText != pathCandidateText else {
+                    return .unchanged
+                }
+                state.loggedPathCandidateText = pathCandidateText
+                return .changed
+            }
+        }
     }
 
     private let dependencies: Dependencies
@@ -47,7 +102,8 @@ struct PermissionDialogScanner {
         self.dependencies = dependencies
     }
 
-    mutating func scanAndApprove() -> ScanResult {
+    mutating func scanAndApprove(processIDs explicitProcessIDs: [pid_t]? = nil) -> ScanResult {
+        let scanStartedAt = dependencies.uptimeNanoseconds()
         guard dependencies.axClient.authorizationStatus(promptIfNeeded: false) == .trusted else {
             requestAccessibilityPermissionIfNeeded()
             return .untrusted
@@ -62,12 +118,13 @@ struct PermissionDialogScanner {
         var visibleInspectionFingerprints: Set<String> = []
         var inspectedWindowTitles: [String] = []
         var matchedWindows: [MatchedWindow] = []
-        let processIDs = configuration.permissionDialogProcessIDs()
+        let processIDs = explicitProcessIDs ?? configuration.permissionDialogProcessIDs()
         var agentProcessIDCandidates: Set<pid_t>?
         let nowUptimeNanoseconds = dependencies.uptimeNanoseconds()
         var inspectedWindowCount = 0
 
         for processID in processIDs {
+            let inspectionStartedAt = dependencies.uptimeNanoseconds()
             let processBundleIdentifier = NSRunningApplication(processIdentifier: processID)?
                 .bundleIdentifier
             let windows: [XcodePermissionDialogAutomation.AXWindow]
@@ -95,6 +152,19 @@ struct PermissionDialogScanner {
                     ]
                 )
                 continue
+            }
+
+            let inspectionDuration = dependencies.uptimeNanoseconds() &- inspectionStartedAt
+            if inspectionDuration >= 500_000_000, state.didLogSlowInspection == false {
+                state.didLogSlowInspection = true
+                dependencies.logger.debug(
+                    "Xcode AX window inspection exceeded the permission-dialog poll interval.",
+                    metadata: [
+                        "pid": "\(processID)",
+                        "duration_ms": "\(inspectionDuration / 1_000_000)",
+                        "window_count": "\(windows.count)",
+                    ]
+                )
             }
 
             inspectedWindowCount += windows.count
@@ -182,7 +252,10 @@ struct PermissionDialogScanner {
                 try dependencies.axClient.pressDefaultButton(in: matchedWindow.window)
                 approvedWindowCount += 1
                 dependencies.logger.info(
-                    "\(Self.approvalLogSummary(processID: matchedWindow.processID, buttonTitle: matchedWindow.decision.defaultButtonTitle))"
+                    "\(Self.approvalLogSummary(processID: matchedWindow.processID, buttonTitle: matchedWindow.decision.defaultButtonTitle))",
+                    metadata: [
+                        "scan_elapsed_ms": "\((dependencies.uptimeNanoseconds() &- scanStartedAt) / 1_000_000)"
+                    ]
                 )
                 dependencies.logger.debug(
                     "Auto-approved Xcode permission dialog details.",
@@ -229,10 +302,9 @@ struct PermissionDialogScanner {
     }
 
     private mutating func requestAccessibilityPermissionIfNeeded() {
-        guard state.didRequestAccessibilityPermission == false else {
+        guard dependencies.sharedState.takeAccessibilityPermissionPrompt() else {
             return
         }
-        state.didRequestAccessibilityPermission = true
         _ = dependencies.axClient.authorizationStatus(promptIfNeeded: true)
         dependencies.logger.warning(
             "Accessibility permission is required to auto-approve the Xcode permission dialog; requested the system prompt and will keep waiting for permission."
@@ -241,20 +313,20 @@ struct PermissionDialogScanner {
 
     private mutating func logMonitoringIfNeeded(agentPathCandidates: Set<String>) {
         let pathCandidateText = agentPathCandidates.sorted().joined(separator: " | ")
-        if state.didLogTrustedMonitoring == false {
+        switch dependencies.sharedState.monitoringAction(pathCandidateText: pathCandidateText) {
+        case .first:
             dependencies.logger.info("\(Self.monitoringLogSummary())")
             dependencies.logger.debug(
                 "Xcode permission dialog auto-approver monitoring details.",
                 metadata: ["agent_paths": .string(pathCandidateText)]
             )
-            state.didLogTrustedMonitoring = true
-            state.loggedPathCandidateText = pathCandidateText
-        } else if state.loggedPathCandidateText != pathCandidateText {
+        case .changed:
             dependencies.logger.debug(
                 "Xcode permission dialog auto-approver candidate paths changed.",
                 metadata: ["agent_paths": .string(pathCandidateText)]
             )
-            state.loggedPathCandidateText = pathCandidateText
+        case .unchanged:
+            break
         }
     }
 
@@ -360,5 +432,13 @@ struct PermissionDialogScanner {
         snapshot: XcodePermissionDialogAutomation.WindowSnapshot
     ) -> String {
         "candidate|\(XcodePermissionDialogAutomation.Matcher.fingerprint(for: snapshot, processID: processID))"
+    }
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () -> T) -> T {
+        lock()
+        defer { unlock() }
+        return body()
     }
 }

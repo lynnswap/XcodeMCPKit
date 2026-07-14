@@ -633,7 +633,6 @@ struct XcodePermissionDialogAutoApproverTests {
                 logger: Logger(label: "tests.permission")
             )
         )
-
         approver.start()
         approver.start()
         try await clock.sleep(untilSuspendedBy: 1)
@@ -641,6 +640,138 @@ struct XcodePermissionDialogAutoApproverTests {
         await approver.shutdown()
 
         #expect(axClient.snapshot().windowScanCalls == 1)
+    }
+
+    @Test func blockedHelperInspectionDoesNotDelayAnotherXcodeDialog() async throws {
+        let helperProcessID: pid_t = 100
+        let xcodeProcessID: pid_t = 200
+        let approvals = RecordedValues<pid_t>()
+        let axClient = BlockingHelperAXClient(
+            helperProcessID: helperProcessID,
+            xcodeProcessID: xcodeProcessID,
+            xcodeWindow: XcodePermissionDialogAutomation.AXWindow(
+                processID: xcodeProcessID,
+                snapshot: makeSnapshot(
+                    processBundleIdentifier: "com.apple.dt.Xcode",
+                    title: "Access",
+                    textValues: ["XcodeMCPKit PID 6119"]
+                ),
+                defaultButton: AXUIElementCreateSystemWide()
+            ),
+            approvals: approvals
+        )
+        let clock = TestClock()
+        let approver = XcodePermissionDialogAutomation.AutoApprover(
+            configuration: .init(
+                permissionDialogProcessIDs: { [helperProcessID, xcodeProcessID] },
+                agentPathCandidates: { [] },
+                assistantNameCandidates: { ["XcodeMCPKit"] },
+                agentProcessIDCandidates: { [6119] },
+                pollInterval: .seconds(1)
+            ),
+            dependencies: .init(
+                axClient: axClient,
+                sleep: { duration in
+                    try await clock.sleep(for: duration)
+                },
+                uptimeNanoseconds: { 0 },
+                logger: Logger(label: "tests.permission")
+            )
+        )
+        defer {
+            axClient.releaseHelperInspection()
+            approver.cancel()
+        }
+
+        approver.start()
+        let approvedProcessID = try await waitWithTimeout(
+            "waiting for Xcode approval while helper AX inspection is blocked"
+        ) {
+            try await approvals.nextValue(at: 0)
+        }
+        axClient.releaseHelperInspection()
+        await approver.shutdown()
+
+        #expect(approvedProcessID == xcodeProcessID)
+    }
+
+    @Test func removedAndReaddedPIDDoesNotOverlapCancelledMonitor() async throws {
+        let processID: pid_t = 100
+        let processInventory = MutableProcessInventory([processID])
+        let inspections = RecordedValues<Int>()
+        let axClient = BlockingProcessAXClient(
+            processID: processID,
+            inspections: inspections
+        )
+        let clock = TestClock()
+        let approver = XcodePermissionDialogAutomation.AutoApprover(
+            configuration: .init(
+                permissionDialogProcessIDs: { processInventory.snapshot() },
+                agentPathCandidates: { [] },
+                assistantNameCandidates: { ["XcodeMCPKit"] },
+                agentProcessIDCandidates: { [] },
+                pollInterval: .seconds(1)
+            ),
+            dependencies: .init(
+                axClient: axClient,
+                sleep: { duration in
+                    try await clock.sleep(for: duration)
+                },
+                uptimeNanoseconds: { 0 },
+                logger: Logger(label: "tests.permission")
+            )
+        )
+        defer {
+            axClient.releaseInspection()
+            approver.cancel()
+        }
+
+        approver.start()
+        _ = try await waitWithTimeout("waiting for the first PID inspection") {
+            try await inspections.nextValue(at: 0)
+        }
+        try await clock.sleep(untilSuspendedBy: 1)
+
+        processInventory.replace(with: [])
+        clock.advance(by: .seconds(1))
+        try await clock.sleep(untilSuspendedBy: 1)
+
+        processInventory.replace(with: [processID])
+        clock.advance(by: .seconds(1))
+        try await clock.sleep(untilSuspendedBy: 1)
+
+        #expect(axClient.inspectionCount == 1)
+
+        axClient.releaseInspection()
+        await approver.shutdown()
+    }
+
+    @Test func autoApproverPromptsAccessibilityOnceAcrossProcessMonitors() async throws {
+        let axClient = RecordingAXClient(status: .untrusted)
+        let clock = TestClock()
+        let approver = XcodePermissionDialogAutomation.AutoApprover(
+            configuration: .init(
+                permissionDialogProcessIDs: { [100, 200] },
+                agentPathCandidates: { [] },
+                assistantNameCandidates: { ["XcodeMCPKit"] },
+                agentProcessIDCandidates: { [] },
+                pollInterval: .seconds(1)
+            ),
+            dependencies: .init(
+                axClient: axClient,
+                sleep: { duration in
+                    try await clock.sleep(for: duration)
+                },
+                uptimeNanoseconds: { 0 },
+                logger: Logger(label: "tests.permission")
+            )
+        )
+
+        approver.start()
+        try await clock.sleep(untilSuspendedBy: 3)
+        await approver.shutdown()
+
+        #expect(axClient.snapshot().promptCalls == 1)
     }
 
     @Test func autoApproverPollTaskDoesNotRetainItsOwner() async throws {
@@ -768,6 +899,129 @@ private final class RecordingAXClient: @unchecked Sendable, XcodePermissionDialo
     func snapshot() -> (promptCalls: Int, windowScanCalls: Int, pressCalls: Int) {
         lock.withLock {
             (promptCalls, windowScanCalls, pressCalls)
+        }
+    }
+}
+
+private final class BlockingHelperAXClient: @unchecked Sendable,
+    XcodePermissionDialogAutomation.AXAccessing
+{
+    private let helperProcessID: pid_t
+    private let xcodeProcessID: pid_t
+    private let xcodeWindow: XcodePermissionDialogAutomation.AXWindow
+    private let approvals: RecordedValues<pid_t>
+    private let helperInspectionStarted = DispatchSemaphore(value: 0)
+    private let helperInspectionRelease = DispatchSemaphore(value: 0)
+
+    init(
+        helperProcessID: pid_t,
+        xcodeProcessID: pid_t,
+        xcodeWindow: XcodePermissionDialogAutomation.AXWindow,
+        approvals: RecordedValues<pid_t>
+    ) {
+        self.helperProcessID = helperProcessID
+        self.xcodeProcessID = xcodeProcessID
+        self.xcodeWindow = xcodeWindow
+        self.approvals = approvals
+    }
+
+    func authorizationStatus(promptIfNeeded _: Bool)
+        -> XcodePermissionDialogAutomation.AccessibilityStatus
+    {
+        .trusted
+    }
+
+    func openWindows(for processID: pid_t) throws
+        -> [XcodePermissionDialogAutomation.AXWindow]
+    {
+        switch processID {
+        case helperProcessID:
+            helperInspectionStarted.signal()
+            helperInspectionRelease.wait()
+            return []
+        case xcodeProcessID:
+            helperInspectionStarted.wait()
+            return [xcodeWindow]
+        default:
+            return []
+        }
+    }
+
+    func pressDefaultButton(in window: XcodePermissionDialogAutomation.AXWindow) throws {
+        let processID = window.processID
+        Task {
+            await approvals.append(processID)
+        }
+    }
+
+    func releaseHelperInspection() {
+        helperInspectionRelease.signal()
+    }
+}
+
+private final class BlockingProcessAXClient: @unchecked Sendable,
+    XcodePermissionDialogAutomation.AXAccessing
+{
+    private let processID: pid_t
+    private let inspections: RecordedValues<Int>
+    private let inspectionRelease = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var inspectionCountStorage = 0
+
+    init(processID: pid_t, inspections: RecordedValues<Int>) {
+        self.processID = processID
+        self.inspections = inspections
+    }
+
+    var inspectionCount: Int {
+        lock.withLock { inspectionCountStorage }
+    }
+
+    func authorizationStatus(promptIfNeeded _: Bool)
+        -> XcodePermissionDialogAutomation.AccessibilityStatus
+    {
+        .trusted
+    }
+
+    func openWindows(for processID: pid_t) throws
+        -> [XcodePermissionDialogAutomation.AXWindow]
+    {
+        #expect(processID == self.processID)
+        let inspection = lock.withLock {
+            inspectionCountStorage += 1
+            return inspectionCountStorage
+        }
+        Task {
+            await inspections.append(inspection)
+        }
+        if inspection == 1 {
+            inspectionRelease.wait()
+        }
+        return []
+    }
+
+    func pressDefaultButton(in _: XcodePermissionDialogAutomation.AXWindow) throws {}
+
+    func releaseInspection() {
+        inspectionRelease.signal()
+    }
+}
+
+private final class MutableProcessInventory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var processIDs: [pid_t]
+
+    init(_ processIDs: [pid_t]) {
+        self.processIDs = processIDs
+    }
+
+    func snapshot() -> [pid_t] {
+        lock.withLock { processIDs }
+    }
+
+    func replace(with processIDs: [pid_t]) {
+        lock.withLock {
+            self.processIDs = processIDs
         }
     }
 }

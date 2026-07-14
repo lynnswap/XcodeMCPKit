@@ -53,6 +53,26 @@ extension XcodePermissionDialogAutomation {
             let task: Task<Void, Never>
         }
 
+        private struct ProcessMonitor {
+            let task: Task<Void, Never>
+            let completion: ProcessMonitorCompletion
+        }
+
+        private final class ProcessMonitorCompletion: @unchecked Sendable {
+            private let lock = NSLock()
+            private var finished = false
+
+            var isFinished: Bool {
+                lock.withLock { finished }
+            }
+
+            func finish() {
+                lock.withLock {
+                    finished = true
+                }
+            }
+        }
+
         private enum Phase {
             case ready
             case running(TaskRecord)
@@ -60,21 +80,9 @@ extension XcodePermissionDialogAutomation {
             case closed
         }
 
-        private actor Worker {
-            private var scanner: PermissionDialogScanner
-
-            init(scanner: PermissionDialogScanner) {
-                self.scanner = scanner
-            }
-
-            func scan() -> PermissionDialogScanner.ScanResult {
-                scanner.scanAndApprove()
-            }
-        }
-
         private let configuration: XcodePermissionDialogAutomation.Configuration
         private let dependencies: Dependencies
-        private let worker: Worker
+        private let scannerSharedState = PermissionDialogScanner.SharedState()
         private let stateLock = NSLock()
         private var phase: Phase = .ready
         private var nextTaskID: UInt64 = 0
@@ -95,16 +103,6 @@ extension XcodePermissionDialogAutomation {
         ) {
             self.configuration = configuration
             self.dependencies = dependencies
-            self.worker = Worker(
-                scanner: PermissionDialogScanner(
-                    dependencies: .init(
-                        configuration: configuration,
-                        axClient: dependencies.axClient,
-                        uptimeNanoseconds: dependencies.uptimeNanoseconds,
-                        logger: dependencies.logger
-                    )
-                )
-            )
         }
 
         deinit {
@@ -119,25 +117,15 @@ extension XcodePermissionDialogAutomation {
 
                 nextTaskID &+= 1
                 let taskID = nextTaskID
-                let worker = worker
-                let interval = configuration.pollInterval
-                let sleep = dependencies.sleep
-                let logger = dependencies.logger
+                let configuration = configuration
+                let dependencies = dependencies
+                let scannerSharedState = scannerSharedState
                 let task = Task {
-                    while Task.isCancelled == false {
-                        _ = await worker.scan()
-                        do {
-                            try await sleep(interval)
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error(
-                                "Xcode permission-dialog auto-approver polling stopped after an unexpected clock failure.",
-                                metadata: ["error": .string(String(describing: error))]
-                            )
-                            break
-                        }
-                    }
+                    await Self.runProcessMonitorSupervisor(
+                        configuration: configuration,
+                        dependencies: dependencies,
+                        scannerSharedState: scannerSharedState
+                    )
                 }
                 phase = .running(TaskRecord(id: taskID, task: task))
             }
@@ -186,6 +174,105 @@ extension XcodePermissionDialogAutomation {
                 return task
             }
             task?.cancel()
+        }
+
+        private static func runProcessMonitorSupervisor(
+            configuration: XcodePermissionDialogAutomation.Configuration,
+            dependencies: Dependencies,
+            scannerSharedState: PermissionDialogScanner.SharedState
+        ) async {
+            var monitors: [pid_t: ProcessMonitor] = [:]
+
+            while Task.isCancelled == false {
+                let processIDs = Set(
+                    configuration.permissionDialogProcessIDs().filter { $0 > 0 }
+                )
+
+                let completedProcessIDs = monitors.compactMap { processID, monitor in
+                    monitor.completion.isFinished ? processID : nil
+                }
+                for processID in completedProcessIDs {
+                    guard let monitor = monitors.removeValue(forKey: processID) else {
+                        continue
+                    }
+                    await monitor.task.value
+                }
+
+                for processID in Array(monitors.keys)
+                where processIDs.contains(processID) == false {
+                    monitors[processID]?.task.cancel()
+                }
+
+                let addedProcessIDs = processIDs.filter { monitors[$0] == nil }.sorted()
+                for processID in addedProcessIDs {
+                    monitors[processID] = makeProcessMonitor(
+                        processID: processID,
+                        configuration: configuration,
+                        dependencies: dependencies,
+                        scannerSharedState: scannerSharedState
+                    )
+                }
+
+                do {
+                    try await dependencies.sleep(configuration.pollInterval)
+                } catch is CancellationError {
+                    break
+                } catch {
+                    dependencies.logger.error(
+                        "Xcode permission-dialog process monitor stopped after an unexpected clock failure.",
+                        metadata: ["error": .string(String(describing: error))]
+                    )
+                    break
+                }
+            }
+
+            let activeMonitors = monitors.values.map(\.task)
+            for monitor in activeMonitors {
+                monitor.cancel()
+            }
+            for monitor in activeMonitors {
+                await monitor.value
+            }
+        }
+
+        private static func makeProcessMonitor(
+            processID: pid_t,
+            configuration: XcodePermissionDialogAutomation.Configuration,
+            dependencies: Dependencies,
+            scannerSharedState: PermissionDialogScanner.SharedState
+        ) -> ProcessMonitor {
+            let completion = ProcessMonitorCompletion()
+            let task = Task {
+                defer { completion.finish() }
+                var scanner = PermissionDialogScanner(
+                    dependencies: .init(
+                        configuration: configuration,
+                        axClient: dependencies.axClient,
+                        uptimeNanoseconds: dependencies.uptimeNanoseconds,
+                        logger: dependencies.logger,
+                        sharedState: scannerSharedState
+                    )
+                )
+
+                while Task.isCancelled == false {
+                    _ = scanner.scanAndApprove(processIDs: [processID])
+                    do {
+                        try await dependencies.sleep(configuration.pollInterval)
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        dependencies.logger.error(
+                            "Xcode permission-dialog PID monitor stopped after an unexpected clock failure.",
+                            metadata: [
+                                "pid": .string("\(processID)"),
+                                "error": .string(String(describing: error)),
+                            ]
+                        )
+                        break
+                    }
+                }
+            }
+            return ProcessMonitor(task: task, completion: completion)
         }
 
         package static func executablePathCandidates(

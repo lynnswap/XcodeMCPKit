@@ -18,6 +18,8 @@
 - `XcodeMCPPermissionAutomation`
   - Package-internal AX adapter, permission-dialog matcher, one-scan state, and
     owned polling lifecycle shared by the proxy and maintainer diagnostic.
+  - Owns one scanner task per caller-supplied PID so a slow helper AX call does
+    not delay approval of another Xcode process's dialog.
   - Consumes caller-supplied Xcode/helper and agent identities; it does not own
     process inventory or launch processes.
 - `XcodeMCPPermissionApproverTool`
