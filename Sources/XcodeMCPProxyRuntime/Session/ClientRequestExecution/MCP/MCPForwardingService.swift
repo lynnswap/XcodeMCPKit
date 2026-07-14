@@ -63,8 +63,13 @@ struct MCPForwardingService: Sendable {
             requestTimeout: requestTimeout,
             leaseID: leaseID,
             onRegistered: { registration in
-                _ = cancellationHandle?.activate(operationLease: registration.operationLease)
-                cancellationHandle?.bindRouterPendingToken(registration.routerPendingToken)
+                guard let cancellationHandle else { return }
+                guard cancellationHandle.bindStartedRegistration(
+                    operationLease: registration.operationLease,
+                    routerPendingToken: registration.routerPendingToken
+                ) else {
+                    throw CancellationError()
+                }
             },
             onTimeout: onTimeout
         )
@@ -247,6 +252,8 @@ struct MCPForwardingService: Sendable {
                         internalCancellationHandle.cancel(using: sessionManager)
                         return eventLoop.makeFailedFuture(CancellationError())
                     }
+                } catch is CancellationError {
+                    return eventLoop.makeFailedFuture(CancellationError())
                 } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
                     return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {

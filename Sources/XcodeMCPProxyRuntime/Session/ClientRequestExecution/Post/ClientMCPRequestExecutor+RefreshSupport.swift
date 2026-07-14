@@ -130,6 +130,8 @@ extension ClientMCPRequestExecutor {
                             )
                         }
                     )
+                } catch is CancellationError {
+                    return eventLoop.makeFailedFuture(CancellationError())
                 } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
                     return eventLoop.makeSucceededFuture(.upstreamUnavailable)
                 } catch {

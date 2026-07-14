@@ -194,7 +194,7 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         on eventLoop: EventLoop,
         requestTimeout: TimeAmount?,
         leaseID: LeaseManager.ID? = nil,
-        onRegistered: (@Sendable (StartedRegistration) -> Void)? = nil,
+        onRegistered: (@Sendable (StartedRegistration) throws -> Void)? = nil,
         onTimeout: (@Sendable () -> Void)? = nil
     ) throws -> StartedRequest {
         guard let idKey = prepared.transform.idKey else {
@@ -215,12 +215,6 @@ struct ProxyUpstreamRequestRuntime: Sendable {
                 timeout: requestTimeout
             )
         }
-        onRegistered?(
-            StartedRegistration(
-                operationLease: prepared.operationLease,
-                routerPendingToken: registration.token
-            )
-        )
         let reject: @Sendable () -> Void = {
             guard router.failPending(
                 token: registration.token,
@@ -235,6 +229,25 @@ struct ProxyUpstreamRequestRuntime: Sendable {
                     operationLease: prepared.operationLease
                 )
             }
+        }
+        do {
+            try onRegistered?(
+                StartedRegistration(
+                    operationLease: prepared.operationLease,
+                    routerPendingToken: registration.token
+                )
+            )
+        } catch {
+            if router.failPending(token: registration.token, error: error),
+                let responseID = prepared.transform.responseID
+            {
+                port.removeUpstreamIDMapping(
+                    sessionID: prepared.sessionID,
+                    requestIDKey: responseID.key,
+                    operationLease: prepared.operationLease
+                )
+            }
+            throw error
         }
         let sent = port.sendUpstream(
             prepared.transform.upstreamData,
