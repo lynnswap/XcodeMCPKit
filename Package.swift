@@ -43,6 +43,10 @@ let package = Package(
             name: "xcode-mcp-proxy-tool-verifier",
             targets: ["XcodeMCPProxyToolVerifier"]
         ),
+        .executable(
+            name: "xcode-mcp-permission-approver",
+            targets: ["XcodeMCPPermissionApproverTool"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
@@ -96,9 +100,17 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
+            name: "XcodeMCPPermissionAutomation",
+            dependencies: [
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "XcodeMCPProxyKit",
             dependencies: [
                 "XcodeMCPKit",
+                "XcodeMCPPermissionAutomation",
                 "XcodeMCPProxyRuntime",
                 "XcodeMCPProxyHTTP",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -153,6 +165,15 @@ let package = Package(
             name: "XcodeMCPProxyToolVerifier",
             dependencies: ["XcodeMCPKit"],
             exclude: ["README.md"],
+            swiftSettings: strictSwiftSettings
+        ),
+        .executableTarget(
+            name: "XcodeMCPPermissionApproverTool",
+            dependencies: [
+                "XcodeMCPPermissionAutomation",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+            ],
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
@@ -293,9 +314,27 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
+            name: "XcodeMCPPermissionAutomationTests",
+            dependencies: [
+                "XcodeMCPCoreTestSupport",
+                "XcodeMCPPermissionAutomation",
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "XcodeMCPPermissionApproverToolTests",
+            dependencies: [
+                "XcodeMCPPermissionApproverTool",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
             name: "ProxyLiveMCPBridgeTests",
             dependencies: [
                 "XcodeMCPKit",
+                "XcodeMCPPermissionAutomation",
                 "XcodeMCPProxyKit",
                 "XcodeMCPProxyRuntime",
                 .product(name: "NIO", package: "swift-nio"),

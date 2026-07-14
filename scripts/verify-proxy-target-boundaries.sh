@@ -55,6 +55,21 @@ reject_matches \
     'RuntimeHTTPGatewayPort|RuntimeHTTPControlPort|XcodeMCPProxyInternalTestSupport' \
     Sources Tests Package.swift
 
+reject_matches \
+    "XcodeMCPPermissionAutomation must not depend on proxy/runtime modules" \
+    '^import (XcodeMCPKit|XcodeMCPProxy)' \
+    Sources/XcodeMCPPermissionAutomation
+
+reject_matches \
+    "XcodeMCPPermissionAutomation must consume caller-owned process inventory" \
+    'NSWorkspace' \
+    Sources/XcodeMCPPermissionAutomation
+
+reject_matches \
+    "permission approver diagnostic must not launch processes" \
+    '(^|[^[:alnum:]_])Process[[:space:]]*\(|MCPBridgeRuntime|mcpbridgePath' \
+    Sources/XcodeMCPPermissionApproverTool
+
 package_description="$(swift package describe --type json)"
 runtime_dependencies="$(
     jq -r '.targets[] | select(.name == "XcodeMCPProxyRuntime") | .target_dependencies | sort | join(",")' \
@@ -68,6 +83,14 @@ facade_dependencies="$(
     jq -r '.targets[] | select(.name == "XcodeMCPProxyKit") | .target_dependencies | sort | join(",")' \
         <<< "${package_description}"
 )"
+permission_automation_dependencies="$(
+    jq -r '.targets[] | select(.name == "XcodeMCPPermissionAutomation") | (.target_dependencies // []) | sort | join(",")' \
+        <<< "${package_description}"
+)"
+permission_tool_dependencies="$(
+    jq -r '.targets[] | select(.name == "XcodeMCPPermissionApproverTool") | .target_dependencies | sort | join(",")' \
+        <<< "${package_description}"
+)"
 
 if [ "${runtime_dependencies}" != "XcodeMCPKit" ]; then
     echo "error: unexpected XcodeMCPProxyRuntime target dependencies: ${runtime_dependencies}" >&2
@@ -78,8 +101,17 @@ if [ "${http_dependencies}" != "XcodeMCPKit,XcodeMCPProxyRuntime" ]; then
     exit 1
 fi
 if [[ ",${facade_dependencies}," != *",XcodeMCPProxyHTTP,"* ]] \
-    || [[ ",${facade_dependencies}," != *",XcodeMCPProxyRuntime,"* ]]; then
-    echo "error: XcodeMCPProxyKit must compose both Runtime and HTTP: ${facade_dependencies}" >&2
+    || [[ ",${facade_dependencies}," != *",XcodeMCPProxyRuntime,"* ]] \
+    || [[ ",${facade_dependencies}," != *",XcodeMCPPermissionAutomation,"* ]]; then
+    echo "error: XcodeMCPProxyKit must compose Runtime, HTTP, and permission automation: ${facade_dependencies}" >&2
+    exit 1
+fi
+if [ -n "${permission_automation_dependencies}" ]; then
+    echo "error: unexpected XcodeMCPPermissionAutomation target dependencies: ${permission_automation_dependencies}" >&2
+    exit 1
+fi
+if [ "${permission_tool_dependencies}" != "XcodeMCPPermissionAutomation" ]; then
+    echo "error: unexpected XcodeMCPPermissionApproverTool target dependencies: ${permission_tool_dependencies}" >&2
     exit 1
 fi
 

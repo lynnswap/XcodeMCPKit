@@ -186,6 +186,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var forceAsyncToolRoutingDecision = false
         var toolRoutingStarted: TestSignal?
         var toolRoutingGate: AsyncGate?
+        var requestLeaseActivationHook: (@Sendable () -> Void)?
         var requeuedLeaseCount = 0
         var rejectNextUpstreamSend = false
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
@@ -820,6 +821,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
                 Date().addingTimeInterval(Double($0.nanoseconds) / 1_000_000_000)
             }
         )
+        state.withLockedValue { $0.requestLeaseActivationHook }?()
     }
 
     func completeRequestLease(_ leaseID: LeaseManager.ID) {
@@ -1020,6 +1022,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             $0.toolRoutingStarted = started
             $0.toolRoutingGate = gate
         }
+    }
+
+    func setRequestLeaseActivationHook(_ hook: (@Sendable () -> Void)?) {
+        state.withLockedValue { $0.requestLeaseActivationHook = hook }
     }
 
     func requestTimeoutNotificationCount() -> Int {

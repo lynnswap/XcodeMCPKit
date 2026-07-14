@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import XcodeMCPKit
+import XcodeMCPPermissionAutomation
 import XcodeMCPProxyHTTP
 import XcodeMCPProxyRuntime
 
@@ -530,23 +531,29 @@ public final class XcodeMCPProxyServer: Sendable {
                         config: config,
                         executableLookupClient: executableLookupClient
                     )
-                    return XcodePermissionDialog.AutoApprover(
-                        dependencies: .live(
+                    return XcodePermissionDialogAutomation.AutoApprover(
+                        configuration: .init(
                             permissionDialogProcessIDs: {
                                 runtime.inventorySnapshot().permissionDialogProcessIDs
                             },
                             agentPathCandidates: {
                                 let processBoundCandidates = runtime.inventorySnapshot()
                                     .xcodeTargets.map(\.mcpBridgePath)
-                                return XcodePermissionDialog.AutoApprover.defaultAgentPathCandidates(
-                                    additionalExecutableCandidates:
+                                return XcodePermissionDialogAutomation.AutoApprover
+                                    .executablePathCandidates(
+                                    additional:
                                         additionalCandidates + processBoundCandidates
                                 )
                             },
                             assistantNameCandidates: {
                                 Set(XcodeMCPProxyServer.permissionDialogAssistantNameCandidates(config: config))
+                            },
+                            agentProcessIDCandidates: {
+                                XcodePermissionDialogAutomation.AutoApprover
+                                    .descendantProcessIDCandidates()
                             }
-                        )
+                        ),
+                        logger: ProxyLogging.make("xcode.permission")
                     )
                 },
                 makeRuntime: { config in
@@ -872,10 +879,12 @@ private extension XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode {
 
 protocol ProxyServerPermissionDialogAutoApprover: Sendable {
     func start()
-    func stop()
+    func shutdown() async
+    func cancel()
 }
 
-extension XcodePermissionDialog.AutoApprover: ProxyServerPermissionDialogAutoApprover {}
+extension XcodePermissionDialogAutomation.AutoApprover:
+    ProxyServerPermissionDialogAutoApprover {}
 
 extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {

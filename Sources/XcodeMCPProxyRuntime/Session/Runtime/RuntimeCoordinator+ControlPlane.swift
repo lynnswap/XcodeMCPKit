@@ -487,9 +487,7 @@ extension RuntimeCoordinator {
                 ),
             ]
         )
-        let requestTimeout = MCP.MethodDispatcher.timeoutForControlPlane(
-            defaultSeconds: config.requestTimeout
-        )
+        let requestTimeout = processRouteToolsCatalogRequestTimeoutAmount()
         addRuntimeTask { [weak self] in
             guard let self else { return }
             let startedAt = self.nowUptimeNanoseconds()
@@ -511,6 +509,13 @@ extension RuntimeCoordinator {
                 )
             }
         }
+    }
+
+    func processRouteToolsCatalogRequestTimeoutAmount() -> TimeAmount? {
+        MCP.MethodDispatcher.timeoutForMethod(
+            "tools/list",
+            defaultSeconds: config.requestTimeout
+        )
     }
 
     func scheduleMissingProcessToolsCatalogRetry(

@@ -11,10 +11,19 @@
     request-scoped progress lanes; it does not own transport/session lifecycle.
 - `XcodeMCPProxyKit`
   - Public server/adapter embedding facades plus internal HTTP gateway, proxy
-    control plane, Xcode routing, upstream topology, discovery, permission
-    automation, and feature workflows.
+    control plane, Xcode routing, upstream topology, discovery, and feature
+    workflows.
   - CLI composition, installer implementation, build metadata, and launch
     diagnostics are package/executable concerns rather than public library API.
+- `XcodeMCPPermissionAutomation`
+  - Package-internal AX adapter, permission-dialog matcher, one-scan state, and
+    owned polling lifecycle shared by the proxy and maintainer diagnostic.
+  - Consumes caller-supplied Xcode/helper and agent identities; it does not own
+    process inventory or launch processes.
+- `XcodeMCPPermissionApproverTool`
+  - Maintainer executable that validates explicit existing PIDs and runs the
+    shared permission automation until interrupted. It never launches
+    `mcpbridge` and is not installed by the release installer.
 
 ## Ownership Boundaries
 
@@ -22,6 +31,9 @@
   - Owns route membership/exposure, activation attempts and their resources,
     per-process tool catalogs, and the canonical tool projection in one lock.
     Transitions return cancellation/I/O effects for execution outside the lock.
+  - Route-activation `tools/list` uses the configured request timeout, not the
+    short discovery/control-plane cap. The activation watchdog and RPC share
+    that deadline owner.
 - `WindowOwnershipAuthority` and `WindowRoutingResolver`
   - The authority owns window/tab identity and `windowEpoch`; the stateless
     resolver combines its snapshot with an immutable route snapshot. Neither
@@ -59,6 +71,9 @@
     contracts. Each invocation is parsed once into typed values.
   - Server environment and file configuration precedence is resolved after
     parsing and before the existing launcher/runtime lifecycle begins.
+  - `XcodeMCPPermissionApproverCommand` accepts only explicit Xcode/helper PIDs,
+    agent root PIDs, and exact path/name candidates. It has no command-launch
+    surface.
 
 ## Dependency Direction
 
@@ -70,6 +85,9 @@
   helpers, and HTTP gateway internals. Low-level proxy implementation files live under
   `Sources/XcodeMCPProxyKit/Internal`, including session implementation files
   under `Sources/XcodeMCPProxyKit/Internal/Session`.
+- `XcodeMCPPermissionAutomation` depends only on `Logging`. `XcodeMCPProxyKit`
+  and `XcodeMCPPermissionApproverTool` depend on it; the automation target does
+  not depend back on proxy/runtime targets.
 - `XcodeMCPProxyCLI`, `XcodeMCPProxyServer`, and `XcodeMCPProxyInstall` depend on
   `XcodeMCPProxyKit`; `XcodeMCPProxyToolVerifier` depends on `XcodeMCPKit`;
   `ProxyBuildInfoTool` is a standalone build-tool dependency of
@@ -106,6 +124,9 @@ contract tests that exercise package and product boundaries.
   - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapterTests -Xswiftc -strict-concurrency=minimal`
 - Full local maintainer check:
   - `scripts/check.sh`
+- Permission diagnostic contract:
+  - `swift test --filter XcodeMCPPermissionAutomationTests -Xswiftc -strict-concurrency=minimal`
+  - `swift test --filter XcodeMCPPermissionApproverToolTests -Xswiftc -strict-concurrency=minimal`
 
 These are used by the default CI workflow and release workflow, and intentionally avoid requiring real `mcpbridge`.
 

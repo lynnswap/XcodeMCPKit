@@ -1,24 +1,22 @@
 import AppKit
 import ApplicationServices
 import Foundation
-import Logging
-import XcodeMCPKit
 
-extension XcodePermissionDialog {
+extension XcodePermissionDialogAutomation {
     protocol AXAccessing: Sendable {
-        func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialog.AccessibilityStatus
-        func openWindows(for processID: pid_t) throws -> [XcodePermissionDialog.AXWindow]
-        func pressDefaultButton(in window: XcodePermissionDialog.AXWindow) throws
+        func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialogAutomation.AccessibilityStatus
+        func openWindows(for processID: pid_t) throws -> [XcodePermissionDialogAutomation.AXWindow]
+        func pressDefaultButton(in window: XcodePermissionDialogAutomation.AXWindow) throws
     }
 
     final class AXWindow {
         let processID: pid_t
-        let snapshot: XcodePermissionDialog.WindowSnapshot
+        let snapshot: XcodePermissionDialogAutomation.WindowSnapshot
         private let defaultButton: AXUIElement
 
         init(
             processID: pid_t,
-            snapshot: XcodePermissionDialog.WindowSnapshot,
+            snapshot: XcodePermissionDialogAutomation.WindowSnapshot,
             defaultButton: AXUIElement
         ) {
             self.processID = processID
@@ -29,7 +27,7 @@ extension XcodePermissionDialog {
         fileprivate func pressDefaultButton() throws {
             let error = AXUIElementPerformAction(defaultButton, kAXPressAction as CFString)
             guard error == .success else {
-                throw XcodePermissionDialog.AXError.performActionFailed(error)
+                throw XcodePermissionDialogAutomation.AXError.performActionFailed(error)
             }
         }
     }
@@ -60,10 +58,11 @@ extension XcodePermissionDialog {
             processBundleIdentifier: String?
         ) -> Bool {
             guard let processBundleIdentifier,
-                  transientAXWindowsCannotCompleteBundleIdentifiers.contains(processBundleIdentifier) else {
+                transientAXWindowsCannotCompleteBundleIdentifiers.contains(processBundleIdentifier)
+            else {
                 return false
             }
-            guard let error = error as? XcodePermissionDialog.AXError else {
+            guard let error = error as? XcodePermissionDialogAutomation.AXError else {
                 return false
             }
             guard case .copyAttributeFailed(let attribute, let axError) = error else {
@@ -73,12 +72,12 @@ extension XcodePermissionDialog {
         }
     }
 
-    struct AXClient: XcodePermissionDialog.AXAccessing {
+    struct AXClient: XcodePermissionDialogAutomation.AXAccessing {
         private let maxDescendantCount = 128
 
         init() {}
 
-        func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialog.AccessibilityStatus {
+        func authorizationStatus(promptIfNeeded: Bool) -> XcodePermissionDialogAutomation.AccessibilityStatus {
             if promptIfNeeded {
                 let options: NSDictionary = [
                     "AXTrustedCheckOptionPrompt" as NSString: true
@@ -88,21 +87,21 @@ extension XcodePermissionDialog {
             return AXIsProcessTrusted() ? .trusted : .untrusted
         }
 
-    func openWindows(for processID: pid_t) throws -> [XcodePermissionDialog.AXWindow] {
-        let app = AXUIElementCreateApplication(processID)
-        return try copyElementArray(attribute: kAXWindowsAttribute as CFString, from: app).compactMap { window in
+        func openWindows(for processID: pid_t) throws -> [XcodePermissionDialogAutomation.AXWindow] {
+            let app = AXUIElementCreateApplication(processID)
+            return try copyElementArray(attribute: kAXWindowsAttribute as CFString, from: app).compactMap { window in
                 try makeWindow(processID: processID, window: window)
             }
         }
 
-        func pressDefaultButton(in window: XcodePermissionDialog.AXWindow) throws {
+        func pressDefaultButton(in window: XcodePermissionDialogAutomation.AXWindow) throws {
             try window.pressDefaultButton()
         }
 
         private func makeWindow(
             processID: pid_t,
             window: AXUIElement
-        ) throws -> XcodePermissionDialog.AXWindow? {
+        ) throws -> XcodePermissionDialogAutomation.AXWindow? {
             let role = copyString(attribute: kAXRoleAttribute as CFString, from: window)
             if let role, role != kAXWindowRole as String {
                 return nil
@@ -110,8 +109,9 @@ extension XcodePermissionDialog {
 
             let subrole = copyString(attribute: kAXSubroleAttribute as CFString, from: window)
             if let subrole,
-               subrole != kAXDialogSubrole as String,
-               subrole != "AXSystemDialog" {
+                subrole != kAXDialogSubrole as String,
+                subrole != "AXSystemDialog"
+            {
                 return nil
             }
 
@@ -133,14 +133,15 @@ extension XcodePermissionDialog {
             }
 
             let children = (try? copyElementArray(attribute: kAXChildrenAttribute as CFString, from: window)) ?? []
-            guard let defaultButton = copyElement(attribute: kAXDefaultButtonAttribute as CFString, from: window)
-                ?? fallbackAllowButton(in: window)
+            guard
+                let defaultButton = copyElement(attribute: kAXDefaultButtonAttribute as CFString, from: window)
+                    ?? fallbackAllowButton(in: window)
             else {
                 return nil
             }
             let processBundleIdentifier = NSRunningApplication(processIdentifier: processID)?.bundleIdentifier
 
-            let snapshot = XcodePermissionDialog.WindowSnapshot(
+            let snapshot = XcodePermissionDialogAutomation.WindowSnapshot(
                 processBundleIdentifier: processBundleIdentifier,
                 title: copyString(attribute: kAXTitleAttribute as CFString, from: window) ?? "",
                 textValues: collectTextValues(from: window),
@@ -158,7 +159,7 @@ extension XcodePermissionDialog {
                     .flatMap(buttonSnapshot(from:))
             )
 
-            return XcodePermissionDialog.AXWindow(
+            return XcodePermissionDialogAutomation.AXWindow(
                 processID: processID,
                 snapshot: snapshot,
                 defaultButton: defaultButton
@@ -240,8 +241,8 @@ extension XcodePermissionDialog {
             }
         }
 
-        private func buttonSnapshot(from element: AXUIElement) -> XcodePermissionDialog.ButtonSnapshot {
-            XcodePermissionDialog.ButtonSnapshot(
+        private func buttonSnapshot(from element: AXUIElement) -> XcodePermissionDialogAutomation.ButtonSnapshot {
+            XcodePermissionDialogAutomation.ButtonSnapshot(
                 title: copyString(attribute: kAXTitleAttribute as CFString, from: element)
                     ?? copyString(attribute: kAXDescriptionAttribute as CFString, from: element)
                     ?? copyString(attribute: kAXValueAttribute as CFString, from: element),
@@ -300,7 +301,7 @@ extension XcodePermissionDialog {
             case .success, .noValue:
                 return value
             default:
-                throw XcodePermissionDialog.AXError.copyAttributeFailed(
+                throw XcodePermissionDialogAutomation.AXError.copyAttributeFailed(
                     attribute: attribute as String,
                     error: error
                 )

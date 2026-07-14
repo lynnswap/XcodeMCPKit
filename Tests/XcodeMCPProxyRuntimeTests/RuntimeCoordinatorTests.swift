@@ -660,7 +660,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         #expect(timeoutScheduler.scheduledCount() == 3)
         #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
-        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
+        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(20).nanoseconds)
         #expect(timeoutScheduler.fire(at: 2))
         #expect(
             try await waitWithTimeout(
@@ -825,7 +825,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         }
         let catalogTimeoutIndex = try #require(
             (0..<timeoutScheduler.scheduledCount()).first {
-                timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(10).nanoseconds
+                timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(20).nanoseconds
                     && timeoutScheduler.isCancelled(at: $0) == false
             })
 
@@ -2686,7 +2686,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         let catalogTimeoutIndex = try #require(
             (0..<timeoutScheduler.scheduledCount()).first {
-                timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(10).nanoseconds
+                timeoutScheduler.delay(at: $0)?.nanoseconds == TimeAmount.seconds(20).nanoseconds
                     && timeoutScheduler.isCancelled(at: $0) == false
             })
         let scheduledBeforeCatalogTimeout = timeoutScheduler.scheduledCount()

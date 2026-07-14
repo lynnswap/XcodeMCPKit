@@ -332,6 +332,7 @@ struct XcodeMCPProxyServerTests {
         try await server.shutdown()
         try await waiter.value
         try await server.shutdown()
+        #expect(autoApprover.shutdownCount == 1)
         #expect((await server.snapshot()).phase == .stopped)
     }
 
@@ -360,14 +361,16 @@ struct XcodeMCPProxyServerTests {
     @Test func startedServerDeinitSynchronouslyCancelsRuntimeRetainTasks() async throws {
         let runtimeReference = WeakRuntimeReference()
         let upstream = RecordingUpstreamSlot()
+        let autoApprover = RecordingAutoApprover()
         var server: XcodeMCPProxyServer? = XcodeMCPProxyServer(
             configuration: .init(
                 bindAddress: .init(host: "127.0.0.1", port: 0),
-                discovery: .disabled
+                discovery: .disabled,
+                approvalPolicy: .automatic
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeAutoApprover: { _, _ in autoApprover },
                 makeRuntime: { config in
                     makeServerTestRuntime(
                         config: config,
@@ -391,6 +394,7 @@ struct XcodeMCPProxyServerTests {
         ) {
             await runtimeTaskDrains.wait()
         }
+        #expect(autoApprover.cancelCount == 1)
 
         // This test deliberately omits the server's explicit shutdown contract.
         // Deinit guarantees cancellation signaling rather than awaiting teardown.
@@ -625,16 +629,32 @@ private enum DiscoveryWriteFailure: Error {
 
 private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermissionDialogAutoApprover {
     private let startCountBox = NIOLockedValueBox(0)
+    private let shutdownCountBox = NIOLockedValueBox(0)
+    private let cancelCountBox = NIOLockedValueBox(0)
 
     var startCount: Int {
         startCountBox.withLockedValue { $0 }
+    }
+
+    var shutdownCount: Int {
+        shutdownCountBox.withLockedValue { $0 }
+    }
+
+    var cancelCount: Int {
+        cancelCountBox.withLockedValue { $0 }
     }
 
     func start() {
         startCountBox.withLockedValue { $0 += 1 }
     }
 
-    func stop() {}
+    func shutdown() async {
+        shutdownCountBox.withLockedValue { $0 += 1 }
+    }
+
+    func cancel() {
+        cancelCountBox.withLockedValue { $0 += 1 }
+    }
 }
 
 private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeServing {
