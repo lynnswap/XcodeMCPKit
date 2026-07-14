@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPKit
 import XcodeMCPProxyRuntime
 
 package struct XcodeMCPProxyProductMetadata: Equatable, Sendable {
@@ -9,58 +10,13 @@ package struct XcodeMCPProxyProductMetadata: Equatable, Sendable {
         self.name = name
         self.version = version
     }
-
-    package func versionLine(arguments: [String], defaultExecutableName: String) -> String {
-        "\(executableName(arguments: arguments, defaultExecutableName: defaultExecutableName)) \(version)"
-    }
-
-    private func executableName(arguments: [String], defaultExecutableName: String) -> String {
-        guard let rawExecutable = arguments.first, !rawExecutable.isEmpty else {
-            return defaultExecutableName
-        }
-
-        let name = URL(fileURLWithPath: rawExecutable).lastPathComponent
-        return name.isEmpty ? defaultExecutableName : name
-    }
 }
 
 extension XcodeMCPProxyServer {
     package enum LaunchAction: Sendable {
-        case showHelp(String)
-        case showVersion(String)
+        case display(String)
         case dryRun(String)
         case start(preparedConfiguration: PreparedConfiguration, forceRestart: Bool)
-    }
-
-    package struct LaunchResolutionError: Error, CustomStringConvertible, Equatable, Sendable {
-        package enum Presentation: Equatable, Sendable {
-            case conciseUsageHint
-            case fullUsage
-        }
-
-        package let message: String
-        package let presentation: Presentation
-
-        package init(message: String, presentation: Presentation) {
-            self.message = message
-            self.presentation = presentation
-        }
-
-        package var description: String { message }
-    }
-
-    package struct ParsedLaunchOptions {
-        var forwardedArguments: [String]
-        var showHelp: Bool
-        var showVersion: Bool
-        var hasListenFlag: Bool
-        var hasHostFlag: Bool
-        var hasPortFlag: Bool
-        var hasConfigFlag: Bool
-        var hasAutoApproveFlag: Bool
-        var hasRefreshCodeIssuesModeFlag: Bool
-        var forceRestart: Bool
-        var dryRun: Bool
     }
 
     package static var productMetadata: XcodeMCPProxyProductMetadata {
@@ -68,38 +24,7 @@ extension XcodeMCPProxyServer {
     }
 
     package static var serverUsage: String {
-        """
-        Usage:
-          xcode-mcp-proxy-server [options]
-
-        Options:
-          --listen host:port
-          --host host
-          --port port
-          --config path
-          --auto-approve
-          --upstream-processes n
-          --refresh-code-issues-mode proxy|upstream
-          --force-restart
-          --dry-run
-          --version
-          -h, --help
-
-        Notes:
-          - Starts the Streamable HTTP proxy server (and spawns xcrun mcpbridge as upstream processes).
-          - HTTP-capable clients should connect directly; xcode-mcp-proxy is the STDIO compatibility adapter.
-          - Default listen: localhost:8765 (override via --listen / --host / --port or env LISTEN/HOST/PORT).
-          - --auto-approve opt-in enables automatic approval of the Xcode permission dialog.
-          - Initialize config path: --config or env MCP_XCODE_CONFIG
-          - When the listen port is already in use, rerun with --force-restart to terminate an existing xcode-mcp-proxy-server.
-        """
-    }
-
-    package static func serverVersionLine(arguments: [String]) -> String {
-        productMetadata.versionLine(
-            arguments: arguments,
-            defaultExecutableName: "xcode-mcp-proxy-server"
-        )
+        ProxyServerCommand.helpMessage()
     }
 
     package static func resolveLaunchAction(
@@ -118,35 +43,35 @@ extension XcodeMCPProxyServer {
     static func resolveLaunchAction(
         arguments: [String],
         environment: [String: String],
-        loadFileConfiguration: @Sendable (URL) throws ->
+        loadFileConfiguration:
+            @Sendable (URL) throws ->
             ProxyConfig.File.LoadedConfiguration
     ) throws -> LaunchAction {
-        var parsed = try parseLaunchOptions(arguments: arguments)
-        let versionLine = serverVersionLine(arguments: arguments)
-
-        if parsed.showHelp {
-            return .showHelp(serverUsage)
-        }
-        if parsed.showVersion {
-            return .showVersion(versionLine)
+        let command: ProxyServerCommand
+        switch try CLICommandParser.parse(ProxyServerCommand.self, arguments: arguments) {
+        case .cleanExit(let message):
+            return .display(message)
+        case .command(let parsedCommand):
+            command = parsedCommand
         }
 
-        try applyLaunchDefaults(from: environment, to: &parsed)
+        if isTruthy(environment["LAZY_INIT"]) {
+            throw CLICommandParser.validationError(
+                for: ProxyServerCommand.self,
+                message: removedLazyInitializationMessage
+            )
+        }
 
-        let proxyArguments = ["xcode-mcp-proxy"] + parsed.forwardedArguments
         let proxyConfig: ProxyConfig
         do {
-            proxyConfig = try CLIParser.parse(args: proxyArguments, environment: environment)
+            proxyConfig = try command.resolveConfiguration(environment: environment)
             try proxyConfig.validateModernProtocolConfiguration()
-        } catch let error as CLIError {
-            throw LaunchResolutionError(
-                message: error.description,
-                presentation: .fullUsage
-            )
-        } catch let error as ProxyConfig.ValidationError {
-            throw LaunchResolutionError(
-                message: error.description,
-                presentation: .fullUsage
+        } catch let error as CLICommandError {
+            throw error
+        } catch {
+            throw CLICommandParser.validationError(
+                for: ProxyServerCommand.self,
+                message: String(describing: error)
             )
         }
 
@@ -159,127 +84,193 @@ extension XcodeMCPProxyServer {
             )
             try resolved.validateModernProtocolConfiguration()
         } catch {
-            throw LaunchResolutionError(
-                message: String(describing: error),
-                presentation: .fullUsage
+            throw CLICommandParser.validationError(
+                for: ProxyServerCommand.self,
+                message: String(describing: error)
             )
         }
-        let dryRun = parsed.dryRun || isTruthy(environment["DRY_RUN"])
-        let dryRunCommandLine = resolvedDryRunCommandLine(options: parsed, configuration: configuration)
 
-        if dryRun {
-            return .dryRun(dryRunCommandLine)
+        if command.dryRun || isTruthy(environment["DRY_RUN"]) {
+            return .dryRun(command.renderResolvedCommand(configuration: configuration))
         }
         return .start(
             preparedConfiguration: PreparedConfiguration(
                 configuration: configuration,
                 proxyConfig: resolved
             ),
-            forceRestart: parsed.forceRestart
+            forceRestart: command.forceRestart
         )
     }
-
-    package static let removedLazyInitializationMessage = CLIParser.removedLazyInitMessage
-    package static let removedXcodePIDMessage = CLIParser.removedXcodePIDMessage
 
     package static func bootstrapLogging(environment: [String: String]) {
         ProxyLogging.bootstrap(environment: environment)
     }
+}
 
-    package static func parseLaunchOptions(arguments: [String]) throws -> ParsedLaunchOptions {
-        let scan: ProxyCLIInvocationScanner.ServerScan
-        do {
-            scan = try ProxyCLIInvocationScanner.scanServer(arguments)
-        } catch let error as ProxyCLIInvocationScanner.Error {
-            throw LaunchResolutionError(
-                message: error.description,
-                presentation: .conciseUsageHint
-            )
+private extension ProxyServerCommand {
+    func resolveConfiguration(environment: [String: String]) throws -> ProxyConfig {
+        let listenAddress = try resolvedListenAddress(environment: environment)
+        let bridge = MCPBridgeInvocation.defaultMCPBridge
+        var resolvedUpstreamArguments = bridge.arguments
+        if let upstreamArgs {
+            resolvedUpstreamArguments =
+                upstreamArgs
+                .split(separator: ",")
+                .map(String.init)
+                .filter { $0.isEmpty == false }
         }
+        resolvedUpstreamArguments.append(contentsOf: upstreamArg)
 
-        return ParsedLaunchOptions(
-            forwardedArguments: scan.forwardedArgs,
-            showHelp: scan.showHelp,
-            showVersion: scan.showVersion,
-            hasListenFlag: scan.hasListenFlag,
-            hasHostFlag: scan.hasHostFlag,
-            hasPortFlag: scan.hasPortFlag,
-            hasConfigFlag: scan.hasConfigFlag,
-            hasAutoApproveFlag: scan.hasAutoApproveFlag,
-            hasRefreshCodeIssuesModeFlag: scan.hasRefreshCodeIssuesModeFlag,
-            forceRestart: scan.forceRestart,
-            dryRun: scan.dryRun
+        let refreshCodeIssuesMode = try resolvedRefreshCodeIssuesMode(
+            environment: environment
+        )
+        return ProxyConfig(
+            listenHost: listenAddress.host,
+            listenPort: listenAddress.port,
+            upstreamCommand: upstreamCommand ?? bridge.command,
+            upstreamArgs: resolvedUpstreamArguments,
+            upstreamProcessCount: upstreamProcesses ?? 1,
+            upstreamSessionID: sessionID ?? nonEmpty(environment["MCP_XCODE_SESSION_ID"]),
+            maxBodyBytes: maxBodyBytes ?? 1_048_576,
+            requestTimeout: requestTimeout?.seconds ?? 300,
+            configPath: config ?? nonEmpty(environment["MCP_XCODE_CONFIG"]),
+            discoveryFileURL: ProxyFilesystemLocations.discoveryFileURL(
+                environment: environment
+            ),
+            autoApproveXcodeDialog: autoApprove,
+            refreshCodeIssuesMode: refreshCodeIssuesMode
         )
     }
 
-    package static func applyLaunchDefaults(
-        from environment: [String: String],
-        to options: inout ParsedLaunchOptions
-    ) throws {
-        if !options.hasListenFlag && !options.hasHostFlag && !options.hasPortFlag {
-            if let listen = nonEmpty(environment["LISTEN"]) {
-                options.forwardedArguments += ["--listen", listen]
-            } else {
-                let envHost = nonEmpty(environment["HOST"])
-                let envPort = nonEmpty(environment["PORT"])
-                if envHost != nil || envPort != nil {
-                    let host = envHost ?? "localhost"
-                    let port = envPort ?? "8765"
-                    options.forwardedArguments += ["--listen", "\(host):\(port)"]
-                } else {
-                    options.forwardedArguments += ["--listen", "localhost:8765"]
-                }
+    func resolvedListenAddress(environment: [String: String]) throws -> CLIListenAddress {
+        if let listen {
+            return listen
+        }
+        if host != nil || port != nil {
+            return CLIListenAddress(host: host ?? "localhost", port: port ?? 8765)
+        }
+        if let value = nonEmpty(environment["LISTEN"]) {
+            guard let address = CLIListenAddress(argument: value) else {
+                throw CLICommandParser.validationError(
+                    for: ProxyServerCommand.self,
+                    message: "LISTEN must be a host:port value with a port in 0...65535"
+                )
             }
+            return address
         }
 
-        if !options.hasListenFlag, options.hasHostFlag, !options.hasPortFlag {
-            options.forwardedArguments += ["--port", "8765"]
+        let environmentHost = nonEmpty(environment["HOST"]) ?? "localhost"
+        let environmentPort: Int
+        if let value = nonEmpty(environment["PORT"]) {
+            guard let port = Int(value), (0...65_535).contains(port) else {
+                throw CLICommandParser.validationError(
+                    for: ProxyServerCommand.self,
+                    message: "PORT must be an integer in 0...65535"
+                )
+            }
+            environmentPort = port
+        } else {
+            environmentPort = 8765
         }
-
-        if isTruthy(environment["LAZY_INIT"]) {
-            throw LaunchResolutionError(
-                message: CLIParser.removedLazyInitMessage,
-                presentation: .conciseUsageHint
-            )
-        }
+        return CLIListenAddress(host: environmentHost, port: environmentPort)
     }
 
-    package static func resolvedDryRunCommandLine(
-        options: ParsedLaunchOptions,
-        configuration: XcodeMCPProxyServerConfiguration
-    ) -> String {
-        var parts = ["xcode-mcp-proxy-server"] + options.forwardedArguments
-        if options.hasConfigFlag == false, let configURL = configuration.configurationFileURL {
-            parts += ["--config", configURL.path]
+    func resolvedRefreshCodeIssuesMode(
+        environment: [String: String]
+    ) throws -> ProxyConfig.RefreshCodeIssuesMode {
+        if let refreshCodeIssuesMode {
+            return refreshCodeIssuesMode
         }
-        if options.hasRefreshCodeIssuesModeFlag == false,
-           configuration.featurePolicy.refreshCodeIssuesMode != .proxy {
-            parts += [
+        guard let value = nonEmpty(environment["MCP_XCODE_REFRESH_CODE_ISSUES_MODE"]) else {
+            return .proxy
+        }
+        guard let mode = ProxyConfig.RefreshCodeIssuesMode(rawValue: value) else {
+            throw CLICommandParser.validationError(
+                for: ProxyServerCommand.self,
+                message: "MCP_XCODE_REFRESH_CODE_ISSUES_MODE must be proxy or upstream"
+            )
+        }
+        return mode
+    }
+
+    func renderResolvedCommand(configuration: XcodeMCPProxyServerConfiguration) -> String {
+        var arguments = [
+            "xcode-mcp-proxy-server",
+            "--listen",
+            "\(configuration.bindAddress.host):\(configuration.bindAddress.port)",
+        ]
+        if let configPath = configuration.configurationFileURL?.path {
+            arguments += ["--config", configPath]
+        }
+        if autoApprove {
+            arguments.append("--auto-approve")
+        }
+        if let maxBodyBytes {
+            arguments += ["--max-body-bytes", String(maxBodyBytes)]
+        }
+        if let requestTimeout {
+            arguments += ["--request-timeout", requestTimeout.description]
+        }
+        if let upstreamCommand {
+            arguments += ["--upstream-command", upstreamCommand]
+        }
+        if let upstreamArgs {
+            arguments += ["--upstream-args", upstreamArgs]
+        }
+        for argument in upstreamArg {
+            arguments += ["--upstream-arg", argument]
+        }
+        if let upstreamProcesses {
+            arguments += ["--upstream-processes", String(upstreamProcesses)]
+        }
+        if let sessionID = configuration.upstream.sessionID {
+            arguments += ["--session-id", sessionID]
+        }
+        if let refreshCodeIssuesMode {
+            arguments += [
+                "--refresh-code-issues-mode",
+                refreshCodeIssuesMode.rawValue,
+            ]
+        } else if configuration.featurePolicy.refreshCodeIssuesMode != .proxy {
+            arguments += [
                 "--refresh-code-issues-mode",
                 configuration.featurePolicy.refreshCodeIssuesMode.rawValue,
             ]
         }
-        return parts.joined(separator: " ")
-    }
-
-    package static func nonEmpty(_ value: String?) -> String? {
-        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
-            return nil
+        if forceRestart {
+            arguments.append("--force-restart")
         }
-        return raw
+        return arguments.map(shellQuoted).joined(separator: " ")
     }
+}
 
-    package static func isTruthy(_ value: String?) -> Bool {
-        guard let raw = nonEmpty(value) else { return false }
-        return ["1", "true", "yes", "on"].contains(raw.lowercased())
+private func nonEmpty(_ value: String?) -> String? {
+    guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+        value.isEmpty == false
+    else {
+        return nil
     }
+    return value
+}
 
-    private static func executableName(arguments: [String], defaultExecutableName: String) -> String {
-        guard let rawExecutable = arguments.first, !rawExecutable.isEmpty else {
-            return defaultExecutableName
-        }
-
-        let name = URL(fileURLWithPath: rawExecutable).lastPathComponent
-        return name.isEmpty ? defaultExecutableName : name
+private func isTruthy(_ value: String?) -> Bool {
+    guard let value = nonEmpty(value) else {
+        return false
     }
+    return ["1", "true", "yes", "on"].contains(value.lowercased())
+}
+
+private let removedLazyInitializationMessage =
+    "The proxy always uses eager initialization; --lazy-init has been removed."
+
+private func shellQuoted(_ value: String) -> String {
+    let safeCharacters = CharacterSet.alphanumerics.union(
+        CharacterSet(charactersIn: "-._/:,@")
+    )
+    if value.isEmpty == false,
+        value.unicodeScalars.allSatisfy(safeCharacters.contains)
+    {
+        return value
+    }
+    return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }

@@ -4,35 +4,27 @@ import Testing
 
 @Suite
 struct StdioAdapterRunnerTests {
-    @Test func adapterRunnerPrintsVersionBeforeValidation() async {
-        let result = await runAdapter(
-            arguments: ["xcode-mcp-proxy", "--version", "--config", "/tmp/config.toml"]
-        )
+    @Test func adapterRunnerPrintsVersion() async {
+        let result = await runAdapter(arguments: ["xcode-mcp-proxy", "--version"])
 
         #expect(result.exitCode == 0)
-        #expect(result.stdout == ["xcode-mcp-proxy \(XcodeMCPProxyServer.productMetadata.version)"])
+        #expect(result.stdout == [XcodeMCPProxyServer.productMetadata.version])
         #expect(result.stderr.isEmpty)
     }
 
-    @Test func adapterRunnerHelpWinsOverVersion() async {
-        let result = await runAdapter(arguments: ["xcode-mcp-proxy", "--version", "--help"])
+    @Test func adapterRunnerPrintsGeneratedHelp() async {
+        let result = await runAdapter(arguments: ["xcode-mcp-proxy", "--help"])
 
         #expect(result.exitCode == 0)
         #expect(result.stderr.isEmpty)
-        #expect(result.stdout.first?.contains("Usage:") == true)
+        #expect(result.stdout.first?.contains("USAGE: xcode-mcp-proxy") == true)
     }
 
-    @Test func adapterRunnerRejectsRemovedStdioFlag() async {
-        let result = await runAdapter(arguments: ["xcode-mcp-proxy", "--stdio"])
-
-        #expect(result.exitCode == 1)
-        #expect(result.stdout.isEmpty)
-        #expect(result.stderr.first == "Unknown argument: --stdio")
-        #expect(result.stderr.contains { $0.contains("Usage:") })
-    }
-
-    @Test func adapterRunnerRejectsServerOnlyFlags() async {
+    @Test func adapterRunnerRejectsUnsupportedOptionsThroughArgumentParser() async {
         let invocations = [
+            ["xcode-mcp-proxy", "--stdio"],
+            ["xcode-mcp-proxy", "--lazy-init"],
+            ["xcode-mcp-proxy", "--xcode-pid", "1234"],
             ["xcode-mcp-proxy", "--listen", "127.0.0.1:9000"],
             ["xcode-mcp-proxy", "--config", "/tmp/proxy-config.toml"],
             ["xcode-mcp-proxy", "--auto-approve"],
@@ -40,21 +32,10 @@ struct StdioAdapterRunnerTests {
 
         for arguments in invocations {
             let result = await runAdapter(arguments: arguments)
-            #expect(result.exitCode == 1)
+            #expect(result.exitCode == 64)
             #expect(result.stdout.isEmpty)
-            #expect(result.stderr == [
-                "This option is only supported by xcode-mcp-proxy-server (proxy server).",
-                "Run: xcode-mcp-proxy-server --help",
-            ])
+            #expect(result.stderr.first?.contains("Unknown option") == true)
         }
-    }
-
-    @Test func adapterRunnerRejectsRemovedFlags() async {
-        let lazyInit = await runAdapter(arguments: ["xcode-mcp-proxy", "--lazy-init"])
-        #expect(lazyInit.stderr == [XcodeMCPProxyServer.removedLazyInitializationMessage])
-
-        let xcodePID = await runAdapter(arguments: ["xcode-mcp-proxy", "--xcode-pid", "1234"])
-        #expect(xcodePID.stderr == [XcodeMCPProxyServer.removedXcodePIDMessage])
     }
 
     @Test func adapterLauncherStartsInjectedAdapterWithDurationConfiguration() async throws {
@@ -119,11 +100,12 @@ struct StdioAdapterRunnerTests {
             let result = await runAdapter(
                 arguments: ["xcode-mcp-proxy", "--request-timeout", value]
             )
-            #expect(result.exitCode == 1)
+            #expect(result.exitCode == 64)
             #expect(result.stdout.isEmpty)
             #expect(
-                result.stderr.first
-                    == "--request-timeout must be a finite number greater than or equal to zero"
+                result.stderr.first?.contains(
+                    "--request-timeout must be a finite number greater than or equal to zero"
+                ) == true
             )
         }
     }
@@ -133,7 +115,7 @@ struct StdioAdapterRunnerTests {
 
         #expect(result.exitCode == 0)
         #expect(result.stderr.isEmpty)
-        #expect(result.stdout.first?.contains("--url url") == true)
+        #expect(result.stdout.first?.contains("--url <url>") == true)
         #expect(result.stdout.first?.contains("--stdio") == false)
     }
 }

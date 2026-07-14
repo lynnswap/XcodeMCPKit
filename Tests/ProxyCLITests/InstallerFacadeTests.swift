@@ -4,35 +4,31 @@ import Testing
 
 @Suite
 struct InstallerFacadeTests {
-    @Test func installerRunnerPrintsVersionBeforeValidation() throws {
-        let result = runInstaller(
-            arguments: ["xcode-mcp-proxy-install", "--version", "--unknown"]
-        )
+    @Test func installerRunnerPrintsVersion() {
+        let result = runInstaller(arguments: ["xcode-mcp-proxy-install", "--version"])
 
         #expect(result.exitCode == 0)
-        #expect(result.stdout == ["xcode-mcp-proxy-install \(XcodeMCPProxyServer.productMetadata.version)"])
+        #expect(result.stdout == [XcodeMCPProxyServer.productMetadata.version])
         #expect(result.stderr.isEmpty)
     }
 
-    @Test func installerRunnerPrintsVersionWhenFlagAppearsAsBindirValue() throws {
+    @Test func installerRunnerDoesNotReinterpretAnOptionValueAsVersion() {
         let result = runInstaller(
             arguments: ["xcode-mcp-proxy-install", "--bindir", "--version"]
         )
 
-        #expect(result.exitCode == 0)
-        #expect(result.stdout == ["xcode-mcp-proxy-install \(XcodeMCPProxyServer.productMetadata.version)"])
-        #expect(result.stderr.isEmpty)
+        #expect(result.exitCode == 64)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr.first?.contains("Missing value for '--bindir <path>'") == true)
     }
 
-    @Test func installerRunnerHelpWinsOverVersion() throws {
-        let result = runInstaller(
-            arguments: ["xcode-mcp-proxy-install", "--version", "--help"]
-        )
+    @Test func installerRunnerPrintsGeneratedHelp() throws {
+        let result = runInstaller(arguments: ["xcode-mcp-proxy-install", "--help"])
 
         #expect(result.exitCode == 0)
         #expect(result.stderr.isEmpty)
         let line = try #require(result.stdout.first)
-        #expect(line.contains("Usage:"))
+        #expect(line.contains("USAGE: xcode-mcp-proxy-install"))
     }
 
     @Test func installerLaunchPlanParsesOptionsAndPrefersBindir() throws {
@@ -98,41 +94,30 @@ struct InstallerFacadeTests {
         }
     }
 
-    @Test func installerRunnerPrintsUsageForHelp() throws {
-        let result = runInstaller(arguments: ["xcode-mcp-proxy-install", "--help"])
-
-        #expect(result.exitCode == 0)
-        #expect(result.stderr.isEmpty)
-        #expect(result.stdout.first?.contains("Usage:") == true)
-    }
-
-    @Test func installerRunnerTreatsHelpOnlyAsTopLevelFlag() throws {
+    @Test func installerRunnerRejectsMissingOptionValues() {
         let result = runInstaller(
             arguments: [
                 "xcode-mcp-proxy-install",
-                "--bindir", "--help",
-                "--dry-run",
+                "--bindir",
             ]
         )
 
-        #expect(result.exitCode == 0)
-        #expect(result.stderr.isEmpty)
-        #expect(result.stdout.isEmpty == false)
-        #expect(result.stdout.first?.contains("Usage:") == false)
+        #expect(result.exitCode == 64)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr.first?.contains("Missing value for '--bindir <path>'") == true)
     }
 
-    @Test func installerRunnerPreservesExplicitHelpBeforeParseErrors() throws {
+    @Test func installerRunnerRejectsUnknownOptions() {
         let result = runInstaller(
             arguments: [
                 "xcode-mcp-proxy-install",
-                "--help",
                 "--unknown",
             ]
         )
 
-        #expect(result.exitCode == 0)
-        #expect(result.stderr.isEmpty)
-        #expect(result.stdout.first?.contains("Usage:") == true)
+        #expect(result.exitCode == 64)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr.first?.contains("Unknown option '--unknown'") == true)
     }
 
     @Test func installerPlanUsesBinaryListAndBindirPriority() throws {
@@ -145,10 +130,11 @@ struct InstallerFacadeTests {
         #expect(plan.binDirectory.path == "/tmp/bin")
         #expect(plan.dryRun)
         #expect(plan.binaries.map(\.name) == XcodeMCPProxyInstaller.binaryNames)
-        #expect(plan.binaries.map(\.destinationURL.lastPathComponent) == [
-            "xcode-mcp-proxy",
-            "xcode-mcp-proxy-server",
-        ])
+        #expect(
+            plan.binaries.map(\.destinationURL.lastPathComponent) == [
+                "xcode-mcp-proxy",
+                "xcode-mcp-proxy-server",
+            ])
     }
 }
 

@@ -355,6 +355,7 @@ struct PublicProductContractTests {
             "no such module '\(moduleName)'",
             "no such module \"\(moduleName)\"",
             "no such module: \(moduleName)",
+            "unable to resolve module dependency: '\(moduleName)'",
         ]
         let reportedMissingModule = expectedFragments.contains { result.output.contains($0) }
         if !reportedMissingModule {
