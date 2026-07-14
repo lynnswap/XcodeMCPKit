@@ -1,4 +1,4 @@
-# Breaking API Migration — 2026-07
+# Breaking API Migration — v0.14.0
 
 This release replaces the previous proxy embedding and client lifecycle APIs.
 It does not provide deprecated wrappers for removed symbols.
