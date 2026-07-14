@@ -383,7 +383,7 @@ extension XcodeMCPProxyServer {
         }
 
         private static func release(_ resources: Resources) async throws {
-            await resources.autoApprover?.shutdown()
+            resources.autoApprover?.cancel()
             var firstError: (any Error)?
 
             do {

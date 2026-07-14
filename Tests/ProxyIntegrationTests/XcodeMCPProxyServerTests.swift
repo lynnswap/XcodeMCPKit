@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
@@ -332,8 +333,41 @@ struct XcodeMCPProxyServerTests {
         try await server.shutdown()
         try await waiter.value
         try await server.shutdown()
-        #expect(autoApprover.shutdownCount == 1)
+        #expect(autoApprover.cancelCount == 1)
         #expect((await server.snapshot()).phase == .stopped)
+    }
+
+    @Test func shutdownDoesNotWaitForCancelledAutoApproverWork() async throws {
+        let autoApprover = BlockingAutoApprover()
+        let upstream = RecordingUpstreamSlot()
+        let config = ProxyConfig(
+            listenHost: "127.0.0.1",
+            listenPort: 0,
+            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
+            maxBodyBytes: 1_048_576,
+            requestTimeout: 300,
+            autoApproveXcodeDialog: true
+        )
+        let server = XcodeMCPProxyServer(
+            proxyConfig: config,
+            dependencies: .init(
+                discoveryClient: .testValue,
+                makeAutoApprover: { _, _ in autoApprover },
+                makeRuntime: { config in
+                    makeServerTestRuntime(config: config, upstream: upstream)
+                }
+            )
+        )
+
+        _ = try await server.start()
+        try await autoApprover.waitUntilWorkStarts()
+
+        try await server.shutdown()
+
+        #expect(autoApprover.cancelCount == 1)
+        #expect(autoApprover.isWorkFinished == false)
+        await autoApprover.releaseWork()
     }
 
     @Test func unstartedServerDoesNotCreateHTTPGateway() async throws {
@@ -629,15 +663,10 @@ private enum DiscoveryWriteFailure: Error {
 
 private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermissionDialogAutoApprover {
     private let startCountBox = NIOLockedValueBox(0)
-    private let shutdownCountBox = NIOLockedValueBox(0)
     private let cancelCountBox = NIOLockedValueBox(0)
 
     var startCount: Int {
         startCountBox.withLockedValue { $0 }
-    }
-
-    var shutdownCount: Int {
-        shutdownCountBox.withLockedValue { $0 }
     }
 
     var cancelCount: Int {
@@ -648,12 +677,58 @@ private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermi
         startCountBox.withLockedValue { $0 += 1 }
     }
 
-    func shutdown() async {
-        shutdownCountBox.withLockedValue { $0 += 1 }
+    func cancel() {
+        cancelCountBox.withLockedValue { $0 += 1 }
+    }
+}
+
+private final class BlockingAutoApprover: @unchecked Sendable,
+    ProxyServerPermissionDialogAutoApprover
+{
+    private let started = TestSignal()
+    private let releaseSemaphore = DispatchSemaphore(value: 0)
+    private let taskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
+    private let cancelCountBox = NIOLockedValueBox(0)
+    private let isWorkFinishedBox = NIOLockedValueBox(false)
+
+    var cancelCount: Int {
+        cancelCountBox.withLockedValue { $0 }
+    }
+
+    var isWorkFinished: Bool {
+        isWorkFinishedBox.withLockedValue { $0 }
+    }
+
+    func start() {
+        let started = started
+        let releaseSemaphore = releaseSemaphore
+        let isWorkFinishedBox = isWorkFinishedBox
+        let task = Task.detached {
+            started.signal()
+            Self.waitForSynchronousWorkRelease(releaseSemaphore)
+            isWorkFinishedBox.withLockedValue { $0 = true }
+        }
+        taskBox.withLockedValue { $0 = task }
     }
 
     func cancel() {
         cancelCountBox.withLockedValue { $0 += 1 }
+        taskBox.withLockedValue { $0 }?.cancel()
+    }
+
+    func waitUntilWorkStarts() async throws {
+        try await started.wait(description: "waiting for blocking auto-approver work")
+    }
+
+    func releaseWork() async {
+        releaseSemaphore.signal()
+        await taskBox.withLockedValue { $0 }?.value
+    }
+
+    private static func waitForSynchronousWorkRelease(
+        _ semaphore: DispatchSemaphore
+    ) {
+        semaphore.wait()
     }
 }
 

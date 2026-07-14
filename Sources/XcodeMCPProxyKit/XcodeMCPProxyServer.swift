@@ -879,7 +879,6 @@ private extension XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode {
 
 protocol ProxyServerPermissionDialogAutoApprover: Sendable {
     func start()
-    func shutdown() async
     func cancel()
 }
 
