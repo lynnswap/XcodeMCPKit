@@ -339,6 +339,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             secondTargets: [newerTarget]
         )
         let routeCreations = LockedRecordedValues<pid_t>()
+        let reconcileCompletions = LockedRecordedValues<String>()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
             processRoutingEnabled: true,
@@ -347,6 +348,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 routeCreations.append(target.processID)
                 return [TestUpstreamClient()]
             },
+            testHooks: RuntimeCoordinatorTestHooks(
+                xcodeProcessReconcileCompleted: { reconcileCompletions.append($0) }
+            ),
             startImmediately: false
         )
         defer {
@@ -365,11 +369,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         try await discovery.secondStarted.waitUntilSignaled()
         #expect(try await nextRecordedValue(routeCreations, at: 1) == newerTarget.processID)
         #expect(discovery.callCount() == 2)
-        _ = try await waitWithTimeout("waiting for second reconcile commit") {
-            while manager.xcodeProcessRoutes.map(\.target.processID) != [newerTarget.processID] {
-                try await Task.sleep(for: .milliseconds(10))
-            }
-        }
+        #expect(try await nextRecordedValue(reconcileCompletions, at: 1) == "second_snapshot")
         #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [newerTarget.processID])
         let processRoutes = manager.debugSnapshot().processRoutes
         #expect(
@@ -424,6 +424,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             secondTargets: [recoveredTarget]
         )
         let routeCreations = LockedRecordedValues<pid_t>()
+        let reconcileCompletions = LockedRecordedValues<String>()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
             processRoutingEnabled: true,
@@ -432,6 +433,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 routeCreations.append(target.processID)
                 return [TestUpstreamClient()]
             },
+            testHooks: RuntimeCoordinatorTestHooks(
+                xcodeProcessReconcileCompleted: { reconcileCompletions.append($0) }
+            ),
             startImmediately: false
         )
         defer {
@@ -451,11 +455,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
         try await discovery.secondStarted.waitUntilSignaled()
         #expect(try await nextRecordedValue(routeCreations, at: 0) == recoveredTarget.processID)
         #expect(discovery.callCount() == 2)
-        _ = try await waitWithTimeout("waiting for recovered reconcile commit") {
-            while manager.xcodeProcessRoutes.map(\.target.processID) != [recoveredTarget.processID] {
-                try await Task.sleep(for: .milliseconds(10))
-            }
-        }
+        #expect(
+            try await nextRecordedValue(reconcileCompletions, at: 0)
+                == "queued_after_cancel"
+        )
         #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [recoveredTarget.processID])
         let processRoutes = manager.debugSnapshot().processRoutes
         #expect(processRoutes.map(\.processID) == [recoveredTarget.processID])
@@ -826,6 +829,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
                     && timeoutScheduler.isCancelled(at: $0) == false
             })
 
+        let retryScheduleIndex = timeoutScheduler.scheduledCount()
         await activationUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -839,19 +843,15 @@ struct RuntimeCoordinatorProcessRoutingTests {
             "waiting for empty catalog retry timeout",
             timeout: .seconds(2)
         ) {
-            while true {
-                if let index = (0..<timeoutScheduler.scheduledCount()).first(where: {
-                    $0 != catalogTimeoutIndex
-                        && timeoutScheduler.delay(at: $0)?.nanoseconds
-                            == TimeAmount.milliseconds(250).nanoseconds
-                        && timeoutScheduler.isCancelled(at: $0) == false
-                }) {
-                    return index
-                }
-                try await Task.sleep(for: .milliseconds(10))
-            }
+            try await timeoutScheduler.nextScheduled(at: retryScheduleIndex)
         }
 
+        #expect(retryIndex != catalogTimeoutIndex)
+        #expect(
+            timeoutScheduler.delay(at: retryIndex)?.nanoseconds
+                == TimeAmount.milliseconds(250).nanoseconds
+        )
+        #expect(timeoutScheduler.isCancelled(at: retryIndex) == false)
         #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex) == false)
         #expect(createdUpstreams.withLockedValue(\.count) == 1)
         #expect(timeoutScheduler.fire(at: retryIndex))
@@ -945,6 +945,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let target = xcodeProcessTarget(processID: 27020, xcodeVersion: "27.0")
         let upstream = TestUpstreamClient()
         let initializedUpstreams = LockedRecordedValues<Int>()
+        let catalogCommits = LockedRecordedValues<(pid_t, Int)>()
         var config = makeConfig(requestTimeout: 5)
         config.prewarmToolsList = false
         let fixture = RuntimeCoordinatorFixture(
@@ -955,7 +956,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ],
             processRoutingEnabled: true,
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamInitialized: { initializedUpstreams.append($0) }
+                upstreamInitialized: { initializedUpstreams.append($0) },
+                processRouteCatalogCommitted: { catalogCommits.append(($0, $1)) }
             ),
             startImmediately: false
         )
@@ -972,6 +974,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         ) {
             try await upstream.nextSent(at: 0)
         }
+        let firstCatalogCommitIndex = catalogCommits.count()
         await upstream.yield(
             .message(
                 try makeInitializeResponse(
@@ -1003,6 +1006,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
                     tools: [toolDescriptor(name: "BeforeDetach")]
                 ))
         )
+        #expect(
+            try await nextRecordedValue(catalogCommits, at: firstCatalogCommitIndex)
+                == (target.processID, 0)
+        )
         await manager.drainRuntimeTasksForTesting()
         #expect(manager.processControlPlane.catalog(forProcessID: target.processID) != nil)
 
@@ -1024,6 +1031,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 matching: { methodName(from: $0) == "initialize" }
             )
         }
+        let republishedCatalogCommitIndex = catalogCommits.count()
         await upstream.yield(
             .message(
                 try makeInitializeResponse(
@@ -1058,6 +1066,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
                     id: try extractUpstreamID(from: freshCatalog),
                     tools: [toolDescriptor(name: "AfterRepublish")]
                 ))
+        )
+        #expect(
+            try await nextRecordedValue(catalogCommits, at: republishedCatalogCommitIndex)
+                == (target.processID, 0)
         )
         await manager.drainRuntimeTasksForTesting()
 
@@ -2585,6 +2597,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         )
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let catalogCommits = LockedRecordedValues<(pid_t, Int)>()
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [old26Upstream, xcode27Upstream],
@@ -2599,6 +2612,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 createdUpstreams.withLockedValue { $0.append(upstream) }
                 return [upstream]
             },
+            testHooks: RuntimeCoordinatorTestHooks(
+                processRouteCatalogCommitted: { catalogCommits.append(($0, $1)) }
+            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -2716,6 +2732,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         ) {
             try await retryAttempt.nextSent(at: 0)
         }
+        let catalogCommitIndex = catalogCommits.count()
         await retryAttempt.yield(
             .message(
                 try makeInitializeResponse(
@@ -2748,16 +2765,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 )
             )
         )
-        _ = try await waitWithTimeout(
-            "waiting for relaunched 26 catalog surface",
-            timeout: .seconds(2)
-        ) {
-            while manager.processControlPlane.catalog(
-                forProcessID: relaunched26Target.processID
-            ) == nil {
-                try await Task.sleep(for: .milliseconds(10))
-            }
-        }
+        #expect(
+            try await nextRecordedValue(catalogCommits, at: catalogCommitIndex)
+                == (relaunched26Target.processID, 2)
+        )
 
         let snapshot = manager.debugSnapshot()
         #expect(
@@ -2834,7 +2845,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         await readiness.setReady(true)
         _ = try await readiness.nextCheck(at: 1)
-        await Task.yield()
         await manager.drainRuntimeTasksForTesting()
 
         #expect(await oldUpstream.startCount() == 0)
@@ -11673,6 +11683,130 @@ struct RuntimeCoordinatorWindowRoutingTests {
         #expect(snapshot?.upstreamIndex == nil)
         #expect(snapshot?.requestIDKey == nil)
         #expect(handle.markRegistered(registrationToken: UUID(), operationLease: testOperationLease(0)) == false)
+    }
+
+    @Test func controlPlaneRPCCancelBetweenPreflightAndEnqueueRemovesQueuedRequest()
+        async throws
+    {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let handle = ControlPlane.RPCHandle()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient()],
+            testHooks: RuntimeCoordinatorTestHooks(
+                controlPlaneRPCWillEnqueue: {
+                    handle.cancel()
+                }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        await #expect(throws: CancellationError.self) {
+            try await waitWithTimeout(
+                "waiting for pre-enqueue control-plane RPC cancellation",
+                timeout: .seconds(2)
+            ) {
+                try await manager.performControlPlaneRPC(
+                    route: .pinnedUpstream(0),
+                    purpose: "pre-enqueue-cancellation",
+                    label: "tools/list",
+                    requestObject: JSONRPC.Wire.requestObject(
+                        id: "pre-enqueue-cancellation",
+                        method: "tools/list"
+                    ),
+                    requestTimeout: .seconds(5),
+                    rpcHandle: handle
+                )
+            }
+        }
+        let schedulerSnapshot = manager.upstreamSlotScheduler.debugSnapshot()
+        #expect(schedulerSnapshot.queuedRequestCount == 0)
+        #expect(schedulerSnapshot.activeLeaseCountByUpstream.isEmpty)
+    }
+
+    @Test func controlPlaneRPCCancelBeforeLeaseActivationReleasesReservedSlot()
+        async throws
+    {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let handle = ControlPlane.RPCHandle()
+        let upstream = TestUpstreamClient()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamRequestWillStart: { _, descriptor in
+                    guard descriptor.label == "cancel-before-lease-activation" else {
+                        return
+                    }
+                    handle.cancel()
+                }
+            ),
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        await #expect(throws: CancellationError.self) {
+            try await waitWithTimeout(
+                "waiting for pre-activation control-plane RPC cancellation",
+                timeout: .seconds(2)
+            ) {
+                try await manager.performControlPlaneRPC(
+                    route: .pinnedUpstream(0),
+                    purpose: "pre-activation-cancellation",
+                    label: "cancel-before-lease-activation",
+                    requestObject: JSONRPC.Wire.requestObject(
+                        id: "pre-activation-cancellation",
+                        method: "tools/list"
+                    ),
+                    requestTimeout: .seconds(5),
+                    rpcHandle: handle
+                )
+            }
+        }
+        #expect(
+            manager.upstreamSlotScheduler.debugSnapshot().activeLeaseCountByUpstream.isEmpty
+        )
+
+        let followUp = Task {
+            try await manager.performControlPlaneRPC(
+                route: .pinnedUpstream(0),
+                purpose: "after-pre-activation-cancellation",
+                label: "follow-up-tools-list",
+                requestObject: JSONRPC.Wire.requestObject(
+                    id: "after-pre-activation-cancellation",
+                    method: "tools/list"
+                ),
+                requestTimeout: .seconds(5)
+            )
+        }
+        let followUpRequest = try await sentValue(
+            from: upstream,
+            at: 0,
+            timeout: .seconds(2)
+        )
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: followUpRequest),
+                    tools: []
+                )
+            )
+        )
+        _ = try await waitWithTimeout(
+            "waiting for follow-up control-plane RPC",
+            timeout: .seconds(2)
+        ) {
+            try await followUp.value
+        }
     }
 
     @Test func controlPlaneRPCHandleCancelAfterRegisterCapturesRegistrationState() {

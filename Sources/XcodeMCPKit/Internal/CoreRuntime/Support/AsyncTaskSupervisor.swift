@@ -17,9 +17,15 @@ package final class AsyncTaskSupervisor: @unchecked Sendable {
         var task: Task<Void, Never>?
     }
 
+    private struct IdleWaiter: Sendable {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     private struct State: Sendable {
         var acceptsNewTasks = true
         var records: [UUID: TaskRecord] = [:]
+        var idleWaiters: [UUID: IdleWaiter] = [:]
     }
 
     private let state = NIOLockedValueBox(State())
@@ -45,9 +51,7 @@ package final class AsyncTaskSupervisor: @unchecked Sendable {
 
     package func cancelAll() {
         let tasks = state.withLockedValue { state -> [Task<Void, Never>] in
-            let tasks = state.records.values.compactMap(\.task)
-            state.records.removeAll()
-            return tasks
+            state.records.values.compactMap(\.task)
         }
         for task in tasks {
             task.cancel()
@@ -62,9 +66,7 @@ package final class AsyncTaskSupervisor: @unchecked Sendable {
     package func beginShutdown() -> Drain {
         let tasks = state.withLockedValue { state -> [Task<Void, Never>] in
             state.acceptsNewTasks = false
-            let tasks = state.records.values.compactMap(\.task)
-            state.records.removeAll()
-            return tasks
+            return state.records.values.compactMap(\.task)
         }
         for task in tasks {
             task.cancel()
@@ -79,9 +81,49 @@ package final class AsyncTaskSupervisor: @unchecked Sendable {
         return Drain(tasks: tasks)
     }
 
-    private func finish(_ id: UUID) {
-        _ = state.withLockedValue { state in
-            state.records.removeValue(forKey: id)
+    package func waitUntilIdle() async {
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let shouldResume = state.withLockedValue { state in
+                    guard Task.isCancelled == false,
+                          state.records.isEmpty == false else {
+                        return true
+                    }
+                    state.idleWaiters[waiterID] = IdleWaiter(
+                        id: waiterID,
+                        continuation: continuation
+                    )
+                    return false
+                }
+                if shouldResume {
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            self.cancelIdleWaiter(id: waiterID)
         }
+    }
+
+    private func finish(_ id: UUID) {
+        let idleWaiters = state.withLockedValue { state -> [IdleWaiter] in
+            state.records.removeValue(forKey: id)
+            guard state.records.isEmpty else {
+                return []
+            }
+            let waiters = Array(state.idleWaiters.values)
+            state.idleWaiters.removeAll()
+            return waiters
+        }
+        for waiter in idleWaiters {
+            waiter.continuation.resume()
+        }
+    }
+
+    private func cancelIdleWaiter(id: UUID) {
+        let waiter = state.withLockedValue { state in
+            state.idleWaiters.removeValue(forKey: id)
+        }
+        waiter?.continuation.resume()
     }
 }

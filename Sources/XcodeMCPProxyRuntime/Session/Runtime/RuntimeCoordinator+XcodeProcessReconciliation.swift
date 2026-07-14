@@ -83,6 +83,7 @@ extension RuntimeCoordinator {
         reason: String
     ) {
         guard processRoutingEnabled else { return }
+        defer { testHooks.xcodeProcessReconcileCompleted?(reason) }
         let existingRoutes = processControlPlane.activeRoutes()
         let observedRoutes = MCPBridgeRuntime.orderedXcodeTargets(targets).map { target in
             existingRoutes.first(where: {
