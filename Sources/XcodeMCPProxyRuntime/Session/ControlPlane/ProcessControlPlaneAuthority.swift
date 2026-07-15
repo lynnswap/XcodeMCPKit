@@ -1251,9 +1251,11 @@ final class ProcessControlPlaneAuthority: Sendable {
                   var record = state.recordsByKey[key],
                   var attempt = record.attempt,
                   attempt.upstreamProof == upstreamProof,
-                  attempt.phase == .attaching else { return nil }
+                  [.attaching, .loadingCatalog].contains(attempt.phase) else { return nil }
             attempt.retryKind = nil
-            attempt.phase = .initialized
+            if attempt.phase == .attaching {
+                attempt.phase = .initialized
+            }
             record.attempt = attempt
             state.recordsByKey[key] = record
             return attempt.id.rawValue

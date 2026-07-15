@@ -777,6 +777,37 @@ struct ControlPlaneAuthorityTests {
         #expect(attaching.readinessWaiterCount == 0)
     }
 
+    @Test func channelInitializationPreservesCatalogLoadStartedByForegroundRequest() throws {
+        let target = xcodeProcessTarget(processID: 41031, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let proof = testTopologyProof(0)
+        let reservation = try #require(authority.reserveActivation(
+            routeID: route.id,
+            upstreamProof: proof,
+            nowUptimeNs: 1,
+            readinessToken: UpstreamReadinessWaiterToken()
+        )).0
+        _ = try #require(authority.beginAttaching(reservation, nowUptimeNs: 2))
+        let (catalogLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 3
+        ))
+
+        let attempt = authority.markChannelInitialized(
+            routeID: route.id,
+            upstreamProof: proof
+        )
+
+        #expect(attempt == catalogLease.attempt)
+        #expect(authority.validateCatalogLoad(catalogLease))
+        #expect(
+            authority.attemptSnapshot(processID: target.processID)?.phase
+                == .loadingCatalog
+        )
+    }
+
     @Test func windowUpdatesDoNotInvalidateCatalogLease() throws {
         let target = xcodeProcessTarget(processID: 41004, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0])])
