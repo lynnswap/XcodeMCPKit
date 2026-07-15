@@ -122,12 +122,25 @@ private struct ProxyToolVerifier {
         }
 
         let client = try await connectToProxy(server: server)
-        defer {
-            Task {
-                await client.close()
-            }
+        do {
+            let result = try await verify(
+                client: client,
+                fixture: fixture,
+                outputRoot: outputRoot
+            )
+            await client.close()
+            return result
+        } catch {
+            await client.close()
+            throw error
         }
+    }
 
+    private func verify(
+        client: XcodeMCP,
+        fixture: FixtureLayout,
+        outputRoot: URL
+    ) async throws -> Bool {
         var state = VerificationState(fixture: fixture)
         let tools = try await client.listTools()
         state.availableTools = Set(tools.map(\.name))

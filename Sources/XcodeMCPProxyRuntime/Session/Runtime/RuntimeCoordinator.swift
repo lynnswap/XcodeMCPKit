@@ -72,6 +72,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         )?
     var primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)?
     var ownerRouteProofsResolved: (@Sendable () -> Void)?
+    var healthProbeResponseWaiterWillRegister: (@Sendable () -> Void)?
 
     init(
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
@@ -99,6 +100,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
             )? = nil,
         primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)? = nil,
         ownerRouteProofsResolved: (@Sendable () -> Void)? = nil,
+        healthProbeResponseWaiterWillRegister: (@Sendable () -> Void)? = nil,
     ) {
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
@@ -111,6 +113,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.upstreamRequestWillStart = upstreamRequestWillStart
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
         self.ownerRouteProofsResolved = ownerRouteProofsResolved
+        self.healthProbeResponseWaiterWillRegister = healthProbeResponseWaiterWillRegister
     }
 }
 
@@ -765,8 +768,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                         let summary: String
                         if state.initInFlight {
                             summary = "initializing"
-                        } else if state.isInitialized {
+                        } else if state.initPhase.isUsableInitialized {
                             summary = "initialized"
+                        } else if state.isInitialized {
+                            summary = "verifying_bridge_attach"
                         } else {
                             summary = "idle"
                         }
@@ -1140,7 +1145,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         guard let documentationProviderManager else { return }
         let initializedUpstreamIndices = Set(
             upstreamHealthManager.activeStatesSnapshot().compactMap { id, state in
-                state.isInitialized ? id.rawValue : nil
+                state.initPhase.isUsableInitialized ? id.rawValue : nil
             }
         )
         guard

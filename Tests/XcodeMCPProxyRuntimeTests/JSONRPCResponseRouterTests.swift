@@ -84,15 +84,21 @@ struct JSONRPCResponseRouterTests {
 
     @Test func responseRouterTimesOutRequests() async throws {
         let eventLoop = EmbeddedEventLoop()
+        let didTimeout = NIOLockedValueBox(false)
         let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(1),
             hasActiveClients: { false },
             sendNotification: { _ in }
         )
 
-        let future = router.registerRequest(idKey: "1", on: eventLoop)
+        let future = router.registerRequest(
+            idKey: "1",
+            on: eventLoop,
+            onTimeout: { didTimeout.withLockedValue { $0 = true } }
+        )
         eventLoop.advanceTime(by: .seconds(1))
         eventLoop.run()
+        #expect(didTimeout.withLockedValue { $0 })
 
         do {
             _ = try await future.get()
@@ -128,6 +134,33 @@ struct JSONRPCResponseRouterTests {
         }
         let buffer = try await replacement.future.get()
         #expect(bufferString(buffer) == response)
+    }
+
+    @Test func responseReceiptWinsBeforeScheduledFutureDelivery() async throws {
+        let eventLoop = EmbeddedEventLoop()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let didTimeout = NIOLockedValueBox(false)
+        let router = JSONRPCResponseRouter(
+            requestTimeout: nil,
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
+        let registration = router.registerRequestPending(
+            idKey: "1",
+            on: eventLoop,
+            timeout: .seconds(1),
+            timeoutScheduler: timeoutScheduler.scheduler(),
+            onTimeout: { didTimeout.withLockedValue { $0 = true } }
+        )
+        let response = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
+
+        router.handleIncoming(Data(response.utf8))
+        #expect(timeoutScheduler.fire(at: 0))
+        eventLoop.run()
+
+        let buffer = try await registration.future.get()
+        #expect(bufferString(buffer) == response)
+        #expect(didTimeout.withLockedValue { $0 } == false)
     }
 
     @Test func responseRouterDisablesTimeoutWhenRequestTimeoutIsNil() async throws {

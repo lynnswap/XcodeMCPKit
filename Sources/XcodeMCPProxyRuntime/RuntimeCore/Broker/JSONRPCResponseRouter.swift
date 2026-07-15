@@ -4,6 +4,11 @@ import NIO
 import NIOConcurrencyHelpers
 
 final class JSONRPCResponseRouter: Sendable {
+    typealias TimeoutScheduler = @Sendable (
+        _ delay: TimeAmount,
+        _ operation: @escaping @Sendable () -> Void
+    ) -> RuntimeScheduledTimeout
+
     struct PendingRegistration {
         let token: UUID
         let future: EventLoopFuture<ByteBuffer>
@@ -13,7 +18,7 @@ final class JSONRPCResponseRouter: Sendable {
         var token: UUID
         var eventLoop: EventLoop
         var promise: EventLoopPromise<ByteBuffer>
-        var timeout: Scheduled<Void>?
+        var timeout: RuntimeScheduledTimeout?
         var onTimeout: (@Sendable () -> Void)?
     }
 
@@ -77,16 +82,25 @@ final class JSONRPCResponseRouter: Sendable {
         idKey: String,
         on eventLoop: EventLoop,
         timeout: TimeAmount? = nil,
+        timeoutScheduler: TimeoutScheduler? = nil,
         onTimeout: (@Sendable () -> Void)? = nil
     ) -> PendingRegistration {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
         let token = UUID()
         let effectiveTimeout = timeout ?? requestTimeout
         let timeout = effectiveTimeout.map { timeout in
-            eventLoop.scheduleTask(in: timeout) { [weak self] in
+            let operation: @Sendable () -> Void = { [weak self] in
                 guard let self else { return }
                 self.failTimeout(idKey: idKey, token: token)
             }
+            if let timeoutScheduler {
+                return timeoutScheduler(timeout, operation)
+            }
+            return RuntimeScheduledTimeout.schedule(
+                on: eventLoop,
+                in: timeout,
+                operation: operation
+            )
         }
         let displaced = state.withLockedValue { state -> Pending? in
             let existing = state.pendingByID[idKey]

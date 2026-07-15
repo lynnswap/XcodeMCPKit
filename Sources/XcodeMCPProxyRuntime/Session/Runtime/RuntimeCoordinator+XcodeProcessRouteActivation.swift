@@ -119,12 +119,6 @@ extension RuntimeCoordinator {
             upstreamIndex: upstreamIndex,
             mode: .processRouteActivation(reservation)
         )
-        guard isInitialized() else {
-            return
-        }
-        for secondaryUpstreamIndex in route.upstreamIndices where secondaryUpstreamIndex != upstreamIndex {
-            startUpstreamWarmInitialize(upstreamIndex: secondaryUpstreamIndex)
-        }
     }
 
     func processRouteActivationOwnsPrimaryInitialize(upstreamIndex: Int) -> Bool {
@@ -540,8 +534,30 @@ extension RuntimeCoordinator {
         _ initializeClaim: UpstreamHealthManager.InitializeClaim
     ) -> Bool {
         guard let proof = initializeClaim.topologyProof else { return false }
+        let requestsBridgePoolRecovery: Bool
+        if initializeClaim.owner == .regular {
+            requestsBridgePoolRecovery = true
+        } else {
+            requestsBridgePoolRecovery = false
+        }
+        return replaceOrRetireInitializeChannel(
+            proof,
+            expectedRouteID: nil,
+            requestsBridgePoolRecovery: requestsBridgePoolRecovery
+        ) != nil
+    }
+
+    @discardableResult
+    func replaceOrRetireInitializeChannel(
+        _ proof: UpstreamTopologyProof,
+        expectedRouteID: ProcessRouteID?,
+        requestsBridgePoolRecovery: Bool
+    ) -> UpstreamTopologyProof? {
         let upstreamIndex = proof.slotID.rawValue
         let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex)
+        if let expectedRouteID, route?.id != expectedRouteID {
+            return nil
+        }
         if let route {
             let replacements = dynamicUpstreamFactory?(route.target) ?? []
             if let replacement = replacements.first,
@@ -554,19 +570,21 @@ extension RuntimeCoordinator {
                 for unused in replacements.dropFirst() {
                     addRuntimeTask { await unused.stop() }
                 }
-                applyProcessControlPlaneTransition(
-                    processControlPlane.requestBridgePoolRecovery(
-                        routeID: route.id,
-                        upstreamID: replacementLease.proof.slotID
+                if requestsBridgePoolRecovery {
+                    applyProcessControlPlaneTransition(
+                        processControlPlane.requestBridgePoolRecovery(
+                            routeID: route.id,
+                            upstreamID: replacementLease.proof.slotID
+                        )
                     )
-                )
-                return true
+                }
+                return replacementLease.proof
             }
             for unused in replacements {
                 addRuntimeTask { await unused.stop() }
             }
         }
-        guard let transition = upstreamTopology.retire(proof) else { return false }
+        guard let transition = upstreamTopology.retire(proof) else { return nil }
         publishUpstreamTopology(transition.snapshot)
         for retired in transition.retired {
             addRuntimeTask { await retired.slot.stop() }
@@ -579,7 +597,7 @@ extension RuntimeCoordinator {
             ))
             triggerXcodeProcessReconcile(reason: "initialize_channel_replacement_unavailable")
         }
-        return false
+        return nil
     }
 
 }

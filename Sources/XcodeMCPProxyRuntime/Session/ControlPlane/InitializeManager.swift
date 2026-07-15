@@ -444,6 +444,19 @@ final class InitializeManager: Sendable {
         }
     }
 
+    /// Retains a canonical participant while bridge attachment is verified.
+    /// The preparation shares the downstream waiter lock so shutdown cannot
+    /// interleave between accepting the initialized notification and owning
+    /// the deferred participant.
+    func prepareInitializeParticipantForBridgeVerification(
+        commit: () -> Bool
+    ) -> Bool {
+        state.withLockedValue { state in
+            guard !state.isShuttingDown else { return false }
+            return commit()
+        }
+    }
+
     /// Runs the topology/health/canonical commit while holding the same lock
     /// that owns downstream initialize waiters. A timeout can win before this
     /// transaction starts, or publication can win and drain the waiters, but

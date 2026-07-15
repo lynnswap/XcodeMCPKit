@@ -77,14 +77,23 @@ enum ProcessControlPlaneEffect: Sendable {
     case restoreBridgePool(ProcessBridgePoolRecovery)
 }
 
-struct ProcessBridgePoolRecovery: Sendable {
+struct ProcessBridgePoolRecovery: Sendable, Hashable {
     let routeID: ProcessRouteID
-    let upstreamIDs: [UpstreamSlotID]
+    let upstreamID: UpstreamSlotID
+    fileprivate let generation: UInt64
 }
 
-struct ProcessBridgeRecovery: Sendable {
-    let routeID: ProcessRouteID
+struct ProcessBridgeRecovery: Sendable, Hashable {
+    let reservation: ProcessBridgePoolRecovery
     let topologyProof: UpstreamTopologyProof
+
+    var routeID: ProcessRouteID { reservation.routeID }
+    var upstreamID: UpstreamSlotID { reservation.upstreamID }
+}
+
+struct ProcessBridgeRecoveryRetry: Sendable {
+    let reservation: ProcessBridgePoolRecovery
+    let delay: TimeAmount
 }
 
 struct ProcessControlPlaneTransition: Sendable {
@@ -454,7 +463,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var catalogCooldown: Cooldown
         var admissionRevision: UInt64
         var catalogEligibilityEstablished: Bool
-        var pendingBridgeRecoveryUpstreamIDs: Set<UpstreamSlotID>
+        var bridgeRecovery: BridgeRecoveryState
         var nextAttemptID: Int
         var attempt: Attempt?
 
@@ -496,6 +505,35 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
     }
 
+    private struct BridgeRecoveryState: Sendable {
+        enum Phase: Sendable {
+            case idle
+            case attempting(ProcessBridgePoolRecovery)
+            case waitingRetry(ProcessBridgePoolRecovery, RuntimeScheduledTimeout?)
+        }
+
+        var pendingUpstreamIDs: Set<UpstreamSlotID>
+        var phase: Phase = .idle
+        var generation: UInt64 = 0
+        var consecutiveFailureCount = 0
+
+        mutating func reset(pendingUpstreamIDs: Set<UpstreamSlotID>)
+            -> [ProcessControlPlaneEffect]
+        {
+            let effects: [ProcessControlPlaneEffect]
+            if case .waitingRetry(_, let timeout) = phase, let timeout {
+                effects = [.cancelTimeout(timeout)]
+            } else {
+                effects = []
+            }
+            generation &+= 1
+            self.pendingUpstreamIDs = pendingUpstreamIDs
+            phase = .idle
+            consecutiveFailureCount = 0
+            return effects
+        }
+    }
+
     private struct State: Sendable {
         var recordsByKey: [InstanceKey: XcodeProcessOwner] = [:]
         var order: [InstanceKey] = []
@@ -534,6 +572,27 @@ final class ProcessControlPlaneAuthority: Sendable {
         state = NIOLockedValueBox(initialState)
     }
 
+    /// Releases one configured sibling without requiring an existing catalog.
+    /// A verified sibling may be the first usable catalog source, so a catalog
+    /// barrier here would make recovery and catalog bootstrap depend on each other.
+    func beginBridgePoolRecovery(
+        routeID: ProcessRouteID
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            guard let key = Self.key(routeID: routeID, in: state),
+                  var owner = state.recordsByKey[key],
+                  owner.state == .active else {
+                return .none
+            }
+            let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
+            state.recordsByKey[key] = owner
+            return ProcessControlPlaneTransition(
+                addedRoutes: [], retiredRoutes: [], effects: effects,
+                publishesToolsListChanged: false
+            )
+        }
+    }
+
     func activeRoutes() -> [XcodeProcessRoute] {
         state.withLockedValue { state in Self.activeRoutes(in: state) }
     }
@@ -550,16 +609,130 @@ final class ProcessControlPlaneAuthority: Sendable {
             else {
                 return .none
             }
-            owner.pendingBridgeRecoveryUpstreamIDs.insert(upstreamID)
-            let effects: [ProcessControlPlaneEffect]
-            if state.catalogsByProcessID[owner.route.target.processID] != nil {
-                effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
-            } else {
-                effects = []
+            switch owner.bridgeRecovery.phase {
+            case .attempting(let current) where current.upstreamID == upstreamID:
+                return .none
+            case .waitingRetry(let current, _) where current.upstreamID == upstreamID:
+                return .none
+            case .idle, .attempting, .waitingRetry:
+                break
             }
+            owner.bridgeRecovery.pendingUpstreamIDs.insert(upstreamID)
+            let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
             state.recordsByKey[key] = owner
             return ProcessControlPlaneTransition(
                 addedRoutes: [], retiredRoutes: [], effects: effects,
+                publishesToolsListChanged: false
+            )
+        }
+    }
+
+    func completeBridgeRecovery(
+        _ recovery: ProcessBridgePoolRecovery
+    ) -> ProcessControlPlaneTransition {
+        completeBridgeRecoveryIfCurrent(recovery) ?? .none
+    }
+
+    func completeBridgeRecoveryIfCurrent(
+        _ recovery: ProcessBridgePoolRecovery,
+        commit: () -> Bool = { true }
+    ) -> ProcessControlPlaneTransition? {
+        state.withLockedValue { state in
+            guard let key = Self.key(routeID: recovery.routeID, in: state),
+                  var owner = state.recordsByKey[key],
+                  case .attempting(let current) = owner.bridgeRecovery.phase,
+                  current == recovery else { return nil }
+            let previousOwner = owner
+            owner.bridgeRecovery.phase = .idle
+            owner.bridgeRecovery.consecutiveFailureCount = 0
+            let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
+            state.recordsByKey[key] = owner
+            guard commit() else {
+                state.recordsByKey[key] = previousOwner
+                return nil
+            }
+            return ProcessControlPlaneTransition(
+                addedRoutes: [], retiredRoutes: [], effects: effects,
+                publishesToolsListChanged: false
+            )
+        }
+    }
+
+    func validateBridgeRecovery(_ recovery: ProcessBridgePoolRecovery) -> Bool {
+        state.withLockedValue { state in
+            guard let key = Self.key(routeID: recovery.routeID, in: state),
+                  let owner = state.recordsByKey[key],
+                  case .attempting(let current) = owner.bridgeRecovery.phase else {
+                return false
+            }
+            return current == recovery
+        }
+    }
+
+    func prepareBridgeRecoveryRetry(
+        _ recovery: ProcessBridgePoolRecovery
+    ) -> ProcessBridgeRecoveryRetry? {
+        state.withLockedValue { state in
+            guard let key = Self.key(routeID: recovery.routeID, in: state),
+                  var owner = state.recordsByKey[key],
+                  case .attempting(let current) = owner.bridgeRecovery.phase,
+                  current == recovery else { return nil }
+            owner.bridgeRecovery.consecutiveFailureCount += 1
+            owner.bridgeRecovery.phase = .waitingRetry(recovery, nil)
+            state.recordsByKey[key] = owner
+            return ProcessBridgeRecoveryRetry(
+                reservation: recovery,
+                delay: owner.bridgeRecovery.consecutiveFailureCount == 1
+                    ? .seconds(1)
+                    : .seconds(10)
+            )
+        }
+    }
+
+    func attachBridgeRecoveryRetryTimeout(
+        _ timeout: RuntimeScheduledTimeout,
+        to recovery: ProcessBridgePoolRecovery
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            guard let key = Self.key(routeID: recovery.routeID, in: state),
+                  var owner = state.recordsByKey[key],
+                  case .waitingRetry(let current, let previous) = owner.bridgeRecovery.phase,
+                  current == recovery else {
+                return ProcessControlPlaneTransition(
+                    addedRoutes: [], retiredRoutes: [],
+                    effects: [.cancelTimeout(timeout)],
+                    publishesToolsListChanged: false
+                )
+            }
+            owner.bridgeRecovery.phase = .waitingRetry(recovery, timeout)
+            state.recordsByKey[key] = owner
+            return ProcessControlPlaneTransition(
+                addedRoutes: [], retiredRoutes: [],
+                effects: previous.map { [.cancelTimeout($0)] } ?? [],
+                publishesToolsListChanged: false
+            )
+        }
+    }
+
+    func handleBridgeRecoveryRetryFired(
+        _ recovery: ProcessBridgePoolRecovery
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            guard let key = Self.key(routeID: recovery.routeID, in: state),
+                  var owner = state.recordsByKey[key],
+                  case .waitingRetry(let current, _) = owner.bridgeRecovery.phase,
+                  current == recovery else { return .none }
+            owner.bridgeRecovery.generation &+= 1
+            let next = ProcessBridgePoolRecovery(
+                routeID: owner.route.id,
+                upstreamID: recovery.upstreamID,
+                generation: owner.bridgeRecovery.generation
+            )
+            owner.bridgeRecovery.phase = .attempting(next)
+            state.recordsByKey[key] = owner
+            return ProcessControlPlaneTransition(
+                addedRoutes: [], retiredRoutes: [],
+                effects: [.restoreBridgePool(next)],
                 publishesToolsListChanged: false
             )
         }
@@ -746,7 +919,6 @@ final class ProcessControlPlaneAuthority: Sendable {
                             effects.append(contentsOf: attempt.detachedEffects())
                             record.attempt = nil
                         }
-                        record.pendingBridgeRecoveryUpstreamIDs.removeAll()
                         Self.removeCatalog(
                             processID: record.route.target.processID,
                             from: &state
@@ -759,6 +931,9 @@ final class ProcessControlPlaneAuthority: Sendable {
                             target: target,
                             upstreamIndices: observedRoute.upstreamIndices
                         )
+                        effects.append(contentsOf: record.bridgeRecovery.reset(
+                            pendingUpstreamIDs: Self.secondaryUpstreamIDs(in: record.route)
+                        ))
                         if record.catalogEligibilityEstablished == false {
                             let replacementIDs = Set(
                                 observedRoute.upstreamIndices.map(
@@ -803,6 +978,9 @@ final class ProcessControlPlaneAuthority: Sendable {
                 record.missingSinceUptimeNs = nowUptimeNs
                 record.lastReconcileReason = reason
                 effects.append(contentsOf: record.clearAllCooldowns().effects)
+                effects.append(contentsOf: record.bridgeRecovery.reset(
+                    pendingUpstreamIDs: []
+                ))
                 if let attempt = record.attempt {
                     effects.append(contentsOf: attempt.detachedEffects())
                     record.attempt = nil
@@ -1577,13 +1755,22 @@ final class ProcessControlPlaneAuthority: Sendable {
     ) -> ProcessControlPlaneTransition {
         state.withLockedValue { state in
             state.catalogEpoch = CatalogEpoch(rawValue: state.catalogEpoch.rawValue &+ 1)
-            let effects = Self.invalidateAttempts(in: &state)
+            var effects = Self.invalidateAttempts(in: &state)
             switch reason {
             case .reset:
                 state.catalogsByProcessID.removeAll()
                 state.processIDByUpstreamID.removeAll()
                 state.unboundCatalogRaw = nil
                 state.unboundCatalogSource = nil
+                for key in state.order {
+                    guard var record = state.recordsByKey[key] else { continue }
+                    effects.append(contentsOf: record.bridgeRecovery.reset(
+                        pendingUpstreamIDs: record.state == .active
+                            ? Self.secondaryUpstreamIDs(in: record.route)
+                            : []
+                    ))
+                    state.recordsByKey[key] = record
+                }
             case .routeMembershipChanged, .exposureChanged:
                 break
             }
@@ -1610,6 +1797,11 @@ final class ProcessControlPlaneAuthority: Sendable {
             for key in state.order {
                 guard var record = state.recordsByKey[key] else { continue }
                 effects.append(contentsOf: record.clearAllCooldowns().effects)
+                effects.append(contentsOf: record.bridgeRecovery.reset(
+                    pendingUpstreamIDs: record.state == .active
+                        ? Self.secondaryUpstreamIDs(in: record.route)
+                        : []
+                ))
                 record.attempt = nil
                 record.catalogEligibilityEstablished = false
                 record.admissionRevision &+= 1
@@ -1864,6 +2056,9 @@ final class ProcessControlPlaneAuthority: Sendable {
             record.admissionRevision &+= 1
             var effects = record.attempt?.detachedEffects() ?? []
             effects.append(contentsOf: record.clearAllCooldowns().effects)
+            effects.append(contentsOf: record.bridgeRecovery.reset(
+                pendingUpstreamIDs: []
+            ))
             record.attempt = nil
             state.recordsByKey[key] = record
             Self.removeCatalog(processID: record.route.target.processID, from: &state)
@@ -2156,7 +2351,9 @@ final class ProcessControlPlaneAuthority: Sendable {
             catalogEligibilityEstablished: Set(
                 route.upstreamIndices.map(UpstreamSlotID.init(rawValue:))
             ).isDisjoint(with: state.usability.recoveryAwareUsableUpstreamIDs) == false,
-            pendingBridgeRecoveryUpstreamIDs: [],
+            bridgeRecovery: BridgeRecoveryState(
+                pendingUpstreamIDs: Self.secondaryUpstreamIDs(in: route)
+            ),
             nextAttemptID: 0,
             attempt: nil
         )
@@ -2167,6 +2364,12 @@ final class ProcessControlPlaneAuthority: Sendable {
     private static func reorderActiveKeys(_ orderedKeys: [InstanceKey], in state: inout State) {
         let activeSet = Set(orderedKeys)
         state.order = orderedKeys + state.order.filter { activeSet.contains($0) == false }
+    }
+
+    private static func secondaryUpstreamIDs(
+        in route: XcodeProcessRoute
+    ) -> Set<UpstreamSlotID> {
+        Set(route.upstreamIndices.dropFirst().map(UpstreamSlotID.init(rawValue:)))
     }
 
     private static func activeRoutes(in state: State) -> [XcodeProcessRoute] {
@@ -2227,16 +2430,20 @@ final class ProcessControlPlaneAuthority: Sendable {
     private static func takeBridgePoolRecoveryEffects(
         owner: inout XcodeProcessOwner
     ) -> [ProcessControlPlaneEffect] {
-        guard owner.pendingBridgeRecoveryUpstreamIDs.isEmpty == false else { return [] }
-        let upstreamIDs = owner.pendingBridgeRecoveryUpstreamIDs.sorted {
-            $0.rawValue < $1.rawValue
-        }
-        owner.pendingBridgeRecoveryUpstreamIDs.removeAll()
+        guard case .idle = owner.bridgeRecovery.phase,
+              let upstreamID = owner.bridgeRecovery.pendingUpstreamIDs.min(by: {
+                  $0.rawValue < $1.rawValue
+              }) else { return [] }
+        owner.bridgeRecovery.pendingUpstreamIDs.remove(upstreamID)
+        owner.bridgeRecovery.generation &+= 1
+        let recovery = ProcessBridgePoolRecovery(
+            routeID: owner.route.id,
+            upstreamID: upstreamID,
+            generation: owner.bridgeRecovery.generation
+        )
+        owner.bridgeRecovery.phase = .attempting(recovery)
         return [
-            .restoreBridgePool(ProcessBridgePoolRecovery(
-                routeID: owner.route.id,
-                upstreamIDs: upstreamIDs
-            ))
+            .restoreBridgePool(recovery)
         ]
     }
 
