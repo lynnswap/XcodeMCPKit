@@ -936,6 +936,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             startingAtEventIndex: firstRetrySearchIndex
         )
         #expect(try await secondary.nextStopCount() == 1)
+        #expect(manager.canonicalHandshakeState.hasInitializeParticipants() == false)
         let firstReplacement = try #require(
             createdPools.withLockedValue { $0.dropFirst().first?.first }
         )
@@ -1046,6 +1047,46 @@ struct RuntimeCoordinatorProcessRoutingTests {
         )
         #expect(route.upstreamIndices == [1, 2])
         #expect(route.usableSlotCount == 2)
+    }
+
+    @Test func healthProbeWaiterRegistrationRejectionSettlesProbe() throws {
+        let upstream = TestUpstreamClient()
+        let runtimeBox = WeakRuntimeCoordinatorBox()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            nowUptimeNanoseconds: { 15_000_000_000 },
+            testHooks: RuntimeCoordinatorTestHooks(
+                healthProbeResponseWaiterWillRegister: {
+                    _ = runtimeBox.value?.runtimeTasks.beginShutdown()
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let proof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        _ = manager.upstreamHealthManager.markRequestTimedOut(proof, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(proof, nowUptimeNs: 0)
+        _ = manager.upstreamHealthManager.markRequestTimedOut(proof, nowUptimeNs: 0)
+        let lease = try #require(
+            manager.upstreamHealthManager.earliestInitializedQuarantineRecovery()
+        )
+        let probe = try #require(
+            manager.upstreamHealthManager.beginQuarantineRecovery(
+                lease,
+                nowUptimeNs: 15_000_000_000
+            )
+        )
+
+        manager.probeUpstreamHealth(probe)
+
+        #expect(
+            manager.upstreamHealthManager.state(for: proof.slotID)?
+                .healthProbeInFlight == false
+        )
+        #expect(manager.upstreamHealthManager.anyRecoveryInFlight() == false)
     }
 
     @Test func processRouteActivationEmptyCatalogRetryPreservesCatalogTimeout()
@@ -2156,7 +2197,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(methodName(from: secondInitialize) == "initialize")
     }
 
-    @Test func processRouteActivationBootstrapsCatalogFromVerifiedSecondaryAfterPrimaryFailure()
+    @Test
+    func processRouteActivationBootstrapsCatalogAndHandshakeFromVerifiedSecondaryAfterPrimaryFailure()
         async throws
     {
         let existingUpstream = TestUpstreamClient()
@@ -2165,8 +2207,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
         let catalogCommits = LockedRecordedValues<(pid_t, Int)>()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [existingUpstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: existingTarget, upstreamIndices: [0])
             ],
@@ -2244,6 +2288,21 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(failedRefresh.0 == 1)
         #expect(failedRefresh.1 == false)
 
+        manager.reconcileXcodeProcessTargets(
+            [newTarget],
+            reason: "test_retire_last_verified_initialize_source"
+        )
+        #expect(manager.canonicalHandshakeState.initializeResult() == nil)
+        #expect(manager.canonicalHandshakeState.snapshot().supporterProofs.isEmpty)
+        let pendingInitialize = fixture.registerInitialize(
+            requestID: 2,
+            sessionID: "session-awaiting-verified-recovery"
+        )
+        let pendingCompletionCount = NIOLockedValueBox(0)
+        pendingInitialize.whenComplete { _ in
+            pendingCompletionCount.withLockedValue { $0 += 1 }
+        }
+
         await newUpstreams[1].yield(
             .message(
                 try makeInitializeResponse(
@@ -2263,6 +2322,17 @@ struct RuntimeCoordinatorProcessRoutingTests {
             }
         )
         #expect(pendingRoute.usableSlotCount == 0)
+        #expect(manager.canonicalHandshakeState.initializeResult() == nil)
+        #expect(manager.canonicalHandshakeState.snapshot().supporterProofs.isEmpty)
+        #expect(manager.initializeManager.pendingInitializes().count == 1)
+        #expect(pendingCompletionCount.withLockedValue { $0 } == 0)
+        let recoveringRoute = try #require(
+            manager.processControlPlane.route(forProcessID: newTarget.processID)
+        )
+        #expect(
+            manager.upstreamHealthManager.state(for: UpstreamSlotID(rawValue: 2))?
+                .initPhase == .initialized(.verifyingBridge(recoveringRoute.id))
+        )
 
         await newUpstreams[1].yield(
             .message(
@@ -2276,6 +2346,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
             startingAt: 3,
             matching: { methodName(from: $0) == "tools/list" }
         )
+        _ = try await pendingInitialize.get()
+        #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 2)
+        #expect(manager.initializeManager.pendingInitializes().isEmpty)
+        #expect(pendingCompletionCount.withLockedValue { $0 } == 1)
         let catalogCommitIndex = catalogCommits.count()
         await newUpstreams[1].yield(
             .message(

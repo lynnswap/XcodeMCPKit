@@ -72,6 +72,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         )?
     var primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)?
     var ownerRouteProofsResolved: (@Sendable () -> Void)?
+    var healthProbeResponseWaiterWillRegister: (@Sendable () -> Void)?
 
     init(
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
@@ -99,6 +100,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
             )? = nil,
         primaryInitializeFailureCleanupCompleted: (@Sendable (_ upstreamIndex: Int?) -> Void)? = nil,
         ownerRouteProofsResolved: (@Sendable () -> Void)? = nil,
+        healthProbeResponseWaiterWillRegister: (@Sendable () -> Void)? = nil,
     ) {
         self.upstreamEventHandled = upstreamEventHandled
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
@@ -111,6 +113,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.upstreamRequestWillStart = upstreamRequestWillStart
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
         self.ownerRouteProofsResolved = ownerRouteProofsResolved
+        self.healthProbeResponseWaiterWillRegister = healthProbeResponseWaiterWillRegister
     }
 }
 

@@ -101,6 +101,26 @@ struct ControlPlaneAuthorityTests {
         #expect(immediateRecovery.upstreamID == UpstreamSlotID(rawValue: 1))
     }
 
+    @Test func bridgeRecoveryCompletionKeepsReservationWhenCommitIsRejected() throws {
+        let target = xcodeProcessTarget(processID: 41040, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        guard case .restoreBridgePool(let recovery) = authority
+            .beginBridgePoolRecovery(routeID: route.id).effects.first else {
+            Issue.record("expected bridge recovery reservation")
+            return
+        }
+
+        #expect(
+            authority.completeBridgeRecoveryIfCurrent(
+                recovery,
+                commit: { false }
+            ) == nil
+        )
+        #expect(authority.validateBridgeRecovery(recovery))
+        #expect(authority.completeBridgeRecoveryIfCurrent(recovery) != nil)
+    }
+
     @Test func bridgeRecoverySerializesSlotsAndOwnsRetryCadence() throws {
         let target = xcodeProcessTarget(processID: 41032, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0, 1, 2])])
@@ -227,12 +247,27 @@ struct ControlPlaneAuthorityTests {
         #expect(health.setWarmInitializeUpstreamID(42, for: claim))
         #expect(health.beginInitializeSend(claim))
         #expect(health.transferInitializeResponse(claim, expectedUpstreamID: 42))
-        let initialized = try #require(health.markInitialized(
+        let canonical = CanonicalHandshakeState()
+        let participant: CanonicalHandshakeState.InitializeParticipantLease
+        switch canonical.offerInitializeResult(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+            ]),
+            sourceProof: proof
+        ) {
+        case .accepted(let lease):
+            participant = lease
+        case .incompatible:
+            Issue.record("expected initialize participant")
+            return
+        }
+        let verification = try #require(health.beginBridgeAttachVerification(
             claim,
             expectedUpstreamID: 42,
-            commit: { true }
+            initializeParticipant: participant
         ))
-        let probe = try #require(initialized.bridgeVerificationProbe)
+        let probe = verification.probe
 
         #expect(health.evaluateUsableInitialized(index: 1, nowUptimeNs: 3).proof == nil)
         #expect(health.markUpstreamOverloaded(proof))
@@ -250,7 +285,12 @@ struct ControlPlaneAuthorityTests {
             success: true,
             nowUptimeNs: 4,
             commit: {
-                authority.completeBridgeRecoveryIfCurrent(reservation) != nil
+                authority.completeBridgeRecoveryIfCurrent(
+                    reservation,
+                    commit: {
+                        canonical.commitInitializeParticipant(participant).isAccepted
+                    }
+                ) != nil
             }
         ))
         #expect(health.evaluateUsableInitialized(index: 1, nowUptimeNs: 5).proof == proof)
@@ -294,12 +334,27 @@ struct ControlPlaneAuthorityTests {
         #expect(health.setWarmInitializeUpstreamID(42, for: claim))
         #expect(health.beginInitializeSend(claim))
         #expect(health.transferInitializeResponse(claim, expectedUpstreamID: 42))
-        let initialized = try #require(health.markInitialized(
+        let canonical = CanonicalHandshakeState()
+        let participant: CanonicalHandshakeState.InitializeParticipantLease
+        switch canonical.offerInitializeResult(
+            try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+            ]),
+            sourceProof: proof
+        ) {
+        case .accepted(let lease):
+            participant = lease
+        case .incompatible:
+            Issue.record("expected initialize participant")
+            return
+        }
+        let verification = try #require(health.beginBridgeAttachVerification(
             claim,
             expectedUpstreamID: 42,
-            commit: { true }
+            initializeParticipant: participant
         ))
-        let probe = try #require(initialized.bridgeVerificationProbe)
+        let probe = verification.probe
 
         let result = health.finishBridgeAttachVerification(
             probe,

@@ -70,8 +70,10 @@ extension RuntimeCoordinator {
 
     func probeUpstreamHealth(_ probe: UpstreamHealthManager.ProbeRequest) {
         let upstreamIndex = probe.upstreamIndex
-        if case .processBridgeAttachment(let reservation) = probe.purpose,
-           processControlPlane.validateBridgeRecovery(reservation) == false {
+        if case .processBridgeAttachment(let verification) = probe.purpose,
+           processControlPlane.validateBridgeRecovery(
+            verification.recovery.reservation
+           ) == false {
             settleRejectedProcessBridgeAttachVerification(
                 probe,
                 reason: "attach_probe_reservation_stale"
@@ -96,24 +98,34 @@ extension RuntimeCoordinator {
         let probeSession = session(id: internalSessionID)
         let probeTimeout: TimeAmount = .seconds(2)
         let originalID = JSONRPC.ID(any: "__probe-\(upstreamIndex)-\(UUID().uuidString)")!
-        let registration = probeSession.router.registerRequestPending(
-            idKey: originalID.key,
-            on: eventLoop,
-            timeout: probeTimeout,
-            timeoutScheduler: scheduleRuntimeTimeout
-        )
         guard let upstreamID = assignUpstreamID(
             sessionID: internalSessionID,
             originalID: originalID,
             operationLease: operationLease
         ) else {
-            _ = probeSession.router.cancelPending(token: registration.token)
             finishHealthProbe(probe, success: false, reason: "assign_request_id_failed")
             return
         }
+        let registration = probeSession.router.registerRequestPending(
+            idKey: originalID.key,
+            on: eventLoop,
+            timeout: probeTimeout,
+            timeoutScheduler: scheduleRuntimeTimeout,
+            onTimeout: { [weak self] in
+                self?.upstreamRouter.remove(
+                    proof: operationLease.proof,
+                    upstreamID: upstreamID
+                )
+            }
+        )
 
         let request = JSONRPC.Wire.requestObject(id: upstreamID, method: "tools/list")
         guard let requestData = try? JSONRPC.Wire.data(from: request) else {
+            _ = probeSession.router.cancelPending(token: registration.token)
+            upstreamRouter.remove(
+                proof: operationLease.proof,
+                upstreamID: upstreamID
+            )
             finishHealthProbe(
                 probe,
                 success: false,
@@ -129,13 +141,18 @@ extension RuntimeCoordinator {
             admission: nil,
             onRejected: {
                 _ = probeSession.router.cancelPending(token: registration.token)
+                self.upstreamRouter.remove(
+                    proof: operationLease.proof,
+                    upstreamID: upstreamID
+                )
             }
         ) else {
             finishHealthProbe(probe, success: false, reason: "send_rejected")
             return
         }
 
-        addRuntimeTask { [weak self, probeSession, registration] in
+        testHooks.healthProbeResponseWaiterWillRegister?()
+        let waiterScheduled = addRuntimeTask { [weak self, probeSession, registration] in
             guard let self else { return }
             do {
                 var buffer = try await withTaskCancellationHandler {
@@ -195,6 +212,19 @@ extension RuntimeCoordinator {
                 )
             }
         }
+        guard waiterScheduled else {
+            _ = probeSession.router.cancelPending(token: registration.token)
+            upstreamRouter.remove(
+                proof: operationLease.proof,
+                upstreamID: upstreamID
+            )
+            finishHealthProbe(
+                probe,
+                success: false,
+                reason: "probe_waiter_rejected"
+            )
+            return
+        }
     }
 
     func finishHealthProbe(
@@ -252,99 +282,21 @@ extension RuntimeCoordinator {
         success: Bool,
         reason: String
     ) {
-        let proof = probe.topologyProof
-        var verification: (
-            recovery: ProcessBridgePoolRecovery,
-            cleared: (
-                timeout: RuntimeScheduledTimeout?,
-                initUpstreamID: Int64?,
-                didReceiveInitializeResponse: Bool,
-                didSendInitialized: Bool
-            )?
-        )?
-        var bridgeCompletion: ProcessControlPlaneTransition?
-        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
-        let eligibility = initializeManager.finishSupportEligibilityUpdate {
-            var update: CanonicalHandshakeState.SupportEligibilityUpdate?
-            guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
-                guard let result = upstreamHealthManager.finishBridgeAttachVerification(
-                    probe,
-                    success: success,
-                    nowUptimeNs: nowUptimeNanoseconds(),
-                    commit: {
-                        guard case .processBridgeAttachment(let reservation) = probe.purpose
-                        else { return false }
-                        guard success else {
-                            return processControlPlane.validateBridgeRecovery(reservation)
-                        }
-                        guard let completion = processControlPlane
-                            .completeBridgeRecoveryIfCurrent(reservation) else {
-                            return false
-                        }
-                        bridgeCompletion = completion
-                        return true
-                    }
-                ) else { return false }
-                verification = result
-                update = commitSupportEligibilityAfterHealthMutation(
-                    topologySnapshot: topologySnapshot,
-                    detachedProof: success ? nil : proof,
-                    processEligibility: &processEligibility
-                )
-                return true
-            }) == true else { return nil }
-            return update
-        }
-        guard let verification, let eligibility, let processEligibility else {
-            settleRejectedProcessBridgeAttachVerification(
-                probe,
-                reason: "attach_probe_completion_rejected"
-            )
-            return
-        }
-        applyProcessControlPlaneTransition(processEligibility.transition)
-        applySupportEligibilityCompletion(eligibility)
-
+        let completed: Bool
         if success {
-            guard let bridgeCompletion else {
-                settleRejectedProcessBridgeAttachVerification(
-                    probe,
-                    reason: "attach_probe_completion_missing"
-                )
-                return
-            }
-            applyProcessControlPlaneTransition(bridgeCompletion)
-            markXcodeProcessRouteAvailable(upstreamIndex: probe.upstreamIndex)
-            if processControlPlane.catalog(
-                forProcessID: verification.recovery.routeID.processID
-            ) == nil,
-               let route = xcodeProcessRoutes.first(where: {
-                   $0.id == verification.recovery.routeID
-               }) {
-                refreshProcessRouteToolsCatalog(
-                    route: route,
-                    upstreamProof: proof,
-                    reason: "bridge_pool_attach_verified_\(probe.upstreamIndex)"
-                )
-            }
-            upstreamSlotScheduler.wake()
-            noteUpstreamInitializationSucceeded()
-        } else {
-            if let cleared = verification.cleared {
-                finishClearingUpstreamState(
-                    proof: proof,
-                    cleared: cleared,
-                    resetsProcessRouteActivation: false
-                )
-            }
-            replaceProcessBridgeRecoveryChannelAndScheduleRetry(
-                ProcessBridgeRecovery(
-                    reservation: verification.recovery,
-                    topologyProof: proof
-                ),
-                reason: "attach_probe_\(reason)"
+            completed = finishSuccessfulProcessBridgeAttachVerification(
+                probe,
+                reason: reason
             )
-            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        } else {
+            completed = finishFailedProcessBridgeAttachVerification(
+                probe,
+                reason: reason
+            )
+        }
+        guard completed,
+              case .processBridgeAttachment(let verification) = probe.purpose else {
+            return
         }
         logger.info(
             "bridge_pool_attach_verification_completed",
@@ -357,19 +309,190 @@ extension RuntimeCoordinator {
         )
     }
 
+    private func finishSuccessfulProcessBridgeAttachVerification(
+        _ probe: UpstreamHealthManager.ProbeRequest,
+        reason: String
+    ) -> Bool {
+        guard case .processBridgeAttachment(let bridgeVerification) = probe.purpose else {
+            return false
+        }
+        let proof = probe.topologyProof
+        var verification: (
+            recovery: ProcessBridgePoolRecovery,
+            cleared: (
+                timeout: RuntimeScheduledTimeout?,
+                initUpstreamID: Int64?,
+                didReceiveInitializeResponse: Bool,
+                didSendInitialized: Bool
+            )?
+        )?
+        var bridgeCompletion: ProcessControlPlaneTransition?
+        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
+        var supportUpdate: CanonicalHandshakeState.SupportEligibilityUpdate?
+        var initializeCommit: CanonicalHandshakeState.InitializeCommit = .stale
+        let transaction = initializeManager.finishInitializeParticipant {
+            guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
+                guard let result = upstreamHealthManager.finishBridgeAttachVerification(
+                    probe,
+                    success: true,
+                    nowUptimeNs: nowUptimeNanoseconds(),
+                    commit: {
+                        guard let completion = processControlPlane
+                            .completeBridgeRecoveryIfCurrent(
+                                bridgeVerification.recovery.reservation,
+                                commit: {
+                                    initializeCommit = canonicalHandshakeState
+                                        .commitInitializeParticipant(
+                                            bridgeVerification.initializeParticipant
+                                        )
+                                    return initializeCommit.isAccepted
+                                }
+                            ) else {
+                            return false
+                        }
+                        bridgeCompletion = completion
+                        return true
+                    }
+                ) else { return false }
+                verification = result
+                supportUpdate = commitSupportEligibilityAfterHealthMutation(
+                    topologySnapshot: topologySnapshot,
+                    detachedProof: nil,
+                    processEligibility: &processEligibility
+                )
+                return true
+            }) == true else { return initializeCommit }
+            return initializeCommit
+        }
+        guard transaction.commit.isAccepted,
+              let verification,
+              let bridgeCompletion,
+              let processEligibility,
+              let supportUpdate else {
+            settleRejectedProcessBridgeAttachVerification(
+                probe,
+                reason: "attach_probe_success_commit_rejected_\(reason)"
+            )
+            return false
+        }
+        applyProcessControlPlaneTransition(processEligibility.transition)
+        applySupportEligibilityCompletion(
+            InitializeManager.SupportEligibilityCompletion(
+                update: supportUpdate,
+                publication: nil
+            )
+        )
+        applyProcessControlPlaneTransition(bridgeCompletion)
+        markXcodeProcessRouteAvailable(upstreamIndex: probe.upstreamIndex)
+        if let publication = transaction.publication {
+            applyInitializePublication(
+                publication,
+                upstreamIndex: probe.upstreamIndex,
+                refreshPendingProcessCatalog: false
+            )
+        }
+        if processControlPlane.catalog(
+            forProcessID: verification.recovery.routeID.processID
+        ) == nil,
+           let route = xcodeProcessRoutes.first(where: {
+               $0.id == verification.recovery.routeID
+           }) {
+            refreshProcessRouteToolsCatalog(
+                route: route,
+                upstreamProof: proof,
+                reason: "bridge_pool_attach_verified_\(probe.upstreamIndex)"
+            )
+        }
+        upstreamSlotScheduler.wake()
+        noteUpstreamInitializationSucceeded()
+        return true
+    }
+
+    private func finishFailedProcessBridgeAttachVerification(
+        _ probe: UpstreamHealthManager.ProbeRequest,
+        reason: String
+    ) -> Bool {
+        guard case .processBridgeAttachment(let bridgeVerification) = probe.purpose else {
+            return false
+        }
+        let proof = probe.topologyProof
+        var verification: (
+            recovery: ProcessBridgePoolRecovery,
+            cleared: (
+                timeout: RuntimeScheduledTimeout?,
+                initUpstreamID: Int64?,
+                didReceiveInitializeResponse: Bool,
+                didSendInitialized: Bool
+            )?
+        )?
+        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
+        let eligibility = initializeManager.finishSupportEligibilityUpdate {
+            var update: CanonicalHandshakeState.SupportEligibilityUpdate?
+            guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
+                guard let result = upstreamHealthManager.finishBridgeAttachVerification(
+                    probe,
+                    success: false,
+                    nowUptimeNs: nowUptimeNanoseconds(),
+                    commit: {
+                        guard processControlPlane.validateBridgeRecovery(
+                            bridgeVerification.recovery.reservation
+                        ) else { return false }
+                        canonicalHandshakeState.cancelInitializeParticipant(
+                            bridgeVerification.initializeParticipant
+                        )
+                        return true
+                    }
+                ) else { return false }
+                verification = result
+                update = commitSupportEligibilityAfterHealthMutation(
+                    topologySnapshot: topologySnapshot,
+                    detachedProof: proof,
+                    processEligibility: &processEligibility
+                )
+                return true
+            }) == true else { return nil }
+            return update
+        }
+        guard let verification, let eligibility, let processEligibility else {
+            settleRejectedProcessBridgeAttachVerification(
+                probe,
+                reason: "attach_probe_failure_commit_rejected_\(reason)"
+            )
+            return false
+        }
+        applyProcessControlPlaneTransition(processEligibility.transition)
+        applySupportEligibilityCompletion(eligibility)
+        if let cleared = verification.cleared {
+            finishClearingUpstreamState(
+                proof: proof,
+                cleared: cleared,
+                resetsProcessRouteActivation: false
+            )
+        }
+        replaceProcessBridgeRecoveryChannelAndScheduleRetry(
+            ProcessBridgeRecovery(
+                reservation: verification.recovery,
+                topologyProof: proof
+            ),
+            reason: "attach_probe_\(reason)"
+        )
+        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        return true
+    }
+
     private func settleRejectedProcessBridgeAttachVerification(
         _ probe: UpstreamHealthManager.ProbeRequest,
         reason: String
     ) {
-        guard case .processBridgeAttachment(let reservation) = probe.purpose else {
+        guard case .processBridgeAttachment(let verification) = probe.purpose else {
             return
         }
-        let recovery = ProcessBridgeRecovery(
-            reservation: reservation,
-            topologyProof: probe.topologyProof
+        canonicalHandshakeState.cancelInitializeParticipant(
+            verification.initializeParticipant
         )
-        if upstreamHealthManager.currentBridgeRecovery(for: probe.topologyProof)?
-            .reservation == reservation {
+        let recovery = verification.recovery
+        if upstreamHealthManager.currentBridgeRecovery(for: probe.topologyProof)
+            == recovery {
             _ = clearUpstreamState(
                 proof: probe.topologyProof,
                 resetsProcessRouteActivation: false
@@ -380,7 +503,7 @@ extension RuntimeCoordinator {
             )
         } else {
             scheduleProcessBridgeRecoveryRetry(
-                reservation,
+                recovery.reservation,
                 reason: reason
             )
         }
@@ -493,9 +616,9 @@ extension RuntimeCoordinator {
     }
 
     /// Commits a verified health transition and its initialize/catalog
-    /// eligibility projection under the shared lock order:
-    /// InitializeManager -> authoritative topology -> health -> canonical ->
-    /// process control plane. Effects are applied only after all locks release.
+    /// eligibility projection while InitializeManager, authoritative topology,
+    /// and health remain stable. Canonical and process projections are updated
+    /// before effects are applied outside those locks.
     func commitVerifiedHealthSupportMutation<Result>(
         proof: UpstreamTopologyProof,
         detachedProof: UpstreamTopologyProof? = nil,

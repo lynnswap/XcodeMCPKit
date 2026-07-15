@@ -27,9 +27,14 @@ final class UpstreamHealthManager: Sendable {
         var upstreamIndex: Int { upstreamID.rawValue }
     }
 
+    struct BridgeAttachmentVerification: Sendable {
+        let recovery: ProcessBridgeRecovery
+        let initializeParticipant: CanonicalHandshakeState.InitializeParticipantLease
+    }
+
     enum ProbePurpose: Sendable {
         case healthRecovery
-        case processBridgeAttachment(ProcessBridgePoolRecovery)
+        case processBridgeAttachment(BridgeAttachmentVerification)
     }
 
     struct ProbeRequest: Sendable {
@@ -102,7 +107,11 @@ final class UpstreamHealthManager: Sendable {
 
     struct MarkInitializedTransition: Sendable {
         let timeout: RuntimeScheduledTimeout?
-        let bridgeVerificationProbe: ProbeRequest?
+    }
+
+    struct BridgeVerificationTransition: Sendable {
+        let timeout: RuntimeScheduledTimeout?
+        let probe: ProbeRequest
     }
 
     struct TimeoutAttachment: Sendable {
@@ -623,8 +632,11 @@ final class UpstreamHealthManager: Sendable {
         )?
     )? {
         state.withLockedValue { state in
-            guard case .processBridgeAttachment(let recovery) = request.purpose,
-                  Self.isActive(request.topologyProof, state: state),
+            guard case .processBridgeAttachment(let verification) = request.purpose else {
+                return nil
+            }
+            let recovery = verification.recovery
+            guard Self.isActive(request.topologyProof, state: state),
                   recovery.upstreamID == request.topologyProof.slotID else { return nil }
             let upstreamIndex = request.upstreamIndex
             guard state.upstreamStates[upstreamIndex].healthProbeInFlight,
@@ -636,10 +648,9 @@ final class UpstreamHealthManager: Sendable {
                     == .initializedAwaitingBridgeVerification,
                   let claim = state.upstreamStates[upstreamIndex].initializeClaim,
                   case .processBridgeRecovery(let current) = claim.owner,
-                  current.reservation == recovery,
-                  current.topologyProof == request.topologyProof,
-                  commit() else { return nil }
+                  current == recovery else { return nil }
             if success {
+                let previousUpstream = state.upstreamStates[upstreamIndex]
                 state.upstreamStates[upstreamIndex].initPhase = .initialized(.usable)
                 state.upstreamStates[upstreamIndex].initializeClaim = nil
                 state.upstreamStates[upstreamIndex].initializeClaimPhase = nil
@@ -649,10 +660,15 @@ final class UpstreamHealthManager: Sendable {
                 state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
                 state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
                 state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nowUptimeNs
-                return (recovery, nil)
+                guard commit() else {
+                    state.upstreamStates[upstreamIndex] = previousUpstream
+                    return nil
+                }
+                return (recovery.reservation, nil)
             }
+            guard commit() else { return nil }
             return (
-                recovery,
+                recovery.reservation,
                 Self.clearUpstreamState(at: upstreamIndex, state: &state)
             )
         }
@@ -899,10 +915,7 @@ final class UpstreamHealthManager: Sendable {
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
             let timeout = state.upstreamStates[upstreamIndex].initTimeout
             state.upstreamStates[upstreamIndex].initTimeout = nil
-            return UpstreamHealthManager.MarkInitializedTransition(
-                timeout: timeout,
-                bridgeVerificationProbe: nil
-            )
+            return UpstreamHealthManager.MarkInitializedTransition(timeout: timeout)
         }
     }
 
@@ -911,7 +924,10 @@ final class UpstreamHealthManager: Sendable {
         expectedUpstreamID: Int64,
         commit: () -> Bool
     ) -> UpstreamHealthManager.MarkInitializedTransition? {
-        state.withLockedValue { state in
+        if case .processBridgeRecovery = claim.owner {
+            return nil
+        }
+        return state.withLockedValue { state in
             guard Self.matches(claim, state: state),
                   state.upstreamStates[claim.upstreamIndex].initUpstreamID
                     == expectedUpstreamID,
@@ -919,24 +935,12 @@ final class UpstreamHealthManager: Sendable {
                     == .responseReceived,
                   commit() else { return nil }
             let timeout = state.upstreamStates[claim.upstreamIndex].initTimeout
-            let bridgeRecovery: ProcessBridgeRecovery?
-            if case .processBridgeRecovery(let recovery) = claim.owner {
-                bridgeRecovery = recovery
-                state.upstreamStates[claim.upstreamIndex].initPhase = .initialized(
-                    .verifyingBridge(recovery.routeID)
-                )
-            } else {
-                bridgeRecovery = nil
-                state.upstreamStates[claim.upstreamIndex].initPhase = .initialized(.usable)
-            }
+            state.upstreamStates[claim.upstreamIndex].initPhase = .initialized(.usable)
             state.upstreamStates[claim.upstreamIndex].initInFlight = false
             state.upstreamStates[claim.upstreamIndex].initUpstreamID = nil
             if claim.owner == .processRouteActivation {
                 state.upstreamStates[claim.upstreamIndex].initializeClaimPhase =
                     .initializedAwaitingCatalog
-            } else if bridgeRecovery != nil {
-                state.upstreamStates[claim.upstreamIndex].initializeClaimPhase =
-                    .initializedAwaitingBridgeVerification
             } else {
                 state.upstreamStates[claim.upstreamIndex].initializeClaim = nil
                 state.upstreamStates[claim.upstreamIndex].initializeClaimPhase = nil
@@ -944,23 +948,53 @@ final class UpstreamHealthManager: Sendable {
             state.upstreamStates[claim.upstreamIndex].initTimeout = nil
             state.upstreamStates[claim.upstreamIndex].healthState = .healthy
             state.upstreamStates[claim.upstreamIndex].consecutiveRequestTimeouts = 0
-            let bridgeVerificationProbe: ProbeRequest?
-            if let bridgeRecovery {
-                state.upstreamStates[claim.upstreamIndex].healthProbeInFlight = true
-                state.upstreamStates[claim.upstreamIndex].healthProbeGeneration &+= 1
-                bridgeVerificationProbe = ProbeRequest(
-                    topologyProof: bridgeRecovery.topologyProof,
-                    probeGeneration: state.upstreamStates[claim.upstreamIndex]
-                        .healthProbeGeneration,
-                    purpose: .processBridgeAttachment(bridgeRecovery.reservation)
+            state.upstreamStates[claim.upstreamIndex].healthProbeInFlight = false
+            return UpstreamHealthManager.MarkInitializedTransition(timeout: timeout)
+        }
+    }
+
+    func beginBridgeAttachVerification(
+        _ claim: InitializeClaim,
+        expectedUpstreamID: Int64,
+        initializeParticipant: CanonicalHandshakeState.InitializeParticipantLease
+    ) -> UpstreamHealthManager.BridgeVerificationTransition? {
+        guard case .processBridgeRecovery(let recovery) = claim.owner,
+              initializeParticipant.topologyProof == recovery.topologyProof else {
+            return nil
+        }
+        return state.withLockedValue { state in
+            guard Self.matches(claim, state: state),
+                  state.upstreamStates[claim.upstreamIndex].initUpstreamID
+                    == expectedUpstreamID,
+                  state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
+                    == .responseReceived else { return nil }
+            let timeout = state.upstreamStates[claim.upstreamIndex].initTimeout
+            state.upstreamStates[claim.upstreamIndex].initPhase = .initialized(
+                .verifyingBridge(recovery.routeID)
+            )
+            state.upstreamStates[claim.upstreamIndex].initInFlight = false
+            state.upstreamStates[claim.upstreamIndex].initUpstreamID = nil
+            state.upstreamStates[claim.upstreamIndex].initializeClaimPhase =
+                .initializedAwaitingBridgeVerification
+            state.upstreamStates[claim.upstreamIndex].initTimeout = nil
+            state.upstreamStates[claim.upstreamIndex].healthState = .healthy
+            state.upstreamStates[claim.upstreamIndex].consecutiveRequestTimeouts = 0
+            state.upstreamStates[claim.upstreamIndex].healthProbeInFlight = true
+            state.upstreamStates[claim.upstreamIndex].healthProbeGeneration &+= 1
+            let probe = ProbeRequest(
+                topologyProof: recovery.topologyProof,
+                probeGeneration: state.upstreamStates[claim.upstreamIndex]
+                    .healthProbeGeneration,
+                purpose: .processBridgeAttachment(
+                    BridgeAttachmentVerification(
+                        recovery: recovery,
+                        initializeParticipant: initializeParticipant
+                    )
                 )
-            } else {
-                state.upstreamStates[claim.upstreamIndex].healthProbeInFlight = false
-                bridgeVerificationProbe = nil
-            }
-            return UpstreamHealthManager.MarkInitializedTransition(
+            )
+            return UpstreamHealthManager.BridgeVerificationTransition(
                 timeout: timeout,
-                bridgeVerificationProbe: bridgeVerificationProbe
+                probe: probe
             )
         }
     }

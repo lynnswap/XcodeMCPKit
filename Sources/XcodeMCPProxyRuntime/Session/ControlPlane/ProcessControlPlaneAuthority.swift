@@ -634,17 +634,23 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     func completeBridgeRecoveryIfCurrent(
-        _ recovery: ProcessBridgePoolRecovery
+        _ recovery: ProcessBridgePoolRecovery,
+        commit: () -> Bool = { true }
     ) -> ProcessControlPlaneTransition? {
         state.withLockedValue { state in
             guard let key = Self.key(routeID: recovery.routeID, in: state),
                   var owner = state.recordsByKey[key],
                   case .attempting(let current) = owner.bridgeRecovery.phase,
                   current == recovery else { return nil }
+            let previousOwner = owner
             owner.bridgeRecovery.phase = .idle
             owner.bridgeRecovery.consecutiveFailureCount = 0
             let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
             state.recordsByKey[key] = owner
+            guard commit() else {
+                state.recordsByKey[key] = previousOwner
+                return nil
+            }
             return ProcessControlPlaneTransition(
                 addedRoutes: [], retiredRoutes: [], effects: effects,
                 publishesToolsListChanged: false

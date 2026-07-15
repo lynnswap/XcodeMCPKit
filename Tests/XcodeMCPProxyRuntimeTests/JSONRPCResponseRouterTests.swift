@@ -84,15 +84,21 @@ struct JSONRPCResponseRouterTests {
 
     @Test func responseRouterTimesOutRequests() async throws {
         let eventLoop = EmbeddedEventLoop()
+        let didTimeout = NIOLockedValueBox(false)
         let router = JSONRPCResponseRouter(
             requestTimeout: .seconds(1),
             hasActiveClients: { false },
             sendNotification: { _ in }
         )
 
-        let future = router.registerRequest(idKey: "1", on: eventLoop)
+        let future = router.registerRequest(
+            idKey: "1",
+            on: eventLoop,
+            onTimeout: { didTimeout.withLockedValue { $0 = true } }
+        )
         eventLoop.advanceTime(by: .seconds(1))
         eventLoop.run()
+        #expect(didTimeout.withLockedValue { $0 })
 
         do {
             _ = try await future.get()
