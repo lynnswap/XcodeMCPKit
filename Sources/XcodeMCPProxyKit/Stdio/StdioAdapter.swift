@@ -1,39 +1,7 @@
 import Foundation
 import Logging
-import Synchronization
 import XcodeMCPKit
 import XcodeMCPProxyRuntime
-
-private final class StdioReadIteratorReadiness: Sendable {
-    private struct State {
-        var isReady = false
-        var waiters: [CheckedContinuation<Void, Never>] = []
-    }
-
-    private let state = Mutex(State())
-
-    func markReady() {
-        let waiters: [CheckedContinuation<Void, Never>] = state.withLock { state in
-            guard state.isReady == false else { return [] }
-            state.isReady = true
-            let waiters = state.waiters
-            state.waiters.removeAll()
-            return waiters
-        }
-        for waiter in waiters { waiter.resume() }
-    }
-
-    func waitUntilReady() async {
-        await withCheckedContinuation { continuation in
-            let shouldResume = state.withLock { state in
-                guard state.isReady == false else { return true }
-                state.waiters.append(continuation)
-                return false
-            }
-            if shouldResume { continuation.resume() }
-        }
-    }
-}
 
 package struct StdioAdapterShutdownPolicy: Sendable {
     package let requestDrainTimeout: Duration
@@ -65,12 +33,11 @@ actor StdioAdapter {
     }
 
     private let requestTimeout: Duration?
-    private let inputHandle: FileHandle
+    private let inputReader: any StdioInputReading
     private let outputWriter: StdioWriter
     private let logger: Logger
     private let authority: MCPClientSessionAuthority
     private let shutdownPolicy: StdioAdapterShutdownPolicy
-    private let readIteratorReadiness = StdioReadIteratorReadiness()
 
     private var framer = StdioFramer()
     private var requestTasks: [UUID: Task<Void, Never>] = [:]
@@ -131,8 +98,24 @@ actor StdioAdapter {
         recipe: MCPTransportRecipe,
         shutdownPolicy: StdioAdapterShutdownPolicy
     ) {
+        self.init(
+            requestTimeout: requestTimeout,
+            inputReader: StdioInputChannel(handle: input),
+            output: output,
+            recipe: recipe,
+            shutdownPolicy: shutdownPolicy
+        )
+    }
+
+    init(
+        requestTimeout: Duration?,
+        inputReader: any StdioInputReading,
+        output: FileHandle,
+        recipe: MCPTransportRecipe,
+        shutdownPolicy: StdioAdapterShutdownPolicy
+    ) {
         self.requestTimeout = requestTimeout
-        self.inputHandle = input
+        self.inputReader = inputReader
         let logger = ProxyLogging.make("stdio.adapter")
         self.logger = logger
         self.outputWriter = StdioWriter(handle: output, logger: logger)
@@ -152,18 +135,13 @@ actor StdioAdapter {
         }
         lifecycle = .running
         startAuthorityEventTask()
-        let input = inputHandle
-        let readIteratorReadiness = readIteratorReadiness
+        let inputReader = inputReader
         readTask = Task { [weak self] in
-            var iterator = input.bytes.makeAsyncIterator()
-            // Do not signal readiness before iterator creation: Foundation accesses the
-            // descriptor here and raises NSFileHandleOperationException if close wins.
-            readIteratorReadiness.markReady()
             var terminalError: (any Error)?
             do {
-                while let byte = try await iterator.next() {
+                while let chunk = try await inputReader.read() {
                     guard Task.isCancelled == false else { break }
-                    await self?.handleInput(Data([byte]))
+                    await self?.handleInput(chunk)
                 }
             } catch is CancellationError {
                 // Explicit stop owns completion.
@@ -198,6 +176,7 @@ actor StdioAdapter {
 
     isolated deinit {
         readTask?.cancel()
+        inputReader.stop()
         authorityEventTask?.cancel()
         for task in requestTasks.values { task.cancel() }
         closeTask?.cancel()
@@ -385,10 +364,8 @@ private extension StdioAdapter {
     }
 
     func performClose(drainsOutput: Bool) async {
-        if readTask != nil {
-            await readIteratorReadiness.waitUntilReady()
-            try? inputHandle.close()
-        }
+        inputReader.stop()
+        await inputReader.waitUntilStopped()
         await authority.close()
         await drainRequestTasks()
         let eventTask = authorityEventTask
