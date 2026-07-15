@@ -4,18 +4,18 @@ import Synchronization
 import XcodeMCPKit
 import XcodeMCPProxyRuntime
 
-private final class StdioReadTaskActivation: Sendable {
+private final class StdioReadIteratorReadiness: Sendable {
     private struct State {
-        var isActivated = false
+        var isReady = false
         var waiters: [CheckedContinuation<Void, Never>] = []
     }
 
     private let state = Mutex(State())
 
-    func activate() {
+    func markReady() {
         let waiters: [CheckedContinuation<Void, Never>] = state.withLock { state in
-            guard state.isActivated == false else { return [] }
-            state.isActivated = true
+            guard state.isReady == false else { return [] }
+            state.isReady = true
             let waiters = state.waiters
             state.waiters.removeAll()
             return waiters
@@ -23,10 +23,10 @@ private final class StdioReadTaskActivation: Sendable {
         for waiter in waiters { waiter.resume() }
     }
 
-    func waitUntilActivated() async {
+    func waitUntilReady() async {
         await withCheckedContinuation { continuation in
             let shouldResume = state.withLock { state in
-                guard state.isActivated == false else { return true }
+                guard state.isReady == false else { return true }
                 state.waiters.append(continuation)
                 return false
             }
@@ -70,7 +70,7 @@ actor StdioAdapter {
     private let logger: Logger
     private let authority: MCPClientSessionAuthority
     private let shutdownPolicy: StdioAdapterShutdownPolicy
-    private let readTaskActivation = StdioReadTaskActivation()
+    private let readIteratorReadiness = StdioReadIteratorReadiness()
 
     private var framer = StdioFramer()
     private var requestTasks: [UUID: Task<Void, Never>] = [:]
@@ -153,12 +153,15 @@ actor StdioAdapter {
         lifecycle = .running
         startAuthorityEventTask()
         let input = inputHandle
-        let readTaskActivation = readTaskActivation
+        let readIteratorReadiness = readIteratorReadiness
         readTask = Task { [weak self] in
-            readTaskActivation.activate()
+            var iterator = input.bytes.makeAsyncIterator()
+            // Do not signal readiness before iterator creation: Foundation accesses the
+            // descriptor here and raises NSFileHandleOperationException if close wins.
+            readIteratorReadiness.markReady()
             var terminalError: (any Error)?
             do {
-                for try await byte in input.bytes {
+                while let byte = try await iterator.next() {
                     guard Task.isCancelled == false else { break }
                     await self?.handleInput(Data([byte]))
                 }
@@ -383,7 +386,7 @@ private extension StdioAdapter {
 
     func performClose(drainsOutput: Bool) async {
         if readTask != nil {
-            await readTaskActivation.waitUntilActivated()
+            await readIteratorReadiness.waitUntilReady()
             try? inputHandle.close()
         }
         await authority.close()

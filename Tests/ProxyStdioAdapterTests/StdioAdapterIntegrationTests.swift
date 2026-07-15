@@ -34,6 +34,28 @@ struct StdioAdapterContractTests {
         outputPipe.fileHandleForWriting.closeFile()
     }
 
+    @Test func immediateStopWaitsForReadIteratorReadiness() async throws {
+        for _ in 0..<100 {
+            let transport = StalledStdioAdapterTransport()
+            let inputPipe = Pipe()
+            let outputPipe = Pipe()
+            let adapter = StdioAdapter(
+                requestTimeout: nil,
+                input: inputPipe.fileHandleForReading,
+                output: outputPipe.fileHandleForWriting,
+                recipe: MCPTransportRecipe { transport },
+                shutdownPolicy: .live
+            )
+
+            try await adapter.start()
+            await adapter.stop()
+
+            #expect(await adapter.connectionState().phase == .closed(.requested))
+            inputPipe.fileHandleForWriting.closeFile()
+            outputPipe.fileHandleForWriting.closeFile()
+        }
+    }
+
     @Test func deinitCancelsReadAndEventTasksWithoutAStopTask() async throws {
         let transport = StalledStdioAdapterTransport()
         let inputPipe = Pipe()
