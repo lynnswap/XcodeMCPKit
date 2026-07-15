@@ -418,7 +418,7 @@ extension RuntimeCoordinator {
     ) -> ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot {
         let states = upstreamHealthManager.activeStatesSnapshot()
         let snapshotUsable = Set(states.compactMap { upstreamID, state -> Int? in
-            guard state.isInitialized else {
+            guard state.initPhase.isUsableInitialized else {
                 return nil
             }
             switch state.healthState {
@@ -1003,7 +1003,7 @@ extension RuntimeCoordinator {
             guard let upstream = upstreamHealthManager.state(
                 for: UpstreamSlotID(rawValue: upstreamIndex)
             ) else { return }
-            guard upstream.isInitialized else { return }
+            guard upstream.initPhase.isUsableInitialized else { return }
             switch upstream.healthState {
             case .healthy, .degraded:
                 count += 1
@@ -1020,7 +1020,7 @@ extension RuntimeCoordinator {
         return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
             upstreamHealthManager.state(
                 for: UpstreamSlotID(rawValue: upstreamIndex)
-            )?.isInitialized == true
+            )?.initPhase.isUsableInitialized == true
         }
     }
 

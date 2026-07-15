@@ -1360,6 +1360,9 @@ extension RuntimeCoordinator {
                 ]
             )
         }
+        if case .processBridgeRecovery = initializeClaim.owner {
+            return
+        }
         guard processRoutingEnabled,
               let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return

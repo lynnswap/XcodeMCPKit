@@ -765,8 +765,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                         let summary: String
                         if state.initInFlight {
                             summary = "initializing"
-                        } else if state.isInitialized {
+                        } else if state.initPhase.isUsableInitialized {
                             summary = "initialized"
+                        } else if state.isInitialized {
+                            summary = "verifying_bridge_attach"
                         } else {
                             summary = "idle"
                         }
@@ -1140,7 +1142,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         guard let documentationProviderManager else { return }
         let initializedUpstreamIndices = Set(
             upstreamHealthManager.activeStatesSnapshot().compactMap { id, state in
-                state.isInitialized ? id.rawValue : nil
+                state.initPhase.isUsableInitialized ? id.rawValue : nil
             }
         )
         guard

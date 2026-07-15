@@ -79,9 +79,34 @@ final class JSONRPCResponseRouter: Sendable {
         timeout: TimeAmount? = nil,
         onTimeout: (@Sendable () -> Void)? = nil
     ) -> PendingRegistration {
+        registerRequestPending(
+            idKey: idKey,
+            on: eventLoop,
+            effectiveTimeout: timeout ?? requestTimeout,
+            onTimeout: onTimeout
+        )
+    }
+
+    func registerRequestPendingWithoutTimeout(
+        idKey: String,
+        on eventLoop: EventLoop
+    ) -> PendingRegistration {
+        registerRequestPending(
+            idKey: idKey,
+            on: eventLoop,
+            effectiveTimeout: nil,
+            onTimeout: nil
+        )
+    }
+
+    private func registerRequestPending(
+        idKey: String,
+        on eventLoop: EventLoop,
+        effectiveTimeout: TimeAmount?,
+        onTimeout: (@Sendable () -> Void)?
+    ) -> PendingRegistration {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
         let token = UUID()
-        let effectiveTimeout = timeout ?? requestTimeout
         let timeout = effectiveTimeout.map { timeout in
             eventLoop.scheduleTask(in: timeout) { [weak self] in
                 guard let self else { return }

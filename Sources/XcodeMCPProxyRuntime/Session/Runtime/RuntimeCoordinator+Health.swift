@@ -24,8 +24,8 @@ extension RuntimeCoordinator {
                 return .regular
             case .processRouteActivation:
                 return .processRouteActivation
-            case .processBridgeRecovery:
-                return .processBridgeRecovery
+            case .processBridgeRecovery(let recovery):
+                return .processBridgeRecovery(recovery)
             }
         }
     }
@@ -70,9 +70,24 @@ extension RuntimeCoordinator {
 
     func probeUpstreamHealth(_ probe: UpstreamHealthManager.ProbeRequest) {
         let upstreamIndex = probe.upstreamIndex
+        if case .processBridgeAttachment(let reservation) = probe.purpose,
+           processControlPlane.validateBridgeRecovery(reservation) == false {
+            settleRejectedProcessBridgeAttachVerification(
+                probe,
+                reason: "attach_probe_reservation_stale"
+            )
+            return
+        }
         guard let operationLease = upstreamTopology.operationLease(
             for: probe.topologyProof
         ) else {
+            if case .processBridgeAttachment = probe.purpose {
+                settleRejectedProcessBridgeAttachVerification(
+                    probe,
+                    reason: "attach_probe_operation_lease_unavailable"
+                )
+                return
+            }
             schedulePendingInitializeQuarantineRecovery()
             return
         }
@@ -80,11 +95,11 @@ extension RuntimeCoordinator {
         _ = session(id: internalSessionID)
         let probeSession = session(id: internalSessionID)
         let probeTimeout: TimeAmount = .seconds(2)
+        let probeDeadlineUptimeNs = deadlineUptimeNanoseconds(for: probeTimeout)
         let originalID = JSONRPC.ID(any: "__probe-\(upstreamIndex)-\(UUID().uuidString)")!
-        let registration = probeSession.router.registerRequestPending(
+        let registration = probeSession.router.registerRequestPendingWithoutTimeout(
             idKey: originalID.key,
-            on: eventLoop,
-            timeout: probeTimeout
+            on: eventLoop
         )
         guard let upstreamID = assignUpstreamID(
             sessionID: internalSessionID,
@@ -123,7 +138,17 @@ extension RuntimeCoordinator {
             guard let self else { return }
             do {
                 var buffer = try await withTaskCancellationHandler {
-                    try await registration.future.get()
+                    try await self.waitForEventLoopFuture(
+                        registration.future,
+                        deadlineUptimeNs: probeDeadlineUptimeNs,
+                        onTimeout: {
+                            _ = probeSession.router.cancelPending(token: registration.token)
+                            self.upstreamRouter.remove(
+                                proof: operationLease.proof,
+                                upstreamID: upstreamID
+                            )
+                        }
+                    )
                 } onCancel: {
                     _ = probeSession.router.cancelPending(token: registration.token)
                     self.upstreamRouter.remove(
@@ -186,6 +211,14 @@ extension RuntimeCoordinator {
         success: Bool,
         reason: String
     ) {
+        if case .processBridgeAttachment = probe.purpose {
+            finishProcessBridgeAttachVerification(
+                probe,
+                success: success,
+                reason: reason
+            )
+            return
+        }
         let upstreamIndex = probe.upstreamIndex
         let nowUptimeNs = nowUptimeNanoseconds()
         let committed: Void? = commitVerifiedHealthSupportMutation(
@@ -221,6 +254,133 @@ extension RuntimeCoordinator {
                 "reason": .string(reason),
             ]
         )
+    }
+
+    func finishProcessBridgeAttachVerification(
+        _ probe: UpstreamHealthManager.ProbeRequest,
+        success: Bool,
+        reason: String
+    ) {
+        let proof = probe.topologyProof
+        var verification: (
+            recovery: ProcessBridgePoolRecovery,
+            cleared: (
+                timeout: RuntimeScheduledTimeout?,
+                initUpstreamID: Int64?,
+                didReceiveInitializeResponse: Bool,
+                didSendInitialized: Bool
+            )?
+        )?
+        var bridgeCompletion: ProcessControlPlaneTransition?
+        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
+        let eligibility = initializeManager.finishSupportEligibilityUpdate {
+            var update: CanonicalHandshakeState.SupportEligibilityUpdate?
+            guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
+                guard let result = upstreamHealthManager.finishBridgeAttachVerification(
+                    probe,
+                    success: success,
+                    nowUptimeNs: nowUptimeNanoseconds(),
+                    commit: {
+                        guard case .processBridgeAttachment(let reservation) = probe.purpose
+                        else { return false }
+                        guard success else {
+                            return processControlPlane.validateBridgeRecovery(reservation)
+                        }
+                        guard let completion = processControlPlane
+                            .completeBridgeRecoveryIfCurrent(reservation) else {
+                            return false
+                        }
+                        bridgeCompletion = completion
+                        return true
+                    }
+                ) else { return false }
+                verification = result
+                update = commitSupportEligibilityAfterHealthMutation(
+                    topologySnapshot: topologySnapshot,
+                    detachedProof: success ? nil : proof,
+                    processEligibility: &processEligibility
+                )
+                return true
+            }) == true else { return nil }
+            return update
+        }
+        guard let verification, let eligibility, let processEligibility else {
+            settleRejectedProcessBridgeAttachVerification(
+                probe,
+                reason: "attach_probe_completion_rejected"
+            )
+            return
+        }
+        applyProcessControlPlaneTransition(processEligibility.transition)
+        applySupportEligibilityCompletion(eligibility)
+
+        if success {
+            guard let bridgeCompletion else {
+                settleRejectedProcessBridgeAttachVerification(
+                    probe,
+                    reason: "attach_probe_completion_missing"
+                )
+                return
+            }
+            applyProcessControlPlaneTransition(bridgeCompletion)
+            markXcodeProcessRouteAvailable(upstreamIndex: probe.upstreamIndex)
+            upstreamSlotScheduler.wake()
+            noteUpstreamInitializationSucceeded()
+        } else {
+            if let cleared = verification.cleared {
+                finishClearingUpstreamState(
+                    proof: proof,
+                    cleared: cleared,
+                    resetsProcessRouteActivation: false
+                )
+            }
+            replaceProcessBridgeRecoveryChannelAndScheduleRetry(
+                ProcessBridgeRecovery(
+                    reservation: verification.recovery,
+                    topologyProof: proof
+                ),
+                reason: "attach_probe_\(reason)"
+            )
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        }
+        logger.info(
+            "bridge_pool_attach_verification_completed",
+            metadata: [
+                "pid": .string("\(verification.recovery.routeID.processID)"),
+                "upstream": .string("\(probe.upstreamIndex)"),
+                "success": .string(success ? "true" : "false"),
+                "reason": .string(reason),
+            ]
+        )
+    }
+
+    private func settleRejectedProcessBridgeAttachVerification(
+        _ probe: UpstreamHealthManager.ProbeRequest,
+        reason: String
+    ) {
+        guard case .processBridgeAttachment(let reservation) = probe.purpose else {
+            return
+        }
+        let recovery = ProcessBridgeRecovery(
+            reservation: reservation,
+            topologyProof: probe.topologyProof
+        )
+        if upstreamHealthManager.currentBridgeRecovery(for: probe.topologyProof)?
+            .reservation == reservation {
+            _ = clearUpstreamState(
+                proof: probe.topologyProof,
+                resetsProcessRouteActivation: false
+            )
+            replaceProcessBridgeRecoveryChannelAndScheduleRetry(
+                recovery,
+                reason: reason
+            )
+        } else {
+            scheduleProcessBridgeRecoveryRetry(
+                reservation,
+                reason: reason
+            )
+        }
     }
 
     func markToolsListRefreshSucceeded(
@@ -403,12 +563,19 @@ extension RuntimeCoordinator {
     ) {
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
         if case .processBridgeRecovery(let recovery) = mode {
-            guard recovery.topologyProof.slotID.rawValue == upstreamIndex,
+            guard processControlPlane.validateBridgeRecovery(recovery.reservation),
+                  recovery.topologyProof.slotID.rawValue == upstreamIndex,
                   upstreamTopology.operationLease(
                     for: recovery.topologyProof.slotID
                   )?.proof == recovery.topologyProof,
                   xcodeProcessRoute(forUpstreamIndex: upstreamIndex)?.id == recovery.routeID
-            else { return }
+            else {
+                scheduleProcessBridgeRecoveryRetry(
+                    recovery.reservation,
+                    reason: "readiness_invalidated"
+                )
+                return
+            }
         }
         let activationStart = beginProcessRouteActivationIfNeeded(
             mode: mode,
@@ -433,12 +600,22 @@ extension RuntimeCoordinator {
                     processControlPlane.cancelActivation(activationStart)
                 )
             }
+            if case .processBridgeRecovery(let recovery) = mode {
+                handleProcessBridgeRecoveryStartRejected(
+                    recovery,
+                    reason: "initialize_claim_rejected"
+                )
+            }
             return
         }
         guard let proof = initializeClaim.topologyProof,
               let operationLease = upstreamTopology.operationLease(for: proof),
               let upstreamID = upstreamRouter.assignInitialize(proof: proof) else {
-            clearUpstreamState(initializeClaim: initializeClaim)
+            handleWarmInitializeStartFailure(
+                mode: mode,
+                initializeClaim: initializeClaim,
+                reason: "initialize_route_unavailable"
+            )
             return
         }
         guard upstreamHealthManager.setWarmInitializeUpstreamID(
@@ -451,9 +628,23 @@ extension RuntimeCoordinator {
                     processControlPlane.cancelActivation(activationStart)
                 )
             }
+            handleWarmInitializeStartFailure(
+                mode: mode,
+                initializeClaim: initializeClaim,
+                reason: "initialize_id_rejected"
+            )
             return
         }
-        guard upstreamHealthManager.validate(initializeClaim) else { return }
+        guard upstreamHealthManager.validate(initializeClaim) else {
+            if case .processBridgeRecovery = mode {
+                handleWarmInitializeStartFailure(
+                    mode: mode,
+                    initializeClaim: initializeClaim,
+                    reason: "initialize_claim_invalidated"
+                )
+            }
+            return
+        }
         scheduleUpstreamInitTimeout(
             mode: mode,
             activationStart: activationStart,
@@ -462,7 +653,16 @@ extension RuntimeCoordinator {
 
         let request = makeInternalInitializeRequest(id: upstreamID)
         if let data = try? JSONRPC.Wire.data(from: request) {
-            guard upstreamHealthManager.beginInitializeSend(initializeClaim) else { return }
+            guard upstreamHealthManager.beginInitializeSend(initializeClaim) else {
+                if case .processBridgeRecovery = mode {
+                    handleWarmInitializeStartFailure(
+                        mode: mode,
+                        initializeClaim: initializeClaim,
+                        reason: "initialize_send_claim_rejected"
+                    )
+                }
+                return
+            }
             _ = sendUpstream(
                 data,
                 operationLease: operationLease,
@@ -481,8 +681,58 @@ extension RuntimeCoordinator {
                 }
             )
         } else {
-            clearUpstreamState(initializeClaim: initializeClaim)
+            handleWarmInitializeStartFailure(
+                mode: mode,
+                initializeClaim: initializeClaim,
+                reason: "initialize_encode_failed"
+            )
         }
+    }
+
+    private func handleWarmInitializeStartFailure(
+        mode: WarmInitializeMode,
+        initializeClaim: UpstreamHealthManager.InitializeClaim,
+        reason: String
+    ) {
+        if case .processBridgeRecovery(let recovery) = mode {
+            _ = clearUpstreamState(
+                initializeClaim: initializeClaim,
+                resetsProcessRouteActivation: false,
+                replacesInitializedChannel: false
+            )
+            replaceProcessBridgeRecoveryChannelAndScheduleRetry(
+                recovery,
+                reason: reason
+            )
+            return
+        }
+        clearUpstreamState(initializeClaim: initializeClaim)
+    }
+
+    private func handleProcessBridgeRecoveryStartRejected(
+        _ recovery: ProcessBridgeRecovery,
+        reason: String
+    ) {
+        let isCurrent = upstreamTopology.operationLease(for: recovery.topologyProof)?.proof
+            == recovery.topologyProof
+            && xcodeProcessRoute(forUpstreamIndex: recovery.upstreamID.rawValue)?.id
+                == recovery.routeID
+        if isCurrent,
+           upstreamHealthManager.currentBridgeRecovery(for: recovery.topologyProof) == recovery {
+            return
+        }
+        if isCurrent,
+           upstreamHealthManager.state(for: recovery.upstreamID)?
+            .initPhase.isUsableInitialized == true {
+            applyProcessControlPlaneTransition(
+                processControlPlane.completeBridgeRecovery(recovery.reservation)
+            )
+            return
+        }
+        scheduleProcessBridgeRecoveryRetry(
+            recovery.reservation,
+            reason: reason
+        )
     }
 
     func scheduleUpstreamInitTimeout(
@@ -563,7 +813,8 @@ extension RuntimeCoordinator {
         recovery: ProcessBridgeRecovery,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
-        guard initializeClaim.owner == .processBridgeRecovery,
+        guard case .processBridgeRecovery(let claimedRecovery) = initializeClaim.owner,
+              claimedRecovery == recovery,
               initializeClaim.topologyProof == recovery.topologyProof,
               clearUpstreamState(
                 initializeClaim: initializeClaim,
@@ -579,6 +830,9 @@ extension RuntimeCoordinator {
                 "phase": .string("initialize"),
             ]
         )
-        _ = replaceOrRetireInitializeChannel(initializeClaim)
+        replaceProcessBridgeRecoveryChannelAndScheduleRetry(
+            recovery,
+            reason: "initialize_timeout"
+        )
     }
 }

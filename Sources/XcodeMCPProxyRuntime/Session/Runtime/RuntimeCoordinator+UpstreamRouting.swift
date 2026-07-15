@@ -175,6 +175,7 @@ extension RuntimeCoordinator {
         let slotID = UpstreamSlotID(rawValue: upstreamIndex)
         guard proof.slotID == slotID,
               upstreamTopology.validate(proof) else { return }
+        let bridgeRecovery = upstreamHealthManager.currentBridgeRecovery(for: proof)
         guard clearUpstreamState(proof: proof) else { return }
         let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
         guard let globalInit else { return }
@@ -201,6 +202,15 @@ extension RuntimeCoordinator {
                 reason: .upstreamExit
             )
         )
+
+        if let bridgeRecovery, exitedActivePrimaryInitialize == false {
+            replaceProcessBridgeRecoveryChannelAndScheduleRetry(
+                bridgeRecovery,
+                reason: "upstream_exit_\(status)"
+            )
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            return
+        }
 
         if exitedActivePrimaryInitialize {
             if retryPrimaryInitializeOnAlternativeUpstream(
@@ -405,7 +415,21 @@ extension RuntimeCoordinator {
         let upstreamIndex = operationLease.upstreamIndex
         switch reason {
         case .terminated, .notStarted, .startFailed:
-            guard clearUpstreamState(proof: operationLease.proof) else { return }
+            let bridgeRecovery = upstreamHealthManager.currentBridgeRecovery(
+                for: operationLease.proof
+            )
+            guard clearUpstreamState(
+                proof: operationLease.proof,
+                resetsProcessRouteActivation: bridgeRecovery == nil
+            ) else { return }
+            if let bridgeRecovery {
+                replaceProcessBridgeRecoveryChannelAndScheduleRetry(
+                    bridgeRecovery,
+                    reason: "upstream_\(reason)"
+                )
+                failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+                return
+            }
             if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
                 markXcodeProcessRouteUnavailable(
                     upstreamIndex: upstreamIndex,
@@ -931,6 +955,7 @@ extension RuntimeCoordinator {
         let slotID = UpstreamSlotID(rawValue: upstreamIndex)
         guard proof.slotID == slotID,
               upstreamTopology.validate(proof) else { return }
+        let bridgeRecovery = upstreamHealthManager.currentBridgeRecovery(for: proof)
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
         let nowUptimeNs = nowUptimeNanoseconds()
         let initSnapshot = initializeManager.snapshot()
@@ -966,6 +991,13 @@ extension RuntimeCoordinator {
                 "uptime_ns": .string("\(nowUptimeNs)"),
             ]
         )
+        if let bridgeRecovery {
+            replaceProcessBridgeRecoveryChannelAndScheduleRetry(
+                bridgeRecovery,
+                reason: "stdout_protocol_violation"
+            )
+            return
+        }
         if processRoutingEnabled,
            let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) {
             startProcessRouteActivation(for: route)

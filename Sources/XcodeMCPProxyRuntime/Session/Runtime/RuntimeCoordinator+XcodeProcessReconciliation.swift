@@ -313,36 +313,93 @@ extension RuntimeCoordinator {
         guard let route = xcodeProcessRoutes.first(where: { $0.id == recovery.routeID }) else {
             return
         }
-        let routeUpstreamIDs = Set(
-            route.upstreamIndices.map(UpstreamSlotID.init(rawValue:))
-        )
-        let recoveries = recovery.upstreamIDs.compactMap { upstreamID -> ProcessBridgeRecovery? in
-            guard routeUpstreamIDs.contains(upstreamID),
-                  let proof = upstreamTopology.operationLease(for: upstreamID)?.proof,
-                  let health = upstreamHealthManager.state(for: upstreamID),
-                  health.isInitialized == false,
-                  health.initInFlight == false
-            else { return nil }
-            return ProcessBridgeRecovery(routeID: recovery.routeID, topologyProof: proof)
+        guard route.upstreamIndices.contains(recovery.upstreamID.rawValue),
+              let proof = upstreamTopology.operationLease(for: recovery.upstreamID)?.proof,
+              let health = upstreamHealthManager.state(for: recovery.upstreamID) else {
+            scheduleProcessBridgeRecoveryRetry(
+                recovery,
+                reason: "slot_missing"
+            )
+            return
         }
-        guard recoveries.isEmpty == false else { return }
+        if health.initPhase.isUsableInitialized {
+            applyProcessControlPlaneTransition(
+                processControlPlane.completeBridgeRecovery(recovery)
+            )
+            return
+        }
+        guard
+              health.isInitialized == false,
+              health.initInFlight == false else {
+            scheduleProcessBridgeRecoveryRetry(
+                recovery,
+                reason: "slot_not_ready"
+            )
+            return
+        }
+        let resolvedRecovery = ProcessBridgeRecovery(
+            reservation: recovery,
+            topologyProof: proof
+        )
         logger.info(
             "bridge_pool_recovery_started",
             metadata: [
                 "pid": .string("\(route.target.processID)"),
-                "upstreams": .string(
-                    recoveries.map { String($0.topologyProof.slotID.rawValue) }
-                        .joined(separator: ",")
-                ),
+                "upstream": .string("\(recovery.upstreamID.rawValue)"),
             ]
         )
-        for recovery in recoveries {
-            startUpstreamWarmInitialize(
-                upstreamIndex: recovery.topologyProof.slotID.rawValue,
-                applyBackoff: true,
-                mode: .processBridgeRecovery(recovery)
+        startUpstreamWarmInitialize(
+            upstreamIndex: recovery.upstreamID.rawValue,
+            applyBackoff: false,
+            mode: .processBridgeRecovery(resolvedRecovery)
+        )
+    }
+
+    func scheduleProcessBridgeRecoveryRetry(
+        _ recovery: ProcessBridgePoolRecovery,
+        reason: String
+    ) {
+        guard let retry = processControlPlane.prepareBridgeRecoveryRetry(recovery) else {
+            return
+        }
+        logger.info(
+            "bridge_pool_recovery_retry_scheduled",
+            metadata: [
+                "pid": .string("\(recovery.routeID.processID)"),
+                "upstream": .string("\(recovery.upstreamID.rawValue)"),
+                "reason": .string(reason),
+                "delay_ms": .string("\(retry.delay.nanoseconds / 1_000_000)"),
+            ]
+        )
+        let timeout = scheduleRuntimeTimeout(retry.delay) { [weak self] in
+            guard let self else { return }
+            self.applyProcessControlPlaneTransition(
+                self.processControlPlane.handleBridgeRecoveryRetryFired(
+                    retry.reservation
+                )
             )
         }
+        applyProcessControlPlaneTransition(
+            processControlPlane.attachBridgeRecoveryRetryTimeout(
+                timeout,
+                to: retry.reservation
+            )
+        )
+    }
+
+    func replaceProcessBridgeRecoveryChannelAndScheduleRetry(
+        _ recovery: ProcessBridgeRecovery,
+        reason: String
+    ) {
+        _ = replaceOrRetireInitializeChannel(
+            recovery.topologyProof,
+            expectedRouteID: recovery.routeID,
+            requestsBridgePoolRecovery: false
+        )
+        scheduleProcessBridgeRecoveryRetry(
+            recovery.reservation,
+            reason: reason
+        )
     }
 
     func refreshPendingProcessToolsCatalogAfterWarmInitialize(upstreamIndex: Int) {

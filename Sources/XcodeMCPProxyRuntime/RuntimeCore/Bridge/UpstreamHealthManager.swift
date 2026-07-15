@@ -7,7 +7,7 @@ final class UpstreamHealthManager: Sendable {
     enum InitializeClaimOwner: Sendable, Hashable {
         case regular
         case processRouteActivation
-        case processBridgeRecovery
+        case processBridgeRecovery(ProcessBridgeRecovery)
     }
 
     enum InitializeClaimPhase: Sendable, Equatable {
@@ -15,6 +15,7 @@ final class UpstreamHealthManager: Sendable {
         case sending
         case responseReceived
         case initializedAwaitingCatalog
+        case initializedAwaitingBridgeVerification
     }
 
     struct InitializeClaim: Sendable, Hashable {
@@ -26,9 +27,25 @@ final class UpstreamHealthManager: Sendable {
         var upstreamIndex: Int { upstreamID.rawValue }
     }
 
+    enum ProbePurpose: Sendable {
+        case healthRecovery
+        case processBridgeAttachment(ProcessBridgePoolRecovery)
+    }
+
     struct ProbeRequest: Sendable {
         let topologyProof: UpstreamTopologyProof
         let probeGeneration: UInt64
+        let purpose: ProbePurpose
+
+        init(
+            topologyProof: UpstreamTopologyProof,
+            probeGeneration: UInt64,
+            purpose: ProbePurpose = .healthRecovery
+        ) {
+            self.topologyProof = topologyProof
+            self.probeGeneration = probeGeneration
+            self.purpose = purpose
+        }
 
         var upstreamID: UpstreamSlotID { topologyProof.slotID }
         var upstreamIndex: Int { upstreamID.rawValue }
@@ -85,6 +102,7 @@ final class UpstreamHealthManager: Sendable {
 
     struct MarkInitializedTransition: Sendable {
         let timeout: RuntimeScheduledTimeout?
+        let bridgeVerificationProbe: ProbeRequest?
     }
 
     struct TimeoutAttachment: Sendable {
@@ -106,10 +124,25 @@ final class UpstreamHealthManager: Sendable {
     enum InitPhase: Sendable, Equatable {
         case idle
         case initializing(upstreamID: Int64?)
-        case initialized
+        case initialized(InitializedReadiness)
+
+        enum InitializedReadiness: Sendable, Equatable {
+            case usable
+            case verifyingBridge(ProcessRouteID)
+        }
 
         var isInitialized: Bool {
             guard case .initialized = self else { return false }
+            return true
+        }
+
+        var isUsableInitialized: Bool {
+            guard case .initialized(.usable) = self else { return false }
+            return true
+        }
+
+        var isVerifyingBridge: Bool {
+            guard case .initialized(.verifyingBridge) = self else { return false }
             return true
         }
 
@@ -148,7 +181,7 @@ final class UpstreamHealthManager: Sendable {
             get { initPhase.isInitialized }
             set {
                 if newValue {
-                    initPhase = .initialized
+                    initPhase = .initialized(.usable)
                 } else if initPhase.isInitialized {
                     initPhase = .idle
                 }
@@ -257,7 +290,9 @@ final class UpstreamHealthManager: Sendable {
 
     func anyInitialized() -> Bool {
         state.withLockedValue { state in
-            Self.activeIndices(in: state).contains { state.upstreamStates[$0].isInitialized }
+            Self.activeIndices(in: state).contains {
+                state.upstreamStates[$0].initPhase.isUsableInitialized
+            }
         }
     }
 
@@ -330,7 +365,7 @@ final class UpstreamHealthManager: Sendable {
         state.withLockedValue { state in
             guard Self.isActive(lease.topologyProof, state: state) else { return nil }
             let upstreamIndex = lease.topologyProof.slotID.rawValue
-            guard state.upstreamStates[upstreamIndex].isInitialized,
+            guard state.upstreamStates[upstreamIndex].initPhase.isUsableInitialized,
                   state.upstreamStates[upstreamIndex].healthProbeInFlight == false,
                   state.upstreamStates[upstreamIndex].healthProbeGeneration
                     == lease.healthProbeGeneration,
@@ -367,7 +402,7 @@ final class UpstreamHealthManager: Sendable {
         state.withLockedValue { state in
             Self.activeIndices(in: state).reduce(into: 0) { count, index in
                 let upstream = state.upstreamStates[index]
-                guard upstream.isInitialized else { return }
+                guard upstream.initPhase.isUsableInitialized else { return }
                 switch upstream.healthState {
                 case .healthy, .degraded:
                     count += 1
@@ -399,7 +434,7 @@ final class UpstreamHealthManager: Sendable {
                 isHealthyEnough = false
             }
             guard isHealthyEnough,
-                  state.upstreamStates[index].isInitialized else { return nil }
+                  state.upstreamStates[index].initPhase.isUsableInitialized else { return nil }
             return state.topology?.proof(UpstreamSlotID(rawValue: index))
         }
         return UpstreamHealthManager.UseEvaluation(
@@ -428,7 +463,9 @@ final class UpstreamHealthManager: Sendable {
                 if occupiedUpstreams.contains(candidate) {
                     continue
                 }
-                guard state.upstreamStates[candidate].isInitialized else { continue }
+                guard state.upstreamStates[candidate].initPhase.isUsableInitialized else {
+                    continue
+                }
                 let health = Self.classifyHealthAndCollectEffectsIfNeeded(
                     upstreamIndex: candidate,
                     nowUptimeNs: nowUptimeNs,
@@ -479,8 +516,10 @@ final class UpstreamHealthManager: Sendable {
             if timeoutCount >= 3 {
                 let quarantineUntil = nowUptimeNs &+ 15_000_000_000
                 state.upstreamStates[upstreamIndex].healthState = .quarantined(untilUptimeNs: quarantineUntil)
-                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
-                state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+                if state.upstreamStates[upstreamIndex].initPhase.isVerifyingBridge == false {
+                    state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+                    state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+                }
                 return (true, timeoutCount)
             } else {
                 state.upstreamStates[upstreamIndex].healthState = .degraded
@@ -569,6 +608,56 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
+    func finishBridgeAttachVerification(
+        _ request: ProbeRequest,
+        success: Bool,
+        nowUptimeNs: UInt64,
+        commit: () -> Bool
+    ) -> (
+        recovery: ProcessBridgePoolRecovery,
+        cleared: (
+            timeout: RuntimeScheduledTimeout?,
+            initUpstreamID: Int64?,
+            didReceiveInitializeResponse: Bool,
+            didSendInitialized: Bool
+        )?
+    )? {
+        state.withLockedValue { state in
+            guard case .processBridgeAttachment(let recovery) = request.purpose,
+                  Self.isActive(request.topologyProof, state: state),
+                  recovery.upstreamID == request.topologyProof.slotID else { return nil }
+            let upstreamIndex = request.upstreamIndex
+            guard state.upstreamStates[upstreamIndex].healthProbeInFlight,
+                  state.upstreamStates[upstreamIndex].healthProbeGeneration
+                    == request.probeGeneration,
+                  state.upstreamStates[upstreamIndex].initPhase
+                    == .initialized(.verifyingBridge(recovery.routeID)),
+                  state.upstreamStates[upstreamIndex].initializeClaimPhase
+                    == .initializedAwaitingBridgeVerification,
+                  let claim = state.upstreamStates[upstreamIndex].initializeClaim,
+                  case .processBridgeRecovery(let current) = claim.owner,
+                  current.reservation == recovery,
+                  current.topologyProof == request.topologyProof,
+                  commit() else { return nil }
+            if success {
+                state.upstreamStates[upstreamIndex].initPhase = .initialized(.usable)
+                state.upstreamStates[upstreamIndex].initializeClaim = nil
+                state.upstreamStates[upstreamIndex].initializeClaimPhase = nil
+                state.upstreamStates[upstreamIndex].healthState = .healthy
+                state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
+                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+                state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
+                state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
+                state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nowUptimeNs
+                return (recovery, nil)
+            }
+            return (
+                recovery,
+                Self.clearUpstreamState(at: upstreamIndex, state: &state)
+            )
+        }
+    }
+
     func markToolsListRefreshSucceeded(
         _ proof: UpstreamTopologyProof,
         nowUptimeNs: UInt64
@@ -576,12 +665,17 @@ final class UpstreamHealthManager: Sendable {
         state.withLockedValue { state in
             guard Self.isActive(proof, state: state) else { return false }
             let upstreamIndex = proof.slotID.rawValue
-            if state.upstreamStates[upstreamIndex].healthProbeInFlight {
+            let isVerifyingBridge = state.upstreamStates[upstreamIndex]
+                .initPhase.isVerifyingBridge
+            if state.upstreamStates[upstreamIndex].healthProbeInFlight,
+               isVerifyingBridge == false {
                 state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
             }
             state.upstreamStates[upstreamIndex].healthState = .healthy
             state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
-            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            if isVerifyingBridge == false {
+                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            }
             state.upstreamStates[upstreamIndex].consecutiveToolsListFailures = 0
             state.upstreamStates[upstreamIndex].lastToolsListSuccessUptimeNs = nowUptimeNs
             return true
@@ -595,12 +689,17 @@ final class UpstreamHealthManager: Sendable {
         state.withLockedValue { state in
             guard Self.isActive(proof, state: state) else { return nil }
             let upstreamIndex = proof.slotID.rawValue
-            if state.upstreamStates[upstreamIndex].healthProbeInFlight {
+            let isVerifyingBridge = state.upstreamStates[upstreamIndex]
+                .initPhase.isVerifyingBridge
+            if state.upstreamStates[upstreamIndex].healthProbeInFlight,
+               isVerifyingBridge == false {
                 state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
             }
             let quarantineUntil = nowUptimeNs &+ 30 * 1_000_000_000
             state.upstreamStates[upstreamIndex].healthState = .quarantined(untilUptimeNs: quarantineUntil)
-            state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            if isVerifyingBridge == false {
+                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+            }
             state.upstreamStates[upstreamIndex].consecutiveToolsListFailures += 1
             return (state.upstreamStates[upstreamIndex].consecutiveToolsListFailures, quarantineUntil)
         }
@@ -681,6 +780,19 @@ final class UpstreamHealthManager: Sendable {
                   let claim = state.upstreamStates[upstreamIndex].initializeClaim,
                   Self.matches(claim, state: state) else { return nil }
             return claim
+        }
+    }
+
+    func currentBridgeRecovery(
+        for proof: UpstreamTopologyProof
+    ) -> ProcessBridgeRecovery? {
+        state.withLockedValue { state in
+            guard Self.isActive(proof, state: state),
+                  let upstream = state.upstreamStates[proof.slotID],
+                  let claim = upstream.initializeClaim,
+                  claim.topologyProof == proof,
+                  case .processBridgeRecovery(let recovery) = claim.owner else { return nil }
+            return recovery
         }
     }
 
@@ -768,8 +880,8 @@ final class UpstreamHealthManager: Sendable {
         state.withLockedValue { state in
             guard Self.isActive(proof, state: state) else { return nil }
             let upstreamIndex = proof.slotID.rawValue
-            if state.upstreamStates[upstreamIndex].initializeClaim?.owner
-                == .processRouteActivation {
+            if let owner = state.upstreamStates[upstreamIndex].initializeClaim?.owner,
+               owner != .regular {
                 return nil
             }
             if let expectedUpstreamID,
@@ -787,7 +899,10 @@ final class UpstreamHealthManager: Sendable {
             state.upstreamStates[upstreamIndex].healthProbeInFlight = false
             let timeout = state.upstreamStates[upstreamIndex].initTimeout
             state.upstreamStates[upstreamIndex].initTimeout = nil
-            return UpstreamHealthManager.MarkInitializedTransition(timeout: timeout)
+            return UpstreamHealthManager.MarkInitializedTransition(
+                timeout: timeout,
+                bridgeVerificationProbe: nil
+            )
         }
     }
 
@@ -804,12 +919,24 @@ final class UpstreamHealthManager: Sendable {
                     == .responseReceived,
                   commit() else { return nil }
             let timeout = state.upstreamStates[claim.upstreamIndex].initTimeout
-            state.upstreamStates[claim.upstreamIndex].isInitialized = true
+            let bridgeRecovery: ProcessBridgeRecovery?
+            if case .processBridgeRecovery(let recovery) = claim.owner {
+                bridgeRecovery = recovery
+                state.upstreamStates[claim.upstreamIndex].initPhase = .initialized(
+                    .verifyingBridge(recovery.routeID)
+                )
+            } else {
+                bridgeRecovery = nil
+                state.upstreamStates[claim.upstreamIndex].initPhase = .initialized(.usable)
+            }
             state.upstreamStates[claim.upstreamIndex].initInFlight = false
             state.upstreamStates[claim.upstreamIndex].initUpstreamID = nil
             if claim.owner == .processRouteActivation {
                 state.upstreamStates[claim.upstreamIndex].initializeClaimPhase =
                     .initializedAwaitingCatalog
+            } else if bridgeRecovery != nil {
+                state.upstreamStates[claim.upstreamIndex].initializeClaimPhase =
+                    .initializedAwaitingBridgeVerification
             } else {
                 state.upstreamStates[claim.upstreamIndex].initializeClaim = nil
                 state.upstreamStates[claim.upstreamIndex].initializeClaimPhase = nil
@@ -817,8 +944,24 @@ final class UpstreamHealthManager: Sendable {
             state.upstreamStates[claim.upstreamIndex].initTimeout = nil
             state.upstreamStates[claim.upstreamIndex].healthState = .healthy
             state.upstreamStates[claim.upstreamIndex].consecutiveRequestTimeouts = 0
-            state.upstreamStates[claim.upstreamIndex].healthProbeInFlight = false
-            return UpstreamHealthManager.MarkInitializedTransition(timeout: timeout)
+            let bridgeVerificationProbe: ProbeRequest?
+            if let bridgeRecovery {
+                state.upstreamStates[claim.upstreamIndex].healthProbeInFlight = true
+                state.upstreamStates[claim.upstreamIndex].healthProbeGeneration &+= 1
+                bridgeVerificationProbe = ProbeRequest(
+                    topologyProof: bridgeRecovery.topologyProof,
+                    probeGeneration: state.upstreamStates[claim.upstreamIndex]
+                        .healthProbeGeneration,
+                    purpose: .processBridgeAttachment(bridgeRecovery.reservation)
+                )
+            } else {
+                state.upstreamStates[claim.upstreamIndex].healthProbeInFlight = false
+                bridgeVerificationProbe = nil
+            }
+            return UpstreamHealthManager.MarkInitializedTransition(
+                timeout: timeout,
+                bridgeVerificationProbe: bridgeVerificationProbe
+            )
         }
     }
 
@@ -930,10 +1073,15 @@ final class UpstreamHealthManager: Sendable {
                 }
                 state.upstreamStates[upstreamIndex].healthState = .healthy
                 state.upstreamStates[upstreamIndex].consecutiveRequestTimeouts = 0
-                if state.upstreamStates[upstreamIndex].healthProbeInFlight {
+                let isVerifyingBridge = state.upstreamStates[upstreamIndex]
+                    .initPhase.isVerifyingBridge
+                if state.upstreamStates[upstreamIndex].healthProbeInFlight,
+                   isVerifyingBridge == false {
                     state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
                 }
-                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+                if isVerifyingBridge == false {
+                    state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+                }
                 return [.failQueuedIfNoRecovery]
 
             case .upstreamOverloaded(let proof):
@@ -942,10 +1090,15 @@ final class UpstreamHealthManager: Sendable {
                 if case .healthy = state.upstreamStates[upstreamIndex].healthState {
                     state.upstreamStates[upstreamIndex].healthState = .degraded
                 }
-                if state.upstreamStates[upstreamIndex].healthProbeInFlight {
+                let isVerifyingBridge = state.upstreamStates[upstreamIndex]
+                    .initPhase.isVerifyingBridge
+                if state.upstreamStates[upstreamIndex].healthProbeInFlight,
+                   isVerifyingBridge == false {
                     state.upstreamStates[upstreamIndex].healthProbeGeneration &+= 1
                 }
-                state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+                if isVerifyingBridge == false {
+                    state.upstreamStates[upstreamIndex].healthProbeInFlight = false
+                }
                 return [.failQueuedIfNoRecovery]
 
             }
@@ -1018,7 +1171,7 @@ final class UpstreamHealthManager: Sendable {
     ) -> Bool {
         guard isActive(proof, state: state),
               let source = state.upstreamStates[proof.slotID],
-              source.isInitialized else {
+              source.initPhase.isUsableInitialized else {
             return false
         }
         switch source.healthState {
