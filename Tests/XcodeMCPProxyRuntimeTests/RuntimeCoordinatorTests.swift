@@ -7940,11 +7940,9 @@ struct RuntimeCoordinatorRecoveryTests {
         }
 
         _ = try await sentValue(from: firstUpstream, at: 0, timeout: .seconds(2))
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: clocks.timeoutClock,
-            uptimeClock: clocks.uptimeClock,
-            by: .milliseconds(100)
-        )
+        try await clocks.timeoutClock.sleep(untilSuspendedFor: .milliseconds(100))
+        clocks.uptimeClock.advance(by: .milliseconds(100))
+        clocks.timeoutClock.advance(by: .milliseconds(100))
 
         do {
             _ = try await waitWithTimeout("waiting for shared deadline timeout") {
