@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import Synchronization
 import Testing
 import XcodeMCPKit
 import XcodeMCPProxyTestSupport
@@ -34,7 +35,7 @@ struct StdioAdapterContractTests {
         outputPipe.fileHandleForWriting.closeFile()
     }
 
-    @Test func immediateStopWaitsForReadIteratorReadiness() async throws {
+    @Test func immediateStopCompletesInputChannelShutdown() async throws {
         for _ in 0..<100 {
             let transport = StalledStdioAdapterTransport()
             let inputPipe = Pipe()
@@ -58,11 +59,11 @@ struct StdioAdapterContractTests {
 
     @Test func deinitCancelsReadAndEventTasksWithoutAStopTask() async throws {
         let transport = StalledStdioAdapterTransport()
-        let inputPipe = Pipe()
+        let inputReader = DeinitObservingStdioInputReader()
         let outputPipe = Pipe()
         var adapter: StdioAdapter? = StdioAdapter(
             requestTimeout: nil,
-            input: inputPipe.fileHandleForReading,
+            inputReader: inputReader,
             output: outputPipe.fileHandleForWriting,
             recipe: MCPTransportRecipe { transport },
             shutdownPolicy: .live
@@ -71,12 +72,9 @@ struct StdioAdapterContractTests {
 
         try await adapter?.start()
         adapter = nil
-        for _ in 0..<100 where weakAdapter != nil {
-            await Task.yield()
-        }
+        await inputReader.waitUntilStopped()
 
         #expect(weakAdapter == nil)
-        inputPipe.fileHandleForWriting.closeFile()
         outputPipe.fileHandleForWriting.closeFile()
     }
 
@@ -85,6 +83,46 @@ struct StdioAdapterContractTests {
         try await TestResourceGate.withProcessHeavyStdioAdapterAccess {
             try await runEOFWithInFlightStalledRequestClosesAndCancelsClientAfterDrainTimeout()
         }
+    }
+
+    @Test func inputReadFailureAbortsPendingRequestWithoutDrainSleep() async throws {
+        let payload = Data(
+            (initializeRequest + "\n" + initializedNotification + "\n" + toolsListRequest + "\n")
+                .utf8
+        )
+        let inputReader = ControlledFailingStdioInputReader(payload: payload)
+        let client = StalledStdioAdapterTransport()
+        let outputPipe = Pipe()
+        let uptimeClock = TestUptimeClock()
+        let drainSleepCount = Mutex(0)
+        let clock = ClockClient(
+            now: {
+                Date(timeIntervalSince1970: Double(uptimeClock.now()) / 1_000_000_000)
+            },
+            uptimeNanoseconds: uptimeClock.now,
+            sleep: { duration in
+                drainSleepCount.withLock { $0 += 1 }
+                uptimeClock.advance(by: duration)
+            },
+            sleepForTimeInterval: { _ in }
+        )
+        let adapter = StdioAdapter(
+            requestTimeout: nil,
+            inputReader: inputReader,
+            output: outputPipe.fileHandleForWriting,
+            recipe: MCPTransportRecipe { client },
+            shutdownPolicy: StdioAdapterShutdownPolicy(clock: clock)
+        )
+
+        try await adapter.start()
+        #expect(try await client.sentBody(at: 2) == Data(toolsListRequest.utf8))
+        inputReader.fail()
+        await adapter.waitUntilStopped()
+
+        #expect(drainSleepCount.withLock { $0 } == 0)
+        #expect(await client.sendCancellationCallCount() == 1)
+        #expect(await client.closeCallCount() == 1)
+        try outputPipe.fileHandleForWriting.close()
     }
 
     private func runEOFWithInFlightStalledRequestClosesAndCancelsClientAfterDrainTimeout()
@@ -469,6 +507,10 @@ private actor StalledStdioAdapterTransport: XcodeMCPTransport {
         await closeCalls.count()
     }
 
+    func sendCancellationCallCount() async -> Int {
+        await sendCancellationCalls.count()
+    }
+
     func releaseStalledSends() async {
         await stalledSends.releaseAll()
     }
@@ -515,6 +557,72 @@ private actor StalledSendContinuations {
 }
 
 private struct StalledSendReleaseError: Error {}
+
+private final class DeinitObservingStdioInputReader: StdioInputReading, Sendable {
+    private let terminal = AsyncTerminalSignal()
+
+    func read() async throws -> Data? {
+        await terminal.wait()
+        throw CancellationError()
+    }
+
+    func stop() {
+        terminal.signal()
+    }
+
+    func waitUntilStopped() async {
+        await terminal.wait()
+    }
+}
+
+private final class ControlledFailingStdioInputReader: StdioInputReading, Sendable {
+    private struct State: Sendable {
+        var didReadPayload = false
+        var isStopped = false
+    }
+
+    private let payload: Data
+    private let state = Mutex(State())
+    private let failure = AsyncTerminalSignal()
+    private let terminal = AsyncTerminalSignal()
+
+    init(payload: Data) {
+        self.payload = payload
+    }
+
+    func read() async throws -> Data? {
+        let shouldReturnPayload = state.withLock { state in
+            guard state.didReadPayload == false else { return false }
+            state.didReadPayload = true
+            return true
+        }
+        if shouldReturnPayload {
+            return payload
+        }
+
+        await failure.wait()
+        if state.withLock({ $0.isStopped }) {
+            throw CancellationError()
+        }
+        throw ControlledStdioInputReadFailure()
+    }
+
+    func fail() {
+        failure.signal()
+    }
+
+    func stop() {
+        state.withLock { $0.isStopped = true }
+        failure.signal()
+        terminal.signal()
+    }
+
+    func waitUntilStopped() async {
+        await terminal.wait()
+    }
+}
+
+private struct ControlledStdioInputReadFailure: Error {}
 
 private actor RecordedCompletionCount {
     private var count = 0
