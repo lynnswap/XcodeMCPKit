@@ -267,6 +267,11 @@ final class ProcessControlPlaneAuthority: Sendable {
         var attempt: Int { lease.attemptID.rawValue }
     }
 
+    struct ChannelInitializedAttempt: Sendable {
+        let attempt: Int
+        let shouldStartCatalogLoad: Bool
+    }
+
     struct Retry: Sendable {
         let attempt: Int
         let delay: TimeAmount
@@ -1245,18 +1250,24 @@ final class ProcessControlPlaneAuthority: Sendable {
     func markChannelInitialized(
         routeID: ProcessRouteID,
         upstreamProof: UpstreamTopologyProof
-    ) -> Int? {
+    ) -> ChannelInitializedAttempt? {
         state.withLockedValue { state in
             guard let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
                   var attempt = record.attempt,
                   attempt.upstreamProof == upstreamProof,
-                  attempt.phase == .attaching else { return nil }
+                  [.attaching, .loadingCatalog].contains(attempt.phase) else { return nil }
+            let shouldStartCatalogLoad = attempt.phase == .attaching
             attempt.retryKind = nil
-            attempt.phase = .initialized
+            if shouldStartCatalogLoad {
+                attempt.phase = .initialized
+            }
             record.attempt = attempt
             state.recordsByKey[key] = record
-            return attempt.id.rawValue
+            return ChannelInitializedAttempt(
+                attempt: attempt.id.rawValue,
+                shouldStartCatalogLoad: shouldStartCatalogLoad
+            )
         }
     }
 

@@ -229,7 +229,7 @@ extension RuntimeCoordinator {
         guard let upstreamProof = initializeClaim.topologyProof,
               upstreamProof.slotID.rawValue == upstreamIndex,
               let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-              let attempt = processControlPlane.markChannelInitialized(
+              let initialized = processControlPlane.markChannelInitialized(
                   routeID: route.id,
                   upstreamProof: upstreamProof
               ) else { return }
@@ -266,9 +266,10 @@ extension RuntimeCoordinator {
         scheduleProcessRouteActivationCatalogTimeout(
             processID: route.target.processID,
             upstreamIndex: upstreamIndex,
-            attempt: attempt,
+            attempt: initialized.attempt,
             initializeClaim: initializeClaim
         )
+        guard initialized.shouldStartCatalogLoad else { return }
         refreshProcessRouteToolsCatalog(
             route: route,
             upstreamProof: upstreamProof,
