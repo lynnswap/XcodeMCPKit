@@ -16134,7 +16134,13 @@ private func occupyUpstreamSlot(
         outcomes.append(.failed(String(describing: error)))
     }
 
-    switch try await outcomes.nextValue(at: 0) {
+    let outcome = try await waitForRecordedValue(
+        outcomes,
+        at: 0,
+        description: "waiting for upstream slot occupation",
+        timeout: .seconds(5)
+    )
+    switch outcome {
     case .activated(let upstreamIndex):
         return upstreamIndex
     case .failed(let description):
