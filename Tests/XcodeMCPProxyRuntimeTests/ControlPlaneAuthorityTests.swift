@@ -47,10 +47,19 @@ struct ControlPlaneAuthorityTests {
         #expect(snapshot.canonicalSourceUpstream == 0)
     }
 
-    @Test func bridgeRecoveryWaitsForCatalogAndThenUsesProcessOwnerEffect() throws {
+    @Test func bridgeRecoveryBeginsBeforeCatalogAndUsesProcessOwnerEffect() throws {
         let target = xcodeProcessTarget(processID: 41031, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0, 1])])
         let route = try #require(authority.route(forProcessID: target.processID))
+
+        let bootstrap = authority.beginBridgePoolRecovery(routeID: route.id)
+        guard case .restoreBridgePool(let bootstrapRecovery) = bootstrap.effects.first else {
+            Issue.record("expected catalog bootstrap bridge recovery")
+            return
+        }
+        #expect(bootstrapRecovery.routeID == route.id)
+        #expect(bootstrapRecovery.upstreamID == UpstreamSlotID(rawValue: 1))
+        #expect(authority.beginBridgePoolRecovery(routeID: route.id).effects.isEmpty)
 
         let (lease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
@@ -65,16 +74,7 @@ struct ControlPlaneAuthorityTests {
             Issue.record("expected sibling catalog to be accepted")
             return
         }
-        let deferredEffect = try #require(catalogTransition.effects.first { effect in
-            if case .restoreBridgePool = effect { return true }
-            return false
-        })
-        guard case .restoreBridgePool(let deferredRecovery) = deferredEffect else {
-            Issue.record("expected deferred bridge recovery effect")
-            return
-        }
-        #expect(deferredRecovery.routeID == route.id)
-        #expect(deferredRecovery.upstreamID == UpstreamSlotID(rawValue: 1))
+        #expect(catalogTransition.effects.isEmpty)
 
         let duplicate = authority.requestBridgePoolRecovery(
             routeID: route.id,
@@ -82,7 +82,7 @@ struct ControlPlaneAuthorityTests {
         )
         #expect(duplicate.effects.isEmpty)
 
-        let completed = authority.completeBridgeRecovery(deferredRecovery)
+        let completed = authority.completeBridgeRecovery(bootstrapRecovery)
         #expect(completed.effects.isEmpty)
 
         let immediate = authority.requestBridgePoolRecovery(
@@ -105,17 +105,9 @@ struct ControlPlaneAuthorityTests {
         let target = xcodeProcessTarget(processID: 41032, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0, 1, 2])])
         let route = try #require(authority.route(forProcessID: target.processID))
-        let (lease, _) = try #require(authority.beginCatalogAttempt(
-            routeID: route.id,
-            preferredUpstreamProof: testTopologyProof(0),
-            nowUptimeNanoseconds: 1
-        ))
-        guard case .accepted(_, let catalogTransition) = authority.completeCatalog(
-            .usable(catalog("BuildProject"), source: testTopologyProof(0)),
-            lease: lease,
-            nowUptimeNanoseconds: 2
-        ), case .restoreBridgePool(let firstAttempt) = catalogTransition.effects.first else {
-            Issue.record("expected first serialized bridge recovery")
+        guard case .restoreBridgePool(let firstAttempt) = authority
+            .beginBridgePoolRecovery(routeID: route.id).effects.first else {
+            Issue.record("expected first serialized bootstrap recovery")
             return
         }
         #expect(firstAttempt.upstreamID == UpstreamSlotID(rawValue: 1))
@@ -163,7 +155,7 @@ struct ControlPlaneAuthorityTests {
         #expect(resetRetry.delay.nanoseconds == TimeAmount.seconds(1).nanoseconds)
     }
 
-    @Test func bridgeRecoveryReturnsToCatalogBarrierWhenRetryFiresWithoutCatalog() throws {
+    @Test func bridgeRecoveryRetryContinuesWhenCatalogDisappears() throws {
         let target = xcodeProcessTarget(processID: 41034, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0, 1])])
         let route = try #require(authority.route(forProcessID: target.processID))
@@ -188,20 +180,9 @@ struct ControlPlaneAuthorityTests {
             source: sourceProof
         )
         #expect(authority.catalog(forProcessID: target.processID) == nil)
-        #expect(authority.handleBridgeRecoveryRetryFired(retry.reservation).effects.isEmpty)
-
-        let replacementProof = testTopologyProof(0, generation: 2)
-        let (replacementLease, _) = try #require(authority.beginCatalogAttempt(
-            routeID: route.id,
-            preferredUpstreamProof: replacementProof,
-            nowUptimeNanoseconds: 3
-        ))
-        guard case .accepted(_, let replacementTransition) = authority.completeCatalog(
-            .usable(catalog("BuildProject"), source: replacementProof),
-            lease: replacementLease,
-            nowUptimeNanoseconds: 4
-        ), case .restoreBridgePool(let resumedAttempt) = replacementTransition.effects.first else {
-            Issue.record("expected catalog restoration to resume bridge recovery")
+        guard case .restoreBridgePool(let resumedAttempt) = authority
+            .handleBridgeRecoveryRetryFired(retry.reservation).effects.first else {
+            Issue.record("expected bridge recovery to continue without a catalog")
             return
         }
         #expect(resumedAttempt.upstreamID == firstAttempt.upstreamID)
@@ -339,7 +320,7 @@ struct ControlPlaneAuthorityTests {
         )
     }
 
-    @Test func bridgeRecoverySuccessWaitsForCatalogBeforeStartingNextSlot() throws {
+    @Test func bridgeRecoverySuccessStartsNextSlotWithoutCatalog() throws {
         let target = xcodeProcessTarget(processID: 41036, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0, 1, 2])])
         let route = try #require(authority.route(forProcessID: target.processID))
@@ -362,7 +343,12 @@ struct ControlPlaneAuthorityTests {
             processID: target.processID,
             source: sourceProof
         )
-        #expect(authority.completeBridgeRecovery(firstAttempt).effects.isEmpty)
+        guard case .restoreBridgePool(let nextAttempt) = authority
+            .completeBridgeRecovery(firstAttempt).effects.first else {
+            Issue.record("expected successful recovery to release the next bridge slot")
+            return
+        }
+        #expect(nextAttempt.upstreamID == UpstreamSlotID(rawValue: 2))
 
         let replacementProof = testTopologyProof(0, generation: 2)
         let (replacementLease, _) = try #require(authority.beginCatalogAttempt(
@@ -374,11 +360,11 @@ struct ControlPlaneAuthorityTests {
             .usable(catalog("BuildProject"), source: replacementProof),
             lease: replacementLease,
             nowUptimeNanoseconds: 4
-        ), case .restoreBridgePool(let nextAttempt) = resumedTransition.effects.first else {
-            Issue.record("expected restored catalog to release the next bridge slot")
+        ) else {
+            Issue.record("expected restored catalog commit")
             return
         }
-        #expect(nextAttempt.upstreamID == UpstreamSlotID(rawValue: 2))
+        #expect(resumedTransition.effects.isEmpty)
     }
 
     @Test func retiringRouteCancelsBridgeRecoveryRetryAndRejectsLateCallback() throws {

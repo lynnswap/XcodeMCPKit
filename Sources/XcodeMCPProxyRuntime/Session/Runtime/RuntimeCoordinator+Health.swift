@@ -324,6 +324,18 @@ extension RuntimeCoordinator {
             }
             applyProcessControlPlaneTransition(bridgeCompletion)
             markXcodeProcessRouteAvailable(upstreamIndex: probe.upstreamIndex)
+            if processControlPlane.catalog(
+                forProcessID: verification.recovery.routeID.processID
+            ) == nil,
+               let route = xcodeProcessRoutes.first(where: {
+                   $0.id == verification.recovery.routeID
+               }) {
+                refreshProcessRouteToolsCatalog(
+                    route: route,
+                    upstreamProof: proof,
+                    reason: "bridge_pool_attach_verified_\(probe.upstreamIndex)"
+                )
+            }
             upstreamSlotScheduler.wake()
             noteUpstreamInitializationSucceeded()
         } else {

@@ -877,7 +877,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             matching: { methodName(from: $0) == "initialize" },
             description: "waiting for route activation initialize"
         )
-        #expect(await secondary.sentCount() == 0)
         await primary.yield(
             .message(
                 try makeInitializeResponse(id: try extractUpstreamID(from: primaryInitialize))
@@ -2158,13 +2157,15 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(methodName(from: secondInitialize) == "initialize")
     }
 
-    @Test func processRouteActivationDefersSecondaryUntilPrimaryCatalogAndAttachProbeSucceed()
+    @Test func processRouteActivationBootstrapsCatalogFromVerifiedSecondaryAfterPrimaryFailure()
         async throws
     {
         let existingUpstream = TestUpstreamClient()
         let existingTarget = xcodeProcessTarget(processID: 26615, xcodeVersion: "26.6")
         let newTarget = xcodeProcessTarget(processID: 27015, xcodeVersion: "27.0")
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
+        let catalogCommits = LockedRecordedValues<(pid_t, Int)>()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [existingUpstream],
             xcodeProcessRoutes: [
@@ -2177,6 +2178,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 createdUpstreams.withLockedValue { $0.append(contentsOf: [primary, secondary]) }
                 return [primary, secondary]
             },
+            testHooks: RuntimeCoordinatorTestHooks(
+                toolsListRefreshCompleted: { toolsListRefreshes.append(($0, $1)) },
+                processRouteCatalogCommitted: { catalogCommits.append(($0, $1)) }
+            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -2203,8 +2208,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let newUpstreams = createdUpstreams.withLockedValue { $0 }
         #expect(newUpstreams.count == 2)
         let primaryInitialize = try await newUpstreams[0].nextSent(at: 0)
+        let secondaryInitialize = try await newUpstreams[1].nextSent(at: 0)
         #expect(methodName(from: primaryInitialize) == "initialize")
-        #expect(await newUpstreams[1].sentCount() == 0)
+        #expect(methodName(from: secondaryInitialize) == "initialize")
 
         await newUpstreams[0].yield(
             .message(
@@ -2219,19 +2225,26 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let primaryToolsList = try await newUpstreams[0].nextSent(
             matching: { methodName(from: $0) == "tools/list" }
         )
-        #expect(await newUpstreams[1].sentCount() == 0)
-
+        let failedRefreshIndex = toolsListRefreshes.count()
         await newUpstreams[0].yield(
             .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: primaryToolsList),
-                    tools: [toolDescriptor(name: "NewOnly")]
-                )
+                try JSONSerialization.data(withJSONObject: [
+                    "jsonrpc": "2.0",
+                    "id": NSNumber(value: try extractUpstreamID(from: primaryToolsList)),
+                    "error": [
+                        "code": -32000,
+                        "message": "primary catalog failed",
+                    ],
+                ])
             )
         )
+        let failedRefresh = try await nextRecordedValue(
+            toolsListRefreshes,
+            at: failedRefreshIndex
+        )
+        #expect(failedRefresh.0 == 1)
+        #expect(failedRefresh.1 == false)
 
-        let secondaryInitialize = try await newUpstreams[1].nextSent(at: 0)
-        #expect(methodName(from: secondaryInitialize) == "initialize")
         await newUpstreams[1].yield(
             .message(
                 try makeInitializeResponse(
@@ -2250,7 +2263,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 $0.processID == newTarget.processID
             }
         )
-        #expect(pendingRoute.usableSlotCount == 1)
+        #expect(pendingRoute.usableSlotCount == 0)
 
         await newUpstreams[1].yield(
             .message(
@@ -2260,13 +2273,33 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 )
             )
         )
-        await manager.drainRuntimeTasksForTesting()
+        let secondaryCatalog = try await newUpstreams[1].nextSent(
+            startingAt: 3,
+            matching: { methodName(from: $0) == "tools/list" }
+        )
+        let catalogCommitIndex = catalogCommits.count()
+        await newUpstreams[1].yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: secondaryCatalog),
+                    tools: [toolDescriptor(name: "NewOnly")]
+                )
+            )
+        )
+        #expect(
+            try await nextRecordedValue(catalogCommits, at: catalogCommitIndex)
+                == (newTarget.processID, 2)
+        )
         let attachedRoute = try #require(
             manager.debugSnapshot().processRoutes.first {
                 $0.processID == newTarget.processID
             }
         )
-        #expect(attachedRoute.usableSlotCount == 2)
+        #expect(attachedRoute.usableSlotCount == 1)
+        #expect(
+            manager.processControlPlane.catalog(forProcessID: newTarget.processID)?
+                .upstreamIndex == 2
+        )
     }
 
     @Test func processBridgeRecoveryRejectsReadinessCallbackAfterCatalogReset()
@@ -2312,6 +2345,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ]
         )
 
+        await readiness.setReady(false)
         manager.reconcileXcodeProcessTargets(
             [existingTarget, newTarget],
             reason: "test_stale_bridge_readiness_callback"
@@ -2319,30 +2353,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         let newUpstreams = createdUpstreams.withLockedValue { $0 }
         #expect(newUpstreams.count == 2)
-        let primaryInitialize = try await newUpstreams[0].nextSent(at: 0)
-        await newUpstreams[0].yield(
-            .message(
-                try makeInitializeResponse(
-                    id: try extractUpstreamID(from: primaryInitialize)
-                )
-            )
-        )
-        _ = try await newUpstreams[0].nextSent(
-            matching: { methodName(from: $0) == "notifications/initialized" }
-        )
-        let primaryToolsList = try await newUpstreams[0].nextSent(
-            matching: { methodName(from: $0) == "tools/list" }
-        )
-
-        await readiness.setReady(false)
-        await newUpstreams[0].yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: primaryToolsList),
-                    tools: [toolDescriptor(name: "NewOnly")]
-                )
-            )
-        )
         _ = try await readiness.nextChangeWait(at: 0)
         #expect(await newUpstreams[1].sentCount() == 0)
 

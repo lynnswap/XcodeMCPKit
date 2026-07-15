@@ -572,6 +572,27 @@ final class ProcessControlPlaneAuthority: Sendable {
         state = NIOLockedValueBox(initialState)
     }
 
+    /// Releases one configured sibling without requiring an existing catalog.
+    /// A verified sibling may be the first usable catalog source, so a catalog
+    /// barrier here would make recovery and catalog bootstrap depend on each other.
+    func beginBridgePoolRecovery(
+        routeID: ProcessRouteID
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            guard let key = Self.key(routeID: routeID, in: state),
+                  var owner = state.recordsByKey[key],
+                  owner.state == .active else {
+                return .none
+            }
+            let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
+            state.recordsByKey[key] = owner
+            return ProcessControlPlaneTransition(
+                addedRoutes: [], retiredRoutes: [], effects: effects,
+                publishesToolsListChanged: false
+            )
+        }
+    }
+
     func activeRoutes() -> [XcodeProcessRoute] {
         state.withLockedValue { state in Self.activeRoutes(in: state) }
     }
@@ -597,12 +618,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 break
             }
             owner.bridgeRecovery.pendingUpstreamIDs.insert(upstreamID)
-            let effects: [ProcessControlPlaneEffect]
-            if state.catalogsByProcessID[owner.route.target.processID] != nil {
-                effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
-            } else {
-                effects = []
-            }
+            let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
             state.recordsByKey[key] = owner
             return ProcessControlPlaneTransition(
                 addedRoutes: [], retiredRoutes: [], effects: effects,
@@ -627,12 +643,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                   current == recovery else { return nil }
             owner.bridgeRecovery.phase = .idle
             owner.bridgeRecovery.consecutiveFailureCount = 0
-            let effects: [ProcessControlPlaneEffect]
-            if state.catalogsByProcessID[owner.route.target.processID] != nil {
-                effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
-            } else {
-                effects = []
-            }
+            let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
             state.recordsByKey[key] = owner
             return ProcessControlPlaneTransition(
                 addedRoutes: [], retiredRoutes: [], effects: effects,
@@ -705,13 +716,6 @@ final class ProcessControlPlaneAuthority: Sendable {
                   var owner = state.recordsByKey[key],
                   case .waitingRetry(let current, _) = owner.bridgeRecovery.phase,
                   current == recovery else { return .none }
-            guard state.catalogsByProcessID[owner.route.target.processID] != nil else {
-                owner.bridgeRecovery.generation &+= 1
-                owner.bridgeRecovery.pendingUpstreamIDs.insert(recovery.upstreamID)
-                owner.bridgeRecovery.phase = .idle
-                state.recordsByKey[key] = owner
-                return .none
-            }
             owner.bridgeRecovery.generation &+= 1
             let next = ProcessBridgePoolRecovery(
                 routeID: owner.route.id,

@@ -303,6 +303,11 @@ extension RuntimeCoordinator {
             startProcessRouteActivation(for: route)
         }
         guard isInitialized() else { return }
+        for route in activeRoutes where pendingProcessIDs.contains(route.target.processID) {
+            applyProcessControlPlaneTransition(
+                processControlPlane.beginBridgePoolRecovery(routeID: route.id)
+            )
+        }
         refreshMissingProcessToolsCatalogsIfNeeded(
             reason: "pending_process_route_\(reason)",
             processIDs: pendingProcessIDs
