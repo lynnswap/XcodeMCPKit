@@ -12638,6 +12638,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
         let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
@@ -12699,7 +12700,6 @@ struct RuntimeCoordinatorWindowRoutingTests {
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
         #expect(methodName(from: queuedRequest) == "tools/list")
 
-        activePromise.fail(CancellationError())
     }
 
     @Test func sessionManagerPrimaryExitClearsCachedInitializeResult() async throws {
@@ -12811,6 +12811,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
         let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
@@ -12878,7 +12879,6 @@ struct RuntimeCoordinatorWindowRoutingTests {
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
         #expect(methodName(from: queuedRequest) == "tools/list")
 
-        activePromise.fail(CancellationError())
     }
 
     @Test func sessionManagerSecondaryExitClearsCachedInitializeResultWhenPrimaryAlreadyDown()
@@ -12890,13 +12890,15 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1],
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
+                upstreamEventHandled: { upstreamEvents.append($0) },
+                upstreamInitialized: { initializedUpstreams.append($0) }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -12921,6 +12923,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         // Wait for per-upstream notifications/initialized.
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0, 1])
 
         // Simulate primary dying first (cached init result should remain because upstream1 is still initialized).
         let primaryExitEventIndex = upstreamEvents.count()
@@ -13154,14 +13157,14 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
-        let upstreamEvents = LockedRecordedValues<Int>()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1],
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
+                upstreamInitialized: { initializedUpstreams.append($0) }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -13181,6 +13184,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         // Wait for per-upstream notifications/initialized.
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0, 1])
 
         let sessionIDA = "session-A"
         let sessionIDB = "session-B"
@@ -13684,6 +13688,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
         let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
@@ -13777,7 +13782,6 @@ struct RuntimeCoordinatorWindowRoutingTests {
         #expect(methodName(from: queuedRequest) == "tools/list")
         #expect(try extractUpstreamID(from: queuedRequest) == 99)
 
-        activePromise.fail(CancellationError())
     }
 
 }
@@ -13950,13 +13954,15 @@ struct RuntimeCoordinatorSchedulingTests {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1],
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
+                upstreamEventHandled: { upstreamEvents.append($0) },
+                upstreamInitialized: { initializedUpstreams.append($0) }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -13974,6 +13980,7 @@ struct RuntimeCoordinatorSchedulingTests {
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0, 1])
 
         // Pin two sessions to different upstreams.
         let sessionIDA = "session-A"
@@ -14007,9 +14014,16 @@ struct RuntimeCoordinatorSchedulingTests {
         let eventLoop = group.next()
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { initializedUpstreams.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         try await waitForSentCount(upstream0, count: 1, timeoutSeconds: 2)
@@ -14024,6 +14038,7 @@ struct RuntimeCoordinatorSchedulingTests {
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0, 1])
 
         let sessionID = "session-timeout-repin"
         _ = manager.session(id: sessionID)
@@ -14050,13 +14065,15 @@ struct RuntimeCoordinatorSchedulingTests {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream0, upstream1],
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
+                upstreamEventHandled: { upstreamEvents.append($0) },
+                upstreamInitialized: { initializedUpstreams.append($0) }
             )
         )
         defer { manager.shutdownAndWait() }
@@ -14074,6 +14091,7 @@ struct RuntimeCoordinatorSchedulingTests {
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0, 1])
 
         let sessionID = "session-1"
         let session = manager.session(id: sessionID)
@@ -14205,9 +14223,16 @@ struct RuntimeCoordinatorSchedulingTests {
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 2)
         let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop, upstreams: [upstream0, upstream1])
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { initializedUpstreams.append($0) }
+            )
+        )
         defer { manager.shutdownAndWait() }
 
         // Initialize both upstreams.
@@ -14223,6 +14248,7 @@ struct RuntimeCoordinatorSchedulingTests {
 
         try await waitForSentCount(upstream0, count: 2, timeoutSeconds: 2)
         try await waitForSentCount(upstream1, count: 2, timeoutSeconds: 2)
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0, 1])
 
         let sessionID = "session-overload-repin"
         let session = manager.session(id: sessionID)
@@ -15004,6 +15030,7 @@ struct RuntimeCoordinatorSchedulingTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
         let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
@@ -15047,7 +15074,6 @@ struct RuntimeCoordinatorSchedulingTests {
             try await queuedFuture.get()
         }
 
-        activePromise.fail(CancellationError())
     }
 
     @Test func sessionManagerAbandonRequestLeaseDropsLateResponseAndReleasesSlot() async throws {
@@ -15408,6 +15434,7 @@ struct RuntimeCoordinatorSchedulingTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
         let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
@@ -15458,7 +15485,6 @@ struct RuntimeCoordinatorSchedulingTests {
         await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
             try await queuedFuture.get()
         }
-        activePromise.fail(CancellationError())
     }
 
     @Test func sessionManagerFailsQueuedRequestsWhenHealthProbeRecoveryFails() async throws {
@@ -15550,6 +15576,7 @@ struct RuntimeCoordinatorSchedulingTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
         let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
@@ -15604,7 +15631,6 @@ struct RuntimeCoordinatorSchedulingTests {
         }
         #expect(manager.debugSnapshot().queuedRequestCount == 0)
 
-        activePromise.fail(CancellationError())
     }
 
     @Test func sessionManagerDebugResetClearsSessionsLeasesAndCache() async throws {
@@ -15742,6 +15768,7 @@ struct RuntimeCoordinatorSchedulingTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
         let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
@@ -15780,7 +15807,6 @@ struct RuntimeCoordinatorSchedulingTests {
             try await queuedFuture.get()
         }
 
-        activePromise.fail(CancellationError())
     }
 
     @Test func requestLeaseRegistryKeepsOnlyBoundedReleasedHistory() async throws {

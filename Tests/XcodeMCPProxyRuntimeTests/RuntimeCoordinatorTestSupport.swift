@@ -2732,6 +2732,20 @@ func waitForRecordedValue<Value: Sendable>(
     }
 }
 
+func waitForInitializedUpstreams(
+    _ initializedUpstreams: LockedRecordedValues<Int>,
+    expected: [Int]
+) async throws {
+    for (eventIndex, expectedUpstreamIndex) in expected.enumerated() {
+        let actualUpstreamIndex = try await waitForRecordedValue(
+            initializedUpstreams,
+            at: eventIndex,
+            description: "waiting for upstream \(expectedUpstreamIndex) initialization commit"
+        )
+        #expect(actualUpstreamIndex == expectedUpstreamIndex)
+    }
+}
+
 func nextRecordedValue<Value: Sendable>(
     _ values: LockedRecordedValues<Value>,
     at index: Int
