@@ -3,7 +3,7 @@ import XcodeMCPCoreTestSupport
 import XcodeMCPKit
 import XcodeMCPKitTesting
 
-@Suite
+@Suite(.asyncTestCleanup)
 struct XcodeMCPKitTestingTests {
     @Test func runtimeCreatesInitializedClientAndRecordsHandshake() async throws {
         let runtime = XcodeMCPTestRuntime()
@@ -77,9 +77,7 @@ struct XcodeMCPKitTestingTests {
         )
 
         let client = try await runtime.makeClient()
-        defer {
-            Task { await client.close() }
-        }
+        defer { closeAfterTest(client) }
 
         let tools = try await client.listTools()
         #expect(tools.map(\.name) == ["DocumentationSearch"])
@@ -122,9 +120,7 @@ struct XcodeMCPKitTestingTests {
         }, forMethod: "workspace/symbols")
 
         let client = try await runtime.makeClient()
-        defer {
-            Task { await client.close() }
-        }
+        defer { closeAfterTest(client) }
 
         let result = try await client.request(
             "workspace/symbols",
@@ -176,9 +172,7 @@ struct XcodeMCPKitTestingTests {
         }
 
         let client = try await runtime.makeClient()
-        defer {
-            Task { await client.close() }
-        }
+        defer { closeAfterTest(client) }
 
         let progressValues = RecordedValues<MCPProgress>()
         let result = try await client.callTool(
@@ -224,12 +218,8 @@ struct XcodeMCPKitTestingTests {
         let config = XcodeMCPConfiguration(requestTimeout: .seconds(1))
         let firstClient = try await runtime.makeClient(configuration: config)
         let secondClient = try await runtime.makeClient(configuration: config)
-        defer {
-            Task {
-                await firstClient.close()
-                await secondClient.close()
-            }
-        }
+        defer { closeAfterTest(firstClient) }
+        defer { closeAfterTest(secondClient) }
 
         let secondResult = try await secondClient.callTool(
             "DocumentationSearch",
@@ -270,9 +260,7 @@ struct XcodeMCPKitTestingTests {
         }
 
         let client = try await runtime.makeClient()
-        defer {
-            Task { await client.close() }
-        }
+        defer { closeAfterTest(client) }
 
         await #expect(throws: XcodeMCPError.serverError(
             code: -32042,

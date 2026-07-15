@@ -1,9 +1,10 @@
 import Foundation
 import Testing
+import XcodeMCPCoreTestSupport
 
 @testable import XcodeMCPKit
 
-@Suite(.serialized)
+@Suite(.serialized, .asyncTestCleanup)
 struct XcodeMCPTests {
     @Test func asyncInitializerPerformsMCPHandshake() async throws {
         let transport = FakeXcodeMCPTransport()
@@ -18,9 +19,7 @@ struct XcodeMCPTests {
             ),
             transport: transport
         )
-        defer {
-            Task { await xcode.close() }
-        }
+        defer { closeAfterTest(xcode) }
 
         let sent = await transport.sentMessages()
         #expect(sent.compactMap(\.method) == ["initialize", "notifications/initialized"])
@@ -73,6 +72,69 @@ struct XcodeMCPTests {
         #expect(await transport.closeCount() == 1)
     }
 
+    @Test func managedInitializerWaitsForUnsupportedHandshakeCleanupTerminal() async throws {
+        let closeGate = ManualGate()
+        let completions = RecordedValues<Void>()
+        let timeoutClock = ManualSessionTimeoutClock()
+        let transport = FakeXcodeMCPTransport(
+            initializeResult: .object([
+                "protocolVersion": .string("2099-01-01"),
+                "serverInfo": .object([
+                    "name": .string("future-server"),
+                    "version": .string("test"),
+                ]),
+                "capabilities": .object([:]),
+            ]),
+            transportCloseGate: closeGate
+        )
+        let clock = await timeoutClock.client()
+
+        let initialize = Task<Void, Error> {
+            do {
+                let authority = try await MCPClientSessionAuthority.startManaged(
+                    recipe: MCPTransportRecipe { transport },
+                    initialize: MCPManagedInitializeContext(
+                        clientName: "UnitTestClient",
+                        clientVersion: "test",
+                        capabilities: [:]
+                    ),
+                    defaultTimeout: .seconds(60),
+                    clock: clock
+                )
+                await authority.close()
+                await completions.append(())
+            } catch {
+                await completions.append(())
+                throw error
+            }
+        }
+        defer {
+            precondition(
+                registerAsyncTestCleanup(
+                    description: "managed initializer cleanup failed",
+                    operation: {
+                        await closeGate.open()
+                        initialize.cancel()
+                        _ = await initialize.result
+                    }
+                ),
+                "initializer cleanup requires an AsyncTestCleanupTrait scope"
+            )
+        }
+
+        #expect(try await transport.nextCloseCount() == 1)
+        #expect(await completions.count() == 0)
+
+        await closeGate.open()
+        #expect(try await transport.nextCloseTerminal() == 1)
+        await #expect(throws: MCPBridgeRuntimeError.invalidResponse(
+            "initialize result has unsupported protocolVersion 2099-01-01"
+        )) {
+            try await initialize.value
+        }
+        #expect(await completions.count() == 1)
+    }
+
     @Test func asyncInitializerMapsRuntimeTransportErrorsToPublicError() async throws {
         let transport = RuntimeFailingXcodeMCPTransport(
             error: MCPBridgeRuntimeError.transportUnavailable("mcpbridge write queue is full")
@@ -96,9 +158,7 @@ struct XcodeMCPTests {
     @Test func listToolsDecodesDescriptorAndPreservesDynamicFields() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
-        defer {
-            Task { await xcode.close() }
-        }
+        defer { closeAfterTest(xcode) }
 
         let tools = try await xcode.listTools()
         let tool = try #require(tools.first)
@@ -112,9 +172,7 @@ struct XcodeMCPTests {
     @Test func callToolSendsShapeAndDecodesFinalResult() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
-        defer {
-            Task { await xcode.close() }
-        }
+        defer { closeAfterTest(xcode) }
 
         let result = try await xcode.callTool(
             "DocumentationSearch",
@@ -146,9 +204,7 @@ struct XcodeMCPTests {
     @Test func rawRequestSendsDynamicMethodAndReturnsRawResult() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
-        defer {
-            Task { await xcode.close() }
-        }
+        defer { closeAfterTest(xcode) }
 
         let result = try await xcode.request(
             "workspace/symbols",
@@ -183,9 +239,6 @@ struct XcodeMCPTests {
         let callFinished = RecordedValues<Void>()
         let handlerGate = ManualGate()
         let xcode = try await XcodeMCP(transport: transport)
-        defer {
-            Task { await xcode.close() }
-        }
 
         let callTask = Task {
             let result = try await xcode.callTool(
@@ -199,6 +252,20 @@ struct XcodeMCPTests {
             }
             await callFinished.append(())
             return result
+        }
+        defer {
+            precondition(
+                registerAsyncTestCleanup(
+                    description: "tool call cleanup failed",
+                    operation: {
+                        await handlerGate.open()
+                        callTask.cancel()
+                        await xcode.close()
+                        _ = await callTask.result
+                    }
+                ),
+                "tool call cleanup requires an AsyncTestCleanupTrait scope"
+            )
         }
 
         #expect(try await reentrantResults.nextValue())
@@ -294,9 +361,7 @@ struct XcodeMCPTests {
                 requestTimeout: .seconds(2)
             )
         )
-        defer {
-            Task { await session.close() }
-        }
+        defer { closeAfterTest(session) }
 
         let progressValues = RecordedValues<JSONValue>()
         let result = try await session.request(
@@ -344,9 +409,7 @@ struct XcodeMCPTests {
                 requestTimeout: .seconds(2)
             )
         )
-        defer {
-            Task { await session.close() }
-        }
+        defer { closeAfterTest(session) }
 
         weak var weakProbe: DeinitProbe?
         do {
@@ -476,9 +539,6 @@ struct XcodeMCPTests {
                 clock: await timeoutClock.client()
             )
         )
-        defer {
-            Task { await session.close() }
-        }
 
         let sleepBaseline = await timeoutClock.requestedSleepCount()
         let requestTask = Task {
@@ -488,7 +548,17 @@ struct XcodeMCPTests {
             )
         }
         defer {
-            requestTask.cancel()
+            precondition(
+                registerAsyncTestCleanup(
+                    description: "timed-out request cleanup failed",
+                    operation: {
+                        requestTask.cancel()
+                        await session.close()
+                        _ = await requestTask.result
+                    }
+                ),
+                "request cleanup requires an AsyncTestCleanupTrait scope"
+            )
         }
 
         _ = try await transport.nextStarted(method: "tools/list")
@@ -531,9 +601,7 @@ struct XcodeMCPTests {
     @Test func unsupportedServerRequestGetsInternalErrorResponse() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
-        defer {
-            Task { await xcode.close() }
-        }
+        defer { closeAfterTest(xcode) }
 
         await transport.emitServerRequest(method: "sampling/createMessage", id: .integer(99))
 
@@ -558,15 +626,22 @@ struct XcodeMCPTests {
             error: .transportUnavailable("mcpbridge write queue is full")
         )
         let xcode = try await XcodeMCP(transport: transport)
-        defer {
-            Task { await xcode.close() }
-        }
 
         let listTask = Task {
             try await xcode.listTools()
         }
         defer {
-            listTask.cancel()
+            precondition(
+                registerAsyncTestCleanup(
+                    description: "pending tools/list cleanup failed",
+                    operation: {
+                        listTask.cancel()
+                        await xcode.close()
+                        _ = await listTask.result
+                    }
+                ),
+                "request cleanup requires an AsyncTestCleanupTrait scope"
+            )
         }
         _ = try await waitWithTimeout("tools/list send did not start") {
             try await transport.nextSentMessage { message in
@@ -1114,8 +1189,16 @@ struct XcodeMCPTests {
         let session = makeFakeHTTPURLSession(server: server)
         let reconnectSleep = ManualReconnectSleep()
         defer {
-            session.invalidateAndCancel()
-            FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+            precondition(
+                registerAsyncTestCleanup(
+                    description: "injected HTTP session cleanup failed",
+                    operation: {
+                        session.invalidateAndCancel()
+                        FakeStreamableHTTPURLProtocolRegistry.shared.reset()
+                    }
+                ),
+                "HTTP session cleanup requires an AsyncTestCleanupTrait scope"
+            )
         }
 
         let transport = StreamableHTTPXcodeMCPTransport(
@@ -1131,9 +1214,7 @@ struct XcodeMCPTests {
                 configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
-        defer {
-            Task { await xcode.close() }
-        }
+        defer { closeAfterTest(xcode) }
 
         let firstGET = try await waitWithTimeout("first event stream GET was not opened") {
             try await server.nextRequest { $0.httpMethod == "GET" }
@@ -3113,8 +3194,10 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
     private let responseErrors: [String: MCPJSONValue]
     private let progressBeforeResponseCount: Int
     private let emitsProgressBarrierServerRequest: Bool
+    private let transportCloseGate: ManualGate?
     private let sentMessageValues = RecordedValues<SentMessage>()
     private let closeValues = RecordedValues<Int>()
+    private let closeTerminalValues = RecordedValues<Int>()
     private var messages: [SentMessage] = []
     private var closed = false
     private var closes = 0
@@ -3130,7 +3213,8 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
         ]),
         responseErrors: [String: MCPJSONValue] = [:],
         progressBeforeResponseCount: Int = 1,
-        emitsProgressBarrierServerRequest: Bool = false
+        emitsProgressBarrierServerRequest: Bool = false,
+        transportCloseGate: ManualGate? = nil
     ) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
         self.events = stream.stream
@@ -3139,6 +3223,7 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
         self.responseErrors = responseErrors
         self.progressBeforeResponseCount = progressBeforeResponseCount
         self.emitsProgressBarrierServerRequest = emitsProgressBarrierServerRequest
+        self.transportCloseGate = transportCloseGate
     }
 
     func send(
@@ -3235,8 +3320,10 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
         closes += 1
         let closeCount = closes
         await closeValues.append(closeCount)
+        await transportCloseGate?.wait()
         continuation.yield(.closed(nil))
         continuation.finish()
+        await closeTerminalValues.append(closeCount)
     }
 
     func emitServerRequest(method: String, id: MCPJSONValue) {
@@ -3264,6 +3351,10 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
 
     func nextCloseCount() async throws -> Int {
         try await closeValues.nextValue()
+    }
+
+    func nextCloseTerminal() async throws -> Int {
+        try await closeTerminalValues.nextValue()
     }
 
     private func yieldMessage(_ object: [String: MCPJSONValue]) throws {

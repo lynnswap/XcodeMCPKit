@@ -5,104 +5,20 @@ import Testing
 import XcodeMCPCoreTestSupport
 
 package typealias AsyncTestTimeoutError = XcodeMCPCoreTestSupport.AsyncTestTimeoutError
+package typealias AsyncTestCleanupTrait = XcodeMCPCoreTestSupport.AsyncTestCleanupTrait
 package typealias RecordedValues<Value: Sendable> = XcodeMCPCoreTestSupport.RecordedValues<Value>
 package typealias TestResourceGate = XcodeMCPCoreTestSupport.TestResourceGate
 package typealias TestClock = XcodeMCPCoreTestSupport.TestClock
 
-/// Runs synchronous `defer`-registered test cleanup without blocking the
-/// cooperative executor that must make the cleanup operation progress.
-package struct AsyncTestCleanupTrait: SuiteTrait, TestTrait, TestScoping {
-    package let isRecursive = true
-
-    package init() {}
-
-    package func provideScope(
-        for test: Test,
-        testCase: Test.Case?,
-        performing function: @Sendable () async throws -> Void
-    ) async throws {
-        let context = AsyncTestCleanupContext()
-        do {
-            try await AsyncTestCleanupContext.$current.withValue(context) {
-                try await function()
-            }
-        } catch {
-            // A fresh task shields cleanup from cancellation of the test body.
-            await Task { await context.run() }.value
-            throw error
-        }
-        await Task { await context.run() }.value
-    }
-}
-
-extension Trait where Self == AsyncTestCleanupTrait {
-    package static var asyncTestCleanup: Self { Self() }
-}
-
-private final class AsyncTestCleanupContext: @unchecked Sendable {
-    private struct Entry: Sendable {
-        let description: String
-        let operation: @Sendable () async throws -> Void
-    }
-
-    private struct State: Sendable {
-        var entries: [Entry] = []
-        var hasStarted = false
-    }
-
-    @TaskLocal static var current: AsyncTestCleanupContext?
-
-    private let state = NIOLockedValueBox(State())
-
-    func register(
-        description: String,
-        operation: @escaping @Sendable () async throws -> Void
-    ) -> Bool {
-        state.withLockedValue { state in
-            guard state.hasStarted == false else {
-                return false
-            }
-            state.entries.append(Entry(description: description, operation: operation))
-            return true
-        }
-    }
-
-    func run() async {
-        let entries = state.withLockedValue { state -> [Entry] in
-            precondition(state.hasStarted == false, "async test cleanup may only run once")
-            state.hasStarted = true
-            let entries = state.entries
-            state.entries.removeAll()
-            return entries
-        }
-
-        // `defer` blocks register while unwinding, so their LIFO order is already
-        // represented by insertion order (for example: manager, then its event loop).
-        for entry in entries {
-            do {
-                try await entry.operation()
-            } catch {
-                Issue.record("\(entry.description): \(error)")
-            }
-        }
-    }
-}
-
-/// Registers cleanup with the active ``AsyncTestCleanupTrait`` scope.
-///
 @discardableResult
 package func registerAsyncTestCleanup(
     description: String,
     operation: @escaping @Sendable () async throws -> Void
 ) -> Bool {
-    guard let context = AsyncTestCleanupContext.current else {
-        return false
-    }
-    guard context.register(description: description, operation: operation) else {
-        Issue.record("async test cleanup registered after cleanup started: \(description)")
-        return true
-    }
-    return true
+    XcodeMCPCoreTestSupport.registerAsyncTestCleanup(
+        description: description,
+        operation: operation
+    )
 }
 
 package final class LockedRecordedValues<Value: Sendable>: @unchecked Sendable {
