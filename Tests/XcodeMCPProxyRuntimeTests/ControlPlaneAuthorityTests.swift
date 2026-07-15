@@ -795,12 +795,13 @@ struct ControlPlaneAuthorityTests {
             nowUptimeNanoseconds: 3
         ))
 
-        let attempt = authority.markChannelInitialized(
+        let initialized = try #require(authority.markChannelInitialized(
             routeID: route.id,
             upstreamProof: proof
-        )
+        ))
 
-        #expect(attempt == catalogLease.attempt)
+        #expect(initialized.attempt == catalogLease.attempt)
+        #expect(initialized.shouldStartCatalogLoad == false)
         #expect(authority.validateCatalogLoad(catalogLease))
         #expect(
             authority.attemptSnapshot(processID: target.processID)?.phase
