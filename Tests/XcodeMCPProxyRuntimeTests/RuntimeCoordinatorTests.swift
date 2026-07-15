@@ -334,7 +334,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
     @Test func processRoutingSerializesTriggeredReconciles() async throws {
         let olderTarget = xcodeProcessTarget(processID: 27004, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27005, xcodeVersion: "27.0")
-        let discovery = ReentrantSequencedXcodeTargetDiscovery(
+        let discovery = ConcurrentSequencedXcodeTargetDiscovery(
             firstTargets: [olderTarget],
             secondTargets: [newerTarget]
         )
@@ -357,14 +357,34 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let manager = fixture.manager
 
         discovery.setFirstCallAction {
+            #expect(discovery.callCount() == 1)
             manager.triggerXcodeProcessReconcile(reason: "second_snapshot")
+            #expect(discovery.callCount() == 1)
         }
         manager.triggerXcodeProcessReconcile(reason: "first_snapshot")
 
-        #expect(try await nextRecordedValue(routeCreations, at: 1) == newerTarget.processID)
+        #expect(
+            try await waitForRecordedValue(
+                routeCreations,
+                at: 1,
+                description: "waiting for queued reconcile route creation"
+            ) == newerTarget.processID
+        )
         #expect(discovery.callCount() == 2)
-        #expect(try await nextRecordedValue(reconcileCompletions, at: 0) == "first_snapshot")
-        #expect(try await nextRecordedValue(reconcileCompletions, at: 1) == "second_snapshot")
+        #expect(
+            try await waitForRecordedValue(
+                reconcileCompletions,
+                at: 0,
+                description: "waiting for first reconcile completion"
+            ) == "first_snapshot"
+        )
+        #expect(
+            try await waitForRecordedValue(
+                reconcileCompletions,
+                at: 1,
+                description: "waiting for queued reconcile completion"
+            ) == "second_snapshot"
+        )
         #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [newerTarget.processID])
         let processRoutes = manager.debugSnapshot().processRoutes
         #expect(
@@ -414,7 +434,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
     @Test func processRoutingReschedulesQueuedReconcileAfterWorkerCancellation() async throws {
         let canceledTarget = xcodeProcessTarget(processID: 27006, xcodeVersion: "26.6")
         let recoveredTarget = xcodeProcessTarget(processID: 27007, xcodeVersion: "27.0")
-        let discovery = ReentrantSequencedXcodeTargetDiscovery(
+        let discovery = ConcurrentSequencedXcodeTargetDiscovery(
             firstTargets: [canceledTarget],
             secondTargets: [recoveredTarget]
         )
@@ -437,15 +457,27 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let manager = fixture.manager
 
         discovery.setFirstCallAction {
+            #expect(discovery.callCount() == 1)
             manager.debugReset()
             manager.triggerXcodeProcessReconcile(reason: "queued_after_cancel")
+            #expect(discovery.callCount() == 1)
         }
         manager.triggerXcodeProcessReconcile(reason: "cancelled_snapshot")
 
-        #expect(try await nextRecordedValue(routeCreations, at: 0) == recoveredTarget.processID)
+        #expect(
+            try await waitForRecordedValue(
+                routeCreations,
+                at: 0,
+                description: "waiting for post-cancellation reconcile route creation"
+            ) == recoveredTarget.processID
+        )
         #expect(discovery.callCount() == 2)
         #expect(
-            try await nextRecordedValue(reconcileCompletions, at: 0)
+            try await waitForRecordedValue(
+                reconcileCompletions,
+                at: 0,
+                description: "waiting for post-cancellation reconcile completion"
+            )
                 == "queued_after_cancel"
         )
         #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [recoveredTarget.processID])
@@ -876,13 +908,21 @@ struct RuntimeCoordinatorProcessRoutingTests {
                     serverName: "recovering"
                 ))
         )
-        try await activationInitializeHandled.waitUntilSignaled()
+        try await activationInitializeHandled.wait(
+            timeout: .seconds(5),
+            description: "waiting for activation bridge initialize commit"
+        )
         _ = try await sentValue(
             from: activationUpstream,
             startingAt: 1,
             matching: { methodName(from: $0) == "tools/list" },
             description: "waiting for activation bridge catalog"
         )
+        let activationCatalogAttempt = try #require(
+            manager.processControlPlane.attemptSnapshot(processID: recoveringTarget.processID)
+        )
+        #expect(activationCatalogAttempt.phase == .loadingCatalog)
+        #expect(activationCatalogAttempt.upstreamID.rawValue == 1)
         let siblingCatalogStartIndex = await siblingUpstream.sentCount()
         await siblingUpstream.yield(
             .message(
@@ -891,7 +931,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
                     serverName: "recovering"
                 ))
         )
-        try await siblingInitializeHandled.waitUntilSignaled()
+        try await siblingInitializeHandled.wait(
+            timeout: .seconds(5),
+            description: "waiting for sibling bridge initialize commit"
+        )
         let catalogTimeoutIndex = try await waitWithTimeout(
             "waiting for activation catalog timeout registration",
             timeout: .seconds(2)
@@ -901,16 +944,28 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 startingAtEventIndex: catalogTimeoutSearchIndex
             )
         }
-        let retryTimeoutIndex = timeoutScheduler.scheduledCount()
+        let retryTimeoutSearchIndex = timeoutScheduler.scheduledCount()
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
         let replacementPool = try #require(createdPools.withLockedValue { $0.dropFirst().first })
         let replacementUpstream = replacementPool[0]
         #expect(try await activationUpstream.nextStopCount() == 1)
         #expect(await replacementUpstream.sentCount() == 0)
-        #expect(
-            timeoutScheduler.delay(at: retryTimeoutIndex)?.nanoseconds
-                == TimeAmount.milliseconds(250).nanoseconds
+        let retryTimeoutIndex = try #require(
+            (retryTimeoutSearchIndex..<timeoutScheduler.scheduledCount()).first { index in
+                timeoutScheduler.delay(at: index)?.nanoseconds
+                    == TimeAmount.milliseconds(250).nanoseconds
+            }
         )
+        let retryAttempt = try #require(
+            manager.processControlPlane.attemptSnapshot(processID: recoveringTarget.processID)
+        )
+        let retryIsActive = retryAttempt.attemptID == activationCatalogAttempt.attemptID
+            && retryAttempt.upstreamProof == activationCatalogAttempt.upstreamProof
+            && retryAttempt.phase == .backoff
+            && retryAttempt.timeoutCount == 1
+        let retryWasSupersededByCatalogLoad = retryAttempt.phase == .loadingCatalog
+            && retryAttempt.timeoutCount == 0
+        #expect(retryIsActive || retryWasSupersededByCatalogLoad)
 
         manager.refreshPendingProcessToolsCatalogForReadyUpstream(
             upstreamIndex: 2,
@@ -922,6 +977,13 @@ struct RuntimeCoordinatorProcessRoutingTests {
             matching: { methodName(from: $0) == "tools/list" },
             description: "waiting for sibling bridge catalog"
         )
+        let siblingCatalogAttempt = try #require(
+            manager.processControlPlane.attemptSnapshot(processID: recoveringTarget.processID)
+        )
+        #expect(siblingCatalogAttempt.phase == .loadingCatalog)
+        #expect(siblingCatalogAttempt.timeoutCount == 0)
+        #expect(siblingCatalogAttempt.rpcCount > 0)
+        #expect(timeoutScheduler.isCancelled(at: retryTimeoutIndex))
         await siblingUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -1089,7 +1151,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
         ) {
             try await activationUpstream.nextSent(at: 1)
         }
-        try await activationInitializeHandled.waitUntilSignaled()
+        try await activationInitializeHandled.wait(
+            timeout: .seconds(5),
+            description: "waiting for activation initialize commit"
+        )
         let activation = try #require(
             manager.processControlPlane.attemptSnapshot(processID: newerTarget.processID)
         )
@@ -10817,7 +10882,10 @@ struct RuntimeCoordinatorWindowCatalogTests {
             activeStarted.signal()
             return activePromise.futureResult
         }
-        try await activeStarted.waitUntilSignaled()
+        try await activeStarted.wait(
+            timeout: .seconds(5),
+            description: "waiting for primary upstream slot occupation"
+        )
 
         let routedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-routed",
@@ -16212,11 +16280,14 @@ private func tabIdentifier(in data: Data) -> String? {
     return arguments["tabIdentifier"] as? String
 }
 
-private final class ReentrantSequencedXcodeTargetDiscovery:
+private final class ConcurrentSequencedXcodeTargetDiscovery:
     XcodeTargetDiscovering,
     @unchecked Sendable
 {
     private let lock = NSLock()
+    private let actionQueue = DispatchQueue(
+        label: "XcodeMCPKitTests.ConcurrentSequencedXcodeTargetDiscovery"
+    )
     private let firstTargets: [XcodeProcessTarget]
     private let secondTargets: [XcodeProcessTarget]
     private var callCountValue = 0
@@ -16241,7 +16312,20 @@ private final class ReentrantSequencedXcodeTargetDiscovery:
                 firstCallAction = nil
                 return (targets: firstTargets, action: action)
             }
-        result.action?()
+        guard let action = result.action else {
+            return result.targets
+        }
+        let actionFinished = DispatchSemaphore(value: 0)
+        // Do not replace this with Task.detached: it shares the cooperative executor that
+        // runningXcodeTargets() intentionally occupies while the external trigger runs.
+        actionQueue.async {
+            defer { actionFinished.signal() }
+            action()
+        }
+        guard actionFinished.wait(timeout: .now() + 5) == .success else {
+            Issue.record("concurrent reconcile action did not complete")
+            return result.targets
+        }
         return result.targets
     }
 

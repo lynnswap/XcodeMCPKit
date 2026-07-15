@@ -247,7 +247,10 @@ struct XcodeProcessEventMonitorTests {
         try await mapper.waitUntilBlocked()
         observation.emit([newSnapshot])
         mapper.releaseBlockedSnapshot()
-        try await oldCallbackCompleted.waitUntilSignaled()
+        try await oldCallbackCompleted.wait(
+            timeout: .seconds(5),
+            description: "waiting for older snapshot callback completion"
+        )
 
         #expect(monitor.runningXcodeTargets().map(\.processID) == [602])
         #expect(monitor.readinessSnapshot().generation == 1)
@@ -442,7 +445,10 @@ private final class BlockingTargetMapper: @unchecked Sendable {
     }
 
     func waitUntilBlocked() async throws {
-        try await blocked.waitUntilSignaled()
+        try await blocked.wait(
+            timeout: .seconds(5),
+            description: "waiting for old target mapping to block"
+        )
     }
 
     func releaseBlockedSnapshot() {
