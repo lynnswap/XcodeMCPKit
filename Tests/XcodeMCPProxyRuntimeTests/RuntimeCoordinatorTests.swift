@@ -334,7 +334,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
     @Test func processRoutingSerializesTriggeredReconciles() async throws {
         let olderTarget = xcodeProcessTarget(processID: 27004, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27005, xcodeVersion: "27.0")
-        let discovery = BlockingSequencedXcodeTargetDiscovery(
+        let discovery = ConcurrentSequencedXcodeTargetDiscovery(
             firstTargets: [olderTarget],
             secondTargets: [newerTarget]
         )
@@ -353,23 +353,38 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ),
             startImmediately: false
         )
-        defer {
-            discovery.releaseFirst()
-            fixture.shutdownAndWait()
-        }
+        defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
+        discovery.setFirstCallAction {
+            #expect(discovery.callCount() == 1)
+            manager.triggerXcodeProcessReconcile(reason: "second_snapshot")
+            #expect(discovery.callCount() == 1)
+        }
         manager.triggerXcodeProcessReconcile(reason: "first_snapshot")
-        try await discovery.firstStarted.waitUntilSignaled()
-        manager.triggerXcodeProcessReconcile(reason: "second_snapshot")
 
-        #expect(discovery.callCount() == 1)
-        discovery.releaseFirst()
-
-        try await discovery.secondStarted.waitUntilSignaled()
-        #expect(try await nextRecordedValue(routeCreations, at: 1) == newerTarget.processID)
+        #expect(
+            try await waitForRecordedValue(
+                routeCreations,
+                at: 1,
+                description: "waiting for queued reconcile route creation"
+            ) == newerTarget.processID
+        )
         #expect(discovery.callCount() == 2)
-        #expect(try await nextRecordedValue(reconcileCompletions, at: 1) == "second_snapshot")
+        #expect(
+            try await waitForRecordedValue(
+                reconcileCompletions,
+                at: 0,
+                description: "waiting for first reconcile completion"
+            ) == "first_snapshot"
+        )
+        #expect(
+            try await waitForRecordedValue(
+                reconcileCompletions,
+                at: 1,
+                description: "waiting for queued reconcile completion"
+            ) == "second_snapshot"
+        )
         #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [newerTarget.processID])
         let processRoutes = manager.debugSnapshot().processRoutes
         #expect(
@@ -419,7 +434,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
     @Test func processRoutingReschedulesQueuedReconcileAfterWorkerCancellation() async throws {
         let canceledTarget = xcodeProcessTarget(processID: 27006, xcodeVersion: "26.6")
         let recoveredTarget = xcodeProcessTarget(processID: 27007, xcodeVersion: "27.0")
-        let discovery = BlockingSequencedXcodeTargetDiscovery(
+        let discovery = ConcurrentSequencedXcodeTargetDiscovery(
             firstTargets: [canceledTarget],
             secondTargets: [recoveredTarget]
         )
@@ -438,25 +453,31 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ),
             startImmediately: false
         )
-        defer {
-            discovery.releaseFirst()
-            fixture.shutdownAndWait()
-        }
+        defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 
+        discovery.setFirstCallAction {
+            #expect(discovery.callCount() == 1)
+            manager.debugReset()
+            manager.triggerXcodeProcessReconcile(reason: "queued_after_cancel")
+            #expect(discovery.callCount() == 1)
+        }
         manager.triggerXcodeProcessReconcile(reason: "cancelled_snapshot")
-        try await discovery.firstStarted.waitUntilSignaled()
-        manager.debugReset()
-        manager.triggerXcodeProcessReconcile(reason: "queued_after_cancel")
 
-        #expect(discovery.callCount() == 1)
-        discovery.releaseFirst()
-
-        try await discovery.secondStarted.waitUntilSignaled()
-        #expect(try await nextRecordedValue(routeCreations, at: 0) == recoveredTarget.processID)
+        #expect(
+            try await waitForRecordedValue(
+                routeCreations,
+                at: 0,
+                description: "waiting for post-cancellation reconcile route creation"
+            ) == recoveredTarget.processID
+        )
         #expect(discovery.callCount() == 2)
         #expect(
-            try await nextRecordedValue(reconcileCompletions, at: 0)
+            try await waitForRecordedValue(
+                reconcileCompletions,
+                at: 0,
+                description: "waiting for post-cancellation reconcile completion"
+            )
                 == "queued_after_cancel"
         )
         #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [recoveredTarget.processID])
@@ -811,6 +832,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let readiness = ReadinessFlag(isReady: true)
         let readinessSleep = ControlledReadinessSleep()
         let createdPools = NIOLockedValueBox<[[TestUpstreamClient]]>([])
+        let activationInitializeHandled = TestSignal()
+        let siblingInitializeHandled = TestSignal()
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [existingUpstream],
@@ -828,6 +851,15 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 createdPools.withLockedValue { $0.append(pool) }
                 return pool
             },
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { upstreamIndex in
+                    if upstreamIndex == 1 {
+                        activationInitializeHandled.signal()
+                    } else if upstreamIndex == 2 {
+                        siblingInitializeHandled.signal()
+                    }
+                }
+            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -876,6 +908,22 @@ struct RuntimeCoordinatorProcessRoutingTests {
                     serverName: "recovering"
                 ))
         )
+        try await activationInitializeHandled.wait(
+            timeout: .seconds(5),
+            description: "waiting for activation bridge initialize commit"
+        )
+        _ = try await sentValue(
+            from: activationUpstream,
+            startingAt: 1,
+            matching: { methodName(from: $0) == "tools/list" },
+            description: "waiting for activation bridge catalog"
+        )
+        let activationCatalogAttempt = try #require(
+            manager.processControlPlane.attemptSnapshot(processID: recoveringTarget.processID)
+        )
+        #expect(activationCatalogAttempt.phase == .loadingCatalog)
+        #expect(activationCatalogAttempt.upstreamID.rawValue == 1)
+        let siblingCatalogStartIndex = await siblingUpstream.sentCount()
         await siblingUpstream.yield(
             .message(
                 try makeInitializeResponse(
@@ -883,11 +931,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
                     serverName: "recovering"
                 ))
         )
-        _ = try await sentValue(
-            from: activationUpstream,
-            startingAt: 1,
-            matching: { methodName(from: $0) == "tools/list" },
-            description: "waiting for activation bridge catalog"
+        try await siblingInitializeHandled.wait(
+            timeout: .seconds(5),
+            description: "waiting for sibling bridge initialize commit"
         )
         let catalogTimeoutIndex = try await waitWithTimeout(
             "waiting for activation catalog timeout registration",
@@ -898,16 +944,29 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 startingAtEventIndex: catalogTimeoutSearchIndex
             )
         }
+        let retryTimeoutSearchIndex = timeoutScheduler.scheduledCount()
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
         let replacementPool = try #require(createdPools.withLockedValue { $0.dropFirst().first })
         let replacementUpstream = replacementPool[0]
         #expect(try await activationUpstream.nextStopCount() == 1)
         #expect(await replacementUpstream.sentCount() == 0)
         let retryTimeoutIndex = try #require(
-            timeoutScheduler.activeTimeoutIndex(delay: .milliseconds(250))
+            (retryTimeoutSearchIndex..<timeoutScheduler.scheduledCount()).first { index in
+                timeoutScheduler.delay(at: index)?.nanoseconds
+                    == TimeAmount.milliseconds(250).nanoseconds
+            }
         )
+        let retryAttempt = try #require(
+            manager.processControlPlane.attemptSnapshot(processID: recoveringTarget.processID)
+        )
+        let retryIsActive = retryAttempt.attemptID == activationCatalogAttempt.attemptID
+            && retryAttempt.upstreamProof == activationCatalogAttempt.upstreamProof
+            && retryAttempt.phase == .backoff
+            && retryAttempt.timeoutCount == 1
+        let retryWasSupersededByCatalogLoad = retryAttempt.phase == .loadingCatalog
+            && retryAttempt.timeoutCount == 0
+        #expect(retryIsActive || retryWasSupersededByCatalogLoad)
 
-        let siblingCatalogStartIndex = await siblingUpstream.sentCount()
         manager.refreshPendingProcessToolsCatalogForReadyUpstream(
             upstreamIndex: 2,
             reason: "test_sibling_catalog_wins"
@@ -918,6 +977,13 @@ struct RuntimeCoordinatorProcessRoutingTests {
             matching: { methodName(from: $0) == "tools/list" },
             description: "waiting for sibling bridge catalog"
         )
+        let siblingCatalogAttempt = try #require(
+            manager.processControlPlane.attemptSnapshot(processID: recoveringTarget.processID)
+        )
+        #expect(siblingCatalogAttempt.phase == .loadingCatalog)
+        #expect(siblingCatalogAttempt.timeoutCount == 0)
+        #expect(siblingCatalogAttempt.rpcCount > 0)
+        #expect(timeoutScheduler.isCancelled(at: retryTimeoutIndex))
         await siblingUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -1025,6 +1091,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let newerTarget = xcodeProcessTarget(processID: 27029, xcodeVersion: "27.0")
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let activationInitializeHandled = TestSignal()
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [olderUpstream],
@@ -1038,6 +1105,13 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 createdUpstreams.withLockedValue { $0.append(upstream) }
                 return [upstream]
             },
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { upstreamIndex in
+                    if upstreamIndex == 1 {
+                        activationInitializeHandled.signal()
+                    }
+                }
+            ),
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -1077,13 +1151,16 @@ struct RuntimeCoordinatorProcessRoutingTests {
         ) {
             try await activationUpstream.nextSent(at: 1)
         }
-        try await waitForProcessRouteActivationInitialized(
-            manager,
-            processID: newerTarget.processID,
-            upstreamIndex: 1,
-            attempt: 1,
-            message: "waiting for activation initialized state"
+        try await activationInitializeHandled.wait(
+            timeout: .seconds(5),
+            description: "waiting for activation initialize commit"
         )
+        let activation = try #require(
+            manager.processControlPlane.attemptSnapshot(processID: newerTarget.processID)
+        )
+        #expect([.initialized, .loadingCatalog].contains(activation.phase))
+        #expect(activation.upstreamID.rawValue == 1)
+        #expect(activation.attemptID.rawValue == 1)
         let firstToolsRequest = try await waitWithTimeout(
             "waiting for activation tools/list",
             timeout: .seconds(2)
@@ -7940,11 +8017,9 @@ struct RuntimeCoordinatorRecoveryTests {
         }
 
         _ = try await sentValue(from: firstUpstream, at: 0, timeout: .seconds(2))
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: clocks.timeoutClock,
-            uptimeClock: clocks.uptimeClock,
-            by: .milliseconds(100)
-        )
+        try await clocks.timeoutClock.sleep(untilSuspendedFor: .milliseconds(100))
+        clocks.uptimeClock.advance(by: .milliseconds(100))
+        clocks.timeoutClock.advance(by: .milliseconds(100))
 
         do {
             _ = try await waitWithTimeout("waiting for shared deadline timeout") {
@@ -10796,6 +10871,7 @@ struct RuntimeCoordinatorWindowCatalogTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
+        let activeStarted = TestSignal()
         let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
@@ -10803,8 +10879,13 @@ struct RuntimeCoordinatorWindowCatalogTests {
             preferredUpstreamIndex: 0
         ) { selectedUpstreamIndex in
             #expect(selectedUpstreamIndex.upstreamIndex == 0)
+            activeStarted.signal()
             return activePromise.futureResult
         }
+        try await activeStarted.wait(
+            timeout: .seconds(5),
+            description: "waiting for primary upstream slot occupation"
+        )
 
         let routedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-routed",
@@ -12639,20 +12720,13 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
         defer { activePromise.fail(CancellationError()) }
-        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+        try await occupyUpstreamSlot(
+            on: manager,
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
-            on: eventLoop
-        ) { selectedUpstreamIndex in
-            manager.activateRequestLease(
-                activeLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
-                timeout: nil
-            )
-            return activePromise.futureResult
-        }
-        _ = activeFuture
+            eventLoop: eventLoop,
+            completionPromise: activePromise
+        )
 
         let queuedRequestData = try JSONSerialization.data(
             withJSONObject: [
@@ -12812,20 +12886,13 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
         defer { activePromise.fail(CancellationError()) }
-        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+        try await occupyUpstreamSlot(
+            on: manager,
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
-            on: eventLoop
-        ) { selectedUpstreamIndex in
-            manager.activateRequestLease(
-                activeLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
-                timeout: nil
-            )
-            return activePromise.futureResult
-        }
-        _ = activeFuture
+            eventLoop: eventLoop,
+            completionPromise: activePromise
+        )
 
         let queuedRequestData = try JSONSerialization.data(
             withJSONObject: [
@@ -13689,20 +13756,13 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
         defer { activePromise.fail(CancellationError()) }
-        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+        try await occupyUpstreamSlot(
+            on: manager,
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
-            on: eventLoop
-        ) { selectedUpstreamIndex in
-            manager.activateRequestLease(
-                activeLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
-                timeout: nil
-            )
-            return activePromise.futureResult
-        }
-        _ = activeFuture
+            eventLoop: eventLoop,
+            completionPromise: activePromise
+        )
 
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
         _ = manager.upstreamHealthManager.markRequestTimedOut(upstreamIndex: 1, nowUptimeNs: 0)
@@ -13828,21 +13888,14 @@ struct RuntimeCoordinatorSchedulingTests {
         )
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
-        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+        let activeUpstreamIndex = try await occupyUpstreamSlot(
+            on: manager,
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
-            on: eventLoop
-        ) { selectedUpstreamIndex in
-            manager.activateRequestLease(
-                activeLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
-                timeout: nil
-            )
-            #expect(selectedUpstreamIndex.upstreamIndex == 0)
-            return activePromise.futureResult
-        }
-        _ = activeFuture
+            eventLoop: eventLoop,
+            completionPromise: activePromise
+        )
+        #expect(activeUpstreamIndex == 0)
 
         let preferredDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-preferred",
@@ -15031,20 +15084,13 @@ struct RuntimeCoordinatorSchedulingTests {
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
         defer { activePromise.fail(CancellationError()) }
-        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+        try await occupyUpstreamSlot(
+            on: manager,
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
-            on: eventLoop
-        ) { selectedUpstreamIndex in
-            manager.activateRequestLease(
-                activeLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
-                timeout: nil
-            )
-            return activePromise.futureResult
-        }
-        _ = activeFuture
+            eventLoop: eventLoop,
+            completionPromise: activePromise
+        )
 
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
@@ -15435,20 +15481,13 @@ struct RuntimeCoordinatorSchedulingTests {
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
         defer { activePromise.fail(CancellationError()) }
-        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+        try await occupyUpstreamSlot(
+            on: manager,
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
-            on: eventLoop
-        ) { selectedUpstreamIndex in
-            manager.activateRequestLease(
-                activeLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
-                timeout: nil
-            )
-            return activePromise.futureResult
-        }
-        _ = activeFuture
+            eventLoop: eventLoop,
+            completionPromise: activePromise
+        )
 
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
@@ -15577,20 +15616,14 @@ struct RuntimeCoordinatorSchedulingTests {
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
         defer { activePromise.fail(CancellationError()) }
-        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+        try await occupyUpstreamSlot(
+            on: manager,
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
-            on: eventLoop
-        ) { selectedUpstreamIndex in
-            manager.activateRequestLease(
-                activeLeaseID,
-                requestIDKey: "active-request",
-                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
-                timeout: nil
-            )
-            return activePromise.futureResult
-        }
-        _ = activeFuture
+            eventLoop: eventLoop,
+            completionPromise: activePromise,
+            requestIDKey: "active-request"
+        )
 
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-timeout-queued",
@@ -15769,20 +15802,13 @@ struct RuntimeCoordinatorSchedulingTests {
         let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
         let activePromise = eventLoop.makePromise(of: Void.self)
         defer { activePromise.fail(CancellationError()) }
-        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+        try await occupyUpstreamSlot(
+            on: manager,
             leaseID: activeLeaseID,
             descriptor: activeDescriptor,
-            on: eventLoop
-        ) { selectedUpstreamIndex in
-            manager.activateRequestLease(
-                activeLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selectedUpstreamIndex.upstreamIndex,
-                timeout: nil
-            )
-            return activePromise.futureResult
-        }
-        _ = activeFuture
+            eventLoop: eventLoop,
+            completionPromise: activePromise
+        )
 
         let queuedDescriptor = SessionRequestPipeline.Descriptor(
             sessionID: "session-queued",
@@ -16139,24 +16165,54 @@ struct RuntimeCoordinatorSchedulingTests {
 
 }
 
-private func waitForProcessRouteActivationInitialized(
-    _ manager: RuntimeCoordinator,
-    processID: pid_t,
-    upstreamIndex expectedUpstreamIndex: Int,
-    attempt expectedAttempt: Int,
-    message: String
-) async throws {
-    _ = try await waitWithTimeout(message, timeout: .seconds(2)) {
-        while true {
-            if let snapshot = manager.processControlPlane.attemptSnapshot(processID: processID),
-                [.initialized, .loadingCatalog].contains(snapshot.phase),
-                snapshot.upstreamID.rawValue == expectedUpstreamIndex,
-                snapshot.attemptID.rawValue == expectedAttempt
-            {
-                return
-            }
-            try await Task.sleep(for: .milliseconds(10))
-        }
+private enum UpstreamSlotOccupationOutcome: Sendable {
+    case activated(upstreamIndex: Int)
+    case failed(String)
+}
+
+private struct UpstreamSlotOccupationError: Error, CustomStringConvertible, Sendable {
+    let description: String
+}
+
+@discardableResult
+private func occupyUpstreamSlot(
+    on manager: RuntimeCoordinator,
+    leaseID: LeaseManager.ID,
+    descriptor: SessionRequestPipeline.Descriptor,
+    eventLoop: EventLoop,
+    completionPromise: EventLoopPromise<Void>,
+    requestIDKey: String? = nil
+) async throws -> Int {
+    let outcomes = LockedRecordedValues<UpstreamSlotOccupationOutcome>()
+    let future: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+        leaseID: leaseID,
+        descriptor: descriptor,
+        on: eventLoop
+    ) { selectedUpstream in
+        manager.activateRequestLease(
+            leaseID,
+            requestIDKey: requestIDKey,
+            upstreamIndex: selectedUpstream.upstreamIndex,
+            timeout: nil
+        )
+        outcomes.append(.activated(upstreamIndex: selectedUpstream.upstreamIndex))
+        return completionPromise.futureResult
+    }
+    future.whenFailure { error in
+        outcomes.append(.failed(String(describing: error)))
+    }
+
+    let outcome = try await waitForRecordedValue(
+        outcomes,
+        at: 0,
+        description: "waiting for upstream slot occupation",
+        timeout: .seconds(5)
+    )
+    switch outcome {
+    case .activated(let upstreamIndex):
+        return upstreamIndex
+    case .failed(let description):
+        throw UpstreamSlotOccupationError(description: description)
     }
 }
 
@@ -16224,19 +16280,18 @@ private func tabIdentifier(in data: Data) -> String? {
     return arguments["tabIdentifier"] as? String
 }
 
-private final class BlockingSequencedXcodeTargetDiscovery:
+private final class ConcurrentSequencedXcodeTargetDiscovery:
     XcodeTargetDiscovering,
     @unchecked Sendable
 {
-    let firstStarted = TestSignal()
-    let secondStarted = TestSignal()
-
     private let lock = NSLock()
+    private let actionQueue = DispatchQueue(
+        label: "XcodeMCPKitTests.ConcurrentSequencedXcodeTargetDiscovery"
+    )
     private let firstTargets: [XcodeProcessTarget]
     private let secondTargets: [XcodeProcessTarget]
-    private let releaseFirstSemaphore = DispatchSemaphore(value: 0)
     private var callCountValue = 0
-    private var firstReleased = false
+    private var firstCallAction: (@Sendable () -> Void)?
 
     init(
         firstTargets: [XcodeProcessTarget],
@@ -16247,40 +16302,43 @@ private final class BlockingSequencedXcodeTargetDiscovery:
     }
 
     func runningXcodeTargets() -> [XcodeProcessTarget] {
-        let call = nextCallCount()
-        if call == 1 {
-            firstStarted.signal()
-            releaseFirstSemaphore.wait()
-            return firstTargets
+        let result: (targets: [XcodeProcessTarget], action: (@Sendable () -> Void)?) =
+            lock.withLock {
+                callCountValue += 1
+                guard callCountValue == 1 else {
+                    return (targets: secondTargets, action: nil)
+                }
+                let action = firstCallAction
+                firstCallAction = nil
+                return (targets: firstTargets, action: action)
+            }
+        guard let action = result.action else {
+            return result.targets
         }
-        if call == 2 {
-            secondStarted.signal()
+        let actionFinished = DispatchSemaphore(value: 0)
+        // Do not replace this with Task.detached: it shares the cooperative executor that
+        // runningXcodeTargets() intentionally occupies while the external trigger runs.
+        actionQueue.async {
+            defer { actionFinished.signal() }
+            action()
         }
-        return secondTargets
+        guard actionFinished.wait(timeout: .now() + 5) == .success else {
+            Issue.record("concurrent reconcile action did not complete")
+            return result.targets
+        }
+        return result.targets
     }
 
-    func releaseFirst() {
-        let shouldRelease = lock.withLock { () -> Bool in
-            guard firstReleased == false else {
-                return false
-            }
-            firstReleased = true
-            return true
-        }
-        if shouldRelease {
-            releaseFirstSemaphore.signal()
+    func setFirstCallAction(_ action: @escaping @Sendable () -> Void) {
+        lock.withLock {
+            precondition(firstCallAction == nil)
+            precondition(callCountValue == 0)
+            firstCallAction = action
         }
     }
 
     func callCount() -> Int {
         lock.withLock { callCountValue }
-    }
-
-    private func nextCallCount() -> Int {
-        lock.withLock {
-            callCountValue += 1
-            return callCountValue
-        }
     }
 }
 
