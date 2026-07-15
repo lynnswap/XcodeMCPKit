@@ -95,11 +95,12 @@ extension RuntimeCoordinator {
         _ = session(id: internalSessionID)
         let probeSession = session(id: internalSessionID)
         let probeTimeout: TimeAmount = .seconds(2)
-        let probeDeadlineUptimeNs = deadlineUptimeNanoseconds(for: probeTimeout)
         let originalID = JSONRPC.ID(any: "__probe-\(upstreamIndex)-\(UUID().uuidString)")!
-        let registration = probeSession.router.registerRequestPendingWithoutTimeout(
+        let registration = probeSession.router.registerRequestPending(
             idKey: originalID.key,
-            on: eventLoop
+            on: eventLoop,
+            timeout: probeTimeout,
+            timeoutScheduler: scheduleRuntimeTimeout
         )
         guard let upstreamID = assignUpstreamID(
             sessionID: internalSessionID,
@@ -138,17 +139,7 @@ extension RuntimeCoordinator {
             guard let self else { return }
             do {
                 var buffer = try await withTaskCancellationHandler {
-                    try await self.waitForEventLoopFuture(
-                        registration.future,
-                        deadlineUptimeNs: probeDeadlineUptimeNs,
-                        onTimeout: {
-                            _ = probeSession.router.cancelPending(token: registration.token)
-                            self.upstreamRouter.remove(
-                                proof: operationLease.proof,
-                                upstreamID: upstreamID
-                            )
-                        }
-                    )
+                    try await registration.future.get()
                 } onCancel: {
                     _ = probeSession.router.cancelPending(token: registration.token)
                     self.upstreamRouter.remove(

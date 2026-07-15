@@ -828,13 +828,11 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let existingUpstream = TestUpstreamClient()
         let existingTarget = xcodeProcessTarget(processID: 26627, xcodeVersion: "26.6")
         let recoveringTarget = xcodeProcessTarget(processID: 27027, xcodeVersion: "27.0")
-        let clocks = makeRuntimeCoordinatorDeterministicClocks()
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let createdPools = NIOLockedValueBox<[[TestUpstreamClient]]>([])
         let fixture = RuntimeCoordinatorFixture(
             config: config,
             upstreams: [existingUpstream],
-            clock: clocks.clock,
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: existingTarget, upstreamIndices: [0])
@@ -909,6 +907,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             matching: { methodName(from: $0) == "initialize" },
             description: "waiting for secondary initialize"
         )
+        let probeTimeoutSearchIndex = timeoutScheduler.scheduledEventCount()
         await secondary.yield(
             .message(
                 try makeInitializeResponse(id: try extractUpstreamID(from: secondaryInitialize))
@@ -926,12 +925,12 @@ struct RuntimeCoordinatorProcessRoutingTests {
             matching: { methodName(from: $0) == "tools/list" },
             description: "waiting for first attach probe"
         )
-        let firstRetrySearchIndex = timeoutScheduler.scheduledEventCount()
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: clocks.timeoutClock,
-            uptimeClock: clocks.uptimeClock,
-            by: .seconds(2)
+        let probeTimeoutIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .seconds(2),
+            startingAtEventIndex: probeTimeoutSearchIndex
         )
+        let firstRetrySearchIndex = timeoutScheduler.scheduledEventCount()
+        #expect(timeoutScheduler.fire(at: probeTimeoutIndex))
         let firstRetryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
             delay: .seconds(1),
             startingAtEventIndex: firstRetrySearchIndex
@@ -7024,6 +7023,7 @@ struct RuntimeCoordinatorRecoveryTests {
             return
         }
 
+        let initialRecoverySearchIndex = timeoutScheduler.scheduledEventCount()
         let pendingInitialize = manager.registerInitialize(
             originalID: JSONRPC.ID(any: NSNumber(value: 80429))!,
             requestObject: makeInitializeRequest(id: 80429),
@@ -7034,16 +7034,16 @@ struct RuntimeCoordinatorRecoveryTests {
             pendingCompletionCount.withLockedValue { $0 += 1 }
         }
         #expect(await upstream.sentCount() == 0)
-        #expect(timeoutScheduler.scheduledCount() == 2)
-        #expect(
-            timeoutScheduler.delay(at: 1)?.nanoseconds
-                == TimeAmount.seconds(30).nanoseconds
+        let initialRecoveryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .seconds(30),
+            startingAtEventIndex: initialRecoverySearchIndex
         )
 
         uptimeClock.advance(by: .seconds(31))
-        #expect(timeoutScheduler.fire(at: 1))
+        #expect(timeoutScheduler.fire(at: initialRecoveryIndex))
         let probeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: probeRequest) == "tools/list")
+        let nextRecoverySearchIndex = timeoutScheduler.scheduledEventCount()
         await upstream.yield(
             .message(
                 try JSONSerialization.data(withJSONObject: [
@@ -7056,14 +7056,13 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(manager.canonicalHandshakeState.initializeResult() == nil)
         #expect(manager.processControlPlane.catalog(forProcessID: target.processID) == nil)
         #expect(pendingCompletionCount.withLockedValue { $0 } == 0)
-        #expect(timeoutScheduler.scheduledCount() == 3)
-        #expect(
-            timeoutScheduler.delay(at: 2)?.nanoseconds
-                == TimeAmount.seconds(15).nanoseconds
+        let nextRecoveryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .seconds(15),
+            startingAtEventIndex: nextRecoverySearchIndex
         )
 
         uptimeClock.advance(by: .seconds(16))
-        #expect(timeoutScheduler.fire(at: 2))
+        #expect(timeoutScheduler.fire(at: nextRecoveryIndex))
         let validProbeRequest = try await sentValue(
             from: upstream,
             at: 1,
@@ -7125,8 +7124,8 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["RecoveredRouteOnly"])
         #expect(timeoutScheduler.isCancelled(at: 0))
         let sentCountAfterRecovery = await upstream.sentCount()
-        #expect(timeoutScheduler.fireIgnoringCancellation(at: 1))
-        #expect(timeoutScheduler.fireIgnoringCancellation(at: 2))
+        #expect(timeoutScheduler.fireIgnoringCancellation(at: initialRecoveryIndex))
+        #expect(timeoutScheduler.fireIgnoringCancellation(at: nextRecoveryIndex))
         await manager.drainRuntimeTasksForTesting()
         #expect(await upstream.sentCount() == sentCountAfterRecovery)
     }
@@ -7258,22 +7257,29 @@ struct RuntimeCoordinatorRecoveryTests {
         )
         #expect(manager.canonicalHandshakeState.initializeResult() == nil)
 
+        let initialRecoverySearchIndex = timeoutScheduler.scheduledEventCount()
         let pending = manager.registerInitialize(
             originalID: JSONRPC.ID(any: NSNumber(value: 80500))!,
             requestObject: makeInitializeRequest(id: 80500),
             on: eventLoop
         )
-        #expect(timeoutScheduler.scheduledCount() == 2)
+        let initialRecoveryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .seconds(30),
+            startingAtEventIndex: initialRecoverySearchIndex
+        )
+        let nextRecoverySearchIndex = timeoutScheduler.scheduledEventCount()
         uptimeClock.advance(by: .seconds(31))
-        #expect(timeoutScheduler.fire(at: 1))
+        #expect(timeoutScheduler.fire(at: initialRecoveryIndex))
         let firstProbe = try await sentValue(
             from: firstUpstream,
             at: 0,
             timeout: .seconds(2)
         )
-        #expect(timeoutScheduler.scheduledCount() == 3)
-        #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == 0)
-        #expect(timeoutScheduler.fire(at: 2))
+        let nextRecoveryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .nanoseconds(0),
+            startingAtEventIndex: nextRecoverySearchIndex
+        )
+        #expect(timeoutScheduler.fire(at: nextRecoveryIndex))
         let secondProbe = try await sentValue(
             from: secondUpstream,
             at: 0,
