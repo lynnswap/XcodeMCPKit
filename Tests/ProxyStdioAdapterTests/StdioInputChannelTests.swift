@@ -1,3 +1,4 @@
+import Darwin
 import Dispatch
 import Foundation
 import Testing
@@ -47,6 +48,7 @@ struct StdioInputChannelTests {
         }
 
         #expect(try await readTask.value == expected)
+        try pipe.fileHandleForReading.close()
     }
 
     @Test func stopInterruptsActiveReadAndWaitsForDescriptorCleanup() async throws {
@@ -68,11 +70,13 @@ struct StdioInputChannelTests {
             try await pendingRead.value
         }
         await channel.waitUntilStopped()
+        try pipe.fileHandleForReading.close()
         try pipe.fileHandleForWriting.close()
     }
 
-    @Test func stopBeforeReadIsIdempotent() async throws {
+    @Test func stopBeforeReadLeavesCallerHandleOpenAndIsIdempotent() async throws {
         let pipe = Pipe()
+        let callerDescriptor = pipe.fileHandleForReading.fileDescriptor
         let channel = StdioInputChannel(handle: pipe.fileHandleForReading)
 
         channel.stop()
@@ -81,6 +85,8 @@ struct StdioInputChannelTests {
         await #expect(throws: CancellationError.self) {
             try await channel.read()
         }
+        #expect(fcntl(callerDescriptor, F_GETFD) != -1)
+        try pipe.fileHandleForReading.close()
         try pipe.fileHandleForWriting.close()
     }
 }

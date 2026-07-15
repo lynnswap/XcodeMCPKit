@@ -50,7 +50,6 @@ final class StdioInputChannel: StdioInputReading, @unchecked Sendable {
             queue: callbackQueue
         ) { _ in
             _ = Darwin.close(descriptor)
-            try? handle.close()
             terminal.signal()
         }
         channel.setLimit(lowWater: 1)

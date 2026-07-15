@@ -115,7 +115,7 @@ struct StdioAdapterContractTests {
         )
 
         try await adapter.start()
-        #expect(try await client.nextSentBody(at: 2) == Data(toolsListRequest.utf8))
+        #expect(try await client.sentBody(at: 2) == Data(toolsListRequest.utf8))
         inputReader.fail()
         await adapter.waitUntilStopped()
 
@@ -485,10 +485,6 @@ private actor StalledStdioAdapterTransport: XcodeMCPTransport {
         try await waitWithTimeout("waiting for fake client send") {
             try await self.sendBodies.nextValue(at: index)
         }
-    }
-
-    func nextSentBody(at index: Int = 0) async throws -> Data {
-        try await sendBodies.nextValue(at: index)
     }
 
     func closeCall(at index: Int = 0) async throws {
