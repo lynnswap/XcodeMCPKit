@@ -1946,14 +1946,14 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(handshake.initializeSourceUpstream == 1)
         #expect(handshake.supporterProofs.map(\.slotID.rawValue).sorted() == [0, 1])
         #expect(
-            fixture.manager.processControlPlane.attemptSnapshot(
-                processID: firstTarget.processID
-            )?.phase == .cataloged
+            fixture.manager.processControlPlane.catalog(
+                forProcessID: firstTarget.processID
+            ) != nil
         )
         #expect(
-            fixture.manager.processControlPlane.attemptSnapshot(
-                processID: secondTarget.processID
-            )?.phase == .cataloged
+            fixture.manager.processControlPlane.catalog(
+                forProcessID: secondTarget.processID
+            ) != nil
         )
 
         let canonicalBeforeNonSourceRetirement = handshake.initializeResult
