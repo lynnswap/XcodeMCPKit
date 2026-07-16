@@ -4,6 +4,12 @@ import NIO
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
+    private enum ServerInitiatedRoutingPolicy: Equatable {
+        case serverRequest
+        case operationOwnerNotification
+        case broadcastNotification
+    }
+
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {
         guard activeInitializedHealthyishCount() == 0 else { return }
         guard anyActiveRecoveryInFlight() == false else { return }
@@ -27,7 +33,8 @@ extension RuntimeCoordinator {
     private struct ServerInitiatedPayload {
         let data: Data
         let object: [String: Any]
-        let expectsResponse: Bool
+        let method: String
+        let routingPolicy: ServerInitiatedRoutingPolicy
 
         func routedData(
             for session: SessionContext,
@@ -795,13 +802,26 @@ extension RuntimeCoordinator {
         originalData: Data
     ) -> ServerInitiatedPayload? {
         let kind = JSONRPC.Message.Inspector.kind(of: object)
-        guard kind.isServerInitiated else {
+        let method: String
+        let routingPolicy: ServerInitiatedRoutingPolicy
+        switch kind {
+        case .request(let requestMethod, _):
+            method = requestMethod
+            routingPolicy = .serverRequest
+        case .notification(let notificationMethod):
+            method = notificationMethod
+            routingPolicy =
+                notificationMethod == "notifications/progress"
+                ? .operationOwnerNotification
+                : .broadcastNotification
+        case .response, .malformed, .other:
             return nil
         }
         return ServerInitiatedPayload(
             data: originalData,
             object: object,
-            expectsResponse: kind.requestID != nil
+            method: method,
+            routingPolicy: routingPolicy
         )
     }
 
@@ -843,16 +863,17 @@ extension RuntimeCoordinator {
         let owningTarget =
             owningTargetOverride ?? activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
         let payloadTargets = serverInitiatedTargets(
-            expectsResponse: serverInitiatedPayload.expectsResponse,
+            routingPolicy: serverInitiatedPayload.routingPolicy,
             owningTarget: owningTarget,
             pendingInitializeTargets: pendingInitializeTargets,
             routedTargets: routedTargets
         )
-        if serverInitiatedPayload.expectsResponse && payloadTargets.isEmpty {
+        if serverInitiatedPayload.routingPolicy == .serverRequest && payloadTargets.isEmpty {
             logger.debug(
                 "Dropping response-requiring server request without an owning session",
                 metadata: [
                     "upstream": .string("\(upstreamIndex)"),
+                    "method": .string(serverInitiatedPayload.method),
                     "bytes": .string("\(serverInitiatedPayload.data.count)"),
                 ]
             )
@@ -876,6 +897,7 @@ extension RuntimeCoordinator {
                 "Dropping unmapped upstream message (no routed target sessions)",
                 metadata: [
                     "upstream": .string("\(upstreamIndex)"),
+                    "method": .string(serverInitiatedPayload.method),
                     "bytes": .string("\(sourceByteCount)"),
                 ]
             )
@@ -894,13 +916,18 @@ extension RuntimeCoordinator {
     }
 
     private func serverInitiatedTargets(
-        expectsResponse: Bool,
+        routingPolicy: ServerInitiatedRoutingPolicy,
         owningTarget: SessionContext?,
         pendingInitializeTargets: [SessionContext],
         routedTargets: [SessionContext]
     ) -> [SessionContext] {
-        guard expectsResponse else {
+        switch routingPolicy {
+        case .broadcastNotification:
             return routedTargets
+        case .operationOwnerNotification:
+            return owningTarget.map { [$0] } ?? []
+        case .serverRequest:
+            break
         }
         if let owningTarget {
             return [owningTarget]

@@ -86,7 +86,7 @@ When the proxy runs in `--refresh-code-issues-mode upstream`, Xcode's live diagn
 - If you need Xcode's native live diagnostics behavior, start the proxy with `--refresh-code-issues-mode upstream` (or `MCP_XCODE_REFRESH_CODE_ISSUES_MODE=upstream`).
 
 ## `session not found`
-Ensure the client is using the server-issued `MCP-Session-Id`. Initialize requests must not rely on a caller-provided session id, and `DELETE /mcp` permanently terminates the session.
+Ensure the client is using the server-issued `MCP-Session-Id`. Initialize requests must not rely on a caller-provided session id. `DELETE /mcp` permanently terminates the session, and the proxy also expires a session after it has had no in-flight request, open SSE stream, or other client activity for five minutes. A client that receives `404` for a session-bound request must initialize a new session; the bundled SDK and STDIO adapter perform that recovery automatically.
 
 ## `protocol version required` / `protocol version mismatch`
 The proxy only accepts `MCP-Protocol-Version: 2025-06-18` after initialize. Reinitialize the client session if it cached an older protocol version or omitted the header.

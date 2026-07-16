@@ -18,6 +18,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let remoteAddress: String?
     }
 
+    struct ActivePostRequest: Sendable {
+        let operation: any ProxyRuntimeRequestOperating
+        let sessionID: ProxySessionID?
+    }
+
     struct State: Sendable {
         var requestHead: HTTPRequestHead?
         var bodyBuffer: ByteBuffer?
@@ -25,7 +30,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         var sseSessionID: String?
         var bodyTooLarge = false
         var originRejected = false
-        var activePostRequestOperations: [String: any ProxyRuntimeRequestOperating] = [:]
+        var activePostRequests: [String: ActivePostRequest] = [:]
         var responseWriteTail: EventLoopFuture<Void>?
     }
 
@@ -109,10 +114,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        let (sessionID, activePostRequestOperations) = state.withLockedValue { state in
-            let operations = Array(state.activePostRequestOperations.values)
-            state.activePostRequestOperations.removeAll()
-            return (state.sseSessionID, operations)
+        let (sessionID, activePostRequests) = state.withLockedValue { state in
+            let requests = Array(state.activePostRequests.values)
+            state.activePostRequests.removeAll()
+            return (state.sseSessionID, requests)
         }
         if let sessionID {
             controlService.closeSSE(
@@ -120,8 +125,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 channel: context.channel
             )
         }
-        for operation in activePostRequestOperations {
-            operation.cancel(reason: .channelInactive)
+        for request in activePostRequests {
+            request.operation.cancel(reason: .channelInactive)
+            if let sessionID = request.sessionID {
+                controlService.clientRequestFinished(sessionID)
+            }
         }
         if let remote = remoteAddressString(for: context.channel) {
             if let sessionID {
@@ -335,10 +343,17 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         buffer.writeString(": ok\n\n")
         context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
 
-        controlService.openSSE(
+        guard controlService.openSSE(
             sessionID: ProxySessionID(rawValue: sessionID),
             channel: context.channel
-        )
+        ) else {
+            logger.warning(
+                "Closing SSE stream after its session expired during admission",
+                metadata: ["session": .string(sessionID)]
+            )
+            context.close(promise: nil)
+            return
+        }
 
         if let remote = requestLog.remoteAddress {
             logger.info("SSE connected", metadata: ["remote": .string(remote), "session": .string(sessionID)])
@@ -469,52 +484,62 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             sessionID: effectiveSessionID.map(ProxySessionID.init(rawValue:))
         )
         state.withLockedValue { state in
-            state.activePostRequestOperations[requestLog.id] = operation
+            state.activePostRequests[requestLog.id] = ActivePostRequest(
+                operation: operation,
+                sessionID: effectiveSessionID.map(ProxySessionID.init(rawValue:))
+            )
         }
         operation.whenComplete { result in
             self.scheduleResponseCompletion(eventLoop) {
                 switch result {
                 case .success(let resolution):
-                let writeFuture = self.enqueueOrderedWrite(on: channel) {
-                    self.sendPostResolution(
-                        resolution,
-                        on: channel,
-                        keepAlive: keepAlive,
-                        requestLog: requestLog
-                    )
-                }
-                writeFuture.whenFailure { error in
-                    self.logger.warning(
-                        "HTTP response write failed",
-                        metadata: [
-                            "request_id": .string(requestLog.id),
-                            "disconnect_source": .string("responseWriteFailure"),
-                            "error": .string("\(error)"),
-                        ]
-                    )
-                    operation.cancel(reason: .responseWriteFailure)
-                }
-                writeFuture.whenComplete { _ in
-                    _ = self.state.withLockedValue { state in
-                        state.activePostRequestOperations.removeValue(forKey: requestLog.id)
+                    let writeFuture = self.enqueueOrderedWrite(on: channel) {
+                        self.sendPostResolution(
+                            resolution,
+                            on: channel,
+                            keepAlive: keepAlive,
+                            requestLog: requestLog
+                        )
+                    }
+                    writeFuture.whenFailure { error in
+                        self.logger.warning(
+                            "HTTP response write failed",
+                            metadata: [
+                                "request_id": .string(requestLog.id),
+                                "disconnect_source": .string("responseWriteFailure"),
+                                "error": .string("\(error)"),
+                            ]
+                        )
+                        operation.cancel(reason: .responseWriteFailure)
+                    }
+                    writeFuture.whenComplete { _ in
+                        self.finishActivePostRequest(requestID: requestLog.id)
+                    }
+                case .failure:
+                    let writeFuture = self.enqueueOrderedWrite(on: channel) {
+                        self.sendPlain(
+                            on: channel,
+                            status: .internalServerError,
+                            body: "internal server error",
+                            keepAlive: keepAlive,
+                            sessionID: effectiveSessionID,
+                            requestLog: requestLog
+                        )
+                    }
+                    writeFuture.whenComplete { _ in
+                        self.finishActivePostRequest(requestID: requestLog.id)
                     }
                 }
-                case .failure:
-                _ = self.state.withLockedValue { state in
-                    state.activePostRequestOperations.removeValue(forKey: requestLog.id)
-                }
-                _ = self.enqueueOrderedWrite(on: channel) {
-                    self.sendPlain(
-                        on: channel,
-                        status: .internalServerError,
-                        body: "internal server error",
-                        keepAlive: keepAlive,
-                        sessionID: effectiveSessionID,
-                        requestLog: requestLog
-                    )
-                }
             }
-            }
+        }
+    }
+
+    private func finishActivePostRequest(requestID: String) {
+        let sessionID = state.withLockedValue { state in
+            state.activePostRequests.removeValue(forKey: requestID)?.sessionID
+        }
+        if let sessionID {
+            controlService.clientRequestFinished(sessionID)
         }
     }
 

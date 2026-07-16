@@ -19,6 +19,7 @@ package final class ProxyHTTPChildChannelInitializer: @unchecked Sendable {
     }
 
     package func initialize(_ channel: Channel) -> EventLoopFuture<Void> {
+        controlService.startSessionExpirySweep(on: channel.eventLoop)
         let pipeline = channel.pipeline
         return pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
             pipeline.addHandler(
