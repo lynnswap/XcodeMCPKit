@@ -189,6 +189,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var requestLeaseActivationHook: (@Sendable () -> Void)?
         var requeuedLeaseCount = 0
         var rejectNextUpstreamSend = false
+        var removeSessionOnNextClientRequestAdmission = false
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
         var begunClientRequestCount = 0
         var finishedClientRequestCount = 0
@@ -278,6 +279,13 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func beginClientRequest(id: String, createIfMissing: Bool) -> Bool {
         state.withLockedValue { state in
+            if state.removeSessionOnNextClientRequestAdmission {
+                state.removeSessionOnNextClientRequestAdmission = false
+                state.initializedSessionIDs.remove(id)
+                state.sessionProtocolVersions.removeValue(forKey: id)
+                state.sessions.removeValue(forKey: id)
+                return false
+            }
             if state.sessions[id] == nil {
                 guard createIfMissing else { return false }
                 state.sessions[id] = SessionContext(id: id, config: config)
@@ -1012,6 +1020,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func rejectNextUpstreamSend() {
         state.withLockedValue { $0.rejectNextUpstreamSend = true }
+    }
+
+    func removeSessionOnNextClientRequestAdmission() {
+        state.withLockedValue { $0.removeSessionOnNextClientRequestAdmission = true }
     }
 
     func setAvailableUpstreamIndex(_ value: Int?) {

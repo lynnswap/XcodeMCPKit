@@ -475,14 +475,24 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let keepAlive = head.isKeepAlive
         let channel = context.channel
         let eventLoop = context.eventLoop
-        let operation = controlService.beginRequest(
+        guard let operation = controlService.beginRequest(
             ProxyRuntimeRequest(
                 data: bodyData,
                 headerSessionExists: headerSessionExists,
                 prefersEventStream: prefersEventStream
             ),
             sessionID: effectiveSessionID.map(ProxySessionID.init(rawValue:))
-        )
+        ) else {
+            _ = sendPlain(
+                on: channel,
+                status: .notFound,
+                body: "session not found",
+                keepAlive: keepAlive,
+                sessionID: effectiveSessionID,
+                requestLog: requestLog
+            )
+            return
+        }
         state.withLockedValue { state in
             state.activePostRequests[requestLog.id] = ActivePostRequest(
                 operation: operation,

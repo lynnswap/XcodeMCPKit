@@ -445,6 +445,40 @@ struct HTTPHandlerTests {
         #expect(sessionManager.clientRequestActivityCounts.finished == 1)
     }
 
+    @Test func httpPostRejectsSessionRemovedAfterValidation() async throws {
+        let config = makeHTTPConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        let sessionID = try await initializeHTTPChannel(channel)
+        let activityBeforeRequest = sessionManager.clientRequestActivityCounts
+        sessionManager.removeSessionOnNextClientRequestAdmission()
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": [String: Any](),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "MCP-Session-Id", value: sessionID)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .notFound)
+        #expect(response.body == "session not found")
+        #expect(sessionManager.clientRequestActivityCounts == activityBeforeRequest)
+    }
+
     @Test func httpPostRejectsNonJSONContentType() async throws {
         let config = makeHTTPConfig()
         let channel = EmbeddedChannel()

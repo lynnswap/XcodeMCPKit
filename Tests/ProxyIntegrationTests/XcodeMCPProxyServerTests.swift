@@ -766,7 +766,7 @@ private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeSe
     func beginRequest(
         _ message: ProxyRuntimeRequest,
         in sessionID: ProxySessionID?
-    ) -> any ProxyRuntimeRequestOperating {
+    ) -> (any ProxyRuntimeRequestOperating)? {
         fatalError("startup lifecycle test does not admit requests")
     }
 

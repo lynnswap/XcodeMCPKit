@@ -13,6 +13,7 @@ package struct ProxySessionID: Hashable, Sendable {
 }
 
 package enum ProxyRuntimeEvent: Sendable {
+    case sessionOpened(sessionID: ProxySessionID)
     case notification(sessionID: ProxySessionID, data: Data)
     case sessionClosed(sessionID: ProxySessionID)
 }
@@ -122,7 +123,7 @@ package protocol ProxyRuntimeServing: Sendable {
     func beginRequest(
         _ message: ProxyRuntimeRequest,
         in sessionID: ProxySessionID?
-    ) -> any ProxyRuntimeRequestOperating
+    ) -> (any ProxyRuntimeRequestOperating)?
     func clientRequestFinished(_ id: ProxySessionID)
     func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState
     func clientEventStreamOpened(_ id: ProxySessionID) -> Bool
@@ -451,12 +452,23 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
     package func beginRequest(
         _ message: ProxyRuntimeRequest,
         in sessionID: ProxySessionID?
-    ) -> any ProxyRuntimeRequestOperating {
+    ) -> (any ProxyRuntimeRequestOperating)? {
+        let createsSession = sessionID != nil && message.headerSessionExists == false
+        if let sessionID, createsSession {
+            // Reserve delivery before admission so a concurrent close cannot overtake
+            // the open event. Generated session IDs are not exposed until the response.
+            eventSource.emit(.sessionOpened(sessionID: sessionID))
+        }
         if let sessionID {
-            _ = coordinator.beginClientRequest(
+            guard coordinator.beginClientRequest(
                 id: sessionID.rawValue,
                 createIfMissing: message.headerSessionExists == false
-            )
+            ) else {
+                if createsSession {
+                    eventSource.emit(.sessionClosed(sessionID: sessionID))
+                }
+                return nil
+            }
         }
         return ProxyRuntimeRequestOperation(
             executor: requestExecutor,

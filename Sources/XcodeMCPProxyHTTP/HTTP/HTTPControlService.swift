@@ -13,6 +13,10 @@ struct HTTPNotificationOverflowWarning: Equatable, Sendable {
     let bufferLimit: Int
 }
 
+private enum HTTPEventDeliveryStoreError: Error {
+    case sessionNotOpen
+}
+
 final class HTTPEventDeliveryStore: Sendable {
     private static let maxDroppedMethodBuckets = 16
     private static let additionalDroppedMethodsBucket = "<additional-methods>"
@@ -58,6 +62,12 @@ final class HTTPEventDeliveryStore: Sendable {
 
     func receive(_ event: ProxyRuntimeEvent) {
         switch event {
+        case .sessionOpened(let sessionID):
+            sessions.withLockedValue { sessions in
+                if sessions[sessionID] == nil {
+                    sessions[sessionID] = SessionDelivery()
+                }
+            }
         case .notification(let sessionID, let data):
             receiveNotification(data, sessionID: sessionID)
         case .sessionClosed(let sessionID):
@@ -66,9 +76,10 @@ final class HTTPEventDeliveryStore: Sendable {
         }
     }
 
-    func open(sessionID: ProxySessionID, channel: Channel) {
+    @discardableResult
+    func open(sessionID: ProxySessionID, channel: Channel) -> Bool {
         sessions.withLockedValue { sessions in
-            var delivery = sessions[sessionID] ?? SessionDelivery()
+            guard var delivery = sessions[sessionID] else { return false }
             switch delivery.hub.add(channel) {
             case .firstActiveClient:
                 let bufferedNotifications = delivery.bufferedNotifications
@@ -86,6 +97,7 @@ final class HTTPEventDeliveryStore: Sendable {
                 break
             }
             sessions[sessionID] = delivery
+            return true
         }
     }
 
@@ -96,10 +108,8 @@ final class HTTPEventDeliveryStore: Sendable {
     }
 
     func waitForClient(sessionID: ProxySessionID) async throws {
-        let hub = sessions.withLockedValue { sessions -> SSEHub in
-            let delivery = sessions[sessionID] ?? SessionDelivery()
-            sessions[sessionID] = delivery
-            return delivery.hub
+        guard let hub = sessions.withLockedValue({ $0[sessionID]?.hub }) else {
+            throw HTTPEventDeliveryStoreError.sessionNotOpen
         }
         try await hub.waitForClient()
     }
@@ -130,14 +140,14 @@ final class HTTPEventDeliveryStore: Sendable {
     ) {
         var warning: HTTPNotificationOverflowWarning?
         sessions.withLockedValue { sessions in
-            let currentDelivery = sessions[sessionID]
+            guard let currentDelivery = sessions[sessionID] else { return }
             if let expectedHub {
-                guard let currentDelivery, currentDelivery.hub === expectedHub else {
+                guard currentDelivery.hub === expectedHub else {
                     return
                 }
             }
 
-            var delivery = currentDelivery ?? SessionDelivery()
+            var delivery = currentDelivery
             if case .unavailable = broadcast(
                 notification,
                 sessionID: sessionID,
@@ -384,7 +394,7 @@ final class HTTPControlService: Sendable {
     func beginRequest(
         _ request: ProxyRuntimeRequest,
         sessionID: ProxySessionID?
-    ) -> any ProxyRuntimeRequestOperating {
+    ) -> (any ProxyRuntimeRequestOperating)? {
         runtime.beginRequest(request, in: sessionID)
     }
 
@@ -405,7 +415,10 @@ final class HTTPControlService: Sendable {
     @discardableResult
     func openSSE(sessionID: ProxySessionID, channel: Channel) -> Bool {
         guard runtime.clientEventStreamOpened(sessionID) else { return false }
-        deliveryStore.open(sessionID: sessionID, channel: channel)
+        guard deliveryStore.open(sessionID: sessionID, channel: channel) else {
+            runtime.clientEventStreamClosed(sessionID)
+            return false
+        }
         return true
     }
 
