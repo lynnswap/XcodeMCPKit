@@ -35,11 +35,22 @@ extension RuntimeCoordinator {
         let object: [String: Any]
         let method: String
         let routingPolicy: ServerInitiatedRoutingPolicy
+        let upstreamProgressToken: String?
 
         func routedData(
             for session: SessionContext,
-            operationLease: UpstreamOperationLease
+            operationLease: UpstreamOperationLease,
+            clientProgressToken: JSONValue?
         ) -> Data? {
+            if let clientProgressToken {
+                guard var params = object["params"] as? [String: Any] else {
+                    return nil
+                }
+                params["progressToken"] = clientProgressToken.foundationObject
+                var routedObject = object
+                routedObject["params"] = params
+                return try? JSONRPC.Wire.data(from: routedObject)
+            }
             guard case .request(_, let upstreamID) =
                 JSONRPC.Message.Inspector.kind(of: object)
             else {
@@ -604,7 +615,8 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
-        timeout: TimeAmount?
+        timeout: TimeAmount?,
+        progressTokenMapping: ProgressTokenMapping? = nil
     ) {
         let timeoutAt = timeout.map {
             Date().addingTimeInterval(Double($0.nanoseconds) / 1_000_000_000)
@@ -613,7 +625,8 @@ extension RuntimeCoordinator {
             leaseID,
             requestIDKey: requestIDKey,
             upstreamIndex: upstreamIndex,
-            timeoutAt: timeoutAt
+            timeoutAt: timeoutAt,
+            progressTokenMapping: progressTokenMapping
         )
     }
 
@@ -821,8 +834,16 @@ extension RuntimeCoordinator {
             data: originalData,
             object: object,
             method: method,
-            routingPolicy: routingPolicy
+            routingPolicy: routingPolicy,
+            upstreamProgressToken: routingPolicy == .operationOwnerNotification
+                ? Self.progressToken(from: object)
+                : nil
         )
+    }
+
+    private static func progressToken(from object: [String: Any]) -> String? {
+        guard let params = object["params"] as? [String: Any] else { return nil }
+        return params["progressToken"] as? String
     }
 
     @discardableResult
@@ -860,8 +881,23 @@ extension RuntimeCoordinator {
             routedTargets.append(target)
         }
 
-        let owningTarget =
-            owningTargetOverride ?? activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
+        let progressTarget: LeaseManager.ProgressTarget?
+        let owningTarget: SessionContext?
+        if serverInitiatedPayload.routingPolicy == .operationOwnerNotification {
+            progressTarget = serverInitiatedPayload.upstreamProgressToken.flatMap {
+                leaseManager.activeProgressTarget(
+                    upstreamIndex: upstreamIndex,
+                    upstreamToken: $0
+                )
+            }
+            owningTarget = progressTarget.flatMap {
+                sessionRegistry.contextIfPresent(id: $0.sessionID)
+            }
+        } else {
+            progressTarget = nil
+            owningTarget =
+                owningTargetOverride ?? activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
+        }
         let payloadTargets = serverInitiatedTargets(
             routingPolicy: serverInitiatedPayload.routingPolicy,
             owningTarget: owningTarget,
@@ -884,7 +920,8 @@ extension RuntimeCoordinator {
         for session in payloadTargets {
             guard let routedData = serverInitiatedPayload.routedData(
                 for: session,
-                operationLease: operationLease
+                operationLease: operationLease,
+                clientProgressToken: progressTarget?.clientToken
             ) else {
                 continue
             }

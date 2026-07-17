@@ -60,6 +60,44 @@ struct RequestInspectorTests {
         #expect(mapped == false)
     }
 
+    @Test func requestInspectorRewritesProgressTokenWhenMapperIsProvided() async throws {
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": [
+                "name": "Example",
+                "arguments": [String: Any](),
+                "_meta": ["progressToken": 42],
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+
+        let transform = try RequestInspector.transform(
+            data,
+            sessionID: "s1",
+            mapProgressToken: { token in
+                #expect(token == .number(.int(42)))
+                return "proxy-progress-token"
+            },
+            mapID: { _, _ in 7 }
+        )
+
+        #expect(
+            transform.progressTokenMapping
+                == ProgressTokenMapping(
+                    clientToken: .number(.int(42)),
+                    upstreamToken: "proxy-progress-token"
+                )
+        )
+        let upstream = try #require(
+            try JSONSerialization.jsonObject(with: transform.upstreamData) as? [String: Any]
+        )
+        let params = try #require(upstream["params"] as? [String: Any])
+        let meta = try #require(params["_meta"] as? [String: Any])
+        #expect(meta["progressToken"] as? String == "proxy-progress-token")
+    }
+
     @Test func requestInspectorDoesNotMapJSONRPCResponseIDs() async throws {
         let payload: [String: Any] = [
             "jsonrpc": "2.0",

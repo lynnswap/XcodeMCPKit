@@ -283,7 +283,8 @@ final class ClientMCPRequestExecutor: Sendable {
                     ?? Self.topLevelRequestTimeoutOverride(
                         method: nil,
                         defaultSeconds: requestTimeoutSeconds
-                    )
+                    ),
+                progressTokenMapping: nil
             )
             return ClientMCPRequestExecutor.Operation(
                 future: makeTopLevelRequestFuture(
@@ -348,7 +349,8 @@ final class ClientMCPRequestExecutor: Sendable {
                         leaseID,
                         requestIDKey: nil,
                         upstreamIndex: operationLease.upstreamIndex,
-                        timeout: nil
+                        timeout: nil,
+                        progressTokenMapping: nil
                     )
                     return self.makeTopLevelRequestFuture(
                         filteredRequest: filteredRequest,

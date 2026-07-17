@@ -842,7 +842,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
-        timeout: TimeAmount?
+        timeout: TimeAmount?,
+        progressTokenMapping: ProgressTokenMapping? = nil
     ) {
         requestLeaseRegistry.activateLease(
             leaseID,
@@ -850,7 +851,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             upstreamIndex: upstreamIndex,
             timeoutAt: timeout.map {
                 Date().addingTimeInterval(Double($0.nanoseconds) / 1_000_000_000)
-            }
+            },
+            progressTokenMapping: progressTokenMapping
         )
         state.withLockedValue { $0.requestLeaseActivationHook }?()
     }

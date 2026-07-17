@@ -49,12 +49,16 @@ struct ProxyUpstreamRequestRuntimeTests {
 
     @Test func startRequestRegistersPendingActivatesLeaseAndSends() throws {
         let port = RecordingUpstreamRuntimePort(chosenUpstreamIndex: 1)
-        let runtime = ProxyUpstreamRequestRuntime(port: port)
+        let runtime = ProxyUpstreamRequestRuntime(
+            port: port,
+            makeUpstreamProgressToken: { "proxy-progress-token" }
+        )
         let requestData = try JSONSerialization.data(
             withJSONObject: [
                 "jsonrpc": "2.0",
                 "id": "client-2",
                 "method": "tools/list",
+                "params": ["_meta": ["progressToken": "client-progress-token"]],
             ],
             options: []
         )
@@ -93,10 +97,21 @@ struct ProxyUpstreamRequestRuntimeTests {
                 leaseID: leaseID,
                 requestIDKey: "client-2",
                 upstreamIndex: 1,
-                timeout: .seconds(3)
+                timeout: .seconds(3),
+                progressTokenMapping: ProgressTokenMapping(
+                    clientToken: .string("client-progress-token"),
+                    upstreamToken: "proxy-progress-token"
+                )
             )
         ])
         #expect(port.sentRequests().map(\.upstreamIndex) == [1])
+        let sentObject = try #require(
+            try JSONSerialization.jsonObject(with: port.sentRequests()[0].data)
+                as? [String: Any]
+        )
+        let sentParams = try #require(sentObject["params"] as? [String: Any])
+        let sentMeta = try #require(sentParams["_meta"] as? [String: Any])
+        #expect(sentMeta["progressToken"] as? String == "proxy-progress-token")
 
         let responseData = try JSONSerialization.data(
             withJSONObject: [
@@ -329,6 +344,7 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
         let requestIDKey: String?
         let upstreamIndex: Int?
         let timeout: TimeAmount?
+        let progressTokenMapping: ProgressTokenMapping?
     }
 
     struct SentRequest: Equatable, Sendable {
@@ -494,7 +510,8 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
-        timeout: TimeAmount?
+        timeout: TimeAmount?,
+        progressTokenMapping: ProgressTokenMapping?
     ) {
         state.withLockedValue { state in
             state.activations.append(
@@ -502,7 +519,8 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
                     leaseID: leaseID,
                     requestIDKey: requestIDKey,
                     upstreamIndex: upstreamIndex,
-                    timeout: timeout
+                    timeout: timeout,
+                    progressTokenMapping: progressTokenMapping
                 )
             )
         }

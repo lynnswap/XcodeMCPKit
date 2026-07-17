@@ -8,7 +8,18 @@ package struct RequestTransform {
     package let method: String?
     package let toolName: String?
     package let originalID: JSONRPC.ID?
+    package let progressTokenMapping: ProgressTokenMapping?
     package let isCacheableToolsListRequest: Bool
+}
+
+package struct ProgressTokenMapping: Equatable, Sendable {
+    package let clientToken: JSONValue
+    package let upstreamToken: String
+
+    package init(clientToken: JSONValue, upstreamToken: String) {
+        self.clientToken = clientToken
+        self.upstreamToken = upstreamToken
+    }
 }
 
 package enum RequestInspector {
@@ -16,6 +27,7 @@ package enum RequestInspector {
         _ data: Data,
         parsedJSON: Any? = nil,
         sessionID: String,
+        mapProgressToken: ((JSONValue) -> String)? = nil,
         mapID: (_ sessionID: String, _ originalID: JSONRPC.ID) throws -> Int64
     ) throws -> RequestTransform {
         let json = try parsedJSON ?? JSONSerialization.jsonObject(with: data, options: [])
@@ -27,6 +39,10 @@ package enum RequestInspector {
         let method = JSONRPC.Message.Inspector.method(from: object)
         let toolName = toolName(from: object, method: method)
         if case .request(let method, let rpcID) = kind {
+            let progressTokenMapping = rewriteProgressToken(
+                in: &object,
+                mapProgressToken: mapProgressToken
+            )
             let upstreamID = try mapID(sessionID, rpcID)
             object["id"] = upstreamID
             return RequestTransform(
@@ -37,6 +53,7 @@ package enum RequestInspector {
                 method: method,
                 toolName: toolName,
                 originalID: rpcID,
+                progressTokenMapping: progressTokenMapping,
                 // tools/list is stable even when clients attach pagination-like params.
                 isCacheableToolsListRequest: method == "tools/list"
             )
@@ -50,8 +67,41 @@ package enum RequestInspector {
             method: method,
             toolName: toolName,
             originalID: nil,
+            progressTokenMapping: nil,
             isCacheableToolsListRequest: false
         )
+    }
+
+    private static func rewriteProgressToken(
+        in object: inout [String: Any],
+        mapProgressToken: ((JSONValue) -> String)?
+    ) -> ProgressTokenMapping? {
+        guard let mapProgressToken,
+            var params = object["params"] as? [String: Any],
+            var meta = params["_meta"] as? [String: Any],
+            let rawClientToken = meta["progressToken"],
+            let clientToken = JSONValue(any: rawClientToken),
+            Self.isValidProgressToken(clientToken)
+        else {
+            return nil
+        }
+        let upstreamToken = mapProgressToken(clientToken)
+        meta["progressToken"] = upstreamToken
+        params["_meta"] = meta
+        object["params"] = params
+        return ProgressTokenMapping(
+            clientToken: clientToken,
+            upstreamToken: upstreamToken
+        )
+    }
+
+    private static func isValidProgressToken(_ token: JSONValue) -> Bool {
+        switch token {
+        case .string, .number(.int):
+            return true
+        case .number(.double), .object, .array, .bool, .null:
+            return false
+        }
     }
 
     private static func toolName(from object: [String: Any], method: String?) -> String? {

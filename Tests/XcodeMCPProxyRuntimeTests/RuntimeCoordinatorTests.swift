@@ -4336,6 +4336,26 @@ struct RuntimeCoordinatorInitializationTests {
         _ = firstSession.router.drainBufferedNotifications()
         _ = secondSession.router.drainBufferedNotifications()
 
+        let firstLeaseID = manager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: firstSessionID,
+                label: "tools/call:first-progress-owner",
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        manager.activateRequestLease(
+            firstLeaseID,
+            requestIDKey: "first-progress-owner",
+            upstreamIndex: 0,
+            timeout: .seconds(5),
+            progressTokenMapping: ProgressTokenMapping(
+                clientToken: .string("client-progress-token-a"),
+                upstreamToken: "proxy-progress-token-a"
+            )
+        )
+        defer { manager.completeRequestLease(firstLeaseID) }
+
         let ownerLeaseID = manager.createRequestLease(
             descriptor: SessionRequestPipeline.Descriptor(
                 sessionID: secondSessionID,
@@ -4348,7 +4368,11 @@ struct RuntimeCoordinatorInitializationTests {
             ownerLeaseID,
             requestIDKey: "progress-owner",
             upstreamIndex: 0,
-            timeout: .seconds(5)
+            timeout: .seconds(5),
+            progressTokenMapping: ProgressTokenMapping(
+                clientToken: .string("client-progress-token-b"),
+                upstreamToken: "proxy-progress-token-b"
+            )
         )
         defer { manager.completeRequestLease(ownerLeaseID) }
 
@@ -4357,7 +4381,7 @@ struct RuntimeCoordinatorInitializationTests {
                 "jsonrpc": "2.0",
                 "method": "notifications/progress",
                 "params": [
-                    "progressToken": "progress-token",
+                    "progressToken": "proxy-progress-token-b",
                     "progress": 1,
                     "total": 2,
                 ],
@@ -4367,7 +4391,14 @@ struct RuntimeCoordinatorInitializationTests {
         manager.routeUpstreamMessage(progressNotification, upstreamIndex: 0)
 
         #expect(firstSession.router.drainBufferedNotifications().isEmpty)
-        #expect(secondSession.router.drainBufferedNotifications() == [progressNotification])
+        let routedNotifications = secondSession.router.drainBufferedNotifications()
+        let routedNotification = try #require(routedNotifications.first)
+        #expect(routedNotifications.count == 1)
+        let routedObject = try #require(
+            try JSONSerialization.jsonObject(with: routedNotification) as? [String: Any]
+        )
+        let routedParams = try #require(routedObject["params"] as? [String: Any])
+        #expect(routedParams["progressToken"] as? String == "client-progress-token-b")
     }
 
     @Test func sessionManagerDropsProgressNotificationWithoutActiveOwner() async throws {
@@ -16233,7 +16264,17 @@ struct RuntimeCoordinatorSchedulingTests {
             lease,
             requestIDKey: "refresh-1",
             upstreamIndex: 0,
-            timeoutAt: Date().addingTimeInterval(30)
+            timeoutAt: Date().addingTimeInterval(30),
+            progressTokenMapping: ProgressTokenMapping(
+                clientToken: .string("client-refresh-token"),
+                upstreamToken: "proxy-refresh-token"
+            )
+        )
+        #expect(
+            registry.activeProgressTarget(
+                upstreamIndex: 0,
+                upstreamToken: "proxy-refresh-token"
+            )?.sessionID == "session-requeue"
         )
 
         let releaseAction = try #require(registry.requeueLease(lease))
@@ -16246,6 +16287,12 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(snapshot.upstreamIndex == nil)
         #expect(snapshot.timeoutAt == nil)
         #expect(snapshot.releaseReason == nil)
+        #expect(
+            registry.activeProgressTarget(
+                upstreamIndex: 0,
+                upstreamToken: "proxy-refresh-token"
+            ) == nil
+        )
     }
 
     @Test func requestLeaseRegistryAbandonActiveLeasesUsesBoundedReleasedHistory()

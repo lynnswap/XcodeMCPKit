@@ -245,7 +245,8 @@ protocol RuntimeRequestLeasePort: Sendable {
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
-        timeout: TimeAmount?
+        timeout: TimeAmount?,
+        progressTokenMapping: ProgressTokenMapping?
     )
     func completeRequestLease(_ leaseID: LeaseManager.ID)
     func requeueRequestLease(_ leaseID: LeaseManager.ID)
