@@ -4,6 +4,12 @@ import NIO
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
+    private enum ServerInitiatedRoutingPolicy: Equatable {
+        case serverRequest
+        case operationOwnerNotification
+        case broadcastNotification
+    }
+
     func failQueuedRequestsIfNoHealthyOrRecoveringUpstream() {
         guard activeInitializedHealthyishCount() == 0 else { return }
         guard anyActiveRecoveryInFlight() == false else { return }
@@ -27,12 +33,24 @@ extension RuntimeCoordinator {
     private struct ServerInitiatedPayload {
         let data: Data
         let object: [String: Any]
-        let expectsResponse: Bool
+        let method: String
+        let routingPolicy: ServerInitiatedRoutingPolicy
+        let upstreamProgressToken: String?
 
         func routedData(
             for session: SessionContext,
-            operationLease: UpstreamOperationLease
+            operationLease: UpstreamOperationLease,
+            clientProgressToken: JSONValue?
         ) -> Data? {
+            if let clientProgressToken {
+                guard var params = object["params"] as? [String: Any] else {
+                    return nil
+                }
+                params["progressToken"] = clientProgressToken.foundationObject
+                var routedObject = object
+                routedObject["params"] = params
+                return try? JSONRPC.Wire.data(from: routedObject)
+            }
             guard case .request(_, let upstreamID) =
                 JSONRPC.Message.Inspector.kind(of: object)
             else {
@@ -597,7 +615,8 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
-        timeout: TimeAmount?
+        timeout: TimeAmount?,
+        progressTokenMapping: ProgressTokenMapping? = nil
     ) {
         let timeoutAt = timeout.map {
             Date().addingTimeInterval(Double($0.nanoseconds) / 1_000_000_000)
@@ -606,7 +625,8 @@ extension RuntimeCoordinator {
             leaseID,
             requestIDKey: requestIDKey,
             upstreamIndex: upstreamIndex,
-            timeoutAt: timeoutAt
+            timeoutAt: timeoutAt,
+            progressTokenMapping: progressTokenMapping
         )
     }
 
@@ -795,14 +815,35 @@ extension RuntimeCoordinator {
         originalData: Data
     ) -> ServerInitiatedPayload? {
         let kind = JSONRPC.Message.Inspector.kind(of: object)
-        guard kind.isServerInitiated else {
+        let method: String
+        let routingPolicy: ServerInitiatedRoutingPolicy
+        switch kind {
+        case .request(let requestMethod, _):
+            method = requestMethod
+            routingPolicy = .serverRequest
+        case .notification(let notificationMethod):
+            method = notificationMethod
+            routingPolicy =
+                notificationMethod == "notifications/progress"
+                ? .operationOwnerNotification
+                : .broadcastNotification
+        case .response, .malformed, .other:
             return nil
         }
         return ServerInitiatedPayload(
             data: originalData,
             object: object,
-            expectsResponse: kind.requestID != nil
+            method: method,
+            routingPolicy: routingPolicy,
+            upstreamProgressToken: routingPolicy == .operationOwnerNotification
+                ? Self.progressToken(from: object)
+                : nil
         )
+    }
+
+    private static func progressToken(from object: [String: Any]) -> String? {
+        guard let params = object["params"] as? [String: Any] else { return nil }
+        return params["progressToken"] as? String
     }
 
     @discardableResult
@@ -840,19 +881,35 @@ extension RuntimeCoordinator {
             routedTargets.append(target)
         }
 
-        let owningTarget =
-            owningTargetOverride ?? activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
+        let progressTarget: LeaseManager.ProgressTarget?
+        let owningTarget: SessionContext?
+        if serverInitiatedPayload.routingPolicy == .operationOwnerNotification {
+            progressTarget = serverInitiatedPayload.upstreamProgressToken.flatMap {
+                leaseManager.activeProgressTarget(
+                    upstreamIndex: upstreamIndex,
+                    upstreamToken: $0
+                )
+            }
+            owningTarget = progressTarget.flatMap {
+                sessionRegistry.contextIfPresent(id: $0.sessionID)
+            }
+        } else {
+            progressTarget = nil
+            owningTarget =
+                owningTargetOverride ?? activeLeaseSessionTarget(upstreamIndex: upstreamIndex)
+        }
         let payloadTargets = serverInitiatedTargets(
-            expectsResponse: serverInitiatedPayload.expectsResponse,
+            routingPolicy: serverInitiatedPayload.routingPolicy,
             owningTarget: owningTarget,
             pendingInitializeTargets: pendingInitializeTargets,
             routedTargets: routedTargets
         )
-        if serverInitiatedPayload.expectsResponse && payloadTargets.isEmpty {
+        if serverInitiatedPayload.routingPolicy == .serverRequest && payloadTargets.isEmpty {
             logger.debug(
                 "Dropping response-requiring server request without an owning session",
                 metadata: [
                     "upstream": .string("\(upstreamIndex)"),
+                    "method": .string(serverInitiatedPayload.method),
                     "bytes": .string("\(serverInitiatedPayload.data.count)"),
                 ]
             )
@@ -863,7 +920,8 @@ extension RuntimeCoordinator {
         for session in payloadTargets {
             guard let routedData = serverInitiatedPayload.routedData(
                 for: session,
-                operationLease: operationLease
+                operationLease: operationLease,
+                clientProgressToken: progressTarget?.clientToken
             ) else {
                 continue
             }
@@ -876,6 +934,7 @@ extension RuntimeCoordinator {
                 "Dropping unmapped upstream message (no routed target sessions)",
                 metadata: [
                     "upstream": .string("\(upstreamIndex)"),
+                    "method": .string(serverInitiatedPayload.method),
                     "bytes": .string("\(sourceByteCount)"),
                 ]
             )
@@ -894,13 +953,18 @@ extension RuntimeCoordinator {
     }
 
     private func serverInitiatedTargets(
-        expectsResponse: Bool,
+        routingPolicy: ServerInitiatedRoutingPolicy,
         owningTarget: SessionContext?,
         pendingInitializeTargets: [SessionContext],
         routedTargets: [SessionContext]
     ) -> [SessionContext] {
-        guard expectsResponse else {
+        switch routingPolicy {
+        case .broadcastNotification:
             return routedTargets
+        case .operationOwnerNotification:
+            return owningTarget.map { [$0] } ?? []
+        case .serverRequest:
+            break
         }
         if let owningTarget {
             return [owningTarget]

@@ -13,6 +13,7 @@ package struct ProxySessionID: Hashable, Sendable {
 }
 
 package enum ProxyRuntimeEvent: Sendable {
+    case sessionOpened(sessionID: ProxySessionID)
     case notification(sessionID: ProxySessionID, data: Data)
     case sessionClosed(sessionID: ProxySessionID)
 }
@@ -122,8 +123,12 @@ package protocol ProxyRuntimeServing: Sendable {
     func beginRequest(
         _ message: ProxyRuntimeRequest,
         in sessionID: ProxySessionID?
-    ) -> any ProxyRuntimeRequestOperating
+    ) -> (any ProxyRuntimeRequestOperating)?
+    func clientRequestFinished(_ id: ProxySessionID)
     func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState
+    func clientEventStreamOpened(_ id: ProxySessionID) -> Bool
+    func clientEventStreamClosed(_ id: ProxySessionID)
+    func expireInactiveSessions(inactiveFor: TimeAmount)
     func removeSession(_ id: ProxySessionID)
     func snapshot() -> ProxyRuntimeSnapshot
     func inventorySnapshot() -> ProxyRuntimeInventorySnapshot
@@ -447,8 +452,25 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
     package func beginRequest(
         _ message: ProxyRuntimeRequest,
         in sessionID: ProxySessionID?
-    ) -> any ProxyRuntimeRequestOperating {
-        ProxyRuntimeRequestOperation(
+    ) -> (any ProxyRuntimeRequestOperating)? {
+        let createsSession = sessionID != nil && message.headerSessionExists == false
+        if let sessionID, createsSession {
+            // Reserve delivery before admission so a concurrent close cannot overtake
+            // the open event. Generated session IDs are not exposed until the response.
+            eventSource.emit(.sessionOpened(sessionID: sessionID))
+        }
+        if let sessionID {
+            guard coordinator.beginClientRequest(
+                id: sessionID.rawValue,
+                createIfMissing: message.headerSessionExists == false
+            ) else {
+                if createsSession {
+                    eventSource.emit(.sessionClosed(sessionID: sessionID))
+                }
+                return nil
+            }
+        }
+        return ProxyRuntimeRequestOperation(
             executor: requestExecutor,
             operation: requestExecutor.handle(
                 bodyData: message.data,
@@ -460,13 +482,26 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         )
     }
 
+    package func clientRequestFinished(_ id: ProxySessionID) {
+        coordinator.endClientRequest(id: id.rawValue)
+    }
+
     package func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState {
-        guard coordinator.hasSession(id: id.rawValue) else { return .missing }
-        guard coordinator.isSessionInitialized(id: id.rawValue) else {
-            return .uninitialized
-        }
-        return .initialized(
-            protocolVersion: coordinator.negotiatedProtocolVersion(id: id.rawValue)
+        coordinator.sessionStateAndTouch(id: id.rawValue)
+    }
+
+    package func clientEventStreamOpened(_ id: ProxySessionID) -> Bool {
+        coordinator.openClientEventStream(id: id.rawValue)
+    }
+
+    package func clientEventStreamClosed(_ id: ProxySessionID) {
+        coordinator.closeClientEventStream(id: id.rawValue)
+    }
+
+    package func expireInactiveSessions(inactiveFor: TimeAmount) {
+        precondition(inactiveFor.nanoseconds > 0)
+        coordinator.expireInactiveSessions(
+            inactiveForNanoseconds: UInt64(inactiveFor.nanoseconds)
         )
     }
 

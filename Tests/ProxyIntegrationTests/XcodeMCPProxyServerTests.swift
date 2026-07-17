@@ -766,13 +766,21 @@ private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeSe
     func beginRequest(
         _ message: ProxyRuntimeRequest,
         in sessionID: ProxySessionID?
-    ) -> any ProxyRuntimeRequestOperating {
+    ) -> (any ProxyRuntimeRequestOperating)? {
         fatalError("startup lifecycle test does not admit requests")
     }
+
+    func clientRequestFinished(_: ProxySessionID) {}
 
     func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState {
         .missing
     }
+
+    func clientEventStreamOpened(_: ProxySessionID) -> Bool { false }
+
+    func clientEventStreamClosed(_: ProxySessionID) {}
+
+    func expireInactiveSessions(inactiveFor _: TimeAmount) {}
 
     func removeSession(_ id: ProxySessionID) {}
 

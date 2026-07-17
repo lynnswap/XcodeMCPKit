@@ -1946,14 +1946,14 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(handshake.initializeSourceUpstream == 1)
         #expect(handshake.supporterProofs.map(\.slotID.rawValue).sorted() == [0, 1])
         #expect(
-            fixture.manager.processControlPlane.attemptSnapshot(
-                processID: firstTarget.processID
-            )?.phase == .cataloged
+            fixture.manager.processControlPlane.catalog(
+                forProcessID: firstTarget.processID
+            ) != nil
         )
         #expect(
-            fixture.manager.processControlPlane.attemptSnapshot(
-                processID: secondTarget.processID
-            )?.phase == .cataloged
+            fixture.manager.processControlPlane.catalog(
+                forProcessID: secondTarget.processID
+            ) != nil
         )
 
         let canonicalBeforeNonSourceRetirement = handshake.initializeResult
@@ -4312,6 +4312,177 @@ struct RuntimeCoordinatorInitializationTests {
         let route = try #require(secondSession.serverRequestTracker.consume(clientID: clientID))
         #expect(route.upstreamIndex == 0)
         #expect(route.upstreamID.key == "server-request-1")
+    }
+
+    @Test func sessionManagerRoutesProgressNotificationOnlyToOwningSession() async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let firstSessionID = "session-progress-owner-a"
+        let firstSession = manager.session(id: firstSessionID)
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: firstSessionID)
+
+        let secondSessionID = "session-progress-owner-b"
+        let secondSession = manager.session(id: secondSessionID)
+        let secondFuture = fixture.registerInitialize(requestID: 2, sessionID: secondSessionID)
+        _ = try await waitWithTimeout(
+            "waiting for second progress session initialize response",
+            timeout: .seconds(2)
+        ) {
+            try await secondFuture.get()
+        }
+        _ = firstSession.router.drainBufferedNotifications()
+        _ = secondSession.router.drainBufferedNotifications()
+
+        let firstLeaseID = manager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: firstSessionID,
+                label: "tools/call:first-progress-owner",
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        manager.activateRequestLease(
+            firstLeaseID,
+            requestIDKey: "first-progress-owner",
+            upstreamIndex: 0,
+            timeout: .seconds(5),
+            progressTokenMapping: ProgressTokenMapping(
+                clientToken: .string("client-progress-token-a"),
+                upstreamToken: "proxy-progress-token-a"
+            )
+        )
+        defer { manager.completeRequestLease(firstLeaseID) }
+
+        let ownerLeaseID = manager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: secondSessionID,
+                label: "tools/call:progress-owner",
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        manager.activateRequestLease(
+            ownerLeaseID,
+            requestIDKey: "progress-owner",
+            upstreamIndex: 0,
+            timeout: .seconds(5),
+            progressTokenMapping: ProgressTokenMapping(
+                clientToken: .string("client-progress-token-b"),
+                upstreamToken: "proxy-progress-token-b"
+            )
+        )
+        defer { manager.completeRequestLease(ownerLeaseID) }
+
+        let progressNotification = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": [
+                    "progressToken": "proxy-progress-token-b",
+                    "progress": 1,
+                    "total": 2,
+                ],
+            ],
+            options: []
+        )
+        manager.routeUpstreamMessage(progressNotification, upstreamIndex: 0)
+
+        #expect(firstSession.router.drainBufferedNotifications().isEmpty)
+        let routedNotifications = secondSession.router.drainBufferedNotifications()
+        let routedNotification = try #require(routedNotifications.first)
+        #expect(routedNotifications.count == 1)
+        let routedObject = try #require(
+            try JSONSerialization.jsonObject(with: routedNotification) as? [String: Any]
+        )
+        let routedParams = try #require(routedObject["params"] as? [String: Any])
+        #expect(routedParams["progressToken"] as? String == "client-progress-token-b")
+    }
+
+    @Test func sessionManagerDropsProgressNotificationWithoutActiveOwner() async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let sessionID = "session-progress-without-owner"
+        let session = manager.session(id: sessionID)
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
+        _ = session.router.drainBufferedNotifications()
+        let droppedBefore = manager.debugSnapshot().upstreams[0]
+            .droppedUnmappedNotificationCount
+
+        let progressNotification = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": [
+                    "progressToken": "orphaned-progress-token",
+                    "progress": 1,
+                ],
+            ],
+            options: []
+        )
+        manager.routeUpstreamMessage(progressNotification, upstreamIndex: 0)
+
+        #expect(session.router.drainBufferedNotifications().isEmpty)
+        #expect(
+            manager.debugSnapshot().upstreams[0].droppedUnmappedNotificationCount
+                == droppedBefore + 1
+        )
+    }
+
+    @Test func sessionManagerBroadcastsGlobalNotificationWithActiveOwner() async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+
+        let firstSessionID = "session-global-notification-a"
+        let firstSession = manager.session(id: firstSessionID)
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: firstSessionID)
+
+        let secondSessionID = "session-global-notification-b"
+        let secondSession = manager.session(id: secondSessionID)
+        let secondFuture = fixture.registerInitialize(requestID: 2, sessionID: secondSessionID)
+        _ = try await waitWithTimeout(
+            "waiting for second global notification session initialize response",
+            timeout: .seconds(2)
+        ) {
+            try await secondFuture.get()
+        }
+        _ = firstSession.router.drainBufferedNotifications()
+        _ = secondSession.router.drainBufferedNotifications()
+
+        let ownerLeaseID = manager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: secondSessionID,
+                label: "tools/call:global-notification-owner",
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        manager.activateRequestLease(
+            ownerLeaseID,
+            requestIDKey: "global-notification-owner",
+            upstreamIndex: 0,
+            timeout: .seconds(5)
+        )
+        defer { manager.completeRequestLease(ownerLeaseID) }
+
+        let globalNotification = try JSONSerialization.data(
+            withJSONObject: [
+                "jsonrpc": "2.0",
+                "method": "notifications/tools/list_changed",
+            ],
+            options: []
+        )
+        manager.routeUpstreamMessage(globalNotification, upstreamIndex: 0)
+
+        #expect(firstSession.router.drainBufferedNotifications() == [globalNotification])
+        #expect(secondSession.router.drainBufferedNotifications() == [globalNotification])
     }
 
     @Test func sessionManagerRestoresPendingInitializeWhenInitializedNotificationOverloads()
@@ -16093,7 +16264,17 @@ struct RuntimeCoordinatorSchedulingTests {
             lease,
             requestIDKey: "refresh-1",
             upstreamIndex: 0,
-            timeoutAt: Date().addingTimeInterval(30)
+            timeoutAt: Date().addingTimeInterval(30),
+            progressTokenMapping: ProgressTokenMapping(
+                clientToken: .string("client-refresh-token"),
+                upstreamToken: "proxy-refresh-token"
+            )
+        )
+        #expect(
+            registry.activeProgressTarget(
+                upstreamIndex: 0,
+                upstreamToken: "proxy-refresh-token"
+            )?.sessionID == "session-requeue"
         )
 
         let releaseAction = try #require(registry.requeueLease(lease))
@@ -16106,6 +16287,12 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(snapshot.upstreamIndex == nil)
         #expect(snapshot.timeoutAt == nil)
         #expect(snapshot.releaseReason == nil)
+        #expect(
+            registry.activeProgressTarget(
+                upstreamIndex: 0,
+                upstreamToken: "proxy-refresh-token"
+            ) == nil
+        )
     }
 
     @Test func requestLeaseRegistryAbandonActiveLeasesUsesBoundedReleasedHistory()

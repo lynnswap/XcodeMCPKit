@@ -385,6 +385,100 @@ struct HTTPHandlerTests {
         #expect(response.head.headers.first(name: "Mcp-Session-Id")?.isEmpty == false)
     }
 
+    @Test func httpPostKeepsRequestActiveUntilResponseWriteCompletes() async throws {
+        let config = makeHTTPConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        let responseCompletions = NIOLockedValueBox<[@Sendable () -> Void]>([])
+        try addHTTPHandler(
+            to: channel,
+            config: config,
+            sessionManager: sessionManager,
+            scheduleResponseCompletion: { _, completion in
+                responseCompletions.withLockedValue { $0.append(completion) }
+            }
+        )
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        #expect(sessionManager.clientRequestActivityCounts.begun == 1)
+        #expect(sessionManager.clientRequestActivityCounts.finished == 0)
+
+        for _ in 0..<3 where responseCompletions.withLockedValue({ $0.isEmpty }) {
+            drainEmbeddedCompletions(for: channel)
+            channel.embeddedEventLoop.run()
+        }
+
+        #expect(responseCompletions.withLockedValue { $0.count } == 1)
+        #expect(sessionManager.clientRequestActivityCounts.finished == 0)
+
+        let completions = responseCompletions.withLockedValue { completions in
+            let pending = completions
+            completions.removeAll()
+            return pending
+        }
+        for completion in completions {
+            completion()
+        }
+        channel.embeddedEventLoop.run()
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .ok)
+        #expect(sessionManager.clientRequestActivityCounts.finished == 1)
+    }
+
+    @Test func httpPostRejectsSessionRemovedAfterValidation() async throws {
+        let config = makeHTTPConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        let sessionID = try await initializeHTTPChannel(channel)
+        let activityBeforeRequest = sessionManager.clientRequestActivityCounts
+        sessionManager.removeSessionOnNextClientRequestAdmission()
+
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": [String: Any](),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "application/json, text/event-stream")
+        head.headers.add(name: "Content-Type", value: "application/json")
+        head.headers.add(name: "MCP-Session-Id", value: sessionID)
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
+        var body = channel.allocator.buffer(capacity: data.count)
+        body.writeBytes(data)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(body))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .notFound)
+        #expect(response.body == "session not found")
+        #expect(sessionManager.clientRequestActivityCounts == activityBeforeRequest)
+    }
+
     @Test func httpPostRejectsNonJSONContentType() async throws {
         let config = makeHTTPConfig()
         let channel = EmbeddedChannel()
@@ -1929,12 +2023,12 @@ struct HTTPHandlerTests {
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
-        _ = sessionManager.session(id: "session-1")
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        let sessionID = try await initializeHTTPChannel(channel)
 
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
         head.headers.add(name: "Accept", value: "text/event-stream")
-        head.headers.add(name: "Mcp-Session-Id", value: "session-1")
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
         head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
@@ -1943,6 +2037,27 @@ struct HTTPHandlerTests {
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "text/event-stream")
         #expect(response.body.contains(": ok"))
+    }
+
+    @Test func httpSSEAdmissionFailureReturnsNotFoundBeforeCommittingStream() async throws {
+        let config = makeHTTPConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        _ = sessionManager.session(id: "session-without-delivery")
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "text/event-stream")
+        head.headers.add(name: "Mcp-Session-Id", value: "session-without-delivery")
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .notFound)
+        #expect(response.head.headers.first(name: "Content-Type") == "text/plain; charset=utf-8")
+        #expect(response.body == "session not found")
     }
 
     @Test func httpToolsListUsesCachedResultWhenAvailable() async throws {

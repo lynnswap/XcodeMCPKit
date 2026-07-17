@@ -189,7 +189,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var requestLeaseActivationHook: (@Sendable () -> Void)?
         var requeuedLeaseCount = 0
         var rejectNextUpstreamSend = false
+        var removeSessionOnNextClientRequestAdmission = false
         var serverRequestResponseSendResults: [Upstream.SendResult] = []
+        var begunClientRequestCount = 0
+        var finishedClientRequestCount = 0
     }
 
     private let state = NIOLockedValueBox(State())
@@ -266,6 +269,34 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             state.sessionProtocolVersions[id] = MCP.ProtocolVersion.current
             return context
         }
+    }
+
+    var clientRequestActivityCounts: (begun: Int, finished: Int) {
+        state.withLockedValue { state in
+            (state.begunClientRequestCount, state.finishedClientRequestCount)
+        }
+    }
+
+    func beginClientRequest(id: String, createIfMissing: Bool) -> Bool {
+        state.withLockedValue { state in
+            if state.removeSessionOnNextClientRequestAdmission {
+                state.removeSessionOnNextClientRequestAdmission = false
+                state.initializedSessionIDs.remove(id)
+                state.sessionProtocolVersions.removeValue(forKey: id)
+                state.sessions.removeValue(forKey: id)
+                return false
+            }
+            if state.sessions[id] == nil {
+                guard createIfMissing else { return false }
+                state.sessions[id] = SessionContext(id: id, config: config)
+            }
+            state.begunClientRequestCount += 1
+            return true
+        }
+    }
+
+    func endClientRequest(id _: String) {
+        state.withLockedValue { $0.finishedClientRequestCount += 1 }
     }
 
     func uninitializedSession(id: String) -> SessionContext {
@@ -811,7 +842,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
-        timeout: TimeAmount?
+        timeout: TimeAmount?,
+        progressTokenMapping: ProgressTokenMapping? = nil
     ) {
         requestLeaseRegistry.activateLease(
             leaseID,
@@ -819,7 +851,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             upstreamIndex: upstreamIndex,
             timeoutAt: timeout.map {
                 Date().addingTimeInterval(Double($0.nanoseconds) / 1_000_000_000)
-            }
+            },
+            progressTokenMapping: progressTokenMapping
         )
         state.withLockedValue { $0.requestLeaseActivationHook }?()
     }
@@ -989,6 +1022,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func rejectNextUpstreamSend() {
         state.withLockedValue { $0.rejectNextUpstreamSend = true }
+    }
+
+    func removeSessionOnNextClientRequestAdmission() {
+        state.withLockedValue { $0.removeSessionOnNextClientRequestAdmission = true }
     }
 
     func setAvailableUpstreamIndex(_ value: Int?) {
@@ -1161,7 +1198,9 @@ func addHTTPHandler(
     sessionManager: any RuntimeCoordinating,
     refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
     refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
-    refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil
+    refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil,
+    scheduleResponseCompletion:
+        (@Sendable (EventLoop, @escaping @Sendable () -> Void) -> Void)? = nil
 ) throws {
     let completionExecutor = EmbeddedEventLoopCompletionExecutor()
     registerEmbeddedCompletionExecutor(completionExecutor, for: channel)
@@ -1183,7 +1222,7 @@ func addHTTPHandler(
             maxBodyBytes: config.maxBodyBytes
         ),
         controlService: HTTPControlService(runtime: runtime),
-        scheduleResponseCompletion: { _, operation in
+        scheduleResponseCompletion: scheduleResponseCompletion ?? { _, operation in
             completionExecutor.enqueue(operation)
         }
     )

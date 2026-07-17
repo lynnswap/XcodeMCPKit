@@ -23,6 +23,7 @@ struct HTTPEventDeliveryStoreTests {
         }
         try activate(firstChannel, port: 1)
         try activate(secondChannel, port: 2)
+        openSession(sessionID, in: store)
 
         store.receive(.notification(sessionID: sessionID, data: buffered))
         store.open(sessionID: sessionID, channel: firstChannel)
@@ -52,6 +53,7 @@ struct HTTPEventDeliveryStoreTests {
             _ = try? channel.finish()
         }
         try activate(channel, port: 3)
+        openSession(sessionID, in: store)
 
         store.receive(.notification(sessionID: sessionID, data: first))
         store.receive(.notification(sessionID: sessionID, data: second))
@@ -63,6 +65,183 @@ struct HTTPEventDeliveryStoreTests {
         #expect(bodies.count == 2)
         #expect(bodies[0].contains(String(decoding: second, as: UTF8.self)))
         #expect(bodies[1].contains(String(decoding: third, as: UTF8.self)))
+    }
+
+    @Test func overflowWarningsAreRateLimitedAndDescribeEvictedNotifications() throws {
+        let state = HTTPDeliveryTestState()
+        let store = HTTPEventDeliveryStore(
+            bufferLimit: 1,
+            notificationOverflowWarningInterval: .seconds(30),
+            uptimeNanoseconds: { state.uptimeNanoseconds },
+            overflowWarningSink: { state.record($0) }
+        )
+        defer { store.closeAll() }
+        let sessionID = ProxySessionID(rawValue: "session-overflow-warning")
+        openSession(sessionID, in: store)
+
+        store.receive(
+            .notification(
+                sessionID: sessionID,
+                data: notification(method: "notifications/first")
+            ))
+        store.receive(
+            .notification(
+                sessionID: sessionID,
+                data: notification(method: "notifications/second")
+            ))
+        store.receive(
+            .notification(
+                sessionID: sessionID,
+                data: notification(method: "notifications/third")
+            ))
+
+        var warnings = state.warnings
+        #expect(warnings.count == 1)
+        let firstWarning = try #require(warnings.first)
+        #expect(firstWarning.droppedNotificationCount == 1)
+        #expect(firstWarning.droppedSinceLastWarning == 1)
+        #expect(
+            firstWarning.droppedMethodsSinceLastWarning
+                == ["notifications/first": 1]
+        )
+
+        state.uptimeNanoseconds = 30_000_000_000
+        store.receive(
+            .notification(
+                sessionID: sessionID,
+                data: notification(method: "notifications/fourth")
+            ))
+
+        warnings = state.warnings
+        #expect(warnings.count == 2)
+        let secondWarning = try #require(warnings.last)
+        #expect(secondWarning.droppedNotificationCount == 3)
+        #expect(secondWarning.droppedSinceLastWarning == 2)
+        #expect(
+            secondWarning.droppedMethodsSinceLastWarning
+                == [
+                    "notifications/second": 1,
+                    "notifications/third": 1,
+                ]
+        )
+    }
+
+    @Test func overflowAccountingIsPerSessionAndResetsWhenSessionCloses() throws {
+        let state = HTTPDeliveryTestState()
+        let store = HTTPEventDeliveryStore(
+            bufferLimit: 0,
+            notificationOverflowWarningInterval: .seconds(30),
+            uptimeNanoseconds: { state.uptimeNanoseconds },
+            overflowWarningSink: { state.record($0) }
+        )
+        defer { store.closeAll() }
+        let firstSessionID = ProxySessionID(rawValue: "session-overflow-a")
+        let secondSessionID = ProxySessionID(rawValue: "session-overflow-b")
+        openSession(firstSessionID, in: store)
+        openSession(secondSessionID, in: store)
+
+        store.receive(
+            .notification(
+                sessionID: firstSessionID,
+                data: notification(method: "notifications/a-1")
+            ))
+        store.receive(
+            .notification(
+                sessionID: firstSessionID,
+                data: notification(method: "notifications/a-2")
+            ))
+        store.receive(
+            .notification(
+                sessionID: secondSessionID,
+                data: notification(method: "notifications/b-1")
+            ))
+
+        var warnings = state.warnings
+        #expect(warnings.map(\.sessionID) == [firstSessionID, secondSessionID])
+        #expect(warnings.map(\.droppedNotificationCount) == [1, 1])
+
+        store.receive(.sessionClosed(sessionID: firstSessionID))
+        store.receive(
+            .notification(
+                sessionID: firstSessionID,
+                data: notification(method: "notifications/a-late")
+            ))
+        #expect(state.warnings.count == 2)
+
+        openSession(firstSessionID, in: store)
+        store.receive(
+            .notification(
+                sessionID: firstSessionID,
+                data: notification(method: "notifications/a-new")
+            ))
+
+        warnings = state.warnings
+        #expect(warnings.count == 3)
+        let resetWarning = try #require(warnings.last)
+        #expect(resetWarning.sessionID == firstSessionID)
+        #expect(resetWarning.droppedNotificationCount == 1)
+        #expect(
+            resetWarning.droppedMethodsSinceLastWarning
+                == ["notifications/a-new": 1]
+        )
+    }
+
+    @Test func overflowMethodAggregationHasBoundedCardinality() throws {
+        let state = HTTPDeliveryTestState()
+        let store = HTTPEventDeliveryStore(
+            bufferLimit: 0,
+            notificationOverflowWarningInterval: .seconds(30),
+            uptimeNanoseconds: { state.uptimeNanoseconds },
+            overflowWarningSink: { state.record($0) }
+        )
+        defer { store.closeAll() }
+        let sessionID = ProxySessionID(rawValue: "session-overflow-method-cardinality")
+        openSession(sessionID, in: store)
+
+        store.receive(
+            .notification(
+                sessionID: sessionID,
+                data: notification(method: "notifications/initial")
+            ))
+        for index in 1...20 {
+            store.receive(
+                .notification(
+                    sessionID: sessionID,
+                    data: notification(method: "notifications/method-\(index)")
+                ))
+        }
+        state.uptimeNanoseconds = 30_000_000_000
+        store.receive(
+            .notification(
+                sessionID: sessionID,
+                data: notification(method: "notifications/method-21")
+            ))
+
+        let warning = try #require(state.warnings.last)
+        #expect(warning.droppedSinceLastWarning == 21)
+        #expect(warning.droppedMethodsSinceLastWarning.count == 16)
+        #expect(warning.droppedMethodsSinceLastWarning["<additional-methods>"] == 6)
+    }
+
+    @Test func sessionExpirySweepRepeatsUntilCancelled() {
+        let eventLoop = EmbeddedEventLoop()
+        let state = HTTPDeliveryTestState()
+        let sweep = HTTPSessionExpirySweep(interval: .seconds(60)) {
+            state.recordExpirySweep()
+        }
+
+        sweep.start(on: eventLoop)
+        sweep.start(on: eventLoop)
+        eventLoop.advanceTime(by: .seconds(59))
+        #expect(state.expirySweepCount == 0)
+        eventLoop.advanceTime(by: .seconds(1))
+        #expect(state.expirySweepCount == 1)
+        eventLoop.advanceTime(by: .seconds(60))
+        #expect(state.expirySweepCount == 2)
+
+        sweep.cancel()
+        eventLoop.advanceTime(by: .seconds(60))
+        #expect(state.expirySweepCount == 2)
     }
 
     @Test func notificationBuffersWhileChannelInactiveCallbackIsPending() throws {
@@ -78,6 +257,7 @@ struct HTTPEventDeliveryStoreTests {
         }
         try activate(disconnectedChannel, port: 4)
         try activate(reconnectedChannel, port: 5)
+        openSession(sessionID, in: store)
 
         store.open(sessionID: sessionID, channel: disconnectedChannel)
         try disconnectedChannel.close().wait()
@@ -103,6 +283,7 @@ struct HTTPEventDeliveryStoreTests {
         }
         try activate(disconnectedChannel, port: 6)
         try activate(reconnectedChannel, port: 7)
+        openSession(sessionID, in: store)
 
         store.open(sessionID: sessionID, channel: disconnectedChannel)
         store.receive(.notification(sessionID: sessionID, data: notification))
@@ -128,6 +309,7 @@ struct HTTPEventDeliveryStoreTests {
             _ = try? channel.finish()
         }
         try activate(channel, port: 8)
+        openSession(sessionID, in: store)
 
         store.receive(.notification(sessionID: sessionID, data: first))
         store.receive(.notification(sessionID: sessionID, data: second))
@@ -151,12 +333,38 @@ struct HTTPEventDeliveryStoreTests {
             _ = try? channel.finish()
         }
         try activate(channel, port: 9)
+        openSession(sessionID, in: store)
         store.open(sessionID: sessionID, channel: channel)
 
         store.receive(.sessionClosed(sessionID: sessionID))
         channel.embeddedEventLoop.run()
 
         #expect(channel.isActive == false)
+    }
+
+    @Test func lateNotificationDoesNotRecreateClosedSessionDelivery() throws {
+        let store = HTTPEventDeliveryStore()
+        let sessionID = ProxySessionID(rawValue: "session-late-notification")
+        let channel = EmbeddedChannel()
+        defer {
+            store.closeAll()
+            _ = try? channel.finish()
+        }
+        try activate(channel, port: 10)
+        openSession(sessionID, in: store)
+
+        store.receive(.sessionClosed(sessionID: sessionID))
+        store.receive(
+            .notification(
+                sessionID: sessionID,
+                data: notification(method: "notifications/late")
+            ))
+
+        #expect(store.open(sessionID: sessionID, channel: channel) == false)
+        openSession(sessionID, in: store)
+        #expect(store.open(sessionID: sessionID, channel: channel))
+        channel.embeddedEventLoop.run()
+        #expect(try drainSSEBodies(from: channel).isEmpty)
     }
 }
 
@@ -174,4 +382,40 @@ private func drainSSEBodies(from channel: EmbeddedChannel) throws -> [String] {
         }
     }
     return bodies
+}
+
+private func notification(method: String) -> Data {
+    Data(#"{"jsonrpc":"2.0","method":"\#(method)"}"#.utf8)
+}
+
+private func openSession(_ sessionID: ProxySessionID, in store: HTTPEventDeliveryStore) {
+    store.receive(.sessionOpened(sessionID: sessionID))
+}
+
+private final class HTTPDeliveryTestState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var uptimeNanosecondsStorage: UInt64 = 0
+    private var warningsStorage: [HTTPNotificationOverflowWarning] = []
+    private var expirySweepCountStorage = 0
+
+    var uptimeNanoseconds: UInt64 {
+        get { lock.withLock { uptimeNanosecondsStorage } }
+        set { lock.withLock { uptimeNanosecondsStorage = newValue } }
+    }
+
+    var warnings: [HTTPNotificationOverflowWarning] {
+        lock.withLock { warningsStorage }
+    }
+
+    var expirySweepCount: Int {
+        lock.withLock { expirySweepCountStorage }
+    }
+
+    func record(_ warning: HTTPNotificationOverflowWarning) {
+        lock.withLock { warningsStorage.append(warning) }
+    }
+
+    func recordExpirySweep() {
+        lock.withLock { expirySweepCountStorage += 1 }
+    }
 }

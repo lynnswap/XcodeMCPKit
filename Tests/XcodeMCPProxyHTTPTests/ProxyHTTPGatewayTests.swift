@@ -50,13 +50,21 @@ private final class GatewayTestRuntime: ProxyRuntimeServing, Sendable {
     func beginRequest(
         _: ProxyRuntimeRequest,
         in _: ProxySessionID?
-    ) -> any ProxyRuntimeRequestOperating {
+    ) -> (any ProxyRuntimeRequestOperating)? {
         fatalError("gateway lifecycle test does not admit requests")
     }
+
+    func clientRequestFinished(_: ProxySessionID) {}
 
     func sessionState(_: ProxySessionID) -> ProxyRuntimeSessionState {
         .missing
     }
+
+    func clientEventStreamOpened(_: ProxySessionID) -> Bool { false }
+
+    func clientEventStreamClosed(_: ProxySessionID) {}
+
+    func expireInactiveSessions(inactiveFor _: TimeAmount) {}
 
     func removeSession(_: ProxySessionID) {}
 

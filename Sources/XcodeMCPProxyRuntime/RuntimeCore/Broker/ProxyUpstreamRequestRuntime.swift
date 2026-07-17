@@ -41,7 +41,8 @@ protocol ProxyUpstreamRequestRuntimePort: Sendable {
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
-        timeout: TimeAmount?
+        timeout: TimeAmount?,
+        progressTokenMapping: ProgressTokenMapping?
     )
 }
 
@@ -137,9 +138,16 @@ struct ProxyUpstreamRequestRuntime: Sendable {
     }
 
     private let port: any ProxyUpstreamRequestRuntimePort
+    private let makeUpstreamProgressToken: @Sendable () -> String
 
-    init(port: any ProxyUpstreamRequestRuntimePort) {
+    init(
+        port: any ProxyUpstreamRequestRuntimePort,
+        makeUpstreamProgressToken: @escaping @Sendable () -> String = {
+            UUID().uuidString
+        }
+    ) {
         self.port = port
+        self.makeUpstreamProgressToken = makeUpstreamProgressToken
     }
 
     func prepareRequest(
@@ -169,6 +177,7 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             rewritten.bodyData,
             parsedJSON: rewritten.parsedRequestJSON,
             sessionID: sessionID,
+            mapProgressToken: { _ in makeUpstreamProgressToken() },
             mapID: { sessionID, originalID in
                 guard let upstreamID = port.assignUpstreamID(
                     sessionID: sessionID,
@@ -212,7 +221,8 @@ struct ProxyUpstreamRequestRuntime: Sendable {
                 leaseID,
                 requestIDKey: prepared.transform.responseID?.key,
                 upstreamIndex: prepared.upstreamIndex,
-                timeout: requestTimeout
+                timeout: requestTimeout,
+                progressTokenMapping: prepared.transform.progressTokenMapping
             )
         }
         let reject: @Sendable () -> Void = {

@@ -100,10 +100,16 @@ final class LeaseManager: Sendable {
         }
     }
 
+    struct ProgressTarget: Equatable, Sendable {
+        let sessionID: String
+        let clientToken: JSONValue
+    }
+
     private struct LeaseRecord: Sendable {
         let leaseID: LeaseManager.ID
         let descriptor: SessionRequestPipeline.Descriptor
         var requestIDKey: String?
+        var progressTokenMapping: ProgressTokenMapping?
         var upstreamIndex: Int?
         var startedAt: Date?
         var timeoutAt: Date?
@@ -134,6 +140,7 @@ final class LeaseManager: Sendable {
                 leaseID: leaseID,
                 descriptor: descriptor,
                 requestIDKey: nil,
+                progressTokenMapping: nil,
                 upstreamIndex: nil,
                 startedAt: nil,
                 timeoutAt: nil,
@@ -150,7 +157,8 @@ final class LeaseManager: Sendable {
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
-        timeoutAt: Date?
+        timeoutAt: Date?,
+        progressTokenMapping: ProgressTokenMapping? = nil
     ) {
         state.withLockedValue { state in
             guard var record = state.leasesByID[leaseID] else { return }
@@ -161,6 +169,8 @@ final class LeaseManager: Sendable {
                 return
             }
             record.requestIDKey = requestIDKey ?? record.requestIDKey
+            record.progressTokenMapping =
+                progressTokenMapping ?? record.progressTokenMapping
             record.upstreamIndex = upstreamIndex ?? record.upstreamIndex
             record.startedAt = record.startedAt ?? Date()
             record.timeoutAt = timeoutAt
@@ -184,6 +194,7 @@ final class LeaseManager: Sendable {
             let upstreamIndex = record.upstreamIndex
             record.state = .queued
             record.requestIDKey = nil
+            record.progressTokenMapping = nil
             record.upstreamIndex = nil
             record.timeoutAt = nil
             state.leasesByID[leaseID] = record
@@ -350,6 +361,29 @@ final class LeaseManager: Sendable {
                 }
                 return (lhs.startedAt ?? .distantPast) < (rhs.startedAt ?? .distantPast)
             }.first?.descriptor.sessionID
+        }
+    }
+
+    func activeProgressTarget(
+        upstreamIndex: Int,
+        upstreamToken: String
+    ) -> ProgressTarget? {
+        state.withLockedValue { state in
+            let leaseIDs = state.activeLeaseIDsByUpstream[upstreamIndex] ?? []
+            let matches = leaseIDs.compactMap { state.leasesByID[$0] }.filter { record in
+                record.state == .active
+                    && record.progressTokenMapping?.upstreamToken == upstreamToken
+            }
+            guard matches.count == 1,
+                let record = matches.first,
+                let mapping = record.progressTokenMapping
+            else {
+                return nil
+            }
+            return ProgressTarget(
+                sessionID: record.descriptor.sessionID,
+                clientToken: mapping.clientToken
+            )
         }
     }
 

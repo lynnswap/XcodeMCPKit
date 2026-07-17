@@ -164,6 +164,12 @@ protocol RuntimeSessionRegistryPort: Sendable {
     func hasSession(id: String) -> Bool
     func isSessionInitialized(id: String) -> Bool
     func negotiatedProtocolVersion(id: String) -> String?
+    func sessionStateAndTouch(id: String) -> ProxyRuntimeSessionState
+    func beginClientRequest(id: String, createIfMissing: Bool) -> Bool
+    func endClientRequest(id: String)
+    func openClientEventStream(id: String) -> Bool
+    func closeClientEventStream(id: String)
+    func expireInactiveSessions(inactiveForNanoseconds: UInt64)
     func removeSession(id: String)
     func isInitialized() -> Bool
 }
@@ -239,7 +245,8 @@ protocol RuntimeRequestLeasePort: Sendable {
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,
         upstreamIndex: Int?,
-        timeout: TimeAmount?
+        timeout: TimeAmount?,
+        progressTokenMapping: ProgressTokenMapping?
     )
     func completeRequestLease(_ leaseID: LeaseManager.ID)
     func requeueRequestLease(_ leaseID: LeaseManager.ID)
@@ -302,6 +309,29 @@ extension RuntimeSessionRegistryPort {
     func negotiatedProtocolVersion(id _: String) -> String? {
         nil
     }
+
+    func sessionStateAndTouch(id: String) -> ProxyRuntimeSessionState {
+        guard hasSession(id: id) else { return .missing }
+        guard isSessionInitialized(id: id) else { return .uninitialized }
+        return .initialized(protocolVersion: negotiatedProtocolVersion(id: id))
+    }
+
+    func beginClientRequest(id: String, createIfMissing: Bool) -> Bool {
+        if createIfMissing {
+            _ = session(id: id)
+        }
+        return hasSession(id: id)
+    }
+
+    func endClientRequest(id _: String) {}
+
+    func openClientEventStream(id: String) -> Bool {
+        hasSession(id: id)
+    }
+
+    func closeClientEventStream(id _: String) {}
+
+    func expireInactiveSessions(inactiveForNanoseconds _: UInt64) {}
 
 }
 
@@ -641,7 +671,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.sessionRegistry = SessionRegistry(
             configuration: config,
             notificationSink: notificationSink,
-            sessionClosedSink: sessionClosedSink
+            sessionClosedSink: sessionClosedSink,
+            nowUptimeNanoseconds: uptimeProvider
         )
         let initialTopology = upstreamTopology.snapshot()
         let debugRecorder = ProxyDebugRecorder()
@@ -940,8 +971,41 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         sessionRegistry.negotiatedProtocolVersion(id: id)
     }
 
+    func sessionStateAndTouch(id: String) -> ProxyRuntimeSessionState {
+        sessionRegistry.sessionStateAndTouch(id: id)
+    }
+
+    func beginClientRequest(id: String, createIfMissing: Bool) -> Bool {
+        sessionRegistry.beginClientRequest(id: id, createIfMissing: createIfMissing)
+    }
+
+    func endClientRequest(id: String) {
+        sessionRegistry.endClientRequest(id: id)
+    }
+
+    func openClientEventStream(id: String) -> Bool {
+        sessionRegistry.openEventStream(id: id)
+    }
+
+    func closeClientEventStream(id: String) {
+        sessionRegistry.closeEventStream(id: id)
+    }
+
+    func expireInactiveSessions(inactiveForNanoseconds: UInt64) {
+        let removedSessionIDs = sessionRegistry.removeInactiveSessions(
+            inactiveForNanoseconds: inactiveForNanoseconds
+        )
+        for sessionID in removedSessionIDs {
+            cleanupRemovedSession(id: sessionID)
+        }
+    }
+
     func removeSession(id: String) {
         _ = sessionRegistry.removeSession(id: id)
+        cleanupRemovedSession(id: id)
+    }
+
+    private func cleanupRemovedSession(id: String) {
         let pendingInitializes = initializeManager.removePendingInitializes(sessionID: id)
         pendingInitializes.timeout?.cancel()
         pendingInitializes.recoveryTimeout?.cancel()
