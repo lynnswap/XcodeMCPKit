@@ -325,6 +325,21 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
+        guard controlService.openSSE(
+            sessionID: ProxySessionID(rawValue: sessionID),
+            channel: context.channel
+        ) else {
+            _ = sendPlain(
+                on: context.channel,
+                status: .notFound,
+                body: "session not found",
+                keepAlive: head.isKeepAlive,
+                sessionID: sessionID,
+                requestLog: requestLog
+            )
+            return
+        }
+
         state.withLockedValue { state in
             state.isSSE = true
             state.sseSessionID = sessionID
@@ -342,18 +357,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         var buffer = context.channel.allocator.buffer(capacity: 8)
         buffer.writeString(": ok\n\n")
         context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-
-        guard controlService.openSSE(
-            sessionID: ProxySessionID(rawValue: sessionID),
-            channel: context.channel
-        ) else {
-            logger.warning(
-                "Closing SSE stream after its session expired during admission",
-                metadata: ["session": .string(sessionID)]
-            )
-            context.close(promise: nil)
-            return
-        }
 
         if let remote = requestLog.remoteAddress {
             logger.info("SSE connected", metadata: ["remote": .string(remote), "session": .string(sessionID)])

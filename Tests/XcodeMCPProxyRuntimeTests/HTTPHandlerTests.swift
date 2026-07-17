@@ -2023,12 +2023,12 @@ struct HTTPHandlerTests {
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let sessionManager = TestRuntimeCoordinator(config: config)
-        _ = sessionManager.session(id: "session-1")
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        let sessionID = try await initializeHTTPChannel(channel)
 
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
         head.headers.add(name: "Accept", value: "text/event-stream")
-        head.headers.add(name: "Mcp-Session-Id", value: "session-1")
+        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
         head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         try channel.writeInbound(HTTPServerRequestPart.head(head))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
@@ -2037,6 +2037,27 @@ struct HTTPHandlerTests {
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "text/event-stream")
         #expect(response.body.contains(": ok"))
+    }
+
+    @Test func httpSSEAdmissionFailureReturnsNotFoundBeforeCommittingStream() async throws {
+        let config = makeHTTPConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        _ = sessionManager.session(id: "session-without-delivery")
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
+        head.headers.add(name: "Accept", value: "text/event-stream")
+        head.headers.add(name: "Mcp-Session-Id", value: "session-without-delivery")
+        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .notFound)
+        #expect(response.head.headers.first(name: "Content-Type") == "text/plain; charset=utf-8")
+        #expect(response.body == "session not found")
     }
 
     @Test func httpToolsListUsesCachedResultWhenAvailable() async throws {
