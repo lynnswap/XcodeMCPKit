@@ -556,11 +556,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         let replacement = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
         #expect(try await upstream.nextStopCount() == 1)
-        let retryTimeoutIndex = try #require(
-            timeoutScheduler.activeTimeoutIndex(
-                delay: .milliseconds(250),
-                startingAt: 2
-            )
+        let retryTimeoutIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .milliseconds(250),
+            startingAtEventIndex: 2
         )
         #expect(timeoutScheduler.fire(at: retryTimeoutIndex))
         _ = try await replacement.nextSent(at: 0)
@@ -1629,7 +1627,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(manager.upstreamHealthManager.anyRecoveryInFlight() == false)
     }
 
-    @Test func processRouteActivationEmptyCatalogRetryPreservesCatalogTimeout()
+    @Test func staleCatalogTimeoutCannotTerminateNewerRetryLoad()
         async throws
     {
         var config = makeConfig(requestTimeout: 20)
@@ -1680,7 +1678,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
         manager.reconcileXcodeProcessTargets(
             [olderTarget, newerTarget],
-            reason: "test_empty_catalog_retry_preserves_catalog_timeout"
+            reason: "test_stale_catalog_timeout"
         )
 
         let activationUpstream = try #require(createdUpstreams.withLockedValue { $0.first })
@@ -1745,7 +1743,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 == TimeAmount.milliseconds(250).nanoseconds
         )
         #expect(timeoutScheduler.isCancelled(at: retryIndex) == false)
-        #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex) == false)
+        #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex))
         #expect(createdUpstreams.withLockedValue(\.count) == 1)
         #expect(timeoutScheduler.fire(at: retryIndex))
         let retryToolsRequest = try await waitWithTimeout(
@@ -1757,6 +1755,19 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 matching: { methodName(from: $0) == "tools/list" }
             )
         }
+        let retryCatalogTimeoutIndex = try #require(
+            timeoutScheduler.activeTimeoutIndex(
+                delay: .seconds(10),
+                startingAt: catalogTimeoutIndex + 1
+            )
+        )
+        #expect(timeoutScheduler.fireIgnoringCancellation(at: catalogTimeoutIndex))
+        #expect(timeoutScheduler.isCancelled(at: retryCatalogTimeoutIndex) == false)
+        #expect(
+            manager.processControlPlane.attemptSnapshot(
+                processID: newerTarget.processID
+            )?.phase == .loadingCatalog
+        )
         await activationUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -1784,7 +1795,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(recoveredAttempt.upstreamID.rawValue == 1)
         #expect(recoveredAttempt.attemptID.rawValue == 1)
         #expect(timeoutScheduler.isCancelled(at: catalogTimeoutIndex))
-        #expect(timeoutScheduler.fire(at: catalogTimeoutIndex) == false)
+        #expect(timeoutScheduler.isCancelled(at: retryCatalogTimeoutIndex))
         #expect(
             Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
                 == Set([
@@ -3191,11 +3202,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ])
 
         let replacementUpstream = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
-        let retryTimeoutIndex = try #require(
-            timeoutScheduler.activeTimeoutIndex(
-                delay: .milliseconds(250),
-                startingAt: 2
-            )
+        let retryTimeoutIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .milliseconds(250),
+            startingAtEventIndex: 2
         )
         let scheduledBeforeReconcile = timeoutScheduler.scheduledCount()
         manager.reconcileXcodeProcessTargets(
@@ -3284,11 +3293,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(manager.testStateSnapshot().hasInitResult == false)
 
         let replacement = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
-        let retryTimeoutIndex = try #require(
-            timeoutScheduler.activeTimeoutIndex(
-                delay: .milliseconds(250),
-                startingAt: 2
-            )
+        let retryTimeoutIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .milliseconds(250),
+            startingAtEventIndex: 2
         )
         #expect(timeoutScheduler.fire(at: retryTimeoutIndex))
         let replacementInitialize = try await replacement.nextSent(at: 0)

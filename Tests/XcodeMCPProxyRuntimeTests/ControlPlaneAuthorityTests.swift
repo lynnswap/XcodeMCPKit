@@ -1498,6 +1498,7 @@ struct ControlPlaneAuthorityTests {
 
         #expect(initialized.attempt == catalogLease.attempt)
         #expect(initialized.shouldStartCatalogLoad == false)
+        #expect(initialized.activeCatalogLeases == [catalogLease])
         #expect(authority.validateCatalogLoad(catalogLease))
         #expect(
             authority.attemptSnapshot(processID: target.processID)?.phase
@@ -1515,35 +1516,164 @@ struct ControlPlaneAuthorityTests {
             preferredUpstreamProof: proof,
             nowUptimeNanoseconds: 1
         ))
+        let firstTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: firstLease)
+        )
+        _ = authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {},
+            to: firstTimeoutReservation
+        )
 
-        let firstTimeout = try #require(authority.handleCatalogRequestTimeout(
-            routeID: route.id,
-            upstreamProof: proof,
-            nowUptimeNs: 2
-        ))
+        guard case .retryRequired(_, let firstRetry, let firstRetryLease) =
+            authority.handleCatalogRequestTimeout(firstTimeoutReservation, nowUptimeNs: 2)
+        else {
+            Issue.record("expected the final load timeout to require retry")
+            return
+        }
 
-        #expect(firstTimeout.catalogLease.attempt == firstLease.attempt)
-        #expect(firstTimeout.retry.delay == .milliseconds(250))
+        #expect(firstRetryLease.attempt == firstLease.attempt)
+        #expect(firstRetry.delay == .milliseconds(250))
         #expect(authority.beginCatalogAttempt(
             routeID: route.id,
             preferredUpstreamProof: proof,
             nowUptimeNanoseconds: 3
         ) == nil)
 
-        #expect(authority.handleRetryFired(firstTimeout.catalogLease))
+        #expect(authority.handleRetryFired(firstRetryLease))
         let (secondLease, _) = try #require(authority.beginCatalogAttempt(
             routeID: route.id,
             preferredUpstreamProof: proof,
             nowUptimeNanoseconds: 4
         ))
-        let secondTimeout = try #require(authority.handleCatalogRequestTimeout(
-            routeID: route.id,
-            upstreamProof: proof,
-            nowUptimeNs: 5
-        ))
+        let secondTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: secondLease)
+        )
+        _ = authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {},
+            to: secondTimeoutReservation
+        )
+        guard case .retryRequired(_, let secondRetry, _) =
+            authority.handleCatalogRequestTimeout(secondTimeoutReservation, nowUptimeNs: 5)
+        else {
+            Issue.record("expected the retry load timeout to require another retry")
+            return
+        }
 
         #expect(secondLease.attempt == firstLease.attempt)
-        #expect(secondTimeout.retry.delay == .milliseconds(500))
+        #expect(secondRetry.delay == .milliseconds(500))
+    }
+
+    @Test func staleCatalogTimeoutCannotTerminateNewerRetryLoad() throws {
+        let target = xcodeProcessTarget(processID: 41033, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let proof = testTopologyProof(0)
+        let (firstLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 1
+        ))
+        let staleTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: firstLease)
+        )
+        _ = authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {},
+            to: staleTimeoutReservation
+        )
+        guard case .accepted = authority.completeCatalog(
+            .unusable,
+            lease: firstLease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected the first load to complete")
+            return
+        }
+        let scheduled = try #require(authority.scheduleRetry(lease: firstLease))
+        #expect(authority.handleRetryFired(scheduled.lease))
+        let (retryLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 3
+        ))
+
+        #expect(authority.handleCatalogRequestTimeout(
+            staleTimeoutReservation,
+            nowUptimeNs: 4
+        ) == nil)
+        #expect(authority.validateCatalogLoad(retryLease))
+        #expect(
+            authority.attemptSnapshot(processID: target.processID)?.phase
+                == .loadingCatalog
+        )
+    }
+
+    @Test func catalogLoadTimeoutPreservesSiblingLoad() throws {
+        let target = xcodeProcessTarget(processID: 41034, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let proof = testTopologyProof(0)
+        let (firstLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 1
+        ))
+        let (siblingLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 2
+        ))
+        let firstTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: firstLease)
+        )
+        let siblingTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: siblingLease)
+        )
+        let firstTimeoutCancelled = NIOLockedValueBox(false)
+        let siblingTimeoutCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {
+                firstTimeoutCancelled.withLockedValue { $0 = true }
+            },
+            to: firstTimeoutReservation
+        ))
+        applyEffects(authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {
+                siblingTimeoutCancelled.withLockedValue { $0 = true }
+            },
+            to: siblingTimeoutReservation
+        ))
+        #expect(authority.reserveCatalogTimeout(for: siblingLease) == nil)
+        let firstRPC = ControlPlane.RPCHandle()
+        let siblingRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(firstRPC), to: firstLease)
+        _ = authority.attach(.rpc(siblingRPC), to: siblingLease)
+
+        guard case .loadTimedOut(let transition) =
+            authority.handleCatalogRequestTimeout(firstTimeoutReservation, nowUptimeNs: 3)
+        else {
+            Issue.record("a sibling load must suppress retry")
+            return
+        }
+        for effect in transition.effects {
+            switch effect {
+            case .cancelTimeout(let timeout):
+                timeout.cancel()
+            case .cancelRPC(let handle):
+                handle.cancel()
+            case .cancelReadinessWaiter, .restoreBridgePool:
+                break
+            }
+        }
+
+        #expect(firstTimeoutCancelled.withLockedValue { $0 })
+        #expect(firstRPC.isCancelled())
+        #expect(siblingTimeoutCancelled.withLockedValue { $0 } == false)
+        #expect(siblingRPC.isCancelled() == false)
+        #expect(authority.validateCatalogLoad(siblingLease))
+        #expect(
+            authority.attemptSnapshot(processID: target.processID)?.phase
+                == .loadingCatalog
+        )
     }
 
     @Test func windowUpdatesDoNotInvalidateCatalogLease() throws {
@@ -1846,6 +1976,7 @@ struct ControlPlaneAuthorityTests {
             commit: { true }
         ))
 
+        #expect(health.timeoutInitializeClaim(claim) == nil)
         #expect(topology.withValidated(proof) {
             health.timeoutCatalogRequest(claim, commit: { _ in true })
         } == true)

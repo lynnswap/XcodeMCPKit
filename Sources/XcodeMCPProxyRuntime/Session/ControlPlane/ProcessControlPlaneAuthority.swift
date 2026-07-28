@@ -33,6 +33,13 @@ struct CatalogLease: Sendable, Hashable {
     }
 }
 
+struct CatalogTimeoutReservation: Sendable, Hashable {
+    fileprivate let catalogLease: CatalogLease
+    fileprivate let generation: UInt64
+
+    var lease: CatalogLease { catalogLease }
+}
+
 struct ActivationLease: Sendable, Hashable {
     let routeID: ProcessRouteID
     let attemptID: CatalogAttemptID
@@ -279,6 +286,7 @@ final class ProcessControlPlaneAuthority: Sendable {
     struct ChannelInitializedAttempt: Sendable {
         let attempt: Int
         let shouldStartCatalogLoad: Bool
+        let activeCatalogLeases: [CatalogLease]
     }
 
     struct Retry: Sendable {
@@ -293,10 +301,21 @@ final class ProcessControlPlaneAuthority: Sendable {
         let activationLease: ActivationLease
     }
 
-    struct CatalogRequestTimeout: Sendable {
-        let transition: ProcessControlPlaneTransition
-        let retry: Retry
-        let catalogLease: CatalogLease
+    enum CatalogRequestTimeout: Sendable {
+        case loadTimedOut(ProcessControlPlaneTransition)
+        case retryRequired(
+            transition: ProcessControlPlaneTransition,
+            retry: Retry,
+            catalogLease: CatalogLease
+        )
+
+        var transition: ProcessControlPlaneTransition {
+            switch self {
+            case .loadTimedOut(let transition),
+                 .retryRequired(let transition, _, _):
+                return transition
+            }
+        }
     }
 
     enum RejectedCancellationRecovery: Sendable {
@@ -350,10 +369,20 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     private struct Attempt: Sendable {
         struct Load: Sendable {
+            struct CatalogTimeout: Sendable {
+                let generation: UInt64
+                var scheduled: RuntimeScheduledTimeout?
+            }
+
+            var catalogTimeout: CatalogTimeout? = nil
             var rpcHandles: [ControlPlane.RPCHandle] = []
 
             func detachedEffects() -> [ProcessControlPlaneEffect] {
-                rpcHandles.map(ProcessControlPlaneEffect.cancelRPC)
+                var effects = catalogTimeout?.scheduled.map {
+                    [ProcessControlPlaneEffect.cancelTimeout($0)]
+                } ?? []
+                effects.append(contentsOf: rpcHandles.map(ProcessControlPlaneEffect.cancelRPC))
+                return effects
             }
         }
 
@@ -558,6 +587,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var canonicalToolsCatalogRaw: JSONValue?
         var canonicalSourceProof: UpstreamTopologyProof?
         var nextUnboundAttemptID: Int = 0
+        var nextCatalogTimeoutGeneration: UInt64 = 0
         var unboundAttempt: Attempt?
         var unboundCatalogRaw: JSONValue?
         var unboundCatalogSource: UpstreamTopologyProof?
@@ -1432,7 +1462,17 @@ final class ProcessControlPlaneAuthority: Sendable {
             state.recordsByKey[key] = record
             return ChannelInitializedAttempt(
                 attempt: attempt.id.rawValue,
-                shouldStartCatalogLoad: shouldStartCatalogLoad
+                shouldStartCatalogLoad: shouldStartCatalogLoad,
+                activeCatalogLeases: attempt.loads.keys.sorted {
+                    $0.rawValue < $1.rawValue
+                }.map {
+                    Self.lease(
+                        for: attempt,
+                        loadID: $0,
+                        routeID: routeID,
+                        catalogEpoch: state.catalogEpoch
+                    )
+                }
             )
         }
     }
@@ -1606,6 +1646,67 @@ final class ProcessControlPlaneAuthority: Sendable {
                 addedRoutes: [], retiredRoutes: [], effects: effects,
                 publishesToolsListChanged: false
             )
+        }
+    }
+
+    func reserveCatalogTimeout(
+        for lease: CatalogLease
+    ) -> CatalogTimeoutReservation? {
+        state.withLockedValue { state in
+            guard lease.routeID != Self.unboundRouteID,
+                  let key = Self.key(routeID: lease.routeID, in: state),
+                  var record = state.recordsByKey[key],
+                  var attempt = record.attempt,
+                  Self.matches(lease: lease, attempt: attempt, state: state),
+                  attempt.phase == .loadingCatalog,
+                  var load = attempt.loads[lease.loadID],
+                  load.catalogTimeout == nil else {
+                return nil
+            }
+            state.nextCatalogTimeoutGeneration &+= 1
+            let reservation = CatalogTimeoutReservation(
+                catalogLease: lease,
+                generation: state.nextCatalogTimeoutGeneration
+            )
+            load.catalogTimeout = Attempt.Load.CatalogTimeout(
+                generation: reservation.generation,
+                scheduled: nil
+            )
+            attempt.loads[lease.loadID] = load
+            record.attempt = attempt
+            state.recordsByKey[key] = record
+            return reservation
+        }
+    }
+
+    func attachCatalogTimeout(
+        _ timeout: RuntimeScheduledTimeout,
+        to reservation: CatalogTimeoutReservation
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            let lease = reservation.catalogLease
+            guard let key = Self.key(routeID: lease.routeID, in: state),
+                  var record = state.recordsByKey[key],
+                  var attempt = record.attempt,
+                  Self.matches(lease: lease, attempt: attempt, state: state),
+                  attempt.phase == .loadingCatalog,
+                  var load = attempt.loads[lease.loadID],
+                  var catalogTimeout = load.catalogTimeout,
+                  catalogTimeout.generation == reservation.generation,
+                  catalogTimeout.scheduled == nil else {
+                return ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: [.cancelTimeout(timeout)],
+                    publishesToolsListChanged: false
+                )
+            }
+            catalogTimeout.scheduled = timeout
+            load.catalogTimeout = catalogTimeout
+            attempt.loads[lease.loadID] = load
+            record.attempt = attempt
+            state.recordsByKey[key] = record
+            return .none
         }
     }
 
@@ -2075,32 +2176,45 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     func handleCatalogRequestTimeout(
-        routeID: ProcessRouteID,
-        upstreamProof: UpstreamTopologyProof,
+        _ reservation: CatalogTimeoutReservation,
         nowUptimeNs: UInt64
     ) -> CatalogRequestTimeout? {
         state.withLockedValue { state in
+            let lease = reservation.catalogLease
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
-            guard let key = Self.key(routeID: routeID, in: state),
+            guard lease.catalogEpoch == state.catalogEpoch,
+                  let key = Self.key(routeID: lease.routeID, in: state),
                   var record = state.recordsByKey[key],
                   var attempt = record.attempt,
-                  attempt.upstreamProof == upstreamProof,
+                  Self.matches(lease: lease, attempt: attempt, state: state),
                   attempt.phase == .loadingCatalog,
-                  let loadID = attempt.loads.keys.min(by: {
-                      $0.rawValue < $1.rawValue
-                  }) else {
+                  let catalogTimeout = attempt.loads[lease.loadID]?.catalogTimeout,
+                  catalogTimeout.generation == reservation.generation,
+                  catalogTimeout.scheduled != nil else {
                 return nil
             }
-            let effects = attempt.detachedEffects()
+            let effects = attempt.loads.removeValue(forKey: lease.loadID)?
+                .detachedEffects() ?? []
+            if attempt.loads.isEmpty == false {
+                record.attempt = attempt
+                state.recordsByKey[key] = record
+                return .loadTimedOut(
+                    ProcessControlPlaneTransition(
+                        addedRoutes: [],
+                        retiredRoutes: [],
+                        effects: effects,
+                        publishesToolsListChanged: false
+                    )
+                )
+            }
             attempt.readinessToken = nil
             attempt.retryTimeout = nil
             attempt.retryKind = .catalog
-            attempt.loads.removeAll()
             attempt.phase = .backoff
             record.catalogRetryCount &+= 1
             record.attempt = attempt
             state.recordsByKey[key] = record
-            return CatalogRequestTimeout(
+            return .retryRequired(
                 transition: ProcessControlPlaneTransition(
                     addedRoutes: [],
                     retiredRoutes: [],
@@ -2108,12 +2222,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     publishesToolsListChanged: false
                 ),
                 retry: Self.retry(forAttempt: record.catalogRetryCount),
-                catalogLease: Self.lease(
-                    for: attempt,
-                    loadID: loadID,
-                    routeID: routeID,
-                    catalogEpoch: state.catalogEpoch
-                )
+                catalogLease: lease
             )
         }
     }

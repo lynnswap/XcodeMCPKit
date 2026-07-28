@@ -855,6 +855,21 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
+    func timeoutInitializeClaim(
+        _ claim: InitializeClaim
+    ) -> ClearedUpstreamState? {
+        state.withLockedValue { state in
+            guard Self.owns(claim, state: state),
+                  let phase = state.upstreamStates[claim.upstreamIndex]
+                    .initializeClaimPhase,
+                  [.reserved, .sending, .responseReceived].contains(phase)
+            else {
+                return nil
+            }
+            return Self.clearUpstreamState(at: claim.upstreamIndex, state: &state)
+        }
+    }
+
     func replaceInitTimeout(
         _ timeout: RuntimeScheduledTimeout,
         for claim: InitializeClaim
@@ -995,23 +1010,6 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
-    func replaceCatalogTimeout(
-        _ timeout: RuntimeScheduledTimeout,
-        for claim: InitializeClaim
-    ) -> TimeoutAttachment {
-        state.withLockedValue { state in
-            guard Self.owns(claim, state: state),
-                  state.upstreamStates[claim.upstreamIndex].isInitialized,
-                  state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
-                    == .initializedAwaitingCatalog else {
-                return TimeoutAttachment(accepted: false, replaced: nil)
-            }
-            let replaced = state.upstreamStates[claim.upstreamIndex].initTimeout
-            state.upstreamStates[claim.upstreamIndex].initTimeout = timeout
-            return TimeoutAttachment(accepted: true, replaced: replaced)
-        }
-    }
-
     func currentCatalogActivationClaim(
         upstreamIndex: Int
     ) -> InitializeClaim? {
@@ -1057,7 +1055,6 @@ final class UpstreamHealthManager: Sendable {
                   state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
                     == .initializedAwaitingCatalog,
                   commit(claim) else { return false }
-            state.upstreamStates[claim.upstreamIndex].initTimeout = nil
             return true
         }
     }

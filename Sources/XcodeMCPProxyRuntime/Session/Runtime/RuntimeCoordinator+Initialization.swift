@@ -1062,14 +1062,42 @@ extension RuntimeCoordinator {
         resetsProcessRouteActivation: Bool = true,
         replacesInitializedChannel: Bool = true
     ) -> Bool {
+        clearUpstreamState(
+            initializeClaim: initializeClaim,
+            resetsProcessRouteActivation: resetsProcessRouteActivation,
+            replacesInitializedChannel: replacesInitializedChannel,
+            clearClaim: upstreamHealthManager.clearInitializeClaim
+        )
+    }
+
+    @discardableResult
+    func timeoutUpstreamInitialize(
+        initializeClaim: UpstreamHealthManager.InitializeClaim,
+        resetsProcessRouteActivation: Bool = true,
+        replacesInitializedChannel: Bool = true
+    ) -> Bool {
+        clearUpstreamState(
+            initializeClaim: initializeClaim,
+            resetsProcessRouteActivation: resetsProcessRouteActivation,
+            replacesInitializedChannel: replacesInitializedChannel,
+            clearClaim: upstreamHealthManager.timeoutInitializeClaim
+        )
+    }
+
+    private func clearUpstreamState(
+        initializeClaim: UpstreamHealthManager.InitializeClaim,
+        resetsProcessRouteActivation: Bool,
+        replacesInitializedChannel: Bool,
+        clearClaim: (UpstreamHealthManager.InitializeClaim)
+            -> UpstreamHealthManager.ClearedUpstreamState?
+    ) -> Bool {
         guard let proof = initializeClaim.topologyProof else { return false }
         var cleared: UpstreamHealthManager.ClearedUpstreamState?
         var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
         let eligibility = initializeManager.finishSupportEligibilityUpdate {
             var update: CanonicalHandshakeState.SupportEligibilityUpdate?
             guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
-                guard let result = upstreamHealthManager.clearInitializeClaim(initializeClaim)
-                else { return false }
+                guard let result = clearClaim(initializeClaim) else { return false }
                 cleared = result
                 update = commitSupportEligibilityAfterHealthMutation(
                     topologySnapshot: topologySnapshot,

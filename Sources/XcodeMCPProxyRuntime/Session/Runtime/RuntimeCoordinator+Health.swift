@@ -934,7 +934,7 @@ extension RuntimeCoordinator {
     func handleUpstreamInitTimeout(
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
-        guard clearUpstreamState(initializeClaim: initializeClaim) else { return }
+        guard timeoutUpstreamInitialize(initializeClaim: initializeClaim) else { return }
         let upstreamIndex = initializeClaim.upstreamIndex
 
         if isCurrentPrimaryInitializeUpstream(upstreamIndex) {
@@ -955,10 +955,10 @@ extension RuntimeCoordinator {
         guard case .processBridgeRecovery(let claimedRecovery) = initializeClaim.owner,
               claimedRecovery == recovery,
               initializeClaim.topologyProof == recovery.topologyProof,
-              clearUpstreamState(
-                initializeClaim: initializeClaim,
-                resetsProcessRouteActivation: false,
-                replacesInitializedChannel: false
+              timeoutUpstreamInitialize(
+                  initializeClaim: initializeClaim,
+                  resetsProcessRouteActivation: false,
+                  replacesInitializedChannel: false
               )
         else { return }
         logger.info(

@@ -253,6 +253,12 @@ extension RuntimeCoordinator {
                 ),
             ]
         )
+        for lease in initialized.activeCatalogLeases {
+            scheduleProcessRouteActivationCatalogTimeout(
+                lease: lease,
+                initializeClaim: initializeClaim
+            )
+        }
         if let existingCatalog = processControlPlane.catalog(
             forProcessID: route.target.processID
         ) {
@@ -272,12 +278,6 @@ extension RuntimeCoordinator {
             }
             return
         }
-        scheduleProcessRouteActivationCatalogTimeout(
-            processID: route.target.processID,
-            upstreamIndex: upstreamIndex,
-            attempt: initialized.attempt,
-            initializeClaim: initializeClaim
-        )
         guard initialized.shouldStartCatalogLoad else { return }
         refreshProcessRouteToolsCatalog(
             route: route,
@@ -396,34 +396,50 @@ extension RuntimeCoordinator {
         applyProcessControlPlaneTransition(transition)
     }
 
+    func scheduleProcessRouteActivationCatalogTimeoutIfNeeded(
+        lease: CatalogLease
+    ) {
+        guard let initializeClaim = upstreamHealthManager.currentCatalogActivationClaim(
+            upstreamIndex: lease.upstreamIndex
+        ), initializeClaim.topologyProof == lease.topologyProof else {
+            return
+        }
+        scheduleProcessRouteActivationCatalogTimeout(
+            lease: lease,
+            initializeClaim: initializeClaim
+        )
+    }
+
     private func scheduleProcessRouteActivationCatalogTimeout(
-        processID: pid_t,
-        upstreamIndex: Int,
-        attempt: Int,
+        lease: CatalogLease,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
         guard let timeoutAmount = processRouteActivationCatalogTimeoutAmount() else {
             return
         }
+        var reservation: CatalogTimeoutReservation?
+        guard initializeManager.performIfRunning({
+            reservation = processControlPlane.reserveCatalogTimeout(for: lease)
+        }), let reservation else {
+            return
+        }
         let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
             self?.handleProcessRouteActivationCatalogTimeout(
-                processID: processID,
-                upstreamIndex: upstreamIndex,
-                attempt: attempt,
+                reservation: reservation,
                 initializeClaim: initializeClaim
             )
         }
-        var attachment: UpstreamHealthManager.TimeoutAttachment?
+        var transition = ProcessControlPlaneTransition.none
         guard initializeManager.performIfRunning({
-            attachment = upstreamHealthManager.replaceCatalogTimeout(
+            transition = processControlPlane.attachCatalogTimeout(
                 timeout,
-                for: initializeClaim
+                to: reservation
             )
-        }), let attachment, attachment.accepted else {
+        }) else {
             timeout.cancel()
             return
         }
-        attachment.replaced?.cancel()
+        applyProcessControlPlaneTransition(transition)
     }
 
     private func processRouteActivationCatalogTimeoutAmount() -> TimeAmount? {
@@ -432,14 +448,14 @@ extension RuntimeCoordinator {
     }
 
     private func handleProcessRouteActivationCatalogTimeout(
-        processID: pid_t,
-        upstreamIndex: Int,
-        attempt: Int,
+        reservation: CatalogTimeoutReservation,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
+        let lease = reservation.lease
         guard let proof = initializeClaim.topologyProof,
-              let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-              route.target.processID == processID else { return }
+              proof == lease.topologyProof,
+              let route = xcodeProcessRoute(forUpstreamIndex: lease.upstreamIndex),
+              route.id == lease.routeIdentity else { return }
         var timeout: ProcessControlPlaneAuthority.CatalogRequestTimeout?
         var didTimeoutCatalogRequest = false
         guard upstreamTopology.withValidated(proof, {
@@ -447,8 +463,7 @@ extension RuntimeCoordinator {
                 initializeClaim,
                 commit: { _ in
                     timeout = processControlPlane.handleCatalogRequestTimeout(
-                        routeID: route.id,
-                        upstreamProof: proof,
+                        reservation,
                         nowUptimeNs: nowUptimeNanoseconds()
                     )
                     return timeout != nil
@@ -456,25 +471,32 @@ extension RuntimeCoordinator {
             )
         }) != nil, didTimeoutCatalogRequest, let timeout else { return }
         let cancellationDeliveries = applyProcessControlPlaneTransition(timeout.transition)
+        guard case .retryRequired(
+            _,
+            let retry,
+            let retryLease
+        ) = timeout else {
+            return
+        }
 
         logger.info(
             "route_activation_timeout",
             metadata: [
-                "pid": .string("\(processID)"),
-                "upstream": .string("\(upstreamIndex)"),
-                "attempt": .string("\(attempt)"),
+                "pid": .string("\(lease.processID)"),
+                "upstream": .string("\(lease.upstreamIndex)"),
+                "attempt": .string("\(lease.attempt)"),
                 "phase": .string("catalog"),
                 "timeout_ms": .string(
                     processRouteActivationCatalogTimeoutMillisecondsDescription()
                 ),
-                "retry_delay_ms": .string("\(timeout.retry.delayMilliseconds)"),
+                "retry_delay_ms": .string("\(retry.delayMilliseconds)"),
             ]
         )
 
         scheduleMissingProcessToolsCatalogRetry(
-            processID: processID,
-            lease: timeout.catalogLease,
-            retry: timeout.retry,
+            processID: lease.processID,
+            lease: retryLease,
+            retry: retry,
             after: cancellationDeliveries,
             reason: "catalog_timeout"
         )
@@ -490,7 +512,7 @@ extension RuntimeCoordinator {
         lease: ActivationLease,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
-        guard clearUpstreamState(
+        guard timeoutUpstreamInitialize(
             initializeClaim: initializeClaim,
             resetsProcessRouteActivation: false,
             replacesInitializedChannel: false

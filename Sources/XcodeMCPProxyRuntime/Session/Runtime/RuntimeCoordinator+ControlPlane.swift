@@ -272,7 +272,10 @@ extension RuntimeCoordinator {
         exposedProcessIDs: Set<pid_t>,
         returnAfterFirstSuccess: Bool = true
     ) async throws -> CanonicalToolsCatalogLoadResult {
-        try await withThrowingTaskGroup(
+        for route in routes {
+            scheduleProcessRouteActivationCatalogTimeoutIfNeeded(lease: route.lease)
+        }
+        return try await withThrowingTaskGroup(
             of: AvailableToolsCatalogOutcome.self,
             returning: CanonicalToolsCatalogLoadResult.self
         ) { group in
