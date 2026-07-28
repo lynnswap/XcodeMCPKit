@@ -240,7 +240,7 @@ struct HTTPConcurrencyTests {
         )
         eventLoop.run()
         await sessionManager.drainRuntimeTasksForTesting()
-        let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
+        let firstRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 1)
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
         let secondOperation = try handlePost(
@@ -264,7 +264,7 @@ struct HTTPConcurrencyTests {
 
         eventLoop.run()
         await sessionManager.drainRuntimeTasksForTesting()
-        let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
+        let secondRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 2)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
             "tools/call:ExecuteSnippet",
@@ -336,7 +336,7 @@ struct HTTPConcurrencyTests {
         )
         firstChannel.embeddedEventLoop.run()
         await sessionManager.drainRuntimeTasksForTesting()
-        let firstRequestLabels = upstream.recordedRequestLabels(count: 1)
+        let firstRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 1)
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
         try postEmbeddedJSON(
@@ -356,7 +356,7 @@ struct HTTPConcurrencyTests {
 
         secondChannel.embeddedEventLoop.run()
         await sessionManager.drainRuntimeTasksForTesting()
-        let secondRequestLabels = upstream.recordedRequestLabels(count: 3)
+        let secondRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 3)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
             "notifications/cancelled",
@@ -964,6 +964,15 @@ private func waitForUpstreamRequestCount(
     }
 }
 
+private func waitForUpstreamRequestCount(
+    _ upstream: EmbeddedControlledUpstreamClient,
+    count: Int
+) async throws -> [String] {
+    try await waitWithTimeout("waiting for \(count) upstream request(s)", timeout: .seconds(2)) {
+        try await upstream.waitForNonInitializeRequestCount(count)
+    }
+}
+
 private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @unchecked Sendable {
     private struct SentRequest: Sendable {
         let label: String
@@ -973,10 +982,13 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
     private struct State {
         var sentRequests: [SentRequest] = []
         var requestHistory: [String] = []
+        var requestLabelBaseline = 0
+        var requestLabelCount = 0
     }
 
     nonisolated let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private let requestLabels = LockedRecordedValues<String>()
     private let lock = NSLock()
     private var state = State()
 
@@ -1014,12 +1026,15 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
         withLock {
             $0.sentRequests.removeAll()
             $0.requestHistory.removeAll()
+            $0.requestLabelBaseline = $0.requestLabelCount
         }
     }
 
-    func recordedRequestLabels(count: Int) -> [String] {
+    func waitForNonInitializeRequestCount(_ count: Int) async throws -> [String] {
         guard count > 0 else { return [] }
 
+        let baseline = withLock { $0.requestLabelBaseline }
+        _ = try await requestLabels.nextValue(at: baseline + count - 1)
         return withLock { Array($0.requestHistory.prefix(count)) }
     }
 
@@ -1066,7 +1081,9 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
         withLock {
             $0.sentRequests.append(SentRequest(label: label, responseData: responseData))
             $0.requestHistory.append(label)
+            $0.requestLabelCount += 1
         }
+        requestLabels.append(label)
     }
 
     private func withLock<T>(_ body: (inout State) -> T) -> T {
