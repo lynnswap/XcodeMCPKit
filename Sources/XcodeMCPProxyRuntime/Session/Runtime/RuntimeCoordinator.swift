@@ -1142,13 +1142,19 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ?? processControlPlane.canonicalToolsCatalogRaw()
     }
 
-    func applyProcessControlPlaneTransition(_ transition: ProcessControlPlaneTransition) {
+    @discardableResult
+    func applyProcessControlPlaneTransition(
+        _ transition: ProcessControlPlaneTransition
+    ) -> [AsyncTerminalSignal] {
+        var cancellationDeliveries: [AsyncTerminalSignal] = []
         for effect in transition.effects {
             switch effect {
             case .cancelTimeout(let timeout):
                 timeout.cancel()
             case .cancelRPC(let handle):
-                handle.cancel()
+                if let delivery = handle.cancel() {
+                    cancellationDeliveries.append(delivery)
+                }
             case .cancelReadinessWaiter(let token):
                 cancelUpstreamReadinessWaiter(token)
             case .restoreBridgePool(let recovery):
@@ -1158,6 +1164,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         if transition.publishesToolsListChanged {
             publishToolsListChangedNotification()
         }
+        return cancellationDeliveries
     }
 
     func publishUpstreamTopology(_ snapshot: UpstreamTopologyAuthority.Snapshot) {

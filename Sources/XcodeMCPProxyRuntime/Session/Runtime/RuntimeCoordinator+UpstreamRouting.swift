@@ -328,12 +328,73 @@ extension RuntimeCoordinator {
         )
     }
 
+    private func cancelUpstreamRequest(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease
+    ) -> AsyncTerminalSignal? {
+        guard let upstreamID = upstreamRouter.remove(
+            proof: operationLease.proof,
+            sessionID: sessionID,
+            requestIDKey: requestIDKey
+        ), let data = try? JSONRPC.Wire.data(
+            from: JSONRPC.Wire.notificationObject(
+                method: "notifications/cancelled",
+                params: .object([
+                    "requestId": .number(.int(upstreamID))
+                ])
+            )
+        ) else {
+            return nil
+        }
+        let delivery = AsyncTerminalSignal()
+        let scheduled = addRuntimeTask { [weak self, operationLease] in
+            guard let self else {
+                delivery.signal()
+                return
+            }
+            defer { delivery.signal() }
+            guard self.upstreamTopology.validate(operationLease) else { return }
+            let result = await operationLease.slot.send(data)
+            guard self.upstreamTopology.validate(operationLease) else { return }
+            if case .accepted = result {
+                self.recordTraffic(
+                    upstreamIndex: operationLease.upstreamIndex,
+                    direction: "outbound",
+                    data: data
+                )
+            }
+        }
+        if scheduled == false {
+            delivery.signal()
+        }
+        return delivery
+    }
+
+    private func cancellationDelivery(
+        waitingFor deliveries: [AsyncTerminalSignal]
+    ) -> AsyncTerminalSignal? {
+        guard deliveries.isEmpty == false else { return nil }
+        guard deliveries.count > 1 else { return deliveries[0] }
+        let aggregate = AsyncTerminalSignal()
+        let scheduled = addRuntimeTask {
+            for delivery in deliveries {
+                await delivery.wait()
+            }
+            aggregate.signal()
+        }
+        if scheduled == false {
+            aggregate.signal()
+        }
+        return aggregate
+    }
+
     func onRequestTimeout(
         sessionID: String,
         requestIDKey: String,
         operationLease: UpstreamOperationLease
     ) {
-        removeUpstreamIDMapping(
+        _ = cancelUpstreamRequest(
             sessionID: sessionID,
             requestIDKey: requestIDKey,
             operationLease: operationLease
@@ -655,21 +716,43 @@ extension RuntimeCoordinator {
         requestIDKeys: [String],
         operationLease: UpstreamOperationLease
     ) {
-        if let first = requestIDKeys.first {
-            onRequestTimeout(
+        _ = handleRequestLeaseTimeoutWithCancellationDelivery(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: operationLease
+        )
+    }
+
+    func handleRequestLeaseTimeoutWithCancellationDelivery(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        operationLease: UpstreamOperationLease?
+    ) -> AsyncTerminalSignal? {
+        var cancellationDeliveries: [AsyncTerminalSignal] = []
+        if let operationLease, let first = requestIDKeys.first {
+            if let delivery = cancelUpstreamRequest(
                 sessionID: sessionID,
                 requestIDKey: first,
                 operationLease: operationLease
-            )
+            ) {
+                cancellationDeliveries.append(delivery)
+            }
             for requestIDKey in requestIDKeys.dropFirst() {
-                removeUpstreamIDMapping(
+                if let delivery = cancelUpstreamRequest(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
                     operationLease: operationLease
-                )
+                ) {
+                    cancellationDeliveries.append(delivery)
+                }
             }
+            markRequestTimedOut(operationLease)
         }
+        upstreamSlotScheduler.cancelQueuedRequest(leaseID: leaseID)
         releaseLeases([leaseManager.timeoutLease(leaseID)].compactMap { $0 })
+        return cancellationDelivery(waitingFor: cancellationDeliveries)
     }
 
     func abandonRequestLease(
@@ -678,13 +761,30 @@ extension RuntimeCoordinator {
         requestIDKeys: [String],
         operationLease: UpstreamOperationLease?
     ) {
+        _ = abandonRequestLeaseWithCancellationDelivery(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: operationLease
+        )
+    }
+
+    func abandonRequestLeaseWithCancellationDelivery(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        operationLease: UpstreamOperationLease?
+    ) -> AsyncTerminalSignal? {
+        var deliveries: [AsyncTerminalSignal] = []
         if let operationLease {
             for requestIDKey in requestIDKeys {
-                removeUpstreamIDMapping(
+                if let delivery = cancelUpstreamRequest(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
                     operationLease: operationLease
-                )
+                ) {
+                    deliveries.append(delivery)
+                }
             }
         }
         upstreamSlotScheduler.cancelQueuedRequest(leaseID: leaseID)
@@ -696,6 +796,7 @@ extension RuntimeCoordinator {
                 reason: .clientDisconnected
             )].compactMap { $0 }
         )
+        return cancellationDelivery(waitingFor: deliveries)
     }
 
     func testStateSnapshot() -> TestSnapshot {

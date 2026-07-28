@@ -1963,6 +1963,7 @@ struct DocumentationProviderTests {
         }
         let toolsRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: toolsRequest) == "tools/list")
+        let toolsUpstreamID = try extractUpstreamID(from: toolsRequest)
 
         toolsListTask.cancel()
         do {
@@ -1980,6 +1981,15 @@ struct DocumentationProviderTests {
         let toolsListSnapshot = manager.debugSnapshot()
         #expect(toolsListSnapshot.queuedRequestCount == 0)
         #expect(toolsListSnapshot.upstreams[0].activeCorrelatedRequestCount == 0)
+        let toolsCancellation = try await sentValue(
+            from: upstream,
+            at: 1,
+            timeout: .seconds(2)
+        )
+        #expect(
+            try extractCancellationRequestID(from: toolsCancellation)
+                == toolsUpstreamID
+        )
 
         let searchTask = Task {
             try await manager.documentationProviderCall(
@@ -1988,9 +1998,10 @@ struct DocumentationProviderTests {
                 requestTimeout: .seconds(30)
             )
         }
-        let searchRequest = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        let searchRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: searchRequest) == "tools/call")
         #expect(try documentationSearchQuery(in: searchRequest) == "UIView")
+        let searchUpstreamID = try extractUpstreamID(from: searchRequest)
 
         searchTask.cancel()
         do {
@@ -2008,6 +2019,15 @@ struct DocumentationProviderTests {
         let searchSnapshot = manager.debugSnapshot()
         #expect(searchSnapshot.queuedRequestCount == 0)
         #expect(searchSnapshot.upstreams[0].activeCorrelatedRequestCount == 0)
+        let searchCancellation = try await sentValue(
+            from: upstream,
+            at: 3,
+            timeout: .seconds(2)
+        )
+        #expect(
+            try extractCancellationRequestID(from: searchCancellation)
+                == searchUpstreamID
+        )
     }
 
     @Test func runtimeDocumentationTransportFallsBackToDirectCandidateWhenNoUpstreamRouteExists()

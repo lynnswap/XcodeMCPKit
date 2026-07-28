@@ -325,11 +325,19 @@ extension RuntimeCoordinator {
                             }
                             return .stale
                         }
-                        self.applyCatalogCommit(self.commitProcessCatalog(
-                            .failed,
+                        let cancellationDeliveries = self.applyCatalogCommit(
+                            self.commitProcessCatalog(
+                                .unusable,
+                                lease: route.lease,
+                                nowUptimeNanoseconds: self.nowUptimeNanoseconds()
+                            )
+                        )
+                        self.scheduleMissingProcessToolsCatalogRetry(
+                            processID: route.target.processID,
                             lease: route.lease,
-                            nowUptimeNanoseconds: self.nowUptimeNanoseconds()
-                        ))
+                            after: cancellationDeliveries,
+                            reason: "process_catalog_timeout"
+                        )
                         throw TimeoutError()
                     } catch {
                         let commit = self.commitProcessCatalog(
@@ -521,25 +529,72 @@ extension RuntimeCoordinator {
     func scheduleMissingProcessToolsCatalogRetry(
         processID: pid_t,
         lease: CatalogLease,
+        after cancellationDeliveries: [AsyncTerminalSignal] = [],
         reason: String
     ) {
         guard let scheduled = processControlPlane.scheduleRetry(lease: lease) else { return }
-        applyProcessControlPlaneTransition(scheduled.transition)
-        let delay = scheduled.retry.delay
+        let retryCancellationDeliveries = applyProcessControlPlaneTransition(
+            scheduled.transition
+        )
+        scheduleMissingProcessToolsCatalogRetry(
+            processID: processID,
+            lease: scheduled.lease,
+            retry: scheduled.retry,
+            after: cancellationDeliveries + retryCancellationDeliveries,
+            reason: reason
+        )
+    }
+
+    func scheduleMissingProcessToolsCatalogRetry(
+        processID: pid_t,
+        lease: CatalogLease,
+        retry: ProcessControlPlaneAuthority.Retry,
+        after cancellationDeliveries: [AsyncTerminalSignal],
+        reason: String
+    ) {
+        guard cancellationDeliveries.isEmpty else {
+            addRuntimeTask { [weak self] in
+                for delivery in cancellationDeliveries {
+                    await delivery.wait()
+                }
+                self?.armMissingProcessToolsCatalogRetry(
+                    processID: processID,
+                    lease: lease,
+                    retry: retry,
+                    reason: reason
+                )
+            }
+            return
+        }
+        armMissingProcessToolsCatalogRetry(
+            processID: processID,
+            lease: lease,
+            retry: retry,
+            reason: reason
+        )
+    }
+
+    private func armMissingProcessToolsCatalogRetry(
+        processID: pid_t,
+        lease: CatalogLease,
+        retry: ProcessControlPlaneAuthority.Retry,
+        reason: String
+    ) {
+        let delay = retry.delay
         logger.debug(
             "Scheduling missing process tools/list catalog retry",
             metadata: [
                 "pid": .string("\(processID)"),
-                "delay_ms": .string("\(scheduled.retry.delayMilliseconds)"),
+                "delay_ms": .string("\(retry.delayMilliseconds)"),
                 "reason": .string(reason),
             ]
         )
         let timeout = scheduleRuntimeTimeout(delay) { [weak self] in
             guard let self else { return }
-            guard self.processControlPlane.handleRetryFired(scheduled.lease),
+            guard self.processControlPlane.handleRetryFired(lease),
                   self.processRoutingEnabled,
                   self.xcodeProcessRoutes.contains(where: {
-                      $0.id == scheduled.lease.routeIdentity
+                      $0.id == lease.routeIdentity
                   }),
                   self.processControlPlane.catalog(forProcessID: processID) == nil
             else {
@@ -551,7 +606,7 @@ extension RuntimeCoordinator {
             )
         }
         applyProcessControlPlaneTransition(
-            processControlPlane.attach(.retryTimeout(timeout), to: scheduled.lease)
+            processControlPlane.attach(.retryTimeout(timeout), to: lease)
         )
     }
 
@@ -915,25 +970,39 @@ extension RuntimeCoordinator {
             case .pinnedUpstream(let upstreamIndex):
                 upstreamIndex
             }
-        rpcHandle?.installCancel { [self, router] snapshot in
+        rpcHandle?.installCancelWithDelivery {
+            [self, router] snapshot, cancellationDelivery in
             if let registrationToken = snapshot.registrationToken {
                 _ = router.cancelPending(token: registrationToken)
             }
             let requestIDKeys = snapshot.requestIDKey.map { [$0] } ?? [originalID.key]
-            if let operationLease = snapshot.operationLease {
-                self.abandonRequestLease(
+            let upstreamDelivery: AsyncTerminalSignal?
+            switch snapshot.cause {
+            case .cancelled:
+                upstreamDelivery = self.abandonRequestLeaseWithCancellationDelivery(
                     leaseID,
                     sessionID: internalSessionID,
                     requestIDKeys: requestIDKeys,
-                    operationLease: operationLease
+                    operationLease: snapshot.operationLease
                 )
-            } else {
-                self.abandonRequestLease(
+            case .timedOut:
+                upstreamDelivery = self.handleRequestLeaseTimeoutWithCancellationDelivery(
                     leaseID,
                     sessionID: internalSessionID,
                     requestIDKeys: requestIDKeys,
-                    operationLease: nil
+                    operationLease: snapshot.operationLease
                 )
+            }
+            guard let upstreamDelivery else {
+                cancellationDelivery.signal()
+                return
+            }
+            let scheduled = self.addRuntimeTask {
+                await upstreamDelivery.wait()
+                cancellationDelivery.signal()
+            }
+            if scheduled == false {
+                cancellationDelivery.signal()
             }
         }
         if rpcHandle?.isCancelled() == true {
@@ -972,12 +1041,16 @@ extension RuntimeCoordinator {
                     on: self.eventLoop,
                     timeout: upstreamRequestTimeout,
                     onTimeout: {
-                        self.handleRequestLeaseTimeout(
-                            leaseID,
-                            sessionID: internalSessionID,
-                            requestIDKeys: [originalID.key],
-                            operationLease: selectedOperationLease
-                        )
+                        if let rpcHandle {
+                            rpcHandle.cancel(cause: .timedOut)
+                        } else {
+                            self.handleRequestLeaseTimeout(
+                                leaseID,
+                                sessionID: internalSessionID,
+                                requestIDKeys: [originalID.key],
+                                operationLease: selectedOperationLease
+                            )
+                        }
                     }
                 )
                 if rpcHandle?.markRegistered(
@@ -1120,7 +1193,7 @@ extension RuntimeCoordinator {
                     future,
                     deadlineUptimeNs: requestDeadlineUptimeNs,
                     onTimeout: {
-                        rpcHandle?.cancel()
+                        rpcHandle?.cancel(cause: .timedOut)
                     }
                 )
             } onCancel: {

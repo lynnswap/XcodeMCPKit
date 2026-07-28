@@ -4,10 +4,11 @@ import NIO
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
-    func applyCatalogCommit(_ commit: CatalogCommit) {
+    @discardableResult
+    func applyCatalogCommit(_ commit: CatalogCommit) -> [AsyncTerminalSignal] {
         switch commit {
         case .accepted(_, let transition), .discarded(_, let transition):
-            applyProcessControlPlaneTransition(transition)
+            return applyProcessControlPlaneTransition(transition)
         }
     }
 
@@ -415,46 +416,25 @@ extension RuntimeCoordinator {
         attempt: Int,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
-        guard let proof = initializeClaim.topologyProof else { return }
-        var cleared: (
-            timeout: RuntimeScheduledTimeout?,
-            initUpstreamID: Int64?,
-            didReceiveInitializeResponse: Bool,
-            didSendInitialized: Bool
-        )?
-        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
-        let eligibility = initializeManager.finishSupportEligibilityUpdate {
-            var update: CanonicalHandshakeState.SupportEligibilityUpdate?
-            guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
-                cleared = upstreamHealthManager.timeoutCatalogActivation(
-                    initializeClaim,
-                    commit: { _ in true }
-                )
-                guard cleared != nil else { return false }
-                update = commitSupportEligibilityAfterHealthMutation(
-                    topologySnapshot: topologySnapshot,
-                    detachedProof: proof,
-                    catalogTimeoutProof: proof,
-                    processEligibility: &processEligibility
-                )
-                return true
-            }) == true else { return nil }
-            return update
-        }
-        guard let eligibility, let cleared, let processEligibility else { return }
-        let timeout = processEligibility.catalogTimeout
-        if let timeout {
-            applyProcessControlPlaneTransition(timeout.transition)
-        }
-        applyProcessControlPlaneTransition(processEligibility.transition)
-        applySupportEligibilityCompletion(eligibility)
-        finishClearingUpstreamState(
-            proof: proof,
-            cleared: cleared,
-            resetsProcessRouteActivation: false
-        )
-        guard replaceOrRetireInitializeChannel(initializeClaim) else { return }
-        guard let timeout else { return }
+        guard let proof = initializeClaim.topologyProof,
+              let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
+              route.target.processID == processID else { return }
+        var timeout: ProcessControlPlaneAuthority.CatalogRequestTimeout?
+        var didTimeoutCatalogRequest = false
+        guard upstreamTopology.withValidated(proof, {
+            didTimeoutCatalogRequest = upstreamHealthManager.timeoutCatalogRequest(
+                initializeClaim,
+                commit: { _ in
+                    timeout = processControlPlane.handleCatalogRequestTimeout(
+                        routeID: route.id,
+                        upstreamProof: proof,
+                        nowUptimeNs: nowUptimeNanoseconds()
+                    )
+                    return timeout != nil
+                }
+            )
+        }) != nil, didTimeoutCatalogRequest, let timeout else { return }
+        let cancellationDeliveries = applyProcessControlPlaneTransition(timeout.transition)
 
         logger.info(
             "route_activation_timeout",
@@ -470,10 +450,11 @@ extension RuntimeCoordinator {
             ]
         )
 
-        scheduleProcessRouteActivationRetry(
-            processID: timeout.activationLease.processID,
+        scheduleMissingProcessToolsCatalogRetry(
+            processID: processID,
+            lease: timeout.catalogLease,
             retry: timeout.retry,
-            lease: timeout.activationLease,
+            after: cancellationDeliveries,
             reason: "catalog_timeout"
         )
     }

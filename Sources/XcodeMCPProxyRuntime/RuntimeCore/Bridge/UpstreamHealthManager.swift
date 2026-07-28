@@ -1051,22 +1051,18 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
-    func timeoutCatalogActivation(
+    func timeoutCatalogRequest(
         _ claim: InitializeClaim,
         commit: (InitializeClaim) -> Bool
-    ) -> (
-        timeout: RuntimeScheduledTimeout?,
-        initUpstreamID: Int64?,
-        didReceiveInitializeResponse: Bool,
-        didSendInitialized: Bool
-    )? {
+    ) -> Bool {
         state.withLockedValue { state in
             guard Self.owns(claim, state: state),
                   state.upstreamStates[claim.upstreamIndex].isInitialized,
                   state.upstreamStates[claim.upstreamIndex].initializeClaimPhase
                     == .initializedAwaitingCatalog,
-                  commit(claim) else { return nil }
-            return Self.clearUpstreamState(at: claim.upstreamIndex, state: &state)
+                  commit(claim) else { return false }
+            state.upstreamStates[claim.upstreamIndex].initTimeout = nil
+            return true
         }
     }
 

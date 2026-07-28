@@ -10,8 +10,11 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     private let sentMessages = RecordedValues<Data>()
     private let startEvents = RecordedValues<Int>()
     private let stopEvents = RecordedValues<Int>()
+    private let blockedCancellationSignal = TestSignal()
     private var startCountValue = 0
     private var stopCountValue = 0
+    private var shouldBlockNextCancellation = false
+    private var blockedCancellation: CheckedContinuation<Upstream.SendResult, Never>?
 
     init() {
         var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
@@ -29,12 +32,40 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     func stop() async {
         stopCountValue += 1
         await stopEvents.append(stopCountValue)
+        releaseBlockedCancellation()
         continuation.finish()
     }
 
     func send(_ data: Data) async -> Upstream.SendResult {
         await sentMessages.append(data)
-        return .accepted
+        guard shouldBlockNextCancellation,
+              methodName(from: data) == "notifications/cancelled"
+        else {
+            return .accepted
+        }
+        shouldBlockNextCancellation = false
+        blockedCancellationSignal.signal()
+        return await withCheckedContinuation { continuation in
+            blockedCancellation = continuation
+        }
+    }
+
+    func blockNextCancellation() {
+        shouldBlockNextCancellation = true
+    }
+
+    func waitForBlockedCancellation() async throws {
+        if blockedCancellation != nil {
+            return
+        }
+        try await blockedCancellationSignal.wait(
+            description: "waiting for blocked cancellation"
+        )
+    }
+
+    func releaseBlockedCancellation() {
+        blockedCancellation?.resume(returning: .accepted)
+        blockedCancellation = nil
     }
 
     func yield(_ event: Upstream.Event) async {

@@ -1453,7 +1453,7 @@ struct ControlPlaneAuthorityTests {
         #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
     }
 
-    @Test func catalogActivationSuccessAndTimeoutHaveSingleTerminalWinner() throws {
+    @Test func catalogRequestTimeoutPreservesActivationForRetry() throws {
         let topology = UpstreamTopologyAuthority([TestUpstreamClient()])
         let snapshot = topology.snapshot()
         let proof = try #require(snapshot.proof(UpstreamSlotID(rawValue: 0)))
@@ -1473,29 +1473,20 @@ struct ControlPlaneAuthorityTests {
             commit: { true }
         ))
 
-        let terminalWinners = NIOLockedValueBox<[String]>([])
-        DispatchQueue.concurrentPerform(iterations: 2) { contender in
-            _ = topology.withValidated(proof) {
-                if contender == 0 {
-                    switch health.commitCatalogActivation(
-                        claim,
-                        sourceProof: proof,
-                        commit: { _ in .complete }
-                    ) {
-                    case .completed:
-                        terminalWinners.withLockedValue { $0.append("success") }
-                    case .notOwned, .kept:
-                        break
-                    }
-                    return
-                }
-                if health.timeoutCatalogActivation(claim, commit: { _ in true }) != nil {
-                    terminalWinners.withLockedValue { $0.append("timeout") }
-                }
-            }
+        #expect(topology.withValidated(proof) {
+            health.timeoutCatalogRequest(claim, commit: { _ in true })
+        } == true)
+        let completion = try #require(topology.withValidated(proof) {
+            health.commitCatalogActivation(
+                claim,
+                sourceProof: proof,
+                commit: { _ in .complete }
+            )
+        })
+        guard case .completed = completion else {
+            Issue.record("catalog request timeout must preserve the initialized activation")
+            return
         }
-
-        #expect(terminalWinners.withLockedValue(\.count) == 1)
     }
 
     @Test func forwardingAdmissionRejectsRouteAndTopologyChangesIndependently() throws {

@@ -2460,6 +2460,15 @@ func extractUpstreamID(from data: Data) throws -> Int64 {
     return (object?["id"] as? NSNumber)?.int64Value ?? 0
 }
 
+func extractCancellationRequestID(from data: Data) throws -> Int64 {
+    let object = try #require(
+        JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+    )
+    #expect(object["method"] as? String == "notifications/cancelled")
+    let params = try #require(object["params"] as? [String: Any])
+    return try #require((params["requestId"] as? NSNumber)?.int64Value)
+}
+
 func decodeJSON(from buffer: ByteBuffer) throws -> [String: Any] {
     var buffer = buffer
     guard let data = buffer.readData(length: buffer.readableBytes) else {

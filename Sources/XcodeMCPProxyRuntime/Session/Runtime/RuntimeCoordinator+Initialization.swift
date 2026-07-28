@@ -1119,7 +1119,6 @@ extension RuntimeCoordinator {
     func commitSupportEligibilityAfterHealthMutation(
         topologySnapshot: UpstreamTopologyAuthority.Snapshot,
         detachedProof: UpstreamTopologyProof?,
-        catalogTimeoutProof: UpstreamTopologyProof? = nil,
         processEligibility: inout ProcessControlPlaneAuthority.SupportEligibilityResult?
     ) -> CanonicalHandshakeState.SupportEligibilityUpdate {
         let authoritativeProofs = Set(topologySnapshot.entries.map { $0.operationLease.proof })
@@ -1146,8 +1145,7 @@ extension RuntimeCoordinator {
                     recoveryAwareUsableUpstreamIDs: usableIDs
                 ),
                 newlyIneligibleProofs: update.newlyIneligibleProofs,
-                nowUptimeNs: nowUptimeNanoseconds(),
-                catalogTimeoutProof: catalogTimeoutProof
+                nowUptimeNs: nowUptimeNanoseconds()
             )
             return update
         }

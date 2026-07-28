@@ -293,6 +293,12 @@ final class ProcessControlPlaneAuthority: Sendable {
         let activationLease: ActivationLease
     }
 
+    struct CatalogRequestTimeout: Sendable {
+        let transition: ProcessControlPlaneTransition
+        let retry: Retry
+        let catalogLease: CatalogLease
+    }
+
     struct CooldownLease: Sendable, Hashable {
         let routeID: ProcessRouteID
         let scope: CooldownScope
@@ -308,7 +314,6 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     struct SupportEligibilityResult: Sendable {
         let transition: ProcessControlPlaneTransition
-        let catalogTimeout: AttemptTimeout?
     }
 
     private enum RouteState: String, Sendable {
@@ -794,8 +799,7 @@ final class ProcessControlPlaneAuthority: Sendable {
     func applySupportEligibility(
         usability: UpstreamUsabilitySnapshot,
         newlyIneligibleProofs: Set<UpstreamTopologyProof>,
-        nowUptimeNs: UInt64,
-        catalogTimeoutProof: UpstreamTopologyProof? = nil
+        nowUptimeNs: UInt64
     ) -> SupportEligibilityResult {
         state.withLockedValue { state in
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
@@ -852,17 +856,6 @@ final class ProcessControlPlaneAuthority: Sendable {
                     state.unboundCatalogSource = nil
                 }
             }
-            // Invalidate the timed-out channel's old proof-bound attempt and
-            // catalog first. The timeout transition then creates the fresh
-            // backoff attempt that owns retry; eligibility invalidation must
-            // not immediately abandon that replacement attempt.
-            let catalogTimeout = catalogTimeoutProof.flatMap {
-                Self.handleCatalogChannelTimeout(
-                    upstreamProof: $0,
-                    nowUptimeNs: nowUptimeNs,
-                    state: &state
-                )
-            }
             let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
             return SupportEligibilityResult(
                 transition: ProcessControlPlaneTransition(
@@ -870,8 +863,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     retiredRoutes: [],
                     effects: effects,
                     publishesToolsListChanged: projectionChanged
-                ),
-                catalogTimeout: catalogTimeout
+                )
             )
         }
     }
@@ -2081,64 +2073,47 @@ final class ProcessControlPlaneAuthority: Sendable {
         )
     }
 
-    private static func handleCatalogChannelTimeout(
+    func handleCatalogRequestTimeout(
+        routeID: ProcessRouteID,
         upstreamProof: UpstreamTopologyProof,
-        nowUptimeNs: UInt64,
-        state: inout State
-    ) -> AttemptTimeout? {
-        state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
-        let upstreamIndex = upstreamProof.slotID.rawValue
-        guard let key = activeKey(upstreamIndex: upstreamIndex, in: state),
-              var record = state.recordsByKey[key] else { return nil }
-
-        let effects: [ProcessControlPlaneEffect]
-        let retryOrdinal: Int
-        let attempt: Attempt
-        if var current = record.attempt,
-           current.upstreamProof == upstreamProof,
-           [.pending, .attaching, .initialized, .loadingCatalog, .backoff]
-            .contains(current.phase) {
-            effects = current.detachedEffects()
-            retryOrdinal = current.id.rawValue
-            current.readinessToken = nil
-            current.retryTimeout = nil
-            current.retryKind = .activation
-            current.loads.removeAll()
-            current.phase = .backoff
-            attempt = current
-        } else {
-            effects = record.attempt?.detachedEffects() ?? []
-            retryOrdinal = max(1, record.nextAttemptID)
-            record.nextAttemptID &+= 1
-            attempt = Attempt(
-                id: CatalogAttemptID(rawValue: record.nextAttemptID),
-                upstreamProof: upstreamProof,
-                startedAtUptimeNs: nowUptimeNs,
-                phase: .backoff,
-                readinessToken: nil,
-                retryTimeout: nil,
-                retryKind: .activation,
-                nextLoadID: 0,
-                loads: [:]
+        nowUptimeNs: UInt64
+    ) -> CatalogRequestTimeout? {
+        state.withLockedValue { state in
+            state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
+            guard let key = Self.key(routeID: routeID, in: state),
+                  var record = state.recordsByKey[key],
+                  var attempt = record.attempt,
+                  attempt.upstreamProof == upstreamProof,
+                  attempt.phase == .loadingCatalog,
+                  let loadID = attempt.loads.keys.min(by: {
+                      $0.rawValue < $1.rawValue
+                  }) else {
+                return nil
+            }
+            let effects = attempt.detachedEffects()
+            attempt.readinessToken = nil
+            attempt.retryTimeout = nil
+            attempt.retryKind = .catalog
+            attempt.loads.removeAll()
+            attempt.phase = .backoff
+            record.attempt = attempt
+            state.recordsByKey[key] = record
+            return CatalogRequestTimeout(
+                transition: ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: effects,
+                    publishesToolsListChanged: false
+                ),
+                retry: Self.retry(forAttempt: attempt.id.rawValue),
+                catalogLease: Self.lease(
+                    for: attempt,
+                    loadID: loadID,
+                    routeID: routeID,
+                    catalogEpoch: state.catalogEpoch
+                )
             )
         }
-        record.attempt = attempt
-        state.recordsByKey[key] = record
-        let lease = ActivationLease(
-            routeID: record.route.id,
-            attemptID: attempt.id,
-            upstreamProof: attempt.upstreamProof
-        )
-        return AttemptTimeout(
-            transition: ProcessControlPlaneTransition(
-                addedRoutes: [],
-                retiredRoutes: [],
-                effects: effects,
-                publishesToolsListChanged: false
-            ),
-            retry: retry(forAttempt: retryOrdinal),
-            activationLease: lease
-        )
     }
 
     func handleRetryFired(_ lease: CatalogLease) -> Bool {

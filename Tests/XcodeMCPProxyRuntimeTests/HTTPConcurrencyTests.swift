@@ -356,9 +356,10 @@ struct HTTPConcurrencyTests {
 
         secondChannel.embeddedEventLoop.run()
         await sessionManager.drainRuntimeTasksForTesting()
-        let secondRequestLabels = upstream.recordedRequestLabels(count: 2)
+        let secondRequestLabels = upstream.recordedRequestLabels(count: 3)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
+            "notifications/cancelled",
             "tools/call:ExecuteSnippet",
         ])
 

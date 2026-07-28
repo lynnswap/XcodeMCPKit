@@ -152,21 +152,29 @@ extension ControlPlane {
 }
 
 extension ControlPlane {
+    enum RPCCancellationCause: Sendable, Equatable {
+        case cancelled
+        case timedOut
+    }
+
     struct RPCCancelSnapshot: Sendable {
         let registrationToken: UUID?
         let operationLease: UpstreamOperationLease?
         let requestIDKey: String?
+        let cause: RPCCancellationCause
 
         var upstreamIndex: Int? { operationLease?.upstreamIndex }
 
         init(
             registrationToken: UUID?,
             operationLease: UpstreamOperationLease?,
-            requestIDKey: String?
+            requestIDKey: String?,
+            cause: RPCCancellationCause
         ) {
             self.registrationToken = registrationToken
             self.operationLease = operationLease
             self.requestIDKey = requestIDKey
+            self.cause = cause
         }
     }
 }
@@ -187,7 +195,13 @@ extension ControlPlane {
 
         private struct HandleState: Sendable {
             var state: State = .queued
-            var onCancel: (@Sendable (ControlPlane.RPCCancelSnapshot) -> Void)?
+            var onCancel: (
+                @Sendable (
+                    ControlPlane.RPCCancelSnapshot,
+                    AsyncTerminalSignal
+                ) -> Void
+            )?
+            var cancellationDelivery: AsyncTerminalSignal?
         }
 
         private let state = NIOLockedValueBox(HandleState())
@@ -197,15 +211,30 @@ extension ControlPlane {
         func installCancel(
             _ onCancel: @escaping @Sendable (ControlPlane.RPCCancelSnapshot) -> Void
         ) {
-            let snapshot = state.withLockedValue { state -> ControlPlane.RPCCancelSnapshot? in
+            installCancelWithDelivery { snapshot, delivery in
+                onCancel(snapshot)
+                delivery.signal()
+            }
+        }
+
+        func installCancelWithDelivery(
+            _ onCancel: @escaping @Sendable (
+                ControlPlane.RPCCancelSnapshot,
+                AsyncTerminalSignal
+            ) -> Void
+        ) {
+            let pendingCancellation = state.withLockedValue {
+                state -> (ControlPlane.RPCCancelSnapshot, AsyncTerminalSignal)? in
                 state.onCancel = onCancel
                 if case .cancelled(let snapshot) = state.state {
-                    return snapshot
+                    let delivery = state.cancellationDelivery ?? AsyncTerminalSignal()
+                    state.cancellationDelivery = delivery
+                    return (snapshot, delivery)
                 }
                 return nil
             }
-            if let snapshot {
-                onCancel(snapshot)
+            if let (snapshot, delivery) = pendingCancellation {
+                onCancel(snapshot, delivery)
             }
         }
 
@@ -263,44 +292,64 @@ extension ControlPlane {
             }
         }
 
-        func cancel() {
-            let cancellation = state.withLockedValue {
-                state -> (
-                    (@Sendable (ControlPlane.RPCCancelSnapshot) -> Void),
-                    ControlPlane.RPCCancelSnapshot
-                )? in
+        @discardableResult
+        func cancel(
+            cause: ControlPlane.RPCCancellationCause = .cancelled
+        ) -> AsyncTerminalSignal? {
+            let cancellation = state.withLockedValue { state -> (
+                delivery: AsyncTerminalSignal,
+                onCancel: (
+                    @Sendable (
+                        ControlPlane.RPCCancelSnapshot,
+                        AsyncTerminalSignal
+                    ) -> Void
+                )?,
+                snapshot: ControlPlane.RPCCancelSnapshot?
+            )? in
                 let snapshot: ControlPlane.RPCCancelSnapshot
                 switch state.state {
-                case .finished, .cancelled:
+                case .finished:
                     return nil
+                case .cancelled:
+                    guard let delivery = state.cancellationDelivery else {
+                        preconditionFailure(
+                            "cancelled RPC handle must own its cancellation delivery"
+                        )
+                    }
+                    return (delivery, nil, nil)
                 case .queued:
                     snapshot = ControlPlane.RPCCancelSnapshot(
                         registrationToken: nil,
                         operationLease: nil,
-                        requestIDKey: nil
+                        requestIDKey: nil,
+                        cause: cause
                     )
                 case .registered(let registrationToken, let operationLease):
                     snapshot = ControlPlane.RPCCancelSnapshot(
                         registrationToken: registrationToken,
                         operationLease: operationLease,
-                        requestIDKey: nil
+                        requestIDKey: nil,
+                        cause: cause
                     )
                 case .assigned(let registrationToken, let operationLease, let requestIDKey):
                     snapshot = ControlPlane.RPCCancelSnapshot(
                         registrationToken: registrationToken,
                         operationLease: operationLease,
-                        requestIDKey: requestIDKey
+                        requestIDKey: requestIDKey,
+                        cause: cause
                     )
                 }
+                let delivery = AsyncTerminalSignal()
                 state.state = .cancelled(snapshot)
-                guard let onCancel = state.onCancel else {
-                    return nil
-                }
-                return (onCancel, snapshot)
+                state.cancellationDelivery = delivery
+                return (delivery, state.onCancel, snapshot)
             }
-            if let (onCancel, snapshot) = cancellation {
-                onCancel(snapshot)
+            guard let cancellation else { return nil }
+            if let onCancel = cancellation.onCancel,
+               let snapshot = cancellation.snapshot {
+                onCancel(snapshot, cancellation.delivery)
             }
+            return cancellation.delivery
         }
 
         func isCancelled() -> Bool {

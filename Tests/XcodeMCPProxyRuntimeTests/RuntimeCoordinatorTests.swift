@@ -645,7 +645,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(timeoutScheduler.isCancelled(at: 0))
     }
 
-    @Test func processRouteActivationCatalogTimeoutStaysBoundedAndReplacesSlot()
+    @Test func processRouteActivationCatalogTimeoutCancelsBeforeRetryingSameSlot()
         async throws
     {
         var config = makeConfig(requestTimeout: 300)
@@ -732,45 +732,45 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(timeoutScheduler.scheduledCount() == 3)
         #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
         #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
+        await firstAttempt.blockNextCancellation()
         #expect(timeoutScheduler.fire(at: 2))
-        #expect(
-            try await waitWithTimeout(
-                "waiting for timed-out activation slot to stop",
-                timeout: .seconds(2)
-            ) {
-                try await firstAttempt.nextStopCount()
-            } == 1)
-        #expect(createdUpstreams.withLockedValue(\.count) == 2)
-
-        let retryAttempt = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
-        let retryTimeoutIndex = try #require(
-            timeoutScheduler.activeTimeoutIndex(
-                delay: .milliseconds(250),
-                startingAt: 3
+        try await firstAttempt.waitForBlockedCancellation()
+        let cancellation = try await waitWithTimeout(
+            "waiting for timed-out catalog cancellation",
+            timeout: .seconds(2)
+        ) {
+            try await firstAttempt.nextSent(
+                startingAt: 3,
+                matching: { methodName(from: $0) == "notifications/cancelled" }
             )
+        }
+        let cancellationObject = try #require(
+            JSONSerialization.jsonObject(with: cancellation, options: []) as? [String: Any]
+        )
+        let cancellationParams = try #require(
+            cancellationObject["params"] as? [String: Any]
+        )
+        let staleToolsUpstreamID = try extractUpstreamID(from: staleToolsRequest)
+        #expect(
+            (cancellationParams["requestId"] as? NSNumber)?.int64Value
+                == staleToolsUpstreamID
+        )
+        #expect(await firstAttempt.stopCount() == 0)
+        #expect(createdUpstreams.withLockedValue(\.count) == 1)
+        #expect(timeoutScheduler.scheduledCount() == 3)
+
+        await firstAttempt.releaseBlockedCancellation()
+        let retryTimeoutIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .milliseconds(250),
+            startingAtEventIndex: 3
         )
         #expect(timeoutScheduler.fire(at: retryTimeoutIndex))
-        let retryInitialize = try await waitWithTimeout(
-            "waiting for activation retry initialize",
-            timeout: .seconds(2)
-        ) {
-            try await retryAttempt.nextSent(at: 0)
-        }
-        await retryAttempt.yield(
-            .message(try makeInitializeResponse(id: try extractUpstreamID(from: retryInitialize)))
-        )
-        _ = try await waitWithTimeout(
-            "waiting for retry activation initialized notification",
-            timeout: .seconds(2)
-        ) {
-            try await retryAttempt.nextSent(at: 1)
-        }
         let retryToolsRequest = try await waitWithTimeout(
-            "waiting for retry activation tools/list",
+            "waiting for catalog retry on the existing activation slot",
             timeout: .seconds(2)
         ) {
-            try await retryAttempt.nextSent(
-                startingAt: 2,
+            try await firstAttempt.nextSent(
+                startingAt: 4,
                 matching: { methodName(from: $0) == "tools/list" }
             )
         }
@@ -787,7 +787,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         )
         #expect(manager.processControlPlane.catalog(forProcessID: newerTarget.processID) == nil)
 
-        await retryAttempt.yield(
+        await firstAttempt.yield(
             .message(
                 try makeDocumentationToolsListResponse(
                     id: try extractUpstreamID(from: retryToolsRequest),
@@ -3286,33 +3286,36 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let catalogTimeoutIndex = try #require(
             timeoutScheduler.activeTimeoutIndex(delay: .seconds(10))
         )
-        let scheduledBeforeCatalogTimeout = timeoutScheduler.scheduledCount()
+        let scheduledEventsBeforeCatalogTimeout = timeoutScheduler.scheduledEventCount()
         #expect(timeoutScheduler.fire(at: catalogTimeoutIndex))
-        #expect(
-            try await waitWithTimeout(
-                "waiting for timed-out 26 upstream stop",
-                timeout: .seconds(2)
-            ) {
-                try await firstAttempt.nextStopCount()
-            } == 1)
+        _ = try await waitWithTimeout(
+            "waiting for timed-out 26 catalog cancellation",
+            timeout: .seconds(2)
+        ) {
+            try await firstAttempt.nextSent(
+                startingAt: 3,
+                matching: { methodName(from: $0) == "notifications/cancelled" }
+            )
+        }
+        #expect(await firstAttempt.stopCount() == 0)
         #expect(
             manager.unavailableXcodeProcessIDs().contains(
                 relaunched26Target.processID
             ) == false)
-        #expect(createdUpstreams.withLockedValue(\.count) == 2)
-        let retryTimeoutIndex = try #require(
-            timeoutScheduler.activeTimeoutIndex(
-                delay: .milliseconds(250),
-                startingAt: scheduledBeforeCatalogTimeout
-            )
+        #expect(createdUpstreams.withLockedValue(\.count) == 1)
+        let retryTimeoutIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .milliseconds(250),
+            startingAtEventIndex: scheduledEventsBeforeCatalogTimeout
         )
-        let retryAttempt = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
         #expect(timeoutScheduler.fire(at: retryTimeoutIndex))
-        let retryInitialize = try await waitWithTimeout(
-            "waiting for activation-retried relaunched 26 initialize",
+        let retryCatalogRequest = try await waitWithTimeout(
+            "waiting for relaunched 26 catalog retry",
             timeout: .seconds(2)
         ) {
-            try await retryAttempt.nextSent(at: 0)
+            try await firstAttempt.nextSent(
+                startingAt: 4,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
         }
 
         await firstAttempt.yield(
@@ -3331,32 +3334,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
             ) == nil)
 
         let catalogCommitIndex = catalogCommits.count()
-        await retryAttempt.yield(
-            .message(
-                try makeInitializeResponse(
-                    id: try extractUpstreamID(from: retryInitialize),
-                    serverName: "cached-source"
-                ))
-        )
-        _ = try await waitWithTimeout(
-            "waiting for relaunched 26 retry initialized notification",
-            timeout: .seconds(2)
-        ) {
-            try await retryAttempt.nextSent(at: 1)
-        }
-        let readyCatalogRequest = try await waitWithTimeout(
-            "waiting for relaunched 26 retry tools/list",
-            timeout: .seconds(2)
-        ) {
-            try await retryAttempt.nextSent(
-                startingAt: 2,
-                matching: { methodName(from: $0) == "tools/list" }
-            )
-        }
-        await retryAttempt.yield(
+        await firstAttempt.yield(
             .message(
                 try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: readyCatalogRequest),
+                    id: try extractUpstreamID(from: retryCatalogRequest),
                     tools: [
                         toolDescriptor(name: "Only26Relaunched")
                     ]
@@ -6160,6 +6141,7 @@ struct RuntimeCoordinatorRecoveryTests {
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/list")
+        await upstream.blockNextCancellation()
         try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
@@ -6168,6 +6150,9 @@ struct RuntimeCoordinatorRecoveryTests {
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
         }
+        try await upstream.waitForBlockedCancellation()
+        #expect(await upstream.sentCount() == 4)
+        await upstream.releaseBlockedCancellation()
 
         _ = try await waitWithTimeout("waiting for timed-out tools/list load cleanup") {
             try await manager.controlPlaneDebugMirror.waitForSnapshot {
@@ -6178,6 +6163,15 @@ struct RuntimeCoordinatorRecoveryTests {
             await manager.drainControlPlaneLoadsForTesting()
         }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
+        let firstCancellation = try await sentValue(
+            from: upstream,
+            at: 3,
+            timeout: .seconds(2)
+        )
+        #expect(
+            try extractCancellationRequestID(from: firstCancellation)
+                == extractUpstreamID(from: firstRequest)
+        )
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -6185,8 +6179,8 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
-        let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        try await waitForSentCount(upstream, count: 5, timeoutSeconds: 2)
+        let secondRequest = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
         try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
@@ -6304,8 +6298,17 @@ struct RuntimeCoordinatorRecoveryTests {
             )
         }
 
-        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
-        let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        try await waitForSentCount(upstream, count: 5, timeoutSeconds: 2)
+        let firstCancellation = try await sentValue(
+            from: upstream,
+            at: 3,
+            timeout: .seconds(2)
+        )
+        #expect(
+            try extractCancellationRequestID(from: firstCancellation)
+                == extractUpstreamID(from: firstRequest)
+        )
+        let secondRequest = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
 
         firstTask.cancel()
@@ -6575,6 +6578,15 @@ struct RuntimeCoordinatorRecoveryTests {
             _ = try await firstTask.value
         }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
+        let prewarmCancellation = try await sentValue(
+            from: upstream,
+            at: 3,
+            timeout: .seconds(2)
+        )
+        #expect(
+            try extractCancellationRequestID(from: prewarmCancellation)
+                == extractUpstreamID(from: prewarmRequest)
+        )
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -6582,8 +6594,8 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
-        let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        try await waitForSentCount(upstream, count: 5, timeoutSeconds: 2)
+        let secondRequest = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
         try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
@@ -6752,6 +6764,15 @@ struct RuntimeCoordinatorRecoveryTests {
             }
         }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
+        let firstCancellation = try await sentValue(
+            from: upstream,
+            at: 3,
+            timeout: .seconds(2)
+        )
+        #expect(
+            try extractCancellationRequestID(from: firstCancellation)
+                == extractUpstreamID(from: firstRequest)
+        )
 
         let secondTask = Task {
             try await manager.liveXcodeListWindowsResult(
@@ -6759,8 +6780,8 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        try await waitForSentCount(upstream, count: 4, timeoutSeconds: 2)
-        let secondRequest = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        try await waitForSentCount(upstream, count: 5, timeoutSeconds: 2)
+        let secondRequest = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/call")
         try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
@@ -8445,10 +8466,10 @@ struct RuntimeCoordinatorRecoveryTests {
             )
         }
 
-        _ = try await upstream0.nextSent {
+        let request0 = try await upstream0.nextSent {
             methodName(from: $0) == "tools/list"
         }
-        _ = try await upstream1.nextSent {
+        let request1 = try await upstream1.nextSent {
             methodName(from: $0) == "tools/list"
         }
 
@@ -8457,8 +8478,24 @@ struct RuntimeCoordinatorRecoveryTests {
         await #expect(throws: CancellationError.self) {
             _ = try await task.value
         }
-        #expect(await upstream0.sentCount() == 1)
-        #expect(await upstream1.sentCount() == 1)
+        let cancellation0 = try await upstream0.nextSent(
+            startingAt: 1,
+            matching: { methodName(from: $0) == "notifications/cancelled" }
+        )
+        let cancellation1 = try await upstream1.nextSent(
+            startingAt: 1,
+            matching: { methodName(from: $0) == "notifications/cancelled" }
+        )
+        #expect(
+            try extractCancellationRequestID(from: cancellation0)
+                == extractUpstreamID(from: request0)
+        )
+        #expect(
+            try extractCancellationRequestID(from: cancellation1)
+                == extractUpstreamID(from: request1)
+        )
+        #expect(await upstream0.sentCount() == 2)
+        #expect(await upstream1.sentCount() == 2)
     }
 
     @Test func sessionManagerUnavailableUncatalogedRouteRecomputesRemainingProcessSurface()
@@ -12468,6 +12505,29 @@ struct RuntimeCoordinatorWindowRoutingTests {
         #expect(handle.markRegistered(registrationToken: UUID(), operationLease: testOperationLease(0)) == false)
     }
 
+    @Test func controlPlaneRPCHandlePublishesSharedDeliveryBeforeInvokingCancellation() async {
+        let handle = ControlPlane.RPCHandle()
+        let callbackDelivery = NIOLockedValueBox<AsyncTerminalSignal?>(nil)
+        let callbackCause = NIOLockedValueBox<ControlPlane.RPCCancellationCause?>(nil)
+
+        let firstDelivery = handle.cancel(cause: .timedOut)
+        let concurrentDelivery = handle.cancel()
+
+        handle.installCancelWithDelivery { snapshot, delivery in
+            callbackCause.withLockedValue { $0 = snapshot.cause }
+            callbackDelivery.withLockedValue { $0 = delivery }
+        }
+
+        let installedDelivery = callbackDelivery.withLockedValue { $0 }
+
+        #expect(firstDelivery === concurrentDelivery)
+        #expect(firstDelivery === installedDelivery)
+        #expect(callbackCause.withLockedValue { $0 } == .timedOut)
+
+        installedDelivery?.signal()
+        await firstDelivery?.wait()
+    }
+
     @Test func controlPlaneRPCCancelBetweenPreflightAndEnqueueRemovesQueuedRequest()
         async throws
     {
@@ -15542,6 +15602,22 @@ struct RuntimeCoordinatorSchedulingTests {
             requestIDKeys: [originalID.key],
             upstreamIndex: 0
         )
+        let cancellation = try await waitWithTimeout(
+            "waiting for abandoned request cancellation",
+            timeout: .seconds(2)
+        ) {
+            try await upstream.nextSent(
+                startingAt: 0,
+                matching: { methodName(from: $0) == "notifications/cancelled" }
+            )
+        }
+        let cancellationObject = try #require(
+            JSONSerialization.jsonObject(with: cancellation, options: []) as? [String: Any]
+        )
+        let cancellationParams = try #require(
+            cancellationObject["params"] as? [String: Any]
+        )
+        #expect((cancellationParams["requestId"] as? NSNumber)?.int64Value == upstreamID)
 
         let releaseSnapshot = manager.debugSnapshot()
         let releasedLease = try #require(
