@@ -3428,6 +3428,126 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 0)
     }
 
+    @Test func processRouteUsabilityEvaluationDefersHealthProbeEffectsOutsideInitializeLock()
+        async throws
+    {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let upstream = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 27015, xcodeVersion: "27.0")
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: group.next(),
+            upstreams: [upstream],
+            nowUptimeNanoseconds: { 16_000_000_000 },
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0])
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let operationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        for _ in 0..<3 {
+            _ = manager.upstreamHealthManager.markRequestTimedOut(
+                operationLease.proof,
+                nowUptimeNs: 0
+            )
+        }
+
+        var capturedEvaluation: RuntimeCoordinator.ProcessRouteUsabilityEvaluation?
+        #expect(manager.initializeManager.performIfRunning {
+            capturedEvaluation = manager.evaluateProcessRouteUpstreamUsability(
+                policy: .toolsCatalog,
+                nowUptimeNs: 16_000_000_000
+            )
+        })
+
+        let evaluation = try #require(capturedEvaluation)
+        #expect(evaluation.snapshot == .empty)
+        #expect(await upstream.sentCount() == 0)
+        let healthEffect = try #require(evaluation.effects.first)
+        guard case .startHealthProbe = healthEffect else {
+            Issue.record("expired quarantine should produce a deferred health probe")
+            return
+        }
+
+        manager.applyHealthEffects(evaluation.effects)
+        let probe = try await upstream.nextSent(at: 0)
+        #expect(methodName(from: probe) == "tools/list")
+        await upstream.yield(
+            .message(
+                try makeDocumentationToolsListResponse(
+                    id: try extractUpstreamID(from: probe),
+                    tools: []
+                )
+            )
+        )
+        await manager.drainRuntimeTasksForTesting()
+        guard let healthState = manager.testStateSnapshot().upstream(id: 0)?.healthState,
+              case .healthy = healthState
+        else {
+            Issue.record("successful deferred probe should restore healthy state")
+            return
+        }
+    }
+
+    @Test func deferredProcessRouteHealthProbeIsRejectedWhenInitializeShutdownWins()
+        async throws
+    {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let upstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let eventLoop = group.next()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            nowUptimeNanoseconds: { 16_000_000_000 },
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(
+                    target: xcodeProcessTarget(processID: 27016, xcodeVersion: "27.0"),
+                    upstreamIndices: [0]
+                )
+            ],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let operationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        for _ in 0..<3 {
+            _ = manager.upstreamHealthManager.markRequestTimedOut(
+                operationLease.proof,
+                nowUptimeNs: 0
+            )
+        }
+
+        var capturedEvaluation: RuntimeCoordinator.ProcessRouteUsabilityEvaluation?
+        #expect(manager.initializeManager.performIfRunning {
+            capturedEvaluation = manager.evaluateProcessRouteUpstreamUsability(
+                policy: .toolsCatalog,
+                nowUptimeNs: 16_000_000_000
+            )
+        })
+        let evaluation = try #require(capturedEvaluation)
+        let healthEffect = try #require(evaluation.effects.first)
+        guard case .startHealthProbe = healthEffect else {
+            Issue.record("expired quarantine should produce a deferred health probe")
+            return
+        }
+
+        _ = manager.initializeManager.beginShutdown()
+        manager.applyHealthEffects(evaluation.effects)
+        await manager.drainRuntimeTasksForTesting()
+        try await eventLoop.submit {}.get()
+
+        #expect(await upstream.sentCount() == 0)
+        #expect(timeoutScheduler.scheduledCount() == 1)
+        #expect(timeoutScheduler.isCancelled(at: 0))
+    }
+
     @Test func processRoutingCooldownTimersFollowRouteLifecycle() {
         let uptimeClock = TestUptimeClock()
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()

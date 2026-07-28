@@ -3,6 +3,11 @@ import NIO
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
+    private struct ProcessRouteReconcileCommit: Sendable {
+        let transition: ProcessControlPlaneTransition
+        let healthEffects: [UpstreamHealthManager.Effect]
+    }
+
     func triggerXcodeProcessReconcile(reason: String) {
         guard processRoutingEnabled, let xcodeTargetDiscovery else {
             return
@@ -84,7 +89,7 @@ extension RuntimeCoordinator {
     ) {
         guard processRoutingEnabled else { return }
         defer { testHooks.xcodeProcessReconcileCompleted?(reason) }
-        var result: ProcessControlPlaneTransition?
+        var commit: ProcessRouteReconcileCommit?
         guard initializeManager.performIfRunning({
             let existingRoutes = processControlPlane.activeRoutes()
             let observedRoutes = MCPBridgeRuntime.orderedXcodeTargets(targets).map { target in
@@ -93,31 +98,36 @@ extension RuntimeCoordinator {
                 })
                     ?? appendProcessBoundRouteWhileRunning(for: target)
             }
-            let usability = processRouteUpstreamUsabilitySnapshot(
+            let nowUptimeNs = nowUptimeNanoseconds()
+            let usability = evaluateProcessRouteUpstreamUsability(
                 policy: .toolsCatalog,
-                nowUptimeNs: nowUptimeNanoseconds()
+                nowUptimeNs: nowUptimeNs
             )
-            result = processControlPlane.reconcileRoutes(
-                observedRoutes,
-                reason: reason,
-                nowUptimeNs: nowUptimeNanoseconds(),
-                usability: usability
+            commit = ProcessRouteReconcileCommit(
+                transition: processControlPlane.reconcileRoutes(
+                    observedRoutes,
+                    reason: reason,
+                    nowUptimeNs: nowUptimeNs,
+                    usability: usability.snapshot
+                ),
+                healthEffects: usability.effects
             )
-        }), let result else {
+        }), let commit else {
             return
         }
-        applyProcessControlPlaneTransition(result)
-        guard result.didChangeRoutes else {
+        applyProcessControlPlaneTransition(commit.transition)
+        applyHealthEffects(commit.healthEffects)
+        guard commit.transition.didChangeRoutes else {
             retryPendingProcessRouteReadiness(reason: reason)
             return
         }
 
-        for route in result.retiredRoutes {
+        for route in commit.transition.retiredRoutes {
             retireProcessBoundRoute(route, reason: reason)
         }
 
-        if result.addedRoutes.isEmpty == false {
-            startInitializationForAddedProcessRoutes(result.addedRoutes)
+        if commit.transition.addedRoutes.isEmpty == false {
+            startInitializationForAddedProcessRoutes(commit.transition.addedRoutes)
         }
 
         retryPendingProcessRouteReadiness(reason: reason)
