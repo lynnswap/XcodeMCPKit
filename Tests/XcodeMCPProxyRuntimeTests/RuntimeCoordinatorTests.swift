@@ -7248,7 +7248,6 @@ struct RuntimeCoordinatorRecoveryTests {
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
         }
-        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
         let prewarmCancellation = try await sentValue(
             from: upstream,
             at: 3,
@@ -7258,6 +7257,8 @@ struct RuntimeCoordinatorRecoveryTests {
             try extractCancellationRequestID(from: prewarmCancellation)
                 == extractUpstreamID(from: prewarmRequest)
         )
+        await manager.drainRuntimeTasksForTesting()
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let secondTask = Task {
             try await manager.sharedToolsList(
