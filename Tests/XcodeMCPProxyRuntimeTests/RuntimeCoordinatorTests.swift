@@ -820,7 +820,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 ]))
     }
 
-    @Test func rejectedCatalogCancellationReplacesChannelInsteadOfRetryingIt()
+    @Test func catalogCancellationOutcomeControlsRetryAndChannelRecovery()
         async throws
     {
         let target = xcodeProcessTarget(processID: 27027, xcodeVersion: "27.0")
@@ -851,24 +851,47 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let proof = try #require(manager.upstreamTopology.operationLease(
             for: UpstreamSlotID(rawValue: 0)
         )?.proof)
-        let (lease, transition) = try #require(
-            manager.processControlPlane.beginCatalogAttempt(
-                routeID: route.id,
-                preferredUpstreamProof: proof,
-                nowUptimeNanoseconds: 1
-            )
-        )
-        manager.applyProcessControlPlaneTransition(transition)
-        manager.applyCatalogCommit(manager.processControlPlane.completeCatalog(
-            .unusable,
-            lease: lease,
-            nowUptimeNanoseconds: 2
-        ))
 
+        func prepareRetryLease(at uptimeNanoseconds: UInt64) throws -> CatalogLease {
+            let (lease, transition) = try #require(
+                manager.processControlPlane.beginCatalogAttempt(
+                    routeID: route.id,
+                    preferredUpstreamProof: proof,
+                    nowUptimeNanoseconds: uptimeNanoseconds
+                )
+            )
+            manager.applyProcessControlPlaneTransition(transition)
+            manager.applyCatalogCommit(manager.processControlPlane.completeCatalog(
+                .unusable,
+                lease: lease,
+                nowUptimeNanoseconds: uptimeNanoseconds &+ 1
+            ))
+            return lease
+        }
+
+        let obsoleteLease = try prepareRetryLease(at: 1)
+        let obsoleteCancellation = ControlPlane.RPCCancellationDelivery()
+        manager.scheduleMissingProcessToolsCatalogRetry(
+            processID: target.processID,
+            lease: obsoleteLease,
+            after: [obsoleteCancellation],
+            reason: "test_obsolete_cancellation"
+        )
+        obsoleteCancellation.complete(.noLongerApplicable)
+        let obsoleteRetryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .milliseconds(250),
+            startingAtEventIndex: 0
+        )
+        manager.applyProcessControlPlaneTransition(
+            manager.processControlPlane.resetAttempt(processID: target.processID)
+        )
+        #expect(timeoutScheduler.isCancelled(at: obsoleteRetryIndex))
+
+        let rejectedLease = try prepareRetryLease(at: 3)
         let cancellation = ControlPlane.RPCCancellationDelivery()
         manager.scheduleMissingProcessToolsCatalogRetry(
             processID: target.processID,
-            lease: lease,
+            lease: rejectedLease,
             after: [cancellation],
             reason: "test_rejected_cancellation"
         )
@@ -884,7 +907,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             )?.proof != proof
         )
         #expect(
-            timeoutScheduler.activeTimeoutIndex(delay: .milliseconds(250)) == nil
+            timeoutScheduler.activeTimeoutIndex(delay: .milliseconds(500)) == nil
         )
     }
 

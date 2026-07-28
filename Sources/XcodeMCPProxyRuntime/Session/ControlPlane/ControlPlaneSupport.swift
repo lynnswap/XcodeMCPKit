@@ -187,8 +187,8 @@ extension ControlPlane {
             case noLongerApplicable
             case rejected
 
-            var permitsSameSlotReuse: Bool {
-                self == .delivered
+            var allowsRetryScheduling: Bool {
+                self != .rejected
             }
         }
 

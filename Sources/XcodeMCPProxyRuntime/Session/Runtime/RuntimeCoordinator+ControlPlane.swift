@@ -555,14 +555,9 @@ extension RuntimeCoordinator {
         guard cancellationDeliveries.isEmpty else {
             addRuntimeTask { [weak self] in
                 var rejected = false
-                var permitsSameSlotReuse = true
                 for delivery in cancellationDeliveries {
                     let result = await delivery.wait()
-                    guard result.permitsSameSlotReuse else {
-                        permitsSameSlotReuse = false
-                        rejected = rejected || result == .rejected
-                        continue
-                    }
+                    rejected = rejected || result.allowsRetryScheduling == false
                 }
                 guard let self else { return }
                 guard rejected == false else {
@@ -572,7 +567,6 @@ extension RuntimeCoordinator {
                     )
                     return
                 }
-                guard permitsSameSlotReuse else { return }
                 self.armMissingProcessToolsCatalogRetry(
                     processID: processID,
                     lease: lease,
@@ -699,7 +693,7 @@ extension RuntimeCoordinator {
                     "upstream": .string("\(sourceUpstream)"),
                 ]
             )
-            applyCatalogCommit(
+            let cancellationDeliveries = applyCatalogCommit(
                 commitProcessCatalog(
                     .unusable,
                     lease: route.lease,
@@ -709,6 +703,7 @@ extension RuntimeCoordinator {
             scheduleMissingProcessToolsCatalogRetry(
                 processID: route.target.processID,
                 lease: route.lease,
+                after: cancellationDeliveries,
                 reason: "empty_process_catalog"
             )
             return currentCatalogResult(
