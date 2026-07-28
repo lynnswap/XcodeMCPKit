@@ -1145,8 +1145,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     @discardableResult
     func applyProcessControlPlaneTransition(
         _ transition: ProcessControlPlaneTransition
-    ) -> [AsyncTerminalSignal] {
-        var cancellationDeliveries: [AsyncTerminalSignal] = []
+    ) -> [ControlPlane.RPCCancellationDelivery] {
+        var cancellationDeliveries: [ControlPlane.RPCCancellationDelivery] = []
         for effect in transition.effects {
             switch effect {
             case .cancelTimeout(let timeout):

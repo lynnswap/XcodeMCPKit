@@ -820,6 +820,74 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 ]))
     }
 
+    @Test func rejectedCatalogCancellationReplacesChannelInsteadOfRetryingIt()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 27027, xcodeVersion: "27.0")
+        let initial = TestUpstreamClient()
+        let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [initial],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0])
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let replacement = TestUpstreamClient()
+                replacements.withLockedValue { $0.append(replacement) }
+                return [replacement]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let route = try #require(manager.processControlPlane.route(
+            forProcessID: target.processID
+        ))
+        let proof = try #require(manager.upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: 0)
+        )?.proof)
+        let (lease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: proof,
+                nowUptimeNanoseconds: 1
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+        manager.applyCatalogCommit(manager.processControlPlane.completeCatalog(
+            .unusable,
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ))
+
+        let cancellation = ControlPlane.RPCCancellationDelivery()
+        manager.scheduleMissingProcessToolsCatalogRetry(
+            processID: target.processID,
+            lease: lease,
+            after: [cancellation],
+            reason: "test_rejected_cancellation"
+        )
+        cancellation.complete(.rejected)
+
+        #expect(
+            try await initial.nextStopCount(timeout: .seconds(2)) == 1
+        )
+        #expect(replacements.withLockedValue(\.count) == 1)
+        #expect(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: 0)
+            )?.proof != proof
+        )
+        #expect(
+            timeoutScheduler.activeTimeoutIndex(delay: .milliseconds(250)) == nil
+        )
+    }
+
     @Test func processBridgeRecoveryRetriesAttachProbeWithBoundedCadence()
         async throws
     {
@@ -6131,6 +6199,8 @@ struct RuntimeCoordinatorRecoveryTests {
 
         let sessionID = "session-tools-timeout"
         _ = manager.session(id: sessionID)
+        await upstream.blockNextSend(method: "tools/list")
+        await upstream.blockNextCancellation()
 
         let firstTask = Task {
             try await manager.sharedToolsList(
@@ -6141,7 +6211,7 @@ struct RuntimeCoordinatorRecoveryTests {
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/list")
-        await upstream.blockNextCancellation()
+        try await upstream.waitForBlockedSend()
         try await advanceRuntimeCoordinatorTimeout(
             timeoutClock: clocks.timeoutClock,
             uptimeClock: clocks.uptimeClock,
@@ -6150,6 +6220,8 @@ struct RuntimeCoordinatorRecoveryTests {
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
         }
+        #expect(await upstream.sentCount() == 3)
+        await upstream.releaseBlockedSend()
         try await upstream.waitForBlockedCancellation()
         #expect(await upstream.sentCount() == 4)
         await upstream.releaseBlockedCancellation()
@@ -6762,6 +6834,9 @@ struct RuntimeCoordinatorRecoveryTests {
             try await manager.controlPlaneDebugMirror.waitForSnapshot {
                 $0.waiterCounts.windows == 0 && $0.inFlightControlPlaneRequests.isEmpty
             }
+        }
+        _ = try await waitWithTimeout("waiting for timed-out XcodeListWindows request cleanup") {
+            await manager.drainControlPlaneLoadsForTesting()
         }
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
         let firstCancellation = try await sentValue(
@@ -12507,7 +12582,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
 
     @Test func controlPlaneRPCHandlePublishesSharedDeliveryBeforeInvokingCancellation() async {
         let handle = ControlPlane.RPCHandle()
-        let callbackDelivery = NIOLockedValueBox<AsyncTerminalSignal?>(nil)
+        let callbackDelivery = NIOLockedValueBox<ControlPlane.RPCCancellationDelivery?>(nil)
         let callbackCause = NIOLockedValueBox<ControlPlane.RPCCancellationCause?>(nil)
 
         let firstDelivery = handle.cancel(cause: .timedOut)
@@ -12524,8 +12599,8 @@ struct RuntimeCoordinatorWindowRoutingTests {
         #expect(firstDelivery === installedDelivery)
         #expect(callbackCause.withLockedValue { $0 } == .timedOut)
 
-        installedDelivery?.signal()
-        await firstDelivery?.wait()
+        installedDelivery?.complete(.delivered)
+        #expect(await firstDelivery?.wait() == .delivered)
     }
 
     @Test func controlPlaneRPCCancelBetweenPreflightAndEnqueueRemovesQueuedRequest()

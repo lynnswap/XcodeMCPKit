@@ -1174,6 +1174,47 @@ struct ControlPlaneAuthorityTests {
         )
     }
 
+    @Test func catalogTimeoutBackoffBlocksLoadsAndAdvancesRetryOrdinal() throws {
+        let target = xcodeProcessTarget(processID: 41032, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let proof = testTopologyProof(0)
+        let (firstLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 1
+        ))
+
+        let firstTimeout = try #require(authority.handleCatalogRequestTimeout(
+            routeID: route.id,
+            upstreamProof: proof,
+            nowUptimeNs: 2
+        ))
+
+        #expect(firstTimeout.catalogLease.attempt == firstLease.attempt)
+        #expect(firstTimeout.retry.delay == .milliseconds(250))
+        #expect(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 3
+        ) == nil)
+
+        #expect(authority.handleRetryFired(firstTimeout.catalogLease))
+        let (secondLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 4
+        ))
+        let secondTimeout = try #require(authority.handleCatalogRequestTimeout(
+            routeID: route.id,
+            upstreamProof: proof,
+            nowUptimeNs: 5
+        ))
+
+        #expect(secondLease.attempt == firstLease.attempt)
+        #expect(secondTimeout.retry.delay == .milliseconds(500))
+    }
+
     @Test func windowUpdatesDoNotInvalidateCatalogLease() throws {
         let target = xcodeProcessTarget(processID: 41004, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0])])

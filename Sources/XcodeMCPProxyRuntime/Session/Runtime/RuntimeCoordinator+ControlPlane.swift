@@ -529,7 +529,7 @@ extension RuntimeCoordinator {
     func scheduleMissingProcessToolsCatalogRetry(
         processID: pid_t,
         lease: CatalogLease,
-        after cancellationDeliveries: [AsyncTerminalSignal] = [],
+        after cancellationDeliveries: [ControlPlane.RPCCancellationDelivery] = [],
         reason: String
     ) {
         guard let scheduled = processControlPlane.scheduleRetry(lease: lease) else { return }
@@ -549,15 +549,31 @@ extension RuntimeCoordinator {
         processID: pid_t,
         lease: CatalogLease,
         retry: ProcessControlPlaneAuthority.Retry,
-        after cancellationDeliveries: [AsyncTerminalSignal],
+        after cancellationDeliveries: [ControlPlane.RPCCancellationDelivery],
         reason: String
     ) {
         guard cancellationDeliveries.isEmpty else {
             addRuntimeTask { [weak self] in
+                var rejected = false
+                var permitsSameSlotReuse = true
                 for delivery in cancellationDeliveries {
-                    await delivery.wait()
+                    let result = await delivery.wait()
+                    guard result.permitsSameSlotReuse else {
+                        permitsSameSlotReuse = false
+                        rejected = rejected || result == .rejected
+                        continue
+                    }
                 }
-                self?.armMissingProcessToolsCatalogRetry(
+                guard let self else { return }
+                guard rejected == false else {
+                    self.recoverProcessCatalogAfterRejectedCancellation(
+                        lease: lease,
+                        reason: reason
+                    )
+                    return
+                }
+                guard permitsSameSlotReuse else { return }
+                self.armMissingProcessToolsCatalogRetry(
                     processID: processID,
                     lease: lease,
                     retry: retry,
@@ -571,6 +587,31 @@ extension RuntimeCoordinator {
             lease: lease,
             retry: retry,
             reason: reason
+        )
+    }
+
+    private func recoverProcessCatalogAfterRejectedCancellation(
+        lease: CatalogLease,
+        reason: String
+    ) {
+        logger.warning(
+            "Process catalog cancellation was rejected; replacing its upstream channel",
+            metadata: [
+                "pid": .string("\(lease.processID)"),
+                "upstream": .string("\(lease.upstreamIndex)"),
+                "reason": .string(reason),
+            ]
+        )
+        guard clearUpstreamState(
+            proof: lease.topologyProof,
+            resetsProcessRouteActivation: false
+        ) else {
+            return
+        }
+        _ = replaceOrRetireInitializeChannel(
+            lease.topologyProof,
+            expectedRouteID: lease.routeIdentity,
+            requestsBridgePoolRecovery: false
         )
     }
 
@@ -976,33 +1017,34 @@ extension RuntimeCoordinator {
                 _ = router.cancelPending(token: registrationToken)
             }
             let requestIDKeys = snapshot.requestIDKey.map { [$0] } ?? [originalID.key]
-            let upstreamDelivery: AsyncTerminalSignal?
+            let upstreamDelivery: ControlPlane.RPCCancellationDelivery?
             switch snapshot.cause {
             case .cancelled:
                 upstreamDelivery = self.abandonRequestLeaseWithCancellationDelivery(
                     leaseID,
                     sessionID: internalSessionID,
                     requestIDKeys: requestIDKeys,
-                    operationLease: snapshot.operationLease
+                    operationLease: snapshot.operationLease,
+                    after: snapshot.requestSendCompletion
                 )
             case .timedOut:
                 upstreamDelivery = self.handleRequestLeaseTimeoutWithCancellationDelivery(
                     leaseID,
                     sessionID: internalSessionID,
                     requestIDKeys: requestIDKeys,
-                    operationLease: snapshot.operationLease
+                    operationLease: snapshot.operationLease,
+                    after: snapshot.requestSendCompletion
                 )
             }
             guard let upstreamDelivery else {
-                cancellationDelivery.signal()
+                cancellationDelivery.complete(.noLongerApplicable)
                 return
             }
             let scheduled = self.addRuntimeTask {
-                await upstreamDelivery.wait()
-                cancellationDelivery.signal()
+                cancellationDelivery.complete(await upstreamDelivery.wait())
             }
             if scheduled == false {
-                cancellationDelivery.signal()
+                cancellationDelivery.complete(.rejected)
             }
         }
         if rpcHandle?.isCancelled() == true {
@@ -1107,10 +1149,12 @@ extension RuntimeCoordinator {
                     )
                     return self.eventLoop.makeFailedFuture(CancellationError())
                 }
+                let requestSendCompletion = rpcHandle?.requestSendCompletion()
                 var upstreamObject = requestTemplate.mapValues(\.foundationObject)
                 upstreamObject["id"] = upstreamID
                 guard let requestData = try? JSONRPC.Wire.data(from: upstreamObject)
                 else {
+                    requestSendCompletion?.signal()
                     self.failRequestLease(
                         leaseID,
                         terminalState: .failed,
@@ -1127,6 +1171,7 @@ extension RuntimeCoordinator {
                     )
                 }
                 if rpcHandle?.isCancelled() == true {
+                    requestSendCompletion?.signal()
                     _ = session.router.cancelPending(token: registration.token)
                     self.removeUpstreamIDMapping(
                         sessionID: internalSessionID,
@@ -1147,6 +1192,7 @@ extension RuntimeCoordinator {
                     operationLease: selectedOperationLease,
                     ensureRunning: false,
                     admission: nil,
+                    requestSendCompletion: requestSendCompletion,
                     onRejected: {
                         _ = session.router.cancelPending(token: registration.token)
                     }

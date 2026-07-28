@@ -5,7 +5,9 @@ import XcodeMCPKit
 
 extension RuntimeCoordinator {
     @discardableResult
-    func applyCatalogCommit(_ commit: CatalogCommit) -> [AsyncTerminalSignal] {
+    func applyCatalogCommit(
+        _ commit: CatalogCommit
+    ) -> [ControlPlane.RPCCancellationDelivery] {
         switch commit {
         case .accepted(_, let transition), .discarded(_, let transition):
             return applyProcessControlPlaneTransition(transition)

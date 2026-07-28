@@ -11,10 +11,13 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     private let startEvents = RecordedValues<Int>()
     private let stopEvents = RecordedValues<Int>()
     private let blockedCancellationSignal = TestSignal()
+    private let blockedSendSignal = TestSignal()
     private var startCountValue = 0
     private var stopCountValue = 0
     private var shouldBlockNextCancellation = false
     private var blockedCancellation: CheckedContinuation<Upstream.SendResult, Never>?
+    private var blockedMethod: String?
+    private var blockedSend: CheckedContinuation<Upstream.SendResult, Never>?
 
     init() {
         var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
@@ -33,14 +36,23 @@ actor TestUpstreamClient: UpstreamSlotControlling {
         stopCountValue += 1
         await stopEvents.append(stopCountValue)
         releaseBlockedCancellation()
+        releaseBlockedSend(.unavailable(.terminated))
         continuation.finish()
     }
 
     func send(_ data: Data) async -> Upstream.SendResult {
         await sentMessages.append(data)
+        let method = methodName(from: data)
         guard shouldBlockNextCancellation,
-              methodName(from: data) == "notifications/cancelled"
+              method == "notifications/cancelled"
         else {
+            if blockedMethod == method {
+                blockedMethod = nil
+                blockedSendSignal.signal()
+                return await withCheckedContinuation { continuation in
+                    blockedSend = continuation
+                }
+            }
             return .accepted
         }
         shouldBlockNextCancellation = false
@@ -66,6 +78,25 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     func releaseBlockedCancellation() {
         blockedCancellation?.resume(returning: .accepted)
         blockedCancellation = nil
+    }
+
+    func blockNextSend(method: String) {
+        precondition(blockedMethod == nil && blockedSend == nil)
+        blockedMethod = method
+    }
+
+    func waitForBlockedSend() async throws {
+        if blockedSend != nil {
+            return
+        }
+        try await blockedSendSignal.wait(
+            description: "waiting for blocked \(blockedMethod ?? "upstream") send"
+        )
+    }
+
+    func releaseBlockedSend(_ result: Upstream.SendResult = .accepted) {
+        blockedSend?.resume(returning: result)
+        blockedSend = nil
     }
 
     func yield(_ event: Upstream.Event) async {

@@ -470,6 +470,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var catalogEligibilityEstablished: Bool
         var bridgeRecovery: BridgeRecoveryState
         var nextAttemptID: Int
+        var catalogRetryCount: Int
         var attempt: Attempt?
 
         func cooldown(_ scope: CooldownScope) -> Cooldown {
@@ -1479,6 +1480,9 @@ final class ProcessControlPlaneAuthority: Sendable {
                     )
                 )
             }
+            if record.attempt?.phase == .backoff {
+                return nil
+            }
             let effects = record.attempt?.detachedEffects() ?? []
             record.nextAttemptID &+= 1
             var attempt = Attempt(
@@ -1688,6 +1692,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     state.processIDByUpstreamID[UpstreamSlotID(rawValue: upstreamIndex)] =
                         record.route.target.processID
                 }
+                record.catalogRetryCount = 0
                 effects.append(contentsOf: record.clearAllCooldowns().effects)
                 attempt.phase = .cataloged
                 effects.append(contentsOf: Self.takeBridgePoolRecoveryEffects(owner: &record))
@@ -1971,6 +1976,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             attempt.readinessToken = nil
             attempt.phase = .backoff
             var updated = record
+            updated.catalogRetryCount &+= 1
             updated.attempt = attempt
             state.recordsByKey[key] = updated
             return (
@@ -1980,7 +1986,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     routeID: lease.routeID,
                     catalogEpoch: state.catalogEpoch
                 ),
-                Self.retry(forAttempt: attempt.id.rawValue),
+                Self.retry(forAttempt: updated.catalogRetryCount),
                 ProcessControlPlaneTransition(
                     addedRoutes: [],
                     retiredRoutes: [],
@@ -2096,6 +2102,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             attempt.retryKind = .catalog
             attempt.loads.removeAll()
             attempt.phase = .backoff
+            record.catalogRetryCount &+= 1
             record.attempt = attempt
             state.recordsByKey[key] = record
             return CatalogRequestTimeout(
@@ -2105,7 +2112,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     effects: effects,
                     publishesToolsListChanged: false
                 ),
-                retry: Self.retry(forAttempt: attempt.id.rawValue),
+                retry: Self.retry(forAttempt: record.catalogRetryCount),
                 catalogLease: Self.lease(
                     for: attempt,
                     loadID: loadID,
@@ -2330,6 +2337,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 pendingUpstreamIDs: Self.secondaryUpstreamIDs(in: route)
             ),
             nextAttemptID: 0,
+            catalogRetryCount: 0,
             attempt: nil
         )
         if state.order.contains(key) == false { state.order.append(key) }

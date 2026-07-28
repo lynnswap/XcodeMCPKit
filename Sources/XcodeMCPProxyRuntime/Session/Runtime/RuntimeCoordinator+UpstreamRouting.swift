@@ -331,8 +331,9 @@ extension RuntimeCoordinator {
     private func cancelUpstreamRequest(
         sessionID: String,
         requestIDKey: String,
-        operationLease: UpstreamOperationLease
-    ) -> AsyncTerminalSignal? {
+        operationLease: UpstreamOperationLease,
+        after requestSendCompletion: AsyncTerminalSignal? = nil
+    ) -> ControlPlane.RPCCancellationDelivery? {
         guard let upstreamID = upstreamRouter.remove(
             proof: operationLease.proof,
             sessionID: sessionID,
@@ -347,44 +348,68 @@ extension RuntimeCoordinator {
         ) else {
             return nil
         }
-        let delivery = AsyncTerminalSignal()
-        let scheduled = addRuntimeTask { [weak self, operationLease] in
+        let delivery = ControlPlane.RPCCancellationDelivery()
+        let scheduled = addRuntimeTask {
+            [weak self, operationLease, requestSendCompletion] in
+            await requestSendCompletion?.wait()
             guard let self else {
-                delivery.signal()
+                delivery.complete(.noLongerApplicable)
                 return
             }
-            defer { delivery.signal() }
-            guard self.upstreamTopology.validate(operationLease) else { return }
+            guard self.upstreamTopology.validate(operationLease) else {
+                delivery.complete(.noLongerApplicable)
+                return
+            }
             let result = await operationLease.slot.send(data)
-            guard self.upstreamTopology.validate(operationLease) else { return }
-            if case .accepted = result {
+            guard self.upstreamTopology.validate(operationLease) else {
+                delivery.complete(.noLongerApplicable)
+                return
+            }
+            switch result {
+            case .accepted:
                 self.recordTraffic(
                     upstreamIndex: operationLease.upstreamIndex,
                     direction: "outbound",
                     data: data
                 )
+                delivery.complete(.delivered)
+            case .backpressure:
+                self.markUpstreamOverloaded(operationLease.proof)
+                delivery.complete(.rejected)
+            case .unavailable(let reason):
+                self.handleUnavailableUpstreamSend(
+                    operationLease: operationLease,
+                    reason: reason
+                )
+                delivery.complete(.noLongerApplicable)
             }
         }
         if scheduled == false {
-            delivery.signal()
+            delivery.complete(.rejected)
         }
         return delivery
     }
 
     private func cancellationDelivery(
-        waitingFor deliveries: [AsyncTerminalSignal]
-    ) -> AsyncTerminalSignal? {
+        waitingFor deliveries: [ControlPlane.RPCCancellationDelivery]
+    ) -> ControlPlane.RPCCancellationDelivery? {
         guard deliveries.isEmpty == false else { return nil }
         guard deliveries.count > 1 else { return deliveries[0] }
-        let aggregate = AsyncTerminalSignal()
+        let aggregate = ControlPlane.RPCCancellationDelivery()
         let scheduled = addRuntimeTask {
+            var result = ControlPlane.RPCCancellationDelivery.Result.delivered
             for delivery in deliveries {
-                await delivery.wait()
+                let next = await delivery.wait()
+                if next == .rejected {
+                    result = .rejected
+                } else if next == .noLongerApplicable, result == .delivered {
+                    result = .noLongerApplicable
+                }
             }
-            aggregate.signal()
+            aggregate.complete(result)
         }
         if scheduled == false {
-            aggregate.signal()
+            aggregate.complete(.rejected)
         }
         return aggregate
     }
@@ -420,19 +445,42 @@ extension RuntimeCoordinator {
         admission: RouteForwardingAdmission?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
+        sendUpstream(
+            data,
+            operationLease: operationLease,
+            ensureRunning: ensureRunning,
+            admission: admission,
+            requestSendCompletion: nil,
+            onRejected: onRejected
+        )
+    }
+
+    @discardableResult
+    func sendUpstream(
+        _ data: Data,
+        operationLease: UpstreamOperationLease,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission?,
+        requestSendCompletion: AsyncTerminalSignal?,
+        onRejected: @escaping @Sendable () -> Void
+    ) -> Bool {
         let upstreamIndex = operationLease.upstreamIndex
         guard upstreamTopology.validate(operationLease) else {
             onRejected()
+            requestSendCompletion?.signal()
             return false
         }
         if let admission {
             guard processControlPlane.validate(admission.route),
                   admission.proof(for: upstreamIndex) == operationLease.proof else {
                 onRejected()
+                requestSendCompletion?.signal()
                 return false
             }
         }
-        let scheduled = addRuntimeTask { [weak self, operationLease, admission, onRejected] in
+        let scheduled = addRuntimeTask {
+            [weak self, operationLease, admission, requestSendCompletion, onRejected] in
+            defer { requestSendCompletion?.signal() }
             guard let self else { return }
             if ensureRunning {
                 await operationLease.slot.start()
@@ -483,6 +531,7 @@ extension RuntimeCoordinator {
         }
         if scheduled == false {
             onRejected()
+            requestSendCompletion?.signal()
         }
         return scheduled
     }
@@ -728,14 +777,16 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease?
-    ) -> AsyncTerminalSignal? {
-        var cancellationDeliveries: [AsyncTerminalSignal] = []
+        operationLease: UpstreamOperationLease?,
+        after requestSendCompletion: AsyncTerminalSignal? = nil
+    ) -> ControlPlane.RPCCancellationDelivery? {
+        var cancellationDeliveries: [ControlPlane.RPCCancellationDelivery] = []
         if let operationLease, let first = requestIDKeys.first {
             if let delivery = cancelUpstreamRequest(
                 sessionID: sessionID,
                 requestIDKey: first,
-                operationLease: operationLease
+                operationLease: operationLease,
+                after: requestSendCompletion
             ) {
                 cancellationDeliveries.append(delivery)
             }
@@ -743,7 +794,8 @@ extension RuntimeCoordinator {
                 if let delivery = cancelUpstreamRequest(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    operationLease: operationLease
+                    operationLease: operationLease,
+                    after: requestSendCompletion
                 ) {
                     cancellationDeliveries.append(delivery)
                 }
@@ -773,15 +825,17 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease?
-    ) -> AsyncTerminalSignal? {
-        var deliveries: [AsyncTerminalSignal] = []
+        operationLease: UpstreamOperationLease?,
+        after requestSendCompletion: AsyncTerminalSignal? = nil
+    ) -> ControlPlane.RPCCancellationDelivery? {
+        var deliveries: [ControlPlane.RPCCancellationDelivery] = []
         if let operationLease {
             for requestIDKey in requestIDKeys {
                 if let delivery = cancelUpstreamRequest(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    operationLease: operationLease
+                    operationLease: operationLease,
+                    after: requestSendCompletion
                 ) {
                     deliveries.append(delivery)
                 }
