@@ -30,12 +30,7 @@ extension UpstreamHealthManager {
     func clearUpstreamState(
         upstreamIndex: Int,
         expectedUpstreamID: Int64? = nil
-    ) -> (
-        timeout: RuntimeScheduledTimeout?,
-        initUpstreamID: Int64?,
-        didReceiveInitializeResponse: Bool,
-        didSendInitialized: Bool
-    )? {
+    ) -> ClearedUpstreamState? {
         guard let proof = topologyProof(for: upstreamIndex) else { return nil }
         return clearUpstreamState(proof, expectedUpstreamID: expectedUpstreamID)
     }
@@ -2353,6 +2348,7 @@ struct RuntimeCoordinatorFixture {
         processRoutingEnabled: Bool? = nil,
         xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
         dynamicUpstreamFactory: XcodeProcessUpstreamFactory? = nil,
+        unboundUpstreamFactory: UnboundUpstreamFactory? = nil,
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
@@ -2375,6 +2371,7 @@ struct RuntimeCoordinatorFixture {
             processRoutingEnabled: processRoutingEnabled,
             xcodeTargetDiscovery: xcodeTargetDiscovery,
             dynamicUpstreamFactory: dynamicUpstreamFactory,
+            unboundUpstreamFactory: unboundUpstreamFactory,
             documentationProviderManager: documentationProviderManager,
             prewarmDocumentationProviderOnStartup: prewarmDocumentationProviderOnStartup,
             testHooks: testHooks,

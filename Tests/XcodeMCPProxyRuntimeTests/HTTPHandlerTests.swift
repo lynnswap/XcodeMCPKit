@@ -2866,7 +2866,6 @@ struct HTTPHandlerTests {
             requestIDKeys: ["91"]
         )
         #expect(cancellationHandle.activate(operationLease: operationLease))
-        cancellationHandle.cancel(using: sessionManager)
 
         let requestObject = JSONRPC.Wire.requestObject(
             id: 91,
@@ -2881,6 +2880,12 @@ struct HTTPHandlerTests {
                 operationLeaseOverride: operationLease
             )
         )
+        #expect(sessionManager.mappedUpstreamRequestCount() == 1)
+
+        cancellationHandle.cancel(using: sessionManager)
+
+        #expect(sessionManager.lastAbandonedRequestHadOperationLease() == false)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 1)
 
         #expect(throws: CancellationError.self) {
             _ = try forwardingService.startRequest(

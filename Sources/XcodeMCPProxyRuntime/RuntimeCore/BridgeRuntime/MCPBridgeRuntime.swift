@@ -66,13 +66,7 @@ enum MCPBridgeRuntime {
         } else {
             upstreams.reserveCapacity(upstreamCount)
             for _ in 0..<upstreamCount {
-                let upstreamConfig = makeDefaultUpstreamConfig(
-                    config: config,
-                    xcodeTarget: nil
-                )
-                upstreams.append(
-                    ManagedUpstreamSlot(factory: UpstreamProcess(configuration: upstreamConfig))
-                )
+                upstreams.append(makeUnboundUpstreamSlot(config: config))
             }
         }
 
@@ -101,6 +95,19 @@ enum MCPBridgeRuntime {
                 )
             )
         }
+    }
+
+    static func makeUnboundUpstreamSlot(
+        config: Configuration
+    ) -> ManagedUpstreamSlot {
+        ManagedUpstreamSlot(
+            factory: UpstreamProcess(
+                configuration: makeDefaultUpstreamConfig(
+                    config: config,
+                    xcodeTarget: nil
+                )
+            )
+        )
     }
 
     static func supportsProcessBoundRouting(config: Configuration) -> Bool {

@@ -27,6 +27,14 @@ final class UpstreamHealthManager: Sendable {
         var upstreamIndex: Int { upstreamID.rawValue }
     }
 
+    struct ClearedUpstreamState: Sendable {
+        let timeout: RuntimeScheduledTimeout?
+        let initUpstreamID: Int64?
+        let didReceiveInitializeResponse: Bool
+        let didSendInitialized: Bool
+        let initializeOwner: InitializeClaimOwner?
+    }
+
     struct BridgeAttachmentVerification: Sendable {
         let recovery: ProcessBridgeRecovery
         let initializeParticipant: CanonicalHandshakeState.InitializeParticipantLease
@@ -624,12 +632,7 @@ final class UpstreamHealthManager: Sendable {
         commit: () -> Bool
     ) -> (
         recovery: ProcessBridgePoolRecovery,
-        cleared: (
-            timeout: RuntimeScheduledTimeout?,
-            initUpstreamID: Int64?,
-            didReceiveInitializeResponse: Bool,
-            didSendInitialized: Bool
-        )?
+        cleared: ClearedUpstreamState?
     )? {
         state.withLockedValue { state in
             guard case .processBridgeAttachment(let verification) = request.purpose else {
@@ -750,23 +753,26 @@ final class UpstreamHealthManager: Sendable {
         owner: InitializeClaimOwner = .regular
     ) -> InitializeClaim? {
         state.withLockedValue { state in
-            guard Self.isActive(upstreamIndex, state: state) else { return nil }
-            if state.upstreamStates[upstreamIndex].isInitialized || state.upstreamStates[upstreamIndex].initInFlight {
-                return nil
-            }
-            state.nextInitializeClaimGeneration &+= 1
-            let claim = InitializeClaim(
-                upstreamID: UpstreamSlotID(rawValue: upstreamIndex),
-                generation: state.nextInitializeClaimGeneration,
+            let upstreamID = UpstreamSlotID(rawValue: upstreamIndex)
+            guard let proof = state.topology?.proof(upstreamID) else { return nil }
+            return Self.claimWarmInitialize(
+                proof: proof,
                 owner: owner,
-                topologyProof: state.topology?.proof(
-                    UpstreamSlotID(rawValue: upstreamIndex)
-                )
+                state: &state
             )
-            state.upstreamStates[upstreamIndex].initInFlight = true
-            state.upstreamStates[upstreamIndex].initializeClaim = claim
-            state.upstreamStates[upstreamIndex].initializeClaimPhase = .reserved
-            return claim
+        }
+    }
+
+    func claimWarmInitialize(
+        topologyProof: UpstreamTopologyProof,
+        owner: InitializeClaimOwner = .regular
+    ) -> InitializeClaim? {
+        state.withLockedValue { state in
+            Self.claimWarmInitialize(
+                proof: topologyProof,
+                owner: owner,
+                state: &state
+            )
         }
     }
 
@@ -842,12 +848,7 @@ final class UpstreamHealthManager: Sendable {
 
     func clearInitializeClaim(
         _ claim: InitializeClaim
-    ) -> (
-        timeout: RuntimeScheduledTimeout?,
-        initUpstreamID: Int64?,
-        didReceiveInitializeResponse: Bool,
-        didSendInitialized: Bool
-    )? {
+    ) -> ClearedUpstreamState? {
         state.withLockedValue { state in
             guard Self.owns(claim, state: state) else { return nil }
             return Self.clearUpstreamState(at: claim.upstreamIndex, state: &state)
@@ -871,12 +872,7 @@ final class UpstreamHealthManager: Sendable {
     func clearUpstreamState(
         _ proof: UpstreamTopologyProof,
         expectedUpstreamID: Int64? = nil
-    ) -> (
-        timeout: RuntimeScheduledTimeout?,
-        initUpstreamID: Int64?,
-        didReceiveInitializeResponse: Bool,
-        didSendInitialized: Bool
-    )? {
+    ) -> ClearedUpstreamState? {
         state.withLockedValue { state in
             guard Self.isActive(proof, state: state) else { return nil }
             let upstreamIndex = proof.slotID.rawValue
@@ -1212,6 +1208,31 @@ final class UpstreamHealthManager: Sendable {
         }
     }
 
+    private static func claimWarmInitialize(
+        proof: UpstreamTopologyProof,
+        owner: InitializeClaimOwner,
+        state: inout State
+    ) -> InitializeClaim? {
+        guard isActive(proof, state: state) else { return nil }
+        let upstreamIndex = proof.slotID.rawValue
+        if state.upstreamStates[upstreamIndex].isInitialized
+            || state.upstreamStates[upstreamIndex].initInFlight
+        {
+            return nil
+        }
+        state.nextInitializeClaimGeneration &+= 1
+        let claim = InitializeClaim(
+            upstreamID: proof.slotID,
+            generation: state.nextInitializeClaimGeneration,
+            owner: owner,
+            topologyProof: proof
+        )
+        state.upstreamStates[upstreamIndex].initInFlight = true
+        state.upstreamStates[upstreamIndex].initializeClaim = claim
+        state.upstreamStates[upstreamIndex].initializeClaimPhase = .reserved
+        return claim
+    }
+
     private static func matches(_ claim: InitializeClaim, state: State) -> Bool {
         let upstreamIndex = claim.upstreamIndex
         guard isActive(upstreamIndex, state: state),
@@ -1233,25 +1254,22 @@ final class UpstreamHealthManager: Sendable {
     private static func clearUpstreamState(
         at upstreamIndex: Int,
         state: inout State
-    ) -> (
-        timeout: RuntimeScheduledTimeout?,
-        initUpstreamID: Int64?,
-        didReceiveInitializeResponse: Bool,
-        didSendInitialized: Bool
-    ) {
+    ) -> ClearedUpstreamState {
         let timeout = state.upstreamStates[upstreamIndex].initTimeout
         let initUpstreamID = state.upstreamStates[upstreamIndex].initUpstreamID
         let didReceiveInitializeResponse =
             state.upstreamStates[upstreamIndex].didReceiveInitializeResponse
         let didSendInitialized = state.upstreamStates[upstreamIndex].didSendInitialized
+        let initializeOwner = state.upstreamStates[upstreamIndex].initializeClaim?.owner
         let nextProbeGeneration = state.upstreamStates[upstreamIndex].healthProbeGeneration &+ 1
         state.upstreamStates[upstreamIndex] = UpstreamState()
         state.upstreamStates[upstreamIndex].healthProbeGeneration = nextProbeGeneration
-        return (
-            timeout,
-            initUpstreamID,
-            didReceiveInitializeResponse,
-            didSendInitialized
+        return ClearedUpstreamState(
+            timeout: timeout,
+            initUpstreamID: initUpstreamID,
+            didReceiveInitializeResponse: didReceiveInitializeResponse,
+            didSendInitialized: didSendInitialized,
+            initializeOwner: initializeOwner
         )
     }
 

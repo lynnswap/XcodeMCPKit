@@ -2459,6 +2459,45 @@ extension HTTPHandlerTests {
         #expect(sessionManager.chooseUpstreamShouldPinValues().isEmpty)
     }
 
+    @Test func forwardingServiceInternalToolTimeoutIsAccountedOnce() async throws {
+        let config = makeHTTPConfig(requestTimeout: 2)
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
+        let eventLoop = eventLoopGroup.next()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { _, _, originalID in
+                .manual(try makeToolSuccessResponse(id: originalID, text: "late"))
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([0])
+        let forwardingService = MCPForwardingService(
+            configuration: config.runtime,
+            sessionManager: sessionManager
+        )
+
+        let result = await forwardingService.callInternalTool(
+            name: "XcodeListNavigatorIssues",
+            arguments: ["tabIdentifier": "windowtab-timeout-accounting"],
+            sessionID: "session-timeout-accounting",
+            eventLoop: eventLoop,
+            upstreamIndexOverride: 0,
+            requestTimeoutOverride: .milliseconds(20)
+        )
+
+        guard case .timeout = result else {
+            Issue.record("expected internal tool request to time out")
+            return
+        }
+        #expect(sessionManager.requestTimeoutNotificationCount() == 1)
+        #expect(sessionManager.requestSuccessNotificationCount() == 0)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+        let lease = try #require(sessionManager.leaseDebugSnapshots().first)
+        #expect(lease.state == .timedOut)
+        #expect(lease.releaseReason == "timedOut")
+    }
+
     @Test func forwardingServiceInternalToolRespectsRequestedOverride()
         async throws
     {
@@ -2605,6 +2644,58 @@ extension HTTPHandlerTests {
         }
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+    }
+
+    @Test func forwardingServiceInternalToolRejectsCancelledParentBeforePreparingRequest()
+        async throws
+    {
+        let config = makeHTTPConfig(requestTimeout: 2)
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(eventLoopGroup) }
+        let eventLoop = eventLoopGroup.next()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamPlanResponder: nil
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setAvailableUpstreamIndices([0])
+
+        let parentLeaseID = sessionManager.createRequestLease(
+            descriptor: .init(
+                sessionID: "session-preparation-cancellation",
+                label: "parent",
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        let parentCancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
+            leaseID: parentLeaseID,
+            sessionID: "session-preparation-cancellation",
+            requestIDKeys: []
+        )
+        parentCancellationHandle.cancel(using: sessionManager)
+
+        let forwardingService = MCPForwardingService(
+            configuration: config.runtime,
+            sessionManager: sessionManager
+        )
+        let result = await forwardingService.callInternalTool(
+            name: "XcodeListNavigatorIssues",
+            arguments: ["tabIdentifier": "windowtab-preparation-cancellation"],
+            sessionID: "session-preparation-cancellation",
+            eventLoop: eventLoop,
+            cancellationHandle: parentCancellationHandle,
+            upstreamIndexOverride: 0
+        )
+
+        guard case .cancelled = result else {
+            Issue.record("expected cancelled parent to reject the internal request")
+            return
+        }
+        #expect(sessionManager.assignedUpstreamIDCount() == 0)
+        #expect(sessionManager.sentUpstreamCount() == 0)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+        #expect(sessionManager.lastAbandonedRequestHadOperationLease() == false)
     }
 
     @Test func forwardingServiceInternalXcodeListWindowsUsesLiveWindowAggregation()

@@ -103,10 +103,21 @@ extension RuntimeCoordinator {
             )
             return
         }
+        guard let operationLease = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        ) else { return }
+        if deferInitializeUntilUpstreamActivatable(
+            operationLease,
+            resume: { [weak self] in
+                self?.sendPrimaryInitializeRequestIfStillPending()
+            }
+        ) {
+            return
+        }
+        let proof = operationLease.proof
         guard let initializeClaim = upstreamHealthManager.claimWarmInitialize(
-            upstreamIndex: upstreamIndex
-        ), let proof = initializeClaim.topologyProof,
-           let operationLease = upstreamTopology.operationLease(for: proof),
+            topologyProof: proof
+        ),
            let upstreamID = upstreamRouter.assignInitialize(proof: proof) else {
             return
         }
@@ -1003,12 +1014,19 @@ extension RuntimeCoordinator {
         expectedUpstreamID: Int64? = nil,
         resetsProcessRouteActivation: Bool = true
     ) -> Bool {
-        var cleared: (
-            timeout: RuntimeScheduledTimeout?,
-            initUpstreamID: Int64?,
-            didReceiveInitializeResponse: Bool,
-            didSendInitialized: Bool
-        )?
+        clearUpstreamStateReturningDetachedState(
+            proof: proof,
+            expectedUpstreamID: expectedUpstreamID,
+            resetsProcessRouteActivation: resetsProcessRouteActivation
+        ) != nil
+    }
+
+    func clearUpstreamStateReturningDetachedState(
+        proof: UpstreamTopologyProof,
+        expectedUpstreamID: Int64? = nil,
+        resetsProcessRouteActivation: Bool = true
+    ) -> UpstreamHealthManager.ClearedUpstreamState? {
+        var cleared: UpstreamHealthManager.ClearedUpstreamState?
         var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
         let eligibility = initializeManager.finishSupportEligibilityUpdate {
             var update: CanonicalHandshakeState.SupportEligibilityUpdate?
@@ -1027,7 +1045,7 @@ extension RuntimeCoordinator {
             }) == true else { return nil }
             return update
         }
-        guard let cleared, let eligibility, let processEligibility else { return false }
+        guard let cleared, let eligibility, let processEligibility else { return nil }
         applyProcessControlPlaneTransition(processEligibility.transition)
         applySupportEligibilityCompletion(eligibility)
         finishClearingUpstreamState(
@@ -1035,7 +1053,7 @@ extension RuntimeCoordinator {
             cleared: cleared,
             resetsProcessRouteActivation: resetsProcessRouteActivation
         )
-        return true
+        return cleared
     }
 
     @discardableResult
@@ -1045,12 +1063,7 @@ extension RuntimeCoordinator {
         replacesInitializedChannel: Bool = true
     ) -> Bool {
         guard let proof = initializeClaim.topologyProof else { return false }
-        var cleared: (
-            timeout: RuntimeScheduledTimeout?,
-            initUpstreamID: Int64?,
-            didReceiveInitializeResponse: Bool,
-            didSendInitialized: Bool
-        )?
+        var cleared: UpstreamHealthManager.ClearedUpstreamState?
         var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
         let eligibility = initializeManager.finishSupportEligibilityUpdate {
             var update: CanonicalHandshakeState.SupportEligibilityUpdate?
@@ -1091,12 +1104,7 @@ extension RuntimeCoordinator {
 
     func finishClearingUpstreamState(
         proof: UpstreamTopologyProof,
-        cleared: (
-            timeout: RuntimeScheduledTimeout?,
-            initUpstreamID: Int64?,
-            didReceiveInitializeResponse: Bool,
-            didSendInitialized: Bool
-        ),
+        cleared: UpstreamHealthManager.ClearedUpstreamState,
         resetsProcessRouteActivation: Bool
     ) {
         let upstreamIndex = proof.slotID.rawValue

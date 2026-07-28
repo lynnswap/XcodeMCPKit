@@ -161,7 +161,7 @@ extension ControlPlane {
         let registrationToken: UUID?
         let operationLease: UpstreamOperationLease?
         let requestIDKey: String?
-        let requestSendCompletion: AsyncTerminalSignal?
+        let requestSendCompletion: UpstreamRequestSendCompletion?
         let cause: RPCCancellationCause
 
         var upstreamIndex: Int? { operationLease?.upstreamIndex }
@@ -170,7 +170,7 @@ extension ControlPlane {
             registrationToken: UUID?,
             operationLease: UpstreamOperationLease?,
             requestIDKey: String?,
-            requestSendCompletion: AsyncTerminalSignal?,
+            requestSendCompletion: UpstreamRequestSendCompletion?,
             cause: RPCCancellationCause
         ) {
             self.registrationToken = registrationToken
@@ -239,7 +239,7 @@ extension ControlPlane {
                 registrationToken: UUID,
                 operationLease: UpstreamOperationLease,
                 requestIDKey: String,
-                requestSendCompletion: AsyncTerminalSignal
+                requestSendCompletion: UpstreamRequestSendCompletion
             )
             case finished
             case cancelled(ControlPlane.RPCCancelSnapshot)
@@ -326,7 +326,7 @@ extension ControlPlane {
                     else {
                         return false
                     }
-                    let requestSendCompletion = AsyncTerminalSignal()
+                    let requestSendCompletion = UpstreamRequestSendCompletion()
                     state.state = .assigned(
                         registrationToken: registrationToken,
                         operationLease: operationLease,
@@ -351,7 +351,7 @@ extension ControlPlane {
             }
         }
 
-        func requestSendCompletion() -> AsyncTerminalSignal? {
+        func requestSendCompletion() -> UpstreamRequestSendCompletion? {
             state.withLockedValue { state in
                 switch state.state {
                 case .assigned(_, _, _, let requestSendCompletion):
@@ -397,10 +397,10 @@ extension ControlPlane {
                         requestSendCompletion: nil,
                         cause: cause
                     )
-                case .registered(let registrationToken, let operationLease):
+                case .registered(let registrationToken, _):
                     snapshot = ControlPlane.RPCCancelSnapshot(
                         registrationToken: registrationToken,
-                        operationLease: operationLease,
+                        operationLease: nil,
                         requestIDKey: nil,
                         requestSendCompletion: nil,
                         cause: cause

@@ -121,12 +121,13 @@ extension ClientMCPRequestExecutor {
                         requestTimeoutOverride: requestTimeoutOverride,
                         leaseID: leaseID,
                         cancellationHandle: cancellationHandle,
-                        onTimeout: {
+                        onTimeout: { requestSendCompletion in
                             self.sessionManager.handleRequestLeaseTimeout(
                                 leaseID,
                                 sessionID: sessionID,
                                 requestIDKeys: [responseID.key],
-                                operationLease: prepared.operationLease
+                                operationLease: prepared.operationLease,
+                                after: requestSendCompletion
                             )
                         }
                     )

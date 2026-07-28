@@ -177,6 +177,15 @@ final class InitializeManager: Sendable {
         }
     }
 
+    @discardableResult
+    func performIfRunning(_ operation: () -> Void) -> Bool {
+        state.withLockedValue { state in
+            guard state.isShuttingDown == false else { return false }
+            operation()
+            return true
+        }
+    }
+
     func removePendingInitializes(sessionID: String) -> PendingRemovalResult {
         state.withLockedValue { state in
             let removed = state.initPending.filter { $0.sessionID == sessionID }

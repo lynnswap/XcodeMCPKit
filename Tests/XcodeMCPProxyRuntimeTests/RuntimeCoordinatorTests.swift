@@ -845,6 +845,15 @@ struct RuntimeCoordinatorProcessRoutingTests {
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
         manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "catalog-cancellation-source"],
+            ]),
+            sourceUpstream: 0
+        )
         let route = try #require(manager.processControlPlane.route(
             forProcessID: target.processID
         ))
@@ -888,14 +897,49 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(timeoutScheduler.isCancelled(at: obsoleteRetryIndex))
 
         let rejectedLease = try prepareRetryLease(at: 3)
-        let cancellation = ControlPlane.RPCCancellationDelivery()
+        let operationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        let sessionID = "rejected-catalog-cancellation"
+        let originalID = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
+        let requestLeaseID = manager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: sessionID,
+                label: "tools/list",
+                expectsResponse: true,
+                isTopLevelClientRequest: false
+            )
+        )
+        let upstreamID = try #require(manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            operationLease: operationLease
+        ))
+        manager.activateRequestLease(
+            requestLeaseID,
+            requestIDKey: originalID.key,
+            upstreamIndex: 0,
+            timeout: .seconds(300)
+        )
+        await initial.blockNextCancellation()
+        let cancellation = try #require(
+            manager.handleRequestLeaseTimeoutWithCancellationDelivery(
+                requestLeaseID,
+                sessionID: sessionID,
+                requestIDKeys: [originalID.key],
+                operationLease: operationLease
+            )
+        )
         manager.scheduleMissingProcessToolsCatalogRetry(
             processID: target.processID,
             lease: rejectedLease,
             after: [cancellation],
             reason: "test_rejected_cancellation"
         )
-        cancellation.complete(.rejected)
+        try await initial.waitForBlockedCancellation()
+        let cancellationData = try await initial.nextSent(
+            matching: { methodName(from: $0) == "notifications/cancelled" }
+        )
+        #expect(try extractCancellationRequestID(from: cancellationData) == upstreamID)
+        await initial.releaseBlockedCancellation(.backpressure)
 
         #expect(
             try await initial.nextStopCount(timeout: .seconds(2)) == 1
@@ -906,8 +950,413 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 for: UpstreamSlotID(rawValue: 0)
             )?.proof != proof
         )
-        #expect(
-            timeoutScheduler.activeTimeoutIndex(delay: .milliseconds(500)) == nil
+        let activationRetryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .milliseconds(500),
+            startingAtEventIndex: obsoleteRetryIndex + 1
+        )
+        #expect(timeoutScheduler.fire(at: activationRetryIndex))
+        let replacement = try #require(replacements.withLockedValue { $0.first })
+        _ = try await replacement.nextSent(
+            matching: { methodName(from: $0) == "initialize" }
+        )
+    }
+
+    @Test func rejectedStaleCatalogCancellationRestartsCurrentAttempt() async throws {
+        let target = xcodeProcessTarget(processID: 27028, xcodeVersion: "27.0")
+        let initial = TestUpstreamClient()
+        let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [initial],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0])
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let replacement = TestUpstreamClient()
+                replacements.withLockedValue { $0.append(replacement) }
+                return [replacement]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "stale-catalog-cancellation-source"],
+            ]),
+            sourceUpstream: 0
+        )
+        let route = try #require(
+            manager.processControlPlane.route(forProcessID: target.processID)
+        )
+        let operationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        let proof = operationLease.proof
+        let (staleLease, transition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: proof,
+                nowUptimeNanoseconds: 1
+            )
+        )
+        manager.applyProcessControlPlaneTransition(transition)
+        manager.applyCatalogCommit(manager.processControlPlane.completeCatalog(
+            .unusable,
+            lease: staleLease,
+            nowUptimeNanoseconds: 2
+        ))
+
+        let sessionID = "stale-catalog-cancellation"
+        let originalID = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
+        let requestLeaseID = manager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: sessionID,
+                label: "tools/list",
+                expectsResponse: true,
+                isTopLevelClientRequest: false
+            )
+        )
+        _ = try #require(manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            operationLease: operationLease
+        ))
+        manager.activateRequestLease(
+            requestLeaseID,
+            requestIDKey: originalID.key,
+            upstreamIndex: 0,
+            timeout: .seconds(300)
+        )
+        await initial.blockNextCancellation()
+        let staleCancellation = try #require(
+            manager.handleRequestLeaseTimeoutWithCancellationDelivery(
+                requestLeaseID,
+                sessionID: sessionID,
+                requestIDKeys: [originalID.key],
+                operationLease: operationLease
+            )
+        )
+        manager.scheduleMissingProcessToolsCatalogRetry(
+            processID: target.processID,
+            lease: staleLease,
+            after: [staleCancellation],
+            reason: "test_stale_rejected_cancellation"
+        )
+        try await initial.waitForBlockedCancellation()
+        manager.applyProcessControlPlaneTransition(
+            manager.processControlPlane.resetAttempt(processID: target.processID)
+        )
+        let (currentLease, currentTransition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: proof,
+                nowUptimeNanoseconds: 3
+            )
+        )
+        manager.applyProcessControlPlaneTransition(currentTransition)
+
+        await initial.releaseBlockedCancellation(.backpressure)
+
+        #expect(try await initial.nextStopCount(timeout: .seconds(2)) == 1)
+        #expect(manager.processControlPlane.validateCatalogLoad(currentLease) == false)
+        #expect(manager.upstreamTopology.validate(proof) == false)
+        #expect(replacements.withLockedValue(\.count) == 1)
+
+        let activationRetryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .milliseconds(500),
+            startingAtEventIndex: 0
+        )
+        #expect(timeoutScheduler.fire(at: activationRetryIndex))
+        let replacement = try #require(replacements.withLockedValue { $0.first })
+        _ = try await replacement.nextSent(
+            matching: { methodName(from: $0) == "initialize" }
+        )
+    }
+
+    @Test func rejectedStaleCatalogCancellationPreservesSiblingAttempt() async throws {
+        let target = xcodeProcessTarget(processID: 27029, xcodeVersion: "27.0")
+        let failed = TestUpstreamClient()
+        let sibling = TestUpstreamClient()
+        let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let replacementFactoryEntered = TestSignal()
+        let allowReplacementFactory = DispatchSemaphore(value: 0)
+        let shouldBlockReplacementFactory = NIOLockedValueBox(true)
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [failed, sibling],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1])
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let shouldBlock = shouldBlockReplacementFactory.withLockedValue {
+                    shouldBlock in
+                    let value = shouldBlock
+                    shouldBlock = false
+                    return value
+                }
+                if shouldBlock {
+                    replacementFactoryEntered.signal()
+                    allowReplacementFactory.wait()
+                }
+                let replacement = TestUpstreamClient()
+                replacements.withLockedValue { $0.append(replacement) }
+                return [replacement]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        defer { allowReplacementFactory.signal() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let initializeResult = try jsonValue([
+            "protocolVersion": MCP.ProtocolVersion.current,
+            "capabilities": [String: Any](),
+            "serverInfo": ["name": "sibling-catalog-cancellation-source"],
+        ])
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: initializeResult,
+            sourceUpstream: 0
+        )
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: initializeResult,
+            sourceUpstream: 1
+        )
+        let route = try #require(
+            manager.processControlPlane.route(forProcessID: target.processID)
+        )
+        let failedOperationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        let siblingProof = manager.operationLeaseForTest(upstreamIndex: 1).proof
+        let (staleLease, staleTransition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: failedOperationLease.proof,
+                nowUptimeNanoseconds: 1
+            )
+        )
+        manager.applyProcessControlPlaneTransition(staleTransition)
+        manager.applyCatalogCommit(manager.processControlPlane.completeCatalog(
+            .unusable,
+            lease: staleLease,
+            nowUptimeNanoseconds: 2
+        ))
+
+        let sessionID = "stale-sibling-catalog-cancellation"
+        let originalID = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
+        let requestLeaseID = manager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: sessionID,
+                label: "tools/list",
+                expectsResponse: true,
+                isTopLevelClientRequest: false
+            )
+        )
+        _ = try #require(manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: originalID,
+            operationLease: failedOperationLease
+        ))
+        manager.activateRequestLease(
+            requestLeaseID,
+            requestIDKey: originalID.key,
+            upstreamIndex: 0,
+            timeout: .seconds(300)
+        )
+        await failed.blockNextCancellation()
+        let staleCancellation = try #require(
+            manager.handleRequestLeaseTimeoutWithCancellationDelivery(
+                requestLeaseID,
+                sessionID: sessionID,
+                requestIDKeys: [originalID.key],
+                operationLease: failedOperationLease
+            )
+        )
+        manager.scheduleMissingProcessToolsCatalogRetry(
+            processID: target.processID,
+            lease: staleLease,
+            after: [staleCancellation],
+            reason: "test_stale_sibling_rejected_cancellation"
+        )
+        try await failed.waitForBlockedCancellation()
+
+        await failed.releaseBlockedCancellation(.backpressure)
+        try await replacementFactoryEntered.wait(
+            description: "waiting for rejected cancellation replacement"
+        )
+        manager.applyProcessControlPlaneTransition(
+            manager.processControlPlane.resetAttempt(processID: target.processID)
+        )
+        let (currentLease, currentTransition) = try #require(
+            manager.processControlPlane.beginCatalogAttempt(
+                routeID: route.id,
+                preferredUpstreamProof: siblingProof,
+                nowUptimeNanoseconds: 3
+            )
+        )
+        manager.applyProcessControlPlaneTransition(currentTransition)
+        allowReplacementFactory.signal()
+
+        #expect(try await failed.nextStopCount(timeout: .seconds(2)) == 1)
+        await manager.drainRuntimeTasksForTesting()
+        #expect(manager.processControlPlane.validateCatalogLoad(currentLease))
+        let currentAttempt = try #require(
+            manager.processControlPlane.attemptSnapshot(processID: target.processID)
+        )
+        #expect(currentAttempt.attemptID.rawValue == currentLease.attempt)
+        #expect(currentAttempt.upstreamProof == siblingProof)
+        #expect(manager.upstreamTopology.validate(siblingProof))
+        #expect(manager.upstreamTopology.validate(failedOperationLease) == false)
+        #expect(replacements.withLockedValue(\.count) == 1)
+    }
+
+    @Test
+    func rejectedCancellationReplacementBlocksExistingActivationRetryUntilOldStopCompletes()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 27030, xcodeVersion: "27.0")
+        let failed = TestUpstreamClient()
+        let sibling = TestUpstreamClient()
+        let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [failed, sibling],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0, 1])
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let replacement = TestUpstreamClient()
+                replacements.withLockedValue { $0.append(replacement) }
+                return [replacement]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        await failed.blockStop()
+        defer {
+            Task {
+                await failed.releaseBlockedStop()
+            }
+        }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let initializeResult = try jsonValue([
+            "protocolVersion": MCP.ProtocolVersion.current,
+            "capabilities": [String: Any](),
+            "serverInfo": ["name": "activation-retry-stop-barrier"],
+        ])
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: initializeResult,
+            sourceUpstream: 0
+        )
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: initializeResult,
+            sourceUpstream: 1
+        )
+
+        let failedOperationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        let activationStart = try #require(
+            manager.beginProcessRouteAttachingForTesting(
+                processID: target.processID,
+                upstreamIndex: failedOperationLease.upstreamIndex,
+                nowUptimeNs: 1
+            )
+        )
+        let activationTimeout = try #require(
+            manager.processControlPlane.handleChannelInitializeTimeout(
+                activationStart.lease
+            )
+        )
+        manager.applyProcessControlPlaneTransition(activationTimeout.transition)
+        manager.scheduleProcessRouteActivationRetry(
+            processID: target.processID,
+            retry: activationTimeout.retry,
+            lease: activationTimeout.activationLease,
+            reason: "test_existing_activation_retry"
+        )
+        let activationRetryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: activationTimeout.retry.delay,
+            startingAtEventIndex: 0
+        )
+
+        let sessionID = "rejected-cancellation-activation-retry-stop-barrier"
+        let requestID = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
+        let requestLeaseID = manager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: sessionID,
+                label: "tools/list",
+                expectsResponse: true,
+                isTopLevelClientRequest: false
+            )
+        )
+        _ = try #require(manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: requestID,
+            operationLease: failedOperationLease
+        ))
+        manager.activateRequestLease(
+            requestLeaseID,
+            requestIDKey: requestID.key,
+            upstreamIndex: failedOperationLease.upstreamIndex,
+            timeout: .seconds(300)
+        )
+        await failed.blockNextCancellation()
+        manager.handleRequestLeaseTimeout(
+            requestLeaseID,
+            sessionID: sessionID,
+            requestIDKeys: [requestID.key],
+            operationLease: failedOperationLease
+        )
+        try await failed.waitForBlockedCancellation()
+        await failed.releaseBlockedCancellation(.backpressure)
+
+        try await failed.waitForBlockedStop()
+        let replacement = try await waitWithTimeout(
+            "waiting for rejected cancellation replacement"
+        ) {
+            while true {
+                if let replacement = replacements.withLockedValue({ $0.first }) {
+                    return replacement
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let replacementProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: failedOperationLease.proof.slotID
+            )?.proof
+        )
+        #expect(replacementProof != failedOperationLease.proof)
+        #expect(timeoutScheduler.isCancelled(at: activationRetryIndex) == false)
+        #expect(timeoutScheduler.fire(at: activationRetryIndex))
+
+        let retryAttempt = try #require(
+            manager.processControlPlane.attemptSnapshot(processID: target.processID)
+        )
+        #expect(retryAttempt.upstreamProof == replacementProof)
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        #expect(await replacement.sentCount() == 0)
+
+        await failed.releaseBlockedStop()
+        #expect(try await failed.nextStopCount(timeout: .seconds(2)) == 1)
+        _ = try await replacement.nextSent(
+            matching: { methodName(from: $0) == "initialize" }
         )
     }
 
@@ -9031,6 +9480,150 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(manager.cachedToolsListResult() == nil)
     }
 
+    @Test func shutdownRejectsWarmInitializeAndRouteActivationRegeneration() async {
+        let target = xcodeProcessTarget(processID: 80448, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let route = XcodeProcessRoute(target: target, upstreamIndices: [0])
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 5),
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [route],
+            processRoutingEnabled: true,
+            startImmediately: false
+        )
+        let manager = fixture.manager
+
+        await manager.shutdown()
+        let scheduledTimeoutCount = timeoutScheduler.scheduledCount()
+
+        manager.startUpstreamWarmInitialize(upstreamIndex: 0)
+        manager.startProcessRouteActivation(for: route)
+
+        #expect(await upstream.sentCount() == 0)
+        #expect(timeoutScheduler.scheduledCount() == scheduledTimeoutCount)
+        #expect(manager.testStateSnapshot().upstream(id: 0) == nil)
+        #expect(manager.processControlPlane.attemptSnapshot(processID: target.processID) == nil)
+    }
+
+    @Test func upstreamSendAdmissionRejectsAfterInitializeShutdownBegins() async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 5),
+            upstreams: [upstream],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let operationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        let rejected = NIOLockedValueBox(false)
+        let requestSendCompletion = UpstreamRequestSendCompletion()
+
+        _ = manager.initializeManager.beginShutdown()
+        let scheduled = manager.sendUpstream(
+            try makeToolListRequest(id: 1),
+            operationLease: operationLease,
+            ensureRunning: false,
+            admission: nil,
+            requestSendCompletion: requestSendCompletion,
+            onRejected: {
+                rejected.withLockedValue { $0 = true }
+            }
+        )
+
+        #expect(scheduled == false)
+        #expect(rejected.withLockedValue { $0 })
+        #expect(await requestSendCompletion.wait() == .notSent)
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await upstream.sentCount() == 0)
+    }
+
+    @Test func processReconcileCannotAppendTopologyAfterInitializeShutdownBegins() async {
+        let upstream = TestUpstreamClient()
+        let lateUpstream = TestUpstreamClient()
+        let factoryCallCount = NIOLockedValueBox(0)
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 5),
+            upstreams: [upstream],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                factoryCallCount.withLockedValue { $0 += 1 }
+                return [lateUpstream]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        let target = xcodeProcessTarget(processID: 80449, xcodeVersion: "27.0")
+
+        _ = manager.initializeManager.beginShutdown()
+        manager.reconcileXcodeProcessTargets(
+            [target],
+            reason: "test_shutdown_append_gate"
+        )
+
+        #expect(factoryCallCount.withLockedValue { $0 } == 0)
+        #expect(manager.processControlPlane.activeRoutes().isEmpty)
+        #expect(manager.upstreamTopology.snapshot().entries.count == 1)
+        #expect(await lateUpstream.startCount() == 0)
+        #expect(await lateUpstream.stopCount() == 0)
+    }
+
+    @Test func shutdownAndRouteRetirementStopEachSlotExactlyOnce() async throws {
+        let target = xcodeProcessTarget(processID: 80450, xcodeVersion: "27.0")
+        let upstream = TestUpstreamClient()
+        let retirementReachedDetach = TestSignal()
+        let allowRetirementDetach = DispatchSemaphore(value: 0)
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 5),
+            upstreams: [upstream],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0])
+            ],
+            processRoutingEnabled: true,
+            testHooks: RuntimeCoordinatorTestHooks(
+                processRouteRetirementWillDetach: {
+                    retirementReachedDetach.signal()
+                    allowRetirementDetach.wait()
+                }
+            ),
+            startImmediately: false
+        )
+        let manager = fixture.manager
+        await upstream.blockStop()
+        defer {
+            allowRetirementDetach.signal()
+            Task {
+                await upstream.releaseBlockedStop()
+            }
+            fixture.shutdownAndWait()
+        }
+
+        let retirement = Task {
+            manager.reconcileXcodeProcessTargets(
+                [],
+                reason: "test_shutdown_retirement_arbitration"
+            )
+        }
+        try await retirementReachedDetach.wait(
+            description: "waiting for route retirement before topology detach"
+        )
+
+        let shutdown = Task {
+            await manager.shutdown()
+        }
+        try await upstream.waitForBlockedStop()
+        allowRetirementDetach.signal()
+        await upstream.releaseBlockedStop()
+        await retirement.value
+        await shutdown.value
+
+        #expect(await upstream.stopCount() == 1)
+        #expect(manager.upstreamTopology.snapshot().entries.isEmpty)
+    }
+
 }
 
 @Suite(.serialized, .asyncTestCleanup)
@@ -12750,6 +13343,166 @@ struct RuntimeCoordinatorWindowRoutingTests {
         }
     }
 
+    @Test func controlPlaneRPCCancelBetweenIDAssignmentAndSendDoesNotCancelUpstream()
+        async throws
+    {
+        let handle = ControlPlane.RPCHandle()
+        let upstream = TestUpstreamClient()
+        let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 5),
+            upstreams: [upstream],
+            unboundUpstreamFactory: {
+                let replacement = TestUpstreamClient()
+                replacements.withLockedValue { $0.append(replacement) }
+                return replacement
+            },
+            testHooks: RuntimeCoordinatorTestHooks(
+                controlPlaneRPCAssignedUpstreamID: {
+                    handle.cancel()
+                }
+            ),
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let originalLease = manager.operationLeaseForTest(upstreamIndex: 0)
+
+        await #expect(throws: CancellationError.self) {
+            try await waitWithTimeout(
+                "waiting for assigned control-plane RPC cancellation",
+                timeout: .seconds(2)
+            ) {
+                try await manager.performControlPlaneRPC(
+                    route: .pinnedUpstream(0),
+                    purpose: "assigned-cancellation",
+                    label: "assigned-cancellation",
+                    requestObject: JSONRPC.Wire.requestObject(
+                        id: "assigned-cancellation",
+                        method: "tools/list"
+                    ),
+                    requestTimeout: .seconds(5),
+                    rpcHandle: handle
+                )
+            }
+        }
+
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await upstream.sentCount() == 0)
+        #expect(replacements.withLockedValue(\.count) == 0)
+        #expect(manager.upstreamTopology.validate(originalLease))
+        #expect(
+            manager.debugSnapshot().upstreams.first?.activeCorrelatedRequestCount == 0
+        )
+        #expect(
+            manager.upstreamSlotScheduler.debugSnapshot()
+                .activeLeaseCountByUpstream.isEmpty
+        )
+    }
+
+    @Test
+    func controlPlaneRPCTimeoutBeforeBarrieredSendDoesNotCancelUnsentRequestWithoutProvidedHandle()
+        async throws
+    {
+        let initial = TestUpstreamClient()
+        let replacement = TestUpstreamClient()
+        let assignedUpstreamID = TestSignal()
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 5),
+            upstreams: [initial],
+            processRoutingEnabled: false,
+            unboundUpstreamFactory: {
+                replacement
+            },
+            testHooks: RuntimeCoordinatorTestHooks(
+                controlPlaneRPCAssignedUpstreamID: {
+                    assignedUpstreamID.signal()
+                }
+            ),
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let initialLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        await initial.blockStop()
+        defer {
+            Task {
+                await initial.releaseBlockedStop()
+            }
+        }
+
+        let replacementResult = try #require(
+            manager.replaceOrRetireInitializeChannel(
+                initialLease.proof,
+                expectedRouteID: nil,
+                requestsBridgePoolRecovery: false
+            )
+        )
+        try await initial.waitForBlockedStop()
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+
+        let request = Task {
+            try await manager.performControlPlaneRPC(
+                route: .pinnedUpstream(0),
+                purpose: "barriered-timeout-without-provided-handle",
+                label: "barriered-timeout-without-provided-handle",
+                requestObject: JSONRPC.Wire.requestObject(
+                    id: "barriered-timeout-without-provided-handle",
+                    method: "tools/list"
+                ),
+                requestTimeout: .milliseconds(20)
+            )
+        }
+        try await assignedUpstreamID.wait(
+            description: "waiting for barriered control-plane RPC assignment"
+        )
+
+        do {
+            _ = try await waitWithTimeout(
+                "waiting for barriered control-plane RPC timeout",
+                timeout: .seconds(2)
+            ) {
+                try await request.value
+            }
+            Issue.record("barriered control-plane RPC should time out")
+        } catch is TimeoutError {
+        } catch let error as ControlPlane.RequestError {
+            #expect(error.underlying is TimeoutError)
+        } catch {
+            Issue.record("expected control-plane timeout but received \(error)")
+        }
+        #expect(await replacement.sentCount() == 0)
+        #expect(manager.upstreamTopology.validate(replacementResult.operationLease))
+        #expect(
+            manager.upstreamSlotScheduler.debugSnapshot()
+                .activeLeaseCountByUpstream[0] == 1
+        )
+
+        await initial.releaseBlockedStop()
+        let originalRequest = try await sentValue(
+            from: replacement,
+            at: 0,
+            timeout: .seconds(2)
+        )
+        #expect(methodName(from: originalRequest) == "tools/list")
+        let cancellation = try await sentMessage(
+            from: replacement,
+            matching: { methodName(from: $0) == "notifications/cancelled" },
+            timeout: .seconds(2)
+        )
+        #expect(
+            try extractCancellationRequestID(from: cancellation)
+                == extractUpstreamID(from: originalRequest)
+        )
+        await manager.drainRuntimeTasksForTesting()
+        #expect(
+            manager.upstreamSlotScheduler.debugSnapshot()
+                .activeLeaseCountByUpstream.isEmpty
+        )
+    }
+
     @Test func topLevelRequestCancelBeforeLeaseActivationDoesNotSendUpstream()
         async throws
     {
@@ -12852,7 +13605,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
 
         let snapshot = cancellation.withLockedValue { $0 }
         #expect(snapshot?.registrationToken == token)
-        #expect(snapshot?.upstreamIndex == 2)
+        #expect(snapshot?.upstreamIndex == nil)
         #expect(snapshot?.requestIDKey == nil)
         #expect(
             handle.markAssigned(registrationToken: token, operationLease: testOperationLease(2), requestIDKey: "req")
@@ -14891,27 +15644,80 @@ struct RuntimeCoordinatorSchedulingTests {
         }
     }
 
-    @Test func sessionManagerRetiresStaticUpstreamWhenInitializedNotificationSendOverloads()
+    @Test func sessionManagerReplacesStaticUpstreamWhenInitializedNotificationSendOverloads()
         async throws
     {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
-        let upstream = ToggleableOverloadUpstreamClient()
+        let upstream = TestUpstreamClient()
+        let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
         let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            unboundUpstreamFactory: {
+                let replacement = TestUpstreamClient()
+                replacements.withLockedValue { $0.append(replacement) }
+                return replacement
+            }
+        )
         defer { manager.shutdownAndWait() }
+        await upstream.blockStop()
+        defer {
+            Task {
+                await upstream.releaseBlockedStop()
+            }
+        }
 
         let initialInitialize = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
         let initialUpstreamID = try extractUpstreamID(from: initialInitialize)
-        await upstream.overloadNextInitializedNotificationSend()
+        await upstream.blockNextSend(method: "notifications/initialized")
         await upstream.yield(.message(try makeInitializeResponse(id: initialUpstreamID)))
 
-        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        try await upstream.waitForBlockedSend()
+        await upstream.releaseBlockedSend(.backpressure)
+        try await upstream.waitForBlockedStop()
+        let replacement = try await waitWithTimeout(
+            "waiting for static initialized-notification replacement"
+        ) {
+            while true {
+                if let replacement = replacements.withLockedValue({ $0.first }) {
+                    return replacement
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        #expect(await replacement.startCount() == 0)
+        #expect(await replacement.sentCount() == 0)
+
+        await upstream.releaseBlockedStop()
+        #expect(try await upstream.nextStopCount(timeout: .seconds(2)) == 1)
+        let replacementInitialize = try await sentValue(
+            from: replacement,
+            at: 0,
+            timeout: .seconds(2)
+        )
+        await replacement.yield(
+            .message(
+                try makeInitializeResponse(
+                    id: extractUpstreamID(from: replacementInitialize),
+                    serverName: "static-notification-replacement"
+                )
+            )
+        )
+        _ = try await replacement.nextSent(
+            startingAt: 1,
+            matching: { methodName(from: $0) == "notifications/initialized" }
+        )
         await manager.drainRuntimeTasksForTesting()
         #expect(await upstream.sentCount() == 2)
-        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == nil)
-        #expect(manager.testStateSnapshot().hasInitResult == false)
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == true)
+        #expect(manager.testStateSnapshot().hasInitResult)
     }
 
     @Test func sessionManagerPrimaryInitializedNotificationOverloadClearsSecondaryStateAndToolsCache()
@@ -15739,6 +16545,478 @@ struct RuntimeCoordinatorSchedulingTests {
             lateSnapshot.leases.first(where: { $0.requestIDKey == originalID.key })
         )
         #expect(lateLease.releaseReason == "clientDisconnected")
+    }
+
+    @Test func requestTimeoutKeepsSlotReservedUntilRejectedCancellationRecoversChannel()
+        async throws
+    {
+        try await assertRejectedCancellationRecoversBeforeSlotRelease(.timeout)
+    }
+
+    @Test func requestAbandonKeepsSlotReservedUntilRejectedCancellationRecoversChannel()
+        async throws
+    {
+        try await assertRejectedCancellationRecoversBeforeSlotRelease(.abandon)
+    }
+
+    @Test func rejectedCancellationReplacesAndReinitializesStaticUpstream() async throws {
+        let initial = TestUpstreamClient()
+        let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [initial],
+            processRoutingEnabled: false,
+            unboundUpstreamFactory: {
+                let replacement = TestUpstreamClient()
+                replacements.withLockedValue { $0.append(replacement) }
+                return replacement
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        await initial.blockStop()
+        defer {
+            Task {
+                await initial.releaseBlockedStop()
+            }
+        }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "static-cancellation-source"],
+            ]),
+            sourceUpstream: 0
+        )
+
+        let sessionID = "static-rejected-cancellation"
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: sessionID,
+            label: "tools/call:DocumentationSearch",
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = manager.createRequestLease(descriptor: descriptor)
+        let activePromise = fixture.eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
+        let requestID = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
+        _ = try await occupyUpstreamSlot(
+            on: manager,
+            leaseID: leaseID,
+            descriptor: descriptor,
+            eventLoop: fixture.eventLoop,
+            completionPromise: activePromise,
+            requestIDKey: requestID.key
+        )
+        let failedLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        _ = try #require(manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: requestID,
+            operationLease: failedLease
+        ))
+
+        let queuedStarts = LockedRecordedValues<UpstreamTopologyProof>()
+        let queuedLeaseID = manager.createRequestLease(descriptor: descriptor)
+        _ = manager.enqueueOnUpstreamSlot(
+            leaseID: queuedLeaseID,
+            descriptor: descriptor,
+            on: fixture.eventLoop
+        ) { selected in
+            queuedStarts.append(selected.proof)
+            return fixture.eventLoop.makeSucceededFuture(())
+        }
+
+        await initial.blockNextCancellation()
+        manager.handleRequestLeaseTimeout(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: [requestID.key],
+            operationLease: failedLease
+        )
+        try await initial.waitForBlockedCancellation()
+        await initial.releaseBlockedCancellation(.backpressure)
+
+        try await initial.waitForBlockedStop()
+        let replacement = try await waitWithTimeout(
+            "waiting for static replacement channel"
+        ) {
+            while true {
+                if let replacement = replacements.withLockedValue({ $0.first }) {
+                    return replacement
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let replacementProof = try #require(
+            manager.upstreamTopology.operationLease(
+                for: UpstreamSlotID(rawValue: 0)
+            )?.proof
+        )
+        #expect(replacementProof != failedLease.proof)
+        manager.startUpstreamWarmInitialize(
+            upstreamIndex: replacementProof.slotID.rawValue,
+            applyBackoff: false
+        )
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        #expect(await replacement.sentCount() == 0)
+        #expect(
+            manager.upstreamSlotScheduler.debugSnapshot()
+                .activeLeaseCountByUpstream[0] == 1
+        )
+        #expect(queuedStarts.count() == 0)
+
+        await initial.releaseBlockedStop()
+        #expect(try await initial.nextStopCount(timeout: .seconds(2)) == 1)
+        let initialize = try await replacement.nextSent(
+            matching: { methodName(from: $0) == "initialize" }
+        )
+        await replacement.yield(
+            .message(
+                try makeInitializeResponse(
+                    id: extractUpstreamID(from: initialize),
+                    serverName: "static-replacement"
+                )
+            )
+        )
+        _ = try await replacement.nextSent(
+            startingAt: 1,
+            matching: { methodName(from: $0) == "notifications/initialized" }
+        )
+        let queuedProof = try await waitForRecordedValue(
+            queuedStarts,
+            at: 0,
+            description: "waiting for queued request on static replacement"
+        )
+        #expect(queuedProof == replacementProof)
+    }
+
+    @Test func forwardedRequestTimeoutWaitsForOriginalSendBeforeCancellation() async throws {
+        try await assertForwardedCancellationWaitsForOriginalSend(.timeout)
+    }
+
+    @Test func forwardedRequestAbandonWaitsForOriginalSendBeforeCancellation() async throws {
+        try await assertForwardedCancellationWaitsForOriginalSend(.abandon)
+    }
+
+    @Test func forwardedRequestTimeoutDoesNotCancelBackpressuredOriginalSend() async throws {
+        try await assertForwardedCancellationSkipsUnsentRequest(.timeout)
+    }
+
+    @Test func forwardedRequestAbandonDoesNotCancelBackpressuredOriginalSend() async throws {
+        try await assertForwardedCancellationSkipsUnsentRequest(.abandon)
+    }
+
+    private enum RejectedCancellationTrigger: Equatable {
+        case timeout
+        case abandon
+    }
+
+    private func assertRejectedCancellationRecoversBeforeSlotRelease(
+        _ trigger: RejectedCancellationTrigger
+    ) async throws {
+        let initial = TestUpstreamClient()
+        let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let target = xcodeProcessTarget(processID: 27091, xcodeVersion: "27.0")
+        let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [initial],
+            scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: target, upstreamIndices: [0])
+            ],
+            processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in
+                let replacement = TestUpstreamClient()
+                replacements.withLockedValue { $0.append(replacement) }
+                return [replacement]
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "request-cancellation-source"],
+            ]),
+            sourceUpstream: 0
+        )
+        try seedProcessToolCatalogs(
+            on: manager,
+            entries: [
+                (target, 0, [toolDescriptor(name: "DocumentationSearch")])
+            ]
+        )
+
+        let sessionID = "session-rejected-\(trigger)"
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: sessionID,
+            label: "tools/call:DocumentationSearch",
+            expectsResponse: true,
+            isTopLevelClientRequest: true
+        )
+        let leaseID = manager.createRequestLease(descriptor: descriptor)
+        let activePromise = fixture.eventLoop.makePromise(of: Void.self)
+        defer { activePromise.fail(CancellationError()) }
+        let requestID = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
+        _ = try await occupyUpstreamSlot(
+            on: manager,
+            leaseID: leaseID,
+            descriptor: descriptor,
+            eventLoop: fixture.eventLoop,
+            completionPromise: activePromise,
+            requestIDKey: requestID.key
+        )
+        let operationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        _ = try #require(manager.assignUpstreamID(
+            sessionID: sessionID,
+            originalID: requestID,
+            operationLease: operationLease
+        ))
+
+        let queuedStarts = LockedRecordedValues<UpstreamTopologyProof>()
+        let queuedLeaseID = manager.createRequestLease(descriptor: descriptor)
+        _ = manager.enqueueOnUpstreamSlot(
+            leaseID: queuedLeaseID,
+            descriptor: descriptor,
+            on: fixture.eventLoop
+        ) { selected in
+            queuedStarts.append(selected.proof)
+            return fixture.eventLoop.makeSucceededFuture(())
+        }
+        #expect(manager.upstreamSlotScheduler.debugSnapshot().queuedRequestCount == 1)
+
+        await initial.blockNextCancellation()
+        switch trigger {
+        case .timeout:
+            manager.handleRequestLeaseTimeout(
+                leaseID,
+                sessionID: sessionID,
+                requestIDKeys: [requestID.key],
+                operationLease: operationLease
+            )
+        case .abandon:
+            manager.abandonRequestLease(
+                leaseID,
+                sessionID: sessionID,
+                requestIDKeys: [requestID.key],
+                operationLease: operationLease
+            )
+        }
+        try await initial.waitForBlockedCancellation()
+
+        #expect(
+            manager.upstreamSlotScheduler.debugSnapshot()
+                .activeLeaseCountByUpstream[0] == 1
+        )
+        #expect(queuedStarts.count() == 0)
+
+        await initial.releaseBlockedCancellation(.backpressure)
+        #expect(try await initial.nextStopCount(timeout: .seconds(2)) == 1)
+        await manager.drainRuntimeTasksForTesting()
+
+        #expect(queuedStarts.count() == 0)
+        #expect(
+            manager.upstreamSlotScheduler.debugSnapshot()
+                .activeLeaseCountByUpstream.isEmpty
+        )
+        #expect(replacements.withLockedValue(\.count) == 1)
+        #expect(manager.upstreamTopology.validate(operationLease) == false)
+
+        let activationRetryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
+            delay: .milliseconds(250),
+            startingAtEventIndex: 0
+        )
+        #expect(timeoutScheduler.fire(at: activationRetryIndex))
+        let replacement = try #require(replacements.withLockedValue { $0.first })
+        _ = try await replacement.nextSent(
+            matching: { methodName(from: $0) == "initialize" }
+        )
+        #expect(queuedStarts.count() == 0)
+    }
+
+    private func assertForwardedCancellationWaitsForOriginalSend(
+        _ trigger: RejectedCancellationTrigger
+    ) async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [upstream],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let sessionID = "session-send-barrier-\(trigger)"
+        let parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
+        switch trigger {
+        case .timeout:
+            parentCancellationHandle = nil
+        case .abandon:
+            let parentLeaseID = manager.createRequestLease(
+                descriptor: SessionRequestPipeline.Descriptor(
+                    sessionID: sessionID,
+                    label: "parent",
+                    expectsResponse: true,
+                    isTopLevelClientRequest: true
+                )
+            )
+            parentCancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
+                leaseID: parentLeaseID,
+                sessionID: sessionID,
+                requestIDKeys: []
+            )
+        }
+        let forwardingService = MCPForwardingService(
+            configuration: makeConfig(requestTimeout: 300),
+            sessionManager: manager
+        )
+        await upstream.blockNextSend(method: "tools/call")
+        let request = Task {
+            let result = await forwardingService.callInternalTool(
+                name: "XcodeListNavigatorIssues",
+                arguments: ["tabIdentifier": "windowtab-send-barrier"],
+                sessionID: sessionID,
+                eventLoop: fixture.eventLoop,
+                cancellationHandle: parentCancellationHandle,
+                upstreamIndexOverride: 0,
+                requestTimeoutOverride: trigger == .timeout ? .milliseconds(20) : .seconds(300)
+            )
+            switch (trigger, result) {
+            case (.timeout, .timeout), (.abandon, .cancelled):
+                return true
+            default:
+                return false
+            }
+        }
+        try await upstream.waitForBlockedSend()
+        parentCancellationHandle?.cancel(using: manager)
+        #expect(try await waitWithTimeout("waiting for forwarded cancellation") {
+            await request.value
+        })
+
+        let beforeOriginalSendCompletion = await upstream.sent()
+        #expect(beforeOriginalSendCompletion.count == 1)
+        let originalRequest = try #require(beforeOriginalSendCompletion.first)
+        #expect(methodName(from: originalRequest) == "tools/call")
+        #expect(
+            beforeOriginalSendCompletion.contains {
+                methodName(from: $0) == "notifications/cancelled"
+            } == false
+        )
+
+        await upstream.releaseBlockedSend()
+        let cancellation = try await upstream.nextSent(
+            matching: { methodName(from: $0) == "notifications/cancelled" }
+        )
+        #expect(
+            try extractCancellationRequestID(from: cancellation)
+                == extractUpstreamID(from: originalRequest)
+        )
+        await manager.drainRuntimeTasksForTesting()
+        #expect(
+            manager.upstreamSlotScheduler.debugSnapshot()
+                .activeLeaseCountByUpstream.isEmpty
+        )
+    }
+
+    private func assertForwardedCancellationSkipsUnsentRequest(
+        _ trigger: RejectedCancellationTrigger
+    ) async throws {
+        let upstream = TestUpstreamClient()
+        let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 300),
+            upstreams: [upstream],
+            unboundUpstreamFactory: {
+                let replacement = TestUpstreamClient()
+                replacements.withLockedValue { $0.append(replacement) }
+                return replacement
+            },
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let originalLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        let sessionID = "session-unsent-cancellation-\(trigger)"
+        let parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
+        switch trigger {
+        case .timeout:
+            parentCancellationHandle = nil
+        case .abandon:
+            let parentLeaseID = manager.createRequestLease(
+                descriptor: SessionRequestPipeline.Descriptor(
+                    sessionID: sessionID,
+                    label: "parent",
+                    expectsResponse: true,
+                    isTopLevelClientRequest: true
+                )
+            )
+            parentCancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
+                leaseID: parentLeaseID,
+                sessionID: sessionID,
+                requestIDKeys: []
+            )
+        }
+        let forwardingService = MCPForwardingService(
+            configuration: makeConfig(requestTimeout: 300),
+            sessionManager: manager
+        )
+        await upstream.blockNextSend(method: "tools/call")
+        let request = Task {
+            let result = await forwardingService.callInternalTool(
+                name: "XcodeListNavigatorIssues",
+                arguments: ["tabIdentifier": "windowtab-unsent-cancellation"],
+                sessionID: sessionID,
+                eventLoop: fixture.eventLoop,
+                cancellationHandle: parentCancellationHandle,
+                upstreamIndexOverride: 0,
+                requestTimeoutOverride: trigger == .timeout
+                    ? .milliseconds(20)
+                    : .seconds(300)
+            )
+            switch (trigger, result) {
+            case (.timeout, .timeout), (.abandon, .cancelled):
+                return true
+            default:
+                return false
+            }
+        }
+        try await upstream.waitForBlockedSend()
+        parentCancellationHandle?.cancel(using: manager)
+        let matchedExpectedResult = try await waitWithTimeout(
+            "waiting for unsent request cancellation"
+        ) {
+            await request.value
+        }
+        #expect(matchedExpectedResult)
+        await upstream.releaseBlockedSend(.backpressure)
+
+        await manager.drainRuntimeTasksForTesting()
+        let messages = await upstream.sent()
+        #expect(messages.count == 1)
+        #expect(messages.first.map { methodName(from: $0) } == "tools/call")
+        #expect(
+            messages.contains {
+                methodName(from: $0) == "notifications/cancelled"
+            } == false
+        )
+        #expect(replacements.withLockedValue(\.count) == 0)
+        #expect(manager.upstreamTopology.validate(originalLease))
+        #expect(
+            manager.upstreamSlotScheduler.debugSnapshot()
+                .activeLeaseCountByUpstream.isEmpty
+        )
     }
 
     @Test func sessionManagerDoesNotReactivateAbandonedLease() async throws {

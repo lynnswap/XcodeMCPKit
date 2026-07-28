@@ -176,6 +176,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var availableUpstreamIndex: Int? = 0
         var requestTimeoutNotifications = 0
         var requestSuccessNotifications = 0
+        var abandonedRequestHadOperationLease: [Bool] = []
         var pendingResponses: [PendingResponse] = []
         var sentRequests: [SentRequest] = []
         var sentUpstreamPayloads: [Data] = []
@@ -637,6 +638,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
         admission _: RouteForwardingAdmission?,
+        requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
         let upstreamIndex = operationLease.upstreamIndex
@@ -651,9 +653,11 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             return (true, state.upstreamSendCount)
         }
         guard sendUpdate.accepted else {
+            requestSendCompletion?.complete(.notSent)
             onRejected()
             return false
         }
+        requestSendCompletion?.complete(.accepted)
         sentUpstreamCountRecords.append(sendUpdate.count)
 
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
@@ -884,7 +888,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease
+        operationLease: UpstreamOperationLease,
+        after _: UpstreamRequestSendCompletion?
     ) {
         _ = leaseID
         if let first = requestIDKeys.first {
@@ -908,8 +913,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease?
+        operationLease: UpstreamOperationLease?,
+        after _: UpstreamRequestSendCompletion?
     ) {
+        state.withLockedValue {
+            $0.abandonedRequestHadOperationLease.append(operationLease != nil)
+        }
         if let operationLease {
             for requestIDKey in requestIDKeys {
                 removeUpstreamIDMapping(
@@ -1018,6 +1027,10 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func mappedUpstreamRequestCount() -> Int {
         state.withLockedValue { $0.upstreamIDMapping.count }
+    }
+
+    func lastAbandonedRequestHadOperationLease() -> Bool? {
+        state.withLockedValue { $0.abandonedRequestHadOperationLease.last }
     }
 
     func rejectNextUpstreamSend() {

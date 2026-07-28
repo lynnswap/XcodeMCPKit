@@ -476,6 +476,7 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
         admission _: RouteForwardingAdmission?,
+        requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
         let acceptsSend = state.withLockedValue { state in
@@ -491,6 +492,7 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
             }
             return state.acceptsSend
         }
+        requestSendCompletion?.complete(acceptsSend ? .accepted : .notSent)
         if acceptsSend == false {
             onRejected()
         }

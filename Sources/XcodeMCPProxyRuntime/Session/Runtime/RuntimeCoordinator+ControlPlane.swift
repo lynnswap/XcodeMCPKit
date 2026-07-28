@@ -231,10 +231,9 @@ extension RuntimeCoordinator {
         let routes = uncachedExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
             guard let preferred = exposure.usableUpstreamIDs.first,
                   let preferredProof = upstreamTopology.operationLease(for: preferred)?.proof,
-                  let (lease, transition) = processControlPlane.beginCatalogAttempt(
+                  let (lease, transition) = beginProcessCatalogAttemptIfRunning(
                       routeID: exposure.route.id,
-                      preferredUpstreamProof: preferredProof,
-                      nowUptimeNanoseconds: nowUptimeNanoseconds()
+                      preferredUpstreamProof: preferredProof
                   ) else { return nil }
             applyProcessControlPlaneTransition(transition)
             return AvailableToolsCatalogRoute(
@@ -413,6 +412,7 @@ extension RuntimeCoordinator {
         reason: String,
         processIDs requestedProcessIDs: Set<pid_t>? = nil
     ) {
+        guard initializeManager.snapshot().isShuttingDown == false else { return }
         guard processRoutingEnabled else {
             return
         }
@@ -434,10 +434,9 @@ extension RuntimeCoordinator {
         let missingRoutes = missingExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
             guard let preferred = exposure.usableUpstreamIDs.first,
                   let preferredProof = upstreamTopology.operationLease(for: preferred)?.proof,
-                  let (lease, transition) = processControlPlane.beginCatalogAttempt(
+                  let (lease, transition) = beginProcessCatalogAttemptIfRunning(
                       routeID: exposure.route.id,
-                      preferredUpstreamProof: preferredProof,
-                      nowUptimeNanoseconds: nowUptimeNanoseconds()
+                      preferredUpstreamProof: preferredProof
                   ) else { return nil }
             applyProcessControlPlaneTransition(transition)
             return AvailableToolsCatalogRoute(
@@ -458,10 +457,9 @@ extension RuntimeCoordinator {
         guard processRoutingEnabled,
               isInitialized(),
               processControlPlane.catalog(forProcessID: route.target.processID) == nil,
-              let (lease, transition) = processControlPlane.beginCatalogAttempt(
+              let (lease, transition) = beginProcessCatalogAttemptIfRunning(
                   routeID: route.id,
-                  preferredUpstreamProof: upstreamProof,
-                  nowUptimeNanoseconds: nowUptimeNanoseconds()
+                  preferredUpstreamProof: upstreamProof
               ) else { return }
         applyProcessControlPlaneTransition(transition)
         refreshProcessToolsCatalogs(
@@ -475,6 +473,24 @@ extension RuntimeCoordinator {
             ],
             reason: reason
         )
+    }
+
+    func beginProcessCatalogAttemptIfRunning(
+        routeID: ProcessRouteID,
+        preferredUpstreamProof: UpstreamTopologyProof
+    ) -> (CatalogLease, ProcessControlPlaneTransition)? {
+        let nowUptimeNanoseconds = nowUptimeNanoseconds()
+        var attempt: (CatalogLease, ProcessControlPlaneTransition)?
+        guard initializeManager.performIfRunning({
+            attempt = processControlPlane.beginCatalogAttempt(
+                routeID: routeID,
+                preferredUpstreamProof: preferredUpstreamProof,
+                nowUptimeNanoseconds: nowUptimeNanoseconds
+            )
+        }) else {
+            return nil
+        }
+        return attempt
     }
 
     private func refreshProcessToolsCatalogs(
@@ -532,7 +548,14 @@ extension RuntimeCoordinator {
         after cancellationDeliveries: [ControlPlane.RPCCancellationDelivery] = [],
         reason: String
     ) {
-        guard let scheduled = processControlPlane.scheduleRetry(lease: lease) else { return }
+        var scheduled: (
+            lease: CatalogLease,
+            retry: ProcessControlPlaneAuthority.Retry,
+            transition: ProcessControlPlaneTransition
+        )?
+        guard initializeManager.performIfRunning({
+            scheduled = processControlPlane.scheduleRetry(lease: lease)
+        }), let scheduled else { return }
         let retryCancellationDeliveries = applyProcessControlPlaneTransition(
             scheduled.transition
         )
@@ -561,10 +584,6 @@ extension RuntimeCoordinator {
                 }
                 guard let self else { return }
                 guard rejected == false else {
-                    self.recoverProcessCatalogAfterRejectedCancellation(
-                        lease: lease,
-                        reason: reason
-                    )
                     return
                 }
                 self.armMissingProcessToolsCatalogRetry(
@@ -581,31 +600,6 @@ extension RuntimeCoordinator {
             lease: lease,
             retry: retry,
             reason: reason
-        )
-    }
-
-    private func recoverProcessCatalogAfterRejectedCancellation(
-        lease: CatalogLease,
-        reason: String
-    ) {
-        logger.warning(
-            "Process catalog cancellation was rejected; replacing its upstream channel",
-            metadata: [
-                "pid": .string("\(lease.processID)"),
-                "upstream": .string("\(lease.upstreamIndex)"),
-                "reason": .string(reason),
-            ]
-        )
-        guard clearUpstreamState(
-            proof: lease.topologyProof,
-            resetsProcessRouteActivation: false
-        ) else {
-            return
-        }
-        _ = replaceOrRetireInitializeChannel(
-            lease.topologyProof,
-            expectedRouteID: lease.routeIdentity,
-            requestsBridgePoolRecovery: false
         )
     }
 
@@ -640,9 +634,14 @@ extension RuntimeCoordinator {
                 processIDs: [processID]
             )
         }
-        applyProcessControlPlaneTransition(
-            processControlPlane.attach(.retryTimeout(timeout), to: lease)
-        )
+        var transition = ProcessControlPlaneTransition.none
+        guard initializeManager.performIfRunning({
+            transition = processControlPlane.attach(.retryTimeout(timeout), to: lease)
+        }) else {
+            timeout.cancel()
+            return
+        }
+        applyProcessControlPlaneTransition(transition)
     }
 
     private func availableToolsCatalogSurfaceResult(
@@ -986,6 +985,7 @@ extension RuntimeCoordinator {
         guard let originalID = JSONRPC.Message.Inspector.requestID(from: requestObject) else {
             throw ControlPlane.Error.invalidResponse("missing request id")
         }
+        let rpcHandle = rpcHandle ?? ControlPlane.RPCHandle()
         let requestTemplate = requestObject.reduce(into: [String: JSONValue]()) { partial, entry in
             if entry.key == "id" { return }
             if let value = JSONValue(any: entry.value) {
@@ -1006,7 +1006,7 @@ extension RuntimeCoordinator {
             case .pinnedUpstream(let upstreamIndex):
                 upstreamIndex
             }
-        rpcHandle?.installCancelWithDelivery {
+        rpcHandle.installCancelWithDelivery {
             [self, router] snapshot, cancellationDelivery in
             if let registrationToken = snapshot.registrationToken {
                 _ = router.cancelPending(token: registrationToken)
@@ -1042,7 +1042,7 @@ extension RuntimeCoordinator {
                 cancellationDelivery.complete(.rejected)
             }
         }
-        if rpcHandle?.isCancelled() == true {
+        if rpcHandle.isCancelled() {
             throw CancellationError()
         }
 
@@ -1055,7 +1055,7 @@ extension RuntimeCoordinator {
                 preferredUpstreamIndex: preferredUpstreamIndex
             ) { [self, requestTemplate, originalID] selectedOperationLease in
                 let selectedUpstreamIndex = selectedOperationLease.upstreamIndex
-                if rpcHandle?.isCancelled() == true {
+                if rpcHandle.isCancelled() {
                     return self.eventLoop.makeFailedFuture(CancellationError())
                 }
                 let upstreamRequestTimeout = self.timeAmount(until: requestDeadlineUptimeNs)
@@ -1078,19 +1078,10 @@ extension RuntimeCoordinator {
                     on: self.eventLoop,
                     timeout: upstreamRequestTimeout,
                     onTimeout: {
-                        if let rpcHandle {
-                            rpcHandle.cancel(cause: .timedOut)
-                        } else {
-                            self.handleRequestLeaseTimeout(
-                                leaseID,
-                                sessionID: internalSessionID,
-                                requestIDKeys: [originalID.key],
-                                operationLease: selectedOperationLease
-                            )
-                        }
+                        rpcHandle.cancel(cause: .timedOut)
                     }
                 )
-                if rpcHandle?.markRegistered(
+                if rpcHandle.markRegistered(
                     registrationToken: registration.token,
                     operationLease: selectedOperationLease
                 ) == false {
@@ -1125,7 +1116,8 @@ extension RuntimeCoordinator {
                         UpstreamSlotScheduler.AcquisitionError.unavailable
                     )
                 }
-                if rpcHandle?.markAssigned(
+                self.testHooks.controlPlaneRPCAssignedUpstreamID?()
+                if rpcHandle.markAssigned(
                     registrationToken: registration.token,
                     operationLease: selectedOperationLease,
                     requestIDKey: originalID.key
@@ -1144,12 +1136,20 @@ extension RuntimeCoordinator {
                     )
                     return self.eventLoop.makeFailedFuture(CancellationError())
                 }
-                let requestSendCompletion = rpcHandle?.requestSendCompletion()
+                guard let requestSendCompletion = rpcHandle.requestSendCompletion() else {
+                    preconditionFailure("assigned RPC must own request send completion")
+                }
                 var upstreamObject = requestTemplate.mapValues(\.foundationObject)
                 upstreamObject["id"] = upstreamID
                 guard let requestData = try? JSONRPC.Wire.data(from: upstreamObject)
                 else {
-                    requestSendCompletion?.signal()
+                    requestSendCompletion.complete(.notSent)
+                    _ = session.router.cancelPending(token: registration.token)
+                    self.removeUpstreamIDMapping(
+                        sessionID: internalSessionID,
+                        requestIDKey: originalID.key,
+                        operationLease: selectedOperationLease
+                    )
                     self.failRequestLease(
                         leaseID,
                         terminalState: .failed,
@@ -1165,8 +1165,8 @@ extension RuntimeCoordinator {
                         )
                     )
                 }
-                if rpcHandle?.isCancelled() == true {
-                    requestSendCompletion?.signal()
+                if rpcHandle.isCancelled() {
+                    requestSendCompletion.complete(.notSent)
                     _ = session.router.cancelPending(token: registration.token)
                     self.removeUpstreamIDMapping(
                         sessionID: internalSessionID,
@@ -1190,6 +1190,11 @@ extension RuntimeCoordinator {
                     requestSendCompletion: requestSendCompletion,
                     onRejected: {
                         _ = session.router.cancelPending(token: registration.token)
+                        self.removeUpstreamIDMapping(
+                            sessionID: internalSessionID,
+                            requestIDKey: originalID.key,
+                            operationLease: selectedOperationLease
+                        )
                     }
                 )
                 guard sent else {
@@ -1198,7 +1203,8 @@ extension RuntimeCoordinator {
                         leaseID,
                         sessionID: internalSessionID,
                         requestIDKeys: [originalID.key],
-                        operationLease: selectedOperationLease
+                        operationLease: selectedOperationLease,
+                        after: requestSendCompletion
                     )
                     return self.eventLoop.makeFailedFuture(
                         UpstreamSlotScheduler.AcquisitionError.unavailable
@@ -1221,7 +1227,7 @@ extension RuntimeCoordinator {
                     )
                 }
             }
-            if rpcHandle?.isCancelled() == true {
+            if rpcHandle.isCancelled() {
                 abandonRequestLease(
                     leaseID,
                     sessionID: internalSessionID,
@@ -1234,11 +1240,11 @@ extension RuntimeCoordinator {
                     future,
                     deadlineUptimeNs: requestDeadlineUptimeNs,
                     onTimeout: {
-                        rpcHandle?.cancel(cause: .timedOut)
+                        rpcHandle.cancel(cause: .timedOut)
                     }
                 )
             } onCancel: {
-                rpcHandle?.cancel()
+                rpcHandle.cancel()
             }
             let responseObject = try extractJSONRPCResponseObject(from: response.responseData)
             let isProxyUpstreamFailure = responseIsProxyUpstreamFailure(responseObject)
@@ -1267,7 +1273,7 @@ extension RuntimeCoordinator {
             } else {
                 responseData = response.responseData
             }
-            rpcHandle?.markFinished()
+            rpcHandle.markFinished()
             if !isProxyUpstreamFailure {
                 markRequestSucceeded(response.operationLease)
             }

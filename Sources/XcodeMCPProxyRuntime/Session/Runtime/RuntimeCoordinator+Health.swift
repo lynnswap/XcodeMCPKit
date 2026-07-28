@@ -319,12 +319,7 @@ extension RuntimeCoordinator {
         let proof = probe.topologyProof
         var verification: (
             recovery: ProcessBridgePoolRecovery,
-            cleared: (
-                timeout: RuntimeScheduledTimeout?,
-                initUpstreamID: Int64?,
-                didReceiveInitializeResponse: Bool,
-                didSendInitialized: Bool
-            )?
+            cleared: UpstreamHealthManager.ClearedUpstreamState?
         )?
         var bridgeCompletion: ProcessControlPlaneTransition?
         var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
@@ -418,12 +413,7 @@ extension RuntimeCoordinator {
         let proof = probe.topologyProof
         var verification: (
             recovery: ProcessBridgePoolRecovery,
-            cleared: (
-                timeout: RuntimeScheduledTimeout?,
-                initUpstreamID: Int64?,
-                didReceiveInitializeResponse: Bool,
-                didSendInitialized: Bool
-            )?
+            cleared: UpstreamHealthManager.ClearedUpstreamState?
         )?
         var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
         let eligibility = initializeManager.finishSupportEligibilityUpdate {
@@ -670,6 +660,7 @@ extension RuntimeCoordinator {
         applyBackoff: Bool = false,
         mode: WarmInitializeMode = .regular
     ) {
+        guard initializeManager.snapshot().isShuttingDown == false else { return }
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
         runWhenUpstreamReady(
             reason: "warm_initialize_\(upstreamIndex)",
@@ -687,7 +678,23 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         mode: WarmInitializeMode
     ) {
+        guard initializeManager.snapshot().isShuttingDown == false else { return }
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
+        guard let operationLease = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        ) else { return }
+        if deferInitializeUntilUpstreamActivatable(
+            operationLease,
+            resume: { [weak self] in
+                self?.startUpstreamWarmInitializeWhenReady(
+                    upstreamIndex: upstreamIndex,
+                    mode: mode
+                )
+            }
+        ) {
+            return
+        }
+        let proof = operationLease.proof
         if case .processBridgeRecovery(let recovery) = mode {
             guard processControlPlane.validateBridgeRecovery(recovery.reservation),
                   recovery.topologyProof.slotID.rawValue == upstreamIndex,
@@ -717,10 +724,16 @@ extension RuntimeCoordinator {
             )
             return
         }
-        guard let initializeClaim = upstreamHealthManager.claimWarmInitialize(
-            upstreamIndex: upstreamIndex,
-            owner: mode.claimOwner
-        ) else {
+        var initializeClaim: UpstreamHealthManager.InitializeClaim?
+        guard initializeManager.performIfRunning({
+            initializeClaim = upstreamHealthManager.claimWarmInitialize(
+                topologyProof: proof,
+                owner: mode.claimOwner
+            )
+        }) else {
+            return
+        }
+        guard let initializeClaim else {
             if let activationStart {
                 applyProcessControlPlaneTransition(
                     processControlPlane.cancelActivation(activationStart)
@@ -734,9 +747,7 @@ extension RuntimeCoordinator {
             }
             return
         }
-        guard let proof = initializeClaim.topologyProof,
-              let operationLease = upstreamTopology.operationLease(for: proof),
-              let upstreamID = upstreamRouter.assignInitialize(proof: proof) else {
+        guard let upstreamID = upstreamRouter.assignInitialize(proof: proof) else {
             handleWarmInitializeStartFailure(
                 mode: mode,
                 initializeClaim: initializeClaim,
@@ -895,11 +906,13 @@ extension RuntimeCoordinator {
                 return
             }
         }
-        let attachment = upstreamHealthManager.replaceInitTimeout(
-            timeout,
-            for: initializeClaim
-        )
-        guard attachment.accepted else {
+        var attachment: UpstreamHealthManager.TimeoutAttachment?
+        guard initializeManager.performIfRunning({
+            attachment = upstreamHealthManager.replaceInitTimeout(
+                timeout,
+                for: initializeClaim
+            )
+        }), let attachment, attachment.accepted else {
             timeout.cancel()
             return
         }

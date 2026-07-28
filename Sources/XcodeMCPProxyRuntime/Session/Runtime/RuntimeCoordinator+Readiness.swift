@@ -29,11 +29,7 @@ extension RuntimeCoordinator {
     func startAllUpstreamSlots() {
         let snapshot = upstreamTopology.snapshot()
         for entry in snapshot.entries {
-            guard let proof = snapshot.proof(entry.id) else { continue }
-            addRuntimeTask { [weak self, entry, proof] in
-                guard let self, self.upstreamTopology.validate(proof) else { return }
-                await entry.slot.start()
-            }
+            startUpstreamSlot(entry.operationLease)
         }
     }
 
@@ -42,12 +38,57 @@ extension RuntimeCoordinator {
     }
 
     func startUpstreamSlot(_ upstreamIndex: Int) {
-        guard let context = upstreamSlotContext(upstreamIndex) else { return }
-        addRuntimeTask { [weak self, context] in
-            guard let self, self.upstreamTopology.validate(context.proof) else { return }
-            let upstream = context.slot
-            await upstream.start()
+        guard let operationLease = upstreamTopology.operationLease(
+            for: UpstreamSlotID(rawValue: upstreamIndex)
+        ) else { return }
+        startUpstreamSlot(operationLease)
+    }
+
+    private func startUpstreamSlot(_ operationLease: UpstreamOperationLease) {
+        addRuntimeTask { [weak self, operationLease] in
+            guard let self,
+                  await self.waitUntilUpstreamOperationActivatable(operationLease)
+            else { return }
+            await operationLease.slot.start()
         }
+    }
+
+    func retireUpstreamSlot(
+        _ slot: any UpstreamSlotControlling,
+        onStopped: @escaping @Sendable () -> Void = {}
+    ) {
+        let retirement: @Sendable () async -> Void = {
+            await slot.stop()
+            onStopped()
+        }
+        if upstreamRetirementTasks.run(retirement) == false {
+            Task.detached(operation: retirement)
+        }
+    }
+
+    func waitUntilUpstreamOperationActivatable(
+        _ operationLease: UpstreamOperationLease
+    ) async -> Bool {
+        if let completion = operationLease.predecessorStopCompletion {
+            await completion.wait()
+        }
+        guard Task.isCancelled == false else { return false }
+        return upstreamTopology.validate(operationLease)
+    }
+
+    func deferInitializeUntilUpstreamActivatable(
+        _ operationLease: UpstreamOperationLease,
+        resume: @escaping @Sendable () -> Void
+    ) -> Bool {
+        guard operationLease.predecessorStopCompletion != nil else { return false }
+        addRuntimeTask { [weak self, operationLease] in
+            guard let self,
+                  await self.waitUntilUpstreamOperationActivatable(operationLease),
+                  self.initializeManager.snapshot().isShuttingDown == false
+            else { return }
+            resume()
+        }
+        return true
     }
 
     func noteUpstreamInitializationSucceeded() {

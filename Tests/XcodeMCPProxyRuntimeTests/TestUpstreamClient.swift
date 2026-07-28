@@ -12,12 +12,15 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     private let stopEvents = RecordedValues<Int>()
     private let blockedCancellationSignal = TestSignal()
     private let blockedSendSignal = TestSignal()
+    private let blockedStopSignal = TestSignal()
     private var startCountValue = 0
     private var stopCountValue = 0
     private var shouldBlockNextCancellation = false
     private var blockedCancellation: CheckedContinuation<Upstream.SendResult, Never>?
     private var blockedMethod: String?
     private var blockedSend: CheckedContinuation<Upstream.SendResult, Never>?
+    private var shouldBlockStop = false
+    private var blockedStop: CheckedContinuation<Void, Never>?
 
     init() {
         var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
@@ -35,6 +38,13 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     func stop() async {
         stopCountValue += 1
         await stopEvents.append(stopCountValue)
+        if shouldBlockStop {
+            shouldBlockStop = false
+            blockedStopSignal.signal()
+            await withCheckedContinuation { continuation in
+                blockedStop = continuation
+            }
+        }
         releaseBlockedCancellation()
         releaseBlockedSend(.unavailable(.terminated))
         continuation.finish()
@@ -75,8 +85,10 @@ actor TestUpstreamClient: UpstreamSlotControlling {
         )
     }
 
-    func releaseBlockedCancellation() {
-        blockedCancellation?.resume(returning: .accepted)
+    func releaseBlockedCancellation(
+        _ result: Upstream.SendResult = .accepted
+    ) {
+        blockedCancellation?.resume(returning: result)
         blockedCancellation = nil
     }
 
@@ -97,6 +109,24 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     func releaseBlockedSend(_ result: Upstream.SendResult = .accepted) {
         blockedSend?.resume(returning: result)
         blockedSend = nil
+    }
+
+    func blockStop() {
+        precondition(shouldBlockStop == false && blockedStop == nil)
+        shouldBlockStop = true
+    }
+
+    func waitForBlockedStop() async throws {
+        if blockedStop != nil {
+            return
+        }
+        try await blockedStopSignal.wait(description: "waiting for blocked upstream stop")
+    }
+
+    func releaseBlockedStop() {
+        shouldBlockStop = false
+        blockedStop?.resume()
+        blockedStop = nil
     }
 
     func yield(_ event: Upstream.Event) async {
