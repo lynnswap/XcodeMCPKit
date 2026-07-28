@@ -985,6 +985,8 @@ struct ControlPlaneAuthorityTests {
         let fallbackRPC = ControlPlane.RPCHandle()
         _ = authority.attach(.rpc(lostRPC), to: lease)
         _ = authority.attach(.rpc(fallbackRPC), to: lease)
+        #expect(lostRPC.installCancel { _ in })
+        #expect(fallbackRPC.installCancel { _ in })
         #expect(lostRPC.markRegistered(
             registrationToken: UUID(),
             operationLease: testOperationLease(0)

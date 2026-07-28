@@ -812,14 +812,14 @@ extension RuntimeCoordinator {
     ) async throws -> CanonicalToolsCatalogLoadResult {
         var lastFailure: (upstreamIndex: Int, error: any Error)?
         for upstreamIndex in route.upstreamIndices {
-            let rpcHandle = ControlPlane.RPCHandle()
-            applyProcessControlPlaneTransition(
-                processControlPlane.attach(.rpc(rpcHandle), to: route.lease)
-            )
             let routeTimeout = timeAmount(until: deadlineUptimeNs) ?? requestTimeout
             if routeTimeout?.nanoseconds == 0 {
                 throw TimeoutError()
             }
+            let rpcHandle = ControlPlane.RPCHandle()
+            applyProcessControlPlaneTransition(
+                processControlPlane.attach(.rpc(rpcHandle), to: route.lease)
+            )
             do {
                 // First-success catalog loads cancel sibling routes; the route-level
                 // handle must release queued or in-flight fallback RPCs.
@@ -1009,7 +1009,7 @@ extension RuntimeCoordinator {
             case .pinnedUpstream(let upstreamIndex):
                 upstreamIndex
             }
-        rpcHandle.installCancelWithDelivery {
+        let installedCancellationHandler = rpcHandle.installCancelWithDelivery {
             [self, router] snapshot, cancellationDelivery in
             if let registrationToken = snapshot.registrationToken {
                 _ = router.cancelPending(token: registrationToken)
@@ -1044,6 +1044,15 @@ extension RuntimeCoordinator {
             if scheduled == false {
                 cancellationDelivery.complete(.rejected)
             }
+        }
+        guard installedCancellationHandler else {
+            abandonRequestLease(
+                leaseID,
+                sessionID: internalSessionID,
+                requestIDKeys: [originalID.key],
+                operationLease: nil
+            )
+            throw CancellationError()
         }
         if rpcHandle.isCancelled() {
             throw CancellationError()

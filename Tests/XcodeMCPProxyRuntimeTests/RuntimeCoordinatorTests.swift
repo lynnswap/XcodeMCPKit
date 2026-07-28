@@ -8989,6 +8989,12 @@ struct RuntimeCoordinatorRecoveryTests {
             #expect(error is TimeoutError)
         }
         #expect(await siblingUpstream.sentCount() == 0)
+        try await waitWithTimeout(
+            "waiting for exhausted sibling deadline retry scheduling",
+            timeout: .seconds(2)
+        ) {
+            await manager.drainRuntimeTasksForTesting()
+        }
     }
 
     @Test func sessionManagerProcessToolsListPropagatesCancellation() async throws {
@@ -13203,27 +13209,91 @@ struct RuntimeCoordinatorWindowRoutingTests {
         #expect(handle.markRegistered(registrationToken: UUID(), operationLease: testOperationLease(0)) == false)
     }
 
+    @Test func controlPlaneRPCHandleCancelBeforeHandlerInstallationTerminatesWithoutReplay() async {
+        let handle = ControlPlane.RPCHandle()
+        let callbackCount = NIOLockedValueBox(0)
+
+        let firstDelivery = handle.cancel(cause: .timedOut)
+        let repeatedDelivery = handle.cancel()
+
+        #expect(firstDelivery === repeatedDelivery)
+        #expect(await firstDelivery?.wait() == .noLongerApplicable)
+        #expect(handle.installCancelWithDelivery { _, _ in
+            callbackCount.withLockedValue { $0 += 1 }
+        } == false)
+        #expect(callbackCount.withLockedValue { $0 } == 0)
+        #expect(
+            handle.markRegistered(
+                registrationToken: UUID(),
+                operationLease: testOperationLease(0)
+            ) == false
+        )
+    }
+
     @Test func controlPlaneRPCHandlePublishesSharedDeliveryBeforeInvokingCancellation() async {
         let handle = ControlPlane.RPCHandle()
         let callbackDelivery = NIOLockedValueBox<ControlPlane.RPCCancellationDelivery?>(nil)
         let callbackCause = NIOLockedValueBox<ControlPlane.RPCCancellationCause?>(nil)
+        let callbackCount = NIOLockedValueBox(0)
+        let reentrantDelivery = NIOLockedValueBox<ControlPlane.RPCCancellationDelivery?>(nil)
 
-        let firstDelivery = handle.cancel(cause: .timedOut)
-        let concurrentDelivery = handle.cancel()
-
-        handle.installCancelWithDelivery { snapshot, delivery in
+        #expect(handle.installCancelWithDelivery { snapshot, delivery in
             callbackCause.withLockedValue { $0 = snapshot.cause }
             callbackDelivery.withLockedValue { $0 = delivery }
-        }
+            callbackCount.withLockedValue { $0 += 1 }
+            reentrantDelivery.withLockedValue { $0 = handle.cancel() }
+        })
 
+        let firstDelivery = handle.cancel(cause: .timedOut)
+        let repeatedDelivery = handle.cancel()
         let installedDelivery = callbackDelivery.withLockedValue { $0 }
 
-        #expect(firstDelivery === concurrentDelivery)
+        #expect(firstDelivery === repeatedDelivery)
         #expect(firstDelivery === installedDelivery)
+        #expect(firstDelivery === reentrantDelivery.withLockedValue { $0 })
         #expect(callbackCause.withLockedValue { $0 } == .timedOut)
+        #expect(callbackCount.withLockedValue { $0 } == 1)
 
         installedDelivery?.complete(.delivered)
         #expect(await firstDelivery?.wait() == .delivered)
+    }
+
+    @Test func controlPlaneRPCRejectsHandleCancelledBeforeInstallationWithoutLeakingLease()
+        async throws
+    {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let upstream = TestUpstreamClient()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: group.next(),
+            upstreams: [upstream],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let handle = ControlPlane.RPCHandle()
+
+        #expect(await handle.cancel()?.wait() == .noLongerApplicable)
+        await #expect(throws: CancellationError.self) {
+            try await manager.performControlPlaneRPC(
+                route: .pinnedUpstream(0),
+                purpose: "cancelled-before-handler-installation",
+                label: "cancelled-before-handler-installation",
+                requestObject: JSONRPC.Wire.requestObject(
+                    id: "cancelled-before-handler-installation",
+                    method: "tools/list"
+                ),
+                requestTimeout: .seconds(5),
+                rpcHandle: handle
+            )
+        }
+
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await upstream.sentCount() == 0)
+        let schedulerSnapshot = manager.upstreamSlotScheduler.debugSnapshot()
+        #expect(schedulerSnapshot.queuedRequestCount == 0)
+        #expect(schedulerSnapshot.activeLeaseCountByUpstream.isEmpty)
     }
 
     @Test func controlPlaneRPCCancelBetweenPreflightAndEnqueueRemovesQueuedRequest()
