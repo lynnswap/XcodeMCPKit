@@ -9308,8 +9308,7 @@ struct RuntimeCoordinatorRecoveryTests {
             [remainingTarget],
             reason: "test_process_route_retired"
         )
-        await manager.drainRuntimeTasksForTesting()
-        #expect(await retiredUpstream.stopCount() == 1)
+        #expect(try await retiredUpstream.nextStopCount() == 1)
 
         #expect(
             toolNames(in: manager.cachedToolsListResult() ?? .null) == [
@@ -9368,8 +9367,7 @@ struct RuntimeCoordinatorRecoveryTests {
             [],
             reason: "test_cataloged_process_route_retired_once"
         )
-        await manager.drainRuntimeTasksForTesting()
-        #expect(await upstream.stopCount() == 1)
+        #expect(try await upstream.nextStopCount() == 1)
 
         let notificationMethods = session.router.drainBufferedNotifications().compactMap {
             methodName(from: $0)
@@ -9676,8 +9674,7 @@ struct RuntimeCoordinatorCatalogTests {
             [remainingTarget],
             reason: "test_uncataloged_process_route_retired"
         )
-        await manager.drainRuntimeTasksForTesting()
-        #expect(await uncatalogedUpstream.stopCount() == 1)
+        #expect(try await uncatalogedUpstream.nextStopCount() == 1)
 
         #expect(
             toolNames(in: manager.cachedToolsListResult() ?? .null) == [
