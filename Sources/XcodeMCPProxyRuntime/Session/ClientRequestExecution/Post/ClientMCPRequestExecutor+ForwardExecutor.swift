@@ -76,7 +76,8 @@ extension ClientMCPRequestExecutor {
                 parsedRequestJSON: requestObject,
                 sessionID: sessionID,
                 operationLeaseOverride: operationLease,
-                admission: admission
+                admission: admission,
+                cancellationHandle: cancellationHandle
             ) else {
                 return makeImmediateLeaseResolution(
                     Self.makeUpstreamUnavailableResolution(
@@ -90,6 +91,8 @@ extension ClientMCPRequestExecutor {
                 )
             }
             prepared = candidate
+        } catch is CancellationError {
+            return eventLoop.makeFailedFuture(CancellationError())
         } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
             return eventLoop.makeFailedFuture(
                 ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology

@@ -30,15 +30,36 @@ struct MCPForwardingService: Sendable {
         parsedRequestJSON: Any,
         sessionID: String,
         operationLeaseOverride: UpstreamOperationLease? = nil,
-        admission: RouteForwardingAdmission? = nil
+        admission: RouteForwardingAdmission? = nil,
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil
     ) throws -> PreparedRequest? {
-        try upstreamRuntime.prepareRequest(
+        guard let prepared = try upstreamRuntime.prepareRequest(
             bodyData: bodyData,
             parsedRequestJSON: parsedRequestJSON,
             sessionID: sessionID,
             operationLeaseOverride: operationLeaseOverride,
             admission: admission
-        )
+        ) else {
+            return nil
+        }
+        guard let cancellationHandle else {
+            return prepared
+        }
+        let requestIDKeys = prepared.transform.responseID.map { [$0.key] } ?? []
+        guard cancellationHandle.bindPreparedRequest(
+            operationLease: prepared.operationLease,
+            requestIDKeys: requestIDKeys
+        ) else {
+            for requestIDKey in requestIDKeys {
+                sessionManager.removeUpstreamIDMapping(
+                    sessionID: sessionID,
+                    requestIDKey: requestIDKey,
+                    operationLease: prepared.operationLease
+                )
+            }
+            throw CancellationError()
+        }
+        return prepared
     }
 
     func startRequest(
@@ -244,14 +265,12 @@ struct MCPForwardingService: Sendable {
                         parsedRequestJSON: parsedRequestJSON,
                         sessionID: sessionID,
                         operationLeaseOverride: selectedOperationLease,
-                        admission: admission
+                        admission: admission,
+                        cancellationHandle: internalCancellationHandle
                     ) else {
                         return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                     }
                     prepared = candidate
-                    internalCancellationHandle.bindRequestIDKeys(
-                        prepared.transform.responseID.map { [$0.key] } ?? []
-                    )
                 } catch is CancellationError {
                     return eventLoop.makeFailedFuture(CancellationError())
                 } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {

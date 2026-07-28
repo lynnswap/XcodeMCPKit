@@ -1563,6 +1563,38 @@ struct ControlPlaneAuthorityTests {
         #expect(secondRetry.delay == .milliseconds(500))
     }
 
+    @Test func catalogTimeoutFiringBeforeAttachmentConsumesReservation() throws {
+        let target = xcodeProcessTarget(processID: 41035, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 1
+        ))
+        let reservation = try #require(
+            authority.reserveCatalogTimeout(for: lease)
+        )
+
+        guard case .retryRequired =
+            authority.handleCatalogRequestTimeout(reservation, nowUptimeNs: 2)
+        else {
+            Issue.record("a reserved timeout must fire before its handle is attached")
+            return
+        }
+
+        let lateTimeoutCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {
+                lateTimeoutCancelled.withLockedValue { $0 = true }
+            },
+            to: reservation
+        ))
+
+        #expect(lateTimeoutCancelled.withLockedValue { $0 })
+        #expect(authority.validateCatalogLoad(lease) == false)
+    }
+
     @Test func staleCatalogTimeoutCannotTerminateNewerRetryLoad() throws {
         let target = xcodeProcessTarget(processID: 41033, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0])])

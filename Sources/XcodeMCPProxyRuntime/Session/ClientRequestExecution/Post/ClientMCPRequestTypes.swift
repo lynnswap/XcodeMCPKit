@@ -72,6 +72,7 @@ extension ClientMCPRequestExecutor {
     final class CancellationHandle: @unchecked Sendable {
         private enum ActiveRequest: Sendable {
             case selected(UpstreamOperationLease)
+            case prepared(UpstreamOperationLease)
             case sendRegistered(
                 operationLease: UpstreamOperationLease,
                 routerPendingToken: UUID,
@@ -87,6 +88,13 @@ extension ClientMCPRequestExecutor {
 
             var cancellationOperationLease: UpstreamOperationLease? {
                 guard case .sendRegistered(let operationLease, _, _) = self else {
+                    return nil
+                }
+                return operationLease
+            }
+
+            var preparedOperationLease: UpstreamOperationLease? {
+                guard case .prepared(let operationLease) = self else {
                     return nil
                 }
                 return operationLease
@@ -147,6 +155,20 @@ extension ClientMCPRequestExecutor {
             }
         }
 
+        func bindPreparedRequest(
+            operationLease: UpstreamOperationLease,
+            requestIDKeys: [String]
+        ) -> Bool {
+            state.withLockedValue { state in
+                guard !state.isTerminal,
+                      case .selected(let selected) = state.activeRequest,
+                      selected.proof == operationLease.proof else { return false }
+                state.requestIDKeys = requestIDKeys
+                state.activeRequest = .prepared(operationLease)
+                return true
+            }
+        }
+
         func bindStartedRegistration(
             operationLease: UpstreamOperationLease,
             routerPendingToken: UUID,
@@ -154,21 +176,14 @@ extension ClientMCPRequestExecutor {
         ) -> Bool {
             state.withLockedValue { state in
                 guard !state.isTerminal,
-                      case .selected(let selected) = state.activeRequest,
-                      selected.proof == operationLease.proof else { return false }
+                      case .prepared(let prepared) = state.activeRequest,
+                      prepared.proof == operationLease.proof else { return false }
                 state.activeRequest = .sendRegistered(
                     operationLease: operationLease,
                     routerPendingToken: routerPendingToken,
                     requestSendCompletion: requestSendCompletion
                 )
                 return true
-            }
-        }
-
-        func bindRequestIDKeys(_ requestIDKeys: [String]) {
-            state.withLockedValue { state in
-                guard !state.isTerminal else { return }
-                state.requestIDKeys = requestIDKeys
             }
         }
 
@@ -200,7 +215,12 @@ extension ClientMCPRequestExecutor {
             }
         }
 
-        func cancel(using runtime: any RuntimeSessionRegistryPort & RuntimeRequestLeasePort) {
+        func cancel(
+            using runtime:
+                any RuntimeSessionRegistryPort
+                    & RuntimeRequestLeasePort
+                    & ProxyUpstreamRequestRuntimePort
+        ) {
             let snapshot = state.withLockedValue {
                 state -> CancellationSnapshot? in
                 guard !state.isTerminal else { return nil }
@@ -223,6 +243,15 @@ extension ClientMCPRequestExecutor {
             if let routerPendingToken = snapshot.activeRequest?.routerPendingToken,
                runtime.hasSession(id: sessionID) {
                 _ = runtime.session(id: sessionID).router.cancelPending(token: routerPendingToken)
+            }
+            if let operationLease = snapshot.activeRequest?.preparedOperationLease {
+                for requestIDKey in snapshot.requestIDKeys {
+                    runtime.removeUpstreamIDMapping(
+                        sessionID: sessionID,
+                        requestIDKey: requestIDKey,
+                        operationLease: operationLease
+                    )
+                }
             }
             runtime.abandonRequestLease(
                 leaseID,

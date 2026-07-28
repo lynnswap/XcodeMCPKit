@@ -95,13 +95,16 @@ extension ClientMCPRequestExecutor {
                         parsedRequestJSON: attemptRequestObject,
                         sessionID: sessionID,
                         operationLeaseOverride: selectedOperationLease,
-                        admission: admission
+                        admission: admission,
+                        cancellationHandle: cancellationHandle
                     ) else {
                         return eventLoop.makeSucceededFuture(
                             MCPForwardingService.ResponseResolution.invalidUpstreamResponse
                         )
                     }
                     prepared = candidate
+                } catch is CancellationError {
+                    return eventLoop.makeFailedFuture(CancellationError())
                 } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
                     return eventLoop.makeSucceededFuture(
                         MCPForwardingService.ResponseResolution.upstreamUnavailable

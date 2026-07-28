@@ -369,18 +369,30 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     private struct Attempt: Sendable {
         struct Load: Sendable {
-            struct CatalogTimeout: Sendable {
-                let generation: UInt64
-                var scheduled: RuntimeScheduledTimeout?
+            enum CatalogTimeout: Sendable {
+                case reserved(generation: UInt64)
+                case attached(generation: UInt64, RuntimeScheduledTimeout)
+
+                var generation: UInt64 {
+                    switch self {
+                    case .reserved(let generation), .attached(let generation, _):
+                        return generation
+                    }
+                }
+
+                var cancellationEffect: ProcessControlPlaneEffect? {
+                    guard case .attached(_, let timeout) = self else {
+                        return nil
+                    }
+                    return .cancelTimeout(timeout)
+                }
             }
 
             var catalogTimeout: CatalogTimeout? = nil
             var rpcHandles: [ControlPlane.RPCHandle] = []
 
             func detachedEffects() -> [ProcessControlPlaneEffect] {
-                var effects = catalogTimeout?.scheduled.map {
-                    [ProcessControlPlaneEffect.cancelTimeout($0)]
-                } ?? []
+                var effects = catalogTimeout?.cancellationEffect.map { [$0] } ?? []
                 effects.append(contentsOf: rpcHandles.map(ProcessControlPlaneEffect.cancelRPC))
                 return effects
             }
@@ -1668,10 +1680,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 catalogLease: lease,
                 generation: state.nextCatalogTimeoutGeneration
             )
-            load.catalogTimeout = Attempt.Load.CatalogTimeout(
-                generation: reservation.generation,
-                scheduled: nil
-            )
+            load.catalogTimeout = .reserved(generation: reservation.generation)
             attempt.loads[lease.loadID] = load
             record.attempt = attempt
             state.recordsByKey[key] = record
@@ -1691,9 +1700,9 @@ final class ProcessControlPlaneAuthority: Sendable {
                   Self.matches(lease: lease, attempt: attempt, state: state),
                   attempt.phase == .loadingCatalog,
                   var load = attempt.loads[lease.loadID],
-                  var catalogTimeout = load.catalogTimeout,
+                  let catalogTimeout = load.catalogTimeout,
                   catalogTimeout.generation == reservation.generation,
-                  catalogTimeout.scheduled == nil else {
+                  case .reserved = catalogTimeout else {
                 return ProcessControlPlaneTransition(
                     addedRoutes: [],
                     retiredRoutes: [],
@@ -1701,8 +1710,10 @@ final class ProcessControlPlaneAuthority: Sendable {
                     publishesToolsListChanged: false
                 )
             }
-            catalogTimeout.scheduled = timeout
-            load.catalogTimeout = catalogTimeout
+            load.catalogTimeout = .attached(
+                generation: reservation.generation,
+                timeout
+            )
             attempt.loads[lease.loadID] = load
             record.attempt = attempt
             state.recordsByKey[key] = record
@@ -2189,8 +2200,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                   Self.matches(lease: lease, attempt: attempt, state: state),
                   attempt.phase == .loadingCatalog,
                   let catalogTimeout = attempt.loads[lease.loadID]?.catalogTimeout,
-                  catalogTimeout.generation == reservation.generation,
-                  catalogTimeout.scheduled != nil else {
+                  catalogTimeout.generation == reservation.generation else {
                 return nil
             }
             let effects = attempt.loads.removeValue(forKey: lease.loadID)?

@@ -458,18 +458,27 @@ extension RuntimeCoordinator {
               route.id == lease.routeIdentity else { return }
         var timeout: ProcessControlPlaneAuthority.CatalogRequestTimeout?
         var didTimeoutCatalogRequest = false
-        guard upstreamTopology.withValidated(proof, {
-            didTimeoutCatalogRequest = upstreamHealthManager.timeoutCatalogRequest(
-                initializeClaim,
-                commit: { _ in
-                    timeout = processControlPlane.handleCatalogRequestTimeout(
-                        reservation,
-                        nowUptimeNs: nowUptimeNanoseconds()
-                    )
-                    return timeout != nil
-                }
-            )
-        }) != nil, didTimeoutCatalogRequest, let timeout else { return }
+        var validatedTopology = false
+        guard initializeManager.performIfRunning({
+            validatedTopology = upstreamTopology.withValidated(proof, {
+                didTimeoutCatalogRequest = upstreamHealthManager.timeoutCatalogRequest(
+                    initializeClaim,
+                    commit: { _ in
+                        timeout = processControlPlane.handleCatalogRequestTimeout(
+                            reservation,
+                            nowUptimeNs: nowUptimeNanoseconds()
+                        )
+                        return timeout != nil
+                    }
+                )
+            }) != nil
+        }),
+            validatedTopology,
+            didTimeoutCatalogRequest,
+            let timeout
+        else {
+            return
+        }
         let cancellationDeliveries = applyProcessControlPlaneTransition(timeout.transition)
         guard case .retryRequired(
             _,
