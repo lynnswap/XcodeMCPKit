@@ -70,10 +70,54 @@ extension ClientMCPRequestExecutor {
     }
 
     final class CancellationHandle: @unchecked Sendable {
+        private enum ActiveRequest: Sendable {
+            case selected(UpstreamOperationLease)
+            case prepared(UpstreamOperationLease)
+            case sendRegistered(
+                operationLease: UpstreamOperationLease,
+                routerPendingToken: UUID,
+                requestSendCompletion: UpstreamRequestSendCompletion
+            )
+
+            var routerPendingToken: UUID? {
+                guard case .sendRegistered(_, let routerPendingToken, _) = self else {
+                    return nil
+                }
+                return routerPendingToken
+            }
+
+            var cancellationOperationLease: UpstreamOperationLease? {
+                guard case .sendRegistered(let operationLease, _, _) = self else {
+                    return nil
+                }
+                return operationLease
+            }
+
+            var preparedOperationLease: UpstreamOperationLease? {
+                guard case .prepared(let operationLease) = self else {
+                    return nil
+                }
+                return operationLease
+            }
+
+            var requestSendCompletion: UpstreamRequestSendCompletion? {
+                guard case .sendRegistered(_, _, let requestSendCompletion) = self else {
+                    return nil
+                }
+                return requestSendCompletion
+            }
+        }
+
+        private struct CancellationSnapshot: Sendable {
+            let activeRequest: ActiveRequest?
+            let refreshTask: Task<Void, Never>?
+            let childHandles: [ClientMCPRequestExecutor.CancellationHandle]
+            let requestIDKeys: [String]
+        }
+
         private struct State: Sendable {
             var requestIDKeys: [String]
-            var operationLease: UpstreamOperationLease?
-            var routerPendingToken: UUID?
+            var activeRequest: ActiveRequest?
             var refreshTask: Task<Void, Never>?
             var childHandles: [ClientMCPRequestExecutor.CancellationHandle] = []
             var isTerminal = false
@@ -106,27 +150,40 @@ extension ClientMCPRequestExecutor {
         func activate(operationLease: UpstreamOperationLease) -> Bool {
             state.withLockedValue { state in
                 guard !state.isTerminal else { return false }
-                state.operationLease = operationLease
+                state.activeRequest = .selected(operationLease)
+                return true
+            }
+        }
+
+        func bindPreparedRequest(
+            operationLease: UpstreamOperationLease,
+            requestIDKeys: [String]
+        ) -> Bool {
+            state.withLockedValue { state in
+                guard !state.isTerminal,
+                      case .selected(let selected) = state.activeRequest,
+                      selected.proof == operationLease.proof else { return false }
+                state.requestIDKeys = requestIDKeys
+                state.activeRequest = .prepared(operationLease)
                 return true
             }
         }
 
         func bindStartedRegistration(
             operationLease: UpstreamOperationLease,
-            routerPendingToken: UUID
+            routerPendingToken: UUID,
+            requestSendCompletion: UpstreamRequestSendCompletion
         ) -> Bool {
             state.withLockedValue { state in
-                guard !state.isTerminal else { return false }
-                state.operationLease = operationLease
-                state.routerPendingToken = routerPendingToken
+                guard !state.isTerminal,
+                      case .prepared(let prepared) = state.activeRequest,
+                      prepared.proof == operationLease.proof else { return false }
+                state.activeRequest = .sendRegistered(
+                    operationLease: operationLease,
+                    routerPendingToken: routerPendingToken,
+                    requestSendCompletion: requestSendCompletion
+                )
                 return true
-            }
-        }
-
-        func bindRequestIDKeys(_ requestIDKeys: [String]) {
-            state.withLockedValue { state in
-                guard !state.isTerminal else { return }
-                state.requestIDKeys = requestIDKeys
             }
         }
 
@@ -158,38 +215,50 @@ extension ClientMCPRequestExecutor {
             }
         }
 
-        func cancel(using runtime: any RuntimeSessionRegistryPort & RuntimeRequestLeasePort) {
+        func cancel(
+            using runtime:
+                any RuntimeSessionRegistryPort
+                    & RuntimeRequestLeasePort
+                    & ProxyUpstreamRequestRuntimePort
+        ) {
             let snapshot = state.withLockedValue {
-                state -> (
-                    UpstreamOperationLease?, UUID?, Task<Void, Never>?, [ClientMCPRequestExecutor.CancellationHandle], [String]
-                )?
-                in
+                state -> CancellationSnapshot? in
                 guard !state.isTerminal else { return nil }
                 state.isTerminal = true
-                let snapshot = (
-                    state.operationLease,
-                    state.routerPendingToken,
-                    state.refreshTask,
-                    state.childHandles,
-                    state.requestIDKeys
+                let snapshot = CancellationSnapshot(
+                    activeRequest: state.activeRequest,
+                    refreshTask: state.refreshTask,
+                    childHandles: state.childHandles,
+                    requestIDKeys: state.requestIDKeys
                 )
                 state.refreshTask = nil
                 state.childHandles = []
                 return snapshot
             }
             guard let snapshot else { return }
-            snapshot.2?.cancel()
-            for childHandle in snapshot.3 {
+            snapshot.refreshTask?.cancel()
+            for childHandle in snapshot.childHandles {
                 childHandle.cancel(using: runtime)
             }
-            if let routerPendingToken = snapshot.1, runtime.hasSession(id: sessionID) {
+            if let routerPendingToken = snapshot.activeRequest?.routerPendingToken,
+               runtime.hasSession(id: sessionID) {
                 _ = runtime.session(id: sessionID).router.cancelPending(token: routerPendingToken)
+            }
+            if let operationLease = snapshot.activeRequest?.preparedOperationLease {
+                for requestIDKey in snapshot.requestIDKeys {
+                    runtime.removeUpstreamIDMapping(
+                        sessionID: sessionID,
+                        requestIDKey: requestIDKey,
+                        operationLease: operationLease
+                    )
+                }
             }
             runtime.abandonRequestLease(
                 leaseID,
                 sessionID: sessionID,
-                requestIDKeys: snapshot.4,
-                operationLease: snapshot.0
+                requestIDKeys: snapshot.requestIDKeys,
+                operationLease: snapshot.activeRequest?.cancellationOperationLease,
+                after: snapshot.activeRequest?.requestSendCompletion
             )
         }
     }

@@ -2866,7 +2866,6 @@ struct HTTPHandlerTests {
             requestIDKeys: ["91"]
         )
         #expect(cancellationHandle.activate(operationLease: operationLease))
-        cancellationHandle.cancel(using: sessionManager)
 
         let requestObject = JSONRPC.Wire.requestObject(
             id: 91,
@@ -2878,9 +2877,16 @@ struct HTTPHandlerTests {
                 bodyData: requestData,
                 parsedRequestJSON: requestObject,
                 sessionID: sessionID,
-                operationLeaseOverride: operationLease
+                operationLeaseOverride: operationLease,
+                cancellationHandle: cancellationHandle
             )
         )
+        #expect(sessionManager.mappedUpstreamRequestCount() == 1)
+
+        cancellationHandle.cancel(using: sessionManager)
+
+        #expect(sessionManager.lastAbandonedRequestHadOperationLease() == false)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
 
         #expect(throws: CancellationError.self) {
             _ = try forwardingService.startRequest(
@@ -2893,6 +2899,51 @@ struct HTTPHandlerTests {
         }
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+    }
+
+    @Test func forwardingServiceCleansMappingWhenCancellationWinsPreparationBinding() throws {
+        let config = makeHTTPConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        let forwardingService = MCPForwardingService(
+            configuration: config.runtime,
+            sessionManager: sessionManager
+        )
+        let sessionID = "session-cancelled-preparation-binding"
+        let operationLease = try #require(sessionManager.chooseUpstreamOperationLease())
+        let leaseID = sessionManager.createRequestLease(
+            descriptor: SessionRequestPipeline.Descriptor(
+                sessionID: sessionID,
+                label: "resources/list",
+                expectsResponse: true,
+                isTopLevelClientRequest: true
+            )
+        )
+        let cancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
+            leaseID: leaseID,
+            sessionID: sessionID,
+            requestIDKeys: ["92"]
+        )
+        #expect(cancellationHandle.activate(operationLease: operationLease))
+        cancellationHandle.cancel(using: sessionManager)
+
+        let requestObject = JSONRPC.Wire.requestObject(
+            id: 92,
+            method: "resources/list"
+        )
+        let requestData = try JSONRPC.Wire.data(from: requestObject)
+
+        #expect(throws: CancellationError.self) {
+            _ = try forwardingService.prepareRequest(
+                bodyData: requestData,
+                parsedRequestJSON: requestObject,
+                sessionID: sessionID,
+                operationLeaseOverride: operationLease,
+                cancellationHandle: cancellationHandle
+            )
+        }
+        #expect(sessionManager.lastAbandonedRequestHadOperationLease() == false)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+        #expect(sessionManager.sentUpstreamCount() == 0)
     }
 
     @Test func httpResourceTemplatesListReturnsEmptyArray() async throws {

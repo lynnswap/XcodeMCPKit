@@ -95,13 +95,16 @@ extension ClientMCPRequestExecutor {
                         parsedRequestJSON: attemptRequestObject,
                         sessionID: sessionID,
                         operationLeaseOverride: selectedOperationLease,
-                        admission: admission
+                        admission: admission,
+                        cancellationHandle: cancellationHandle
                     ) else {
                         return eventLoop.makeSucceededFuture(
                             MCPForwardingService.ResponseResolution.invalidUpstreamResponse
                         )
                     }
                     prepared = candidate
+                } catch is CancellationError {
+                    return eventLoop.makeFailedFuture(CancellationError())
                 } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
                     return eventLoop.makeSucceededFuture(
                         MCPForwardingService.ResponseResolution.upstreamUnavailable
@@ -121,12 +124,13 @@ extension ClientMCPRequestExecutor {
                         requestTimeoutOverride: requestTimeoutOverride,
                         leaseID: leaseID,
                         cancellationHandle: cancellationHandle,
-                        onTimeout: {
+                        onTimeout: { requestSendCompletion in
                             self.sessionManager.handleRequestLeaseTimeout(
                                 leaseID,
                                 sessionID: sessionID,
                                 requestIDKeys: [responseID.key],
-                                operationLease: prepared.operationLease
+                                operationLease: prepared.operationLease,
+                                after: requestSendCompletion
                             )
                         }
                     )

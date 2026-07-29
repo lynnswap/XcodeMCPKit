@@ -54,7 +54,9 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     var processRouteCatalogCommitted:
         (@Sendable (_ processID: pid_t, _ upstreamIndex: Int) -> Void)?
     var xcodeProcessReconcileCompleted: (@Sendable (_ reason: String) -> Void)?
+    var processRouteRetirementWillDetach: (@Sendable () -> Void)?
     var controlPlaneRPCWillEnqueue: (@Sendable () -> Void)?
+    var controlPlaneRPCAssignedUpstreamID: (@Sendable () -> Void)?
     var upstreamRequestQueued:
         (
             @Sendable (
@@ -82,7 +84,9 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         processRouteCatalogCommitted:
             (@Sendable (_ processID: pid_t, _ upstreamIndex: Int) -> Void)? = nil,
         xcodeProcessReconcileCompleted: (@Sendable (_ reason: String) -> Void)? = nil,
+        processRouteRetirementWillDetach: (@Sendable () -> Void)? = nil,
         controlPlaneRPCWillEnqueue: (@Sendable () -> Void)? = nil,
+        controlPlaneRPCAssignedUpstreamID: (@Sendable () -> Void)? = nil,
         upstreamRequestQueued:
             (
                 @Sendable (
@@ -108,7 +112,9 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.upstreamInitialized = upstreamInitialized
         self.processRouteCatalogCommitted = processRouteCatalogCommitted
         self.xcodeProcessReconcileCompleted = xcodeProcessReconcileCompleted
+        self.processRouteRetirementWillDetach = processRouteRetirementWillDetach
         self.controlPlaneRPCWillEnqueue = controlPlaneRPCWillEnqueue
+        self.controlPlaneRPCAssignedUpstreamID = controlPlaneRPCAssignedUpstreamID
         self.upstreamRequestQueued = upstreamRequestQueued
         self.upstreamRequestWillStart = upstreamRequestWillStart
         self.primaryInitializeFailureCleanupCompleted = primaryInitializeFailureCleanupCompleted
@@ -136,6 +142,8 @@ struct DocumentationProviderDiscoveryState: Sendable {
 
 typealias XcodeProcessUpstreamFactory =
     @Sendable (_ target: XcodeProcessTarget) -> [any UpstreamSlotControlling]
+typealias UnboundUpstreamFactory =
+    @Sendable () -> any UpstreamSlotControlling
 
 /// The single routing decision for a DocumentationSearch tools/call:
 /// either the provider produced the response, or proxy-managed
@@ -259,14 +267,48 @@ protocol RuntimeRequestLeasePort: Sendable {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease
+        operationLease: UpstreamOperationLease,
+        after requestSendCompletion: UpstreamRequestSendCompletion?
     )
     func abandonRequestLease(
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease?
+        operationLease: UpstreamOperationLease?,
+        after requestSendCompletion: UpstreamRequestSendCompletion?
     )
+}
+
+extension RuntimeRequestLeasePort {
+    func handleRequestLeaseTimeout(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        operationLease: UpstreamOperationLease
+    ) {
+        handleRequestLeaseTimeout(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: operationLease,
+            after: nil
+        )
+    }
+
+    func abandonRequestLease(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        operationLease: UpstreamOperationLease?
+    ) {
+        abandonRequestLease(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: operationLease,
+            after: nil
+        )
+    }
 }
 
 protocol RuntimeClientLocalMCPResponderPort:
@@ -452,7 +494,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let sessionRegistry: SessionRegistry
     let initializeManager: InitializeManager
     let upstreamEventTasks = AsyncTaskSupervisor()
+    let upstreamRetirementTasks = AsyncTaskSupervisor()
     let runtimeTasks = AsyncTaskSupervisor()
+    let upstreamTopologyCommitLock = NIOLock()
     let upstreamStderrLogLimiter = UpstreamStderrLogLimiter()
     let primaryInitializeReadinessTokenBox =
         NIOLockedValueBox<UpstreamReadinessWaiterToken?>(nil)
@@ -494,6 +538,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let xcodeProcessEventMonitor: (any XcodeProcessEventMonitoring)?
     let xcodeTargetDiscovery: (any XcodeTargetDiscovering)?
     let dynamicUpstreamFactory: XcodeProcessUpstreamFactory?
+    let unboundUpstreamFactory: UnboundUpstreamFactory?
     var xcodeProcessRoutes: [XcodeProcessRoute] {
         processControlPlane.activeRoutes()
     }
@@ -559,6 +604,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 )
             }
             : nil
+        let unboundUpstreamFactory: UnboundUpstreamFactory?
+        if xcodeProcessRoutingEnabled {
+            unboundUpstreamFactory = nil
+        } else {
+            unboundUpstreamFactory = {
+                MCPBridgeRuntime.makeUnboundUpstreamSlot(config: bridgeRuntimeConfig)
+            }
+        }
         self.init(
             config: config,
             eventLoop: eventLoop,
@@ -575,6 +628,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     xcodeTarget: target
                 )
             },
+            unboundUpstreamFactory: unboundUpstreamFactory,
             documentationProviderManager: documentationProviderManager,
             prewarmDocumentationProviderOnStartup: documentationProviderManager != nil,
             notificationSink: notificationSink,
@@ -629,6 +683,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
         xcodeProcessEventMonitor: (any XcodeProcessEventMonitoring)? = nil,
         dynamicUpstreamFactory: XcodeProcessUpstreamFactory? = nil,
+        unboundUpstreamFactory: UnboundUpstreamFactory? = nil,
         documentationProviderManager: (any DocumentationProviderManaging)? = nil,
         prewarmDocumentationProviderOnStartup: Bool = false,
         notificationSink: (@Sendable (_ sessionID: String, _ data: Data) -> Void)? = nil,
@@ -698,6 +753,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.xcodeTargetDiscovery = xcodeTargetDiscovery
         self.xcodeProcessEventMonitor = xcodeProcessEventMonitor
         self.dynamicUpstreamFactory = dynamicUpstreamFactory
+        self.unboundUpstreamFactory = unboundUpstreamFactory
         self.prewarmDocumentationProviderOnStartup = prewarmDocumentationProviderOnStartup
         self.testHooks = testHooks
         let resolvedReadinessGate =
@@ -1090,10 +1146,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             clearToolsCatalog: true
         )
 
+        let shutdownTopology = commitUpstreamTopologyMutation {
+            upstreamTopology.retireAll()
+        }
         await withTaskGroup(of: Void.self) { group in
-            for upstream in upstreams {
+            for entry in shutdownTopology.retired {
                 group.addTask {
-                    await upstream.stop()
+                    await entry.slot.stop()
                 }
             }
             if let documentationProviderManager {
@@ -1110,6 +1169,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         await upstreamEventTasks.shutdown()
         await controlPlaneDrain.wait()
         await runtimeDrain.wait()
+        await upstreamRetirementTasks.shutdown()
     }
 
     func cancelForDeinit() {
@@ -1127,6 +1187,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
         _ = runtimeTasks.beginShutdown()
         _ = upstreamEventTasks.beginShutdown()
+        _ = upstreamRetirementTasks.beginShutdown()
     }
 
     func isInitialized() -> Bool {
@@ -1142,13 +1203,19 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             ?? processControlPlane.canonicalToolsCatalogRaw()
     }
 
-    func applyProcessControlPlaneTransition(_ transition: ProcessControlPlaneTransition) {
+    @discardableResult
+    func applyProcessControlPlaneTransition(
+        _ transition: ProcessControlPlaneTransition
+    ) -> [ControlPlane.RPCCancellationDelivery] {
+        var cancellationDeliveries: [ControlPlane.RPCCancellationDelivery] = []
         for effect in transition.effects {
             switch effect {
             case .cancelTimeout(let timeout):
                 timeout.cancel()
             case .cancelRPC(let handle):
-                handle.cancel()
+                if let delivery = handle.cancel() {
+                    cancellationDeliveries.append(delivery)
+                }
             case .cancelReadinessWaiter(let token):
                 cancelUpstreamReadinessWaiter(token)
             case .restoreBridgePool(let recovery):
@@ -1158,6 +1225,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         if transition.publishesToolsListChanged {
             publishToolsListChangedNotification()
         }
+        return cancellationDeliveries
     }
 
     func publishUpstreamTopology(_ snapshot: UpstreamTopologyAuthority.Snapshot) {
@@ -1166,13 +1234,24 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         debugRecorder.applyTopology(snapshot)
     }
 
-    func upstreamSlotContext(
-        _ upstreamIndex: Int
-    ) -> (slot: any UpstreamSlotControlling, proof: UpstreamTopologyProof)? {
-        let snapshot = upstreamTopology.snapshot()
-        let id = UpstreamSlotID(rawValue: upstreamIndex)
-        guard let slot = snapshot.slot(id), let proof = snapshot.proof(id) else { return nil }
-        return (slot, proof)
+    func commitUpstreamTopologyMutation(
+        _ mutation: () -> UpstreamTopologyAuthority.Transition
+    ) -> UpstreamTopologyAuthority.Transition {
+        upstreamTopologyCommitLock.withLock {
+            let transition = mutation()
+            publishUpstreamTopology(transition.snapshot)
+            return transition
+        }
+    }
+
+    func commitUpstreamTopologyMutation(
+        _ mutation: () -> UpstreamTopologyAuthority.Transition?
+    ) -> UpstreamTopologyAuthority.Transition? {
+        upstreamTopologyCommitLock.withLock {
+            guard let transition = mutation() else { return nil }
+            publishUpstreamTopology(transition.snapshot)
+            return transition
+        }
     }
 
     func processToolCatalogExposedProcessIDs() -> Set<pid_t> {

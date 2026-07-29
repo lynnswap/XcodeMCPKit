@@ -4,10 +4,19 @@ import NIO
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
-    func applyCatalogCommit(_ commit: CatalogCommit) {
+    struct InitializeChannelReplacement: Sendable {
+        let operationLease: UpstreamOperationLease
+
+        var proof: UpstreamTopologyProof { operationLease.proof }
+    }
+
+    @discardableResult
+    func applyCatalogCommit(
+        _ commit: CatalogCommit
+    ) -> [ControlPlane.RPCCancellationDelivery] {
         switch commit {
         case .accepted(_, let transition), .discarded(_, let transition):
-            applyProcessControlPlaneTransition(transition)
+            return applyProcessControlPlaneTransition(transition)
         }
     }
 
@@ -91,6 +100,7 @@ extension RuntimeCoordinator {
     }
 
     func startProcessRouteActivation(for route: XcodeProcessRoute) {
+        guard initializeManager.snapshot().isShuttingDown == false else { return }
         guard unavailableXcodeProcessIDs().contains(route.target.processID) == false else {
             return
         }
@@ -106,12 +116,18 @@ extension RuntimeCoordinator {
             for: UpstreamSlotID(rawValue: upstreamIndex)
         )?.proof else { return }
         let readinessToken = UpstreamReadinessWaiterToken()
-        guard let (reservation, transition) = processControlPlane.reserveActivation(
-            routeID: route.id,
-            upstreamProof: upstreamProof,
-            nowUptimeNs: nowUptimeNanoseconds(),
-            readinessToken: readinessToken
-        ) else {
+        var activation: (
+            ProcessControlPlaneAuthority.ActivationReservation,
+            ProcessControlPlaneTransition
+        )?
+        guard initializeManager.performIfRunning({
+            activation = processControlPlane.reserveActivation(
+                routeID: route.id,
+                upstreamProof: upstreamProof,
+                nowUptimeNs: nowUptimeNanoseconds(),
+                readinessToken: readinessToken
+            )
+        }), let (reservation, transition) = activation else {
             return
         }
         applyProcessControlPlaneTransition(transition)
@@ -237,13 +253,18 @@ extension RuntimeCoordinator {
                 ),
             ]
         )
+        for lease in initialized.activeCatalogLeases {
+            scheduleProcessRouteActivationCatalogTimeout(
+                lease: lease,
+                initializeClaim: initializeClaim
+            )
+        }
         if let existingCatalog = processControlPlane.catalog(
             forProcessID: route.target.processID
         ) {
-            guard let (lease, transition) = processControlPlane.beginCatalogAttempt(
+            guard let (lease, transition) = beginProcessCatalogAttemptIfRunning(
                 routeID: route.id,
-                preferredUpstreamProof: upstreamProof,
-                nowUptimeNanoseconds: nowUptimeNanoseconds()
+                preferredUpstreamProof: upstreamProof
             ) else { return }
             applyProcessControlPlaneTransition(transition)
             let commit = commitProcessCatalog(
@@ -257,12 +278,6 @@ extension RuntimeCoordinator {
             }
             return
         }
-        scheduleProcessRouteActivationCatalogTimeout(
-            processID: route.target.processID,
-            upstreamIndex: upstreamIndex,
-            attempt: initialized.attempt,
-            initializeClaim: initializeClaim
-        )
         guard initialized.shouldStartCatalogLoad else { return }
         refreshProcessRouteToolsCatalog(
             route: route,
@@ -371,37 +386,60 @@ extension RuntimeCoordinator {
             }
             self.startProcessRouteActivation(for: route)
         }
-        applyProcessControlPlaneTransition(
-            processControlPlane.attachRetryTimeout(timeout, to: lease)
+        var transition = ProcessControlPlaneTransition.none
+        guard initializeManager.performIfRunning({
+            transition = processControlPlane.attachRetryTimeout(timeout, to: lease)
+        }) else {
+            timeout.cancel()
+            return
+        }
+        applyProcessControlPlaneTransition(transition)
+    }
+
+    func scheduleProcessRouteActivationCatalogTimeoutIfNeeded(
+        lease: CatalogLease
+    ) {
+        guard let initializeClaim = upstreamHealthManager.currentCatalogActivationClaim(
+            upstreamIndex: lease.upstreamIndex
+        ), initializeClaim.topologyProof == lease.topologyProof else {
+            return
+        }
+        scheduleProcessRouteActivationCatalogTimeout(
+            lease: lease,
+            initializeClaim: initializeClaim
         )
     }
 
     private func scheduleProcessRouteActivationCatalogTimeout(
-        processID: pid_t,
-        upstreamIndex: Int,
-        attempt: Int,
+        lease: CatalogLease,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
         guard let timeoutAmount = processRouteActivationCatalogTimeoutAmount() else {
             return
         }
+        var reservation: CatalogTimeoutReservation?
+        guard initializeManager.performIfRunning({
+            reservation = processControlPlane.reserveCatalogTimeout(for: lease)
+        }), let reservation else {
+            return
+        }
         let timeout = scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
             self?.handleProcessRouteActivationCatalogTimeout(
-                processID: processID,
-                upstreamIndex: upstreamIndex,
-                attempt: attempt,
+                reservation: reservation,
                 initializeClaim: initializeClaim
             )
         }
-        let attachment = upstreamHealthManager.replaceCatalogTimeout(
-            timeout,
-            for: initializeClaim
-        )
-        guard attachment.accepted else {
+        var transition = ProcessControlPlaneTransition.none
+        guard initializeManager.performIfRunning({
+            transition = processControlPlane.attachCatalogTimeout(
+                timeout,
+                to: reservation
+            )
+        }) else {
             timeout.cancel()
             return
         }
-        attachment.replaced?.cancel()
+        applyProcessControlPlaneTransition(transition)
     }
 
     private func processRouteActivationCatalogTimeoutAmount() -> TimeAmount? {
@@ -410,70 +448,65 @@ extension RuntimeCoordinator {
     }
 
     private func handleProcessRouteActivationCatalogTimeout(
-        processID: pid_t,
-        upstreamIndex: Int,
-        attempt: Int,
+        reservation: CatalogTimeoutReservation,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
-        guard let proof = initializeClaim.topologyProof else { return }
-        var cleared: (
-            timeout: RuntimeScheduledTimeout?,
-            initUpstreamID: Int64?,
-            didReceiveInitializeResponse: Bool,
-            didSendInitialized: Bool
-        )?
-        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
-        let eligibility = initializeManager.finishSupportEligibilityUpdate {
-            var update: CanonicalHandshakeState.SupportEligibilityUpdate?
-            guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
-                cleared = upstreamHealthManager.timeoutCatalogActivation(
+        let lease = reservation.lease
+        guard let proof = initializeClaim.topologyProof,
+              proof == lease.topologyProof,
+              let route = xcodeProcessRoute(forUpstreamIndex: lease.upstreamIndex),
+              route.id == lease.routeIdentity else { return }
+        var timeout: ProcessControlPlaneAuthority.CatalogRequestTimeout?
+        var didTimeoutCatalogRequest = false
+        var validatedTopology = false
+        guard initializeManager.performIfRunning({
+            validatedTopology = upstreamTopology.withValidated(proof, {
+                didTimeoutCatalogRequest = upstreamHealthManager.timeoutCatalogRequest(
                     initializeClaim,
-                    commit: { _ in true }
+                    commit: { _ in
+                        timeout = processControlPlane.handleCatalogRequestTimeout(
+                            reservation,
+                            nowUptimeNs: nowUptimeNanoseconds()
+                        )
+                        return timeout != nil
+                    }
                 )
-                guard cleared != nil else { return false }
-                update = commitSupportEligibilityAfterHealthMutation(
-                    topologySnapshot: topologySnapshot,
-                    detachedProof: proof,
-                    catalogTimeoutProof: proof,
-                    processEligibility: &processEligibility
-                )
-                return true
-            }) == true else { return nil }
-            return update
+            }) != nil
+        }),
+            validatedTopology,
+            didTimeoutCatalogRequest,
+            let timeout
+        else {
+            return
         }
-        guard let eligibility, let cleared, let processEligibility else { return }
-        let timeout = processEligibility.catalogTimeout
-        if let timeout {
-            applyProcessControlPlaneTransition(timeout.transition)
+        let cancellationDeliveries = applyProcessControlPlaneTransition(timeout.transition)
+        guard case .retryRequired(
+            _,
+            let retry,
+            let retryLease
+        ) = timeout else {
+            return
         }
-        applyProcessControlPlaneTransition(processEligibility.transition)
-        applySupportEligibilityCompletion(eligibility)
-        finishClearingUpstreamState(
-            proof: proof,
-            cleared: cleared,
-            resetsProcessRouteActivation: false
-        )
-        guard replaceOrRetireInitializeChannel(initializeClaim) else { return }
-        guard let timeout else { return }
 
         logger.info(
             "route_activation_timeout",
             metadata: [
-                "pid": .string("\(processID)"),
-                "upstream": .string("\(upstreamIndex)"),
-                "attempt": .string("\(attempt)"),
+                "pid": .string("\(lease.processID)"),
+                "upstream": .string("\(lease.upstreamIndex)"),
+                "attempt": .string("\(lease.attempt)"),
                 "phase": .string("catalog"),
                 "timeout_ms": .string(
                     processRouteActivationCatalogTimeoutMillisecondsDescription()
                 ),
-                "retry_delay_ms": .string("\(timeout.retry.delayMilliseconds)"),
+                "retry_delay_ms": .string("\(retry.delayMilliseconds)"),
             ]
         )
 
-        scheduleProcessRouteActivationRetry(
-            processID: timeout.activationLease.processID,
-            retry: timeout.retry,
-            lease: timeout.activationLease,
+        scheduleMissingProcessToolsCatalogRetry(
+            processID: lease.processID,
+            lease: retryLease,
+            retry: retry,
+            after: cancellationDeliveries,
             reason: "catalog_timeout"
         )
     }
@@ -488,22 +521,23 @@ extension RuntimeCoordinator {
         lease: ActivationLease,
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
-        guard clearUpstreamState(
+        guard timeoutUpstreamInitialize(
             initializeClaim: initializeClaim,
             resetsProcessRouteActivation: false,
             replacesInitializedChannel: false
         ) else {
             return
         }
-        guard replaceOrRetireInitializeChannel(initializeClaim) else { return }
+        guard let replacement = replaceOrRetireInitializeChannel(initializeClaim) else { return }
         let timeout = processControlPlane.handleChannelInitializeTimeout(lease)
         if let timeout,
            xcodeProcessRoutes.contains(where: { $0.id == timeout.activationLease.routeID }) {
             applyProcessControlPlaneTransition(timeout.transition)
-            scheduleProcessRouteActivationRetry(
+            scheduleProcessRouteActivationRetryAfterChannelStop(
                 processID: lease.processID,
                 retry: timeout.retry,
                 lease: timeout.activationLease,
+                replacement: replacement,
                 reason: "channel_initialize_timeout"
             )
             return
@@ -511,29 +545,66 @@ extension RuntimeCoordinator {
         if let timeout {
             applyProcessControlPlaneTransition(timeout.transition)
         }
-        guard let route = xcodeProcessRoute(forUpstreamIndex: initializeClaim.upstreamIndex),
-              let replacementProof = upstreamTopology.operationLease(
-                for: UpstreamSlotID(rawValue: initializeClaim.upstreamIndex)
-              )?.proof,
-              let fresh = processControlPlane.prepareFreshActivationRetry(
-                  routeID: route.id,
-                  upstreamProof: replacementProof,
-                  nowUptimeNs: nowUptimeNanoseconds()
-              ) else { return }
+        guard let route = xcodeProcessRoute(forUpstreamIndex: initializeClaim.upstreamIndex) else {
+            return
+        }
+        var fresh: (
+            ActivationLease,
+            ProcessControlPlaneAuthority.Retry,
+            ProcessControlPlaneTransition
+        )?
+        guard initializeManager.performIfRunning({
+            fresh = processControlPlane.prepareFreshActivationRetry(
+                routeID: route.id,
+                upstreamProof: replacement.proof,
+                nowUptimeNs: nowUptimeNanoseconds()
+            )
+        }), let fresh else {
+            return
+        }
         applyProcessControlPlaneTransition(fresh.2)
-        scheduleProcessRouteActivationRetry(
+        scheduleProcessRouteActivationRetryAfterChannelStop(
             processID: route.target.processID,
             retry: fresh.1,
             lease: fresh.0,
+            replacement: replacement,
             reason: "channel_initialize_timeout"
         )
+    }
+
+    private func scheduleProcessRouteActivationRetryAfterChannelStop(
+        processID: pid_t,
+        retry: ProcessControlPlaneAuthority.Retry,
+        lease: ActivationLease,
+        replacement: InitializeChannelReplacement,
+        reason: String
+    ) {
+        let scheduled = addRuntimeTask { [weak self, replacement] in
+            guard let self,
+                  await self.waitUntilUpstreamOperationActivatable(
+                    replacement.operationLease
+                  ),
+                  self.initializeManager.snapshot().isShuttingDown == false
+            else { return }
+            self.scheduleProcessRouteActivationRetry(
+                processID: processID,
+                retry: retry,
+                lease: lease,
+                reason: reason
+            )
+        }
+        if scheduled == false {
+            applyProcessControlPlaneTransition(
+                processControlPlane.resetAttempt(processID: processID)
+            )
+        }
     }
 
     @discardableResult
     func replaceOrRetireInitializeChannel(
         _ initializeClaim: UpstreamHealthManager.InitializeClaim
-    ) -> Bool {
-        guard let proof = initializeClaim.topologyProof else { return false }
+    ) -> InitializeChannelReplacement? {
+        guard let proof = initializeClaim.topologyProof else { return nil }
         let requestsBridgePoolRecovery: Bool
         if initializeClaim.owner == .regular {
             requestsBridgePoolRecovery = true
@@ -544,7 +615,7 @@ extension RuntimeCoordinator {
             proof,
             expectedRouteID: nil,
             requestsBridgePoolRecovery: requestsBridgePoolRecovery
-        ) != nil
+        )
     }
 
     @discardableResult
@@ -552,42 +623,99 @@ extension RuntimeCoordinator {
         _ proof: UpstreamTopologyProof,
         expectedRouteID: ProcessRouteID?,
         requestsBridgePoolRecovery: Bool
-    ) -> UpstreamTopologyProof? {
+    ) -> InitializeChannelReplacement? {
+        var replacement: InitializeChannelReplacement?
+        guard initializeManager.performIfRunning({
+            replacement = replaceOrRetireInitializeChannelWhileRunning(
+                proof,
+                expectedRouteID: expectedRouteID,
+                requestsBridgePoolRecovery: requestsBridgePoolRecovery
+            )
+        }) else {
+            return nil
+        }
+        return replacement
+    }
+
+    private func replaceOrRetireInitializeChannelWhileRunning(
+        _ proof: UpstreamTopologyProof,
+        expectedRouteID: ProcessRouteID?,
+        requestsBridgePoolRecovery: Bool
+    ) -> InitializeChannelReplacement? {
         let upstreamIndex = proof.slotID.rawValue
         let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex)
         if let expectedRouteID, route?.id != expectedRouteID {
             return nil
         }
+        let replacements: [any UpstreamSlotControlling]
         if let route {
-            let replacements = dynamicUpstreamFactory?(route.target) ?? []
-            if let replacement = replacements.first,
-               let transition = upstreamTopology.replace(proof, with: replacement),
-               let previous = transition.replaced?.slot,
-               let replacementLease = transition.snapshot.operationLease(proof.slotID) {
-                publishUpstreamTopology(transition.snapshot)
+            replacements = dynamicUpstreamFactory?(route.target) ?? []
+        } else if processRoutingEnabled == false, let unboundUpstreamFactory {
+            replacements = [unboundUpstreamFactory()]
+        } else {
+            replacements = []
+        }
+        if let replacement = replacements.first {
+            let previousStopCompletion = AsyncTerminalSignal()
+            if let transition = commitUpstreamTopologyMutation({
+                upstreamTopology.replace(
+                    proof,
+                    with: replacement,
+                    predecessorStopCompletion: previousStopCompletion
+                )
+            }),
+                let previous = transition.replaced?.slot,
+                let replacementLease = transition.snapshot.operationLease(proof.slotID) {
                 observeUpstreamEvents(replacementLease)
-                addRuntimeTask { await previous.stop() }
+                let replacementProof = replacementLease.proof
+                let upstreamTopology = upstreamTopology
+                let finishPreviousStop: @Sendable () -> Void = {
+                    upstreamTopology.clearPredecessorStopCompletion(
+                        previousStopCompletion,
+                        for: replacementProof
+                    )
+                    previousStopCompletion.signal()
+                }
+                retireUpstreamSlot(previous, onStopped: finishPreviousStop)
                 for unused in replacements.dropFirst() {
-                    addRuntimeTask { await unused.stop() }
+                    retireUpstreamSlot(unused)
                 }
                 if requestsBridgePoolRecovery {
-                    applyProcessControlPlaneTransition(
-                        processControlPlane.requestBridgePoolRecovery(
-                            routeID: route.id,
-                            upstreamID: replacementLease.proof.slotID
-                        )
-                    )
+                    addRuntimeTask { [weak self, replacementLease] in
+                        guard let self,
+                              await self.waitUntilUpstreamOperationActivatable(replacementLease),
+                              self.initializeManager.snapshot().isShuttingDown == false
+                        else { return }
+                        if let route {
+                            var transition = ProcessControlPlaneTransition.none
+                            guard self.initializeManager.performIfRunning({
+                                transition = self.processControlPlane.requestBridgePoolRecovery(
+                                    routeID: route.id,
+                                    upstreamID: replacementLease.proof.slotID
+                                )
+                            }) else { return }
+                            self.applyProcessControlPlaneTransition(transition)
+                        } else if self.processRoutingEnabled == false {
+                            self.startUpstreamWarmInitialize(
+                                upstreamIndex: replacementLease.upstreamIndex,
+                                applyBackoff: true
+                            )
+                        }
+                    }
                 }
-                return replacementLease.proof
-            }
-            for unused in replacements {
-                addRuntimeTask { await unused.stop() }
+                return InitializeChannelReplacement(
+                    operationLease: replacementLease
+                )
             }
         }
-        guard let transition = upstreamTopology.retire(proof) else { return nil }
-        publishUpstreamTopology(transition.snapshot)
+        for unused in replacements {
+            retireUpstreamSlot(unused)
+        }
+        guard let transition = commitUpstreamTopologyMutation({
+            upstreamTopology.retire(proof)
+        }) else { return nil }
         for retired in transition.retired {
-            addRuntimeTask { await retired.slot.stop() }
+            retireUpstreamSlot(retired.slot)
         }
         if let route {
             applyProcessControlPlaneTransition(processControlPlane.retireRoute(

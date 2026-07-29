@@ -3,6 +3,11 @@ import NIO
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
+    private struct ProcessRouteReconcileCommit: Sendable {
+        let transition: ProcessControlPlaneTransition
+        let healthEffects: [UpstreamHealthManager.Effect]
+    }
+
     func triggerXcodeProcessReconcile(reason: String) {
         guard processRoutingEnabled, let xcodeTargetDiscovery else {
             return
@@ -84,41 +89,51 @@ extension RuntimeCoordinator {
     ) {
         guard processRoutingEnabled else { return }
         defer { testHooks.xcodeProcessReconcileCompleted?(reason) }
-        let existingRoutes = processControlPlane.activeRoutes()
-        let observedRoutes = MCPBridgeRuntime.orderedXcodeTargets(targets).map { target in
-            existingRoutes.first(where: {
-                $0.target == target && $0.upstreamIndices.isEmpty == false
-            })
-                ?? appendProcessBoundRoute(for: target)
+        var commit: ProcessRouteReconcileCommit?
+        guard initializeManager.performIfRunning({
+            let existingRoutes = processControlPlane.activeRoutes()
+            let observedRoutes = MCPBridgeRuntime.orderedXcodeTargets(targets).map { target in
+                existingRoutes.first(where: {
+                    $0.target == target && $0.upstreamIndices.isEmpty == false
+                })
+                    ?? appendProcessBoundRouteWhileRunning(for: target)
+            }
+            let nowUptimeNs = nowUptimeNanoseconds()
+            let usability = evaluateProcessRouteUpstreamUsability(
+                policy: .toolsCatalog,
+                nowUptimeNs: nowUptimeNs
+            )
+            commit = ProcessRouteReconcileCommit(
+                transition: processControlPlane.reconcileRoutes(
+                    observedRoutes,
+                    reason: reason,
+                    nowUptimeNs: nowUptimeNs,
+                    usability: usability.snapshot
+                ),
+                healthEffects: usability.effects
+            )
+        }), let commit else {
+            return
         }
-        let usability = processRouteUpstreamUsabilitySnapshot(
-            policy: .toolsCatalog,
-            nowUptimeNs: nowUptimeNanoseconds()
-        )
-        let result = processControlPlane.reconcileRoutes(
-            observedRoutes,
-            reason: reason,
-            nowUptimeNs: nowUptimeNanoseconds(),
-            usability: usability
-        )
-        applyProcessControlPlaneTransition(result)
-        guard result.didChangeRoutes else {
+        applyProcessControlPlaneTransition(commit.transition)
+        applyHealthEffects(commit.healthEffects)
+        guard commit.transition.didChangeRoutes else {
             retryPendingProcessRouteReadiness(reason: reason)
             return
         }
 
-        for route in result.retiredRoutes {
+        for route in commit.transition.retiredRoutes {
             retireProcessBoundRoute(route, reason: reason)
         }
 
-        if result.addedRoutes.isEmpty == false {
-            startInitializationForAddedProcessRoutes(result.addedRoutes)
+        if commit.transition.addedRoutes.isEmpty == false {
+            startInitializationForAddedProcessRoutes(commit.transition.addedRoutes)
         }
 
         retryPendingProcessRouteReadiness(reason: reason)
     }
 
-    private func appendProcessBoundRoute(
+    private func appendProcessBoundRouteWhileRunning(
         for target: XcodeProcessTarget
     ) -> XcodeProcessRoute {
         let slots = dynamicUpstreamFactory?(target) ?? []
@@ -133,8 +148,9 @@ extension RuntimeCoordinator {
             return XcodeProcessRoute(target: target, upstreamIndices: [])
         }
 
-        let transition = upstreamTopology.append(slots)
-        publishUpstreamTopology(transition.snapshot)
+        let transition = commitUpstreamTopologyMutation {
+            upstreamTopology.append(slots)
+        }
         let upstreamIndices = transition.addedIDs.map(\.rawValue)
         for id in transition.addedIDs {
             guard let operationLease = transition.snapshot.operationLease(id) else { continue }
@@ -168,10 +184,15 @@ extension RuntimeCoordinator {
                 reason: reason
             )
         }
-        let topologyTransition = upstreamTopology.retire(
-            Set(route.upstreamIndices.map(UpstreamSlotID.init(rawValue:)))
-        )
-        publishUpstreamTopology(topologyTransition.snapshot)
+        testHooks.processRouteRetirementWillDetach?()
+        let topologyTransition = commitUpstreamTopologyMutation {
+            upstreamTopology.retire(
+                Set(route.upstreamIndices.map(UpstreamSlotID.init(rawValue:)))
+            )
+        }
+        for retired in topologyTransition.retired {
+            retireUpstreamSlot(retired.slot)
+        }
 
         let resetInitialize = hadGlobalInitialize
             && canonicalHandshakeState.initializeResult() == nil
@@ -212,10 +233,6 @@ extension RuntimeCoordinator {
                 reason: .upstreamExit
             )
         )
-        addRuntimeTask {
-            await operationLease.slot.stop()
-        }
-
         let retiredPrimaryInitialize =
             globalInit?.wasInFlight == true
             && globalInit?.primaryInitUpstreamIndex == upstreamIndex
@@ -304,9 +321,11 @@ extension RuntimeCoordinator {
         }
         guard isInitialized() else { return }
         for route in activeRoutes where pendingProcessIDs.contains(route.target.processID) {
-            applyProcessControlPlaneTransition(
-                processControlPlane.beginBridgePoolRecovery(routeID: route.id)
-            )
+            var transition = ProcessControlPlaneTransition.none
+            guard initializeManager.performIfRunning({
+                transition = processControlPlane.beginBridgePoolRecovery(routeID: route.id)
+            }) else { return }
+            applyProcessControlPlaneTransition(transition)
         }
         refreshMissingProcessToolsCatalogsIfNeeded(
             reason: "pending_process_route_\(reason)",
@@ -315,6 +334,7 @@ extension RuntimeCoordinator {
     }
 
     func restoreProcessBridgePool(_ recovery: ProcessBridgePoolRecovery) {
+        guard initializeManager.snapshot().isShuttingDown == false else { return }
         guard let route = xcodeProcessRoutes.first(where: { $0.id == recovery.routeID }) else {
             return
         }
@@ -364,14 +384,24 @@ extension RuntimeCoordinator {
         _ recovery: ProcessBridgePoolRecovery,
         reason: String
     ) {
-        guard let retry = processControlPlane.prepareBridgeRecoveryRetry(recovery) else {
+        var retry: ProcessBridgeRecoveryRetry?
+        guard initializeManager.performIfRunning({
+            retry = processControlPlane.prepareBridgeRecoveryRetry(recovery)
+        }), let retry else {
             return
         }
+        schedulePreparedProcessBridgeRecoveryRetry(retry, reason: reason)
+    }
+
+    func schedulePreparedProcessBridgeRecoveryRetry(
+        _ retry: ProcessBridgeRecoveryRetry,
+        reason: String
+    ) {
         logger.info(
             "bridge_pool_recovery_retry_scheduled",
             metadata: [
-                "pid": .string("\(recovery.routeID.processID)"),
-                "upstream": .string("\(recovery.upstreamID.rawValue)"),
+                "pid": .string("\(retry.reservation.routeID.processID)"),
+                "upstream": .string("\(retry.reservation.upstreamID.rawValue)"),
                 "reason": .string(reason),
                 "delay_ms": .string("\(retry.delay.nanoseconds / 1_000_000)"),
             ]
@@ -384,27 +414,47 @@ extension RuntimeCoordinator {
                 )
             )
         }
-        applyProcessControlPlaneTransition(
-            processControlPlane.attachBridgeRecoveryRetryTimeout(
+        var transition = ProcessControlPlaneTransition.none
+        guard initializeManager.performIfRunning({
+            transition = processControlPlane.attachBridgeRecoveryRetryTimeout(
                 timeout,
                 to: retry.reservation
             )
-        )
+        }) else {
+            timeout.cancel()
+            return
+        }
+        applyProcessControlPlaneTransition(transition)
     }
 
     func replaceProcessBridgeRecoveryChannelAndScheduleRetry(
         _ recovery: ProcessBridgeRecovery,
         reason: String
     ) {
-        _ = replaceOrRetireInitializeChannel(
+        let replacement = replaceOrRetireInitializeChannel(
             recovery.topologyProof,
             expectedRouteID: recovery.routeID,
             requestsBridgePoolRecovery: false
         )
-        scheduleProcessBridgeRecoveryRetry(
-            recovery.reservation,
-            reason: reason
-        )
+        var retry: ProcessBridgeRecoveryRetry?
+        guard initializeManager.performIfRunning({
+            retry = processControlPlane.prepareBridgeRecoveryRetry(
+                recovery.reservation
+            )
+        }), let retry else { return }
+        guard let replacement else {
+            schedulePreparedProcessBridgeRecoveryRetry(retry, reason: reason)
+            return
+        }
+        addRuntimeTask { [weak self, replacement] in
+            guard let self,
+                  await self.waitUntilUpstreamOperationActivatable(
+                    replacement.operationLease
+                  ),
+                  self.initializeManager.snapshot().isShuttingDown == false
+            else { return }
+            self.schedulePreparedProcessBridgeRecoveryRetry(retry, reason: reason)
+        }
     }
 
     func refreshPendingProcessToolsCatalogAfterWarmInitialize(upstreamIndex: Int) {

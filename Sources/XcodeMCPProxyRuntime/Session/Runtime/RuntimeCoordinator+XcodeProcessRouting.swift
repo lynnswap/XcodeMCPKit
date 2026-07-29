@@ -4,6 +4,11 @@ import NIOCore
 import XcodeMCPKit
 
 extension RuntimeCoordinator {
+    struct ProcessRouteUsabilityEvaluation: Sendable {
+        let snapshot: ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot
+        let effects: [UpstreamHealthManager.Effect]
+    }
+
     private static let xcodeProcessRouteUnavailableCooldownNanoseconds: UInt64 =
         2_000_000_000
     private static let xcodeProcessRouteCatalogUnavailableCooldownNanoseconds: UInt64 =
@@ -402,20 +407,23 @@ extension RuntimeCoordinator {
         policy: ProcessControlPlaneAuthority.ExposurePolicy
     ) -> ProcessControlPlaneAuthority.RoutingSnapshot {
         let nowUptimeNs = nowUptimeNanoseconds()
-        let upstreamUsability = processRouteUpstreamUsabilitySnapshot(
+        let upstreamUsability = evaluateProcessRouteUpstreamUsability(
             policy: policy,
             nowUptimeNs: nowUptimeNs
         )
-        applyProcessControlPlaneTransition(
-            processControlPlane.updateUsability(upstreamUsability, nowUptimeNs: nowUptimeNs)
+        let transition = processControlPlane.updateUsability(
+            upstreamUsability.snapshot,
+            nowUptimeNs: nowUptimeNs
         )
+        applyProcessControlPlaneTransition(transition)
+        applyHealthEffects(upstreamUsability.effects)
         return processControlPlane.routingSnapshot(policy: policy, nowUptimeNs: nowUptimeNs)
     }
 
-    func processRouteUpstreamUsabilitySnapshot(
+    func evaluateProcessRouteUpstreamUsability(
         policy: ProcessControlPlaneAuthority.ExposurePolicy,
         nowUptimeNs: UInt64
-    ) -> ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot {
+    ) -> ProcessRouteUsabilityEvaluation {
         let states = upstreamHealthManager.activeStatesSnapshot()
         let snapshotUsable = Set(states.compactMap { upstreamID, state -> Int? in
             guard state.initPhase.isUsableInitialized else {
@@ -430,9 +438,9 @@ extension RuntimeCoordinator {
         })
 
         var recoveryAwareUsable = snapshotUsable
+        var effects: [UpstreamHealthManager.Effect] = []
         switch policy {
         case .toolsCatalog:
-            var effects: [UpstreamHealthManager.Effect] = []
             recoveryAwareUsable = Set(states.compactMap { upstreamID, _ -> Int? in
                 let evaluation = upstreamHealthManager.evaluateUsableInitialized(
                     index: upstreamID.rawValue,
@@ -441,16 +449,20 @@ extension RuntimeCoordinator {
                 effects.append(contentsOf: evaluation.effects)
                 return evaluation.isUsable ? upstreamID.rawValue : nil
             })
-            applyHealthEffects(effects)
         case .ownerRouting, .windowDiscovery, .initialization:
             break
         }
 
-        return ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot(
-            snapshotUsableUpstreamIDs: Set(snapshotUsable.map(UpstreamSlotID.init(rawValue:))),
-            recoveryAwareUsableUpstreamIDs: Set(
-                recoveryAwareUsable.map(UpstreamSlotID.init(rawValue:))
-            )
+        return ProcessRouteUsabilityEvaluation(
+            snapshot: ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot(
+                snapshotUsableUpstreamIDs: Set(
+                    snapshotUsable.map(UpstreamSlotID.init(rawValue:))
+                ),
+                recoveryAwareUsableUpstreamIDs: Set(
+                    recoveryAwareUsable.map(UpstreamSlotID.init(rawValue:))
+                )
+            ),
+            effects: effects
         )
     }
 

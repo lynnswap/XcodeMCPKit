@@ -30,15 +30,36 @@ struct MCPForwardingService: Sendable {
         parsedRequestJSON: Any,
         sessionID: String,
         operationLeaseOverride: UpstreamOperationLease? = nil,
-        admission: RouteForwardingAdmission? = nil
+        admission: RouteForwardingAdmission? = nil,
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil
     ) throws -> PreparedRequest? {
-        try upstreamRuntime.prepareRequest(
+        guard let prepared = try upstreamRuntime.prepareRequest(
             bodyData: bodyData,
             parsedRequestJSON: parsedRequestJSON,
             sessionID: sessionID,
             operationLeaseOverride: operationLeaseOverride,
             admission: admission
-        )
+        ) else {
+            return nil
+        }
+        guard let cancellationHandle else {
+            return prepared
+        }
+        let requestIDKeys = prepared.transform.responseID.map { [$0.key] } ?? []
+        guard cancellationHandle.bindPreparedRequest(
+            operationLease: prepared.operationLease,
+            requestIDKeys: requestIDKeys
+        ) else {
+            for requestIDKey in requestIDKeys {
+                sessionManager.removeUpstreamIDMapping(
+                    sessionID: sessionID,
+                    requestIDKey: requestIDKey,
+                    operationLease: prepared.operationLease
+                )
+            }
+            throw CancellationError()
+        }
+        return prepared
     }
 
     func startRequest(
@@ -48,7 +69,7 @@ struct MCPForwardingService: Sendable {
         requestTimeoutOverride: TimeAmount? = nil,
         leaseID: LeaseManager.ID? = nil,
         cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil,
-        onTimeout: (@Sendable () -> Void)? = nil
+        onTimeout: (@Sendable (UpstreamRequestSendCompletion) -> Void)? = nil
     ) throws -> StartedRequest {
         let requestTimeout =
             requestTimeoutOverride
@@ -66,7 +87,8 @@ struct MCPForwardingService: Sendable {
                 guard let cancellationHandle else { return }
                 guard cancellationHandle.bindStartedRegistration(
                     operationLease: registration.operationLease,
-                    routerPendingToken: registration.routerPendingToken
+                    routerPendingToken: registration.routerPendingToken,
+                    requestSendCompletion: registration.requestSendCompletion
                 ) else {
                     throw CancellationError()
                 }
@@ -215,6 +237,11 @@ struct MCPForwardingService: Sendable {
             sessionID: sessionID,
             requestIDKeys: []
         )
+        if let cancellationHandle,
+           cancellationHandle.bindChildHandle(internalCancellationHandle) == false {
+            internalCancellationHandle.cancel(using: sessionManager)
+            return .cancelled
+        }
         let session = sessionManager.session(id: sessionID)
 
         let resolution: ResponseResolution
@@ -238,20 +265,12 @@ struct MCPForwardingService: Sendable {
                         parsedRequestJSON: parsedRequestJSON,
                         sessionID: sessionID,
                         operationLeaseOverride: selectedOperationLease,
-                        admission: admission
+                        admission: admission,
+                        cancellationHandle: internalCancellationHandle
                     ) else {
                         return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
                     }
                     prepared = candidate
-                    internalCancellationHandle.bindRequestIDKeys(
-                        prepared.transform.responseID.map { [$0.key] } ?? []
-                    )
-                    if let cancellationHandle,
-                        cancellationHandle.bindChildHandle(internalCancellationHandle) == false
-                    {
-                        internalCancellationHandle.cancel(using: sessionManager)
-                        return eventLoop.makeFailedFuture(CancellationError())
-                    }
                 } catch is CancellationError {
                     return eventLoop.makeFailedFuture(CancellationError())
                 } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
@@ -269,12 +288,13 @@ struct MCPForwardingService: Sendable {
                         requestTimeoutOverride: requestTimeoutOverride,
                         leaseID: leaseID,
                         cancellationHandle: internalCancellationHandle,
-                        onTimeout: {
+                        onTimeout: { requestSendCompletion in
                             self.sessionManager.handleRequestLeaseTimeout(
                                 leaseID,
                                 sessionID: sessionID,
                                 requestIDKeys: prepared.transform.responseID.map { [$0.key] } ?? [],
-                                operationLease: prepared.operationLease
+                                operationLease: prepared.operationLease,
+                                after: requestSendCompletion
                             )
                         }
                     )
@@ -299,7 +319,8 @@ struct MCPForwardingService: Sendable {
                     return self.resolveResponse(
                         .failure(error),
                         started: started,
-                        sessionID: sessionID
+                        sessionID: sessionID,
+                        accountTimeout: false
                     )
                 }
             }.get()

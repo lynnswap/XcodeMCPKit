@@ -152,60 +152,143 @@ extension ControlPlane {
 }
 
 extension ControlPlane {
+    enum RPCCancellationCause: Sendable, Equatable {
+        case cancelled
+        case timedOut
+    }
+
     struct RPCCancelSnapshot: Sendable {
         let registrationToken: UUID?
         let operationLease: UpstreamOperationLease?
         let requestIDKey: String?
+        let requestSendCompletion: UpstreamRequestSendCompletion?
+        let cause: RPCCancellationCause
 
         var upstreamIndex: Int? { operationLease?.upstreamIndex }
 
         init(
             registrationToken: UUID?,
             operationLease: UpstreamOperationLease?,
-            requestIDKey: String?
+            requestIDKey: String?,
+            requestSendCompletion: UpstreamRequestSendCompletion?,
+            cause: RPCCancellationCause
         ) {
             self.registrationToken = registrationToken
             self.operationLease = operationLease
             self.requestIDKey = requestIDKey
+            self.requestSendCompletion = requestSendCompletion
+            self.cause = cause
+        }
+    }
+
+    final class RPCCancellationDelivery: @unchecked Sendable {
+        enum Result: Sendable, Equatable {
+            case delivered
+            case noLongerApplicable
+            case rejected
+
+            var allowsRetryScheduling: Bool {
+                self != .rejected
+            }
+        }
+
+        private struct DeliveryState {
+            var result: Result?
+            var waiters: [CheckedContinuation<Result, Never>] = []
+        }
+
+        private let state = NIOLockedValueBox(DeliveryState())
+
+        func complete(_ result: Result) {
+            let waiters = state.withLockedValue {
+                state -> [CheckedContinuation<Result, Never>] in
+                guard state.result == nil else { return [] }
+                state.result = result
+                let waiters = state.waiters
+                state.waiters.removeAll()
+                return waiters
+            }
+            for waiter in waiters {
+                waiter.resume(returning: result)
+            }
+        }
+
+        func wait() async -> Result {
+            await withCheckedContinuation { continuation in
+                let result = state.withLockedValue { state -> Result? in
+                    if let result = state.result {
+                        return result
+                    }
+                    state.waiters.append(continuation)
+                    return nil
+                }
+                if let result {
+                    continuation.resume(returning: result)
+                }
+            }
         }
     }
 }
 
 extension ControlPlane {
     final class RPCHandle: Sendable {
-        enum State: Sendable {
-            case queued
-            case registered(registrationToken: UUID, operationLease: UpstreamOperationLease)
+        typealias CancellationHandler = @Sendable (
+            ControlPlane.RPCCancelSnapshot,
+            ControlPlane.RPCCancellationDelivery
+        ) -> Void
+
+        private enum State: Sendable {
+            case idle
+            case armed(CancellationHandler)
+            case registered(
+                onCancel: CancellationHandler,
+                registrationToken: UUID,
+                operationLease: UpstreamOperationLease
+            )
             case assigned(
+                onCancel: CancellationHandler,
                 registrationToken: UUID,
                 operationLease: UpstreamOperationLease,
-                requestIDKey: String
+                requestIDKey: String,
+                requestSendCompletion: UpstreamRequestSendCompletion
             )
             case finished
-            case cancelled(ControlPlane.RPCCancelSnapshot)
+            case cancelled(
+                snapshot: ControlPlane.RPCCancelSnapshot,
+                delivery: ControlPlane.RPCCancellationDelivery
+            )
         }
 
-        private struct HandleState: Sendable {
-            var state: State = .queued
-            var onCancel: (@Sendable (ControlPlane.RPCCancelSnapshot) -> Void)?
-        }
-
-        private let state = NIOLockedValueBox(HandleState())
+        private let state = NIOLockedValueBox<State>(.idle)
 
         init() {}
 
+        @discardableResult
         func installCancel(
             _ onCancel: @escaping @Sendable (ControlPlane.RPCCancelSnapshot) -> Void
-        ) {
-            let snapshot = state.withLockedValue { state -> ControlPlane.RPCCancelSnapshot? in
-                state.onCancel = onCancel
-                if case .cancelled(let snapshot) = state.state {
-                    return snapshot
-                }
-                return nil
-            }
-            if let snapshot {
+        ) -> Bool {
+            installCancelWithDelivery { snapshot, delivery in
                 onCancel(snapshot)
+                delivery.complete(.noLongerApplicable)
+            }
+        }
+
+        @discardableResult
+        func installCancelWithDelivery(
+            _ onCancel: @escaping CancellationHandler
+        ) -> Bool {
+            state.withLockedValue { state in
+                switch state {
+                case .idle:
+                    state = .armed(onCancel)
+                    return true
+                case .cancelled, .finished:
+                    return false
+                case .armed, .registered, .assigned:
+                    preconditionFailure(
+                        "RPC handle cancellation handler may only be installed once"
+                    )
+                }
             }
         }
 
@@ -214,14 +297,15 @@ extension ControlPlane {
             operationLease: UpstreamOperationLease
         ) -> Bool {
             state.withLockedValue { state in
-                switch state.state {
-                case .queued:
-                    state.state = .registered(
+                switch state {
+                case .armed(let onCancel):
+                    state = .registered(
+                        onCancel: onCancel,
                         registrationToken: registrationToken,
                         operationLease: operationLease
                     )
                     return true
-                case .cancelled, .finished, .registered, .assigned:
+                case .idle, .cancelled, .finished, .registered, .assigned:
                     return false
                 }
             }
@@ -233,20 +317,27 @@ extension ControlPlane {
             requestIDKey: String
         ) -> Bool {
             state.withLockedValue { state in
-                switch state.state {
-                case .registered(let token, let registeredOperationLease):
+                switch state {
+                case .registered(
+                    let onCancel,
+                    let token,
+                    let registeredOperationLease
+                ):
                     guard token == registrationToken,
                           registeredOperationLease.proof == operationLease.proof
                     else {
                         return false
                     }
-                    state.state = .assigned(
+                    let requestSendCompletion = UpstreamRequestSendCompletion()
+                    state = .assigned(
+                        onCancel: onCancel,
                         registrationToken: registrationToken,
                         operationLease: operationLease,
-                        requestIDKey: requestIDKey
+                        requestIDKey: requestIDKey,
+                        requestSendCompletion: requestSendCompletion
                     )
                     return true
-                case .queued, .assigned, .cancelled, .finished:
+                case .idle, .armed, .assigned, .cancelled, .finished:
                     return false
                 }
             }
@@ -254,58 +345,109 @@ extension ControlPlane {
 
         func markFinished() {
             state.withLockedValue { state in
-                switch state.state {
-                case .queued, .registered, .assigned:
-                    state.state = .finished
+                switch state {
+                case .idle, .armed, .registered, .assigned:
+                    state = .finished
                 case .finished, .cancelled:
                     return
                 }
             }
         }
 
-        func cancel() {
-            let cancellation = state.withLockedValue {
-                state -> (
-                    (@Sendable (ControlPlane.RPCCancelSnapshot) -> Void),
-                    ControlPlane.RPCCancelSnapshot
-                )? in
-                let snapshot: ControlPlane.RPCCancelSnapshot
-                switch state.state {
-                case .finished, .cancelled:
+        func requestSendCompletion() -> UpstreamRequestSendCompletion? {
+            state.withLockedValue { state in
+                switch state {
+                case .assigned(_, _, _, _, let requestSendCompletion):
+                    return requestSendCompletion
+                case .cancelled(let snapshot, _):
+                    return snapshot.requestSendCompletion
+                case .idle, .armed, .registered, .finished:
                     return nil
-                case .queued:
+                }
+            }
+        }
+
+        @discardableResult
+        func cancel(
+            cause: ControlPlane.RPCCancellationCause = .cancelled
+        ) -> ControlPlane.RPCCancellationDelivery? {
+            let cancellation = state.withLockedValue { state -> (
+                delivery: ControlPlane.RPCCancellationDelivery,
+                onCancel: CancellationHandler?,
+                snapshot: ControlPlane.RPCCancelSnapshot,
+                completesImmediately: Bool
+            )? in
+                let snapshot: ControlPlane.RPCCancelSnapshot
+                let onCancel: CancellationHandler?
+                let completesImmediately: Bool
+                switch state {
+                case .finished:
+                    return nil
+                case .cancelled(let snapshot, let delivery):
+                    return (delivery, nil, snapshot, false)
+                case .idle:
                     snapshot = ControlPlane.RPCCancelSnapshot(
                         registrationToken: nil,
                         operationLease: nil,
-                        requestIDKey: nil
+                        requestIDKey: nil,
+                        requestSendCompletion: nil,
+                        cause: cause
                     )
-                case .registered(let registrationToken, let operationLease):
+                    onCancel = nil
+                    completesImmediately = true
+                case .armed(let handler):
+                    snapshot = ControlPlane.RPCCancelSnapshot(
+                        registrationToken: nil,
+                        operationLease: nil,
+                        requestIDKey: nil,
+                        requestSendCompletion: nil,
+                        cause: cause
+                    )
+                    onCancel = handler
+                    completesImmediately = false
+                case .registered(let handler, let registrationToken, _):
+                    snapshot = ControlPlane.RPCCancelSnapshot(
+                        registrationToken: registrationToken,
+                        operationLease: nil,
+                        requestIDKey: nil,
+                        requestSendCompletion: nil,
+                        cause: cause
+                    )
+                    onCancel = handler
+                    completesImmediately = false
+                case .assigned(
+                    let handler,
+                    let registrationToken,
+                    let operationLease,
+                    let requestIDKey,
+                    let requestSendCompletion
+                ):
                     snapshot = ControlPlane.RPCCancelSnapshot(
                         registrationToken: registrationToken,
                         operationLease: operationLease,
-                        requestIDKey: nil
+                        requestIDKey: requestIDKey,
+                        requestSendCompletion: requestSendCompletion,
+                        cause: cause
                     )
-                case .assigned(let registrationToken, let operationLease, let requestIDKey):
-                    snapshot = ControlPlane.RPCCancelSnapshot(
-                        registrationToken: registrationToken,
-                        operationLease: operationLease,
-                        requestIDKey: requestIDKey
-                    )
+                    onCancel = handler
+                    completesImmediately = false
                 }
-                state.state = .cancelled(snapshot)
-                guard let onCancel = state.onCancel else {
-                    return nil
-                }
-                return (onCancel, snapshot)
+                let delivery = ControlPlane.RPCCancellationDelivery()
+                state = .cancelled(snapshot: snapshot, delivery: delivery)
+                return (delivery, onCancel, snapshot, completesImmediately)
             }
-            if let (onCancel, snapshot) = cancellation {
-                onCancel(snapshot)
+            guard let cancellation else { return nil }
+            if let onCancel = cancellation.onCancel {
+                onCancel(cancellation.snapshot, cancellation.delivery)
+            } else if cancellation.completesImmediately {
+                cancellation.delivery.complete(.noLongerApplicable)
             }
+            return cancellation.delivery
         }
 
         func isCancelled() -> Bool {
             state.withLockedValue { state in
-                if case .cancelled = state.state {
+                if case .cancelled = state {
                     return true
                 }
                 return false
@@ -314,13 +456,13 @@ extension ControlPlane {
 
         func isBound(to proof: UpstreamTopologyProof) -> Bool {
             state.withLockedValue { state in
-                switch state.state {
-                case .registered(_, let operationLease),
-                     .assigned(_, let operationLease, _):
+                switch state {
+                case .registered(_, _, let operationLease),
+                     .assigned(_, _, let operationLease, _, _):
                     return operationLease.proof == proof
-                case .cancelled(let snapshot):
+                case .cancelled(let snapshot, _):
                     return snapshot.operationLease?.proof == proof
-                case .queued, .finished:
+                case .idle, .armed, .finished:
                     return false
                 }
             }

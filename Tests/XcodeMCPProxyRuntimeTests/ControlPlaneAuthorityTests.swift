@@ -210,6 +210,337 @@ struct ControlPlaneAuthorityTests {
         #expect(periodicRetry.delay.nanoseconds == TimeAmount.seconds(10).nanoseconds)
     }
 
+    @Test func rejectedCancellationReplacesFailedAttemptWithFreshActivation() throws {
+        let target = xcodeProcessTarget(processID: 41041, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let failedProof = testTopologyProof(0)
+        let replacementProof = testTopologyProof(0, generation: 2)
+        let (failedLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: failedProof,
+            nowUptimeNanoseconds: 1
+        ))
+        let failedRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(failedRPC), to: failedLease)
+
+        let result = try #require(authority.recoverAfterRejectedCancellation(
+            routeID: route.id,
+            failedProof: failedProof,
+            replacementProof: replacementProof,
+            rejectedBridgeRecovery: nil,
+            nowUptimeNs: 2
+        ))
+
+        guard case .freshActivation(let activation, let retry, let transition) = result else {
+            Issue.record("expected a fresh activation on the replacement proof")
+            return
+        }
+        #expect(activation.upstreamProof == replacementProof)
+        #expect(retry.delay == .milliseconds(250))
+        let attempt = try #require(authority.attemptSnapshot(processID: target.processID))
+        #expect(attempt.attemptID == activation.attemptID)
+        #expect(attempt.upstreamProof == replacementProof)
+        #expect(attempt.phase == .backoff)
+        for effect in transition.effects {
+            if case .cancelRPC(let handle) = effect {
+                handle.cancel()
+            }
+        }
+        #expect(failedRPC.isCancelled())
+    }
+
+    @Test func rejectedCancellationPreservesSiblingAttemptAndQueuesReplacementRecovery() throws {
+        let target = xcodeProcessTarget(processID: 41042, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let failedProof = testTopologyProof(0)
+        let replacementProof = testTopologyProof(0, generation: 2)
+        let siblingProof = testTopologyProof(1)
+        let (siblingLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: siblingProof,
+            nowUptimeNanoseconds: 1
+        ))
+
+        let result = try #require(authority.recoverAfterRejectedCancellation(
+            routeID: route.id,
+            failedProof: failedProof,
+            replacementProof: replacementProof,
+            rejectedBridgeRecovery: nil,
+            nowUptimeNs: 2
+        ))
+
+        guard case .preserved(let transition) = result,
+              case .restoreBridgePool(let recovery) = transition.effects.first else {
+            Issue.record("expected the replacement slot to enter bridge recovery")
+            return
+        }
+        #expect(recovery.routeID == route.id)
+        #expect(recovery.upstreamID == replacementProof.slotID)
+        let attempt = try #require(authority.attemptSnapshot(processID: target.processID))
+        #expect(attempt.attemptID.rawValue == siblingLease.attempt)
+        #expect(attempt.upstreamProof == siblingProof)
+        #expect(attempt.phase == .loadingCatalog)
+    }
+
+    @Test func rejectedCancellationPreservesAttemptAlreadyUsingReplacementProof() throws {
+        let target = xcodeProcessTarget(processID: 41043, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let failedProof = testTopologyProof(0)
+        let replacementProof = testTopologyProof(0, generation: 2)
+        let (replacementLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: replacementProof,
+            nowUptimeNanoseconds: 1
+        ))
+
+        let result = try #require(authority.recoverAfterRejectedCancellation(
+            routeID: route.id,
+            failedProof: failedProof,
+            replacementProof: replacementProof,
+            rejectedBridgeRecovery: nil,
+            nowUptimeNs: 2
+        ))
+
+        guard case .preserved(let transition) = result else {
+            Issue.record("expected replacement-proof attempt to survive")
+            return
+        }
+        #expect(transition.effects.isEmpty)
+        let attempt = try #require(authority.attemptSnapshot(processID: target.processID))
+        #expect(attempt.attemptID.rawValue == replacementLease.attempt)
+        #expect(attempt.upstreamProof == replacementProof)
+        guard case .restoreBridgePool(let pendingSibling) = authority
+            .beginBridgePoolRecovery(routeID: route.id).effects.first else {
+            Issue.record("expected only the configured sibling to remain pending")
+            return
+        }
+        #expect(pendingSibling.upstreamID == UpstreamSlotID(rawValue: 1))
+    }
+
+    @Test func staleRejectedCancellationPreservesNewerSameSlotOwners() throws {
+        let attemptTarget = xcodeProcessTarget(processID: 41048, xcodeVersion: "27.0")
+        let attemptAuthority = makeAuthority([(attemptTarget, [0])])
+        let attemptRoute = try #require(
+            attemptAuthority.route(forProcessID: attemptTarget.processID)
+        )
+        let newerProof = testTopologyProof(0, generation: 3)
+        let (newerLease, _) = try #require(attemptAuthority.beginCatalogAttempt(
+            routeID: attemptRoute.id,
+            preferredUpstreamProof: newerProof,
+            nowUptimeNanoseconds: 1
+        ))
+        let attemptResult = try #require(attemptAuthority.recoverAfterRejectedCancellation(
+            routeID: attemptRoute.id,
+            failedProof: testTopologyProof(0),
+            replacementProof: testTopologyProof(0, generation: 2),
+            rejectedBridgeRecovery: nil,
+            nowUptimeNs: 2
+        ))
+        guard case .preserved(let attemptTransition) = attemptResult else {
+            Issue.record("expected the newer same-slot attempt to survive")
+            return
+        }
+        #expect(attemptTransition.effects.isEmpty)
+        #expect(
+            attemptAuthority.attemptSnapshot(processID: attemptTarget.processID)?
+                .attemptID.rawValue == newerLease.attempt
+        )
+
+        let catalogTarget = xcodeProcessTarget(processID: 41049, xcodeVersion: "27.0")
+        let catalogAuthority = makeAuthority([(catalogTarget, [0])])
+        let catalogRoute = try #require(
+            catalogAuthority.route(forProcessID: catalogTarget.processID)
+        )
+        let (catalogLease, _) = try #require(catalogAuthority.beginCatalogAttempt(
+            routeID: catalogRoute.id,
+            preferredUpstreamProof: newerProof,
+            nowUptimeNanoseconds: 1
+        ))
+        guard case .accepted = catalogAuthority.completeCatalog(
+            .usable(catalog("NewerTool"), source: newerProof),
+            lease: catalogLease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected newer catalog")
+            return
+        }
+        let catalogResult = try #require(catalogAuthority.recoverAfterRejectedCancellation(
+            routeID: catalogRoute.id,
+            failedProof: testTopologyProof(0),
+            replacementProof: testTopologyProof(0, generation: 2),
+            rejectedBridgeRecovery: nil,
+            nowUptimeNs: 3
+        ))
+        guard case .preserved(let catalogTransition) = catalogResult else {
+            Issue.record("expected the newer same-slot catalog to survive")
+            return
+        }
+        #expect(catalogTransition.effects.isEmpty)
+        #expect(
+            catalogAuthority.catalog(forProcessID: catalogTarget.processID)?
+                .upstreamProof == newerProof
+        )
+    }
+
+    @Test func rejectedCancellationPreservesCatalogAndSerializesReplacementRecovery() throws {
+        let target = xcodeProcessTarget(processID: 41044, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let sourceProof = testTopologyProof(1)
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: sourceProof,
+            nowUptimeNanoseconds: 1
+        ))
+        guard case .accepted(_, let catalogTransition) = authority.completeCatalog(
+            .usable(catalog("BuildProject"), source: sourceProof),
+            lease: lease,
+            nowUptimeNanoseconds: 2
+        ), case .restoreBridgePool(let existingRecovery) = catalogTransition.effects.first else {
+            Issue.record("expected the existing sibling recovery")
+            return
+        }
+
+        let replacementProof = testTopologyProof(0, generation: 2)
+        let result = try #require(authority.recoverAfterRejectedCancellation(
+            routeID: route.id,
+            failedProof: testTopologyProof(0),
+            replacementProof: replacementProof,
+            rejectedBridgeRecovery: nil,
+            nowUptimeNs: 3
+        ))
+
+        guard case .preserved(let transition) = result else {
+            Issue.record("expected the usable catalog to survive")
+            return
+        }
+        #expect(transition.effects.isEmpty)
+        #expect(authority.catalog(forProcessID: target.processID)?.upstreamProof == sourceProof)
+        guard case .restoreBridgePool(let replacementRecovery) = authority
+            .completeBridgeRecovery(existingRecovery).effects.first else {
+            Issue.record("expected serialized recovery of the replacement slot")
+            return
+        }
+        #expect(replacementRecovery.upstreamID == replacementProof.slotID)
+    }
+
+    @Test func rejectedBridgeCancellationAtomicallyBecomesRetry() throws {
+        let target = xcodeProcessTarget(processID: 41045, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        guard case .restoreBridgePool(let rejectedRecovery) = authority
+            .beginBridgePoolRecovery(routeID: route.id).effects.first else {
+            Issue.record("expected bridge recovery reservation")
+            return
+        }
+
+        let result = try #require(authority.recoverAfterRejectedCancellation(
+            routeID: route.id,
+            failedProof: testTopologyProof(1),
+            replacementProof: testTopologyProof(1, generation: 2),
+            rejectedBridgeRecovery: rejectedRecovery,
+            nowUptimeNs: 1
+        ))
+
+        guard case .bridgeRecovery(let retry) = result else {
+            Issue.record("expected the rejected reservation to enter retry")
+            return
+        }
+        #expect(retry.reservation == rejectedRecovery)
+        #expect(retry.delay == .seconds(1))
+        #expect(authority.attemptSnapshot(processID: target.processID) == nil)
+        #expect(authority.prepareBridgeRecoveryRetry(rejectedRecovery) == nil)
+        guard case .restoreBridgePool(let retried) = authority
+            .handleBridgeRecoveryRetryFired(retry.reservation).effects.first else {
+            Issue.record("expected the atomic retry to remain schedulable")
+            return
+        }
+        #expect(retried.upstreamID == rejectedRecovery.upstreamID)
+        #expect(retried != rejectedRecovery)
+    }
+
+    @Test func staleRejectedBridgeCancellationPreservesNewerRecoveryState() throws {
+        let target = xcodeProcessTarget(processID: 41046, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        guard case .restoreBridgePool(let staleRecovery) = authority
+            .beginBridgePoolRecovery(routeID: route.id).effects.first else {
+            Issue.record("expected initial bridge recovery")
+            return
+        }
+        let staleRetry = try #require(authority.prepareBridgeRecoveryRetry(staleRecovery))
+        guard case .restoreBridgePool(let currentRecovery) = authority
+            .handleBridgeRecoveryRetryFired(staleRetry.reservation).effects.first else {
+            Issue.record("expected a newer bridge recovery")
+            return
+        }
+
+        let attemptingResult = try #require(authority.recoverAfterRejectedCancellation(
+            routeID: route.id,
+            failedProof: testTopologyProof(1),
+            replacementProof: testTopologyProof(1, generation: 2),
+            rejectedBridgeRecovery: staleRecovery,
+            nowUptimeNs: 1
+        ))
+        guard case .preserved(let attemptingTransition) = attemptingResult else {
+            Issue.record("expected newer attempting recovery to survive")
+            return
+        }
+        #expect(attemptingTransition.effects.isEmpty)
+        #expect(authority.validateBridgeRecovery(currentRecovery))
+
+        let currentRetry = try #require(authority.prepareBridgeRecoveryRetry(currentRecovery))
+        let waitingResult = try #require(authority.recoverAfterRejectedCancellation(
+            routeID: route.id,
+            failedProof: testTopologyProof(1),
+            replacementProof: testTopologyProof(1, generation: 2),
+            rejectedBridgeRecovery: staleRecovery,
+            nowUptimeNs: 2
+        ))
+        guard case .preserved(let waitingTransition) = waitingResult else {
+            Issue.record("expected newer waiting recovery to survive")
+            return
+        }
+        #expect(waitingTransition.effects.isEmpty)
+        guard case .restoreBridgePool(let resumed) = authority
+            .handleBridgeRecoveryRetryFired(currentRetry.reservation).effects.first else {
+            Issue.record("expected preserved waiting recovery to resume")
+            return
+        }
+        #expect(resumed.upstreamID == currentRecovery.upstreamID)
+        #expect(authority.attemptSnapshot(processID: target.processID) == nil)
+    }
+
+    @Test func staleRejectedBridgeEvidenceFallsThroughAfterRecoveryCompleted() throws {
+        let target = xcodeProcessTarget(processID: 41047, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0, 1])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        guard case .restoreBridgePool(let completedRecovery) = authority
+            .beginBridgePoolRecovery(routeID: route.id).effects.first else {
+            Issue.record("expected bridge recovery")
+            return
+        }
+        _ = authority.completeBridgeRecovery(completedRecovery)
+        let replacementProof = testTopologyProof(1, generation: 2)
+
+        let result = try #require(authority.recoverAfterRejectedCancellation(
+            routeID: route.id,
+            failedProof: testTopologyProof(1),
+            replacementProof: replacementProof,
+            rejectedBridgeRecovery: completedRecovery,
+            nowUptimeNs: 1
+        ))
+
+        guard case .freshActivation(let activation, _, _) = result else {
+            Issue.record("expected stale evidence to fall through to route activation")
+            return
+        }
+        #expect(activation.upstreamProof == replacementProof)
+    }
+
     @Test func bridgeVerificationIsNotUsableUntilExactProbeSucceeds() throws {
         let target = xcodeProcessTarget(processID: 41035, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0, 1])])
@@ -654,6 +985,8 @@ struct ControlPlaneAuthorityTests {
         let fallbackRPC = ControlPlane.RPCHandle()
         _ = authority.attach(.rpc(lostRPC), to: lease)
         _ = authority.attach(.rpc(fallbackRPC), to: lease)
+        #expect(lostRPC.installCancel { _ in })
+        #expect(fallbackRPC.installCancel { _ in })
         #expect(lostRPC.markRegistered(
             registrationToken: UUID(),
             operationLease: testOperationLease(0)
@@ -1167,7 +1500,210 @@ struct ControlPlaneAuthorityTests {
 
         #expect(initialized.attempt == catalogLease.attempt)
         #expect(initialized.shouldStartCatalogLoad == false)
+        #expect(initialized.activeCatalogLeases == [catalogLease])
         #expect(authority.validateCatalogLoad(catalogLease))
+        #expect(
+            authority.attemptSnapshot(processID: target.processID)?.phase
+                == .loadingCatalog
+        )
+    }
+
+    @Test func catalogTimeoutBackoffBlocksLoadsAndAdvancesRetryOrdinal() throws {
+        let target = xcodeProcessTarget(processID: 41032, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let proof = testTopologyProof(0)
+        let (firstLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 1
+        ))
+        let firstTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: firstLease)
+        )
+        _ = authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {},
+            to: firstTimeoutReservation
+        )
+
+        guard case .retryRequired(_, let firstRetry, let firstRetryLease) =
+            authority.handleCatalogRequestTimeout(firstTimeoutReservation, nowUptimeNs: 2)
+        else {
+            Issue.record("expected the final load timeout to require retry")
+            return
+        }
+
+        #expect(firstRetryLease.attempt == firstLease.attempt)
+        #expect(firstRetry.delay == .milliseconds(250))
+        #expect(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 3
+        ) == nil)
+
+        #expect(authority.handleRetryFired(firstRetryLease))
+        let (secondLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 4
+        ))
+        let secondTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: secondLease)
+        )
+        _ = authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {},
+            to: secondTimeoutReservation
+        )
+        guard case .retryRequired(_, let secondRetry, _) =
+            authority.handleCatalogRequestTimeout(secondTimeoutReservation, nowUptimeNs: 5)
+        else {
+            Issue.record("expected the retry load timeout to require another retry")
+            return
+        }
+
+        #expect(secondLease.attempt == firstLease.attempt)
+        #expect(secondRetry.delay == .milliseconds(500))
+    }
+
+    @Test func catalogTimeoutFiringBeforeAttachmentConsumesReservation() throws {
+        let target = xcodeProcessTarget(processID: 41035, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let (lease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 1
+        ))
+        let reservation = try #require(
+            authority.reserveCatalogTimeout(for: lease)
+        )
+
+        guard case .retryRequired =
+            authority.handleCatalogRequestTimeout(reservation, nowUptimeNs: 2)
+        else {
+            Issue.record("a reserved timeout must fire before its handle is attached")
+            return
+        }
+
+        let lateTimeoutCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {
+                lateTimeoutCancelled.withLockedValue { $0 = true }
+            },
+            to: reservation
+        ))
+
+        #expect(lateTimeoutCancelled.withLockedValue { $0 })
+        #expect(authority.validateCatalogLoad(lease) == false)
+    }
+
+    @Test func staleCatalogTimeoutCannotTerminateNewerRetryLoad() throws {
+        let target = xcodeProcessTarget(processID: 41033, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let proof = testTopologyProof(0)
+        let (firstLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 1
+        ))
+        let staleTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: firstLease)
+        )
+        _ = authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {},
+            to: staleTimeoutReservation
+        )
+        guard case .accepted = authority.completeCatalog(
+            .unusable,
+            lease: firstLease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected the first load to complete")
+            return
+        }
+        let scheduled = try #require(authority.scheduleRetry(lease: firstLease))
+        #expect(authority.handleRetryFired(scheduled.lease))
+        let (retryLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 3
+        ))
+
+        #expect(authority.handleCatalogRequestTimeout(
+            staleTimeoutReservation,
+            nowUptimeNs: 4
+        ) == nil)
+        #expect(authority.validateCatalogLoad(retryLease))
+        #expect(
+            authority.attemptSnapshot(processID: target.processID)?.phase
+                == .loadingCatalog
+        )
+    }
+
+    @Test func catalogLoadTimeoutPreservesSiblingLoad() throws {
+        let target = xcodeProcessTarget(processID: 41034, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let proof = testTopologyProof(0)
+        let (firstLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 1
+        ))
+        let (siblingLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: proof,
+            nowUptimeNanoseconds: 2
+        ))
+        let firstTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: firstLease)
+        )
+        let siblingTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: siblingLease)
+        )
+        let firstTimeoutCancelled = NIOLockedValueBox(false)
+        let siblingTimeoutCancelled = NIOLockedValueBox(false)
+        applyEffects(authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {
+                firstTimeoutCancelled.withLockedValue { $0 = true }
+            },
+            to: firstTimeoutReservation
+        ))
+        applyEffects(authority.attachCatalogTimeout(
+            RuntimeScheduledTimeout {
+                siblingTimeoutCancelled.withLockedValue { $0 = true }
+            },
+            to: siblingTimeoutReservation
+        ))
+        #expect(authority.reserveCatalogTimeout(for: siblingLease) == nil)
+        let firstRPC = ControlPlane.RPCHandle()
+        let siblingRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(firstRPC), to: firstLease)
+        _ = authority.attach(.rpc(siblingRPC), to: siblingLease)
+
+        guard case .loadTimedOut(let transition) =
+            authority.handleCatalogRequestTimeout(firstTimeoutReservation, nowUptimeNs: 3)
+        else {
+            Issue.record("a sibling load must suppress retry")
+            return
+        }
+        for effect in transition.effects {
+            switch effect {
+            case .cancelTimeout(let timeout):
+                timeout.cancel()
+            case .cancelRPC(let handle):
+                handle.cancel()
+            case .cancelReadinessWaiter, .restoreBridgePool:
+                break
+            }
+        }
+
+        #expect(firstTimeoutCancelled.withLockedValue { $0 })
+        #expect(firstRPC.isCancelled())
+        #expect(siblingTimeoutCancelled.withLockedValue { $0 } == false)
+        #expect(siblingRPC.isCancelled() == false)
+        #expect(authority.validateCatalogLoad(siblingLease))
         #expect(
             authority.attemptSnapshot(processID: target.processID)?.phase
                 == .loadingCatalog
@@ -1380,6 +1916,7 @@ struct ControlPlaneAuthorityTests {
             processRoutingEnabled: true,
             startImmediately: false
         )
+        defer { manager.shutdownAndWait() }
         let retiredSlot = TestUpstreamClient()
         let currentSlot = TestUpstreamClient()
         let appended = manager.upstreamTopology.append([retiredSlot])
@@ -1399,7 +1936,7 @@ struct ControlPlaneAuthorityTests {
             preview: "{stale"
         )))
         await retiredSlot.stop()
-        await manager.shutdown()
+        await manager.upstreamEventTasks.drainCurrentTasks().wait()
 
         guard case .healthy = manager.upstreamHealthManager.state(
             for: UpstreamSlotID(rawValue: 0)
@@ -1453,7 +1990,7 @@ struct ControlPlaneAuthorityTests {
         #expect(session.serverRequestTracker.lookup(clientID: clientID) != nil)
     }
 
-    @Test func catalogActivationSuccessAndTimeoutHaveSingleTerminalWinner() throws {
+    @Test func catalogRequestTimeoutPreservesActivationForRetry() throws {
         let topology = UpstreamTopologyAuthority([TestUpstreamClient()])
         let snapshot = topology.snapshot()
         let proof = try #require(snapshot.proof(UpstreamSlotID(rawValue: 0)))
@@ -1473,29 +2010,21 @@ struct ControlPlaneAuthorityTests {
             commit: { true }
         ))
 
-        let terminalWinners = NIOLockedValueBox<[String]>([])
-        DispatchQueue.concurrentPerform(iterations: 2) { contender in
-            _ = topology.withValidated(proof) {
-                if contender == 0 {
-                    switch health.commitCatalogActivation(
-                        claim,
-                        sourceProof: proof,
-                        commit: { _ in .complete }
-                    ) {
-                    case .completed:
-                        terminalWinners.withLockedValue { $0.append("success") }
-                    case .notOwned, .kept:
-                        break
-                    }
-                    return
-                }
-                if health.timeoutCatalogActivation(claim, commit: { _ in true }) != nil {
-                    terminalWinners.withLockedValue { $0.append("timeout") }
-                }
-            }
+        #expect(health.timeoutInitializeClaim(claim) == nil)
+        #expect(topology.withValidated(proof) {
+            health.timeoutCatalogRequest(claim, commit: { _ in true })
+        } == true)
+        let completion = try #require(topology.withValidated(proof) {
+            health.commitCatalogActivation(
+                claim,
+                sourceProof: proof,
+                commit: { _ in .complete }
+            )
+        })
+        guard case .completed = completion else {
+            Issue.record("catalog request timeout must preserve the initialized activation")
+            return
         }
-
-        #expect(terminalWinners.withLockedValue(\.count) == 1)
     }
 
     @Test func forwardingAdmissionRejectsRouteAndTopologyChangesIndependently() throws {

@@ -328,12 +328,189 @@ extension RuntimeCoordinator {
         )
     }
 
+    private func cancelUpstreamRequest(
+        sessionID: String,
+        requestIDKey: String,
+        operationLease: UpstreamOperationLease,
+        after requestSendCompletion: UpstreamRequestSendCompletion? = nil
+    ) -> ControlPlane.RPCCancellationDelivery? {
+        guard let upstreamID = upstreamRouter.remove(
+            proof: operationLease.proof,
+            sessionID: sessionID,
+            requestIDKey: requestIDKey
+        ), let data = try? JSONRPC.Wire.data(
+            from: JSONRPC.Wire.notificationObject(
+                method: "notifications/cancelled",
+                params: .object([
+                    "requestId": .number(.int(upstreamID))
+                ])
+            )
+        ) else {
+            return nil
+        }
+        let delivery = ControlPlane.RPCCancellationDelivery()
+        let scheduled = addRuntimeTask {
+            [weak self, operationLease, requestSendCompletion] in
+            if let requestSendCompletion,
+               await requestSendCompletion.wait() == .notSent {
+                delivery.complete(.noLongerApplicable)
+                return
+            }
+            guard let self else {
+                delivery.complete(.noLongerApplicable)
+                return
+            }
+            guard self.upstreamTopology.validate(operationLease) else {
+                delivery.complete(.noLongerApplicable)
+                return
+            }
+            let result = await operationLease.slot.send(data)
+            guard self.upstreamTopology.validate(operationLease) else {
+                delivery.complete(.noLongerApplicable)
+                return
+            }
+            switch result {
+            case .accepted:
+                self.recordTraffic(
+                    upstreamIndex: operationLease.upstreamIndex,
+                    direction: "outbound",
+                    data: data
+                )
+                delivery.complete(.delivered)
+            case .backpressure:
+                await self.recoverUpstreamAfterRejectedCancellation(
+                    operationLease,
+                    reason: "cancellation_backpressure"
+                )
+                delivery.complete(.rejected)
+            case .unavailable(let reason):
+                self.handleUnavailableUpstreamSend(
+                    operationLease: operationLease,
+                    reason: reason
+                )
+                delivery.complete(.noLongerApplicable)
+            }
+        }
+        if scheduled == false {
+            delivery.complete(.rejected)
+        }
+        return delivery
+    }
+
+    private func recoverUpstreamAfterRejectedCancellation(
+        _ operationLease: UpstreamOperationLease,
+        reason: String
+    ) async {
+        let proof = operationLease.proof
+        let route = xcodeProcessRoute(forUpstreamIndex: operationLease.upstreamIndex)
+        logger.warning(
+            "Upstream cancellation was rejected; replacing its channel",
+            metadata: [
+                "upstream": .string("\(operationLease.upstreamIndex)"),
+                "reason": .string(reason),
+            ]
+        )
+        guard let cleared = clearUpstreamStateReturningDetachedState(
+            proof: proof,
+            resetsProcessRouteActivation: false
+        ) else {
+            return
+        }
+        let rejectedBridgeRecovery: ProcessBridgePoolRecovery?
+        if case .processBridgeRecovery(let recovery) = cleared.initializeOwner {
+            rejectedBridgeRecovery = recovery.reservation
+        } else {
+            rejectedBridgeRecovery = nil
+        }
+        guard let replacement = replaceOrRetireInitializeChannel(
+            proof,
+            expectedRouteID: route?.id,
+            requestsBridgePoolRecovery: false
+        ) else {
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            return
+        }
+        guard await waitUntilUpstreamOperationActivatable(replacement.operationLease) else {
+            if initializeManager.snapshot().isShuttingDown == false {
+                failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            }
+            return
+        }
+        guard initializeManager.snapshot().isShuttingDown == false else {
+            return
+        }
+        guard upstreamTopology.validate(replacement.proof) else {
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            return
+        }
+        let replacementProof = replacement.proof
+        guard let route else {
+            startUpstreamWarmInitialize(
+                upstreamIndex: replacementProof.slotID.rawValue,
+                applyBackoff: true
+            )
+            return
+        }
+        var recovery: ProcessControlPlaneAuthority.RejectedCancellationRecovery?
+        guard initializeManager.performIfRunning({
+            recovery = processControlPlane.recoverAfterRejectedCancellation(
+                routeID: route.id,
+                failedProof: proof,
+                replacementProof: replacementProof,
+                rejectedBridgeRecovery: rejectedBridgeRecovery,
+                nowUptimeNs: nowUptimeNanoseconds()
+            )
+        }), let recovery else {
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            return
+        }
+        switch recovery {
+        case .preserved(let transition):
+            applyProcessControlPlaneTransition(transition)
+        case .bridgeRecovery(let retry):
+            schedulePreparedProcessBridgeRecoveryRetry(retry, reason: reason)
+        case .freshActivation(let lease, let retry, let transition):
+            applyProcessControlPlaneTransition(transition)
+            scheduleProcessRouteActivationRetry(
+                processID: route.target.processID,
+                retry: retry,
+                lease: lease,
+                reason: reason
+            )
+        }
+        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+    }
+
+    private func cancellationDelivery(
+        waitingFor deliveries: [ControlPlane.RPCCancellationDelivery]
+    ) -> ControlPlane.RPCCancellationDelivery? {
+        guard deliveries.isEmpty == false else { return nil }
+        guard deliveries.count > 1 else { return deliveries[0] }
+        let aggregate = ControlPlane.RPCCancellationDelivery()
+        let scheduled = addRuntimeTask {
+            var result = ControlPlane.RPCCancellationDelivery.Result.delivered
+            for delivery in deliveries {
+                let next = await delivery.wait()
+                if next == .rejected {
+                    result = .rejected
+                } else if next == .noLongerApplicable, result == .delivered {
+                    result = .noLongerApplicable
+                }
+            }
+            aggregate.complete(result)
+        }
+        if scheduled == false {
+            aggregate.complete(.rejected)
+        }
+        return aggregate
+    }
+
     func onRequestTimeout(
         sessionID: String,
         requestIDKey: String,
         operationLease: UpstreamOperationLease
     ) {
-        removeUpstreamIDMapping(
+        _ = cancelUpstreamRequest(
             sessionID: sessionID,
             requestIDKey: requestIDKey,
             operationLease: operationLease
@@ -359,69 +536,112 @@ extension RuntimeCoordinator {
         admission: RouteForwardingAdmission?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
+        sendUpstream(
+            data,
+            operationLease: operationLease,
+            ensureRunning: ensureRunning,
+            admission: admission,
+            requestSendCompletion: nil,
+            onRejected: onRejected
+        )
+    }
+
+    @discardableResult
+    func sendUpstream(
+        _ data: Data,
+        operationLease: UpstreamOperationLease,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission?,
+        requestSendCompletion: UpstreamRequestSendCompletion?,
+        onRejected: @escaping @Sendable () -> Void
+    ) -> Bool {
         let upstreamIndex = operationLease.upstreamIndex
         guard upstreamTopology.validate(operationLease) else {
             onRejected()
+            requestSendCompletion?.complete(.notSent)
             return false
         }
         if let admission {
             guard processControlPlane.validate(admission.route),
                   admission.proof(for: upstreamIndex) == operationLease.proof else {
                 onRejected()
+                requestSendCompletion?.complete(.notSent)
                 return false
             }
         }
-        let scheduled = addRuntimeTask { [weak self, operationLease, admission, onRejected] in
-            guard let self else { return }
-            if ensureRunning {
-                await operationLease.slot.start()
-            }
-            guard self.upstreamTopology.validate(operationLease) else {
-                onRejected()
-                return
-            }
-            if let admission {
-                guard self.processControlPlane.validate(admission.route),
-                      admission.proof(for: upstreamIndex) == operationLease.proof else {
+        var scheduled = false
+        guard initializeManager.performIfRunning({
+            scheduled = addRuntimeTask {
+                [weak self, operationLease, admission, requestSendCompletion, onRejected] in
+                guard let self else {
+                    requestSendCompletion?.complete(.notSent)
+                    return
+                }
+                guard await self.waitUntilUpstreamOperationActivatable(operationLease) else {
+                    requestSendCompletion?.complete(.notSent)
                     onRejected()
                     return
                 }
+                if ensureRunning {
+                    await operationLease.slot.start()
+                }
+                guard self.upstreamTopology.validate(operationLease) else {
+                    requestSendCompletion?.complete(.notSent)
+                    onRejected()
+                    return
+                }
+                if let admission {
+                    guard self.processControlPlane.validate(admission.route),
+                          admission.proof(for: upstreamIndex) == operationLease.proof else {
+                        requestSendCompletion?.complete(.notSent)
+                        onRejected()
+                        return
+                    }
+                }
+                let result = await operationLease.slot.send(data)
+                requestSendCompletion?.complete(
+                    result == .accepted ? .accepted : .notSent
+                )
+                guard self.upstreamTopology.validate(operationLease) else {
+                    onRejected()
+                    return
+                }
+                switch result {
+                case .accepted:
+                    self.recordTraffic(
+                        upstreamIndex: upstreamIndex,
+                        direction: "outbound",
+                        data: data
+                    )
+                case .backpressure:
+                    self.markUpstreamOverloaded(operationLease.proof)
+                    self.failPendingSend(
+                        originalRequestData: data,
+                        proof: operationLease.proof,
+                        code: -32002,
+                        message: "upstream overloaded"
+                    )
+                case .unavailable(let reason):
+                    self.failPendingSend(
+                        originalRequestData: data,
+                        proof: operationLease.proof,
+                        code: -32001,
+                        message: "upstream unavailable"
+                    )
+                    self.handleUnavailableUpstreamSend(
+                        operationLease: operationLease,
+                        reason: reason
+                    )
+                }
             }
-            let result = await operationLease.slot.send(data)
-            guard self.upstreamTopology.validate(operationLease) else {
-                onRejected()
-                return
-            }
-            switch result {
-            case .accepted:
-                self.recordTraffic(
-                    upstreamIndex: upstreamIndex,
-                    direction: "outbound",
-                    data: data
-                )
-            case .backpressure:
-                self.markUpstreamOverloaded(operationLease.proof)
-                self.failPendingSend(
-                    originalRequestData: data,
-                    proof: operationLease.proof,
-                    code: -32002,
-                    message: "upstream overloaded"
-                )
-            case .unavailable(let reason):
-                self.failPendingSend(
-                    originalRequestData: data,
-                    proof: operationLease.proof,
-                    code: -32001,
-                    message: "upstream unavailable"
-                )
-                self.handleUnavailableUpstreamSend(
-                    operationLease: operationLease,
-                    reason: reason
-                )
-            }
+        }) else {
+            onRejected()
+            requestSendCompletion?.complete(.notSent)
+            return false
         }
         if scheduled == false {
             onRejected()
+            requestSendCompletion?.complete(.notSent)
         }
         return scheduled
     }
@@ -653,49 +873,103 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease
+        operationLease: UpstreamOperationLease,
+        after requestSendCompletion: UpstreamRequestSendCompletion?
     ) {
-        if let first = requestIDKeys.first {
-            onRequestTimeout(
+        _ = handleRequestLeaseTimeoutWithCancellationDelivery(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: operationLease,
+            after: requestSendCompletion
+        )
+    }
+
+    func handleRequestLeaseTimeoutWithCancellationDelivery(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        operationLease: UpstreamOperationLease?,
+        after requestSendCompletion: UpstreamRequestSendCompletion? = nil
+    ) -> ControlPlane.RPCCancellationDelivery? {
+        var cancellationDeliveries: [ControlPlane.RPCCancellationDelivery] = []
+        if let operationLease, let first = requestIDKeys.first {
+            if let delivery = cancelUpstreamRequest(
                 sessionID: sessionID,
                 requestIDKey: first,
-                operationLease: operationLease
-            )
+                operationLease: operationLease,
+                after: requestSendCompletion
+            ) {
+                cancellationDeliveries.append(delivery)
+            }
             for requestIDKey in requestIDKeys.dropFirst() {
-                removeUpstreamIDMapping(
+                if let delivery = cancelUpstreamRequest(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    operationLease: operationLease
-                )
+                    operationLease: operationLease,
+                    after: requestSendCompletion
+                ) {
+                    cancellationDeliveries.append(delivery)
+                }
             }
+            markRequestTimedOut(operationLease)
         }
-        releaseLeases([leaseManager.timeoutLease(leaseID)].compactMap { $0 })
+        upstreamSlotScheduler.cancelQueuedRequest(leaseID: leaseID)
+        let cancellationDelivery = cancellationDelivery(waitingFor: cancellationDeliveries)
+        settleRequestLease(
+            leaseManager.timeoutLease(leaseID),
+            after: cancellationDelivery
+        )
+        return cancellationDelivery
     }
 
     func abandonRequestLease(
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease?
+        operationLease: UpstreamOperationLease?,
+        after requestSendCompletion: UpstreamRequestSendCompletion?
     ) {
+        _ = abandonRequestLeaseWithCancellationDelivery(
+            leaseID,
+            sessionID: sessionID,
+            requestIDKeys: requestIDKeys,
+            operationLease: operationLease,
+            after: requestSendCompletion
+        )
+    }
+
+    func abandonRequestLeaseWithCancellationDelivery(
+        _ leaseID: LeaseManager.ID,
+        sessionID: String,
+        requestIDKeys: [String],
+        operationLease: UpstreamOperationLease?,
+        after requestSendCompletion: UpstreamRequestSendCompletion? = nil
+    ) -> ControlPlane.RPCCancellationDelivery? {
+        var deliveries: [ControlPlane.RPCCancellationDelivery] = []
         if let operationLease {
             for requestIDKey in requestIDKeys {
-                removeUpstreamIDMapping(
+                if let delivery = cancelUpstreamRequest(
                     sessionID: sessionID,
                     requestIDKey: requestIDKey,
-                    operationLease: operationLease
-                )
+                    operationLease: operationLease,
+                    after: requestSendCompletion
+                ) {
+                    deliveries.append(delivery)
+                }
             }
         }
         upstreamSlotScheduler.cancelQueuedRequest(leaseID: leaseID)
-        upstreamSlotScheduler.releaseUpstreamSlot(leaseID: leaseID)
-        releaseLeases(
-            [leaseManager.failLease(
+        let cancellationDelivery = cancellationDelivery(waitingFor: deliveries)
+        settleRequestLease(
+            leaseManager.failLease(
                 leaseID,
                 terminalState: .abandoned,
                 reason: .clientDisconnected
-            )].compactMap { $0 }
+            ),
+            after: cancellationDelivery
         )
+        return cancellationDelivery
     }
 
     func testStateSnapshot() -> TestSnapshot {
@@ -1111,12 +1385,35 @@ extension RuntimeCoordinator {
 
     func releaseLeases(_ actions: [LeaseManager.ReleaseAction]) {
         for action in actions {
-            upstreamSlotScheduler.releaseUpstreamSlot(
-                upstreamIndex: action.upstreamIndex,
-                leaseID: action.leaseID
-            )
+            releaseUpstreamSlot(for: action)
             failPendingRequestIfNeeded(for: action)
         }
+    }
+
+    private func settleRequestLease(
+        _ action: LeaseManager.ReleaseAction?,
+        after cancellationDelivery: ControlPlane.RPCCancellationDelivery?
+    ) {
+        guard let action else { return }
+        failPendingRequestIfNeeded(for: action)
+        guard let cancellationDelivery else {
+            releaseUpstreamSlot(for: action)
+            return
+        }
+        let scheduled = addRuntimeTask { [weak self] in
+            _ = await cancellationDelivery.wait()
+            self?.releaseUpstreamSlot(for: action)
+        }
+        if scheduled == false {
+            releaseUpstreamSlot(for: action)
+        }
+    }
+
+    private func releaseUpstreamSlot(for action: LeaseManager.ReleaseAction) {
+        upstreamSlotScheduler.releaseUpstreamSlot(
+            upstreamIndex: action.upstreamIndex,
+            leaseID: action.leaseID
+        )
     }
 
     private func failPendingRequestIfNeeded(for action: LeaseManager.ReleaseAction) {

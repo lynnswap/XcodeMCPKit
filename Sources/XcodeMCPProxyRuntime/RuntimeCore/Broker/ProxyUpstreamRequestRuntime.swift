@@ -1,6 +1,50 @@
 import Foundation
 import NIO
+import NIOConcurrencyHelpers
 import XcodeMCPKit
+
+final class UpstreamRequestSendCompletion: @unchecked Sendable {
+    enum Outcome: Sendable, Equatable {
+        case accepted
+        case notSent
+    }
+
+    private struct State {
+        var outcome: Outcome?
+        var waiters: [CheckedContinuation<Outcome, Never>] = []
+    }
+
+    private let state = NIOLockedValueBox(State())
+
+    func complete(_ outcome: Outcome) {
+        let waiters = state.withLockedValue {
+            state -> [CheckedContinuation<Outcome, Never>] in
+            guard state.outcome == nil else { return [] }
+            state.outcome = outcome
+            let waiters = state.waiters
+            state.waiters.removeAll()
+            return waiters
+        }
+        for waiter in waiters {
+            waiter.resume(returning: outcome)
+        }
+    }
+
+    func wait() async -> Outcome {
+        await withCheckedContinuation { continuation in
+            let outcome = state.withLockedValue { state -> Outcome? in
+                if let outcome = state.outcome {
+                    return outcome
+                }
+                state.waiters.append(continuation)
+                return nil
+            }
+            if let outcome {
+                continuation.resume(returning: outcome)
+            }
+        }
+    }
+}
 
 protocol ProxyUpstreamRequestRuntimePort: Sendable {
     func chooseUpstreamOperationLease() -> UpstreamOperationLease?
@@ -35,6 +79,7 @@ protocol ProxyUpstreamRequestRuntimePort: Sendable {
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
         admission: RouteForwardingAdmission?,
+        requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool
     func activateRequestLease(
@@ -68,7 +113,26 @@ extension ProxyUpstreamRequestRuntimePort {
             operationLease: operationLease,
             ensureRunning: ensureRunning,
             admission: admission,
+            requestSendCompletion: nil,
             onRejected: {}
+        )
+    }
+
+    @discardableResult
+    func sendUpstream(
+        _ data: Data,
+        operationLease: UpstreamOperationLease,
+        ensureRunning: Bool,
+        admission: RouteForwardingAdmission?,
+        onRejected: @escaping @Sendable () -> Void
+    ) -> Bool {
+        sendUpstream(
+            data,
+            operationLease: operationLease,
+            ensureRunning: ensureRunning,
+            admission: admission,
+            requestSendCompletion: nil,
+            onRejected: onRejected
         )
     }
 
@@ -99,12 +163,18 @@ struct ProxyUpstreamRequestRuntime: Sendable {
     struct StartedRegistration: Sendable {
         let operationLease: UpstreamOperationLease
         let routerPendingToken: UUID
+        let requestSendCompletion: UpstreamRequestSendCompletion
 
         var upstreamIndex: Int { operationLease.upstreamIndex }
 
-        init(operationLease: UpstreamOperationLease, routerPendingToken: UUID) {
+        init(
+            operationLease: UpstreamOperationLease,
+            routerPendingToken: UUID,
+            requestSendCompletion: UpstreamRequestSendCompletion
+        ) {
             self.operationLease = operationLease
             self.routerPendingToken = routerPendingToken
+            self.requestSendCompletion = requestSendCompletion
         }
     }
 
@@ -204,16 +274,25 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         requestTimeout: TimeAmount?,
         leaseID: LeaseManager.ID? = nil,
         onRegistered: (@Sendable (StartedRegistration) throws -> Void)? = nil,
-        onTimeout: (@Sendable () -> Void)? = nil
+        onTimeout: (@Sendable (UpstreamRequestSendCompletion) -> Void)? = nil
     ) throws -> StartedRequest {
         guard let idKey = prepared.transform.idKey else {
             throw Error.missingRequestID
+        }
+        let requestSendCompletion = UpstreamRequestSendCompletion()
+        let timeoutHandler: (@Sendable () -> Void)?
+        if let onTimeout {
+            timeoutHandler = {
+                onTimeout(requestSendCompletion)
+            }
+        } else {
+            timeoutHandler = nil
         }
         let registration = router.registerRequestPending(
             idKey: idKey,
             on: eventLoop,
             timeout: requestTimeout,
-            onTimeout: onTimeout
+            onTimeout: timeoutHandler
         )
 
         if let leaseID {
@@ -244,10 +323,12 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             try onRegistered?(
                 StartedRegistration(
                     operationLease: prepared.operationLease,
-                    routerPendingToken: registration.token
+                    routerPendingToken: registration.token,
+                    requestSendCompletion: requestSendCompletion
                 )
             )
         } catch {
+            requestSendCompletion.complete(.notSent)
             if router.failPending(token: registration.token, error: error),
                 let responseID = prepared.transform.responseID
             {
@@ -264,9 +345,11 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             operationLease: prepared.operationLease,
             ensureRunning: false,
             admission: prepared.admission,
+            requestSendCompletion: requestSendCompletion,
             onRejected: reject
         )
         guard sent else {
+            requestSendCompletion.complete(.notSent)
             reject()
             throw Error.staleUpstreamTopology
         }

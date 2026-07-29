@@ -465,8 +465,12 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
         admission: RouteForwardingAdmission?,
+        requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
-    ) -> Bool { false }
+    ) -> Bool {
+        requestSendCompletion?.complete(.notSent)
+        return false
+    }
     func debugSnapshot() -> ProxyDebug.Snapshot { fatalError("unused in ToolSurfaceTests") }
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         fatalError("unused in ToolSurfaceTests")
@@ -497,13 +501,15 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease
+        operationLease: UpstreamOperationLease,
+        after requestSendCompletion: UpstreamRequestSendCompletion?
     ) {}
 
     func abandonRequestLease(
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease?
+        operationLease: UpstreamOperationLease?,
+        after requestSendCompletion: UpstreamRequestSendCompletion?
     ) {}
 }

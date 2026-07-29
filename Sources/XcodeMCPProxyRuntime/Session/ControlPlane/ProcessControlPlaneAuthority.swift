@@ -33,6 +33,13 @@ struct CatalogLease: Sendable, Hashable {
     }
 }
 
+struct CatalogTimeoutReservation: Sendable, Hashable {
+    fileprivate let catalogLease: CatalogLease
+    fileprivate let generation: UInt64
+
+    var lease: CatalogLease { catalogLease }
+}
+
 struct ActivationLease: Sendable, Hashable {
     let routeID: ProcessRouteID
     let attemptID: CatalogAttemptID
@@ -279,6 +286,7 @@ final class ProcessControlPlaneAuthority: Sendable {
     struct ChannelInitializedAttempt: Sendable {
         let attempt: Int
         let shouldStartCatalogLoad: Bool
+        let activeCatalogLeases: [CatalogLease]
     }
 
     struct Retry: Sendable {
@@ -291,6 +299,29 @@ final class ProcessControlPlaneAuthority: Sendable {
         let transition: ProcessControlPlaneTransition
         let retry: Retry
         let activationLease: ActivationLease
+    }
+
+    enum CatalogRequestTimeout: Sendable {
+        case loadTimedOut(ProcessControlPlaneTransition)
+        case retryRequired(
+            transition: ProcessControlPlaneTransition,
+            retry: Retry,
+            catalogLease: CatalogLease
+        )
+
+        var transition: ProcessControlPlaneTransition {
+            switch self {
+            case .loadTimedOut(let transition),
+                 .retryRequired(let transition, _, _):
+                return transition
+            }
+        }
+    }
+
+    enum RejectedCancellationRecovery: Sendable {
+        case preserved(ProcessControlPlaneTransition)
+        case bridgeRecovery(ProcessBridgeRecoveryRetry)
+        case freshActivation(ActivationLease, Retry, ProcessControlPlaneTransition)
     }
 
     struct CooldownLease: Sendable, Hashable {
@@ -308,7 +339,6 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     struct SupportEligibilityResult: Sendable {
         let transition: ProcessControlPlaneTransition
-        let catalogTimeout: AttemptTimeout?
     }
 
     private enum RouteState: String, Sendable {
@@ -339,10 +369,32 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     private struct Attempt: Sendable {
         struct Load: Sendable {
+            enum CatalogTimeout: Sendable {
+                case reserved(generation: UInt64)
+                case attached(generation: UInt64, RuntimeScheduledTimeout)
+
+                var generation: UInt64 {
+                    switch self {
+                    case .reserved(let generation), .attached(let generation, _):
+                        return generation
+                    }
+                }
+
+                var cancellationEffect: ProcessControlPlaneEffect? {
+                    guard case .attached(_, let timeout) = self else {
+                        return nil
+                    }
+                    return .cancelTimeout(timeout)
+                }
+            }
+
+            var catalogTimeout: CatalogTimeout? = nil
             var rpcHandles: [ControlPlane.RPCHandle] = []
 
             func detachedEffects() -> [ProcessControlPlaneEffect] {
-                rpcHandles.map(ProcessControlPlaneEffect.cancelRPC)
+                var effects = catalogTimeout?.cancellationEffect.map { [$0] } ?? []
+                effects.append(contentsOf: rpcHandles.map(ProcessControlPlaneEffect.cancelRPC))
+                return effects
             }
         }
 
@@ -465,6 +517,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var catalogEligibilityEstablished: Bool
         var bridgeRecovery: BridgeRecoveryState
         var nextAttemptID: Int
+        var catalogRetryCount: Int
         var attempt: Attempt?
 
         func cooldown(_ scope: CooldownScope) -> Cooldown {
@@ -546,6 +599,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var canonicalToolsCatalogRaw: JSONValue?
         var canonicalSourceProof: UpstreamTopologyProof?
         var nextUnboundAttemptID: Int = 0
+        var nextCatalogTimeoutGeneration: UInt64 = 0
         var unboundAttempt: Attempt?
         var unboundCatalogRaw: JSONValue?
         var unboundCatalogSource: UpstreamTopologyProof?
@@ -609,16 +663,10 @@ final class ProcessControlPlaneAuthority: Sendable {
             else {
                 return .none
             }
-            switch owner.bridgeRecovery.phase {
-            case .attempting(let current) where current.upstreamID == upstreamID:
-                return .none
-            case .waitingRetry(let current, _) where current.upstreamID == upstreamID:
-                return .none
-            case .idle, .attempting, .waitingRetry:
-                break
-            }
-            owner.bridgeRecovery.pendingUpstreamIDs.insert(upstreamID)
-            let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
+            let effects = Self.requestBridgePoolRecoveryEffects(
+                upstreamID: upstreamID,
+                owner: &owner
+            )
             state.recordsByKey[key] = owner
             return ProcessControlPlaneTransition(
                 addedRoutes: [], retiredRoutes: [], effects: effects,
@@ -675,17 +723,12 @@ final class ProcessControlPlaneAuthority: Sendable {
         state.withLockedValue { state in
             guard let key = Self.key(routeID: recovery.routeID, in: state),
                   var owner = state.recordsByKey[key],
-                  case .attempting(let current) = owner.bridgeRecovery.phase,
-                  current == recovery else { return nil }
-            owner.bridgeRecovery.consecutiveFailureCount += 1
-            owner.bridgeRecovery.phase = .waitingRetry(recovery, nil)
+                  let retry = Self.prepareBridgeRecoveryRetry(
+                      recovery,
+                      owner: &owner
+                  ) else { return nil }
             state.recordsByKey[key] = owner
-            return ProcessBridgeRecoveryRetry(
-                reservation: recovery,
-                delay: owner.bridgeRecovery.consecutiveFailureCount == 1
-                    ? .seconds(1)
-                    : .seconds(10)
-            )
+            return retry
         }
     }
 
@@ -794,8 +837,7 @@ final class ProcessControlPlaneAuthority: Sendable {
     func applySupportEligibility(
         usability: UpstreamUsabilitySnapshot,
         newlyIneligibleProofs: Set<UpstreamTopologyProof>,
-        nowUptimeNs: UInt64,
-        catalogTimeoutProof: UpstreamTopologyProof? = nil
+        nowUptimeNs: UInt64
     ) -> SupportEligibilityResult {
         state.withLockedValue { state in
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
@@ -852,17 +894,6 @@ final class ProcessControlPlaneAuthority: Sendable {
                     state.unboundCatalogSource = nil
                 }
             }
-            // Invalidate the timed-out channel's old proof-bound attempt and
-            // catalog first. The timeout transition then creates the fresh
-            // backoff attempt that owns retry; eligibility invalidation must
-            // not immediately abandon that replacement attempt.
-            let catalogTimeout = catalogTimeoutProof.flatMap {
-                Self.handleCatalogChannelTimeout(
-                    upstreamProof: $0,
-                    nowUptimeNs: nowUptimeNs,
-                    state: &state
-                )
-            }
             let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
             return SupportEligibilityResult(
                 transition: ProcessControlPlaneTransition(
@@ -870,8 +901,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     retiredRoutes: [],
                     effects: effects,
                     publishesToolsListChanged: projectionChanged
-                ),
-                catalogTimeout: catalogTimeout
+                )
             )
         }
     }
@@ -1444,7 +1474,17 @@ final class ProcessControlPlaneAuthority: Sendable {
             state.recordsByKey[key] = record
             return ChannelInitializedAttempt(
                 attempt: attempt.id.rawValue,
-                shouldStartCatalogLoad: shouldStartCatalogLoad
+                shouldStartCatalogLoad: shouldStartCatalogLoad,
+                activeCatalogLeases: attempt.loads.keys.sorted {
+                    $0.rawValue < $1.rawValue
+                }.map {
+                    Self.lease(
+                        for: attempt,
+                        loadID: $0,
+                        routeID: routeID,
+                        catalogEpoch: state.catalogEpoch
+                    )
+                }
             )
         }
     }
@@ -1486,6 +1526,9 @@ final class ProcessControlPlaneAuthority: Sendable {
                         publishesToolsListChanged: false
                     )
                 )
+            }
+            if record.attempt?.phase == .backoff {
+                return nil
             }
             let effects = record.attempt?.detachedEffects() ?? []
             record.nextAttemptID &+= 1
@@ -1618,6 +1661,66 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
     }
 
+    func reserveCatalogTimeout(
+        for lease: CatalogLease
+    ) -> CatalogTimeoutReservation? {
+        state.withLockedValue { state in
+            guard lease.routeID != Self.unboundRouteID,
+                  let key = Self.key(routeID: lease.routeID, in: state),
+                  var record = state.recordsByKey[key],
+                  var attempt = record.attempt,
+                  Self.matches(lease: lease, attempt: attempt, state: state),
+                  attempt.phase == .loadingCatalog,
+                  var load = attempt.loads[lease.loadID],
+                  load.catalogTimeout == nil else {
+                return nil
+            }
+            state.nextCatalogTimeoutGeneration &+= 1
+            let reservation = CatalogTimeoutReservation(
+                catalogLease: lease,
+                generation: state.nextCatalogTimeoutGeneration
+            )
+            load.catalogTimeout = .reserved(generation: reservation.generation)
+            attempt.loads[lease.loadID] = load
+            record.attempt = attempt
+            state.recordsByKey[key] = record
+            return reservation
+        }
+    }
+
+    func attachCatalogTimeout(
+        _ timeout: RuntimeScheduledTimeout,
+        to reservation: CatalogTimeoutReservation
+    ) -> ProcessControlPlaneTransition {
+        state.withLockedValue { state in
+            let lease = reservation.catalogLease
+            guard let key = Self.key(routeID: lease.routeID, in: state),
+                  var record = state.recordsByKey[key],
+                  var attempt = record.attempt,
+                  Self.matches(lease: lease, attempt: attempt, state: state),
+                  attempt.phase == .loadingCatalog,
+                  var load = attempt.loads[lease.loadID],
+                  let catalogTimeout = load.catalogTimeout,
+                  catalogTimeout.generation == reservation.generation,
+                  case .reserved = catalogTimeout else {
+                return ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: [.cancelTimeout(timeout)],
+                    publishesToolsListChanged: false
+                )
+            }
+            load.catalogTimeout = .attached(
+                generation: reservation.generation,
+                timeout
+            )
+            attempt.loads[lease.loadID] = load
+            record.attempt = attempt
+            state.recordsByKey[key] = record
+            return .none
+        }
+    }
+
     func validateCatalogLoad(_ lease: CatalogLease) -> Bool {
         state.withLockedValue { state in
             guard lease.catalogEpoch == state.catalogEpoch else { return false }
@@ -1696,6 +1799,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     state.processIDByUpstreamID[UpstreamSlotID(rawValue: upstreamIndex)] =
                         record.route.target.processID
                 }
+                record.catalogRetryCount = 0
                 effects.append(contentsOf: record.clearAllCooldowns().effects)
                 attempt.phase = .cataloged
                 effects.append(contentsOf: Self.takeBridgePoolRecoveryEffects(owner: &record))
@@ -1979,6 +2083,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             attempt.readinessToken = nil
             attempt.phase = .backoff
             var updated = record
+            updated.catalogRetryCount &+= 1
             updated.attempt = attempt
             state.recordsByKey[key] = updated
             return (
@@ -1988,7 +2093,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     routeID: lease.routeID,
                     catalogEpoch: state.catalogEpoch
                 ),
-                Self.retry(forAttempt: attempt.id.rawValue),
+                Self.retry(forAttempt: updated.catalogRetryCount),
                 ProcessControlPlaneTransition(
                     addedRoutes: [],
                     retiredRoutes: [],
@@ -2081,64 +2186,55 @@ final class ProcessControlPlaneAuthority: Sendable {
         )
     }
 
-    private static func handleCatalogChannelTimeout(
-        upstreamProof: UpstreamTopologyProof,
-        nowUptimeNs: UInt64,
-        state: inout State
-    ) -> AttemptTimeout? {
-        state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
-        let upstreamIndex = upstreamProof.slotID.rawValue
-        guard let key = activeKey(upstreamIndex: upstreamIndex, in: state),
-              var record = state.recordsByKey[key] else { return nil }
-
-        let effects: [ProcessControlPlaneEffect]
-        let retryOrdinal: Int
-        let attempt: Attempt
-        if var current = record.attempt,
-           current.upstreamProof == upstreamProof,
-           [.pending, .attaching, .initialized, .loadingCatalog, .backoff]
-            .contains(current.phase) {
-            effects = current.detachedEffects()
-            retryOrdinal = current.id.rawValue
-            current.readinessToken = nil
-            current.retryTimeout = nil
-            current.retryKind = .activation
-            current.loads.removeAll()
-            current.phase = .backoff
-            attempt = current
-        } else {
-            effects = record.attempt?.detachedEffects() ?? []
-            retryOrdinal = max(1, record.nextAttemptID)
-            record.nextAttemptID &+= 1
-            attempt = Attempt(
-                id: CatalogAttemptID(rawValue: record.nextAttemptID),
-                upstreamProof: upstreamProof,
-                startedAtUptimeNs: nowUptimeNs,
-                phase: .backoff,
-                readinessToken: nil,
-                retryTimeout: nil,
-                retryKind: .activation,
-                nextLoadID: 0,
-                loads: [:]
+    func handleCatalogRequestTimeout(
+        _ reservation: CatalogTimeoutReservation,
+        nowUptimeNs: UInt64
+    ) -> CatalogRequestTimeout? {
+        state.withLockedValue { state in
+            let lease = reservation.catalogLease
+            state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
+            guard lease.catalogEpoch == state.catalogEpoch,
+                  let key = Self.key(routeID: lease.routeID, in: state),
+                  var record = state.recordsByKey[key],
+                  var attempt = record.attempt,
+                  Self.matches(lease: lease, attempt: attempt, state: state),
+                  attempt.phase == .loadingCatalog,
+                  let catalogTimeout = attempt.loads[lease.loadID]?.catalogTimeout,
+                  catalogTimeout.generation == reservation.generation else {
+                return nil
+            }
+            let effects = attempt.loads.removeValue(forKey: lease.loadID)?
+                .detachedEffects() ?? []
+            if attempt.loads.isEmpty == false {
+                record.attempt = attempt
+                state.recordsByKey[key] = record
+                return .loadTimedOut(
+                    ProcessControlPlaneTransition(
+                        addedRoutes: [],
+                        retiredRoutes: [],
+                        effects: effects,
+                        publishesToolsListChanged: false
+                    )
+                )
+            }
+            attempt.readinessToken = nil
+            attempt.retryTimeout = nil
+            attempt.retryKind = .catalog
+            attempt.phase = .backoff
+            record.catalogRetryCount &+= 1
+            record.attempt = attempt
+            state.recordsByKey[key] = record
+            return .retryRequired(
+                transition: ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: effects,
+                    publishesToolsListChanged: false
+                ),
+                retry: Self.retry(forAttempt: record.catalogRetryCount),
+                catalogLease: lease
             )
         }
-        record.attempt = attempt
-        state.recordsByKey[key] = record
-        let lease = ActivationLease(
-            routeID: record.route.id,
-            attemptID: attempt.id,
-            upstreamProof: attempt.upstreamProof
-        )
-        return AttemptTimeout(
-            transition: ProcessControlPlaneTransition(
-                addedRoutes: [],
-                retiredRoutes: [],
-                effects: effects,
-                publishesToolsListChanged: false
-            ),
-            retry: retry(forAttempt: retryOrdinal),
-            activationLease: lease
-        )
     }
 
     func handleRetryFired(_ lease: CatalogLease) -> Bool {
@@ -2172,6 +2268,100 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
     }
 
+    /// Commits rejected-cancellation recovery against the current process owner.
+    ///
+    /// The rejected bridge reservation is evidence only: a newer attempt, catalog,
+    /// or bridge recovery that won the race is preserved by this same transaction.
+    func recoverAfterRejectedCancellation(
+        routeID: ProcessRouteID,
+        failedProof: UpstreamTopologyProof,
+        replacementProof: UpstreamTopologyProof,
+        rejectedBridgeRecovery: ProcessBridgePoolRecovery?,
+        nowUptimeNs: UInt64
+    ) -> RejectedCancellationRecovery? {
+        state.withLockedValue { state in
+            state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
+            guard failedProof != replacementProof,
+                  failedProof.slotID == replacementProof.slotID,
+                  replacementProof.slotGeneration == failedProof.slotGeneration &+ 1,
+                  let key = Self.key(routeID: routeID, in: state),
+                  var record = state.recordsByKey[key],
+                  record.route.upstreamIndices.contains(replacementProof.slotID.rawValue) else {
+                return nil
+            }
+
+            if let rejectedBridgeRecovery,
+               rejectedBridgeRecovery.routeID == routeID,
+               rejectedBridgeRecovery.upstreamID == failedProof.slotID,
+               let retry = Self.prepareBridgeRecoveryRetry(
+                   rejectedBridgeRecovery,
+                   owner: &record
+               ) {
+                state.recordsByKey[key] = record
+                return .bridgeRecovery(retry)
+            }
+
+            switch record.bridgeRecovery.phase {
+            case .attempting(let current)
+                where current.upstreamID == replacementProof.slotID:
+                return .preserved(.none)
+            case .waitingRetry(let current, _)
+                where current.upstreamID == replacementProof.slotID:
+                return .preserved(.none)
+            case .idle, .attempting, .waitingRetry:
+                break
+            }
+
+            if let catalog = state.catalogsByProcessID[record.route.target.processID] {
+                if catalog.upstreamProof.slotID == failedProof.slotID,
+                   catalog.upstreamProof != failedProof {
+                    return .preserved(.none)
+                }
+                let effects = Self.requestBridgePoolRecoveryEffects(
+                    upstreamID: replacementProof.slotID,
+                    owner: &record
+                )
+                state.recordsByKey[key] = record
+                return .preserved(ProcessControlPlaneTransition(
+                    addedRoutes: [],
+                    retiredRoutes: [],
+                    effects: effects,
+                    publishesToolsListChanged: false
+                ))
+            }
+
+            if let attempt = record.attempt, attempt.phase != .abandoned {
+                if attempt.upstreamProof == replacementProof {
+                    return .preserved(.none)
+                }
+                if attempt.upstreamProof.slotID != failedProof.slotID {
+                    let effects = Self.requestBridgePoolRecoveryEffects(
+                        upstreamID: replacementProof.slotID,
+                        owner: &record
+                    )
+                    state.recordsByKey[key] = record
+                    return .preserved(ProcessControlPlaneTransition(
+                        addedRoutes: [],
+                        retiredRoutes: [],
+                        effects: effects,
+                        publishesToolsListChanged: false
+                    ))
+                }
+                if attempt.upstreamProof != failedProof {
+                    return .preserved(.none)
+                }
+            }
+
+            let fresh = Self.prepareFreshActivationRetry(
+                upstreamProof: replacementProof,
+                nowUptimeNs: nowUptimeNs,
+                owner: &record
+            )
+            state.recordsByKey[key] = record
+            return .freshActivation(fresh.0, fresh.1, fresh.2)
+        }
+    }
+
     func prepareFreshActivationRetry(
         routeID: ProcessRouteID,
         upstreamProof: UpstreamTopologyProof,
@@ -2184,34 +2374,13 @@ final class ProcessControlPlaneAuthority: Sendable {
                   record.route.upstreamIndices.contains(upstreamProof.slotID.rawValue) else {
                 return nil
             }
-            let effects = record.attempt?.detachedEffects() ?? []
-            let retryOrdinal = max(1, record.nextAttemptID)
-            record.nextAttemptID &+= 1
-            let attempt = Attempt(
-                id: CatalogAttemptID(rawValue: record.nextAttemptID),
+            let fresh = Self.prepareFreshActivationRetry(
                 upstreamProof: upstreamProof,
-                startedAtUptimeNs: nowUptimeNs,
-                phase: .backoff,
-                readinessToken: nil,
-                retryTimeout: nil,
-                retryKind: .activation,
-                nextLoadID: 0,
-                loads: [:]
+                nowUptimeNs: nowUptimeNs,
+                owner: &record
             )
-            record.attempt = attempt
             state.recordsByKey[key] = record
-            return (
-                ActivationLease(
-                    routeID: routeID,
-                    attemptID: attempt.id,
-                    upstreamProof: attempt.upstreamProof
-                ),
-                Self.retry(forAttempt: retryOrdinal),
-                ProcessControlPlaneTransition(
-                    addedRoutes: [], retiredRoutes: [], effects: effects,
-                    publishesToolsListChanged: false
-                )
-            )
+            return fresh
         }
     }
 
@@ -2355,6 +2524,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 pendingUpstreamIDs: Self.secondaryUpstreamIDs(in: route)
             ),
             nextAttemptID: 0,
+            catalogRetryCount: 0,
             attempt: nil
         )
         if state.order.contains(key) == false { state.order.append(key) }
@@ -2427,6 +2597,38 @@ final class ProcessControlPlaneAuthority: Sendable {
         return state.recordsByKey[key]
     }
 
+    private static func prepareBridgeRecoveryRetry(
+        _ recovery: ProcessBridgePoolRecovery,
+        owner: inout XcodeProcessOwner
+    ) -> ProcessBridgeRecoveryRetry? {
+        guard case .attempting(let current) = owner.bridgeRecovery.phase,
+              current == recovery else { return nil }
+        owner.bridgeRecovery.consecutiveFailureCount += 1
+        owner.bridgeRecovery.phase = .waitingRetry(recovery, nil)
+        return ProcessBridgeRecoveryRetry(
+            reservation: recovery,
+            delay: owner.bridgeRecovery.consecutiveFailureCount == 1
+                ? .seconds(1)
+                : .seconds(10)
+        )
+    }
+
+    private static func requestBridgePoolRecoveryEffects(
+        upstreamID: UpstreamSlotID,
+        owner: inout XcodeProcessOwner
+    ) -> [ProcessControlPlaneEffect] {
+        switch owner.bridgeRecovery.phase {
+        case .attempting(let current) where current.upstreamID == upstreamID:
+            return []
+        case .waitingRetry(let current, _) where current.upstreamID == upstreamID:
+            return []
+        case .idle, .attempting, .waitingRetry:
+            break
+        }
+        owner.bridgeRecovery.pendingUpstreamIDs.insert(upstreamID)
+        return takeBridgePoolRecoveryEffects(owner: &owner)
+    }
+
     private static func takeBridgePoolRecoveryEffects(
         owner: inout XcodeProcessOwner
     ) -> [ProcessControlPlaneEffect] {
@@ -2445,6 +2647,42 @@ final class ProcessControlPlaneAuthority: Sendable {
         return [
             .restoreBridgePool(recovery)
         ]
+    }
+
+    private static func prepareFreshActivationRetry(
+        upstreamProof: UpstreamTopologyProof,
+        nowUptimeNs: UInt64,
+        owner: inout XcodeProcessOwner
+    ) -> (ActivationLease, Retry, ProcessControlPlaneTransition) {
+        let effects = owner.attempt?.detachedEffects() ?? []
+        let retryOrdinal = max(1, owner.nextAttemptID)
+        owner.nextAttemptID &+= 1
+        let attempt = Attempt(
+            id: CatalogAttemptID(rawValue: owner.nextAttemptID),
+            upstreamProof: upstreamProof,
+            startedAtUptimeNs: nowUptimeNs,
+            phase: .backoff,
+            readinessToken: nil,
+            retryTimeout: nil,
+            retryKind: .activation,
+            nextLoadID: 0,
+            loads: [:]
+        )
+        owner.attempt = attempt
+        return (
+            ActivationLease(
+                routeID: owner.route.id,
+                attemptID: attempt.id,
+                upstreamProof: attempt.upstreamProof
+            ),
+            retry(forAttempt: retryOrdinal),
+            ProcessControlPlaneTransition(
+                addedRoutes: [],
+                retiredRoutes: [],
+                effects: effects,
+                publishesToolsListChanged: false
+            )
+        )
     }
 
     private static func routingSnapshot(
