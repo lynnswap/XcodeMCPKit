@@ -6808,7 +6808,11 @@ struct RuntimeCoordinatorRecoveryTests {
             )
         }
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
-        let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let firstRequest = try await sentValue(
+            from: upstream,
+            at: 2,
+            timeout: .seconds(2)
+        )
         #expect(methodName(from: firstRequest) == "tools/list")
         try await upstream.waitForBlockedSend()
         try await advanceRuntimeCoordinatorTimeout(
@@ -7073,6 +7077,7 @@ struct RuntimeCoordinatorRecoveryTests {
 
         let sessionID = "session-tools-shared-no-starvation"
         _ = manager.session(id: sessionID)
+        await upstream.blockNextCancellation()
 
         let firstTask = Task {
             try await manager.sharedToolsList(
@@ -7080,7 +7085,8 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: firstRequest) == "tools/list")
 
         uptimeClock.advance(by: .nanoseconds(120_000_001))
 
@@ -7090,7 +7096,16 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        try await upstream.waitForBlockedCancellation()
+        let firstCancellation = try await sentValue(
+            from: upstream,
+            at: 3,
+            timeout: .seconds(2)
+        )
+        #expect(
+            try extractCancellationRequestID(from: firstCancellation)
+                == extractUpstreamID(from: firstRequest)
+        )
 
         uptimeClock.advance(by: .nanoseconds(120_000_001))
 
@@ -7106,7 +7121,9 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 3
             }
         }
-        #expect(await upstream.sentCount() == 4)
+        let sentCount = await upstream.sentCount()
+        #expect(sentCount == 4)
+        await upstream.releaseBlockedCancellation()
 
         firstTask.cancel()
         secondTask.cancel()
@@ -7224,6 +7241,7 @@ struct RuntimeCoordinatorRecoveryTests {
         manager.refreshToolsListIfNeeded()
         let prewarmRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: prewarmRequest) == "tools/list")
+        await upstream.blockNextCancellation()
 
         let sessionID = "session-tools-prewarm-timeout"
         _ = manager.session(id: sessionID)
@@ -7248,6 +7266,7 @@ struct RuntimeCoordinatorRecoveryTests {
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
         }
+        try await upstream.waitForBlockedCancellation()
         let prewarmCancellation = try await sentValue(
             from: upstream,
             at: 3,
@@ -7257,6 +7276,7 @@ struct RuntimeCoordinatorRecoveryTests {
             try extractCancellationRequestID(from: prewarmCancellation)
                 == extractUpstreamID(from: prewarmRequest)
         )
+        await upstream.releaseBlockedCancellation()
         await manager.drainRuntimeTasksForTesting()
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
