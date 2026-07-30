@@ -57,13 +57,24 @@ source ~/.zshrc
 
 ## Set Up Your MCP Client
 
-### 1. Start the Proxy Server
+### 1. Enable Xcode MCP Access
+
+Open your project in Xcode, choose **Xcode > Settings > Intelligence**, and turn
+on **Allow external agents to use Xcode tools** under **Model Context Protocol**.
+See [Giving external agents access to Xcode][apple-xcode-mcp-access].
+
+This global Xcode setting is separate from the per-connection **Allow** dialog.
+`--auto-approve` handles the dialog; it does not enable Xcode MCP access.
+
+### 2. Start the Proxy Server
 
 ```bash
 xcode-mcp-proxy-server --auto-approve
 ```
 
-`--auto-approve` clicks the Xcode **Allow** button automatically. It requires macOS Accessibility permission.
+`--auto-approve` clicks the Xcode **Allow** button automatically. In
+**System Settings > Privacy & Security > Accessibility**, allow the app that
+launches the proxy (for example, Terminal or iTerm).
 
 Without Accessibility permission, omit `--auto-approve` and click **Allow** yourself:
 
@@ -71,7 +82,7 @@ Without Accessibility permission, omit `--auto-approve` and click **Allow** your
 xcode-mcp-proxy-server
 ```
 
-### 2. Register the Client
+### 3. Register the Client
 
 Replace `xcrun mcpbridge` with the proxy endpoint.
 
@@ -234,3 +245,5 @@ Edit the draft release notes, then publish the release manually.
 ## License
 
 [LICENSE](LICENSE)
+
+[apple-xcode-mcp-access]: https://developer.apple.com/documentation/xcode/giving-external-agents-access-to-xcode

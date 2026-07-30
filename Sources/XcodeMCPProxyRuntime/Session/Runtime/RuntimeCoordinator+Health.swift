@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import NIO
 import NIOFoundationCompat
 import XcodeMCPKit
@@ -305,6 +306,7 @@ extension RuntimeCoordinator {
                 "upstream": .string("\(probe.upstreamIndex)"),
                 "success": .string(success ? "true" : "false"),
                 "reason": .string(reason),
+                "method": .string("tools/list"),
             ]
         )
     }

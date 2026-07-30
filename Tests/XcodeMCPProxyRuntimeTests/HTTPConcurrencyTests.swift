@@ -354,6 +354,7 @@ struct HTTPConcurrencyTests {
         let firstObject = try jsonObject(from: firstResponse.body)
         #expect((firstObject["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
 
+        await sessionManager.drainRuntimeTasksForTesting()
         secondChannel.embeddedEventLoop.run()
         await sessionManager.drainRuntimeTasksForTesting()
         let secondRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 3)

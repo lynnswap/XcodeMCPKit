@@ -483,7 +483,8 @@ extension RuntimeCoordinator {
         guard case .retryRequired(
             _,
             let retry,
-            let retryLease
+            let retryLease,
+            let catalogTimeoutCount
         ) = timeout else {
             return
         }
@@ -495,12 +496,22 @@ extension RuntimeCoordinator {
                 "upstream": .string("\(lease.upstreamIndex)"),
                 "attempt": .string("\(lease.attempt)"),
                 "phase": .string("catalog"),
+                "method": .string("tools/list"),
                 "timeout_ms": .string(
                     processRouteActivationCatalogTimeoutMillisecondsDescription()
                 ),
+                "catalog_timeout_count": .string("\(catalogTimeoutCount)"),
                 "retry_delay_ms": .string("\(retry.delayMilliseconds)"),
             ]
         )
+        if catalogTimeoutCount == 1 {
+            XcodeMCPToolsAvailabilityDiagnostic.logTimeout(
+                logger: logger,
+                processID: lease.processID,
+                upstreamIndex: lease.upstreamIndex,
+                retryDelayMilliseconds: retry.delayMilliseconds
+            )
+        }
 
         scheduleMissingProcessToolsCatalogRetry(
             processID: lease.processID,
