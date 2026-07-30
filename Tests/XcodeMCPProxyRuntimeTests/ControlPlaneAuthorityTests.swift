@@ -134,6 +134,7 @@ struct ControlPlaneAuthorityTests {
 
         let firstRetry = try #require(authority.prepareBridgeRecoveryRetry(firstAttempt))
         #expect(firstRetry.delay.nanoseconds == TimeAmount.seconds(1).nanoseconds)
+        #expect(firstRetry.consecutiveFailureCount == 1)
         guard case .restoreBridgePool(let secondAttempt) = authority
             .handleBridgeRecoveryRetryFired(firstRetry.reservation).effects.first else {
             Issue.record("expected early bridge recovery retry")
@@ -160,6 +161,7 @@ struct ControlPlaneAuthorityTests {
 
         let periodicRetry = try #require(authority.prepareBridgeRecoveryRetry(secondAttempt))
         #expect(periodicRetry.delay.nanoseconds == TimeAmount.seconds(10).nanoseconds)
+        #expect(periodicRetry.consecutiveFailureCount == 2)
         guard case .restoreBridgePool(let thirdAttempt) = authority
             .handleBridgeRecoveryRetryFired(periodicRetry.reservation).effects.first else {
             Issue.record("expected periodic bridge recovery retry")
@@ -173,6 +175,7 @@ struct ControlPlaneAuthorityTests {
         #expect(nextSlot.upstreamID == UpstreamSlotID(rawValue: 2))
         let resetRetry = try #require(authority.prepareBridgeRecoveryRetry(nextSlot))
         #expect(resetRetry.delay.nanoseconds == TimeAmount.seconds(1).nanoseconds)
+        #expect(resetRetry.consecutiveFailureCount == 1)
     }
 
     @Test func bridgeRecoveryRetryContinuesWhenCatalogDisappears() throws {
@@ -1534,6 +1537,7 @@ struct ControlPlaneAuthorityTests {
         }
 
         #expect(firstRetryLease.attempt == firstLease.attempt)
+        #expect(firstRetry.attempt == 1)
         #expect(firstRetry.delay == .milliseconds(250))
         #expect(authority.beginCatalogAttempt(
             routeID: route.id,
@@ -1562,6 +1566,7 @@ struct ControlPlaneAuthorityTests {
         }
 
         #expect(secondLease.attempt == firstLease.attempt)
+        #expect(secondRetry.attempt == 2)
         #expect(secondRetry.delay == .milliseconds(500))
     }
 

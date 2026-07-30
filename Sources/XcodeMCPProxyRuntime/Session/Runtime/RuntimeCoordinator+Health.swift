@@ -299,21 +299,15 @@ extension RuntimeCoordinator {
               case .processBridgeAttachment(let verification) = probe.purpose else {
             return
         }
-        var metadata: Logger.Metadata = [
-            "pid": .string("\(verification.recovery.routeID.processID)"),
-            "upstream": .string("\(probe.upstreamIndex)"),
-            "success": .string(success ? "true" : "false"),
-            "reason": .string(reason),
-            "method": .string("tools/list"),
-        ]
-        if let recoveryAction = XcodeMCPToolsAvailabilityDiagnostic.action(
-            forAttachProbeFailureReason: reason
-        ) {
-            metadata["recovery_action"] = .string(recoveryAction)
-        }
         logger.info(
             "bridge_pool_attach_verification_completed",
-            metadata: metadata
+            metadata: [
+                "pid": .string("\(verification.recovery.routeID.processID)"),
+                "upstream": .string("\(probe.upstreamIndex)"),
+                "success": .string(success ? "true" : "false"),
+                "reason": .string(reason),
+                "method": .string("tools/list"),
+            ]
         )
     }
 

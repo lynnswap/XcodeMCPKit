@@ -404,8 +404,18 @@ extension RuntimeCoordinator {
                 "upstream": .string("\(retry.reservation.upstreamID.rawValue)"),
                 "reason": .string(reason),
                 "delay_ms": .string("\(retry.delay.nanoseconds / 1_000_000)"),
+                "consecutive_failures": .string("\(retry.consecutiveFailureCount)"),
             ]
         )
+        if reason == "attach_probe_timeout",
+           retry.consecutiveFailureCount == 1 {
+            XcodeMCPToolsAvailabilityDiagnostic.logTimeout(
+                logger: logger,
+                processID: retry.reservation.routeID.processID,
+                upstreamIndex: retry.reservation.upstreamID.rawValue,
+                retryDelayMilliseconds: retry.delay.nanoseconds / 1_000_000
+            )
+        }
         let timeout = scheduleRuntimeTimeout(retry.delay) { [weak self] in
             guard let self else { return }
             self.applyProcessControlPlaneTransition(

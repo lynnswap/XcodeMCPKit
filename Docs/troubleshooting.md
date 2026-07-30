@@ -11,9 +11,10 @@ If it fails:
 Ensure the proxy server is running. Before increasing any timeout, confirm that
 Xcode MCP access is enabled as described in
 [Set Up Your MCP Client](../README.md#1-enable-xcode-mcp-access). If the proxy
-logs `route_activation_timeout` or `attach_probe_timeout`, follow the dedicated
-section below. Increase `startup_timeout_sec` only when setup is correct and the
-upstream is still starting too slowly.
+logs `route_activation_timeout`, or `bridge_pool_attach_verification_completed`
+with `success=false reason=timeout`, follow the dedicated section below.
+Increase `startup_timeout_sec` only when setup is correct and the upstream is
+still starting too slowly.
 
 If you see an error like:
 
@@ -25,9 +26,11 @@ it’s usually because the upstream (`xcrun mcpbridge` / Xcode) was slow on the 
 - The tool list cache is **not persisted to disk**. It survives repeated Codex restarts as long as the proxy server stays running.
 - `tools/list` is intentionally treated as stable for the lifetime of the proxy process (no background refresh), to avoid upstream churn and surprise Xcode permission dialogs.
 
-## `route_activation_timeout` / `attach_probe_timeout`
-These logs mean `mcpbridge` initialized, but Xcode did not return a usable
-`tools/list` response before the route or bridge-attachment deadline.
+## Xcode tools are unavailable
+`route_activation_timeout`, or `bridge_pool_attach_verification_completed` with
+`success=false reason=timeout`, means `mcpbridge` initialized but Xcode did not
+return a usable `tools/list` response before the route or bridge-attachment
+deadline.
 
 First, open your project in Xcode, choose **Xcode > Settings > Intelligence**,
 and turn on **Allow external agents to use Xcode tools** under
@@ -46,9 +49,10 @@ enable the global Xcode setting. If the setting is already on:
   `bridge_pool_attach_verification_completed` with `success=true`.
 
 When Xcode does not send a JSON-RPC response for `tools/list`, the proxy cannot
-recover Xcode's internal error from the stdio transport. The timeout log
-therefore includes a `recovery_action` instead of claiming a specific upstream
-failure.
+recover Xcode's internal error from the stdio transport. The first timeout
+therefore prints an **Xcode tools are unavailable** warning with recovery steps
+and continues retrying automatically. Later retries keep the structured event
+but do not repeat the warning.
 
 ## Streamable HTTP client cannot connect
 - Ensure `xcode-mcp-proxy-server` is running.

@@ -71,11 +71,32 @@ enum LogLevelParser {
 }
 
 enum XcodeMCPToolsAvailabilityDiagnostic {
-    static let enableToolsAction =
-        "Check that \"Allow external agents to use Xcode tools\" is enabled in "
-        + "Xcode > Settings > Intelligence. If Xcode shows a connection dialog, approve it."
+    static let timeoutSummary = """
+        Xcode tools are unavailable
 
-    static func action(forAttachProbeFailureReason reason: String) -> String? {
-        reason == "timeout" ? enableToolsAction : nil
+          The proxy timed out waiting for tools/list.
+          Recovery:
+            1. Open a project in Xcode.
+            2. Check that "Allow external agents to use Xcode tools" is enabled in
+               Xcode > Settings > Intelligence.
+            3. If Xcode shows a connection dialog, approve it.
+          The proxy will retry automatically.
+        """
+
+    static func logTimeout(
+        logger: Logger,
+        processID: pid_t,
+        upstreamIndex: Int,
+        retryDelayMilliseconds: Int64
+    ) {
+        logger.warning(
+            "\(timeoutSummary)",
+            metadata: [
+                "pid": .string("\(processID)"),
+                "upstream": .string("\(upstreamIndex)"),
+                "method": .string("tools/list"),
+                "retry_delay_ms": .string("\(retryDelayMilliseconds)"),
+            ]
+        )
     }
 }

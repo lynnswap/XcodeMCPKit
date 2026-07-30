@@ -499,12 +499,18 @@ extension RuntimeCoordinator {
                 "timeout_ms": .string(
                     processRouteActivationCatalogTimeoutMillisecondsDescription()
                 ),
+                "catalog_timeout_count": .string("\(retry.attempt)"),
                 "retry_delay_ms": .string("\(retry.delayMilliseconds)"),
-                "recovery_action": .string(
-                    XcodeMCPToolsAvailabilityDiagnostic.enableToolsAction
-                ),
             ]
         )
+        if retry.attempt == 1 {
+            XcodeMCPToolsAvailabilityDiagnostic.logTimeout(
+                logger: logger,
+                processID: lease.processID,
+                upstreamIndex: lease.upstreamIndex,
+                retryDelayMilliseconds: retry.delayMilliseconds
+            )
+        }
 
         scheduleMissingProcessToolsCatalogRetry(
             processID: lease.processID,

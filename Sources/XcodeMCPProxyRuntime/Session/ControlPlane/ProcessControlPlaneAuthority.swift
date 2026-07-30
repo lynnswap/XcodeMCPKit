@@ -101,6 +101,7 @@ struct ProcessBridgeRecovery: Sendable, Hashable {
 struct ProcessBridgeRecoveryRetry: Sendable {
     let reservation: ProcessBridgePoolRecovery
     let delay: TimeAmount
+    let consecutiveFailureCount: Int
 }
 
 struct ProcessControlPlaneTransition: Sendable {
@@ -2609,7 +2610,8 @@ final class ProcessControlPlaneAuthority: Sendable {
             reservation: recovery,
             delay: owner.bridgeRecovery.consecutiveFailureCount == 1
                 ? .seconds(1)
-                : .seconds(10)
+                : .seconds(10),
+            consecutiveFailureCount: owner.bridgeRecovery.consecutiveFailureCount
         )
     }
 
