@@ -483,7 +483,8 @@ extension RuntimeCoordinator {
         guard case .retryRequired(
             _,
             let retry,
-            let retryLease
+            let retryLease,
+            let catalogTimeoutCount
         ) = timeout else {
             return
         }
@@ -499,11 +500,11 @@ extension RuntimeCoordinator {
                 "timeout_ms": .string(
                     processRouteActivationCatalogTimeoutMillisecondsDescription()
                 ),
-                "catalog_timeout_count": .string("\(retry.attempt)"),
+                "catalog_timeout_count": .string("\(catalogTimeoutCount)"),
                 "retry_delay_ms": .string("\(retry.delayMilliseconds)"),
             ]
         )
-        if retry.attempt == 1 {
+        if catalogTimeoutCount == 1 {
             XcodeMCPToolsAvailabilityDiagnostic.logTimeout(
                 logger: logger,
                 processID: lease.processID,

@@ -98,10 +98,16 @@ struct ProcessBridgeRecovery: Sendable, Hashable {
     var upstreamID: UpstreamSlotID { reservation.upstreamID }
 }
 
+enum ProcessBridgeRecoveryFailure: Sendable, Equatable {
+    case toolsListTimeout
+    case other
+}
+
 struct ProcessBridgeRecoveryRetry: Sendable {
     let reservation: ProcessBridgePoolRecovery
     let delay: TimeAmount
     let consecutiveFailureCount: Int
+    let shouldLogToolsUnavailableWarning: Bool
 }
 
 struct ProcessControlPlaneTransition: Sendable {
@@ -307,13 +313,14 @@ final class ProcessControlPlaneAuthority: Sendable {
         case retryRequired(
             transition: ProcessControlPlaneTransition,
             retry: Retry,
-            catalogLease: CatalogLease
+            catalogLease: CatalogLease,
+            timeoutCount: Int
         )
 
         var transition: ProcessControlPlaneTransition {
             switch self {
             case .loadTimedOut(let transition),
-                 .retryRequired(let transition, _, _):
+                 .retryRequired(let transition, _, _, _):
                 return transition
             }
         }
@@ -407,6 +414,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var readinessToken: UpstreamReadinessWaiterToken?
         var retryTimeout: RuntimeScheduledTimeout?
         var retryKind: RetryKind?
+        var catalogTimeoutCount: Int
         var nextLoadID: Int
         var loads: [CatalogLoadID: Load]
 
@@ -570,6 +578,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var phase: Phase = .idle
         var generation: UInt64 = 0
         var consecutiveFailureCount = 0
+        var didLogToolsUnavailableWarning = false
 
         mutating func reset(pendingUpstreamIDs: Set<UpstreamSlotID>)
             -> [ProcessControlPlaneEffect]
@@ -584,6 +593,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             self.pendingUpstreamIDs = pendingUpstreamIDs
             phase = .idle
             consecutiveFailureCount = 0
+            didLogToolsUnavailableWarning = false
             return effects
         }
     }
@@ -694,6 +704,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             let previousOwner = owner
             owner.bridgeRecovery.phase = .idle
             owner.bridgeRecovery.consecutiveFailureCount = 0
+            owner.bridgeRecovery.didLogToolsUnavailableWarning = false
             let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
             state.recordsByKey[key] = owner
             guard commit() else {
@@ -719,13 +730,15 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     func prepareBridgeRecoveryRetry(
-        _ recovery: ProcessBridgePoolRecovery
+        _ recovery: ProcessBridgePoolRecovery,
+        failure: ProcessBridgeRecoveryFailure
     ) -> ProcessBridgeRecoveryRetry? {
         state.withLockedValue { state in
             guard let key = Self.key(routeID: recovery.routeID, in: state),
                   var owner = state.recordsByKey[key],
                   let retry = Self.prepareBridgeRecoveryRetry(
                       recovery,
+                      failure: failure,
                       owner: &owner
                   ) else { return nil }
             state.recordsByKey[key] = owner
@@ -1298,6 +1311,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 readinessToken: readinessToken,
                 retryTimeout: nil,
                 retryKind: nil,
+                catalogTimeoutCount: 0,
                 nextLoadID: 0,
                 loads: [:]
             )
@@ -1541,6 +1555,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 readinessToken: nil,
                 retryTimeout: nil,
                 retryKind: nil,
+                catalogTimeoutCount: 0,
                 nextLoadID: 0,
                 loads: [:]
             )
@@ -1593,6 +1608,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 readinessToken: nil,
                 retryTimeout: nil,
                 retryKind: nil,
+                catalogTimeoutCount: 0,
                 nextLoadID: 0,
                 loads: [:]
             )
@@ -2222,6 +2238,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             attempt.retryTimeout = nil
             attempt.retryKind = .catalog
             attempt.phase = .backoff
+            attempt.catalogTimeoutCount &+= 1
             record.catalogRetryCount &+= 1
             record.attempt = attempt
             state.recordsByKey[key] = record
@@ -2233,7 +2250,8 @@ final class ProcessControlPlaneAuthority: Sendable {
                     publishesToolsListChanged: false
                 ),
                 retry: Self.retry(forAttempt: record.catalogRetryCount),
-                catalogLease: lease
+                catalogLease: lease,
+                timeoutCount: attempt.catalogTimeoutCount
             )
         }
     }
@@ -2296,6 +2314,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                rejectedBridgeRecovery.upstreamID == failedProof.slotID,
                let retry = Self.prepareBridgeRecoveryRetry(
                    rejectedBridgeRecovery,
+                   failure: .other,
                    owner: &record
                ) {
                 state.recordsByKey[key] = record
@@ -2600,18 +2619,26 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     private static func prepareBridgeRecoveryRetry(
         _ recovery: ProcessBridgePoolRecovery,
+        failure: ProcessBridgeRecoveryFailure,
         owner: inout XcodeProcessOwner
     ) -> ProcessBridgeRecoveryRetry? {
         guard case .attempting(let current) = owner.bridgeRecovery.phase,
               current == recovery else { return nil }
         owner.bridgeRecovery.consecutiveFailureCount += 1
+        let shouldLogToolsUnavailableWarning =
+            failure == .toolsListTimeout
+            && owner.bridgeRecovery.didLogToolsUnavailableWarning == false
+        if shouldLogToolsUnavailableWarning {
+            owner.bridgeRecovery.didLogToolsUnavailableWarning = true
+        }
         owner.bridgeRecovery.phase = .waitingRetry(recovery, nil)
         return ProcessBridgeRecoveryRetry(
             reservation: recovery,
             delay: owner.bridgeRecovery.consecutiveFailureCount == 1
                 ? .seconds(1)
                 : .seconds(10),
-            consecutiveFailureCount: owner.bridgeRecovery.consecutiveFailureCount
+            consecutiveFailureCount: owner.bridgeRecovery.consecutiveFailureCount,
+            shouldLogToolsUnavailableWarning: shouldLogToolsUnavailableWarning
         )
     }
 
@@ -2667,6 +2694,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             readinessToken: nil,
             retryTimeout: nil,
             retryKind: .activation,
+            catalogTimeoutCount: 0,
             nextLoadID: 0,
             loads: [:]
         )

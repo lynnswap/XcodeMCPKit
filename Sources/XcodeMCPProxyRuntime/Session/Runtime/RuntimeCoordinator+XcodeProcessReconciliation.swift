@@ -386,7 +386,10 @@ extension RuntimeCoordinator {
     ) {
         var retry: ProcessBridgeRecoveryRetry?
         guard initializeManager.performIfRunning({
-            retry = processControlPlane.prepareBridgeRecoveryRetry(recovery)
+            retry = processControlPlane.prepareBridgeRecoveryRetry(
+                recovery,
+                failure: reason == "attach_probe_timeout" ? .toolsListTimeout : .other
+            )
         }), let retry else {
             return
         }
@@ -407,8 +410,7 @@ extension RuntimeCoordinator {
                 "consecutive_failures": .string("\(retry.consecutiveFailureCount)"),
             ]
         )
-        if reason == "attach_probe_timeout",
-           retry.consecutiveFailureCount == 1 {
+        if retry.shouldLogToolsUnavailableWarning {
             XcodeMCPToolsAvailabilityDiagnostic.logTimeout(
                 logger: logger,
                 processID: retry.reservation.routeID.processID,
@@ -449,7 +451,8 @@ extension RuntimeCoordinator {
         var retry: ProcessBridgeRecoveryRetry?
         guard initializeManager.performIfRunning({
             retry = processControlPlane.prepareBridgeRecoveryRetry(
-                recovery.reservation
+                recovery.reservation,
+                failure: reason == "attach_probe_timeout" ? .toolsListTimeout : .other
             )
         }), let retry else { return }
         guard let replacement else {

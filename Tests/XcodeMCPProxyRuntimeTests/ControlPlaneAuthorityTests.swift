@@ -132,9 +132,13 @@ struct ControlPlaneAuthorityTests {
         }
         #expect(firstAttempt.upstreamID == UpstreamSlotID(rawValue: 1))
 
-        let firstRetry = try #require(authority.prepareBridgeRecoveryRetry(firstAttempt))
+        let firstRetry = try #require(authority.prepareBridgeRecoveryRetry(
+            firstAttempt,
+            failure: .other
+        ))
         #expect(firstRetry.delay.nanoseconds == TimeAmount.seconds(1).nanoseconds)
         #expect(firstRetry.consecutiveFailureCount == 1)
+        #expect(firstRetry.shouldLogToolsUnavailableWarning == false)
         guard case .restoreBridgePool(let secondAttempt) = authority
             .handleBridgeRecoveryRetryFired(firstRetry.reservation).effects.first else {
             Issue.record("expected early bridge recovery retry")
@@ -159,23 +163,41 @@ struct ControlPlaneAuthorityTests {
         #expect(cancelled.withLockedValue { $0 })
         #expect(authority.handleBridgeRecoveryRetryFired(firstRetry.reservation).effects.isEmpty)
 
-        let periodicRetry = try #require(authority.prepareBridgeRecoveryRetry(secondAttempt))
+        let periodicRetry = try #require(authority.prepareBridgeRecoveryRetry(
+            secondAttempt,
+            failure: .toolsListTimeout
+        ))
         #expect(periodicRetry.delay.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(periodicRetry.consecutiveFailureCount == 2)
+        #expect(periodicRetry.shouldLogToolsUnavailableWarning)
         guard case .restoreBridgePool(let thirdAttempt) = authority
             .handleBridgeRecoveryRetryFired(periodicRetry.reservation).effects.first else {
             Issue.record("expected periodic bridge recovery retry")
             return
         }
+        let repeatedTimeoutRetry = try #require(authority.prepareBridgeRecoveryRetry(
+            thirdAttempt,
+            failure: .toolsListTimeout
+        ))
+        #expect(repeatedTimeoutRetry.shouldLogToolsUnavailableWarning == false)
+        guard case .restoreBridgePool(let recoveredAttempt) = authority
+            .handleBridgeRecoveryRetryFired(repeatedTimeoutRetry.reservation).effects.first else {
+            Issue.record("expected repeated timeout recovery retry")
+            return
+        }
         guard case .restoreBridgePool(let nextSlot) = authority
-            .completeBridgeRecovery(thirdAttempt).effects.first else {
+            .completeBridgeRecovery(recoveredAttempt).effects.first else {
             Issue.record("expected next serialized bridge slot")
             return
         }
         #expect(nextSlot.upstreamID == UpstreamSlotID(rawValue: 2))
-        let resetRetry = try #require(authority.prepareBridgeRecoveryRetry(nextSlot))
+        let resetRetry = try #require(authority.prepareBridgeRecoveryRetry(
+            nextSlot,
+            failure: .toolsListTimeout
+        ))
         #expect(resetRetry.delay.nanoseconds == TimeAmount.seconds(1).nanoseconds)
         #expect(resetRetry.consecutiveFailureCount == 1)
+        #expect(resetRetry.shouldLogToolsUnavailableWarning)
     }
 
     @Test func bridgeRecoveryRetryContinuesWhenCatalogDisappears() throws {
@@ -196,7 +218,10 @@ struct ControlPlaneAuthorityTests {
             Issue.record("expected bridge recovery after catalog commit")
             return
         }
-        let retry = try #require(authority.prepareBridgeRecoveryRetry(firstAttempt))
+        let retry = try #require(authority.prepareBridgeRecoveryRetry(
+            firstAttempt,
+            failure: .other
+        ))
 
         _ = authority.invalidateCatalogSource(
             processID: target.processID,
@@ -209,7 +234,10 @@ struct ControlPlaneAuthorityTests {
             return
         }
         #expect(resumedAttempt.upstreamID == firstAttempt.upstreamID)
-        let periodicRetry = try #require(authority.prepareBridgeRecoveryRetry(resumedAttempt))
+        let periodicRetry = try #require(authority.prepareBridgeRecoveryRetry(
+            resumedAttempt,
+            failure: .other
+        ))
         #expect(periodicRetry.delay.nanoseconds == TimeAmount.seconds(10).nanoseconds)
     }
 
@@ -455,7 +483,10 @@ struct ControlPlaneAuthorityTests {
         #expect(retry.reservation == rejectedRecovery)
         #expect(retry.delay == .seconds(1))
         #expect(authority.attemptSnapshot(processID: target.processID) == nil)
-        #expect(authority.prepareBridgeRecoveryRetry(rejectedRecovery) == nil)
+        #expect(authority.prepareBridgeRecoveryRetry(
+            rejectedRecovery,
+            failure: .other
+        ) == nil)
         guard case .restoreBridgePool(let retried) = authority
             .handleBridgeRecoveryRetryFired(retry.reservation).effects.first else {
             Issue.record("expected the atomic retry to remain schedulable")
@@ -474,7 +505,10 @@ struct ControlPlaneAuthorityTests {
             Issue.record("expected initial bridge recovery")
             return
         }
-        let staleRetry = try #require(authority.prepareBridgeRecoveryRetry(staleRecovery))
+        let staleRetry = try #require(authority.prepareBridgeRecoveryRetry(
+            staleRecovery,
+            failure: .other
+        ))
         guard case .restoreBridgePool(let currentRecovery) = authority
             .handleBridgeRecoveryRetryFired(staleRetry.reservation).effects.first else {
             Issue.record("expected a newer bridge recovery")
@@ -495,7 +529,10 @@ struct ControlPlaneAuthorityTests {
         #expect(attemptingTransition.effects.isEmpty)
         #expect(authority.validateBridgeRecovery(currentRecovery))
 
-        let currentRetry = try #require(authority.prepareBridgeRecoveryRetry(currentRecovery))
+        let currentRetry = try #require(authority.prepareBridgeRecoveryRetry(
+            currentRecovery,
+            failure: .other
+        ))
         let waitingResult = try #require(authority.recoverAfterRejectedCancellation(
             routeID: route.id,
             failedProof: testTopologyProof(1),
@@ -773,7 +810,10 @@ struct ControlPlaneAuthorityTests {
             Issue.record("expected bridge recovery")
             return
         }
-        let retry = try #require(authority.prepareBridgeRecoveryRetry(recovery))
+        let retry = try #require(authority.prepareBridgeRecoveryRetry(
+            recovery,
+            failure: .other
+        ))
         let cancelled = NIOLockedValueBox(false)
         let timeout = RuntimeScheduledTimeout {
             cancelled.withLockedValue { $0 = true }
@@ -1529,7 +1569,7 @@ struct ControlPlaneAuthorityTests {
             to: firstTimeoutReservation
         )
 
-        guard case .retryRequired(_, let firstRetry, let firstRetryLease) =
+        guard case .retryRequired(_, let firstRetry, let firstRetryLease, let firstTimeoutCount) =
             authority.handleCatalogRequestTimeout(firstTimeoutReservation, nowUptimeNs: 2)
         else {
             Issue.record("expected the final load timeout to require retry")
@@ -1539,6 +1579,7 @@ struct ControlPlaneAuthorityTests {
         #expect(firstRetryLease.attempt == firstLease.attempt)
         #expect(firstRetry.attempt == 1)
         #expect(firstRetry.delay == .milliseconds(250))
+        #expect(firstTimeoutCount == 1)
         #expect(authority.beginCatalogAttempt(
             routeID: route.id,
             preferredUpstreamProof: proof,
@@ -1558,7 +1599,7 @@ struct ControlPlaneAuthorityTests {
             RuntimeScheduledTimeout {},
             to: secondTimeoutReservation
         )
-        guard case .retryRequired(_, let secondRetry, _) =
+        guard case .retryRequired(_, let secondRetry, _, let secondTimeoutCount) =
             authority.handleCatalogRequestTimeout(secondTimeoutReservation, nowUptimeNs: 5)
         else {
             Issue.record("expected the retry load timeout to require another retry")
@@ -1568,6 +1609,7 @@ struct ControlPlaneAuthorityTests {
         #expect(secondLease.attempt == firstLease.attempt)
         #expect(secondRetry.attempt == 2)
         #expect(secondRetry.delay == .milliseconds(500))
+        #expect(secondTimeoutCount == 2)
     }
 
     @Test func catalogTimeoutFiringBeforeAttachmentConsumesReservation() throws {
@@ -1602,7 +1644,7 @@ struct ControlPlaneAuthorityTests {
         #expect(authority.validateCatalogLoad(lease) == false)
     }
 
-    @Test func staleCatalogTimeoutCannotTerminateNewerRetryLoad() throws {
+    @Test func catalogTimeoutCountIgnoresNonTimeoutRetryAndRejectsStaleReservation() throws {
         let target = xcodeProcessTarget(processID: 41033, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0])])
         let route = try #require(authority.route(forProcessID: target.processID))
@@ -1644,6 +1686,17 @@ struct ControlPlaneAuthorityTests {
             authority.attemptSnapshot(processID: target.processID)?.phase
                 == .loadingCatalog
         )
+        let retryTimeoutReservation = try #require(
+            authority.reserveCatalogTimeout(for: retryLease)
+        )
+        guard case .retryRequired(_, let retry, _, let timeoutCount) =
+            authority.handleCatalogRequestTimeout(retryTimeoutReservation, nowUptimeNs: 5)
+        else {
+            Issue.record("expected the current load timeout to require retry")
+            return
+        }
+        #expect(retry.attempt == 2)
+        #expect(timeoutCount == 1)
     }
 
     @Test func catalogLoadTimeoutPreservesSiblingLoad() throws {
