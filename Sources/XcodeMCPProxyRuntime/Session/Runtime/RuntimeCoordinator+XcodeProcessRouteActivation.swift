@@ -495,10 +495,14 @@ extension RuntimeCoordinator {
                 "upstream": .string("\(lease.upstreamIndex)"),
                 "attempt": .string("\(lease.attempt)"),
                 "phase": .string("catalog"),
+                "method": .string("tools/list"),
                 "timeout_ms": .string(
                     processRouteActivationCatalogTimeoutMillisecondsDescription()
                 ),
                 "retry_delay_ms": .string("\(retry.delayMilliseconds)"),
+                "recovery_action": .string(
+                    XcodeMCPToolsAvailabilityDiagnostic.enableToolsAction
+                ),
             ]
         )
 

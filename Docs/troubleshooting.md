@@ -8,7 +8,12 @@ If it fails:
 - Confirm `xcrun mcpbridge -h` works in Terminal.
 
 ## `MCP client ... timed out`
-Ensure the proxy server is running. Increase `startup_timeout_sec` in the client config if needed.
+Ensure the proxy server is running. Before increasing any timeout, confirm that
+Xcode MCP access is enabled as described in
+[Set Up Your MCP Client](../README.md#1-enable-xcode-mcp-access). If the proxy
+logs `route_activation_timeout` or `attach_probe_timeout`, follow the dedicated
+section below. Increase `startup_timeout_sec` only when setup is correct and the
+upstream is still starting too slowly.
 
 If you see an error like:
 
@@ -19,6 +24,31 @@ it’s usually because the upstream (`xcrun mcpbridge` / Xcode) was slow on the 
 - `xcode-mcp-proxy-server` prewarms and caches `tools/list` **in memory** once it’s ready, and serves it immediately on subsequent requests.
 - The tool list cache is **not persisted to disk**. It survives repeated Codex restarts as long as the proxy server stays running.
 - `tools/list` is intentionally treated as stable for the lifetime of the proxy process (no background refresh), to avoid upstream churn and surprise Xcode permission dialogs.
+
+## `route_activation_timeout` / `attach_probe_timeout`
+These logs mean `mcpbridge` initialized, but Xcode did not return a usable
+`tools/list` response before the route or bridge-attachment deadline.
+
+First, open your project in Xcode, choose **Xcode > Settings > Intelligence**,
+and turn on **Allow external agents to use Xcode tools** under
+**Model Context Protocol**. This global switch is required by
+[Xcode's external-agent setup][apple-xcode-mcp-access].
+
+`--auto-approve` only handles the per-connection **Allow** dialog; it does not
+enable the global Xcode setting. If the setting is already on:
+
+- Approve any pending Xcode connection dialog.
+- When using `--auto-approve`, allow the app that launched the proxy (for
+  example, Terminal or iTerm) in
+  **System Settings > Privacy & Security > Accessibility**.
+- Wait for the proxy's automatic retry. A recovered route logs
+  `route_activation_cataloged`; a recovered secondary bridge logs
+  `bridge_pool_attach_verification_completed` with `success=true`.
+
+When Xcode does not send a JSON-RPC response for `tools/list`, the proxy cannot
+recover Xcode's internal error from the stdio transport. The timeout log
+therefore includes a `recovery_action` instead of claiming a specific upstream
+failure.
 
 ## Streamable HTTP client cannot connect
 - Ensure `xcode-mcp-proxy-server` is running.
@@ -90,3 +120,5 @@ Ensure the client is using the server-issued `MCP-Session-Id`. Initialize reques
 
 ## `protocol version required` / `protocol version mismatch`
 The proxy only accepts `MCP-Protocol-Version: 2025-06-18` after initialize. Reinitialize the client session if it cached an older protocol version or omitted the header.
+
+[apple-xcode-mcp-access]: https://developer.apple.com/documentation/xcode/giving-external-agents-access-to-xcode

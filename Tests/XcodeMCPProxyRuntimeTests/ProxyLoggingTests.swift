@@ -24,4 +24,20 @@ struct ProxyLoggingTests {
         )
         #expect(level == .error)
     }
+
+    @Test func toolsAvailabilityDiagnosticExplainsAttachTimeout() {
+        let expectedAction =
+            "Check that \"Allow external agents to use Xcode tools\" is enabled in "
+            + "Xcode > Settings > Intelligence. If Xcode shows a connection dialog, approve it."
+        #expect(
+            XcodeMCPToolsAvailabilityDiagnostic.action(
+                forAttachProbeFailureReason: "timeout"
+            ) == expectedAction
+        )
+        #expect(
+            XcodeMCPToolsAvailabilityDiagnostic.action(
+                forAttachProbeFailureReason: "invalid_response"
+            ) == nil
+        )
+    }
 }

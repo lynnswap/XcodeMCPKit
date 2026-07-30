@@ -69,3 +69,13 @@ enum LogLevelParser {
         }
     }
 }
+
+enum XcodeMCPToolsAvailabilityDiagnostic {
+    static let enableToolsAction =
+        "Check that \"Allow external agents to use Xcode tools\" is enabled in "
+        + "Xcode > Settings > Intelligence. If Xcode shows a connection dialog, approve it."
+
+    static func action(forAttachProbeFailureReason reason: String) -> String? {
+        reason == "timeout" ? enableToolsAction : nil
+    }
+}
