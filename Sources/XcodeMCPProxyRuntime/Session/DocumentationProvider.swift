@@ -1833,7 +1833,7 @@ struct DocumentationSearchActionProvider: DocumentationSearchProviding {
         for target: XcodeProcessTarget,
         timeout: TimeAmount?
     ) async throws -> Data {
-        guard timeout?.nanoseconds != 0 else {
+        guard timeout.map({ $0.nanoseconds > 0 }) ?? true else {
             throw TimeoutError()
         }
         let arguments = try Self.searchArguments(from: requestData)

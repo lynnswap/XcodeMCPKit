@@ -5122,7 +5122,7 @@ struct DocumentationProviderTests {
         #expect(await unavailableInvokerProvider.descriptor(for: target) == nil)
     }
 
-    @Test func documentationSearchActionProviderHonorsSearchTimeout()
+    @Test func documentationSearchActionProviderRejectsNonPositiveSearchTimeout()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
@@ -5136,6 +5136,7 @@ struct DocumentationProviderTests {
             osVersion: "26.2",
             documentationRelease: 900339
         )
+        let recorder = DocumentationSearchActionInvocationRecorder()
         let provider = DocumentationSearchActionProvider(
             assetRoot: root,
             invoker: StubDocumentationSearchActionInvoker(
@@ -5147,18 +5148,22 @@ struct DocumentationProviderTests {
                         score: 0.92,
                         kind: "symbol"
                     ),
-                ])
+                ]),
+                recorder: recorder
             )
         )
         let target = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
 
-        await #expect(throws: TimeoutError.self) {
-            try await provider.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 125, query: "UIView"),
-                for: target,
-                timeout: .nanoseconds(0)
-            )
+        for timeout in [TimeAmount.nanoseconds(0), .nanoseconds(-1)] {
+            await #expect(throws: TimeoutError.self) {
+                try await provider.callDocumentationSearch(
+                    requestData: makeDocumentationSearchRequest(id: 125, query: "UIView"),
+                    for: target,
+                    timeout: timeout
+                )
+            }
         }
+        #expect(await recorder.recordedValues().isEmpty)
     }
 
     @Test func documentationProviderBackgroundDiscoveryRemovesStaleDescriptorWhenAbsent()
