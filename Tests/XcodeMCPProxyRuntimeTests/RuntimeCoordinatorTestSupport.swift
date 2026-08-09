@@ -484,7 +484,8 @@ func makeInstalledDocumentationAsset(
     name: String,
     xcodeVersion: String,
     osVersion: String,
-    documentationRelease: Int
+    documentationRelease: Int,
+    embeddingModelName: String? = nil
 ) throws {
     let assetURL = root.appendingPathComponent("\(name).asset", isDirectory: true)
     let assetDataURL = assetURL.appendingPathComponent("AssetData", isDirectory: true)
@@ -503,7 +504,10 @@ func makeInstalledDocumentationAsset(
     try PropertyListEncoder().encode(plist).write(
         to: assetURL.appendingPathComponent("Info.plist", isDirectory: false)
     )
-    try Data("{}".utf8).write(
+    let config: [String: String] = embeddingModelName.map {
+        ["embeddingModelName": $0]
+    } ?? [:]
+    try JSONEncoder().encode(config).write(
         to: assetDataURL.appendingPathComponent("config.json", isDirectory: false)
     )
     try Data().write(

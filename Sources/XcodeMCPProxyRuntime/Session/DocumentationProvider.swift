@@ -131,21 +131,25 @@ struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairi
     private static let configURLDefaultsKey = "IDEChatDocumentationSearchConfigURL"
 
     private let assetRoot: URL
+    private let currentOSVersion: @Sendable () -> String
     private let readConfigURLOverride: @Sendable () -> String?
     private let writeConfigURLOverride: @Sendable (String) -> Bool
 
     init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
+        currentOSVersion: @escaping @Sendable () -> String =
+            DocumentationSearchAssetLocator.currentOperatingSystemVersionString,
         readConfigURLOverride: @escaping @Sendable () -> String? = Self.currentConfigURLOverride,
         writeConfigURLOverride: @escaping @Sendable (String) -> Bool = Self.writeConfigURLOverride
     ) {
         self.assetRoot = assetRoot
+        self.currentOSVersion = currentOSVersion
         self.readConfigURLOverride = readConfigURLOverride
         self.writeConfigURLOverride = writeConfigURLOverride
     }
 
     func repairDocumentationSearch(
-        for _: XcodeProcessTarget
+        for target: XcodeProcessTarget
     ) async -> DocumentationSearchServiceRepairResult {
         let scan: DocumentationSearchAssetScan
         do {
@@ -153,7 +157,11 @@ struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairi
         } catch {
             return .failed("asset_scan_failed: \(error)")
         }
-        guard let asset = DocumentationSearchAssetLocator.latestAsset(from: scan.assets) else {
+        guard let asset = DocumentationSearchAssetLocator.bestAsset(
+            for: target.xcodeVersion,
+            currentOSVersion: currentOSVersion(),
+            from: scan.assets
+        ) else {
             return .skipped(scan.noAssetReason)
         }
 
@@ -365,16 +373,26 @@ extension DocumentationProvider {
         }
 
         static func responseIsDocumentationProviderFailure(_ data: Data) -> Bool {
-            responseErrorTexts(in: data).contains { text in
-                let normalized = text.lowercased()
-                return normalized.contains("config.json")
-                    || normalized.contains("documentation database")
-                    || normalized.contains("asset is not installed")
-                    || normalized.contains("unable to obtain asset location")
-                    || normalized.contains("no matching asset")
-                    || normalized.contains("cannot complete asset query")
-                    || normalized.contains("cannot resolve asset query")
-            }
+            responseErrorTexts(in: data).contains(where: errorTextIsDocumentationProviderFailure)
+        }
+
+        static func errorTextIsDocumentationProviderFailure(_ text: String) -> Bool {
+            let normalized = text.lowercased()
+            return normalized.contains("config.json")
+                || normalized.contains("documentation database")
+                || normalized.contains("asset is not installed")
+                || normalized.contains("unable to obtain asset location")
+                || normalized.contains("no matching asset")
+                || normalized.contains("cannot complete asset query")
+                || normalized.contains("cannot resolve asset query")
+                || errorTextIsTextEncoderInitializationFailure(normalized)
+        }
+
+        static func errorTextIsTextEncoderInitializationFailure(_ text: String) -> Bool {
+            let normalized = text.lowercased()
+            return normalized.contains("text encoding failed")
+                || normalized.contains("failed to create text encoder configuration")
+                || normalized.contains("text embedding model file not found")
         }
 
         private static func replacingDocumentationSearch(
@@ -669,8 +687,25 @@ enum DocumentationSearchAssetLocator {
         currentOSVersion: String,
         from assets: [DocumentationSearchInstalledAsset]
     ) -> DocumentationSearchInstalledAsset? {
-        assets.max { lhs, rhs in
-            isBetter(rhs, than: lhs, targetXcodeVersion: targetXcodeVersion, currentOSVersion: currentOSVersion)
+        assetsOrderedByCompatibility(
+            for: targetXcodeVersion,
+            currentOSVersion: currentOSVersion,
+            from: assets
+        ).first
+    }
+
+    static func assetsOrderedByCompatibility(
+        for targetXcodeVersion: String,
+        currentOSVersion: String,
+        from assets: [DocumentationSearchInstalledAsset]
+    ) -> [DocumentationSearchInstalledAsset] {
+        assets.sorted { lhs, rhs in
+            isBetter(
+                lhs,
+                than: rhs,
+                targetXcodeVersion: targetXcodeVersion,
+                currentOSVersion: currentOSVersion
+            )
         }
     }
 
@@ -1665,29 +1700,78 @@ actor LiveDocumentationSearchActionInvoker: DocumentationSearchActionInvoking {
 }
 
 private actor DocumentationAssetSelectionCache {
+    private struct SelectionKey: Hashable {
+        let appPath: String
+        let xcodeVersion: String
+        let currentOSVersion: String
+    }
+
     private struct RootSignature: Equatable {
         let path: String
         let modificationDate: Date?
     }
 
     private var cachedRootSignature: RootSignature?
-    private var cachedAsset: DocumentationSearchInstalledAsset?
+    private var cachedAssets: [DocumentationSearchInstalledAsset]?
+    private var successfulAssetPathBySelectionKey: [SelectionKey: String] = [:]
 
-    func latestInstalledAsset(assetRoot: URL) -> DocumentationSearchInstalledAsset? {
+    func installedAssets(
+        assetRoot: URL,
+        target: XcodeProcessTarget,
+        currentOSVersion: String
+    ) -> [DocumentationSearchInstalledAsset] {
         let signature = Self.rootSignature(for: assetRoot)
-        if cachedRootSignature == signature, let cachedAsset {
-            return cachedAsset
+        let assets: [DocumentationSearchInstalledAsset]
+        if cachedRootSignature == signature, let cachedAssets {
+            assets = cachedAssets
+        } else {
+            guard let scan = try? DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
+            else {
+                return []
+            }
+            cachedRootSignature = signature
+            cachedAssets = scan.assets
+            successfulAssetPathBySelectionKey.removeAll()
+            assets = scan.assets
         }
-        guard let scan = try? DocumentationSearchAssetLocator.scanInstalledAssets(in: assetRoot)
-        else {
-            return nil
+        var orderedAssets = DocumentationSearchAssetLocator.assetsOrderedByCompatibility(
+            for: target.xcodeVersion,
+            currentOSVersion: currentOSVersion,
+            from: assets
+        )
+        let key = SelectionKey(
+            appPath: target.appPath,
+            xcodeVersion: target.xcodeVersion,
+            currentOSVersion: currentOSVersion
+        )
+        guard let successfulAssetPath = successfulAssetPathBySelectionKey[key],
+              let index = orderedAssets.firstIndex(where: {
+                  $0.assetURL.path == successfulAssetPath
+              }),
+              index != orderedAssets.startIndex else {
+            return orderedAssets
         }
-        guard let asset = DocumentationSearchAssetLocator.latestAsset(from: scan.assets) else {
-            return nil
+        orderedAssets.insert(orderedAssets.remove(at: index), at: orderedAssets.startIndex)
+        return orderedAssets
+    }
+
+    func recordSuccessfulAsset(
+        _ asset: DocumentationSearchInstalledAsset,
+        assetRoot: URL,
+        target: XcodeProcessTarget,
+        currentOSVersion: String
+    ) {
+        guard cachedRootSignature == Self.rootSignature(for: assetRoot),
+              cachedAssets?.contains(asset) == true else {
+            return
         }
-        cachedRootSignature = signature
-        cachedAsset = asset
-        return asset
+        successfulAssetPathBySelectionKey[
+            SelectionKey(
+                appPath: target.appPath,
+                xcodeVersion: target.xcodeVersion,
+                currentOSVersion: currentOSVersion
+            )
+        ] = asset.assetURL.path
     }
 
     private static func rootSignature(for assetRoot: URL) -> RootSignature {
@@ -1710,22 +1794,26 @@ struct DocumentationSearchActionProvider: DocumentationSearchProviding {
     private let assetCache: DocumentationAssetSelectionCache
     private let invoker: any DocumentationSearchActionInvoking
     private let defaultTargetResolver: @Sendable () -> XcodeProcessTarget?
+    private let currentOSVersion: @Sendable () -> String
 
     init(
         assetRoot: URL = DocumentationSearchAssetLocator.defaultAssetRoot,
         invoker: any DocumentationSearchActionInvoking = LiveDocumentationSearchActionInvoker(),
         defaultTargetResolver: @escaping @Sendable () -> XcodeProcessTarget? =
-            Self.defaultXcodeProcessTarget
+            Self.defaultXcodeProcessTarget,
+        currentOSVersion: @escaping @Sendable () -> String =
+            DocumentationSearchAssetLocator.currentOperatingSystemVersionString
     ) {
         self.assetRoot = assetRoot
         self.invoker = invoker
         self.defaultTargetResolver = defaultTargetResolver
+        self.currentOSVersion = currentOSVersion
         assetCache = DocumentationAssetSelectionCache()
     }
 
     func descriptor(for target: XcodeProcessTarget) async -> JSONValue? {
-        guard await latestInstalledAsset() != nil,
-              let resolvedTarget = resolveTarget(target),
+        guard let resolvedTarget = resolveTarget(target),
+              await installedAssets(for: resolvedTarget).isEmpty == false,
               await invoker.isAvailable(for: resolvedTarget) else {
             return nil
         }
@@ -1741,28 +1829,76 @@ struct DocumentationSearchActionProvider: DocumentationSearchProviding {
             throw TimeoutError()
         }
         let arguments = try Self.searchArguments(from: requestData)
-        guard let asset = await latestInstalledAsset(),
-              let resolvedTarget = resolveTarget(target) else {
+        guard let resolvedTarget = resolveTarget(target) else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        let output = try await invoker.invoke(
-            DocumentationSearchActionInvocation(
-                target: resolvedTarget,
-                asset: asset,
-                query: arguments.query,
-                frameworks: arguments.frameworks,
-                limit: arguments.limit
-            ),
-            timeout: timeout
+        let currentOSVersion = currentOSVersion()
+        let assets = await installedAssets(
+            for: resolvedTarget,
+            currentOSVersion: currentOSVersion
         )
-        return try Self.makeResponse(
-            requestID: arguments.requestID,
-            output: output
+        guard assets.isEmpty == false else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        let deadline = Deadline.fromNow(timeout)
+        var lastTextEncoderInitializationError: (any Error)?
+        for asset in assets {
+            let remainingTimeout = deadline?.remaining()
+            if remainingTimeout?.nanoseconds == 0 {
+                throw TimeoutError()
+            }
+            do {
+                let output = try await invoker.invoke(
+                    DocumentationSearchActionInvocation(
+                        target: resolvedTarget,
+                        asset: asset,
+                        query: arguments.query,
+                        frameworks: arguments.frameworks,
+                        limit: arguments.limit
+                    ),
+                    timeout: remainingTimeout
+                )
+                await assetCache.recordSuccessfulAsset(
+                    asset,
+                    assetRoot: assetRoot,
+                    target: resolvedTarget,
+                    currentOSVersion: currentOSVersion
+                )
+                return try Self.makeResponse(
+                    requestID: arguments.requestID,
+                    output: output
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard Self.isTextEncoderInitializationFailure(error) else {
+                    throw error
+                }
+                lastTextEncoderInitializationError = error
+            }
+        }
+        throw lastTextEncoderInitializationError
+            ?? UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+
+    private func installedAssets(
+        for target: XcodeProcessTarget,
+        currentOSVersion: String? = nil
+    ) async -> [DocumentationSearchInstalledAsset] {
+        await assetCache.installedAssets(
+            assetRoot: assetRoot,
+            target: target,
+            currentOSVersion: currentOSVersion ?? self.currentOSVersion()
         )
     }
 
-    private func latestInstalledAsset() async -> DocumentationSearchInstalledAsset? {
-        await assetCache.latestInstalledAsset(assetRoot: assetRoot)
+    private static func isTextEncoderInitializationFailure(_ error: any Error) -> Bool {
+        guard let controlPlaneError = error as? ControlPlane.Error,
+              case .invalidResponse(let message) = controlPlaneError else {
+            return false
+        }
+        return DocumentationProvider.ToolCatalog
+            .errorTextIsTextEncoderInitializationFailure(message)
     }
 
     private func resolveTarget(_ target: XcodeProcessTarget) -> XcodeProcessTarget? {
@@ -3061,16 +3197,23 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
     }
 
     private func promoteToActive(_ profile: CandidateProfile) async -> Bool {
-        let previous = activeProvider
-        activeProvider = ActiveProvider(profile: profile)
-        preparedProviders.removeValue(forKey: profile.target.processID)
-        guard let previous else {
-            return true
-        }
-        guard previous.profile.id != profile.id else {
+        if let activeProvider,
+           activeProvider.profile.target.processID == profile.target.processID {
+            if preparedProviders[profile.target.processID]?.id == profile.id {
+                preparedProviders.removeValue(forKey: profile.target.processID)
+            }
             return false
         }
-        await closeTransportRouteIfPresent(previous.profile, awaitTermination: isShutdown)
+        guard let prepared = preparedProviders[profile.target.processID],
+              prepared.id == profile.id else {
+            return false
+        }
+        preparedProviders.removeValue(forKey: profile.target.processID)
+        let previous = activeProvider
+        activeProvider = ActiveProvider(profile: prepared)
+        if let previous {
+            await closeTransportRouteIfPresent(previous.profile, awaitTermination: isShutdown)
+        }
         return true
     }
 
