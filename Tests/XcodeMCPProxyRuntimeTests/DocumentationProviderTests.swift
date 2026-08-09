@@ -23,15 +23,21 @@ private struct StubDocumentationSearchActionInvoker: DocumentationSearchActionIn
     let available: Bool
     let output: DocumentationSearchActionOutput
     let recorder: DocumentationSearchActionInvocationRecorder?
+    let failureMessagesByEmbeddingModelName: [String: String]
+    let timeoutEmbeddingModelNames: Set<String>
 
     init(
         available: Bool = true,
         output: DocumentationSearchActionOutput,
-        recorder: DocumentationSearchActionInvocationRecorder? = nil
+        recorder: DocumentationSearchActionInvocationRecorder? = nil,
+        failureMessagesByEmbeddingModelName: [String: String] = [:],
+        timeoutEmbeddingModelNames: Set<String> = []
     ) {
         self.available = available
         self.output = output
         self.recorder = recorder
+        self.failureMessagesByEmbeddingModelName = failureMessagesByEmbeddingModelName
+        self.timeoutEmbeddingModelNames = timeoutEmbeddingModelNames
     }
 
     func isAvailable(for _: XcodeProcessTarget) async -> Bool {
@@ -43,8 +49,101 @@ private struct StubDocumentationSearchActionInvoker: DocumentationSearchActionIn
         timeout _: TimeAmount?
     ) async throws -> DocumentationSearchActionOutput {
         await recorder?.record(invocation)
+        if timeoutEmbeddingModelNames.contains(invocation.asset.embeddingModelName) {
+            throw TimeoutError()
+        }
+        if let failureMessage = failureMessagesByEmbeddingModelName[
+            invocation.asset.embeddingModelName
+        ] {
+            throw ControlPlane.Error.invalidResponse(failureMessage)
+        }
         return output
     }
+}
+
+private actor ControllableDocumentationProviderTransport: DocumentationProviderRouting {
+    private let firstCallStarted: TestSignal
+    private let secondCallStarted: TestSignal
+    private var callContinuations: [CheckedContinuation<Data, any Error>] = []
+    private var closedRouteIDs: [String] = []
+
+    init(firstCallStarted: TestSignal, secondCallStarted: TestSignal) {
+        self.firstCallStarted = firstCallStarted
+        self.secondCallStarted = secondCallStarted
+    }
+
+    func openRoute(
+        for target: XcodeProcessTarget,
+        requestTimeout _: TimeAmount?,
+        initializeParams _: [String: JSONValue]
+    ) async throws -> DocumentationProviderRoute {
+        DocumentationProviderRoute(
+            id: "controllable-\(target.processID)",
+            target: target,
+            upstreamIndex: nil,
+            serverVersion: target.xcodeVersion
+        )
+    }
+
+    func toolsList(
+        route: DocumentationProviderRoute,
+        timeout _: TimeAmount?
+    ) async throws -> JSONValue {
+        .object([
+            "tools": .array([
+                documentationDescriptor(version: route.serverVersion),
+            ]),
+        ])
+    }
+
+    func callDocumentationSearch(
+        route _: DocumentationProviderRoute,
+        requestData _: Data,
+        timeout _: TimeAmount?
+    ) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            callContinuations.append(continuation)
+            switch callContinuations.count {
+            case 1:
+                firstCallStarted.signal()
+            case 2:
+                secondCallStarted.signal()
+            default:
+                break
+            }
+        }
+    }
+
+    func respondToCall(at index: Int, with data: Data) {
+        callContinuations[index].resume(returning: data)
+    }
+
+    func close(route: DocumentationProviderRoute) async {
+        closedRouteIDs.append(route.id)
+    }
+
+    func closedRoutes() -> [String] {
+        closedRouteIDs
+    }
+}
+
+private func makeTextEncoderFallbackAssets(in root: URL) throws {
+    try makeInstalledDocumentationAsset(
+        root: root,
+        name: "xcode-27-md7v2",
+        xcodeVersion: "27.0",
+        osVersion: "26.4",
+        documentationRelease: 950001,
+        embeddingModelName: "md7v2"
+    )
+    try makeInstalledDocumentationAsset(
+        root: root,
+        name: "xcode-26-5-md8",
+        xcodeVersion: "26.5",
+        osVersion: "26.6",
+        documentationRelease: 900340,
+        embeddingModelName: "md8"
+    )
 }
 
 private actor DocumentationSearchActionProcessRecorder: ProcessRunning {
@@ -1556,6 +1655,104 @@ struct DocumentationProviderTests {
             target.processID,
         ])
         #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit"])
+    }
+
+    @Test func concurrentNativeSuccessPreservesFallbackAfterNativeRouteCloses()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 751, xcodeVersion: "26.6")
+        let firstCallStarted = TestSignal()
+        let secondCallStarted = TestSignal()
+        let transport = ControllableDocumentationProviderTransport(
+            firstCallStarted: firstCallStarted,
+            secondCallStarted: secondCallStarted
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 149,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let providerManager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            transport: transport,
+            providerSelectionTimeout: .seconds(1),
+            localSearchProvider: localProvider
+        )
+
+        let fallbackTask = Task {
+            try await providerManager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(
+                    id: 149,
+                    query: "EstimationTechnique"
+                ),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        try await firstCallStarted.wait(
+            description: "waiting for first native DocumentationSearch call"
+        )
+
+        let nativeSuccessTask = Task {
+            try await providerManager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 150, query: "UIView"),
+                requestTimeoutOverride: .seconds(2)
+            )
+        }
+        try await secondCallStarted.wait(
+            description: "waiting for second native DocumentationSearch call"
+        )
+
+        let textEncoderFailure = try makeDocumentationSearchToolErrorResponse(
+            id: 149,
+            text: "Search failed for 'EstimationTechnique' with error: "
+                + "Error Domain=NSOSStatusErrorDomain Code=-18 "
+                + "UserInfo={NSLocalizedDescription=Text encoding failed ((null))}"
+        )
+        await transport.respondToCall(
+            at: 0,
+            with: textEncoderFailure
+        )
+        let fallbackOutcome = try await waitWithTimeout(
+            "waiting for installed asset fallback"
+        ) {
+            try await fallbackTask.value
+        }
+        guard case .handled(let fallbackData, let invalidatedProvider) = fallbackOutcome else {
+            Issue.record("expected handled fallback outcome, got \(fallbackOutcome)")
+            return
+        }
+        #expect(invalidatedProvider)
+        #expect(try toolContentText(in: fallbackData) == "{\"answer\":\"asset\"}")
+
+        let nativeSuccess = try makeDocumentationSearchResponse(
+            id: 150,
+            text: "{\"answer\":\"native\"}"
+        )
+        await transport.respondToCall(
+            at: 1,
+            with: nativeSuccess
+        )
+        let nativeSuccessOutcome = try await waitWithTimeout(
+            "waiting for concurrent native response"
+        ) {
+            try await nativeSuccessTask.value
+        }
+        guard case .handled(let nativeData, _) = nativeSuccessOutcome else {
+            Issue.record("expected handled native outcome, got \(nativeSuccessOutcome)")
+            return
+        }
+        #expect(try toolContentText(in: nativeData) == "{\"answer\":\"native\"}")
+
+        let update = await providerManager.toolListUpdate(requestTimeout: .seconds(1))
+        let result = DocumentationProvider.ToolCatalog.applying(
+            update,
+            to: try jsonValue(["tools": []])
+        )
+        #expect(documentationDescriptorDescription(in: result) == "docs-asset-fallback")
+        #expect(await localProvider.requestedQueries() == ["EstimationTechnique"])
+        #expect(await transport.closedRoutes() == ["controllable-751"])
     }
 
     @Test func runtimeDocumentationTransportKeepsBorrowedRouteAfterInitialAssetFallbackTimeout()
@@ -4048,6 +4245,192 @@ struct DocumentationProviderTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
     }
 
+    @Test func documentationProviderFallsBackToInstalledAssetWhenTextEncoderIsUnavailable()
+        async throws
+    {
+        let target = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
+        let factory = ScriptedDocumentationSessionFactory(
+            plansByPID: [
+                target.processID: [
+                    .init(
+                        serverVersion: "26.6",
+                        toolCount: 21,
+                        includesDocumentationSearch: true,
+                        firstDocumentationResponse: .toolErrorText(
+                            "Search failed for 'EstimationTechnique' with error: "
+                                + "Error Domain=NSOSStatusErrorDomain Code=-18 "
+                                + "UserInfo={NSLocalizedDescription=Text encoding failed ((null))}"
+                        ),
+                        userCallResponses: [.successText("{\"answer\":\"after-error\"}")]
+                    ),
+                ],
+            ]
+        )
+        let localProvider = StubDocumentationSearchProvider(
+            descriptor: documentationDescriptor(version: "asset-fallback"),
+            responseData: try makeDocumentationSearchResponse(
+                id: 125,
+                text: "{\"answer\":\"asset\"}"
+            )
+        )
+        let manager = DocumentationProviderManager(
+            discovery: StubXcodeTargetDiscovery(targets: [target]),
+            sessionFactory: factory,
+            localSearchProvider: localProvider
+        )
+
+        let firstOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(
+                id: 125,
+                query: "EstimationTechnique"
+            ),
+            requestTimeoutOverride: .seconds(1)
+        )
+        let secondOutcome = try await manager.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 126, query: "UIView"),
+            requestTimeoutOverride: .seconds(1)
+        )
+
+        guard case .handled(let firstData, let firstInvalidatedProvider) = firstOutcome,
+              case .handled(let secondData, let secondInvalidatedProvider) = secondOutcome else {
+            Issue.record("expected handled outcomes, got \(firstOutcome) and \(secondOutcome)")
+            return
+        }
+        #expect(firstInvalidatedProvider)
+        #expect(secondInvalidatedProvider == false)
+        #expect(try toolContentText(in: firstData) == "{\"answer\":\"asset\"}")
+        #expect(try toolContentText(in: secondData) == "{\"answer\":\"asset\"}")
+        #expect(await localProvider.requestedCallPIDs() == [target.processID, target.processID])
+        #expect(await localProvider.requestedQueries() == ["EstimationTechnique", "UIView"])
+        #expect(await factory.documentationQueries(for: target.processID) == ["EstimationTechnique"])
+        #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
+    }
+
+    @Test func liveDocumentationSearchServiceRepairerPrefersHostCompatibleAssetOverExactXcodeVersion()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "27.0",
+            documentationRelease: 950001
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5-old-os",
+            xcodeVersion: "26.5",
+            osVersion: "26.2",
+            documentationRelease: 900339
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5-current-os",
+            xcodeVersion: "26.5",
+            osVersion: "26.6",
+            documentationRelease: 900340
+        )
+        let writtenValues = NIOLockedValueBox<[String]>([])
+        let repairer = LiveDocumentationSearchServiceRepairer(
+            assetRoot: root,
+            currentOSVersion: { "26.6.1" },
+            readConfigURLOverride: { nil },
+            writeConfigURLOverride: { value in
+                writtenValues.withLockedValue { $0.append(value) }
+                return true
+            }
+        )
+
+        let result = await repairer.repairDocumentationSearch(
+            for: xcodeProcessTarget(processID: 126, xcodeVersion: "27.0")
+        )
+
+        guard case .repaired(let report) = result else {
+            Issue.record("expected repaired result, got \(result)")
+            return
+        }
+        #expect(report.xcodeVersion == "26.5")
+        #expect(report.osVersion == "26.6")
+        #expect(report.documentationRelease == 900340)
+        #expect(report.changedDefault)
+        #expect(report.configURL.contains("xcode-26-5-current-os.asset/AssetData/config.json"))
+        #expect(writtenValues.withLockedValue { $0 } == [report.configURL])
+    }
+
+    @Test func liveDocumentationSearchServiceRepairerSkipsWithoutHostCompatibleAsset()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "27.0",
+            documentationRelease: 950001
+        )
+        let writtenValues = NIOLockedValueBox<[String]>([])
+        let repairer = LiveDocumentationSearchServiceRepairer(
+            assetRoot: root,
+            currentOSVersion: { "26.6.1" },
+            readConfigURLOverride: { nil },
+            writeConfigURLOverride: { value in
+                writtenValues.withLockedValue { $0.append(value) }
+                return true
+            }
+        )
+
+        let result = await repairer.repairDocumentationSearch(
+            for: xcodeProcessTarget(processID: 126, xcodeVersion: "27.0")
+        )
+
+        #expect(
+            result == .skipped(
+                "no_host_compatible_documentation_asset current_os=26.6.1"
+            )
+        )
+        #expect(writtenValues.withLockedValue { $0 }.isEmpty)
+    }
+
+    @Test func documentationAssetLocatorExcludesAssetsNewerThanHostOS()
+        throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-27-newer-os",
+            xcodeVersion: "27.0",
+            osVersion: "27.0",
+            documentationRelease: 950001
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5-current-os",
+            xcodeVersion: "26.5",
+            osVersion: "26.6",
+            documentationRelease: 900340
+        )
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: root)
+
+        let orderedAssets = DocumentationSearchAssetLocator
+            .hostCompatibleAssetsOrderedByCompatibility(
+                for: "27.0",
+                currentOSVersion: "26.6.1",
+                from: scan.assets
+            )
+
+        #expect(orderedAssets.map(\.xcodeVersion) == ["26.5"])
+    }
+
     @Test func documentationAssetLocatorTreatsTrailingZeroXcodeVersionsAsExactMatch()
         throws
     {
@@ -4072,7 +4455,7 @@ struct DocumentationProviderTests {
         let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: root)
 
         let asset = try #require(
-            DocumentationSearchAssetLocator.bestAsset(
+            DocumentationSearchAssetLocator.bestHostCompatibleAsset(
                 for: "26.0",
                 currentOSVersion: "26.0",
                 from: scan.assets
@@ -4120,6 +4503,42 @@ struct DocumentationProviderTests {
         #expect(asset.assetURL.path.contains("xcode-27-new-release.asset"))
     }
 
+    @Test func documentationSearchActionProviderIsUnavailableWithOnlyNewerOSAsset()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-27-newer-os",
+            xcodeVersion: "27.0",
+            osVersion: "27.0",
+            documentationRelease: 950001
+        )
+        let recorder = DocumentationSearchActionInvocationRecorder()
+        let provider = DocumentationSearchActionProvider(
+            assetRoot: root,
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: []),
+                recorder: recorder
+            ),
+            currentOSVersion: { "26.6.1" }
+        )
+        let target = xcodeProcessTarget(processID: 122, xcodeVersion: "27.0")
+
+        #expect(await provider.descriptor(for: target) == nil)
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) {
+            try await provider.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 122, query: "UIView"),
+                for: target,
+                timeout: .seconds(1)
+            )
+        }
+        #expect(await recorder.recordedValues().isEmpty)
+    }
+
     @Test func documentationSearchActionProviderReturnsHelperOutput()
         async throws
     {
@@ -4129,16 +4548,23 @@ struct DocumentationProviderTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try makeInstalledDocumentationAsset(
             root: root,
-            name: "xcode-26-5",
+            name: "xcode-26-5-old-os",
             xcodeVersion: "26.5",
             osVersion: "26.2",
             documentationRelease: 900339
         )
         try makeInstalledDocumentationAsset(
             root: root,
+            name: "xcode-26-5-current-os",
+            xcodeVersion: "26.5",
+            osVersion: "26.6",
+            documentationRelease: 900340
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
             name: "xcode-27",
             xcodeVersion: "27.0",
-            osVersion: "27.0",
+            osVersion: "26.4",
             documentationRelease: 950001
         )
         let recorder = DocumentationSearchActionInvocationRecorder()
@@ -4156,7 +4582,8 @@ struct DocumentationProviderTests {
                     ),
                 ]),
                 recorder: recorder
-            )
+            ),
+            currentOSVersion: { "26.6.1" }
         )
 
         #expect(await provider.descriptor(for: target) != nil)
@@ -4196,11 +4623,211 @@ struct DocumentationProviderTests {
 
         let invocation = try #require(await recorder.recordedValues().first)
         #expect(invocation.target == target)
-        #expect(invocation.asset.xcodeVersion == "27.0")
-        #expect(invocation.asset.documentationRelease == 950001)
+        #expect(invocation.asset.xcodeVersion == "26.5")
+        #expect(invocation.asset.osVersion == "26.6")
+        #expect(invocation.asset.documentationRelease == 900340)
         #expect(invocation.query == "UIView")
         #expect(invocation.frameworks == ["UIKit"])
         #expect(invocation.limit == 2)
+    }
+
+    @Test func documentationSearchActionProviderCachesAssetsInsteadOfOneTargetSelection()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5",
+            xcodeVersion: "26.5",
+            osVersion: "26.6",
+            documentationRelease: 900340
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "26.6",
+            documentationRelease: 950001
+        )
+        let recorder = DocumentationSearchActionInvocationRecorder()
+        let provider = DocumentationSearchActionProvider(
+            assetRoot: root,
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: []),
+                recorder: recorder
+            ),
+            currentOSVersion: { "26.6.1" }
+        )
+        let xcode26 = xcodeProcessTarget(processID: 127, xcodeVersion: "26.6")
+        let xcode27 = xcodeProcessTarget(processID: 128, xcodeVersion: "27.0")
+
+        _ = try await provider.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 127, query: "UIView"),
+            for: xcode26,
+            timeout: .seconds(1)
+        )
+        _ = try await provider.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 128, query: "SwiftUI"),
+            for: xcode27,
+            timeout: .seconds(1)
+        )
+
+        let invocations = await recorder.recordedValues()
+        #expect(invocations.map(\.target) == [xcode26, xcode27])
+        #expect(invocations.map(\.asset.xcodeVersion) == ["26.5", "27.0"])
+    }
+
+    @Test func documentationSearchActionProviderRetriesTextEncoderFailureAndCachesSuccess()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeTextEncoderFallbackAssets(in: root)
+        let recorder = DocumentationSearchActionInvocationRecorder()
+        let provider = DocumentationSearchActionProvider(
+            assetRoot: root,
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: []),
+                recorder: recorder,
+                failureMessagesByEmbeddingModelName: [
+                    "md7v2": "DocumentationSearchAction helper failed: Text encoding failed ((null))",
+                ]
+            ),
+            currentOSVersion: { "26.6.1" }
+        )
+        let target = xcodeProcessTarget(processID: 129, xcodeVersion: "27.0")
+
+        let firstResponse = try await provider.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(
+                id: 129,
+                query: "EstimationTechnique"
+            ),
+            for: target,
+            timeout: .seconds(1)
+        )
+        let secondResponse = try await provider.callDocumentationSearch(
+            requestData: makeDocumentationSearchRequest(id: 130, query: "UIView"),
+            for: target,
+            timeout: .seconds(1)
+        )
+
+        #expect(try responseID(in: firstResponse) == 129)
+        #expect(try responseID(in: secondResponse) == 130)
+        let invocations = await recorder.recordedValues()
+        #expect(invocations.map(\.asset.embeddingModelName) == ["md7v2", "md8", "md8"])
+    }
+
+    @Test func documentationSearchActionProviderDoesNotRetryWithAssetNewerThanHostOS()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5-md8",
+            xcodeVersion: "26.5",
+            osVersion: "26.6",
+            documentationRelease: 900340,
+            embeddingModelName: "md8"
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-27-md7v2",
+            xcodeVersion: "27.0",
+            osVersion: "27.0",
+            documentationRelease: 950001,
+            embeddingModelName: "md7v2"
+        )
+        let recorder = DocumentationSearchActionInvocationRecorder()
+        let provider = DocumentationSearchActionProvider(
+            assetRoot: root,
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: []),
+                recorder: recorder,
+                failureMessagesByEmbeddingModelName: [
+                    "md8": "DocumentationSearchAction helper failed: Text encoding failed ((null))",
+                ]
+            ),
+            currentOSVersion: { "26.6.1" }
+        )
+
+        await #expect(throws: ControlPlane.Error.self) {
+            try await provider.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 133, query: "UIView"),
+                for: xcodeProcessTarget(processID: 133, xcodeVersion: "27.0"),
+                timeout: .seconds(1)
+            )
+        }
+        #expect(await recorder.recordedValues().map(\.asset.embeddingModelName) == ["md8"])
+    }
+
+    @Test func documentationSearchActionProviderDoesNotRetryUnrelatedHelperFailure()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeTextEncoderFallbackAssets(in: root)
+        let recorder = DocumentationSearchActionInvocationRecorder()
+        let provider = DocumentationSearchActionProvider(
+            assetRoot: root,
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: []),
+                recorder: recorder,
+                failureMessagesByEmbeddingModelName: [
+                    "md7v2": "DocumentationSearchAction helper failed: query-specific failure",
+                ]
+            ),
+            currentOSVersion: { "26.6.1" }
+        )
+
+        await #expect(throws: ControlPlane.Error.self) {
+            try await provider.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 131, query: "bad query"),
+                for: xcodeProcessTarget(processID: 131, xcodeVersion: "27.0"),
+                timeout: .seconds(1)
+            )
+        }
+
+        #expect(await recorder.recordedValues().map(\.asset.embeddingModelName) == ["md7v2"])
+    }
+
+    @Test func documentationSearchActionProviderDoesNotRetryTimeout()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeTextEncoderFallbackAssets(in: root)
+        let recorder = DocumentationSearchActionInvocationRecorder()
+        let provider = DocumentationSearchActionProvider(
+            assetRoot: root,
+            invoker: StubDocumentationSearchActionInvoker(
+                output: DocumentationSearchActionOutput(documents: []),
+                recorder: recorder,
+                timeoutEmbeddingModelNames: ["md7v2"]
+            ),
+            currentOSVersion: { "26.6.1" }
+        )
+
+        await #expect(throws: TimeoutError.self) {
+            try await provider.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 132, query: "UIView"),
+                for: xcodeProcessTarget(processID: 132, xcodeVersion: "27.0"),
+                timeout: .seconds(1)
+            )
+        }
+
+        #expect(await recorder.recordedValues().map(\.asset.embeddingModelName) == ["md7v2"])
     }
 
     @Test func documentationSearchActionInvokerPassesLatestAssetWithActionDefaults()
@@ -4586,7 +5213,7 @@ struct DocumentationProviderTests {
         #expect(await unavailableInvokerProvider.descriptor(for: target) == nil)
     }
 
-    @Test func documentationSearchActionProviderHonorsSearchTimeout()
+    @Test func documentationSearchActionProviderRejectsNonPositiveSearchTimeout()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
@@ -4600,6 +5227,7 @@ struct DocumentationProviderTests {
             osVersion: "26.2",
             documentationRelease: 900339
         )
+        let recorder = DocumentationSearchActionInvocationRecorder()
         let provider = DocumentationSearchActionProvider(
             assetRoot: root,
             invoker: StubDocumentationSearchActionInvoker(
@@ -4611,18 +5239,22 @@ struct DocumentationProviderTests {
                         score: 0.92,
                         kind: "symbol"
                     ),
-                ])
+                ]),
+                recorder: recorder
             )
         )
         let target = xcodeProcessTarget(processID: 125, xcodeVersion: "26.6")
 
-        await #expect(throws: TimeoutError.self) {
-            try await provider.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 125, query: "UIView"),
-                for: target,
-                timeout: .nanoseconds(0)
-            )
+        for timeout in [TimeAmount.nanoseconds(0), .nanoseconds(-1)] {
+            await #expect(throws: TimeoutError.self) {
+                try await provider.callDocumentationSearch(
+                    requestData: makeDocumentationSearchRequest(id: 125, query: "UIView"),
+                    for: target,
+                    timeout: timeout
+                )
+            }
         }
+        #expect(await recorder.recordedValues().isEmpty)
     }
 
     @Test func documentationProviderBackgroundDiscoveryRemovesStaleDescriptorWhenAbsent()
