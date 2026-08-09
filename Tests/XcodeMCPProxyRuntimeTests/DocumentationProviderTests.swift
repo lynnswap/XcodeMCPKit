@@ -4298,7 +4298,7 @@ struct DocumentationProviderTests {
         #expect(await factory.requestCount(processID: target.processID, method: "tools/call") == 1)
     }
 
-    @Test func liveDocumentationSearchServiceRepairerSelectsCompatibleAsset()
+    @Test func liveDocumentationSearchServiceRepairerPrefersHostCompatibleAssetOverExactXcodeVersion()
         async throws
     {
         let root = FileManager.default.temporaryDirectory
@@ -4309,7 +4309,7 @@ struct DocumentationProviderTests {
             root: root,
             name: "xcode-27",
             xcodeVersion: "27.0",
-            osVersion: "26.4",
+            osVersion: "27.0",
             documentationRelease: 950001
         )
         try makeInstalledDocumentationAsset(
@@ -4338,7 +4338,7 @@ struct DocumentationProviderTests {
         )
 
         let result = await repairer.repairDocumentationSearch(
-            for: xcodeProcessTarget(processID: 126, xcodeVersion: "26.6")
+            for: xcodeProcessTarget(processID: 126, xcodeVersion: "27.0")
         )
 
         guard case .repaired(let report) = result else {
@@ -4351,6 +4351,75 @@ struct DocumentationProviderTests {
         #expect(report.changedDefault)
         #expect(report.configURL.contains("xcode-26-5-current-os.asset/AssetData/config.json"))
         #expect(writtenValues.withLockedValue { $0 } == [report.configURL])
+    }
+
+    @Test func liveDocumentationSearchServiceRepairerSkipsWithoutHostCompatibleAsset()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-27",
+            xcodeVersion: "27.0",
+            osVersion: "27.0",
+            documentationRelease: 950001
+        )
+        let writtenValues = NIOLockedValueBox<[String]>([])
+        let repairer = LiveDocumentationSearchServiceRepairer(
+            assetRoot: root,
+            currentOSVersion: { "26.6.1" },
+            readConfigURLOverride: { nil },
+            writeConfigURLOverride: { value in
+                writtenValues.withLockedValue { $0.append(value) }
+                return true
+            }
+        )
+
+        let result = await repairer.repairDocumentationSearch(
+            for: xcodeProcessTarget(processID: 126, xcodeVersion: "27.0")
+        )
+
+        #expect(
+            result == .skipped(
+                "no_host_compatible_documentation_asset current_os=26.6.1"
+            )
+        )
+        #expect(writtenValues.withLockedValue { $0 }.isEmpty)
+    }
+
+    @Test func documentationAssetLocatorOrdersHostCompatibilityBeforeExactXcodeVersion()
+        throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("xcode-doc-assets-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-27-newer-os",
+            xcodeVersion: "27.0",
+            osVersion: "27.0",
+            documentationRelease: 950001
+        )
+        try makeInstalledDocumentationAsset(
+            root: root,
+            name: "xcode-26-5-current-os",
+            xcodeVersion: "26.5",
+            osVersion: "26.6",
+            documentationRelease: 900340
+        )
+        let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: root)
+
+        let orderedAssets = DocumentationSearchAssetLocator.assetsOrderedByCompatibility(
+            for: "27.0",
+            currentOSVersion: "26.6.1",
+            from: scan.assets
+        )
+
+        #expect(orderedAssets.map(\.xcodeVersion) == ["26.5", "27.0"])
     }
 
     @Test func documentationAssetLocatorTreatsTrailingZeroXcodeVersionsAsExactMatch()
@@ -4377,7 +4446,7 @@ struct DocumentationProviderTests {
         let scan = try DocumentationSearchAssetLocator.scanInstalledAssets(in: root)
 
         let asset = try #require(
-            DocumentationSearchAssetLocator.bestAsset(
+            DocumentationSearchAssetLocator.bestHostCompatibleAsset(
                 for: "26.0",
                 currentOSVersion: "26.0",
                 from: scan.assets

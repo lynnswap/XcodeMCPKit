@@ -157,12 +157,18 @@ struct LiveDocumentationSearchServiceRepairer: DocumentationSearchServiceRepairi
         } catch {
             return .failed("asset_scan_failed: \(error)")
         }
-        guard let asset = DocumentationSearchAssetLocator.bestAsset(
+        let hostOSVersion = currentOSVersion()
+        guard let asset = DocumentationSearchAssetLocator.bestHostCompatibleAsset(
             for: target.xcodeVersion,
-            currentOSVersion: currentOSVersion(),
+            currentOSVersion: hostOSVersion,
             from: scan.assets
         ) else {
-            return .skipped(scan.noAssetReason)
+            guard scan.assets.isEmpty == false else {
+                return .skipped(scan.noAssetReason)
+            }
+            return .skipped(
+                "no_host_compatible_documentation_asset current_os=\(hostOSVersion)"
+            )
         }
 
         let configURLString = asset.configURL.path
@@ -682,7 +688,7 @@ enum DocumentationSearchAssetLocator {
         ))
     }
 
-    static func bestAsset(
+    static func bestHostCompatibleAsset(
         for targetXcodeVersion: String,
         currentOSVersion: String,
         from assets: [DocumentationSearchInstalledAsset]
@@ -691,7 +697,9 @@ enum DocumentationSearchAssetLocator {
             for: targetXcodeVersion,
             currentOSVersion: currentOSVersion,
             from: assets
-        ).first
+        ).first { asset in
+            compareVersion(asset.osVersion, currentOSVersion) != .orderedDescending
+        }
     }
 
     static func assetsOrderedByCompatibility(
@@ -745,6 +753,9 @@ enum DocumentationSearchAssetLocator {
     ) -> Bool {
         let lhsRank = rank(lhs, targetXcodeVersion: targetXcodeVersion, currentOSVersion: currentOSVersion)
         let rhsRank = rank(rhs, targetXcodeVersion: targetXcodeVersion, currentOSVersion: currentOSVersion)
+        if lhsRank.notNewerThanCurrentOS != rhsRank.notNewerThanCurrentOS {
+            return lhsRank.notNewerThanCurrentOS
+        }
         if lhsRank.exactXcodeVersion != rhsRank.exactXcodeVersion {
             return lhsRank.exactXcodeVersion
         }
@@ -757,9 +768,6 @@ enum DocumentationSearchAssetLocator {
         if lhsRank.xcodeVersionDistance != rhsRank.xcodeVersionDistance {
             return lhsRank.xcodeVersionDistance < rhsRank.xcodeVersionDistance
         }
-        if lhsRank.notNewerThanCurrentOS != rhsRank.notNewerThanCurrentOS {
-            return lhsRank.notNewerThanCurrentOS
-        }
         if lhsRank.osVersionDistance != rhsRank.osVersionDistance {
             return lhsRank.osVersionDistance < rhsRank.osVersionDistance
         }
@@ -770,11 +778,11 @@ enum DocumentationSearchAssetLocator {
     }
 
     private struct AssetRank {
+        let notNewerThanCurrentOS: Bool
         let exactXcodeVersion: Bool
         let sameXcodeMajor: Bool
         let notNewerThanTargetXcode: Bool
         let xcodeVersionDistance: Int
-        let notNewerThanCurrentOS: Bool
         let osVersionDistance: Int
         let documentationRelease: Int
     }
@@ -789,11 +797,11 @@ enum DocumentationSearchAssetLocator {
         let assetOSParts = numericVersionParts(asset.osVersion)
         let currentOSParts = numericVersionParts(currentOSVersion)
         return AssetRank(
+            notNewerThanCurrentOS: compareVersion(asset.osVersion, currentOSVersion) != .orderedDescending,
             exactXcodeVersion: compareVersion(asset.xcodeVersion, targetXcodeVersion) == .orderedSame,
             sameXcodeMajor: assetXcodeParts.first != nil && assetXcodeParts.first == targetXcodeParts.first,
             notNewerThanTargetXcode: compareVersion(asset.xcodeVersion, targetXcodeVersion) != .orderedDescending,
             xcodeVersionDistance: versionDistance(assetXcodeParts, targetXcodeParts),
-            notNewerThanCurrentOS: compareVersion(asset.osVersion, currentOSVersion) != .orderedDescending,
             osVersionDistance: versionDistance(assetOSParts, currentOSParts),
             documentationRelease: asset.documentationRelease ?? 0
         )
