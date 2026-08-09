@@ -65,6 +65,7 @@ private actor ControllableDocumentationProviderTransport: DocumentationProviderR
     private let firstCallStarted: TestSignal
     private let secondCallStarted: TestSignal
     private var callContinuations: [CheckedContinuation<Data, any Error>] = []
+    private var closedRouteIDs: [String] = []
 
     init(firstCallStarted: TestSignal, secondCallStarted: TestSignal) {
         self.firstCallStarted = firstCallStarted
@@ -117,7 +118,13 @@ private actor ControllableDocumentationProviderTransport: DocumentationProviderR
         callContinuations[index].resume(returning: data)
     }
 
-    func close(route _: DocumentationProviderRoute) async {}
+    func close(route: DocumentationProviderRoute) async {
+        closedRouteIDs.append(route.id)
+    }
+
+    func closedRoutes() -> [String] {
+        closedRouteIDs
+    }
 }
 
 private func makeTextEncoderFallbackAssets(in root: URL) throws {
@@ -1650,7 +1657,7 @@ struct DocumentationProviderTests {
         #expect(await localProvider.requestedQueries() == ["SwiftUI", "UIKit"])
     }
 
-    @Test func concurrentNativeSuccessDoesNotReplaceInstalledAssetFallback()
+    @Test func concurrentNativeSuccessPreservesFallbackAfterNativeRouteCloses()
         async throws
     {
         let target = xcodeProcessTarget(processID: 751, xcodeVersion: "26.6")
@@ -1745,6 +1752,7 @@ struct DocumentationProviderTests {
         )
         #expect(documentationDescriptorDescription(in: result) == "docs-asset-fallback")
         #expect(await localProvider.requestedQueries() == ["EstimationTechnique"])
+        #expect(await transport.closedRoutes() == ["controllable-751"])
     }
 
     @Test func runtimeDocumentationTransportKeepsBorrowedRouteAfterInitialAssetFallbackTimeout()

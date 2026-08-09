@@ -3210,6 +3210,13 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
             if preparedProviders[profile.target.processID]?.id == profile.id {
                 preparedProviders.removeValue(forKey: profile.target.processID)
             }
+            if activeProvider.profile.id != profile.id,
+               let route = profile.route,
+               activeProvider.profile.route?.id != route.id,
+               preparedProviders.values.contains(where: { $0.route?.id == route.id }) == false
+            {
+                await closeTransportRouteIfPresent(profile, awaitTermination: isShutdown)
+            }
             return false
         }
         guard let prepared = preparedProviders[profile.target.processID],
