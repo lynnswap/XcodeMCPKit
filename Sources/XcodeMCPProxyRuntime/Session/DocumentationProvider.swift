@@ -693,28 +693,30 @@ enum DocumentationSearchAssetLocator {
         currentOSVersion: String,
         from assets: [DocumentationSearchInstalledAsset]
     ) -> DocumentationSearchInstalledAsset? {
-        assetsOrderedByCompatibility(
+        hostCompatibleAssetsOrderedByCompatibility(
             for: targetXcodeVersion,
             currentOSVersion: currentOSVersion,
             from: assets
-        ).first { asset in
-            compareVersion(asset.osVersion, currentOSVersion) != .orderedDescending
-        }
+        ).first
     }
 
-    static func assetsOrderedByCompatibility(
+    static func hostCompatibleAssetsOrderedByCompatibility(
         for targetXcodeVersion: String,
         currentOSVersion: String,
         from assets: [DocumentationSearchInstalledAsset]
     ) -> [DocumentationSearchInstalledAsset] {
-        assets.sorted { lhs, rhs in
-            isBetter(
-                lhs,
-                than: rhs,
-                targetXcodeVersion: targetXcodeVersion,
-                currentOSVersion: currentOSVersion
-            )
-        }
+        assets
+            .filter {
+                compareVersion($0.osVersion, currentOSVersion) != .orderedDescending
+            }
+            .sorted { lhs, rhs in
+                isBetter(
+                    lhs,
+                    than: rhs,
+                    targetXcodeVersion: targetXcodeVersion,
+                    currentOSVersion: currentOSVersion
+                )
+            }
     }
 
     static func latestAsset(
@@ -753,9 +755,6 @@ enum DocumentationSearchAssetLocator {
     ) -> Bool {
         let lhsRank = rank(lhs, targetXcodeVersion: targetXcodeVersion, currentOSVersion: currentOSVersion)
         let rhsRank = rank(rhs, targetXcodeVersion: targetXcodeVersion, currentOSVersion: currentOSVersion)
-        if lhsRank.notNewerThanCurrentOS != rhsRank.notNewerThanCurrentOS {
-            return lhsRank.notNewerThanCurrentOS
-        }
         if lhsRank.exactXcodeVersion != rhsRank.exactXcodeVersion {
             return lhsRank.exactXcodeVersion
         }
@@ -778,7 +777,6 @@ enum DocumentationSearchAssetLocator {
     }
 
     private struct AssetRank {
-        let notNewerThanCurrentOS: Bool
         let exactXcodeVersion: Bool
         let sameXcodeMajor: Bool
         let notNewerThanTargetXcode: Bool
@@ -797,7 +795,6 @@ enum DocumentationSearchAssetLocator {
         let assetOSParts = numericVersionParts(asset.osVersion)
         let currentOSParts = numericVersionParts(currentOSVersion)
         return AssetRank(
-            notNewerThanCurrentOS: compareVersion(asset.osVersion, currentOSVersion) != .orderedDescending,
             exactXcodeVersion: compareVersion(asset.xcodeVersion, targetXcodeVersion) == .orderedSame,
             sameXcodeMajor: assetXcodeParts.first != nil && assetXcodeParts.first == targetXcodeParts.first,
             notNewerThanTargetXcode: compareVersion(asset.xcodeVersion, targetXcodeVersion) != .orderedDescending,
@@ -1742,11 +1739,12 @@ private actor DocumentationAssetSelectionCache {
             successfulAssetPathBySelectionKey.removeAll()
             assets = scan.assets
         }
-        var orderedAssets = DocumentationSearchAssetLocator.assetsOrderedByCompatibility(
-            for: target.xcodeVersion,
-            currentOSVersion: currentOSVersion,
-            from: assets
-        )
+        var orderedAssets = DocumentationSearchAssetLocator
+            .hostCompatibleAssetsOrderedByCompatibility(
+                for: target.xcodeVersion,
+                currentOSVersion: currentOSVersion,
+                from: assets
+            )
         let key = SelectionKey(
             appPath: target.appPath,
             xcodeVersion: target.xcodeVersion,
