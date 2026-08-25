@@ -9,6 +9,7 @@ enum MCPBridgeRuntime {
         let sharedSessionID: String?
         let maxBodyBytes: Int
         let processBoundRoutingSupported: Bool
+        let removesInheritedXcodeProcessBinding: Bool
 
         init(
             upstreamCommand: String,
@@ -16,7 +17,8 @@ enum MCPBridgeRuntime {
             upstreamProcessCount: Int,
             sharedSessionID: String?,
             maxBodyBytes: Int,
-            processBoundRoutingSupported: Bool
+            processBoundRoutingSupported: Bool,
+            removesInheritedXcodeProcessBinding: Bool = false
         ) {
             self.upstreamCommand = upstreamCommand
             self.upstreamArgs = upstreamArgs
@@ -24,6 +26,7 @@ enum MCPBridgeRuntime {
             self.sharedSessionID = sharedSessionID
             self.maxBodyBytes = maxBodyBytes
             self.processBoundRoutingSupported = processBoundRoutingSupported
+            self.removesInheritedXcodeProcessBinding = removesInheritedXcodeProcessBinding
         }
     }
 
@@ -145,6 +148,9 @@ enum MCPBridgeRuntime {
     ) -> UpstreamProcess.Config {
         var environment = baseEnvironment
         environment.removeValue(forKey: "XCODE_PID")
+        if config.removesInheritedXcodeProcessBinding {
+            environment.removeValue(forKey: "MCP_XCODE_PID")
+        }
         let sharedSessionID = config.sharedSessionID
         if let sharedSessionID, !sharedSessionID.isEmpty {
             environment["MCP_XCODE_SESSION_ID"] = sharedSessionID

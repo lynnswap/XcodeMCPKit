@@ -23,7 +23,8 @@ let server = XcodeMCPProxyServer(
         upstream: .defaultMCPBridge(processesPerXcode: 1),
         requestTimeout: .seconds(300),
         discovery: .defaultLocation,
-        approvalPolicy: .manual
+        approvalPolicy: .manual,
+        xcodeMode: .automatic
     )
 )
 
@@ -60,6 +61,19 @@ a new instance after shutdown.
 - `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
 - `approvalPolicy`: manual or automatic Xcode permission handling.
 - `featurePolicy`: tools-list prewarming and refresh-code-issues routing.
+- `xcodeMode`: `.automatic` (the default), `.gui`, or `.headless` for the stock
+  `mcpbridge` upstream. Automatic mode selects the enabled Xcode 27 headless
+  service and otherwise preserves GUI routing.
+
+Headless mode does not require a workspace to be open in the Xcode app. It
+forwards workspace lifecycle and DocumentationSearch tools to Xcode Service,
+does not run GUI permission automation, and never enables, approves, or stops
+the shared service. If headless access is disabled, enable it separately with
+`sudo xcrun mcp-server enable`; explicit `.headless` fails startup instead of
+silently falling back.
+
+Custom upstream commands keep their existing unbound behavior and require
+`xcodeMode: .automatic`.
 
 ```swift
 import Foundation

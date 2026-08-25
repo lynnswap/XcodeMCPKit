@@ -10,7 +10,9 @@ extension UpstreamReadinessGate {
         clock: ClockClient,
         processEventMonitor: any XcodeProcessEventMonitoring
     ) -> UpstreamReadinessGate {
-        guard XcrunArguments.isDefaultMCPBridgeInvocation(config: config) else {
+        guard config.xcodeMode == .gui,
+            XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
+        else {
             return .alwaysReady()
         }
 

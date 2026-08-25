@@ -2,6 +2,12 @@ import Foundation
 import XcodeMCPKit
 
 package struct ProxyRuntimeConfiguration: Sendable {
+    package enum XcodeMode: String, Sendable {
+        case gui
+        case headless
+        case custom
+    }
+
     package enum RefreshCodeIssuesMode: String, Sendable {
         case proxy
         case upstream
@@ -60,6 +66,7 @@ package struct ProxyRuntimeConfiguration: Sendable {
         }
     }
 
+    package var xcodeMode: XcodeMode
     package var upstreamCommand: String
     package var upstreamArgs: [String]
     package var upstreamProcessCount: Int
@@ -73,6 +80,7 @@ package struct ProxyRuntimeConfiguration: Sendable {
     package var initializeParamsOverride: InitializeHandshakeOverride?
 
     package init(
+        xcodeMode: XcodeMode = .gui,
         upstreamCommand: String,
         upstreamArgs: [String],
         upstreamProcessCount: Int = 1,
@@ -85,6 +93,7 @@ package struct ProxyRuntimeConfiguration: Sendable {
         disabledToolNames: Set<String> = [],
         initializeParamsOverride: InitializeHandshakeOverride? = nil
     ) {
+        self.xcodeMode = xcodeMode
         self.upstreamCommand = upstreamCommand
         self.upstreamArgs = upstreamArgs
         self.upstreamProcessCount = upstreamProcessCount

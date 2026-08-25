@@ -19,19 +19,22 @@ extension XcodeMCPProxyServer {
             let runtime: any ProxyRuntimeServing
             let autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
             let endpoint: Endpoint
+            let xcodeMode: ProxyRuntimeConfiguration.XcodeMode
 
             init(
                 config: ProxyConfig,
                 httpGateway: any ProxyHTTPGatewayServing,
                 runtime: any ProxyRuntimeServing,
                 autoApprover: (any ProxyServerPermissionDialogAutoApprover)?,
-                endpoint: Endpoint
+                endpoint: Endpoint,
+                xcodeMode: ProxyRuntimeConfiguration.XcodeMode
             ) {
                 self.config = config
                 self.httpGateway = httpGateway
                 self.runtime = runtime
                 self.autoApprover = autoApprover
                 self.endpoint = endpoint
+                self.xcodeMode = xcodeMode
             }
 
             func signalCancellation() {
@@ -87,6 +90,7 @@ extension XcodeMCPProxyServer {
                     )
                 }
                 try config.validateModernProtocolConfiguration()
+                try config.validateXcodeModeConfiguration()
             } catch {
                 phase = .stopped
                 throw error
@@ -284,6 +288,7 @@ extension XcodeMCPProxyServer {
                 displayHost: displayHost,
                 port: resources.endpoint.port,
                 config: resources.config,
+                xcodeMode: resources.xcodeMode,
                 xcodeTargets: resources.runtime.inventorySnapshot().xcodeTargets
             )
             logger.info("\(summary)")
@@ -301,8 +306,16 @@ extension XcodeMCPProxyServer {
             dependencies: Dependencies,
             logger: Logger
         ) async throws -> Resources {
-            let runtime = dependencies.makeRuntime(config.runtimeConfiguration)
-            let autoApprover = config.autoApproveXcodeDialog
+            let modeResolution = try await XcodeConnectionModeResolver.resolve(
+                config: config,
+                availability: dependencies.headlessMCPAvailability
+            )
+            logModeDiagnostic(modeResolution.diagnostic, logger: logger)
+            let runtimeConfiguration = config.runtimeConfiguration(
+                xcodeMode: modeResolution.xcodeMode
+            )
+            let runtime = dependencies.makeRuntime(runtimeConfiguration)
+            let autoApprover = runtimeConfiguration.usesPermissionDialogAutomation
                 ? dependencies.makeAutoApprover(config, runtime)
                 : nil
             let httpGateway = dependencies.makeHTTPGateway(
@@ -333,13 +346,28 @@ extension XcodeMCPProxyServer {
                     httpGateway: httpGateway,
                     runtime: runtime,
                     autoApprover: autoApprover,
-                    endpoint: endpoint
+                    endpoint: endpoint,
+                    xcodeMode: modeResolution.xcodeMode
                 )
             } catch {
                 autoApprover?.cancel()
                 try? await httpGateway.shutdown()
                 await runtime.shutdown()
                 throw error
+            }
+        }
+
+        private static func logModeDiagnostic(
+            _ diagnostic: XcodeConnectionModeResolver.Diagnostic?,
+            logger: Logger
+        ) {
+            switch diagnostic {
+            case .notice(let message):
+                logger.notice("\(message)")
+            case .warning(let message):
+                logger.warning("\(message)")
+            case nil:
+                break
             }
         }
 

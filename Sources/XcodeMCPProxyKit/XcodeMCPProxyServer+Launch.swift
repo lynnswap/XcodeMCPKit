@@ -66,6 +66,7 @@ extension XcodeMCPProxyServer {
         do {
             proxyConfig = try command.resolveConfiguration(environment: environment)
             try proxyConfig.validateModernProtocolConfiguration()
+            try proxyConfig.validateXcodeModeConfiguration()
         } catch let error as CLICommandError {
             throw error
         } catch {
@@ -124,6 +125,9 @@ private extension ProxyServerCommand {
         let refreshCodeIssuesMode = try resolvedRefreshCodeIssuesMode(
             environment: environment
         )
+        let usesCustomUpstream = upstreamCommand != nil
+            || upstreamArgs != nil
+            || upstreamArg.isEmpty == false
         return ProxyConfig(
             listenHost: listenAddress.host,
             listenPort: listenAddress.port,
@@ -131,6 +135,8 @@ private extension ProxyServerCommand {
             upstreamArgs: resolvedUpstreamArguments,
             upstreamProcessCount: upstreamProcesses ?? 1,
             upstreamSessionID: sessionID ?? nonEmpty(environment["MCP_XCODE_SESSION_ID"]),
+            upstreamKind: usesCustomUpstream ? .custom : .stockMCPBridge,
+            xcodeMode: xcodeMode,
             maxBodyBytes: maxBodyBytes ?? 1_048_576,
             requestTimeout: requestTimeout?.seconds ?? 300,
             configPath: config ?? nonEmpty(environment["MCP_XCODE_CONFIG"]),
@@ -225,6 +231,9 @@ private extension ProxyServerCommand {
         }
         if let sessionID = configuration.upstream.sessionID {
             arguments += ["--session-id", sessionID]
+        }
+        if configuration.xcodeMode != .automatic {
+            arguments += ["--xcode-mode", configuration.xcodeMode.rawValue]
         }
         if let refreshCodeIssuesMode {
             arguments += [

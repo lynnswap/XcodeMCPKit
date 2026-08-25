@@ -3,6 +3,17 @@ import XcodeMCPKit
 import XcodeMCPProxyRuntime
 
 package struct ProxyConfig: Sendable {
+    package enum XcodeMode: String, Sendable {
+        case automatic
+        case gui
+        case headless
+    }
+
+    package enum UpstreamKind: Sendable {
+        case stockMCPBridge
+        case custom
+    }
+
     package enum RefreshCodeIssuesMode: String, Sendable {
         case proxy
         case upstream
@@ -29,6 +40,8 @@ package struct ProxyConfig: Sendable {
     package var upstreamArgs: [String]
     package var upstreamProcessCount: Int
     package var upstreamSessionID: String?
+    package var upstreamKind: UpstreamKind
+    package var xcodeMode: XcodeMode
     package var maxBodyBytes: Int
     package var requestTimeout: TimeInterval
     package var configPath: String?
@@ -46,6 +59,8 @@ package struct ProxyConfig: Sendable {
         upstreamArgs: [String],
         upstreamProcessCount: Int = 1,
         upstreamSessionID: String? = nil,
+        upstreamKind: UpstreamKind? = nil,
+        xcodeMode: XcodeMode = .automatic,
         maxBodyBytes: Int,
         requestTimeout: TimeInterval,
         configPath: String? = nil,
@@ -62,6 +77,11 @@ package struct ProxyConfig: Sendable {
         self.upstreamArgs = upstreamArgs
         self.upstreamProcessCount = upstreamProcessCount
         self.upstreamSessionID = upstreamSessionID
+        self.upstreamKind = upstreamKind ?? Self.inferredUpstreamKind(
+            command: upstreamCommand,
+            arguments: upstreamArgs
+        )
+        self.xcodeMode = xcodeMode
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
         self.configPath = configPath
@@ -103,6 +123,25 @@ package struct ProxyConfig: Sendable {
         }
     }
 
+    package func validateXcodeModeConfiguration() throws {
+        guard upstreamKind == .stockMCPBridge || xcodeMode == .automatic else {
+            throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration(
+                "xcodeMode must be automatic when using a custom upstream"
+            )
+        }
+    }
+
+    private static func inferredUpstreamKind(
+        command: String,
+        arguments: [String]
+    ) -> UpstreamKind {
+        let invocation = MCPBridgeInvocation.defaultMCPBridge
+        if command == invocation.command, arguments == invocation.arguments {
+            return .stockMCPBridge
+        }
+        return .custom
+    }
+
     static func normalizedToolNames<S: Sequence>(_ names: S) -> Set<String>
     where
         S.Element == String
@@ -118,8 +157,22 @@ package struct ProxyConfig: Sendable {
         return normalized
     }
 
-    package var runtimeConfiguration: ProxyRuntimeConfiguration {
-        ProxyRuntimeConfiguration(
+    package func runtimeConfiguration(
+        xcodeMode: ProxyRuntimeConfiguration.XcodeMode
+    ) -> ProxyRuntimeConfiguration {
+        let effectiveRefreshCodeIssuesMode: ProxyRuntimeConfiguration.RefreshCodeIssuesMode
+        if xcodeMode == .headless {
+            // The proxy workflow resolves GUI tab identity and navigator state.
+            // Headless workspace identity belongs to Xcode Service, so preserve
+            // the upstream tool contract instead of manufacturing a GUI owner.
+            effectiveRefreshCodeIssuesMode = .upstream
+        } else {
+            effectiveRefreshCodeIssuesMode = ProxyRuntimeConfiguration.RefreshCodeIssuesMode(
+                refreshCodeIssuesMode
+            )
+        }
+        return ProxyRuntimeConfiguration(
+            xcodeMode: xcodeMode,
             upstreamCommand: upstreamCommand,
             upstreamArgs: upstreamArgs,
             upstreamProcessCount: upstreamProcessCount,
@@ -127,10 +180,8 @@ package struct ProxyConfig: Sendable {
             maxMessageBytes: maxBodyBytes,
             requestTimeout: requestTimeout,
             prewarmToolsList: prewarmToolsList,
-            usesPermissionDialogAutomation: autoApproveXcodeDialog,
-            refreshCodeIssuesMode: ProxyRuntimeConfiguration.RefreshCodeIssuesMode(
-                refreshCodeIssuesMode
-            ),
+            usesPermissionDialogAutomation: autoApproveXcodeDialog && xcodeMode != .headless,
+            refreshCodeIssuesMode: effectiveRefreshCodeIssuesMode,
             disabledToolNames: disabledToolNames,
             initializeParamsOverride: initializeParamsOverride.map(
                 ProxyRuntimeConfiguration.InitializeHandshakeOverride.init

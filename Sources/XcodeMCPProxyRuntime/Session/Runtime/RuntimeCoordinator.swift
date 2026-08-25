@@ -674,6 +674,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         config: ProxyRuntimeConfiguration
     ) -> Bool {
         config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
+            && config.xcodeMode == .gui
             && MCPBridgeRuntime.supportsProcessBoundRouting(
                 config: config.mcpBridgeRuntimeConfiguration
             )

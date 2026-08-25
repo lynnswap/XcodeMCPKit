@@ -296,6 +296,159 @@ struct XcodeMCPProxyServerTests {
         try await server.shutdown()
     }
 
+    @Test func automaticEnabledHeadlessSkipsGUIAutomationAndUsesUnboundFeatures() async throws {
+        let availabilityQueries = NIOLockedValueBox(0)
+        let autoApproverCreations = NIOLockedValueBox(0)
+        let runtimeConfiguration = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
+        let runtime = StartupInventoryRuntime()
+        let server = XcodeMCPProxyServer(
+            configuration: .init(
+                bindAddress: .init(host: "127.0.0.1", port: 0),
+                discovery: .disabled,
+                approvalPolicy: .automatic,
+                featurePolicy: .init(refreshCodeIssuesMode: .proxy)
+            ),
+            dependencies: .init(
+                discoveryClient: .testValue,
+                headlessMCPAvailability: {
+                    availabilityQueries.withLockedValue { $0 += 1 }
+                    return .enabled
+                },
+                makeAutoApprover: { _, _ in
+                    autoApproverCreations.withLockedValue { $0 += 1 }
+                    return RecordingAutoApprover()
+                },
+                makeRuntime: { config in
+                    runtimeConfiguration.withLockedValue { $0 = config }
+                    return runtime
+                }
+            )
+        )
+
+        _ = try await server.start()
+        let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
+        #expect(availabilityQueries.withLockedValue { $0 } == 1)
+        #expect(captured.xcodeMode == .headless)
+        #expect(captured.usesPermissionDialogAutomation == false)
+        #expect(captured.refreshCodeIssuesMode == .upstream)
+        #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: captured) == false)
+        #expect(ProxyRuntime.documentationSearchIsConfigured(configuration: captured) == false)
+        #expect(autoApproverCreations.withLockedValue { $0 } == 0)
+        try await server.shutdown()
+    }
+
+    @Test func explicitGUIPreservesLegacyRoutingWithoutStatusQuery() async throws {
+        let availabilityQueries = NIOLockedValueBox(0)
+        let runtimeConfiguration = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
+        let runtime = StartupInventoryRuntime()
+        let server = XcodeMCPProxyServer(
+            configuration: .init(
+                bindAddress: .init(host: "127.0.0.1", port: 0),
+                discovery: .disabled,
+                xcodeMode: .gui
+            ),
+            dependencies: .init(
+                discoveryClient: .testValue,
+                headlessMCPAvailability: {
+                    availabilityQueries.withLockedValue { $0 += 1 }
+                    return .enabled
+                },
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { config in
+                    runtimeConfiguration.withLockedValue { $0 = config }
+                    return runtime
+                }
+            )
+        )
+
+        _ = try await server.start()
+        let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
+        #expect(availabilityQueries.withLockedValue { $0 } == 0)
+        #expect(captured.xcodeMode == .gui)
+        #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: captured))
+        try await server.shutdown()
+    }
+
+    @Test func customAutomaticUpstreamPreservesUnboundModeWithoutStatusQuery() async throws {
+        let availabilityQueries = NIOLockedValueBox(0)
+        let runtimeConfiguration = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
+        let runtime = StartupInventoryRuntime()
+        let server = XcodeMCPProxyServer(
+            configuration: .init(
+                bindAddress: .init(host: "127.0.0.1", port: 0),
+                upstream: .custom(command: "/bin/echo", arguments: []),
+                discovery: .disabled
+            ),
+            dependencies: .init(
+                discoveryClient: .testValue,
+                headlessMCPAvailability: {
+                    availabilityQueries.withLockedValue { $0 += 1 }
+                    return .enabled
+                },
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { config in
+                    runtimeConfiguration.withLockedValue { $0 = config }
+                    return runtime
+                }
+            )
+        )
+
+        _ = try await server.start()
+        let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
+        #expect(availabilityQueries.withLockedValue { $0 } == 0)
+        #expect(captured.xcodeMode == .custom)
+        #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: captured) == false)
+        try await server.shutdown()
+    }
+
+    @Test func explicitHeadlessDisabledFailsBeforeRuntimeAcquisition() async {
+        let runtimeCreations = NIOLockedValueBox(0)
+        let server = XcodeMCPProxyServer(
+            configuration: .init(
+                discovery: .disabled,
+                xcodeMode: .headless
+            ),
+            dependencies: .init(
+                discoveryClient: .testValue,
+                headlessMCPAvailability: { .disabled },
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in
+                    runtimeCreations.withLockedValue { $0 += 1 }
+                    return StartupInventoryRuntime()
+                }
+            )
+        )
+
+        await #expect(throws: XcodeMCPProxyServer.LifecycleError.self) {
+            _ = try await server.start()
+        }
+        #expect(runtimeCreations.withLockedValue { $0 } == 0)
+    }
+
+    @Test func explicitModeRejectsCustomUpstreamBeforeRuntimeAcquisition() async {
+        let runtimeCreations = NIOLockedValueBox(0)
+        let server = XcodeMCPProxyServer(
+            configuration: .init(
+                upstream: .custom(command: "/bin/echo", arguments: []),
+                discovery: .disabled,
+                xcodeMode: .gui
+            ),
+            dependencies: .init(
+                discoveryClient: .testValue,
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in
+                    runtimeCreations.withLockedValue { $0 += 1 }
+                    return StartupInventoryRuntime()
+                }
+            )
+        )
+
+        await #expect(throws: XcodeMCPProxyServer.LifecycleError.self) {
+            _ = try await server.start()
+        }
+        #expect(runtimeCreations.withLockedValue { $0 } == 0)
+    }
+
     @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {
         let autoApprover = RecordingAutoApprover()
         let upstream = RecordingUpstreamSlot()

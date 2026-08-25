@@ -332,6 +332,16 @@ struct ServerRunnerTests {
         #expect(line.contains("--auto-approve"))
     }
 
+    @Test func serverRunnerDryRunPrintsExplicitXcodeMode() async throws {
+        let result = await runServer(
+            arguments: ["xcode-mcp-proxy-server", "--xcode-mode", "headless", "--dry-run"]
+        )
+
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        #expect(result.stdout.first?.contains("--xcode-mode headless") == true)
+    }
+
     @Test func serverRunnerDryRunPreservesExplicitProxyRefreshMode() async throws {
         let result = await runServer(
             arguments: [

@@ -14,9 +14,9 @@ extension MCPBridgeRuntime.Configuration {
             upstreamProcessCount: max(1, min(config.upstreamProcessCount, 10)),
             sharedSessionID: config.upstreamSessionID,
             maxBodyBytes: config.maxMessageBytes,
-            processBoundRoutingSupported: XcrunArguments.isDefaultMCPBridgeInvocation(
-                config: config
-            )
+            processBoundRoutingSupported: config.xcodeMode == .gui
+                && XcrunArguments.isDefaultMCPBridgeInvocation(config: config),
+            removesInheritedXcodeProcessBinding: config.xcodeMode == .headless
         )
     }
 }
