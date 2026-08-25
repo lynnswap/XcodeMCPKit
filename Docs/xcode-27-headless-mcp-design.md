@@ -105,6 +105,9 @@ Xcode 27 developer directory in `DEVELOPER_DIR`:
    boundary. It must not be used as a substitute for `XcodeOpenWorkspace`.
 7. Xcode Service is process-shared. XcodeMCPKit owns its child `mcpbridge`
    processes, but does not own or stop Xcode Service.
+8. With headless access enabled and Xcode Service stopped, launching an unbound
+   `mcpbridge` starts Xcode Service and completes `initialize`. XcodeMCPKit does
+   not need to call `mcp-server start`.
 
 The preview CLI may return valid status JSON together with a nonzero status or
 warning when its live service query times out. A valid JSON payload is the
@@ -266,6 +269,7 @@ that behavior is observed.
 - [x] Verify status JSON while disabled and enabled.
 - [x] Verify headless initialize and 54-tool catalog.
 - [x] Verify workspace tools are the approval/bootstrap boundary.
+- [x] Verify unbound `mcpbridge` starts Xcode Service on demand.
 - [ ] Implement mode/status resolution and notice.
 - [ ] Implement resolved runtime ownership and public/CLI surface.
 - [ ] Implement device interaction affinity.
