@@ -105,11 +105,11 @@ import Testing
             slotGeneration: 1
         )
         let affinity0 = DeviceInteractionAffinityAuthority.Affinity(
-            routeProof: .init(exposureEpoch: 1, routeID: route0),
+            routeID: route0,
             upstreamProof: proof0
         )
         let affinity1 = DeviceInteractionAffinityAuthority.Affinity(
-            routeProof: .init(exposureEpoch: 1, routeID: route1),
+            routeID: route1,
             upstreamProof: proof1
         )
 
