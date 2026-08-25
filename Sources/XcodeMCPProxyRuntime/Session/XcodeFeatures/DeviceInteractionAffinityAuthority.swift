@@ -40,17 +40,25 @@ enum DeviceInteractionToolCall: Equatable, Sendable {
         }
     }
 
+    static func decode(requestData: Data) -> Self? {
+        guard let object = try? JSONRPC.Wire.object(fromData: requestData) else {
+            return nil
+        }
+        return decode(object)
+    }
+
     static func successfulSessionKey(from responseData: Data) -> String? {
-        guard let object = try? JSONRPC.Wire.object(fromData: responseData),
-              object["error"] == nil,
-              let result = object["result"] as? [String: Any],
-              result["isError"] as? Bool != true,
+        guard let result = successfulResult(from: responseData),
               let structuredContent = result["structuredContent"] as? [String: Any],
               let key = structuredContent["interactionSessionKey"] as? String,
               key.isEmpty == false else {
             return nil
         }
         return key
+    }
+
+    static func isSuccessfulResponse(_ responseData: Data) -> Bool {
+        successfulResult(from: responseData) != nil
     }
 
     private static func continuation(
@@ -65,11 +73,21 @@ enum DeviceInteractionToolCall: Equatable, Sendable {
         }
         return .continuesSession(key: key, endsSession: endsSession)
     }
+
+    private static func successfulResult(from responseData: Data) -> [String: Any]? {
+        guard let object = try? JSONRPC.Wire.object(fromData: responseData),
+              object["error"] == nil,
+              let result = object["result"] as? [String: Any],
+              result["isError"] as? Bool != true else {
+            return nil
+        }
+        return result
+    }
 }
 
 final class DeviceInteractionAffinityAuthority: Sendable {
     struct Affinity: Equatable, Sendable {
-        let routeProof: ProcessControlPlaneAuthority.RouteProof
+        let routeID: ProcessRouteID
         let upstreamProof: UpstreamTopologyProof
     }
 
@@ -92,7 +110,7 @@ final class DeviceInteractionAffinityAuthority: Sendable {
         guard routeIDs.isEmpty == false else { return }
         affinities.withLockedValue { affinities in
             affinities = affinities.filter { _, affinity in
-                routeIDs.contains(affinity.routeProof.routeID) == false
+                routeIDs.contains(affinity.routeID) == false
             }
         }
     }

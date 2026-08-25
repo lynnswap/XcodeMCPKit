@@ -495,6 +495,12 @@ extension RuntimeCoordinator {
               let request = toolRoutingRequest(in: object) else {
             return .forward(preferredUpstreamIndex: nil)
         }
+        if let affinityDecision = deviceInteractionAffinityRoutingDecision(
+            for: object,
+            request: request
+        ) {
+            return affinityDecision
+        }
         if request.id != nil, request.toolName == "XcodeListWindows" {
             return .localXcodeListWindows
         }
@@ -507,6 +513,117 @@ extension RuntimeCoordinator {
             return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
         }
         return nil
+    }
+
+    func recordDeviceInteractionAffinityIfNeeded(
+        requestData: Data,
+        responseData: Data,
+        operationLease: UpstreamOperationLease
+    ) {
+        guard processRoutingEnabled,
+              let call = DeviceInteractionToolCall.decode(requestData: requestData) else {
+            return
+        }
+
+        switch call {
+        case .startsSession:
+            guard let key = DeviceInteractionToolCall.successfulSessionKey(
+                from: responseData
+            ),
+                  upstreamTopology.validate(operationLease),
+                  let route = xcodeProcessRoute(
+                    forUpstreamIndex: operationLease.upstreamIndex
+                  ),
+                  let routeProof = processControlPlane.routeProof(routeID: route.id) else {
+                return
+            }
+            deviceInteractionAffinityAuthority.record(
+                .init(
+                    routeID: routeProof.routeID,
+                    upstreamProof: operationLease.proof
+                ),
+                for: key
+            )
+        case .continuesSession(let key, let endsSession):
+            guard endsSession,
+                  DeviceInteractionToolCall.isSuccessfulResponse(responseData) else {
+                return
+            }
+            deviceInteractionAffinityAuthority.remove(key: key)
+        }
+    }
+
+    private func deviceInteractionAffinityRoutingDecision(
+        for requestObject: [String: Any],
+        request: ToolRoutingRequest
+    ) -> ToolRoutingDecision? {
+        guard case .continuesSession(let key, _) = DeviceInteractionToolCall.decode(
+            requestObject
+        ) else {
+            return nil
+        }
+        guard let affinity = deviceInteractionAffinityAuthority.affinity(for: key) else {
+            return .reject(
+                errors: deviceInteractionRoutingErrors(
+                    id: request.id,
+                    message: "unknown device interaction session"
+                )
+            )
+        }
+        guard let routeProof = processControlPlane.routeProof(routeID: affinity.routeID),
+              let routeAdmission = processControlPlane.admit(routeProof),
+              upstreamTopology.validate(affinity.upstreamProof) else {
+            deviceInteractionAffinityAuthority.remove(key: key)
+            return .reject(
+                errors: deviceInteractionRoutingErrors(
+                    id: request.id,
+                    message: "device interaction session is no longer available"
+                )
+            )
+        }
+        let windowAdmission: WindowRouteAdmission?
+        if hasOwnerHint(request) {
+            let owners = windowOwnershipAuthority.snapshot()
+            guard case .resolved(let processID, _, let windowProof) = cachedOwnerResolution(
+                for: request
+            ),
+                  processID == affinity.routeID.processID,
+                  windowProof.route.routeID == affinity.routeID,
+                  windowProof.windowEpoch == owners.epoch else {
+                return .reject(
+                    errors: deviceInteractionRoutingErrors(
+                        id: request.id,
+                        message: "device interaction session does not own the selected Xcode window"
+                    )
+                )
+            }
+            windowAdmission = WindowRouteAdmission(
+                proof: windowProof,
+                route: routeAdmission,
+                rewritePlan: ownerBoundRequestRewritePlan(
+                    processID: processID,
+                    request: request,
+                    owners: owners
+                )
+            )
+        } else {
+            windowAdmission = nil
+        }
+        return .forwardAdmitted(
+            preferredUpstreamIndices: [affinity.upstreamProof.slotID.rawValue],
+            admission: RouteForwardingAdmission(
+                route: routeAdmission,
+                upstreamProofs: [affinity.upstreamProof],
+                window: windowAdmission
+            )
+        )
+    }
+
+    private func deviceInteractionRoutingErrors(
+        id: JSONRPC.ID?,
+        message: String
+    ) -> [ToolRoutingError] {
+        id.map { [ToolRoutingError(id: $0, message: message)] } ?? []
     }
 
     private func ownerBoundToolRoutingDecision(

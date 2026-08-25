@@ -223,6 +223,11 @@ protocol RuntimeToolRoutingPort: Sendable {
         route: ControlPlane.Route,
         requestTimeoutOverride: TimeAmount?
     ) async throws -> JSONValue
+    func recordDeviceInteractionAffinityIfNeeded(
+        requestData: Data,
+        responseData: Data,
+        operationLease: UpstreamOperationLease
+    )
 }
 
 protocol RuntimeUpstreamForwardingPort: Sendable {
@@ -415,6 +420,12 @@ extension RuntimeToolRoutingPort {
     func primaryUpstreamIndex(forXcodeProcessID _: pid_t) -> Int? {
         nil
     }
+
+    func recordDeviceInteractionAffinityIfNeeded(
+        requestData _: Data,
+        responseData _: Data,
+        operationLease _: UpstreamOperationLease
+    ) {}
 }
 
 extension RuntimeUpstreamForwardingPort {
@@ -544,6 +555,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
     let windowOwnershipAuthority = WindowOwnershipAuthority()
     let windowRoutingResolver = WindowRoutingResolver()
+    let deviceInteractionAffinityAuthority = DeviceInteractionAffinityAuthority()
     let prewarmDocumentationProviderOnStartup: Bool
     let testHooks: RuntimeCoordinatorTestHooks
     private let lifecycleStartedBox = NIOLockedValueBox(false)
@@ -1086,6 +1098,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func debugReset() {
+        deviceInteractionAffinityAuthority.clear()
         let initializeReset = initializeManager.resetForDebug()
         initializeReset.timeout?.cancel()
         initializeReset.recoveryTimeout?.cancel()
@@ -1118,6 +1131,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func shutdown() async {
+        deviceInteractionAffinityAuthority.clear()
         let shutdownState = initializeManager.beginShutdown()
         let pendingInitializes = shutdownState.pending
         for pending in pendingInitializes {
@@ -1173,6 +1187,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func cancelForDeinit() {
+        deviceInteractionAffinityAuthority.clear()
         let shutdownState = initializeManager.beginShutdown()
         shutdownState.timeout?.cancel()
         shutdownState.recoveryTimeout?.cancel()
@@ -1207,6 +1222,9 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     func applyProcessControlPlaneTransition(
         _ transition: ProcessControlPlaneTransition
     ) -> [ControlPlane.RPCCancellationDelivery] {
+        deviceInteractionAffinityAuthority.remove(
+            routeIDs: Set(transition.retiredRoutes.map(\.id))
+        )
         var cancellationDeliveries: [ControlPlane.RPCCancellationDelivery] = []
         for effect in transition.effects {
             switch effect {
@@ -1237,21 +1255,37 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     func commitUpstreamTopologyMutation(
         _ mutation: () -> UpstreamTopologyAuthority.Transition
     ) -> UpstreamTopologyAuthority.Transition {
-        upstreamTopologyCommitLock.withLock {
+        let transition = upstreamTopologyCommitLock.withLock {
             let transition = mutation()
             publishUpstreamTopology(transition.snapshot)
             return transition
         }
+        removeDeviceInteractionAffinities(in: transition)
+        return transition
     }
 
     func commitUpstreamTopologyMutation(
         _ mutation: () -> UpstreamTopologyAuthority.Transition?
     ) -> UpstreamTopologyAuthority.Transition? {
-        upstreamTopologyCommitLock.withLock {
+        let transition: UpstreamTopologyAuthority.Transition? = upstreamTopologyCommitLock.withLock {
             guard let transition = mutation() else { return nil }
             publishUpstreamTopology(transition.snapshot)
             return transition
         }
+        if let transition {
+            removeDeviceInteractionAffinities(in: transition)
+        }
+        return transition
+    }
+
+    private func removeDeviceInteractionAffinities(
+        in transition: UpstreamTopologyAuthority.Transition
+    ) {
+        var proofs = Set(transition.retired.map(\.operationLease.proof))
+        if let replaced = transition.replaced {
+            proofs.insert(replaced.operationLease.proof)
+        }
+        deviceInteractionAffinityAuthority.remove(upstreamProofs: proofs)
     }
 
     func processToolCatalogExposedProcessIDs() -> Set<pid_t> {

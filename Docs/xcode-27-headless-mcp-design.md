@@ -203,8 +203,9 @@ Follow-up tools use two spellings:
   `interactionSessionKey`
 
 For routed GUI pools, the runtime records the returned key together with the
-exact upstream topology proof that created it. Follow-up requests with either
-spelling are admitted only to that current proof. Route replacement,
+stable process-route identity and exact upstream topology proof that created
+it. Follow-up requests obtain a current route admission for that identity and
+are admitted only to the recorded upstream proof. Route replacement,
 retirement, session end, and runtime shutdown evict the corresponding affinity.
 An unknown key follows the upstream's ordinary error path only when a single
 unbound upstream exists; it is never guessed across multiple GUI routes.
@@ -272,7 +273,7 @@ that behavior is observed.
 - [x] Verify unbound `mcpbridge` starts Xcode Service on demand.
 - [ ] Implement mode/status resolution and notice.
 - [ ] Implement resolved runtime ownership and public/CLI surface.
-- [ ] Implement device interaction affinity.
+- [x] Implement device interaction affinity.
 - [ ] Extend verifier and documentation.
 - [ ] Run all validation and clean `codex-review`.
 - [ ] Open a Ready PR to `main`.
