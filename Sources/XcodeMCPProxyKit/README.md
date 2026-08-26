@@ -70,7 +70,9 @@ forwards workspace lifecycle and DocumentationSearch tools to Xcode Service,
 does not run GUI permission automation, and never enables, approves, or stops
 the shared service. If headless access is disabled, enable it separately with
 `sudo xcrun mcp-server enable`; explicit `.headless` fails startup instead of
-silently falling back.
+silently falling back. Xcode Service can request manual agent and folder
+approval on the first `XcodeOpenWorkspace` call; `approvalPolicy: .automatic`
+applies only to GUI Xcode dialogs.
 
 Custom upstream commands keep their existing unbound behavior and require
 `xcodeMode: .automatic`.

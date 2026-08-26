@@ -80,6 +80,9 @@ See [Giving external agents access to Xcode][apple-xcode-mcp-access].
 
 This global Xcode setting is separate from the per-connection **Allow** dialog.
 `--auto-approve` handles the GUI dialog; it does not enable headless MCP access.
+The first headless `XcodeOpenWorkspace` call can separately ask you to approve
+the agent and containing folder. Review that request in Xcode Service and
+approve it manually; XcodeMCPKit does not broaden headless permissions.
 
 ### 2. Start the Proxy Server
 
