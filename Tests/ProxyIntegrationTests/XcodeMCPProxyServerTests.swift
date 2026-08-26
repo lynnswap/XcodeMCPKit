@@ -449,6 +449,76 @@ struct XcodeMCPProxyServerTests {
         #expect(runtimeCreations.withLockedValue { $0 } == 0)
     }
 
+    @Test func cancellingStartCancelsAndAwaitsHeadlessStatusResolution() async throws {
+        let availability = CancellationControlledHeadlessAvailability()
+        let runtimeCreations = NIOLockedValueBox(0)
+        let server = XcodeMCPProxyServer(
+            configuration: .init(discovery: .disabled),
+            dependencies: .init(
+                discoveryClient: .testValue,
+                headlessMCPAvailability: {
+                    try await availability.resolve()
+                },
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in
+                    runtimeCreations.withLockedValue { $0 += 1 }
+                    return StartupInventoryRuntime()
+                }
+            )
+        )
+        let startTask = Task {
+            try await server.start()
+        }
+
+        try await availability.started.wait(description: "waiting for headless status resolution")
+        startTask.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await startTask.value
+        }
+        try await availability.completed.wait(
+            description: "waiting for cancelled headless status unwind"
+        )
+        #expect(availability.wasCancelled)
+        #expect(runtimeCreations.withLockedValue { $0 } == 0)
+        #expect((await server.snapshot()).phase == .stopped)
+    }
+
+    @Test func shutdownWhileStartingCancelsAndAwaitsHeadlessStatusResolution() async throws {
+        let availability = CancellationControlledHeadlessAvailability()
+        let runtimeCreations = NIOLockedValueBox(0)
+        let server = XcodeMCPProxyServer(
+            configuration: .init(discovery: .disabled),
+            dependencies: .init(
+                discoveryClient: .testValue,
+                headlessMCPAvailability: {
+                    try await availability.resolve()
+                },
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in
+                    runtimeCreations.withLockedValue { $0 += 1 }
+                    return StartupInventoryRuntime()
+                }
+            )
+        )
+        let startTask = Task {
+            try await server.start()
+        }
+
+        try await availability.started.wait(description: "waiting for headless status resolution")
+        try await server.shutdown()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await startTask.value
+        }
+        try await availability.completed.wait(
+            description: "waiting for shutdown status unwind"
+        )
+        #expect(availability.wasCancelled)
+        #expect(runtimeCreations.withLockedValue { $0 } == 0)
+        #expect((await server.snapshot()).phase == .stopped)
+    }
+
     @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {
         let autoApprover = RecordingAutoApprover()
         let upstream = RecordingUpstreamSlot()
@@ -882,6 +952,30 @@ private final class BlockingAutoApprover: @unchecked Sendable,
         _ semaphore: DispatchSemaphore
     ) {
         semaphore.wait()
+    }
+}
+
+private final class CancellationControlledHeadlessAvailability: @unchecked Sendable {
+    let started = TestSignal()
+    let completed = TestSignal()
+
+    private let release = TestSignal()
+    private let cancelled = NIOLockedValueBox(false)
+
+    var wasCancelled: Bool {
+        cancelled.withLockedValue { $0 }
+    }
+
+    func resolve() async throws -> XcodeMCPServerAvailability {
+        started.signal()
+        defer { completed.signal() }
+        do {
+            try await release.waitUntilSignaled()
+            return .enabled
+        } catch is CancellationError {
+            cancelled.withLockedValue { $0 = true }
+            throw CancellationError()
+        }
     }
 }
 

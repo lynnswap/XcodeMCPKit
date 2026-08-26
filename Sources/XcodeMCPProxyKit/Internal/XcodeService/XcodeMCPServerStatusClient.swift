@@ -93,8 +93,8 @@ struct XcodeMCPServerStatusClient: Sendable {
                 stderr: discovery.stderr
             )
         }
-        guard discovery.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-        else {
+        let mcpServerPath = discovery.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard mcpServerPath.isEmpty == false else {
             throw Failure.discoveryReturnedNoPath
         }
 
@@ -102,8 +102,8 @@ struct XcodeMCPServerStatusClient: Sendable {
             operation: "mcp-server status",
             request: ProcessRequest(
                 label: "read-xcode-mcp-server-status",
-                executablePath: MCPBridgeInvocation.xcrunCommand,
-                arguments: ["mcp-server", "status", "--format", "json"],
+                executablePath: mcpServerPath,
+                arguments: ["status", "--format", "json"],
                 input: nil,
                 timeoutNanoseconds: Self.statusTimeoutNanoseconds
             )

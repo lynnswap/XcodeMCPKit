@@ -45,6 +45,18 @@ struct XcodeMCPServerStatusClientTests {
         #expect(try await client.availability() == .disabled)
     }
 
+    @Test func emptyDiscoveredExecutablePathIsRejectedBeforeStatus() async {
+        let requests = StatusLockedBox<[ProcessRequest]>([])
+        let client = makeClient(requests: requests) { _ in
+            ProcessOutput(terminationStatus: 0, stdout: " \n", stderr: "")
+        }
+
+        await #expect(throws: XcodeMCPServerStatusClient.Failure.discoveryReturnedNoPath) {
+            _ = try await client.availability()
+        }
+        #expect(requests.withLockedValue { $0.count } == 1)
+    }
+
     @Test func enabledStatusAcceptsDynamicOpenWorkspacesAndNonzeroExit() async throws {
         let client = makeClient { request in
             if request.label == "discover-xcode-mcp-server" {
@@ -145,8 +157,11 @@ struct XcodeMCPServerStatusClientTests {
             recorded[0].timeoutNanoseconds
                 == XcodeMCPServerStatusClient.discoveryTimeoutNanoseconds
         )
-        #expect(recorded[1].executablePath == MCPBridgeInvocation.xcrunCommand)
-        #expect(recorded[1].arguments == ["mcp-server", "status", "--format", "json"])
+        #expect(
+            recorded[1].executablePath
+                == "/Applications/Xcode.app/Contents/Developer/usr/bin/mcp-server"
+        )
+        #expect(recorded[1].arguments == ["status", "--format", "json"])
         #expect(
             recorded[1].timeoutNanoseconds
                 == XcodeMCPServerStatusClient.statusTimeoutNanoseconds

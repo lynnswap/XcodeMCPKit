@@ -108,7 +108,11 @@ extension XcodeMCPProxyServer {
 
             let acquired: Resources
             do {
-                acquired = try await task.value
+                acquired = try await withTaskCancellationHandler {
+                    try await task.value
+                } onCancel: {
+                    task.cancel()
+                }
             } catch {
                 startupTask = nil
                 phase = .stopped
@@ -227,6 +231,7 @@ extension XcodeMCPProxyServer {
                     phase = .stopped
                     return
                 }
+                startupTask.cancel()
                 do {
                     let acquired = try await startupTask.value
                     self.startupTask = nil
