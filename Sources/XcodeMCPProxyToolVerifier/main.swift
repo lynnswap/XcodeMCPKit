@@ -398,13 +398,39 @@ private struct ProxyToolVerifier {
 
     private func connectToProxy(server: RunningProcess) async throws -> XcodeMCP {
         try await waitForProxyListener(server: server)
-        return try await XcodeMCP(
-            configuration: .init(
-                transport: .streamableHTTP(endpoint: options.endpoint),
-                clientName: "XcodeMCPProxyToolVerifier",
-                clientVersion: "dev",
-                requestTimeout: .seconds(options.requestTimeoutSeconds)
-            )
+
+        var lastError: (any Error)?
+        for attempt in 0..<90 {
+            guard server.isRunning else {
+                throw VerifierFailure(
+                    "debug proxy server exited before MCP initialization with status "
+                        + "\(server.terminationStatus)"
+                )
+            }
+            do {
+                return try await XcodeMCP(
+                    configuration: .init(
+                        transport: .streamableHTTP(endpoint: options.endpoint),
+                        clientName: "XcodeMCPProxyToolVerifier",
+                        clientVersion: "dev",
+                        requestTimeout: .seconds(options.requestTimeoutSeconds)
+                    )
+                )
+            } catch {
+                try Task.checkCancellation()
+                guard isRetryableMCPInitializationError(error) else {
+                    throw error
+                }
+                lastError = error
+                if attempt < 89 {
+                    try await Task.sleep(for: .seconds(1))
+                }
+            }
+        }
+        throw VerifierFailure(
+            "proxy did not complete MCP initialization at "
+                + "\(options.endpoint.absoluteString): "
+                + "\(lastError.map(errorDescription) ?? "unknown error")"
         )
     }
 
@@ -417,7 +443,9 @@ private struct ProxyToolVerifier {
 
         var request = URLRequest(url: options.endpoint)
         request.httpMethod = "HEAD"
-        for _ in 0..<90 {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(30))
+        while clock.now < deadline {
             guard server.isRunning else {
                 throw VerifierFailure(
                     "debug proxy server exited before becoming ready with status "
@@ -429,15 +457,26 @@ private struct ProxyToolVerifier {
                 if response is HTTPURLResponse {
                     return
                 }
-            } catch is CancellationError {
-                throw CancellationError()
             } catch {
+                try Task.checkCancellation()
                 try await Task.sleep(for: .milliseconds(100))
             }
         }
         throw VerifierFailure(
             "proxy listener did not become ready at \(options.endpoint.absoluteString)"
         )
+    }
+
+    private func isRetryableMCPInitializationError(_ error: any Error) -> Bool {
+        guard let error = error as? XcodeMCPError else { return false }
+        switch error {
+        case .closed, .transportUnavailable:
+            return true
+        case .serverError(let code, _, _):
+            return code == -32_001 || code == -32_002
+        case .invalidRequest, .invalidResponse, .requestTimedOut, .sessionRecoveryFailed:
+            return false
+        }
     }
 
     private func prepareOutputDirectory(_ outputRoot: URL) throws {
