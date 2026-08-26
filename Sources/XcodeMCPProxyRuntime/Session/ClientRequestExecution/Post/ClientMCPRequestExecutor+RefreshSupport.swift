@@ -49,7 +49,6 @@ extension ClientMCPRequestExecutor {
         )
         let preferredUpstreamIndices: [Int]?
         let admission: RouteForwardingAdmission?
-        let requiredUpstreamProof: UpstreamTopologyProof?
         switch await sessionManager.toolRoutingDecision(
             for: requestObject,
             requestTimeoutOverride: requestTimeoutOverride
@@ -57,19 +56,12 @@ extension ClientMCPRequestExecutor {
         case .forward(let resolvedUpstreamIndex):
             preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
             admission = nil
-            requiredUpstreamProof = nil
-        case .forwardExact(let upstreamProof):
-            preferredUpstreamIndices = [upstreamProof.slotID.rawValue]
-            admission = nil
-            requiredUpstreamProof = upstreamProof
         case .forwardAny(let resolvedUpstreamIndices):
             preferredUpstreamIndices = resolvedUpstreamIndices
             admission = nil
-            requiredUpstreamProof = nil
         case .forwardAdmitted(let resolvedUpstreamIndices, let resolvedAdmission):
             preferredUpstreamIndices = resolvedUpstreamIndices
             admission = resolvedAdmission
-            requiredUpstreamProof = nil
         case .localXcodeListWindows:
             return .upstreamUnavailable(responseID: responseID)
         case .reject:
@@ -84,11 +76,6 @@ extension ClientMCPRequestExecutor {
                 on: eventLoop,
                 preferredUpstreamIndices: preferredUpstreamIndices
             ) { selectedOperationLease -> EventLoopFuture<MCPForwardingService.ResponseResolution> in
-                if let requiredUpstreamProof,
-                    selectedOperationLease.proof != requiredUpstreamProof
-                {
-                    return eventLoop.makeSucceededFuture(.upstreamUnavailable)
-                }
                 if let cancellationHandle,
                     cancellationHandle.activate(operationLease: selectedOperationLease) == false
                 {

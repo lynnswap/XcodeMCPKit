@@ -11998,8 +11998,9 @@ struct RuntimeCoordinatorWindowCatalogTests {
             return
         }
         #expect(preferred == [1])
-        #expect(manager.processControlPlane.validate(admission.route))
-        #expect(admission.window?.proof.route.routeID == admission.route.routeID)
+        let routeAdmission = try #require(admission.route)
+        #expect(manager.processControlPlane.validate(routeAdmission))
+        #expect(admission.window?.proof.route.routeID == routeAdmission.routeID)
     }
 
     @Test func ownerHintRoutesBeforeProcessToolCatalogIsAvailable() async throws {

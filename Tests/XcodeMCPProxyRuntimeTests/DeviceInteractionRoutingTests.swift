@@ -49,7 +49,7 @@ struct DeviceInteractionRoutingTests {
         }
         #expect(indices == [1])
         #expect(admission.upstreamProofs == [creatingLease.proof])
-        #expect(admission.route.routeID == manager.xcodeProcessRoutes[0].id)
+        #expect(admission.route?.routeID == manager.xcodeProcessRoutes[0].id)
 
         #expect(
             manager.recordXcodeWindowOwners(
@@ -203,11 +203,13 @@ struct DeviceInteractionRoutingTests {
                 )
             )
         )
-        guard case .forwardExact(let routedProof) = routed else {
+        guard case .forwardAdmitted(let routedIndices, let routedAdmission) = routed else {
             Issue.record("expected exact unbound affinity routing")
             return
         }
-        #expect(routedProof == creatingLease.proof)
+        #expect(routedIndices == [1])
+        #expect(routedAdmission.route == nil)
+        #expect(routedAdmission.upstreamProofs == [creatingLease.proof])
 
         let transition = manager.commitUpstreamTopologyMutation {
             manager.upstreamTopology.replace(
@@ -274,10 +276,15 @@ struct DeviceInteractionRoutingTests {
         )
         sessionManager.setInitialized(true)
         sessionManager.setToolRoutingDecision(
-            .forwardExact(
-                upstreamProof: UpstreamTopologyProof(
-                    slotID: UpstreamSlotID(rawValue: 1),
-                    slotGeneration: 0
+            .forwardAdmitted(
+                preferredUpstreamIndices: [1],
+                admission: RouteForwardingAdmission(
+                    upstreamProofs: [
+                        UpstreamTopologyProof(
+                            slotID: UpstreamSlotID(rawValue: 1),
+                            slotGeneration: 0
+                        )
+                    ]
                 )
             )
         )

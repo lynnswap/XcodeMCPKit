@@ -604,7 +604,12 @@ extension RuntimeCoordinator {
                     )
                 )
             }
-            return .forwardExact(upstreamProof: affinity.upstreamProof)
+            return .forwardAdmitted(
+                preferredUpstreamIndices: [affinity.upstreamProof.slotID.rawValue],
+                admission: RouteForwardingAdmission(
+                    upstreamProofs: [affinity.upstreamProof]
+                )
+            )
         }
         guard processRoutingEnabled,
               let routeProof = processControlPlane.routeProof(routeID: affinityRouteID),
