@@ -11,7 +11,7 @@ swift run xcode-mcp-proxy-tool-verifier
 To verify Xcode 27's headless service without opening an Xcode window:
 
 ```sh
-swift run xcode-mcp-proxy-tool-verifier --xcode-mode headless
+swift run xcode-mcp-proxy-tool-verifier --xcode-mode headless --upstream-processes 2
 ```
 
 Headless access must already be enabled. The verifier does not run
@@ -57,4 +57,6 @@ swift run xcode-mcp-proxy-tool-verifier --xcode-mode headless --request-timeout 
 swift run xcode-mcp-proxy-tool-verifier --keep-server
 ```
 
-`--upstream-processes` and `--no-open-xcode` apply only to GUI verification.
+`--upstream-processes` applies to both modes so the headless verifier also
+exercises pooled-upstream routing. `--no-open-xcode` applies only to GUI
+verification.

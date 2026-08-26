@@ -78,7 +78,7 @@ private struct VerifierOptions {
     Options:
       --host host                 Listen host for the debug proxy server. Default: 127.0.0.1
       --port port                 Dedicated verifier port. Default: 18765
-      --upstream-processes n      GUI upstream mcpbridge processes per Xcode. Default: 2
+      --upstream-processes n      Upstream mcpbridge process count. Default: 2
       --request-timeout seconds   XcodeMCP request timeout. Default: 600
       --output path               Git-ignored verifier output directory. Default: ProxyToolVerifierOutput
       --xcode-mode gui|headless   Xcode runtime to verify. Default: gui
@@ -478,10 +478,10 @@ private struct ProxyToolVerifier {
             "--listen", "\(options.host):\(options.port)",
             "--request-timeout", "\(options.requestTimeoutSeconds)",
             "--xcode-mode", options.xcodeMode.rawValue,
+            "--upstream-processes", "\(options.upstreamProcesses)",
         ]
         if options.xcodeMode == .gui {
             arguments += [
-                "--upstream-processes", "\(options.upstreamProcesses)",
                 "--auto-approve",
                 "--refresh-code-issues-mode", "proxy",
             ]
