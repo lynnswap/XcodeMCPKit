@@ -488,9 +488,6 @@ extension RuntimeCoordinator {
     }
 
     func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
-        guard processRoutingEnabled else {
-            return .forward(preferredUpstreamIndex: nil)
-        }
         guard let object = requestJSON as? [String: Any],
               let request = toolRoutingRequest(in: object) else {
             return .forward(preferredUpstreamIndex: nil)
@@ -500,6 +497,9 @@ extension RuntimeCoordinator {
             request: request
         ) {
             return affinityDecision
+        }
+        guard processRoutingEnabled else {
+            return .forward(preferredUpstreamIndex: nil)
         }
         if request.id != nil, request.toolName == "XcodeListWindows" {
             return .localXcodeListWindows
@@ -520,8 +520,7 @@ extension RuntimeCoordinator {
         responseData: Data,
         operationLease: UpstreamOperationLease
     ) {
-        guard processRoutingEnabled,
-              let call = DeviceInteractionToolCall.decode(requestData: requestData) else {
+        guard let call = DeviceInteractionToolCall.decode(requestData: requestData) else {
             return
         }
 
@@ -529,21 +528,32 @@ extension RuntimeCoordinator {
         case .startsSession:
             guard let key = DeviceInteractionToolCall.successfulSessionKey(
                 from: responseData
-            ),
-                  upstreamTopology.validate(operationLease),
-                  let route = xcodeProcessRoute(
-                    forUpstreamIndex: operationLease.upstreamIndex
-                  ),
-                  let routeProof = processControlPlane.routeProof(routeID: route.id) else {
+            ) else {
                 return
             }
-            deviceInteractionAffinityAuthority.record(
-                .init(
-                    routeID: routeProof.routeID,
-                    upstreamProof: operationLease.proof
+            let routeID: ProcessRouteID?
+            if processRoutingEnabled {
+                guard let route = xcodeProcessRoute(
+                    forUpstreamIndex: operationLease.upstreamIndex
                 ),
-                for: key
-            )
+                    let routeProof = processControlPlane.routeProof(routeID: route.id)
+                else {
+                    return
+                }
+                routeID = routeProof.routeID
+            } else {
+                routeID = nil
+            }
+            upstreamTopologyCommitLock.withLock {
+                guard upstreamTopology.validate(operationLease) else { return }
+                deviceInteractionAffinityAuthority.record(
+                    .init(
+                        upstreamProof: operationLease.proof,
+                        routeID: routeID
+                    ),
+                    for: key
+                )
+            }
         case .continuesSession(let key, let endsSession):
             guard endsSession,
                   DeviceInteractionToolCall.isSuccessfulResponse(responseData) else {
@@ -563,6 +573,11 @@ extension RuntimeCoordinator {
             return nil
         }
         guard let affinity = deviceInteractionAffinityAuthority.affinity(for: key) else {
+            if processRoutingEnabled == false,
+                upstreamTopology.snapshot().entries.count == 1
+            {
+                return nil
+            }
             return .reject(
                 errors: deviceInteractionRoutingErrors(
                     id: request.id,
@@ -570,9 +585,30 @@ extension RuntimeCoordinator {
                 )
             )
         }
-        guard let routeProof = processControlPlane.routeProof(routeID: affinity.routeID),
-              let routeAdmission = processControlPlane.admit(routeProof),
-              upstreamTopology.validate(affinity.upstreamProof) else {
+        guard upstreamTopology.validate(affinity.upstreamProof) else {
+            deviceInteractionAffinityAuthority.remove(key: key)
+            return .reject(
+                errors: deviceInteractionRoutingErrors(
+                    id: request.id,
+                    message: "device interaction session is no longer available"
+                )
+            )
+        }
+        guard let affinityRouteID = affinity.routeID else {
+            guard processRoutingEnabled == false else {
+                deviceInteractionAffinityAuthority.remove(key: key)
+                return .reject(
+                    errors: deviceInteractionRoutingErrors(
+                        id: request.id,
+                        message: "device interaction session is no longer available"
+                    )
+                )
+            }
+            return .forwardExact(upstreamProof: affinity.upstreamProof)
+        }
+        guard processRoutingEnabled,
+              let routeProof = processControlPlane.routeProof(routeID: affinityRouteID),
+              let routeAdmission = processControlPlane.admit(routeProof) else {
             deviceInteractionAffinityAuthority.remove(key: key)
             return .reject(
                 errors: deviceInteractionRoutingErrors(
@@ -587,8 +623,8 @@ extension RuntimeCoordinator {
             guard case .resolved(let processID, _, let windowProof) = cachedOwnerResolution(
                 for: request
             ),
-                  processID == affinity.routeID.processID,
-                  windowProof.route.routeID == affinity.routeID,
+                  processID == affinityRouteID.processID,
+                  windowProof.route.routeID == affinityRouteID,
                   windowProof.windowEpoch == owners.epoch else {
                 return .reject(
                     errors: deviceInteractionRoutingErrors(

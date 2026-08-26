@@ -3,6 +3,7 @@ import XcodeMCPKit
 
 enum ToolRoutingDecision: Sendable {
     case forward(preferredUpstreamIndex: Int?)
+    case forwardExact(upstreamProof: UpstreamTopologyProof)
     case forwardAny(preferredUpstreamIndices: [Int])
     case forwardAdmitted(
         preferredUpstreamIndices: [Int],
@@ -15,6 +16,8 @@ enum ToolRoutingDecision: Sendable {
         switch self {
         case .forward(let index):
             return index.map { [$0] }
+        case .forwardExact(let proof):
+            return [proof.slotID.rawValue]
         case .forwardAny(let indices), .forwardAdmitted(let indices, _):
             return indices
         case .localXcodeListWindows, .reject:

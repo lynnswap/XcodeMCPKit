@@ -201,9 +201,11 @@ struct MCPForwardingService: Sendable {
 
         let preferredUpstreamIndices: [Int]?
         let admission: RouteForwardingAdmission?
+        let requiredUpstreamProof: UpstreamTopologyProof?
         if let upstreamIndexOverride {
             preferredUpstreamIndices = [upstreamIndexOverride]
             admission = nil
+            requiredUpstreamProof = nil
         } else {
             switch await sessionManager.toolRoutingDecision(
                 for: requestObject,
@@ -212,12 +214,19 @@ struct MCPForwardingService: Sendable {
             case .forward(let resolvedUpstreamIndex):
                 preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
                 admission = nil
+                requiredUpstreamProof = nil
+            case .forwardExact(let upstreamProof):
+                preferredUpstreamIndices = [upstreamProof.slotID.rawValue]
+                admission = nil
+                requiredUpstreamProof = upstreamProof
             case .forwardAny(let resolvedUpstreamIndices):
                 preferredUpstreamIndices = resolvedUpstreamIndices
                 admission = nil
+                requiredUpstreamProof = nil
             case .forwardAdmitted(let resolvedUpstreamIndices, let resolvedAdmission):
                 preferredUpstreamIndices = resolvedUpstreamIndices
                 admission = resolvedAdmission
+                requiredUpstreamProof = nil
             case .localXcodeListWindows:
                 return .unavailable
             case .reject:
@@ -252,6 +261,11 @@ struct MCPForwardingService: Sendable {
                 on: eventLoop,
                 preferredUpstreamIndices: preferredUpstreamIndices
             ) { selectedOperationLease -> EventLoopFuture<ResponseResolution> in
+                if let requiredUpstreamProof,
+                    selectedOperationLease.proof != requiredUpstreamProof
+                {
+                    return eventLoop.makeSucceededFuture(.upstreamUnavailable)
+                }
                 guard internalCancellationHandle.activate(
                     operationLease: selectedOperationLease
                 ) else {

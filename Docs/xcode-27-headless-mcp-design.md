@@ -202,13 +202,14 @@ Follow-up tools use two spellings:
 - `DeviceInteractionInstallAndRun` and `DeviceInteractionEndSession`:
   `interactionSessionKey`
 
-For routed GUI pools, the runtime records the returned key together with the
-stable process-route identity and exact upstream topology proof that created
-it. Follow-up requests obtain a current route admission for that identity and
-are admitted only to the recorded upstream proof. Route replacement,
-retirement, session end, and runtime shutdown evict the corresponding affinity.
-An unknown key follows the upstream's ordinary error path only when a single
-unbound upstream exists; it is never guessed across multiple GUI routes.
+For every upstream topology, the runtime records the returned key together with
+the exact upstream topology proof that created it. Routed GUI pools additionally
+record the stable process-route identity needed for window admission and
+identifier rewriting. Follow-up requests are admitted only to the recorded
+upstream proof. Route replacement, retirement, session end, and runtime shutdown
+evict the corresponding affinity. An unknown key follows the upstream's ordinary
+error path only when a single unbound upstream exists; it is never guessed across
+multiple process-routed or unbound upstreams.
 
 The affinity authority owns token membership. Request routing consumes an
 immutable snapshot/proof and revalidates it before send. It does not mirror
@@ -259,7 +260,8 @@ that behavior is observed.
 - Startup-summary and exact multiline notice tests.
 - Public product contract compile test for `xcodeMode`.
 - Device-affinity owner and routing tests, including both key spellings,
-  replacement, retirement, end, and unknown keys.
+  process-routed and unbound pools, replacement, retirement, end, and unknown
+  keys.
 - Existing fast, process, adapter, and full maintainer checks.
 - Opt-in live headless initialize, catalog, workspace open/list/close, progress,
   and shutdown verification against Xcode 27.

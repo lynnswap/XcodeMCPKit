@@ -161,11 +161,162 @@ struct DeviceInteractionRoutingTests {
         #expect(fixture.manager.deviceInteractionAffinityAuthority.count() == 0)
     }
 
+    @Test func headlessUnboundPoolRoutesToExactCreatingUpstreamAndEvictsOnReplacement() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? group.syncShutdownGracefully() }
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .headless
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            processRoutingEnabled: false,
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+
+        let creatingLease = manager.operationLeaseForTest(upstreamIndex: 1)
+        manager.recordDeviceInteractionAffinityIfNeeded(
+            requestData: try requestData(
+                name: "DeviceInteractionStartWorkspaceSession",
+                arguments: ["sessionIdentifier": "Verify Headless Flow"]
+            ),
+            responseData: try successfulToolResponse(
+                structuredContent: ["interactionSessionKey": "headless-device-key"]
+            ),
+            operationLease: creatingLease
+        )
+
+        let affinity = try #require(
+            manager.deviceInteractionAffinityAuthority.affinity(for: "headless-device-key")
+        )
+        #expect(affinity.upstreamProof == creatingLease.proof)
+        #expect(affinity.routeID == nil)
+        let routed = try #require(
+            manager.immediateToolRoutingDecision(
+                for: toolsCallObject(
+                    id: 6,
+                    name: "DeviceInteractionSynthesize",
+                    arguments: ["interactSessionKey": "headless-device-key"]
+                )
+            )
+        )
+        guard case .forwardExact(let routedProof) = routed else {
+            Issue.record("expected exact unbound affinity routing")
+            return
+        }
+        #expect(routedProof == creatingLease.proof)
+
+        let transition = manager.commitUpstreamTopologyMutation {
+            manager.upstreamTopology.replace(
+                creatingLease.proof,
+                with: TestUpstreamClient()
+            )
+        }
+        #expect(transition != nil)
+        #expect(manager.deviceInteractionAffinityAuthority.count() == 0)
+
+        let afterReplacement = try #require(
+            manager.immediateToolRoutingDecision(
+                for: toolsCallObject(
+                    id: 7,
+                    name: "DeviceInteractionSynthesize",
+                    arguments: ["interactSessionKey": "headless-device-key"]
+                )
+            )
+        )
+        guard case .reject(let errors) = afterReplacement else {
+            Issue.record("replaced unbound affinity should be rejected")
+            return
+        }
+        #expect(errors.map(\.message) == ["unknown device interaction session"])
+    }
+
+    @Test func headlessUnboundPoolRejectsUnknownSessionInsteadOfGuessing() throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { try? group.syncShutdownGracefully() }
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .headless
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: group.next(),
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            processRoutingEnabled: false,
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+
+        let decision = try #require(
+            manager.immediateToolRoutingDecision(
+                for: toolsCallObject(
+                    id: 8,
+                    name: "DeviceInteractionEndSession",
+                    arguments: ["interactionSessionKey": "external-key"]
+                )
+            )
+        )
+        guard case .reject(let errors) = decision else {
+            Issue.record("multi-upstream unbound runtime must not guess a session owner")
+            return
+        }
+        #expect(errors.map(\.message) == ["unknown device interaction session"])
+    }
+
+    @Test func exactUnboundDecisionRejectsReplacementGenerationBeforeSending() async throws {
+        let config = makeHTTPConfig()
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamResponder: { _, originalID in
+                try makeToolSuccessResponse(id: originalID, text: #"{"ok":true}"#)
+            }
+        )
+        sessionManager.setInitialized(true)
+        sessionManager.setToolRoutingDecision(
+            .forwardExact(
+                upstreamProof: UpstreamTopologyProof(
+                    slotID: UpstreamSlotID(rawValue: 1),
+                    slotGeneration: 0
+                )
+            )
+        )
+        sessionManager.setUsablePreferredUpstreamIndices([1])
+        let server = try TestHTTPHandlerServer.start(
+            config: config,
+            sessionManager: sessionManager
+        )
+
+        do {
+            let (response, body) = try await postHTTPJSON(
+                url: server.url,
+                sessionID: "session-replaced-unbound-affinity",
+                payload: toolsCallPayload(
+                    id: 9,
+                    name: "DeviceInteractionSynthesize",
+                    arguments: ["interactSessionKey": "headless-device-key"]
+                )
+            )
+
+            #expect(response.statusCode == 200)
+            let error = try #require(body["error"] as? [String: Any])
+            #expect((error["code"] as? NSNumber)?.intValue == -32001)
+            #expect(error["message"] as? String == "upstream unavailable")
+            #expect(sessionManager.sentMethods().isEmpty)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func unboundRuntimeLeavesUnknownSessionHandlingToItsOnlyUpstream() throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { try? group.syncShutdownGracefully() }
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .headless
         let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
+            config: config,
             eventLoop: group.next(),
             upstreams: [TestUpstreamClient()],
             processRoutingEnabled: false,

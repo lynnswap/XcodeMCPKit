@@ -95,7 +95,6 @@ import Testing
     @Test func ownsAffinityMembershipAndInvalidation() throws {
         let authority = DeviceInteractionAffinityAuthority()
         let route0 = ProcessRouteID(processID: 10, instanceGeneration: 1)
-        let route1 = ProcessRouteID(processID: 20, instanceGeneration: 1)
         let proof0 = UpstreamTopologyProof(
             slotID: UpstreamSlotID(rawValue: 0),
             slotGeneration: 1
@@ -105,11 +104,10 @@ import Testing
             slotGeneration: 1
         )
         let affinity0 = DeviceInteractionAffinityAuthority.Affinity(
-            routeID: route0,
-            upstreamProof: proof0
+            upstreamProof: proof0,
+            routeID: route0
         )
         let affinity1 = DeviceInteractionAffinityAuthority.Affinity(
-            routeID: route1,
             upstreamProof: proof1
         )
 

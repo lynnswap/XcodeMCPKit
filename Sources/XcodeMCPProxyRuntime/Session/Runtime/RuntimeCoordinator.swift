@@ -1256,27 +1256,23 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     func commitUpstreamTopologyMutation(
         _ mutation: () -> UpstreamTopologyAuthority.Transition
     ) -> UpstreamTopologyAuthority.Transition {
-        let transition = upstreamTopologyCommitLock.withLock {
+        upstreamTopologyCommitLock.withLock {
             let transition = mutation()
             publishUpstreamTopology(transition.snapshot)
+            removeDeviceInteractionAffinities(in: transition)
             return transition
         }
-        removeDeviceInteractionAffinities(in: transition)
-        return transition
     }
 
     func commitUpstreamTopologyMutation(
         _ mutation: () -> UpstreamTopologyAuthority.Transition?
     ) -> UpstreamTopologyAuthority.Transition? {
-        let transition: UpstreamTopologyAuthority.Transition? = upstreamTopologyCommitLock.withLock {
+        upstreamTopologyCommitLock.withLock {
             guard let transition = mutation() else { return nil }
             publishUpstreamTopology(transition.snapshot)
+            removeDeviceInteractionAffinities(in: transition)
             return transition
         }
-        if let transition {
-            removeDeviceInteractionAffinities(in: transition)
-        }
-        return transition
     }
 
     private func removeDeviceInteractionAffinities(

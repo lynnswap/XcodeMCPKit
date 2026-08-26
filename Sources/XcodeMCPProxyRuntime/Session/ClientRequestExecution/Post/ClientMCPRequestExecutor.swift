@@ -330,7 +330,8 @@ final class ClientMCPRequestExecutor: Sendable {
             }
             func forward(
                 preferredUpstreamIndices: [Int]?,
-                admission: RouteForwardingAdmission? = nil
+                admission: RouteForwardingAdmission? = nil,
+                requiredUpstreamProof: UpstreamTopologyProof? = nil
             ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
                 let remainingTimeout = forwardingTimeout()
                 if forwardingDeadline != nil, remainingTimeout == nil {
@@ -342,6 +343,13 @@ final class ClientMCPRequestExecutor: Sendable {
                     on: eventLoop,
                     preferredUpstreamIndices: preferredUpstreamIndices
                 ) { operationLease in
+                    if let requiredUpstreamProof,
+                        operationLease.proof != requiredUpstreamProof
+                    {
+                        return eventLoop.makeFailedFuture(
+                            ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology
+                        )
+                    }
                     guard cancellationHandle.activate(operationLease: operationLease) else {
                         return eventLoop.makeFailedFuture(CancellationError())
                     }
@@ -450,6 +458,11 @@ final class ClientMCPRequestExecutor: Sendable {
                 return promise.futureResult
             case .forward(let preferredUpstreamIndex):
                 return forward(preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] })
+            case .forwardExact(let upstreamProof):
+                return forward(
+                    preferredUpstreamIndices: [upstreamProof.slotID.rawValue],
+                    requiredUpstreamProof: upstreamProof
+                )
             case .forwardAny(let preferredUpstreamIndices):
                 return forward(
                     preferredUpstreamIndices: preferredUpstreamIndices

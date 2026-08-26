@@ -87,8 +87,16 @@ enum DeviceInteractionToolCall: Equatable, Sendable {
 
 final class DeviceInteractionAffinityAuthority: Sendable {
     struct Affinity: Equatable, Sendable {
-        let routeID: ProcessRouteID
         let upstreamProof: UpstreamTopologyProof
+        let routeID: ProcessRouteID?
+
+        init(
+            upstreamProof: UpstreamTopologyProof,
+            routeID: ProcessRouteID? = nil
+        ) {
+            self.upstreamProof = upstreamProof
+            self.routeID = routeID
+        }
     }
 
     private let affinities = NIOLockedValueBox<[String: Affinity]>([:])
@@ -110,7 +118,8 @@ final class DeviceInteractionAffinityAuthority: Sendable {
         guard routeIDs.isEmpty == false else { return }
         affinities.withLockedValue { affinities in
             affinities = affinities.filter { _, affinity in
-                routeIDs.contains(affinity.routeID) == false
+                guard let routeID = affinity.routeID else { return true }
+                return routeIDs.contains(routeID) == false
             }
         }
     }
