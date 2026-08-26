@@ -6,7 +6,8 @@
 - Baseline: `b251cecfa059ce7b5f0a9c9a8b7f9480e390edb3`
 - Verified Xcode: 27.0 build `27A5252f`
 - Verified Xcode MCP server: `xcode-tools` version `25295.11`
-- Implementation: complete; validation in progress
+- Implementation: complete; automated validation complete
+- Live workspace validation: pending manual Xcode Service approval
 
 This document is the design contract and progress ledger for Xcode 27 headless
 MCP support. Update it before changing a public API or owner boundary.
@@ -277,5 +278,6 @@ that behavior is observed.
 - [x] Implement resolved runtime ownership and public/CLI surface.
 - [x] Implement device interaction affinity.
 - [x] Extend verifier and documentation.
-- [ ] Run all validation and clean `codex-review`.
-- [ ] Open a Ready PR to `main`.
+- [x] Run automated validation and clean `codex-review`.
+- [ ] Complete post-approval live workspace open/list/close and progress
+  verification.
