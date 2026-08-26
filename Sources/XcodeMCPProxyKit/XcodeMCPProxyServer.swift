@@ -47,6 +47,10 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     }
 
     /// Upstream `mcpbridge` process policy.
+    ///
+    /// `processesPerXcode` is the number of process-bound bridges for each GUI
+    /// Xcode process. Headless and custom unbound routing use the same value as
+    /// the total bridge-pool size.
     public enum Upstream: Equatable, Sendable {
         /// Use Xcode's default `xcrun mcpbridge` invocation.
         case defaultMCPBridge(processesPerXcode: Int = 1, sessionID: String? = nil)

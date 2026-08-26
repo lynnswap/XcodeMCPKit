@@ -52,6 +52,8 @@ a new instance after shutdown.
 
 - `bindAddress`: host and port; port `0` requests an ephemeral port.
 - `upstream`: the default `xcrun mcpbridge` invocation or an explicit command.
+  Its `processesPerXcode` value is per GUI Xcode process; headless and custom
+  unbound routing use it as the total bridge-pool size.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
 - `configurationFileURL`: optional TOML file. An explicit unreadable or invalid

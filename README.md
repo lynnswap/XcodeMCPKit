@@ -143,7 +143,7 @@ xcode-mcp-proxy --help
 |--------|-------------|
 | `--listen host:port` | Listen address. Defaults to `localhost:8765`. |
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. |
-| `--upstream-processes n` | Number of upstream `mcpbridge` processes per running Xcode process when the default `xcrun mcpbridge` upstream is used. Default: `1`, max: `10`. |
+| `--upstream-processes n` | Upstream `mcpbridge` count: per running Xcode in GUI mode, or total unbound pool size in headless/custom mode. Default: `1`, max: `10`. |
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialize still has a bounded handshake timeout. |
 | `--config path` | TOML config path. |
 | `--xcode-mode automatic|gui|headless` | Select Xcode routing. `automatic` (default) uses enabled headless MCP when available and otherwise uses GUI routing. `headless` fails instead of falling back. |
