@@ -397,7 +397,26 @@ private struct ProxyToolVerifier {
     }
 
     private func connectToProxy(server: RunningProcess) async throws -> XcodeMCP {
-        var lastError: (any Error)?
+        try await waitForProxyListener(server: server)
+        return try await XcodeMCP(
+            configuration: .init(
+                transport: .streamableHTTP(endpoint: options.endpoint),
+                clientName: "XcodeMCPProxyToolVerifier",
+                clientVersion: "dev",
+                requestTimeout: .seconds(options.requestTimeoutSeconds)
+            )
+        )
+    }
+
+    private func waitForProxyListener(server: RunningProcess) async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 1
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        var request = URLRequest(url: options.endpoint)
+        request.httpMethod = "HEAD"
         for _ in 0..<90 {
             guard server.isRunning else {
                 throw VerifierFailure(
@@ -406,21 +425,18 @@ private struct ProxyToolVerifier {
                 )
             }
             do {
-                return try await XcodeMCP(
-                        configuration: .init(
-                        transport: .streamableHTTP(endpoint: options.endpoint),
-                        clientName: "XcodeMCPProxyToolVerifier",
-                        clientVersion: "dev",
-                        requestTimeout: .seconds(options.requestTimeoutSeconds)
-                    )
-                )
+                let (_, response) = try await session.data(for: request)
+                if response is HTTPURLResponse {
+                    return
+                }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
-                lastError = error
-                try await Task.sleep(for: .seconds(1))
+                try await Task.sleep(for: .milliseconds(100))
             }
         }
         throw VerifierFailure(
-            "proxy did not become ready at \(options.endpoint.absoluteString): \(lastError.map(errorDescription) ?? "unknown error")"
+            "proxy listener did not become ready at \(options.endpoint.absoluteString)"
         )
     }
 
