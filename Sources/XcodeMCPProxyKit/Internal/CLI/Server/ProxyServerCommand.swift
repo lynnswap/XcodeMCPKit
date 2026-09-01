@@ -67,6 +67,9 @@ package struct ProxyServerCommand: ParsableCommand {
     @Option(help: "Explicit upstream Xcode MCP session identifier.")
     var sessionID: String?
 
+    @Option(help: "Xcode connection mode: automatic, gui, or headless.")
+    var xcodeMode: ProxyConfig.XcodeMode = .automatic
+
     @Option(help: "Code issue refresh owner: proxy or upstream.")
     var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode?
 
@@ -134,3 +137,4 @@ package struct CLIListenAddress: Equatable, Sendable, CustomStringConvertible,
 }
 
 extension ProxyConfig.RefreshCodeIssuesMode: ExpressibleByArgument {}
+extension ProxyConfig.XcodeMode: ExpressibleByArgument {}

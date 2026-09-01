@@ -17,6 +17,8 @@ struct ServerCommandTests {
         #expect(config.requestTimeout == 300)
         #expect(config.autoApproveXcodeDialog == false)
         #expect(config.refreshCodeIssuesMode == .proxy)
+        #expect(config.xcodeMode == .automatic)
+        #expect(config.upstreamKind == .stockMCPBridge)
     }
 
     @Test func serverCommandMapsTypedOptionsToConfiguration() throws {
@@ -45,6 +47,7 @@ struct ServerCommandTests {
         #expect(config.requestTimeout == 12.5)
         #expect(config.autoApproveXcodeDialog)
         #expect(config.refreshCodeIssuesMode == .upstream)
+        #expect(config.upstreamKind == .custom)
     }
 
     @Test func serverCommandAllowsPortZeroAndZeroTimeout() throws {
@@ -83,11 +86,35 @@ struct ServerCommandTests {
             ["--upstream-processes", "0"],
             ["--upstream-processes", "11"],
             ["--upstream-processes", "abc"],
+            ["--xcode-mode", "invalid"],
         ]
 
         for arguments in invalidInvocations {
             #expect(throws: CLICommandError.self) {
                 _ = try resolvedProxyConfig(arguments: arguments)
+            }
+        }
+    }
+
+    @Test func serverCommandResolvesExplicitXcodeModesForStockUpstream() throws {
+        for mode in ProxyConfig.XcodeMode.allCasesForTesting {
+            let config = try resolvedProxyConfig(
+                arguments: ["--xcode-mode", mode.rawValue]
+            )
+            #expect(config.xcodeMode == mode)
+            #expect(config.upstreamKind == .stockMCPBridge)
+        }
+    }
+
+    @Test func serverCommandRejectsExplicitXcodeModeWithCustomUpstream() {
+        for mode in [ProxyConfig.XcodeMode.gui, .headless] {
+            #expect(throws: CLICommandError.self) {
+                _ = try resolvedProxyConfig(
+                    arguments: [
+                        "--upstream-command", "/tmp/custom-bridge",
+                        "--xcode-mode", mode.rawValue,
+                    ]
+                )
             }
         }
     }
@@ -240,3 +267,7 @@ private func makeTempConfigFile(_ contents: String) throws -> URL {
 }
 
 private struct UnexpectedServerCommandAction: Error {}
+
+private extension ProxyConfig.XcodeMode {
+    static let allCasesForTesting: [Self] = [.automatic, .gui, .headless]
+}

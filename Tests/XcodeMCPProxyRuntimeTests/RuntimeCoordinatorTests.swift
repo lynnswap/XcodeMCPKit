@@ -64,6 +64,26 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(plan.xcodeProcessRoutes.isEmpty)
     }
 
+    @Test func headlessStockBridgeBuildsOnlyUnboundUpstreamsDespiteGUITargets() throws {
+        try withEnvironmentVariables(["MCP_XCODE_PID": "5678"]) {
+            var config = makeConfig(requestTimeout: 0)
+            config.xcodeMode = .headless
+
+            let plan = MCPBridgeRuntime.makeUpstreamPlan(
+                config: makeBridgeRuntimeConfig(config),
+                xcodeTargets: [xcodeProcessTarget(processID: 101)]
+            )
+
+            #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: config) == false)
+            #expect(plan.upstreams.count == 1)
+            #expect(plan.xcodeProcessRoutes.isEmpty)
+            let upstream = try #require(plan.upstreams.first)
+            let environment = try upstreamEnvironment(from: upstream)
+            #expect(environment["MCP_XCODE_PID"] == nil)
+            #expect(environment["DEVELOPER_DIR"] == nil)
+        }
+    }
+
     @Test func processRoutingWithoutInitialTargetsRunsReadinessAutoLaunch() async throws {
         let readiness = ReadinessFlag(isReady: false)
         let launchRecorder = XcodeLaunchRecorder()
@@ -11978,8 +11998,9 @@ struct RuntimeCoordinatorWindowCatalogTests {
             return
         }
         #expect(preferred == [1])
-        #expect(manager.processControlPlane.validate(admission.route))
-        #expect(admission.window?.proof.route.routeID == admission.route.routeID)
+        let routeAdmission = try #require(admission.route)
+        #expect(manager.processControlPlane.validate(routeAdmission))
+        #expect(admission.window?.proof.route.routeID == routeAdmission.routeID)
     }
 
     @Test func ownerHintRoutesBeforeProcessToolCatalogIsAvailable() async throws {
@@ -13940,7 +13961,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 configurationFileURL: URL(fileURLWithPath: configPath),
                 featurePolicy: .init(prewarmToolsList: false)
             )
-        ).runtimeConfiguration
+        ).runtimeConfiguration(xcodeMode: .gui)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -13984,7 +14005,9 @@ struct RuntimeCoordinatorWindowRoutingTests {
             ),
             featurePolicy: .init(prewarmToolsList: false)
         )
-        let config = try ProxyConfig.resolving(publicConfiguration).runtimeConfiguration
+        let config = try ProxyConfig.resolving(publicConfiguration).runtimeConfiguration(
+            xcodeMode: .gui
+        )
 
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
@@ -14026,7 +14049,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 configurationFileURL: URL(fileURLWithPath: configPath),
                 featurePolicy: .init(prewarmToolsList: false)
             )
-        ).runtimeConfiguration
+        ).runtimeConfiguration(xcodeMode: .gui)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -14101,7 +14124,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 configurationFileURL: URL(fileURLWithPath: configPath),
                 featurePolicy: .init(prewarmToolsList: false)
             )
-        ).runtimeConfiguration
+        ).runtimeConfiguration(xcodeMode: .gui)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,

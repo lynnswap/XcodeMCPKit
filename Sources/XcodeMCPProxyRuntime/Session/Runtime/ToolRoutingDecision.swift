@@ -24,9 +24,15 @@ enum ToolRoutingDecision: Sendable {
 }
 
 struct RouteForwardingAdmission: Sendable {
-    let route: ProcessControlPlaneAuthority.RouteAdmissionLease
+    let route: ProcessControlPlaneAuthority.RouteAdmissionLease?
     let upstreamProofs: [UpstreamTopologyProof]
     let window: WindowRouteAdmission?
+
+    init(upstreamProofs: [UpstreamTopologyProof]) {
+        self.route = nil
+        self.upstreamProofs = upstreamProofs
+        self.window = nil
+    }
 
     init(
         route: ProcessControlPlaneAuthority.RouteAdmissionLease,

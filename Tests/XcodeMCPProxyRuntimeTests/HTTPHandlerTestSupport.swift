@@ -637,12 +637,20 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ data: Data,
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission _: RouteForwardingAdmission?,
+        admission: RouteForwardingAdmission?,
         requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
         let upstreamIndex = operationLease.upstreamIndex
         _ = ensureRunning
+        guard upstreamTopology.validate(operationLease),
+              admission.map({
+                $0.proof(for: upstreamIndex) == operationLease.proof
+              }) ?? true else {
+            requestSendCompletion?.complete(.notSent)
+            onRejected()
+            return false
+        }
         let sendUpdate = state.withLockedValue { state -> (accepted: Bool, count: Int) in
             if state.rejectNextUpstreamSend {
                 state.rejectNextUpstreamSend = false

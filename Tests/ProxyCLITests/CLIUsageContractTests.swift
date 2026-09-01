@@ -20,6 +20,7 @@ struct CLIUsageContractTests {
             "--upstream-arg <upstream-arg>",
             "--upstream-processes <upstream-processes>",
             "--session-id <session-id>",
+            "--xcode-mode <xcode-mode>",
             "--refresh-code-issues-mode <refresh-code-issues-mode>",
             "--force-restart",
             "--dry-run",

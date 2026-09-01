@@ -33,6 +33,21 @@ struct UpstreamReadinessTests {
         #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config) == false)
     }
 
+    @Test func headlessStockBridgeUsesAlwaysReadyGate() async {
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .headless
+
+        let gate = UpstreamReadinessGate.liveDefault(
+            config: config,
+            clock: .liveValue,
+            processEventMonitor: NeverReadyXcodeProcessMonitor()
+        )
+
+        #expect(gate.isEnabled == false)
+        #expect(gate.launchIfUnavailable == nil)
+        #expect((await gate.snapshot()).isReady)
+    }
+
     @Test func readinessChangeWaitDoesNotMissChangeBeforeRegistration() async throws {
         let readiness = ReadinessFlag(isReady: false)
         let snapshot = await readiness.snapshot()
@@ -429,4 +444,19 @@ struct UpstreamReadinessTests {
         #expect(secondDelay == 1_000_000_000)
         await sleepRecorder.resumeNext()
     }
+}
+
+private final class NeverReadyXcodeProcessMonitor:
+    XcodeProcessEventMonitoring,
+    @unchecked Sendable
+{
+    func start() {}
+    func setChangeHandler(_: @escaping @Sendable (String) -> Void) {}
+    func runningXcodeTargets() -> [XcodeProcessTarget] { [] }
+    func permissionDialogProcessIDs() -> [pid_t] { [] }
+    func readinessSnapshot() -> UpstreamReadinessSnapshot {
+        UpstreamReadinessSnapshot(isReady: false, generation: 0)
+    }
+    func waitForReadinessChange(after _: UInt64) async {}
+    func stop() {}
 }

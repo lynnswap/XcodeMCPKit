@@ -23,7 +23,8 @@ let server = XcodeMCPProxyServer(
         upstream: .defaultMCPBridge(processesPerXcode: 1),
         requestTimeout: .seconds(300),
         discovery: .defaultLocation,
-        approvalPolicy: .manual
+        approvalPolicy: .manual,
+        xcodeMode: .automatic
     )
 )
 
@@ -51,6 +52,8 @@ a new instance after shutdown.
 
 - `bindAddress`: host and port; port `0` requests an ephemeral port.
 - `upstream`: the default `xcrun mcpbridge` invocation or an explicit command.
+  Its `processesPerXcode` value is per GUI Xcode process; headless and custom
+  unbound routing use it as the total bridge-pool size.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
 - `configurationFileURL`: optional TOML file. An explicit unreadable or invalid
@@ -60,6 +63,21 @@ a new instance after shutdown.
 - `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
 - `approvalPolicy`: manual or automatic Xcode permission handling.
 - `featurePolicy`: tools-list prewarming and refresh-code-issues routing.
+- `xcodeMode`: `.automatic` (the default), `.gui`, or `.headless` for the stock
+  `mcpbridge` upstream. Automatic mode selects the enabled Xcode 27 headless
+  service and otherwise preserves GUI routing.
+
+Headless mode does not require a workspace to be open in the Xcode app. It
+forwards workspace lifecycle and DocumentationSearch tools to Xcode Service,
+does not run GUI permission automation, and never enables, approves, or stops
+the shared service. If headless access is disabled, enable it separately with
+`sudo xcrun mcp-server enable`; explicit `.headless` fails startup instead of
+silently falling back. Xcode Service can request manual agent and folder
+approval on the first `XcodeOpenWorkspace` call; `approvalPolicy: .automatic`
+applies only to GUI Xcode dialogs.
+
+Custom upstream commands keep their existing unbound behavior and require
+`xcodeMode: .automatic`.
 
 ```swift
 import Foundation

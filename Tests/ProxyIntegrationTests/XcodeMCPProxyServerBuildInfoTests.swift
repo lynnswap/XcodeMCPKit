@@ -29,6 +29,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
             displayHost: "localhost",
             port: 8765,
             config: config,
+            xcodeMode: .gui,
             xcodeTargets: [
                 ProxyRuntimeInventorySnapshot.XcodeTarget(
                     processID: target.processID,
@@ -51,6 +52,40 @@ struct XcodeMCPProxyServerBuildInfoTests {
           App: /Applications/Xcode.app
           PID: 9004
           DocumentationSearch: pending
+        """)
+    }
+
+    @Test func headlessStartupSummaryNamesTheServiceAndUpstreamDocumentationOwner() {
+        let config = ProxyConfig(
+            listenHost: "localhost",
+            listenPort: 8765,
+            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
+            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
+            maxBodyBytes: 1_048_576,
+            requestTimeout: 300,
+            autoApproveXcodeDialog: true
+        )
+
+        let summary = XcodeMCPProxyServer.startupSummary(
+            displayHost: "localhost",
+            port: 8765,
+            config: config,
+            xcodeMode: .headless,
+            xcodeTargets: []
+        )
+
+        #expect(summary == """
+        XcodeMCPProxyKit \(XcodeMCPProxyServer.productMetadata.version)
+
+        Server
+          URL: http://localhost:8765/mcp
+          Upstream processes: 1
+          Auto approve: disabled
+
+        Xcode
+          Mode: headless
+          Status: Xcode Service
+          DocumentationSearch: upstream
         """)
     }
 }

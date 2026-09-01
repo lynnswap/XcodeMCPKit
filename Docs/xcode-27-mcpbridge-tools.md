@@ -1,19 +1,99 @@
-# Xcode 27 mcpbridge Tool Additions
+# Xcode 27 mcpbridge Tool Surfaces
 
 ## Verified Environment
 
 - Xcode 26.6: `/Applications/Xcode.app`, build `17F109`, `xcode-tools` server version `24950`
-- Xcode 27.0: `/Applications/Xcode_27.app`, build `27A5209h`, `xcode-tools` server version `25245.3`
+- Xcode 27.0 GUI baseline: `/Applications/Xcode_27.app`, build `27A5209h`, `xcode-tools` server version `25245.3`
+- Xcode 27.0 headless: `/Applications/Xcode_27.app`, build `27A5252f`, `xcode-tools` server version `25295.11`
 - MCP protocol: `2025-06-18`
 
-Xcode 26.6's `tools/list` returned 21 tools. Xcode 27.0's `tools/list`
-returned 43 tools. No tools were removed; 22 tools were added.
+Xcode 26.6's `tools/list` returned 21 tools. The Xcode 27 GUI baseline returned
+43 tools: no Xcode 26.6 tool was removed and 22 tools were added. The newer
+Xcode 27 headless server returned 54 tools. Its catalog is not a strict
+superset of the GUI catalog: it replaces GUI window ownership with workspace
+lifecycle tools and omits two other GUI-only queries.
 
 This document is based on the raw `tools/list` descriptors, the `mcp__xcode`
 tool metadata exposed to Codex, and light read-oriented runtime checks against
 the Xcode 27 MCP server.
 
-## Added Tools
+## Headless Workspace Surface
+
+With `MCP_XCODE_PID` absent, an unbound `mcpbridge` connected to Xcode Service
+and advertised 54 tools. Relative to the 43-tool GUI baseline, the headless
+catalog adds these 14 tools:
+
+| Category | Tool | Primary purpose |
+| --- | --- | --- |
+| Workspace lifecycle | `XcodeOpenWorkspace` | Open a project or workspace for this agent and return its identifier |
+| Workspace lifecycle | `XcodeListWorkspaces` | List workspaces currently available through Xcode Service |
+| Workspace lifecycle | `XcodeCloseWorkspace` | Close one workspace by identifier |
+| Target inspection | `XcodeListTargets` | List targets in the selected workspace |
+| Target inspection | `GetTargetBuildSettings` | Read target build settings |
+| Target mutation | `UpdateTargetBuildSetting` | Change one target build setting |
+| Target mutation | `AddEntitlement` | Add an entitlement through Xcode's project model |
+| Target mutation | `AddInfoPlist` | Add or update an Info.plist entry through Xcode's project model |
+| Project creation | `XcodeListTemplates` | List templates available for project or target creation |
+| Project creation | `XcodeNewProject` | Create a project from a template |
+| Project creation | `XcodeNewTarget` | Add a target from a template |
+| Test plans | `XcodeListTestPlans` | List test plans in the selected workspace |
+| Test plans | `XcodeSwitchTestPlan` | Change the active test plan |
+| Device interaction | `DeviceInteractionStartWorkspaceSession` | Start device interaction from a headless workspace |
+
+The headless catalog does not advertise `XcodeListWindows`,
+`XcodeGetCurrentFile`, or `XcodeListNavigatorIssues`. These depend on GUI
+window, editor, or navigator state. Consumers must detect
+`XcodeListWorkspaces` versus `XcodeListWindows` from `tools/list`; Xcode version
+strings are not a reliable routing contract.
+
+### Workspace lifecycle and approval bootstrap
+
+The verified headless lifecycle is:
+
+1. Call `tools/list`; catalog discovery does not require an open workspace.
+2. Call `XcodeOpenWorkspace` with required `path`.
+3. Keep the returned `workspaceIdentifier` and optional `workspacePath`.
+4. Pass that identifier to workspace-scoped tools when their current schema
+   advertises `workspaceIdentifier`.
+5. Call `XcodeCloseWorkspace` with the same identifier only if this client
+   opened the workspace.
+
+`XcodeOpenWorkspace` is also the first-use approval boundary for the agent
+identity and containing folder. Before approval, `XcodeListWorkspaces` and
+other workspace calls can return an actionable tool error directing the caller
+to open or create a workspace. `xcrun mcp-server open <path>` administers the
+shared service but does not replace this approval bootstrap.
+
+XcodeMCPKit never enables headless access, approves an agent or folder, broadens
+permission policy, or stops Xcode Service. The service is process-shared; a
+client owns only its `mcpbridge` child and workspace handles it explicitly
+acquired.
+
+### Schema differences
+
+- GUI workspace tools use `tabIdentifier`; headless workspace tools advertise
+  optional `workspaceIdentifier`, described as either the identifier returned
+  by `XcodeOpenWorkspace` or an absolute workspace path.
+- `XcodeOpenWorkspace` requires `path` and returns required
+  `workspaceIdentifier` plus optional `workspacePath`, `activeScheme`,
+  `activeRunDestination`, and `message` fields.
+- `XcodeListWorkspaces` takes no arguments.
+- `XcodeCloseWorkspace` requires `workspaceIdentifier`.
+- `DeviceInteractionStartWorkspaceSession` requires `sessionIdentifier`,
+  accepts optional `workspaceIdentifier`, and returns
+  `interactionSessionKey`.
+- Follow-up device calls retain two key spellings:
+  `DeviceInteractionSynthesize` requires `interactSessionKey`, while
+  `DeviceInteractionInstallAndRun` and `DeviceInteractionEndSession` require
+  `interactionSessionKey`.
+
+The live verifier writes the full raw headless catalog to
+`ProxyToolVerifierOutput/headless-tool-catalog.json`. It validates a planned
+call's arguments against that run's input schema, reports unknown or unsafe
+tools as `not-planned`, and preserves raw `MCPProgress` payloads for build and
+test operations in `report.json`.
+
+## Xcode 27 GUI Additions over Xcode 26.6
 
 | Category | Tool | Primary purpose |
 | --- | --- | --- |
@@ -336,7 +416,9 @@ valid version and signature.
 
 ## Practical Notes
 
-- Most added tools require `tabIdentifier`. Start with `XcodeListWindows` to select the target workspace tab.
+- In the GUI catalog, most tools require `tabIdentifier`; start with
+  `XcodeListWindows`. In the headless catalog, open the workspace and use the
+  returned `workspaceIdentifier` only where the advertised schema accepts it.
 - `XcodeSwitchScheme` and `XcodeSwitchRunDestination` change Xcode UI state. Use list tools for inspection-only workflows.
 - `RunProject`, `DeviceInteraction*`, `StringCatalogEdit`, and `UpdateFileCompilerFlags` change project, device, or file state. Prefer fixtures or scratch projects when validating them.
 - Organizer diagnostics may succeed at the MCP transport level while returning structured `success=false` for product, platform, App Store Connect, or Organizer availability issues. Treat this separately from an MCP error.

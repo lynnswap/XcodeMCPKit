@@ -202,6 +202,11 @@ extension ClientMCPRequestExecutor {
             let responseID = started.transform.responseID
             switch resolution {
             case .success(let responseData):
+                self.sessionManager.recordDeviceInteractionAffinityIfNeeded(
+                    requestData: bodyData,
+                    responseData: responseData,
+                    operationLease: started.operationLease
+                )
                 cancellationHandle?.markCompleted()
                 self.sessionManager.completeRequestLease(leaseID)
                 self.logFinishedRequest(

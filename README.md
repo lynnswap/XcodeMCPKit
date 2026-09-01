@@ -59,12 +59,30 @@ source ~/.zshrc
 
 ### 1. Enable Xcode MCP Access
 
-Open your project in Xcode, choose **Xcode > Settings > Intelligence**, and turn
-on **Allow external agents to use Xcode tools** under **Model Context Protocol**.
+XcodeMCPKit automatically uses Xcode 27's headless MCP service when it is
+available and enabled. This lets the proxy start before a project or workspace
+is open in the Xcode app. Enabling the service is an optional, one-time system
+setup performed by you:
+
+```bash
+sudo xcrun mcp-server enable
+```
+
+XcodeMCPKit never runs `sudo` or changes Xcode MCP permissions. If Xcode 27
+provides the service but it is disabled, startup prints the command above and
+continues with GUI Xcode routing. Older Xcode versions also continue with GUI
+routing.
+
+For GUI routing, open your project in Xcode, choose
+**Xcode > Settings > Intelligence**, and turn on
+**Allow external agents to use Xcode tools** under **Model Context Protocol**.
 See [Giving external agents access to Xcode][apple-xcode-mcp-access].
 
 This global Xcode setting is separate from the per-connection **Allow** dialog.
-`--auto-approve` handles the dialog; it does not enable Xcode MCP access.
+`--auto-approve` handles the GUI dialog; it does not enable headless MCP access.
+The first headless `XcodeOpenWorkspace` call can separately ask you to approve
+the agent and containing folder. Review that request in Xcode Service and
+approve it manually; XcodeMCPKit does not broaden headless permissions.
 
 ### 2. Start the Proxy Server
 
@@ -72,7 +90,7 @@ This global Xcode setting is separate from the per-connection **Allow** dialog.
 xcode-mcp-proxy-server --auto-approve
 ```
 
-`--auto-approve` clicks the Xcode **Allow** button automatically. In
+In GUI mode, `--auto-approve` clicks the Xcode **Allow** button automatically. In
 **System Settings > Privacy & Security > Accessibility**, allow the app that
 launches the proxy (for example, Terminal or iTerm).
 
@@ -125,9 +143,10 @@ xcode-mcp-proxy --help
 |--------|-------------|
 | `--listen host:port` | Listen address. Defaults to `localhost:8765`. |
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. |
-| `--upstream-processes n` | Number of upstream `mcpbridge` processes per running Xcode process when the default `xcrun mcpbridge` upstream is used. Default: `1`, max: `10`. |
+| `--upstream-processes n` | Upstream `mcpbridge` count: per running Xcode in GUI mode, or total unbound pool size in headless/custom mode. Default: `1`, max: `10`. |
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialize still has a bounded handshake timeout. |
 | `--config path` | TOML config path. |
+| `--xcode-mode automatic|gui|headless` | Select Xcode routing. `automatic` (default) uses enabled headless MCP when available and otherwise uses GUI routing. `headless` fails instead of falling back. |
 | `--auto-approve` | Automatically approve the Xcode permission dialog. Requires Accessibility permission. |
 | `--refresh-code-issues-mode proxy|upstream` | Serve `XcodeRefreshCodeIssuesInFile` through proxy diagnostics (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`). |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port and start a new one. |
@@ -138,7 +157,7 @@ xcode-mcp-proxy --help
 |----------|-------------|
 | `LISTEN` | Listen address, for example `127.0.0.1:8765`. |
 | `HOST` / `PORT` | Listen host and port when `LISTEN` is unset. |
-| `MCP_XCODE_PID` | Set by the proxy on process-bound upstream `mcpbridge` children. An inherited value is only passed through when process-bound Xcode routing is not active. |
+| `MCP_XCODE_PID` | Set by the proxy on GUI process-bound upstream `mcpbridge` children. Headless routing leaves the stock bridge unbound. An inherited value is only passed through when process-bound Xcode routing is not active. |
 | `MCP_XCODE_SESSION_ID` | Optional explicit upstream Xcode MCP session ID. |
 | `MCP_XCODE_CONFIG` | TOML config path. `--config` takes precedence. |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream`. |

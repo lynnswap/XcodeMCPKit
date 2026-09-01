@@ -528,6 +528,18 @@ extension RuntimeCoordinator {
         markRequestSucceeded(operationLease)
     }
 
+    private func validatesForwardingAdmission(
+        _ admission: RouteForwardingAdmission?,
+        operationLease: UpstreamOperationLease
+    ) -> Bool {
+        guard let admission else { return true }
+        guard admission.proof(for: operationLease.upstreamIndex) == operationLease.proof else {
+            return false
+        }
+        guard let route = admission.route else { return true }
+        return processControlPlane.validate(route)
+    }
+
     @discardableResult
     func sendUpstream(
         _ data: Data,
@@ -561,13 +573,13 @@ extension RuntimeCoordinator {
             requestSendCompletion?.complete(.notSent)
             return false
         }
-        if let admission {
-            guard processControlPlane.validate(admission.route),
-                  admission.proof(for: upstreamIndex) == operationLease.proof else {
-                onRejected()
-                requestSendCompletion?.complete(.notSent)
-                return false
-            }
+        guard validatesForwardingAdmission(
+            admission,
+            operationLease: operationLease
+        ) else {
+            onRejected()
+            requestSendCompletion?.complete(.notSent)
+            return false
         }
         var scheduled = false
         guard initializeManager.performIfRunning({
@@ -590,13 +602,13 @@ extension RuntimeCoordinator {
                     onRejected()
                     return
                 }
-                if let admission {
-                    guard self.processControlPlane.validate(admission.route),
-                          admission.proof(for: upstreamIndex) == operationLease.proof else {
-                        requestSendCompletion?.complete(.notSent)
-                        onRejected()
-                        return
-                    }
+                guard self.validatesForwardingAdmission(
+                    admission,
+                    operationLease: operationLease
+                ) else {
+                    requestSendCompletion?.complete(.notSent)
+                    onRejected()
+                    return
                 }
                 let result = await operationLease.slot.send(data)
                 requestSendCompletion?.complete(
