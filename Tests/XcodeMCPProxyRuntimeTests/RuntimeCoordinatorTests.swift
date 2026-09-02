@@ -6996,6 +6996,11 @@ struct RuntimeCoordinatorRecoveryTests {
         }
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/list")
+        _ = try await waitWithTimeout("waiting for first tools/list waiter to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
+        }
 
         uptimeClock.advance(by: .nanoseconds(120_000_001))
 
@@ -7006,18 +7011,18 @@ struct RuntimeCoordinatorRecoveryTests {
             )
         }
 
-        try await waitForSentCount(upstream, count: 5, timeoutSeconds: 2)
-        let firstCancellation = try await sentValue(
-            from: upstream,
-            at: 3,
-            timeout: .seconds(2)
+        let firstCancellation = try await upstream.nextSent(
+            startingAt: 3,
+            matching: { methodName(from: $0) == "notifications/cancelled" }
         )
         #expect(
             try extractCancellationRequestID(from: firstCancellation)
                 == extractUpstreamID(from: firstRequest)
         )
-        let secondRequest = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
-        #expect(methodName(from: secondRequest) == "tools/list")
+        _ = try await upstream.nextSent(
+            startingAt: 3,
+            matching: { methodName(from: $0) == "tools/list" }
+        )
 
         firstTask.cancel()
         secondTask.cancel()
@@ -7120,6 +7125,11 @@ struct RuntimeCoordinatorRecoveryTests {
         }
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/list")
+        _ = try await waitWithTimeout("waiting for first tools/list waiter to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
+        }
 
         uptimeClock.advance(by: .nanoseconds(120_000_001))
 
@@ -7130,14 +7140,21 @@ struct RuntimeCoordinatorRecoveryTests {
             )
         }
         try await upstream.waitForBlockedCancellation()
-        let firstCancellation = try await sentValue(
-            from: upstream,
-            at: 3,
-            timeout: .seconds(2)
+        let firstCancellation = try await upstream.nextSent(
+            startingAt: 3,
+            matching: { methodName(from: $0) == "notifications/cancelled" }
         )
         #expect(
             try extractCancellationRequestID(from: firstCancellation)
                 == extractUpstreamID(from: firstRequest)
+        )
+        _ = try await waitWithTimeout("waiting for promoted tools/list waiters to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 2
+            }
+        }
+        let sharedLoadID = try #require(
+            await manager.controlPlaneCoordinator.toolsCatalogLoad?.loadID
         )
 
         uptimeClock.advance(by: .nanoseconds(120_000_001))
@@ -7154,8 +7171,7 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 3
             }
         }
-        let sentCount = await upstream.sentCount()
-        #expect(sentCount == 4)
+        #expect(await manager.controlPlaneCoordinator.toolsCatalogLoad?.loadID == sharedLoadID)
         await upstream.releaseBlockedCancellation()
 
         firstTask.cancel()
@@ -7201,6 +7217,11 @@ struct RuntimeCoordinatorRecoveryTests {
             )
         }
         _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        _ = try await waitWithTimeout("waiting for first promoted tools/list waiter to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
+        }
 
         uptimeClock.advance(by: .nanoseconds(120_000_001))
 
@@ -7210,7 +7231,15 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        _ = try await upstream.nextSent(
+            startingAt: 3,
+            matching: { methodName(from: $0) == "notifications/cancelled" }
+        )
+        _ = try await waitWithTimeout("waiting for promoted tools/list waiters to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 2
+            }
+        }
 
         firstTask.cancel()
         do {
@@ -13455,6 +13484,13 @@ struct RuntimeCoordinatorWindowRoutingTests {
             )
         }
         _ = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        _ = try await waitWithTimeout(
+            "waiting for first promoted XcodeListWindows waiter to attach"
+        ) {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.windows == 1
+            }
+        }
 
         uptimeClock.advance(by: .nanoseconds(120_000_001))
 
@@ -13464,7 +13500,17 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        _ = try await upstream.nextSent(
+            startingAt: 3,
+            matching: { methodName(from: $0) == "notifications/cancelled" }
+        )
+        _ = try await waitWithTimeout(
+            "waiting for promoted XcodeListWindows waiters to attach"
+        ) {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.windows == 2
+            }
+        }
 
         firstTask.cancel()
         do {
