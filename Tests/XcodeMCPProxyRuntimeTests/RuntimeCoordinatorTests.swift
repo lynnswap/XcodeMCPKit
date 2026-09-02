@@ -7011,18 +7011,24 @@ struct RuntimeCoordinatorRecoveryTests {
             )
         }
 
-        let firstCancellation = try await upstream.nextSent(
-            startingAt: 3,
-            matching: { methodName(from: $0) == "notifications/cancelled" }
-        )
+        let firstCancellation = try await waitWithTimeout(
+            "waiting for promoted tools/list cancellation"
+        ) {
+            try await upstream.nextSent(
+                startingAt: 3,
+                matching: { methodName(from: $0) == "notifications/cancelled" }
+            )
+        }
         #expect(
             try extractCancellationRequestID(from: firstCancellation)
                 == extractUpstreamID(from: firstRequest)
         )
-        _ = try await upstream.nextSent(
-            startingAt: 3,
-            matching: { methodName(from: $0) == "tools/list" }
-        )
+        _ = try await waitWithTimeout("waiting for replacement tools/list request") {
+            try await upstream.nextSent(
+                startingAt: 3,
+                matching: { methodName(from: $0) == "tools/list" }
+            )
+        }
 
         firstTask.cancel()
         secondTask.cancel()
@@ -7140,10 +7146,14 @@ struct RuntimeCoordinatorRecoveryTests {
             )
         }
         try await upstream.waitForBlockedCancellation()
-        let firstCancellation = try await upstream.nextSent(
-            startingAt: 3,
-            matching: { methodName(from: $0) == "notifications/cancelled" }
-        )
+        let firstCancellation = try await waitWithTimeout(
+            "waiting for shared tools/list cancellation"
+        ) {
+            try await upstream.nextSent(
+                startingAt: 3,
+                matching: { methodName(from: $0) == "notifications/cancelled" }
+            )
+        }
         #expect(
             try extractCancellationRequestID(from: firstCancellation)
                 == extractUpstreamID(from: firstRequest)
@@ -7231,10 +7241,12 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        _ = try await upstream.nextSent(
-            startingAt: 3,
-            matching: { methodName(from: $0) == "notifications/cancelled" }
-        )
+        _ = try await waitWithTimeout("waiting for migrated tools/list cancellation") {
+            try await upstream.nextSent(
+                startingAt: 3,
+                matching: { methodName(from: $0) == "notifications/cancelled" }
+            )
+        }
         _ = try await waitWithTimeout("waiting for promoted tools/list waiters to attach") {
             try await manager.controlPlaneDebugMirror.waitForSnapshot {
                 $0.waiterCounts.toolsCatalog == 2
@@ -13500,10 +13512,12 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        _ = try await upstream.nextSent(
-            startingAt: 3,
-            matching: { methodName(from: $0) == "notifications/cancelled" }
-        )
+        _ = try await waitWithTimeout("waiting for migrated XcodeListWindows cancellation") {
+            try await upstream.nextSent(
+                startingAt: 3,
+                matching: { methodName(from: $0) == "notifications/cancelled" }
+            )
+        }
         _ = try await waitWithTimeout(
             "waiting for promoted XcodeListWindows waiters to attach"
         ) {
