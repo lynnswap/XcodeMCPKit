@@ -228,6 +228,17 @@ extension RuntimeCoordinator {
         guard uncachedExposures.isEmpty == false else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
+        let uncachedProcessIDs = Set(uncachedExposures.map(\.route.target.processID))
+        if let surface = currentSurface,
+           let sourceProof = surface.sourceProof {
+            return CanonicalToolsCatalogLoadResult(
+                rawResult: surface.rawResult,
+                sourceProof: sourceProof,
+                durationMilliseconds: elapsedMilliseconds(
+                    sinceUptimeNanoseconds: startedAt
+                )
+            )
+        }
         let routes = uncachedExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
             guard let preferred = exposure.usableUpstreamIDs.first,
                   let preferredProof = upstreamTopology.operationLease(for: preferred)?.proof,
@@ -254,14 +265,19 @@ extension RuntimeCoordinator {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
 
-        return try await loadAvailableToolsCatalogsInBatch(
+        let result = try await loadAvailableToolsCatalogsInBatch(
             routes,
             requestTimeout: requestTimeout,
             deadlineUptimeNs: deadlineUptimeNs,
             startedAt: startedAt,
             exposedProcessIDs: exposedProcessIDs,
-            returnAfterFirstSuccess: false
+            returnAfterFirstSuccess: true
         )
+        refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "foreground_first_catalog",
+            processIDs: uncachedProcessIDs
+        )
+        return result
     }
 
     private func loadAvailableToolsCatalogsInBatch(
