@@ -957,6 +957,33 @@ struct ControlPlaneAuthorityTests {
         #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["Foreground"])
     }
 
+    @Test func backgroundCatalogAdmissionCoalescesWhileForegroundCanJoin() throws {
+        let target = xcodeProcessTarget(processID: 41050, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [0])])
+        let route = try #require(authority.route(forProcessID: target.processID))
+        let (background, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 1,
+            allowsConcurrentLoad: false
+        ))
+
+        #expect(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 2,
+            allowsConcurrentLoad: false
+        ) == nil)
+
+        let (foreground, _) = try #require(authority.beginCatalogAttempt(
+            routeID: route.id,
+            preferredUpstreamProof: testTopologyProof(0),
+            nowUptimeNanoseconds: 3
+        ))
+        #expect(foreground.attempt == background.attempt)
+        #expect(foreground != background)
+    }
+
     @Test func catalogCommitUsesActualFallbackResponseProof() throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }

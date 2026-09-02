@@ -2470,6 +2470,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let secondInitialize = try await secondUpstream.nextSent(
             matching: { methodName(from: $0) == "initialize" }
         )
+        let pendingInitialize = fixture.registerInitialize(
+            requestID: 27021,
+            sessionID: "session-compatible-sibling-first-success"
+        )
 
         await firstUpstream.yield(
             .message(
@@ -2490,6 +2494,15 @@ struct RuntimeCoordinatorProcessRoutingTests {
         _ = try await secondUpstream.nextSent(
             matching: { methodName(from: $0) == "notifications/initialized" }
         )
+        let downstreamInitialize = try decodeJSON(
+            from: try await waitWithTimeout(
+                "waiting for compatible sibling to complete downstream initialize"
+            ) {
+                try await pendingInitialize.get()
+            }
+        )
+        #expect(downstreamInitialize["result"] != nil)
+        #expect(fixture.manager.canonicalHandshakeState.initializeSourceUpstream() == 1)
         let secondTools = try await secondUpstream.nextSent(
             matching: { methodName(from: $0) == "tools/list" }
         )
@@ -7508,7 +7521,7 @@ struct RuntimeCoordinatorRecoveryTests {
         }
     }
 
-    @Test func sessionManagerToolsListWaitsForCompleteCatalogDespiteKnownOwner()
+    @Test func sessionManagerToolsListReturnsAvailableCatalogDespiteKnownOwner()
         async throws
     {
         let group = borrowSharedTestEventLoopGroup()
@@ -7519,7 +7532,7 @@ struct RuntimeCoordinatorRecoveryTests {
         let latestTarget = xcodeProcessTarget(processID: 80422, xcodeVersion: "27.0")
         let olderTarget = xcodeProcessTarget(processID: 66333, xcodeVersion: "26.6")
         let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
+            config: makeConfig(requestTimeout: 0),
             eventLoop: eventLoop,
             upstreams: [olderUpstream, latestUpstream],
             xcodeProcessRoutes: [
@@ -7531,6 +7544,15 @@ struct RuntimeCoordinatorRecoveryTests {
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "known-owner-first-success"],
+            ]),
+            sourceUpstream: 1
+        )
         #expect(
             manager.recordXcodeWindowOwners(
                 from: try jsonValue([
@@ -7545,7 +7567,7 @@ struct RuntimeCoordinatorRecoveryTests {
         let task = Task {
             try await manager.sharedToolsList(
                 sessionID: "session-process-catalog-available-owner",
-                requestTimeoutOverride: .seconds(5)
+                requestTimeoutOverride: nil
             )
         }
 
@@ -7564,23 +7586,37 @@ struct RuntimeCoordinatorRecoveryTests {
                 )
             )
         )
+        let partial = try await waitWithTimeout("waiting for available process catalog") {
+            try await task.value
+        }
+        #expect(Set(toolNames(in: partial)) == Set(["Only27", "SharedTool"]))
+        #expect(toolDescription(in: partial, name: "SharedTool") == "from-27")
         #expect(manager.cachedToolsListResult() == nil)
+        let cancellation = try await olderUpstream.nextSent(
+            startingAt: 1,
+            matching: { methodName(from: $0) == "notifications/cancelled" }
+        )
+        #expect(
+            try extractCancellationRequestID(from: cancellation)
+                == extractUpstreamID(from: olderRequest)
+        )
+        let backgroundRequest = try await olderUpstream.nextSent(
+            startingAt: 2,
+            matching: { methodName(from: $0) == "tools/list" }
+        )
         await olderUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: olderRequest),
+                    id: try extractUpstreamID(from: backgroundRequest),
                     tools: [
                         toolDescriptor(name: "Only26", description: "old-only")
                     ]
                 )
             )
         )
-
-        let result = try await waitWithTimeout("waiting for process-routed tools/list") {
-            try await task.value
+        _ = try await waitWithTimeout("waiting for complete process catalog") {
+            await manager.drainRuntimeTasksForTesting()
         }
-        #expect(Set(toolNames(in: result)) == Set(["Only26", "Only27", "SharedTool"]))
-        #expect(toolDescription(in: result, name: "SharedTool") == "from-27")
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 1)
         #expect(
             Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
@@ -7592,7 +7628,7 @@ struct RuntimeCoordinatorRecoveryTests {
                     "Only27",
                     "SharedTool",
                 ]))
-        #expect(await olderUpstream.sentCount() == 1)
+        #expect(await olderUpstream.sentCount() == 3)
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let catalogs = manager.debugSnapshot().processToolCatalogs
@@ -7629,6 +7665,15 @@ struct RuntimeCoordinatorRecoveryTests {
         )
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "fallback-owner"],
+            ]),
+            sourceUpstream: 0
+        )
 
         let fallbackTask = Task {
             try await manager.sharedToolsList(
@@ -7668,15 +7713,17 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["FallbackOnly"])
         manager.markUpstreamInitialized(upstreamIndex: 1)
         #expect(manager.cachedToolsListResult() == nil)
-
-        let ownerTask = Task {
-            try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-after-owner",
-                requestTimeoutOverride: .seconds(5)
-            )
-        }
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_owner_catalog_background_refresh",
+            processIDs: [ownerTarget.processID]
+        )
         let ownerRequest = try await sentValue(from: ownerUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: ownerRequest) == "tools/list")
+        let ownerResult = try await manager.sharedToolsList(
+            sessionID: "session-process-catalog-after-owner",
+            requestTimeoutOverride: nil
+        )
+        #expect(toolNames(in: ownerResult) == ["FallbackOnly"])
         await ownerUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -7687,10 +7734,9 @@ struct RuntimeCoordinatorRecoveryTests {
                 )
             )
         )
-        let ownerResult = try await waitWithTimeout("waiting for owner tools/list") {
-            try await ownerTask.value
+        _ = try await waitWithTimeout("waiting for owner catalog completion") {
+            await manager.drainRuntimeTasksForTesting()
         }
-        #expect(Set(toolNames(in: ownerResult)) == Set(["FallbackOnly", "OwnerOnly"]))
         #expect(
             Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
                 == Set([
@@ -7701,7 +7747,7 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(await ownerUpstream.sentCount() == 1)
     }
 
-    @Test func sessionManagerToolsListWaitsForStalledRouteBeforePublishingCompleteCatalog()
+    @Test func sessionManagerToolsListReturnsFirstCatalogAndCompletesMissingRouteInBackground()
         async throws
     {
         let group = borrowSharedTestEventLoopGroup()
@@ -7711,24 +7757,44 @@ struct RuntimeCoordinatorRecoveryTests {
         let newerUpstream = TestUpstreamClient()
         let olderTarget = xcodeProcessTarget(processID: 66338, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 80425, xcodeVersion: "27.0")
+        let catalogCommits = LockedRecordedValues<(pid_t, Int)>()
         let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
+            config: makeConfig(requestTimeout: 0),
             eventLoop: eventLoop,
             upstreams: [olderUpstream, newerUpstream],
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: newerTarget, upstreamIndices: [1]),
             ],
+            testHooks: RuntimeCoordinatorTestHooks(
+                processRouteCatalogCommitted: { catalogCommits.append(($0, $1)) }
+            ),
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "catalog-first-success"],
+            ]),
+            sourceUpstream: 1
+        )
+        let notificationSessionID = "session-process-catalog-first-success-notifications"
+        let notificationSession = manager.session(id: notificationSessionID)
+        manager.sessionRegistry.markInitialized(
+            id: notificationSessionID,
+            negotiatedProtocolVersion: MCP.ProtocolVersion.current
+        )
+        _ = notificationSession.router.drainBufferedNotifications()
 
         let task = Task {
             try await manager.sharedToolsList(
                 sessionID: "session-process-catalog-later-usable-route",
-                requestTimeoutOverride: .seconds(5)
+                requestTimeoutOverride: nil
             )
         }
 
@@ -7741,33 +7807,113 @@ struct RuntimeCoordinatorRecoveryTests {
                 try makeDocumentationToolsListResponse(
                     id: try extractUpstreamID(from: newerRequest),
                     tools: [
-                        toolDescriptor(name: "NewerRouteOnly")
+                        toolDescriptor(name: "NewerRouteOnly"),
+                        toolDescriptor(name: "XcodeListWindows"),
                     ]
                 )
             )
         )
+        let partial = try await waitWithTimeout(
+            "waiting for first usable process catalog"
+        ) {
+            try await task.value
+        }
+        #expect(Set(toolNames(in: partial)) == Set(["NewerRouteOnly", "XcodeListWindows"]))
         #expect(manager.cachedToolsListResult() == nil)
-        #expect(await olderUpstream.sentCount() == 1)
-        #expect(await newerUpstream.sentCount() == 1)
+        #expect(
+            Set(toolNames(in: manager.cachedToolsListResult(forUpstreamIndex: 1) ?? .null))
+                == Set(["NewerRouteOnly", "XcodeListWindows"])
+        )
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
+        let cancellation = try await olderUpstream.nextSent(
+            startingAt: 1,
+            matching: { methodName(from: $0) == "notifications/cancelled" }
+        )
+        #expect(
+            try extractCancellationRequestID(from: cancellation)
+                == extractUpstreamID(from: olderRequest)
+        )
+        let backgroundRequest = try await olderUpstream.nextSent(
+            startingAt: 2,
+            matching: { methodName(from: $0) == "tools/list" }
+        )
+        #expect(try extractUpstreamID(from: backgroundRequest) != extractUpstreamID(from: olderRequest))
+        #expect(await olderUpstream.sentCount() == 3)
+        #expect(await newerUpstream.sentCount() == 1)
+        _ = notificationSession.router.drainBufferedNotifications()
+
+        let windowsTask = Task {
+            try await manager.liveXcodeListWindowsResult(
+                route: .anyHealthy,
+                requestTimeoutOverride: nil
+            )
+        }
+        let windowsRequest = try await newerUpstream.nextSent(
+            startingAt: 1,
+            matching: {
+                methodName(from: $0) == "tools/call"
+                    && toolCallName(from: $0) == "XcodeListWindows"
+            }
+        )
+        #expect(await olderUpstream.sentCount() == 3)
+        await newerUpstream.yield(
+            .message(
+                try makeXcodeListWindowsResponse(
+                    id: try extractUpstreamID(from: windowsRequest),
+                    message: "* tabIdentifier: tab-newer, workspacePath: /Work/Newer.xcworkspace"
+                )
+            )
+        )
+        _ = try await waitWithTimeout("waiting for cataloged-route window discovery") {
+            try await windowsTask.value
+        }
+
+        let repeatedPartial = try await manager.sharedToolsList(
+            sessionID: "session-process-catalog-existing-partial",
+            requestTimeoutOverride: nil
+        )
+        #expect(
+            Set(toolNames(in: repeatedPartial))
+                == Set(["NewerRouteOnly", "XcodeListWindows"])
+        )
+        #expect(await olderUpstream.sentCount() == 3)
+        let abandonedLease = try #require(
+            manager.debugSnapshot().leases.first {
+                $0.label == "tools/list"
+                    && $0.upstreamIndex == 0
+                    && $0.state == .abandoned
+                    && $0.releaseReason == "clientDisconnected"
+            }
+        )
+        #expect(abandonedLease.requestIDKey != nil)
+        #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 1)
 
         await olderUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: olderRequest),
+                    id: try extractUpstreamID(from: backgroundRequest),
                     tools: [
                         toolDescriptor(name: "OlderRouteOnly")
                     ]
                 )
             )
         )
-        let result = try await waitWithTimeout("waiting for complete process catalog") {
-            try await task.value
+        let backgroundCommit = try await nextRecordedValue(catalogCommits, at: 1)
+        #expect(backgroundCommit.0 == olderTarget.processID)
+        #expect(backgroundCommit.1 == 0)
+        _ = try await waitWithTimeout("waiting for background catalog completion") {
+            await manager.drainRuntimeTasksForTesting()
         }
-        #expect(Set(toolNames(in: result)) == Set(["NewerRouteOnly", "OlderRouteOnly"]))
         #expect(
-            Set(toolNames(in: manager.cachedToolsListResult() ?? .null)) == Set(["NewerRouteOnly", "OlderRouteOnly"]))
+            Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
+                == Set(["NewerRouteOnly", "OlderRouteOnly", "XcodeListWindows"])
+        )
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
+        let notificationMethods = notificationSession.router.drainBufferedNotifications().compactMap {
+            methodName(from: $0)
+        }
+        #expect(notificationMethods == ["notifications/tools/list_changed"])
+        #expect(notificationSession.router.drainBufferedNotifications().isEmpty)
     }
 
     @Test func sessionManagerToolsListCompletesCachedProcessCatalogWithFreshRoutes()
@@ -7797,22 +7943,33 @@ struct RuntimeCoordinatorRecoveryTests {
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
         manager.markUpstreamInitialized(upstreamIndex: 2)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-fresh-routes"],
+            ]),
+            sourceUpstream: 0
+        )
         try seedProcessToolCatalogs(
             on: manager,
             entries: [(olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")])]
         )
-
-        let task = Task {
-            try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-cached-union",
-                requestTimeoutOverride: .seconds(5)
-            )
-        }
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_cached_fresh_routes_background_refresh",
+            processIDs: [middleTarget.processID, latestTarget.processID]
+        )
 
         let middleRequest = try await sentValue(from: middleUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: middleRequest) == "tools/list")
         let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: latestRequest) == "tools/list")
+        let partial = try await manager.sharedToolsList(
+            sessionID: "session-process-catalog-cached-union",
+            requestTimeoutOverride: nil
+        )
+        #expect(toolNames(in: partial) == ["OlderRouteOnly"])
         await latestUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -7833,18 +7990,9 @@ struct RuntimeCoordinatorRecoveryTests {
                 )
             )
         )
-
-        let result = try await waitWithTimeout("waiting for cached process catalog surface") {
-            try await task.value
+        _ = try await waitWithTimeout("waiting for complete cached process catalog") {
+            await manager.drainRuntimeTasksForTesting()
         }
-
-        #expect(
-            Set(toolNames(in: result))
-                == Set([
-                    "LatestRouteOnly",
-                    "MiddleRouteOnly",
-                    "OlderRouteOnly",
-                ]))
         #expect(manager.cachedToolsListResult() != nil)
         #expect(await olderUpstream.sentCount() == 0)
         #expect(await middleUpstream.sentCount() == 1)
@@ -7887,22 +8035,33 @@ struct RuntimeCoordinatorRecoveryTests {
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-fresh-failure"],
+            ]),
+            sourceUpstream: 0
+        )
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")])
             ]
         )
-
-        let task = Task {
-            try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-cached-fresh-fails",
-                requestTimeoutOverride: .seconds(5)
-            )
-        }
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_cached_fresh_failure_background_refresh",
+            processIDs: [latestTarget.processID]
+        )
 
         let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: latestRequest) == "tools/list")
+        let result = try await manager.sharedToolsList(
+            sessionID: "session-process-catalog-cached-fresh-fails",
+            requestTimeoutOverride: nil
+        )
+        #expect(toolNames(in: result) == ["OlderRouteOnly"])
         await latestUpstream.yield(
             .message(
                 try JSONSerialization.data(
@@ -7917,12 +8076,9 @@ struct RuntimeCoordinatorRecoveryTests {
                 )
             )
         )
-
-        let result = try await waitWithTimeout("waiting for cached process catalog fallback") {
-            try await task.value
+        _ = try await waitWithTimeout("waiting for failed background catalog cleanup") {
+            await manager.drainRuntimeTasksForTesting()
         }
-
-        #expect(toolNames(in: result) == ["OlderRouteOnly"])
         #expect(manager.cachedToolsListResult() == nil)
         #expect(toolNames(in: manager.cachedToolsListResult(forUpstreamIndex: 0) ?? .null) == ["OlderRouteOnly"])
         #expect(await olderUpstream.sentCount() == 0)
@@ -8296,7 +8452,7 @@ struct RuntimeCoordinatorRecoveryTests {
         await manager.drainRuntimeTasksForTesting()
     }
 
-    @Test func sessionManagerToolsListWaitsWhileCachedProcessCatalogIsIncomplete()
+    @Test func sessionManagerToolsListReturnsCachedPartialWhileBackgroundCatalogIsIncomplete()
         async throws
     {
         let group = borrowSharedTestEventLoopGroup()
@@ -8308,7 +8464,7 @@ struct RuntimeCoordinatorRecoveryTests {
         let latestTarget = xcodeProcessTarget(processID: 80428, xcodeVersion: "27.0")
         let toolsListRefreshes = NIOLockedValueBox<[String]>([])
         let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
+            config: makeConfig(requestTimeout: 0),
             eventLoop: eventLoop,
             upstreams: [olderUpstream, latestUpstream],
             xcodeProcessRoutes: [
@@ -8327,19 +8483,25 @@ struct RuntimeCoordinatorRecoveryTests {
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "cached-partial"],
+            ]),
+            sourceUpstream: 0
+        )
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")])
             ]
         )
-
-        let task = Task {
-            try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-cached-fresh-cancelled",
-                requestTimeoutOverride: .seconds(5)
-            )
-        }
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_cached_partial_background_refresh",
+            processIDs: [latestTarget.processID]
+        )
 
         let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: latestRequest) == "tools/list")
@@ -8350,6 +8512,17 @@ struct RuntimeCoordinatorRecoveryTests {
             manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
                 olderTarget.processID
             ])
+        let partial = try await manager.sharedToolsList(
+            sessionID: "session-process-catalog-cached-partial",
+            requestTimeoutOverride: nil
+        )
+        #expect(toolNames(in: partial) == ["OlderRouteOnly"])
+        let repeatedPartial = try await manager.sharedToolsList(
+            sessionID: "session-process-catalog-cached-partial-repeat",
+            requestTimeoutOverride: nil
+        )
+        #expect(toolNames(in: repeatedPartial) == ["OlderRouteOnly"])
+        #expect(await latestUpstream.sentCount() == 1)
 
         await latestUpstream.yield(
             .message(
@@ -8361,10 +8534,9 @@ struct RuntimeCoordinatorRecoveryTests {
                 )
             )
         )
-        let result = try await waitWithTimeout("waiting for complete process catalog") {
-            try await task.value
+        _ = try await waitWithTimeout("waiting for complete background process catalog") {
+            await manager.drainRuntimeTasksForTesting()
         }
-        #expect(Set(toolNames(in: result)) == Set(["LatestRouteOnly", "OlderRouteOnly"]))
         #expect(
             Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
                 == Set(["LatestRouteOnly", "OlderRouteOnly"])
@@ -9297,9 +9469,10 @@ struct RuntimeCoordinatorRecoveryTests {
             upstreamProof: manager.operationLeaseForTest(upstreamIndex: 0).proof
         )
 
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
-            reason: "test_overlap_background_refresh",
-            processIDs: [target.processID]
+        manager.refreshProcessRouteToolsCatalog(
+            route: route,
+            upstreamProof: manager.operationLeaseForTest(upstreamIndex: 0).proof,
+            reason: "test_overlap_background_refresh"
         )
         let backgroundRequest = try await sentValue(
             from: upstream,
@@ -9873,6 +10046,21 @@ struct RuntimeCoordinatorCatalogTests {
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
         manager.markUpstreamInitialized(upstreamIndex: 2)
+        let initializeResult = try jsonValue([
+            "protocolVersion": MCP.ProtocolVersion.current,
+            "capabilities": [String: Any](),
+            "serverInfo": ["name": "catalog-source"],
+        ])
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: initializeResult,
+            sourceUpstream: 0
+        )
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: initializeResult,
+            sourceUpstream: 1
+        )
         try seedProcessToolCatalogs(
             on: manager,
             entries: [
@@ -9891,18 +10079,20 @@ struct RuntimeCoordinatorCatalogTests {
                 == [remainingTarget.processID]
         )
         #expect(manager.processControlPlane.canonicalSourceUpstream() == nil)
-
-        let freshCatalogTask = Task {
-            try await manager.sharedToolsList(
-                sessionID: "session-resync-cleared-process-catalog",
-                requestTimeoutOverride: .seconds(5)
-            )
-        }
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_cleared_source_background_refresh",
+            processIDs: [clearedTarget.processID]
+        )
         let freshRequest = try await sentValue(
             from: clearedSibling,
             at: 0,
             timeout: .seconds(2)
         )
+        let available = try await manager.sharedToolsList(
+            sessionID: "session-resync-cleared-process-catalog",
+            requestTimeoutOverride: nil
+        )
+        #expect(toolNames(in: available) == ["RemainingOnlyTool"])
         await clearedSibling.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -9910,11 +10100,11 @@ struct RuntimeCoordinatorCatalogTests {
                     tools: [toolDescriptor(name: "ClearedFreshTool")]
                 ))
         )
-        let refreshed = try await waitWithTimeout("waiting for exact-source catalog reload") {
-            try await freshCatalogTask.value
+        _ = try await waitWithTimeout("waiting for exact-source catalog reload") {
+            await manager.drainRuntimeTasksForTesting()
         }
         #expect(
-            Set(toolNames(in: refreshed))
+            Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
                 == Set([
                     "ClearedFreshTool",
                     "RemainingOnlyTool",
@@ -9988,6 +10178,15 @@ struct RuntimeCoordinatorCatalogTests {
         )
         defer { manager.shutdownAndWait() }
         manager.markUpstreamInitialized(upstreamIndex: 1)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue([
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": [String: Any](),
+                "serverInfo": ["name": "warm-route"],
+            ]),
+            sourceUpstream: 1
+        )
 
         let task = Task {
             try await manager.sharedToolsList(
@@ -10021,13 +10220,16 @@ struct RuntimeCoordinatorCatalogTests {
 
         manager.markUpstreamInitialized(upstreamIndex: 0)
         #expect(manager.cachedToolsListResult() == nil)
-        let completeTask = Task {
-            try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-after-cold-warms",
-                requestTimeoutOverride: .seconds(5)
-            )
-        }
+        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+            reason: "test_cold_route_background_refresh",
+            processIDs: [coldTarget.processID]
+        )
         let coldRequest = try await sentValue(from: coldUpstream, at: 0, timeout: .seconds(2))
+        let stillAvailable = try await manager.sharedToolsList(
+            sessionID: "session-process-catalog-after-cold-warms",
+            requestTimeoutOverride: nil
+        )
+        #expect(toolNames(in: stillAvailable) == ["WarmOnlyTool"])
         await coldUpstream.yield(
             .message(
                 try makeDocumentationToolsListResponse(
@@ -10036,10 +10238,13 @@ struct RuntimeCoordinatorCatalogTests {
                 )
             )
         )
-        let complete = try await waitWithTimeout("waiting for newly warm process catalog") {
-            try await completeTask.value
+        _ = try await waitWithTimeout("waiting for newly warm process catalog") {
+            await manager.drainRuntimeTasksForTesting()
         }
-        #expect(Set(toolNames(in: complete)) == Set(["ColdOnlyTool", "WarmOnlyTool"]))
+        #expect(
+            Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
+                == Set(["ColdOnlyTool", "WarmOnlyTool"])
+        )
         #expect(await coldUpstream.sentCount() == 1)
         #expect(await warmUpstream.sentCount() == 1)
     }
