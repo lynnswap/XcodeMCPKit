@@ -9469,9 +9469,10 @@ struct RuntimeCoordinatorRecoveryTests {
             upstreamProof: manager.operationLeaseForTest(upstreamIndex: 0).proof
         )
 
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
-            reason: "test_overlap_background_refresh",
-            processIDs: [target.processID]
+        manager.refreshProcessRouteToolsCatalog(
+            route: route,
+            upstreamProof: manager.operationLeaseForTest(upstreamIndex: 0).proof,
+            reason: "test_overlap_background_refresh"
         )
         let backgroundRequest = try await sentValue(
             from: upstream,

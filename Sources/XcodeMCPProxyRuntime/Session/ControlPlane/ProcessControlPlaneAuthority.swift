@@ -1507,7 +1507,8 @@ final class ProcessControlPlaneAuthority: Sendable {
     func beginCatalogAttempt(
         routeID: ProcessRouteID,
         preferredUpstreamProof: UpstreamTopologyProof,
-        nowUptimeNanoseconds: UInt64
+        nowUptimeNanoseconds: UInt64,
+        allowsConcurrentLoad: Bool = true
     ) -> (CatalogLease, ProcessControlPlaneTransition)? {
         state.withLockedValue { state in
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNanoseconds)
@@ -1518,6 +1519,9 @@ final class ProcessControlPlaneAuthority: Sendable {
                   ) else { return nil }
             if var attempt = record.attempt,
                [.pending, .attaching, .initialized, .loadingCatalog].contains(attempt.phase) {
+                guard allowsConcurrentLoad || attempt.loads.isEmpty else {
+                    return nil
+                }
                 let effects = attempt.readinessToken.map {
                     [ProcessControlPlaneEffect.cancelReadinessWaiter($0)]
                 } ?? []

@@ -231,6 +231,10 @@ extension RuntimeCoordinator {
         let uncachedProcessIDs = Set(uncachedExposures.map(\.route.target.processID))
         if let surface = currentSurface,
            let sourceProof = surface.sourceProof {
+            refreshMissingProcessToolsCatalogsIfNeeded(
+                reason: "foreground_partial_catalog",
+                processIDs: uncachedProcessIDs
+            )
             return CanonicalToolsCatalogLoadResult(
                 rawResult: surface.rawResult,
                 sourceProof: sourceProof,
@@ -455,7 +459,8 @@ extension RuntimeCoordinator {
                   let preferredProof = upstreamTopology.operationLease(for: preferred)?.proof,
                   let (lease, transition) = beginProcessCatalogAttemptIfRunning(
                       routeID: exposure.route.id,
-                      preferredUpstreamProof: preferredProof
+                      preferredUpstreamProof: preferredProof,
+                      allowsConcurrentLoad: false
                   ) else { return nil }
             applyProcessControlPlaneTransition(transition)
             return AvailableToolsCatalogRoute(
@@ -496,7 +501,8 @@ extension RuntimeCoordinator {
 
     func beginProcessCatalogAttemptIfRunning(
         routeID: ProcessRouteID,
-        preferredUpstreamProof: UpstreamTopologyProof
+        preferredUpstreamProof: UpstreamTopologyProof,
+        allowsConcurrentLoad: Bool = true
     ) -> (CatalogLease, ProcessControlPlaneTransition)? {
         let nowUptimeNanoseconds = nowUptimeNanoseconds()
         var attempt: (CatalogLease, ProcessControlPlaneTransition)?
@@ -504,7 +510,8 @@ extension RuntimeCoordinator {
             attempt = processControlPlane.beginCatalogAttempt(
                 routeID: routeID,
                 preferredUpstreamProof: preferredUpstreamProof,
-                nowUptimeNanoseconds: nowUptimeNanoseconds
+                nowUptimeNanoseconds: nowUptimeNanoseconds,
+                allowsConcurrentLoad: allowsConcurrentLoad
             )
         }) else {
             return nil
