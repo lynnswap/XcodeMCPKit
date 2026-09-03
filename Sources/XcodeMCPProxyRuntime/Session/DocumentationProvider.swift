@@ -913,15 +913,17 @@ private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable 
     private var resolved = false
 
     func wait(
-        for task: Task<DocumentationSearchServiceRepairResult, Never>,
+        operation: @escaping @Sendable () async -> DocumentationSearchServiceRepairResult,
         timeout: TimeAmount,
         clock: ClockClient
     ) async -> Result {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                setContinuation(continuation)
+                guard setContinuation(continuation) else {
+                    return
+                }
                 addTask(Task {
-                    let result = await task.value
+                    let result = await operation()
                     self.resume(Result(repairResult: result, timedOut: false))
                 })
                 addTask(Task {
@@ -929,25 +931,24 @@ private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable 
                     guard Task.isCancelled == false else {
                         return
                     }
-                    task.cancel()
                     self.resume(Result(repairResult: nil, timedOut: true))
                 })
             }
         } onCancel: {
-            task.cancel()
             resume(Result(repairResult: nil, timedOut: true))
         }
     }
 
-    private func setContinuation(_ continuation: CheckedContinuation<Result, Never>) {
+    private func setContinuation(_ continuation: CheckedContinuation<Result, Never>) -> Bool {
         lock.lock()
         if resolved {
             lock.unlock()
             continuation.resume(returning: Result(repairResult: nil, timedOut: true))
-            return
+            return false
         }
         self.continuation = continuation
         lock.unlock()
+        return true
     }
 
     private func addTask(_ task: Task<Void, Never>) {
@@ -4183,8 +4184,9 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
         guard let timeout, timeout.nanoseconds > 0 else {
             return await serviceRepairer.repairDocumentationSearch(for: target)
         }
+        let serviceRepairer = serviceRepairer
         let result = await DocumentationSearchServiceRepairWaiter().wait(
-            for: Task {
+            operation: {
                 await serviceRepairer.repairDocumentationSearch(for: target)
             },
             timeout: timeout,
