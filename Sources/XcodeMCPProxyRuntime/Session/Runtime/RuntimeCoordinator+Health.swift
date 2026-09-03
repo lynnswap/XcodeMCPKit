@@ -299,7 +299,7 @@ extension RuntimeCoordinator {
               case .processBridgeAttachment(let verification) = probe.purpose else {
             return
         }
-        logger.info(
+        logger.debug(
             "bridge_pool_attach_verification_completed",
             metadata: [
                 "pid": .string("\(verification.recovery.routeID.processID)"),
@@ -963,7 +963,7 @@ extension RuntimeCoordinator {
                   replacesInitializedChannel: false
               )
         else { return }
-        logger.info(
+        logger.debug(
             "bridge_pool_recovery_timeout",
             metadata: [
                 "pid": .string("\(recovery.routeID.processID)"),

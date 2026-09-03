@@ -171,7 +171,7 @@ extension RuntimeCoordinator {
         let timeoutMs = upstreamInitTimeoutAmount(for: mode).map {
             $0.nanoseconds / 1_000_000
         }
-        logger.info(
+        logger.debug(
             "route_activation_started",
             metadata: [
                 "pid": .string("\(processID)"),
@@ -208,7 +208,7 @@ extension RuntimeCoordinator {
         processID: pid_t,
         upstreamIndex: Int
     ) {
-        logger.info(
+        logger.debug(
             "route_activation_initialized",
             metadata: [
                 "pid": .string("\(processID)"),
@@ -243,7 +243,7 @@ extension RuntimeCoordinator {
                   routeID: route.id,
                   upstreamProof: upstreamProof
               ) else { return }
-        logger.info(
+        logger.debug(
             "route_activation_initialized",
             metadata: [
                 "pid": .string("\(route.target.processID)"),
@@ -288,7 +288,7 @@ extension RuntimeCoordinator {
 
     func abandonProcessRouteActivation(processID: pid_t, reason: String) {
         applyProcessControlPlaneTransition(processControlPlane.abandon(processID: processID))
-        logger.info(
+        logger.debug(
             "route_activation_abandoned",
             metadata: [
                 "pid": .string("\(processID)"),
@@ -301,7 +301,7 @@ extension RuntimeCoordinator {
         let transition = processControlPlane.resetAttempt(processID: processID)
         guard transition.effects.isEmpty == false else { return }
         applyProcessControlPlaneTransition(transition)
-        logger.info(
+        logger.debug(
             "route_activation_abandoned",
             metadata: [
                 "pid": .string("\(processID)"),
@@ -349,7 +349,7 @@ extension RuntimeCoordinator {
         let reset = processControlPlane.resetAllAttempts()
         applyProcessControlPlaneTransition(reset.transition)
         for processID in reset.processIDs {
-            logger.info(
+            logger.debug(
                 "route_activation_abandoned",
                 metadata: [
                     "pid": .string("\(processID)"),
@@ -365,7 +365,7 @@ extension RuntimeCoordinator {
         lease: ActivationLease,
         reason: String
     ) {
-        logger.info(
+        logger.debug(
             "route_activation_retry_scheduled",
             metadata: [
                 "pid": .string("\(processID)"),
@@ -489,7 +489,7 @@ extension RuntimeCoordinator {
             return
         }
 
-        logger.info(
+        logger.debug(
             "route_activation_timeout",
             metadata: [
                 "pid": .string("\(lease.processID)"),
@@ -504,7 +504,7 @@ extension RuntimeCoordinator {
                 "retry_delay_ms": .string("\(retry.delayMilliseconds)"),
             ]
         )
-        if catalogTimeoutCount == 1 {
+        if processControlPlane.consumeToolsUnavailableWarningIfNeeded() {
             XcodeMCPToolsAvailabilityDiagnostic.logTimeout(
                 logger: logger,
                 processID: lease.processID,

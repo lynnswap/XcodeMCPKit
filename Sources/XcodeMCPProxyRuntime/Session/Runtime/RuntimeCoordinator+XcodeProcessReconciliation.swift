@@ -366,7 +366,7 @@ extension RuntimeCoordinator {
             reservation: recovery,
             topologyProof: proof
         )
-        logger.info(
+        logger.debug(
             "bridge_pool_recovery_started",
             metadata: [
                 "pid": .string("\(route.target.processID)"),
@@ -400,7 +400,7 @@ extension RuntimeCoordinator {
         _ retry: ProcessBridgeRecoveryRetry,
         reason: String
     ) {
-        logger.info(
+        logger.debug(
             "bridge_pool_recovery_retry_scheduled",
             metadata: [
                 "pid": .string("\(retry.reservation.routeID.processID)"),
@@ -410,7 +410,8 @@ extension RuntimeCoordinator {
                 "consecutive_failures": .string("\(retry.consecutiveFailureCount)"),
             ]
         )
-        if retry.shouldLogToolsUnavailableWarning {
+        if retry.failure == .toolsListTimeout,
+           processControlPlane.consumeToolsUnavailableWarningIfNeeded() {
             XcodeMCPToolsAvailabilityDiagnostic.logTimeout(
                 logger: logger,
                 processID: retry.reservation.routeID.processID,
