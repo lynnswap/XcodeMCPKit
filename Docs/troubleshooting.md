@@ -11,8 +11,7 @@ If it fails:
 Ensure the proxy server is running. Before increasing any timeout, confirm that
 Xcode MCP access is enabled as described in
 [Set Up Your MCP Client](../README.md#1-enable-xcode-mcp-access). If the proxy
-logs `route_activation_timeout`, or `bridge_pool_attach_verification_completed`
-with `success=false reason=timeout`, follow the dedicated section below.
+prints **Xcode tools are unavailable**, follow the dedicated section below.
 Increase `startup_timeout_sec` only when setup is correct and the upstream is
 still starting too slowly.
 
@@ -22,15 +21,18 @@ If you see an error like:
 
 it’s usually because the upstream (`xcrun mcpbridge` / Xcode) was slow on the first `tools/list`.
 
-- `xcode-mcp-proxy-server` prewarms and caches `tools/list` **in memory** once it’s ready, and serves it immediately on subsequent requests.
+- `xcode-mcp-proxy-server` caches each available process catalog **in memory**
+  and serves the current catalog surface immediately on subsequent requests.
 - The tool list cache is **not persisted to disk**. It survives repeated Codex restarts as long as the proxy server stays running.
-- `tools/list` is intentionally treated as stable for the lifetime of the proxy process (no background refresh), to avoid upstream churn and surprise Xcode permission dialogs.
+- Missing process catalogs continue loading in the background. They do not block
+  `tools/list` while another Xcode route has a usable catalog.
 
 ## Xcode tools are unavailable
-`route_activation_timeout`, or `bridge_pool_attach_verification_completed` with
-`success=false reason=timeout`, means `mcpbridge` initialized but Xcode did not
-return a usable `tools/list` response before the route or bridge-attachment
-deadline.
+The proxy prints this warning after an actual `tools/list` timeout only when no
+Xcode route has a usable tool catalog. An Xcode process without an open project
+or workspace is a normal route-local waiting state. If another route is usable,
+its timeout and recovery remain debug telemetry and do not report a proxy-wide
+outage.
 
 First, open your project in Xcode, choose **Xcode > Settings > Intelligence**,
 and turn on **Allow external agents to use Xcode tools** under
@@ -45,16 +47,22 @@ enable the global Xcode setting. If the setting is already on:
   example, Terminal or iTerm) in
   **System Settings > Privacy & Security > Accessibility**.
 - Wait for the proxy's automatic retry. A recovered route logs
-  `route_activation_cataloged`; a recovered secondary bridge logs
-  `bridge_pool_attach_verification_completed` with `success=true`.
+  `route_activation_cataloged` at the default log level.
 
 When Xcode does not send a JSON-RPC response for `tools/list`, the proxy cannot
-recover Xcode's internal error from the stdio transport. The first timeout
-therefore prints an **Xcode tools are unavailable** warning with recovery steps
-and continues retrying automatically. Later retries keep the structured event
-but do not repeat the warning.
+recover Xcode's internal error from the stdio transport. The first timeout while
+the proxy has no usable catalog on any route therefore prints the warning with
+recovery steps and continues retrying automatically. Later retries do not
+repeat it. A usable catalog resets the incident so a later complete outage can
+warn again.
+
+Set `MCP_LOG_LEVEL=debug` to inspect per-route events such as
+`route_activation_timeout`, `bridge_pool_attach_verification_completed`, retry
+scheduling, and readiness backoff.
 
 ## Streamable HTTP client cannot connect
+- Set `MCP_LOG_LEVEL=debug` when per-connection and per-request access logs are
+  needed; routine HTTP traffic is not printed at the default log level.
 - Ensure `xcode-mcp-proxy-server` is running.
 - Confirm the URL is correct (default: `http://localhost:8765/mcp`).
 - If you changed the listen address/port, check the discovery file: `~/Library/Caches/XcodeMCPProxy/endpoint.json`.

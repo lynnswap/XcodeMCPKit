@@ -150,7 +150,7 @@ struct HTTPResponseWriter: Sendable {
         if let remote = request.remoteAddress {
             metadata["remote"] = .string(remote)
         }
-        logger.info("HTTP request", metadata: metadata)
+        logger.debug("HTTP request", metadata: metadata)
     }
 
     func logResponse(
@@ -170,7 +170,7 @@ struct HTTPResponseWriter: Sendable {
         if let sessionID {
             metadata["session"] = .string(sessionID)
         }
-        logger.info("HTTP response", metadata: metadata)
+        logger.debug("HTTP response", metadata: metadata)
     }
 
     private func sendErrorPayload(

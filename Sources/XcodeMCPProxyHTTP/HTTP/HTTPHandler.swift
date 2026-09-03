@@ -107,9 +107,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
 
     func channelActive(context: ChannelHandlerContext) {
         if let remote = remoteAddressString(for: context.channel) {
-            logger.info("Client connected", metadata: ["remote": .string(remote)])
+            logger.debug("Client connected", metadata: ["remote": .string(remote)])
         } else {
-            logger.info("Client connected")
+            logger.debug("Client connected")
         }
     }
 
@@ -133,14 +133,14 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
         if let remote = remoteAddressString(for: context.channel) {
             if let sessionID {
-                logger.info("Client disconnected", metadata: ["remote": .string(remote), "session": .string(sessionID)])
+                logger.debug("Client disconnected", metadata: ["remote": .string(remote), "session": .string(sessionID)])
             } else {
-                logger.info("Client disconnected", metadata: ["remote": .string(remote)])
+                logger.debug("Client disconnected", metadata: ["remote": .string(remote)])
             }
         } else if let sessionID {
-            logger.info("Client disconnected", metadata: ["session": .string(sessionID)])
+            logger.debug("Client disconnected", metadata: ["session": .string(sessionID)])
         } else {
-            logger.info("Client disconnected")
+            logger.debug("Client disconnected")
         }
     }
 
@@ -359,9 +359,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
 
         if let remote = requestLog.remoteAddress {
-            logger.info("SSE connected", metadata: ["remote": .string(remote), "session": .string(sessionID)])
+            logger.debug("SSE connected", metadata: ["remote": .string(remote), "session": .string(sessionID)])
         } else {
-            logger.info("SSE connected", metadata: ["session": .string(sessionID)])
+            logger.debug("SSE connected", metadata: ["session": .string(sessionID)])
         }
     }
 

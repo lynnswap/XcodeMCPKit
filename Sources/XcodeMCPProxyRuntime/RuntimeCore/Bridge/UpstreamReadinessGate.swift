@@ -238,7 +238,7 @@ final class UpstreamReadinessCoordinator: Sendable {
         case .fire(let waiters, let epoch):
             fire(waiters: waiters, epoch: epoch)
         case .deferWaiters(let delay):
-            logger.info(
+            logger.debug(
                 "Backing off before restarting mcpbridge",
                 metadata: [
                     "target": .string(gate.targetName),

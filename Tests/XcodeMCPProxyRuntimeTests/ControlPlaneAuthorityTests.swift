@@ -138,7 +138,7 @@ struct ControlPlaneAuthorityTests {
         ))
         #expect(firstRetry.delay.nanoseconds == TimeAmount.seconds(1).nanoseconds)
         #expect(firstRetry.consecutiveFailureCount == 1)
-        #expect(firstRetry.shouldLogToolsUnavailableWarning == false)
+        #expect(firstRetry.failure == .other)
         guard case .restoreBridgePool(let secondAttempt) = authority
             .handleBridgeRecoveryRetryFired(firstRetry.reservation).effects.first else {
             Issue.record("expected early bridge recovery retry")
@@ -169,7 +169,8 @@ struct ControlPlaneAuthorityTests {
         ))
         #expect(periodicRetry.delay.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         #expect(periodicRetry.consecutiveFailureCount == 2)
-        #expect(periodicRetry.shouldLogToolsUnavailableWarning)
+        #expect(periodicRetry.failure == .toolsListTimeout)
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded())
         guard case .restoreBridgePool(let thirdAttempt) = authority
             .handleBridgeRecoveryRetryFired(periodicRetry.reservation).effects.first else {
             Issue.record("expected periodic bridge recovery retry")
@@ -179,7 +180,8 @@ struct ControlPlaneAuthorityTests {
             thirdAttempt,
             failure: .toolsListTimeout
         ))
-        #expect(repeatedTimeoutRetry.shouldLogToolsUnavailableWarning == false)
+        #expect(repeatedTimeoutRetry.failure == .toolsListTimeout)
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded() == false)
         guard case .restoreBridgePool(let recoveredAttempt) = authority
             .handleBridgeRecoveryRetryFired(repeatedTimeoutRetry.reservation).effects.first else {
             Issue.record("expected repeated timeout recovery retry")
@@ -197,7 +199,8 @@ struct ControlPlaneAuthorityTests {
         ))
         #expect(resetRetry.delay.nanoseconds == TimeAmount.seconds(1).nanoseconds)
         #expect(resetRetry.consecutiveFailureCount == 1)
-        #expect(resetRetry.shouldLogToolsUnavailableWarning)
+        #expect(resetRetry.failure == .toolsListTimeout)
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded() == false)
     }
 
     @Test func bridgeRecoveryRetryContinuesWhenCatalogDisappears() throws {
@@ -220,8 +223,10 @@ struct ControlPlaneAuthorityTests {
         }
         let retry = try #require(authority.prepareBridgeRecoveryRetry(
             firstAttempt,
-            failure: .other
+            failure: .toolsListTimeout
         ))
+        #expect(retry.failure == .toolsListTimeout)
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded() == false)
 
         _ = authority.invalidateCatalogSource(
             processID: target.processID,
@@ -236,9 +241,11 @@ struct ControlPlaneAuthorityTests {
         #expect(resumedAttempt.upstreamID == firstAttempt.upstreamID)
         let periodicRetry = try #require(authority.prepareBridgeRecoveryRetry(
             resumedAttempt,
-            failure: .other
+            failure: .toolsListTimeout
         ))
         #expect(periodicRetry.delay.nanoseconds == TimeAmount.seconds(10).nanoseconds)
+        #expect(periodicRetry.failure == .toolsListTimeout)
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded())
     }
 
     @Test func rejectedCancellationReplacesFailedAttemptWithFreshActivation() throws {
@@ -1596,7 +1603,12 @@ struct ControlPlaneAuthorityTests {
             to: firstTimeoutReservation
         )
 
-        guard case .retryRequired(_, let firstRetry, let firstRetryLease, let firstTimeoutCount) =
+        guard case .retryRequired(
+            _,
+            let firstRetry,
+            let firstRetryLease,
+            let firstTimeoutCount
+        ) =
             authority.handleCatalogRequestTimeout(firstTimeoutReservation, nowUptimeNs: 2)
         else {
             Issue.record("expected the final load timeout to require retry")
@@ -1607,6 +1619,7 @@ struct ControlPlaneAuthorityTests {
         #expect(firstRetry.attempt == 1)
         #expect(firstRetry.delay == .milliseconds(250))
         #expect(firstTimeoutCount == 1)
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded())
         #expect(authority.beginCatalogAttempt(
             routeID: route.id,
             preferredUpstreamProof: proof,
@@ -1626,7 +1639,12 @@ struct ControlPlaneAuthorityTests {
             RuntimeScheduledTimeout {},
             to: secondTimeoutReservation
         )
-        guard case .retryRequired(_, let secondRetry, _, let secondTimeoutCount) =
+        guard case .retryRequired(
+            _,
+            let secondRetry,
+            _,
+            let secondTimeoutCount
+        ) =
             authority.handleCatalogRequestTimeout(secondTimeoutReservation, nowUptimeNs: 5)
         else {
             Issue.record("expected the retry load timeout to require another retry")
@@ -1637,6 +1655,114 @@ struct ControlPlaneAuthorityTests {
         #expect(secondRetry.attempt == 2)
         #expect(secondRetry.delay == .milliseconds(500))
         #expect(secondTimeoutCount == 2)
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded() == false)
+    }
+
+    @Test func catalogTimeoutWarningFollowsOverallCatalogAvailability() throws {
+        let availableTarget = xcodeProcessTarget(processID: 41036, xcodeVersion: "27.0")
+        let stalledTarget = xcodeProcessTarget(processID: 41037, xcodeVersion: "27.0")
+        let authority = makeAuthority([
+            (availableTarget, [0]),
+            (stalledTarget, [1]),
+        ])
+        let availableRoute = try #require(
+            authority.route(forProcessID: availableTarget.processID)
+        )
+        let stalledRoute = try #require(
+            authority.route(forProcessID: stalledTarget.processID)
+        )
+        let availableProof = testTopologyProof(0)
+        let stalledProof = testTopologyProof(1)
+
+        let (availableLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: availableRoute.id,
+            preferredUpstreamProof: availableProof,
+            nowUptimeNanoseconds: 1
+        ))
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("BuildProject"), source: availableProof),
+            lease: availableLease,
+            nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("expected the sibling catalog to become available")
+            return
+        }
+
+        let (firstStalledLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: stalledRoute.id,
+            preferredUpstreamProof: stalledProof,
+            nowUptimeNanoseconds: 3
+        ))
+        let firstTimeout = try #require(authority.reserveCatalogTimeout(for: firstStalledLease))
+        guard case .retryRequired(
+            _,
+            _,
+            let firstRetryLease,
+            _
+        ) = authority.handleCatalogRequestTimeout(firstTimeout, nowUptimeNs: 4) else {
+            Issue.record("expected the stalled route to retry")
+            return
+        }
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded() == false)
+
+        _ = authority.invalidateCatalogSource(
+            processID: availableTarget.processID,
+            source: availableProof
+        )
+        #expect(authority.availableToolCatalogSurface() == nil)
+        #expect(authority.handleRetryFired(firstRetryLease))
+
+        let (secondStalledLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: stalledRoute.id,
+            preferredUpstreamProof: stalledProof,
+            nowUptimeNanoseconds: 5
+        ))
+        let secondTimeout = try #require(authority.reserveCatalogTimeout(for: secondStalledLease))
+        guard case .retryRequired(
+            _,
+            _,
+            let secondRetryLease,
+            _
+        ) = authority.handleCatalogRequestTimeout(secondTimeout, nowUptimeNs: 6) else {
+            Issue.record("expected the unavailable service to retry")
+            return
+        }
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded())
+        #expect(authority.handleRetryFired(secondRetryLease))
+
+        let (recoveryLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: stalledRoute.id,
+            preferredUpstreamProof: stalledProof,
+            nowUptimeNanoseconds: 7
+        ))
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("BuildProject"), source: stalledProof),
+            lease: recoveryLease,
+            nowUptimeNanoseconds: 8
+        ) else {
+            Issue.record("expected the stalled route to recover")
+            return
+        }
+        _ = authority.invalidateCatalogSource(
+            processID: stalledTarget.processID,
+            source: stalledProof
+        )
+
+        let (newIncidentLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: stalledRoute.id,
+            preferredUpstreamProof: stalledProof,
+            nowUptimeNanoseconds: 9
+        ))
+        let newIncidentTimeout = try #require(
+            authority.reserveCatalogTimeout(for: newIncidentLease)
+        )
+        guard case .retryRequired =
+            authority.handleCatalogRequestTimeout(newIncidentTimeout, nowUptimeNs: 10)
+        else {
+            Issue.record("expected the new unavailable incident to retry")
+            return
+        }
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded())
     }
 
     @Test func catalogTimeoutFiringBeforeAttachmentConsumesReservation() throws {
@@ -1724,6 +1850,7 @@ struct ControlPlaneAuthorityTests {
         }
         #expect(retry.attempt == 2)
         #expect(timeoutCount == 1)
+        #expect(authority.consumeToolsUnavailableWarningIfNeeded())
     }
 
     @Test func catalogLoadTimeoutPreservesSiblingLoad() throws {

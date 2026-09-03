@@ -107,7 +107,7 @@ struct ProcessBridgeRecoveryRetry: Sendable {
     let reservation: ProcessBridgePoolRecovery
     let delay: TimeAmount
     let consecutiveFailureCount: Int
-    let shouldLogToolsUnavailableWarning: Bool
+    let failure: ProcessBridgeRecoveryFailure
 }
 
 struct ProcessControlPlaneTransition: Sendable {
@@ -578,7 +578,6 @@ final class ProcessControlPlaneAuthority: Sendable {
         var phase: Phase = .idle
         var generation: UInt64 = 0
         var consecutiveFailureCount = 0
-        var didLogToolsUnavailableWarning = false
 
         mutating func reset(pendingUpstreamIDs: Set<UpstreamSlotID>)
             -> [ProcessControlPlaneEffect]
@@ -593,7 +592,6 @@ final class ProcessControlPlaneAuthority: Sendable {
             self.pendingUpstreamIDs = pendingUpstreamIDs
             phase = .idle
             consecutiveFailureCount = 0
-            didLogToolsUnavailableWarning = false
             return effects
         }
     }
@@ -609,6 +607,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var processIDByUpstreamID: [UpstreamSlotID: pid_t] = [:]
         var canonicalToolsCatalogRaw: JSONValue?
         var canonicalSourceProof: UpstreamTopologyProof?
+        var didLogToolsUnavailableWarning = false
         var nextUnboundAttemptID: Int = 0
         var nextCatalogTimeoutGeneration: UInt64 = 0
         var unboundAttempt: Attempt?
@@ -704,7 +703,6 @@ final class ProcessControlPlaneAuthority: Sendable {
             let previousOwner = owner
             owner.bridgeRecovery.phase = .idle
             owner.bridgeRecovery.consecutiveFailureCount = 0
-            owner.bridgeRecovery.didLogToolsUnavailableWarning = false
             let effects = Self.takeBridgePoolRecoveryEffects(owner: &owner)
             state.recordsByKey[key] = owner
             guard commit() else {
@@ -1887,6 +1885,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 state.processIDByUpstreamID.removeAll()
                 state.unboundCatalogRaw = nil
                 state.unboundCatalogSource = nil
+                Self.resetToolsUnavailableWarningIncident(in: &state)
                 for key in state.order {
                     guard var record = state.recordsByKey[key] else { continue }
                     effects.append(contentsOf: record.bridgeRecovery.reset(
@@ -1916,6 +1915,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             state.processIDByUpstreamID.removeAll()
             state.canonicalToolsCatalogRaw = nil
             state.canonicalSourceProof = nil
+            Self.resetToolsUnavailableWarningIncident(in: &state)
             state.unboundCatalogRaw = nil
             state.unboundCatalogSource = nil
             state.usability = .empty
@@ -1991,6 +1991,12 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func availableToolCatalogSurface(processIDs: Set<pid_t>? = nil) -> AvailableToolCatalog? {
         state.withLockedValue { Self.availableToolCatalogSurface(in: $0, processIDs: processIDs) }
+    }
+
+    func consumeToolsUnavailableWarningIfNeeded() -> Bool {
+        state.withLockedValue { state in
+            Self.consumeToolsUnavailableWarningIfNeeded(in: &state)
+        }
     }
 
     func canonicalToolsCatalogRaw() -> JSONValue? {
@@ -2629,12 +2635,6 @@ final class ProcessControlPlaneAuthority: Sendable {
         guard case .attempting(let current) = owner.bridgeRecovery.phase,
               current == recovery else { return nil }
         owner.bridgeRecovery.consecutiveFailureCount += 1
-        let shouldLogToolsUnavailableWarning =
-            failure == .toolsListTimeout
-            && owner.bridgeRecovery.didLogToolsUnavailableWarning == false
-        if shouldLogToolsUnavailableWarning {
-            owner.bridgeRecovery.didLogToolsUnavailableWarning = true
-        }
         owner.bridgeRecovery.phase = .waitingRetry(recovery, nil)
         return ProcessBridgeRecoveryRetry(
             reservation: recovery,
@@ -2642,8 +2642,32 @@ final class ProcessControlPlaneAuthority: Sendable {
                 ? .seconds(1)
                 : .seconds(10),
             consecutiveFailureCount: owner.bridgeRecovery.consecutiveFailureCount,
-            shouldLogToolsUnavailableWarning: shouldLogToolsUnavailableWarning
+            failure: failure
         )
+    }
+
+    private static func toolsUnavailableWarningIsAvailable(in state: State) -> Bool {
+        state.didLogToolsUnavailableWarning == false
+            && hasAvailableToolsCatalog(in: state) == false
+    }
+
+    private static func consumeToolsUnavailableWarningIfNeeded(
+        in state: inout State
+    ) -> Bool {
+        guard toolsUnavailableWarningIsAvailable(in: state) else { return false }
+        state.didLogToolsUnavailableWarning = true
+        return true
+    }
+
+    private static func hasAvailableToolsCatalog(in state: State) -> Bool {
+        state.unboundCatalogRaw != nil
+            || availableToolCatalogSurface(in: state, processIDs: nil) != nil
+    }
+
+    private static func resetToolsUnavailableWarningIncident(
+        in state: inout State
+    ) {
+        state.didLogToolsUnavailableWarning = false
     }
 
     private static func requestBridgePoolRecoveryEffects(
@@ -2859,6 +2883,9 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     @discardableResult
     private static func recomputeCanonicalProjection(in state: inout State) -> Bool {
+        if hasAvailableToolsCatalog(in: state) {
+            resetToolsUnavailableWarningIncident(in: &state)
+        }
         let previousRaw = state.canonicalToolsCatalogRaw
         let previousSource = state.canonicalSourceProof
         let activeRoutes = activeRoutes(in: state)
