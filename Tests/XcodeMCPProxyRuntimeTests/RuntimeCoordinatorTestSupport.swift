@@ -600,7 +600,63 @@ func seedProcessToolCatalogs(
     }
 }
 
+struct ControlPlaneLoadTestSnapshot: Sendable {
+    let loadID: UUID
+    let waiterCount: Int
+    let foregroundWaiterCount: Int
+    let rpcHandle: ControlPlane.RPCHandle
+}
+
 extension ControlPlaneCoordinator {
+    func requestToolsCatalogLoadSnapshotForTesting() -> ControlPlaneLoadTestSnapshot? {
+        toolsCatalogLoad.map(loadSnapshotForTesting)
+    }
+
+    func prewarmToolsCatalogLoadSnapshotForTesting() -> ControlPlaneLoadTestSnapshot? {
+        prewarmToolsCatalogLoad.map(loadSnapshotForTesting)
+    }
+
+    func windowLoadSnapshotForTesting(
+        route: ControlPlane.Route
+    ) -> ControlPlaneLoadTestSnapshot? {
+        windowLoads[route].map {
+            ControlPlaneLoadTestSnapshot(
+                loadID: $0.loadID,
+                waiterCount: $0.waiters.count,
+                foregroundWaiterCount: $0.waiters.count,
+                rpcHandle: $0.rpcHandle
+            )
+        }
+    }
+
+    @discardableResult
+    func timeoutForegroundToolsCatalogWaiterForTesting() -> Bool {
+        let loads = [toolsCatalogLoad, prewarmToolsCatalogLoad].compactMap { $0 }
+        guard loads.count == 1,
+              let load = loads.first,
+              let waiterID = load.waiters.first(where: {
+                  if case .foreground = $0.value.kind {
+                      return true
+                  }
+                  return false
+              })?.key else {
+            return false
+        }
+        timeoutToolsCatalogWaiter(loadID: load.loadID, waiterID: waiterID)
+        return true
+    }
+
+    @discardableResult
+    func timeoutWindowWaiterForTesting(route: ControlPlane.Route) -> Bool {
+        guard let load = windowLoads[route],
+              load.waiters.count == 1,
+              let waiterID = load.waiters.keys.first else {
+            return false
+        }
+        timeoutWindowWaiter(route: route, loadID: load.loadID, waiterID: waiterID)
+        return true
+    }
+
     func drainLoadsForTesting() async {
         while completionTasks.isEmpty == false {
             let tasks = Array(completionTasks.values)
@@ -608,6 +664,17 @@ extension ControlPlaneCoordinator {
                 await task.value
             }
         }
+    }
+
+    private func loadSnapshotForTesting(
+        _ load: ToolsCatalogLoadState
+    ) -> ControlPlaneLoadTestSnapshot {
+        ControlPlaneLoadTestSnapshot(
+            loadID: load.loadID,
+            waiterCount: load.waiters.count,
+            foregroundWaiterCount: load.foregroundWaiterCount,
+            rpcHandle: load.rpcHandle
+        )
     }
 }
 

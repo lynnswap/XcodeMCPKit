@@ -6848,10 +6848,13 @@ struct RuntimeCoordinatorRecoveryTests {
         )
         #expect(methodName(from: firstRequest) == "tools/list")
         try await upstream.waitForBlockedSend()
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: clocks.timeoutClock,
-            uptimeClock: clocks.uptimeClock,
-            by: .seconds(5)
+        _ = try await waitWithTimeout("waiting for first tools/list waiter to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
+        }
+        #expect(
+            await manager.controlPlaneCoordinator.timeoutForegroundToolsCatalogWaiterForTesting()
         )
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
@@ -6890,10 +6893,13 @@ struct RuntimeCoordinatorRecoveryTests {
         try await waitForSentCount(upstream, count: 5, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: clocks.timeoutClock,
-            uptimeClock: clocks.uptimeClock,
-            by: .seconds(5)
+        _ = try await waitWithTimeout("waiting for second tools/list waiter to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
+        }
+        #expect(
+            await manager.controlPlaneCoordinator.timeoutForegroundToolsCatalogWaiterForTesting()
         )
         await #expect(throws: TimeoutError.self) {
             _ = try await secondTask.value
@@ -6921,9 +6927,13 @@ struct RuntimeCoordinatorRecoveryTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        manager.refreshToolsListIfNeeded()
         let prewarmRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: prewarmRequest) == "tools/list")
+        let prewarmLoad = try #require(
+            await manager.controlPlaneCoordinator.prewarmToolsCatalogLoadSnapshotForTesting()
+        )
+        #expect(prewarmLoad.waiterCount == 1)
+        #expect(prewarmLoad.foregroundWaiterCount == 0)
 
         let sessionID = "session-tools-prewarm"
         _ = manager.session(id: sessionID)
@@ -6939,7 +6949,16 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 1
             }
         }
-        #expect(await upstream.sentCount() == 3)
+        let reusedLoad = try #require(
+            await manager.controlPlaneCoordinator.prewarmToolsCatalogLoadSnapshotForTesting()
+        )
+        #expect(reusedLoad.loadID == prewarmLoad.loadID)
+        #expect(reusedLoad.waiterCount == 2)
+        #expect(reusedLoad.foregroundWaiterCount == 1)
+        #expect(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()?
+                .loadID == nil
+        )
 
         let prewarmUpstreamID = try extractUpstreamID(from: prewarmRequest)
         let response: [String: Any] = [
@@ -6957,6 +6976,64 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(object["tools"] != nil)
     }
 
+    @Test func controlPlaneRejectsExpiredLoadsBeforeStartingUnobservedWork() async throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            clock: clocks.clock
+        )
+        defer { manager.shutdownAndWait() }
+
+        let initFuture = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let initRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initUpstreamID = try extractUpstreamID(from: initRequest)
+        await upstream.yield(.message(try makeInitializeResponse(id: initUpstreamID)))
+        _ = try await initFuture.get()
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+
+        let expiredDeadline = clocks.uptimeClock.now()
+        await #expect(throws: TimeoutError.self) {
+            _ = try await manager.controlPlaneCoordinator.toolsCatalog(
+                deadlineUptimeNs: expiredDeadline
+            )
+        }
+        #expect(
+            await manager.controlPlaneCoordinator.prewarmToolsCatalogIfNeeded(
+                deadlineUptimeNs: expiredDeadline
+            ) == nil
+        )
+        await #expect(throws: TimeoutError.self) {
+            _ = try await manager.controlPlaneCoordinator.listWindows(
+                route: .anyHealthy,
+                deadlineUptimeNs: expiredDeadline
+            )
+        }
+
+        #expect(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()?
+                .loadID == nil
+        )
+        #expect(
+            await manager.controlPlaneCoordinator.prewarmToolsCatalogLoadSnapshotForTesting()?
+                .loadID == nil
+        )
+        #expect(
+            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .anyHealthy)?
+                .loadID == nil
+        )
+        #expect(await upstream.sentCount() == 2)
+    }
+
     @Test func sessionManagerSharedToolsListPromotesPartlyConsumedSharedTimeout()
         async throws
     {
@@ -6965,12 +7042,12 @@ struct RuntimeCoordinatorRecoveryTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let uptimeClock = TestUptimeClock()
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            nowUptimeNanoseconds: uptimeClock.now
+            clock: clocks.clock
         )
         defer { manager.shutdownAndWait() }
 
@@ -7001,8 +7078,13 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 1
             }
         }
+        let firstLoad = try #require(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()
+        )
+        #expect(firstLoad.waiterCount == 1)
+        #expect(firstLoad.foregroundWaiterCount == 1)
 
-        uptimeClock.advance(by: .nanoseconds(120_000_001))
+        clocks.uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -7010,25 +7092,18 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-
-        let firstCancellation = try await waitWithTimeout(
-            "waiting for promoted tools/list cancellation"
-        ) {
-            try await upstream.nextSent(
-                startingAt: 3,
-                matching: { methodName(from: $0) == "notifications/cancelled" }
-            )
+        _ = try await waitWithTimeout("waiting for promoted tools/list waiters to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 2
+            }
         }
-        #expect(
-            try extractCancellationRequestID(from: firstCancellation)
-                == extractUpstreamID(from: firstRequest)
+        let promotedLoad = try #require(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()
         )
-        _ = try await waitWithTimeout("waiting for replacement tools/list request") {
-            try await upstream.nextSent(
-                startingAt: 3,
-                matching: { methodName(from: $0) == "tools/list" }
-            )
-        }
+        #expect(promotedLoad.loadID != firstLoad.loadID)
+        #expect(promotedLoad.waiterCount == 2)
+        #expect(promotedLoad.foregroundWaiterCount == 2)
+        #expect(firstLoad.rpcHandle.isCancelled())
 
         firstTask.cancel()
         secondTask.cancel()
@@ -7099,12 +7174,12 @@ struct RuntimeCoordinatorRecoveryTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let uptimeClock = TestUptimeClock()
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            nowUptimeNanoseconds: uptimeClock.now
+            clock: clocks.clock
         )
         defer { manager.shutdownAndWait() }
 
@@ -7121,7 +7196,6 @@ struct RuntimeCoordinatorRecoveryTests {
 
         let sessionID = "session-tools-shared-no-starvation"
         _ = manager.session(id: sessionID)
-        await upstream.blockNextCancellation()
 
         let firstTask = Task {
             try await manager.sharedToolsList(
@@ -7136,8 +7210,11 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 1
             }
         }
+        let firstLoad = try #require(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()
+        )
 
-        uptimeClock.advance(by: .nanoseconds(120_000_001))
+        clocks.uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -7145,29 +7222,20 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        try await upstream.waitForBlockedCancellation()
-        let firstCancellation = try await waitWithTimeout(
-            "waiting for shared tools/list cancellation"
-        ) {
-            try await upstream.nextSent(
-                startingAt: 3,
-                matching: { methodName(from: $0) == "notifications/cancelled" }
-            )
-        }
-        #expect(
-            try extractCancellationRequestID(from: firstCancellation)
-                == extractUpstreamID(from: firstRequest)
-        )
         _ = try await waitWithTimeout("waiting for promoted tools/list waiters to attach") {
             try await manager.controlPlaneDebugMirror.waitForSnapshot {
                 $0.waiterCounts.toolsCatalog == 2
             }
         }
-        let sharedLoadID = try #require(
-            await manager.controlPlaneCoordinator.toolsCatalogLoad?.loadID
+        let sharedLoad = try #require(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()
         )
+        #expect(sharedLoad.loadID != firstLoad.loadID)
+        #expect(sharedLoad.waiterCount == 2)
+        #expect(sharedLoad.foregroundWaiterCount == 2)
+        #expect(firstLoad.rpcHandle.isCancelled())
 
-        uptimeClock.advance(by: .nanoseconds(120_000_001))
+        clocks.uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let thirdTask = Task {
             try await manager.sharedToolsList(
@@ -7181,8 +7249,13 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 3
             }
         }
-        #expect(await manager.controlPlaneCoordinator.toolsCatalogLoad?.loadID == sharedLoadID)
-        await upstream.releaseBlockedCancellation()
+        let unchangedLoad = try #require(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()
+        )
+        #expect(unchangedLoad.loadID == sharedLoad.loadID)
+        #expect(unchangedLoad.waiterCount == 3)
+        #expect(unchangedLoad.foregroundWaiterCount == 3)
+        #expect(sharedLoad.rpcHandle.isCancelled() == false)
 
         firstTask.cancel()
         secondTask.cancel()
@@ -7190,6 +7263,16 @@ struct RuntimeCoordinatorRecoveryTests {
         _ = try? await firstTask.value
         _ = try? await secondTask.value
         _ = try? await thirdTask.value
+        _ = try await waitWithTimeout("waiting for shared tools/list load cancellation") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 0 && $0.inFlightControlPlaneRequests.isEmpty
+            }
+        }
+        #expect(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()?
+                .loadID == nil
+        )
+        #expect(sharedLoad.rpcHandle.isCancelled())
     }
 
     @Test func sessionManagerPromotedToolsListCancellationRemovesMigratedWaiter() async throws {
@@ -7198,12 +7281,12 @@ struct RuntimeCoordinatorRecoveryTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let uptimeClock = TestUptimeClock()
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            nowUptimeNanoseconds: uptimeClock.now
+            clock: clocks.clock
         )
         defer { manager.shutdownAndWait() }
 
@@ -7232,8 +7315,11 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 1
             }
         }
+        let firstLoad = try #require(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()
+        )
 
-        uptimeClock.advance(by: .nanoseconds(120_000_001))
+        clocks.uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.sharedToolsList(
@@ -7241,17 +7327,18 @@ struct RuntimeCoordinatorRecoveryTests {
                 requestTimeoutOverride: .seconds(5)
             )
         }
-        _ = try await waitWithTimeout("waiting for migrated tools/list cancellation") {
-            try await upstream.nextSent(
-                startingAt: 3,
-                matching: { methodName(from: $0) == "notifications/cancelled" }
-            )
-        }
         _ = try await waitWithTimeout("waiting for promoted tools/list waiters to attach") {
             try await manager.controlPlaneDebugMirror.waitForSnapshot {
                 $0.waiterCounts.toolsCatalog == 2
             }
         }
+        let promotedLoad = try #require(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()
+        )
+        #expect(promotedLoad.loadID != firstLoad.loadID)
+        #expect(promotedLoad.waiterCount == 2)
+        #expect(promotedLoad.foregroundWaiterCount == 2)
+        #expect(firstLoad.rpcHandle.isCancelled())
 
         firstTask.cancel()
         do {
@@ -7267,6 +7354,13 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 1
             }
         }
+        let remainingLoad = try #require(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()
+        )
+        #expect(remainingLoad.loadID == promotedLoad.loadID)
+        #expect(remainingLoad.waiterCount == 1)
+        #expect(remainingLoad.foregroundWaiterCount == 1)
+        #expect(promotedLoad.rpcHandle.isCancelled() == false)
 
         secondTask.cancel()
         do {
@@ -7282,6 +7376,11 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 0 && $0.inFlightControlPlaneRequests.isEmpty
             }
         }
+        #expect(
+            await manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()?
+                .loadID == nil
+        )
+        #expect(promotedLoad.rpcHandle.isCancelled())
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
@@ -7290,6 +7389,7 @@ struct RuntimeCoordinatorRecoveryTests {
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
+        let prewarmCompletions = LockedRecordedValues<Void>()
         var config = makeConfig(requestTimeout: 5)
         config.prewarmToolsList = true
         let clocks = makeRuntimeCoordinatorDeterministicClocks()
@@ -7297,7 +7397,10 @@ struct RuntimeCoordinatorRecoveryTests {
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            clock: clocks.clock
+            clock: clocks.clock,
+            testHooks: RuntimeCoordinatorTestHooks(
+                toolsListPrewarmCompleted: { prewarmCompletions.append(()) }
+            )
         )
         defer { manager.shutdownAndWait() }
 
@@ -7312,7 +7415,6 @@ struct RuntimeCoordinatorRecoveryTests {
         _ = try await initFuture.get()
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
 
-        manager.refreshToolsListIfNeeded()
         let prewarmRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: prewarmRequest) == "tools/list")
         await upstream.blockNextCancellation()
@@ -7331,11 +7433,8 @@ struct RuntimeCoordinatorRecoveryTests {
                 $0.waiterCounts.toolsCatalog == 1
             }
         }
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: clocks.timeoutClock,
-            uptimeClock: clocks.uptimeClock,
-            by: .seconds(5),
-            suspendedSleepers: 2
+        #expect(
+            await manager.controlPlaneCoordinator.timeoutForegroundToolsCatalogWaiterForTesting()
         )
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
@@ -7351,7 +7450,11 @@ struct RuntimeCoordinatorRecoveryTests {
                 == extractUpstreamID(from: prewarmRequest)
         )
         await upstream.releaseBlockedCancellation()
-        await manager.drainRuntimeTasksForTesting()
+        _ = try await waitForRecordedValue(
+            prewarmCompletions,
+            at: 0,
+            description: "waiting for timed-out tools/list prewarm completion"
+        )
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
 
         let secondTask = Task {
@@ -7363,10 +7466,13 @@ struct RuntimeCoordinatorRecoveryTests {
         try await waitForSentCount(upstream, count: 5, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/list")
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: clocks.timeoutClock,
-            uptimeClock: clocks.uptimeClock,
-            by: .seconds(5)
+        _ = try await waitWithTimeout("waiting for fresh tools/list waiter to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.toolsCatalog == 1
+            }
+        }
+        #expect(
+            await manager.controlPlaneCoordinator.timeoutForegroundToolsCatalogWaiterForTesting()
         )
         await #expect(throws: TimeoutError.self) {
             _ = try await secondTask.value
@@ -7515,10 +7621,13 @@ struct RuntimeCoordinatorRecoveryTests {
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
         let firstRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: firstRequest) == "tools/call")
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: clocks.timeoutClock,
-            uptimeClock: clocks.uptimeClock,
-            by: .seconds(5)
+        _ = try await waitWithTimeout("waiting for first XcodeListWindows waiter to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.windows == 1
+            }
+        }
+        #expect(
+            await manager.controlPlaneCoordinator.timeoutWindowWaiterForTesting(route: .anyHealthy)
         )
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
@@ -7552,10 +7661,13 @@ struct RuntimeCoordinatorRecoveryTests {
         try await waitForSentCount(upstream, count: 5, timeoutSeconds: 2)
         let secondRequest = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
         #expect(methodName(from: secondRequest) == "tools/call")
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: clocks.timeoutClock,
-            uptimeClock: clocks.uptimeClock,
-            by: .seconds(5)
+        _ = try await waitWithTimeout("waiting for second XcodeListWindows waiter to attach") {
+            try await manager.controlPlaneDebugMirror.waitForSnapshot {
+                $0.waiterCounts.windows == 1
+            }
+        }
+        #expect(
+            await manager.controlPlaneCoordinator.timeoutWindowWaiterForTesting(route: .anyHealthy)
         )
         await #expect(throws: TimeoutError.self) {
             _ = try await secondTask.value
@@ -13469,12 +13581,12 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let config = makeConfig(requestTimeout: 5)
-        let uptimeClock = TestUptimeClock()
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            nowUptimeNanoseconds: uptimeClock.now
+            clock: clocks.clock
         )
         defer { manager.shutdownAndWait() }
 
@@ -13503,19 +13615,16 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 $0.waiterCounts.windows == 1
             }
         }
+        let firstLoad = try #require(
+            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .anyHealthy)
+        )
 
-        uptimeClock.advance(by: .nanoseconds(120_000_001))
+        clocks.uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.liveXcodeListWindowsResult(
                 route: .anyHealthy,
                 requestTimeoutOverride: .seconds(5)
-            )
-        }
-        _ = try await waitWithTimeout("waiting for migrated XcodeListWindows cancellation") {
-            try await upstream.nextSent(
-                startingAt: 3,
-                matching: { methodName(from: $0) == "notifications/cancelled" }
             )
         }
         _ = try await waitWithTimeout(
@@ -13525,6 +13634,12 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 $0.waiterCounts.windows == 2
             }
         }
+        let promotedLoad = try #require(
+            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .anyHealthy)
+        )
+        #expect(promotedLoad.loadID != firstLoad.loadID)
+        #expect(promotedLoad.waiterCount == 2)
+        #expect(firstLoad.rpcHandle.isCancelled())
 
         firstTask.cancel()
         do {
@@ -13540,6 +13655,12 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 $0.waiterCounts.windows == 1
             }
         }
+        let remainingLoad = try #require(
+            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .anyHealthy)
+        )
+        #expect(remainingLoad.loadID == promotedLoad.loadID)
+        #expect(remainingLoad.waiterCount == 1)
+        #expect(promotedLoad.rpcHandle.isCancelled() == false)
 
         secondTask.cancel()
         do {
@@ -13555,6 +13676,11 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 $0.waiterCounts.windows == 0 && $0.inFlightControlPlaneRequests.isEmpty
             }
         }
+        #expect(
+            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .anyHealthy)?
+                .loadID == nil
+        )
+        #expect(promotedLoad.rpcHandle.isCancelled())
         #expect(manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
     }
 

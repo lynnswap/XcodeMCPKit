@@ -131,6 +131,9 @@ actor ControlPlaneCoordinator {
         if let rawResult = cachedToolsCatalog() {
             return rawResult
         }
+        guard deadlineExceeded(deadlineUptimeNs) == false else {
+            throw TimeoutError()
+        }
 
         let requestedTimeout = sharedRequestTimeout(for: deadlineUptimeNs)
         let requestedPromotionDeadlineUptimeNs = promotionDeadlineUptimeNs(
@@ -165,6 +168,9 @@ actor ControlPlaneCoordinator {
     ) async throws -> JSONValue {
         guard acceptsNewLoads else {
             throw CancellationError()
+        }
+        guard deadlineExceeded(deadlineUptimeNs) == false else {
+            throw TimeoutError()
         }
         let requestedTimeout = sharedRequestTimeout(for: deadlineUptimeNs)
         let requestedPromotionDeadlineUptimeNs = promotionDeadlineUptimeNs(
@@ -201,6 +207,9 @@ actor ControlPlaneCoordinator {
         if let rawResult = cachedToolsCatalog() {
             syncDebug()
             return rawResult
+        }
+        guard deadlineExceeded(deadlineUptimeNs) == false else {
+            return nil
         }
         guard
             toolsCatalogLoad == nil,
@@ -408,6 +417,11 @@ actor ControlPlaneCoordinator {
             return
         }
         if deadlineExceeded(deadlineUptimeNs) {
+            if load.waiters.isEmpty {
+                clearToolsCatalogLoadState(loadID: loadID)
+                cancelToolsCatalogLoad(load, error: TimeoutError())
+                syncDebug()
+            }
             continuation.resume(throwing: TimeoutError())
             return
         }
@@ -439,6 +453,11 @@ actor ControlPlaneCoordinator {
             return
         }
         if deadlineExceeded(deadlineUptimeNs) {
+            if load.waiters.isEmpty {
+                windowLoads.removeValue(forKey: route)
+                cancelWindowLoad(load, error: TimeoutError())
+                syncDebug()
+            }
             continuation.resume(throwing: TimeoutError())
             return
         }
