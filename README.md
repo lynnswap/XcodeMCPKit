@@ -79,7 +79,8 @@ For GUI routing, open your project in Xcode, choose
 See [Giving external agents access to Xcode][apple-xcode-mcp-access].
 
 This global Xcode setting is separate from the per-connection **Allow** dialog.
-`--auto-approve` handles the GUI dialog; it does not enable headless MCP access.
+`--auto-approve` handles Xcode connection dialogs, including those that appear
+while using headless routing; it does not enable headless MCP access.
 The first headless `XcodeOpenWorkspace` call can separately ask you to approve
 the agent and containing folder. Review that request in Xcode Service and
 approve it manually; XcodeMCPKit does not broaden headless permissions.
@@ -90,7 +91,8 @@ approve it manually; XcodeMCPKit does not broaden headless permissions.
 xcode-mcp-proxy-server --auto-approve
 ```
 
-In GUI mode, `--auto-approve` clicks the Xcode **Allow** button automatically. In
+`--auto-approve` clicks the Xcode **Allow** button for the proxy's own connections
+in both GUI and headless modes. In
 **System Settings > Privacy & Security > Accessibility**, allow the app that
 launches the proxy (for example, Terminal or iTerm).
 
@@ -157,7 +159,7 @@ xcode-mcp-proxy --help
 |----------|-------------|
 | `LISTEN` | Listen address, for example `127.0.0.1:8765`. |
 | `HOST` / `PORT` | Listen host and port when `LISTEN` is unset. |
-| `MCP_XCODE_PID` | Set by the proxy on GUI process-bound upstream `mcpbridge` children. Headless routing leaves the stock bridge unbound. An inherited value is only passed through when process-bound Xcode routing is not active. |
+| `MCP_XCODE_PID` | Set by the proxy on GUI process-bound upstream `mcpbridge` children. Headless routing removes inherited values to leave the stock bridge unbound. Custom and GUI fallback upstreams pass inherited values through. |
 | `MCP_XCODE_SESSION_ID` | Optional explicit upstream Xcode MCP session ID. |
 | `MCP_XCODE_CONFIG` | TOML config path. `--config` takes precedence. |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream`. |

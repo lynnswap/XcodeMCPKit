@@ -124,8 +124,16 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(manager.debugSnapshot().processRoutes.isEmpty)
     }
 
-    @Test func autoApprovalStartsProcessInventoryOutsideProcessRouting() {
+    @Test(arguments: [
+        ProxyRuntimeConfiguration.XcodeMode.gui,
+        .headless,
+        .custom,
+    ])
+    func autoApprovalStartsProcessInventoryOutsideProcessRouting(
+        xcodeMode: ProxyRuntimeConfiguration.XcodeMode
+    ) async {
         var config = makeConfig(requestTimeout: 0)
+        config.xcodeMode = xcodeMode
         config.usesPermissionDialogAutomation = true
         let monitor = StartRecordingXcodeProcessMonitor()
         let manager = RuntimeCoordinator(
@@ -136,11 +144,15 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessEventMonitor: monitor,
             startImmediately: false
         )
-        defer { manager.shutdownAndWait() }
-
         manager.start()
 
         #expect(monitor.startCount() == 1)
+        #expect(monitor.changeHandlerCount() == 0)
+        #expect(manager.processRoutingEnabled == false)
+        #expect(manager.debugSnapshot().processRoutes.isEmpty)
+
+        await manager.shutdown()
+        #expect(monitor.stopCount() == 1)
     }
 
     @Test func defaultUpstreamsPassThroughInheritedMCPXcodePIDEnvironment() async throws {
@@ -18893,6 +18905,8 @@ private final class StartRecordingXcodeProcessMonitor:
 {
     private let lock = NSLock()
     private var starts = 0
+    private var stops = 0
+    private var changeHandlers = 0
 
     func start() {
         lock.withLock { starts += 1 }
@@ -18901,6 +18915,7 @@ private final class StartRecordingXcodeProcessMonitor:
     func setChangeHandler(
         _: @escaping @Sendable (String) -> Void
     ) {
+        lock.withLock { changeHandlers += 1 }
         start()
     }
 
@@ -18914,10 +18929,20 @@ private final class StartRecordingXcodeProcessMonitor:
 
     func waitForReadinessChange(after _: UInt64) async {}
 
-    func stop() {}
+    func stop() {
+        lock.withLock { stops += 1 }
+    }
 
     func startCount() -> Int {
         lock.withLock { starts }
+    }
+
+    func stopCount() -> Int {
+        lock.withLock { stops }
+    }
+
+    func changeHandlerCount() -> Int {
+        lock.withLock { changeHandlers }
     }
 }
 

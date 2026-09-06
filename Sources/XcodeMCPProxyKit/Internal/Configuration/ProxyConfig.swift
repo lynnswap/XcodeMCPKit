@@ -180,7 +180,7 @@ package struct ProxyConfig: Sendable {
             maxMessageBytes: maxBodyBytes,
             requestTimeout: requestTimeout,
             prewarmToolsList: prewarmToolsList,
-            usesPermissionDialogAutomation: autoApproveXcodeDialog && xcodeMode != .headless,
+            usesPermissionDialogAutomation: autoApproveXcodeDialog,
             refreshCodeIssuesMode: effectiveRefreshCodeIssuesMode,
             disabledToolNames: disabledToolNames,
             initializeParamsOverride: initializeParamsOverride.map(

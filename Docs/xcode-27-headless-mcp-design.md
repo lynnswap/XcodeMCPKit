@@ -109,6 +109,10 @@ Xcode 27 developer directory in `DEVELOPER_DIR`:
 8. With headless access enabled and Xcode Service stopped, launching an unbound
    `mcpbridge` starts Xcode Service and completes `initialize`. XcodeMCPKit does
    not need to call `mcp-server start`.
+9. With `unsafeAlwaysAllowAllAgents` enabled, headless `DocumentationSearch`
+   can still present a connection approval dialog in GUI Xcode. The proxy's
+   automatic approval policy therefore applies independently of routing mode;
+   the existing dialog matcher limits approval to the proxy's own connections.
 
 The preview CLI may return valid status JSON together with a nonzero status or
 warning when its live service query times out. A valid JSON payload is the
@@ -170,8 +174,9 @@ resolved mode.
 - GUI mode preserves process-bound discovery, `MCP_XCODE_PID`, per-Xcode pools,
   AX permission automation, and the proxy DocumentationSearch provider.
 - Headless mode launches the configured stock bridge without
-  `MCP_XCODE_PID`. It does not wait for a GUI Xcode process and does not run AX
-  permission automation.
+  `MCP_XCODE_PID`. It does not wait for a GUI Xcode process. When automatic
+  approval is requested, the existing process monitor supplies dialog owners
+  to AX permission automation without enabling GUI process routing.
 - Headless mode forwards the upstream DocumentationSearch and workspace tools;
   it does not create a second workspace or documentation source of truth.
 - Proxy shutdown closes and awaits its bridge/runtime/HTTP resources. It does
@@ -257,7 +262,8 @@ that behavior is observed.
   cancellation.
 - CLI/config tests for all modes and custom-upstream conflicts.
 - Runtime tests proving GUI mode remains process-bound and headless mode is
-  unbound with no GUI readiness launch.
+  unbound with no GUI readiness launch, while honoring the approval policy for
+  Xcode connection dialogs.
 - Startup-summary and exact multiline notice tests.
 - Public product contract compile test for `xcodeMode`.
 - Device-affinity owner and routing tests, including both key spellings,

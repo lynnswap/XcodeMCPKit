@@ -296,16 +296,20 @@ struct XcodeMCPProxyServerTests {
         try await server.shutdown()
     }
 
-    @Test func automaticEnabledHeadlessSkipsGUIAutomationAndUsesUnboundFeatures() async throws {
+    @Test(arguments: [false, true])
+    func automaticEnabledHeadlessHonorsApprovalPolicyAndUsesUnboundFeatures(
+        autoApprove: Bool
+    ) async throws {
         let availabilityQueries = NIOLockedValueBox(0)
         let autoApproverCreations = NIOLockedValueBox(0)
+        let autoApprover = RecordingAutoApprover()
         let runtimeConfiguration = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
         let runtime = StartupInventoryRuntime()
         let server = XcodeMCPProxyServer(
             configuration: .init(
                 bindAddress: .init(host: "127.0.0.1", port: 0),
                 discovery: .disabled,
-                approvalPolicy: .automatic,
+                approvalPolicy: autoApprove ? .automatic : .manual,
                 featurePolicy: .init(refreshCodeIssuesMode: .proxy)
             ),
             dependencies: .init(
@@ -316,7 +320,7 @@ struct XcodeMCPProxyServerTests {
                 },
                 makeAutoApprover: { _, _ in
                     autoApproverCreations.withLockedValue { $0 += 1 }
-                    return RecordingAutoApprover()
+                    return autoApprover
                 },
                 makeRuntime: { config in
                     runtimeConfiguration.withLockedValue { $0 = config }
@@ -329,12 +333,14 @@ struct XcodeMCPProxyServerTests {
         let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
         #expect(availabilityQueries.withLockedValue { $0 } == 1)
         #expect(captured.xcodeMode == .headless)
-        #expect(captured.usesPermissionDialogAutomation == false)
+        #expect(captured.usesPermissionDialogAutomation == autoApprove)
         #expect(captured.refreshCodeIssuesMode == .upstream)
         #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: captured) == false)
         #expect(ProxyRuntime.documentationSearchIsConfigured(configuration: captured) == false)
-        #expect(autoApproverCreations.withLockedValue { $0 } == 0)
+        #expect(autoApproverCreations.withLockedValue { $0 } == (autoApprove ? 1 : 0))
+        #expect(autoApprover.startCount == (autoApprove ? 1 : 0))
         try await server.shutdown()
+        #expect(autoApprover.cancelCount == (autoApprove ? 1 : 0))
     }
 
     @Test func explicitGUIPreservesLegacyRoutingWithoutStatusQuery() async throws {

@@ -68,13 +68,14 @@ a new instance after shutdown.
   service and otherwise preserves GUI routing.
 
 Headless mode does not require a workspace to be open in the Xcode app. It
-forwards workspace lifecycle and DocumentationSearch tools to Xcode Service,
-does not run GUI permission automation, and never enables, approves, or stops
-the shared service. If headless access is disabled, enable it separately with
+forwards workspace lifecycle and DocumentationSearch tools to Xcode Service
+and never enables, approves, or stops the shared service. If headless access is
+disabled, enable it separately with
 `sudo xcrun mcp-server enable`; explicit `.headless` fails startup instead of
 silently falling back. Xcode Service can request manual agent and folder
-approval on the first `XcodeOpenWorkspace` call; `approvalPolicy: .automatic`
-applies only to GUI Xcode dialogs.
+approval on the first `XcodeOpenWorkspace` call. `approvalPolicy: .automatic`
+handles Xcode connection dialogs for the proxy's own connections in either
+routing mode. It does not grant headless agent or folder permissions.
 
 Custom upstream commands keep their existing unbound behavior and require
 `xcodeMode: .automatic`.
