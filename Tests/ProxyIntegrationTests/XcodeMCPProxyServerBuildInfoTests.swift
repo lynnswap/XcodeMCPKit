@@ -80,7 +80,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
         Server
           URL: http://localhost:8765/mcp
           Upstream processes: 1
-          Auto approve: disabled
+          Auto approve: enabled
 
         Xcode
           Mode: headless
