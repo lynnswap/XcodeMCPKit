@@ -10,7 +10,7 @@
 
 ### Compatibility
 
-- Keep the existing `XcodeMCPProxyServerConfiguration.ApprovalPolicy` and `--auto-approve` behavior.
+- `XcodeMCPProxyServerConfiguration.ApprovalPolicy.automatic` and `--auto-approve` approve recognized MCP connection dialogs for all agents, including connections outside the proxy. The diagnostic remains limited to explicit agent identities.
 - Do not add a public Swift library product. The extracted module is package-internal and changes in lockstep with the proxy.
 - Add one maintainer executable product. It is not added to the release installer.
 
@@ -44,7 +44,7 @@ XcodeMCPProxyRuntime               XcodeMCPPermissionApproverTool
 ```
 
 - `XcodeMCPPermissionAutomation`: inspects, matches, and approves Xcode MCP permission dialogs through macOS AX.
-- `XcodeMCPProxyKit`: composes proxy configuration, runtime inventory, executable candidates, logging, and the automation lifecycle.
+- `XcodeMCPProxyKit`: composes proxy configuration, runtime inventory, logging, and the automation lifecycle.
 - `XcodeMCPPermissionApproverTool`: monitors only caller-supplied Xcode PIDs and agent identity candidates for diagnostics; it does not launch an MCP bridge.
 - `XcodeMCPProxyRuntime`: remains the proxy's only running-Xcode/helper inventory owner.
 
@@ -55,9 +55,9 @@ This is an internal target rather than a separate package because all consumers 
 | Concern | Owner after migration |
 | --- | --- |
 | Running Xcode/helper membership in the proxy | `XcodeProcessEventMonitor` |
-| Proxy upstream executable/name/PID candidate composition | `XcodeMCPProxyKit` composition root |
+| All connections versus explicit agent identities | Proxy and diagnostic composition roots |
 | AX authorization and window/button I/O | `XcodeMCPPermissionAutomation.AXClient` |
-| Dialog structural and ownership match policy | `XcodeMCPPermissionAutomation.Matcher` |
+| Connection-dialog recognition and explicit identity matching | `XcodeMCPPermissionAutomation.Matcher` |
 | One scan's match, retry suppression, press, and diagnostics | `XcodeMCPPermissionAutomation.Scanner` |
 | Per-process poll task lifecycle | `XcodeMCPPermissionAutomation.AutoApprover` |
 | Diagnostic CLI argument validation and signals | `XcodeMCPPermissionApproverTool` |
@@ -72,6 +72,11 @@ package enum XcodePermissionDialogAutomation {
     package static func isAllowedProcessBundleIdentifier(_ identifier: String?) -> Bool
 
     package struct Configuration: Sendable {
+        package init(
+            permissionDialogProcessIDs: @escaping @Sendable () -> [pid_t],
+            pollInterval: Duration = .milliseconds(250)
+        )
+
         package init(
             permissionDialogProcessIDs: @escaping @Sendable () -> [pid_t],
             agentPathCandidates: @escaping @Sendable () -> Set<String>,
@@ -118,12 +123,6 @@ let approver = XcodePermissionDialogAutomation.AutoApprover(
     configuration: .init(
         permissionDialogProcessIDs: {
             runtime.inventorySnapshot().permissionDialogProcessIDs
-        },
-        agentPathCandidates: { proxyExecutableCandidates(config, runtime) },
-        assistantNameCandidates: { assistantNames(config) },
-        agentProcessIDCandidates: {
-            XcodePermissionDialogAutomation.AutoApprover
-                .descendantProcessIDCandidates()
         }
     ),
     logger: ProxyLogging.make("xcode.permission")

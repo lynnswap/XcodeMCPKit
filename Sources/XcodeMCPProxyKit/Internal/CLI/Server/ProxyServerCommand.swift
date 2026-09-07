@@ -33,7 +33,7 @@ package struct ProxyServerCommand: ParsableCommand {
     @Option(help: ArgumentHelp("TOML configuration file.", valueName: "path"))
     var config: String?
 
-    @Flag(help: "Automatically approve the Xcode permission dialog.")
+    @Flag(help: "Automatically approve Xcode MCP connection dialogs for all agents, including direct connections outside this proxy.")
     var autoApprove = false
 
     @Option(help: "Maximum accepted HTTP request body size in bytes.")

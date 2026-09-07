@@ -8,6 +8,189 @@ import XcodeMCPCoreTestSupport
 
 @Suite(.serialized)
 struct XcodePermissionDialogAutoApproverTests {
+    @Test(arguments: [
+        "com.apple.dt.Xcode",
+        "com.apple.dt.ExternalViewService",
+        "com.apple.dt.Xcode.DeveloperSystemPolicyService",
+    ])
+    func connectionMatcherAcceptsIndependentAgent(processBundleIdentifier: String) {
+        let snapshot = makeIndependentAgentSnapshot(processBundleIdentifier: processBundleIdentifier)
+        let decision = XcodePermissionDialogAutomation.Matcher.connectionDecision(
+            for: snapshot,
+            processID: 10620
+        )
+
+        #expect(decision?.defaultButtonTitle == "allow")
+        #expect(decision?.fingerprint.isEmpty == false)
+    }
+
+    @Test func explicitAgentMatcherStillRejectsIndependentConnection() {
+        let decision = XcodePermissionDialogAutomation.Matcher.decision(
+            for: makeIndependentAgentSnapshot(),
+            processID: 10620,
+            assistantNameCandidates: ["XcodeMCPKit"],
+            serverProcessIDCandidates: [6119]
+        )
+
+        #expect(decision == nil)
+    }
+
+    @Test(arguments: [
+        (#"Allow "Codex Release benchmark" to access Xcode?"#, [String]()),
+        ("Allow “Other agent” to access Xcode?", ["An updated explanation."]),
+        ("Allow “別のエージェント” to access Xcode?", ["PID: 7001", "Path: /unrelated/python"]),
+        ("Allow “Multiline\nagent” to access Xcode?", ["Beschreibung der Anfrage."]),
+    ])
+    func scannerApprovesConnectionHeadingAndAllowRegardlessOfBody(title: String, body: [String]) {
+        let processID: pid_t = 10620
+        let axClient = RecordingAXClient(
+            status: .trusted,
+            windowsByProcessID: [
+                processID: [
+                    XcodePermissionDialogAutomation.AXWindow(
+                        processID: processID,
+                        snapshot: makeSnapshot(
+                            processBundleIdentifier: "com.apple.dt.Xcode",
+                            title: "",
+                            textValues: [title] + body
+                        ),
+                        defaultButton: AXUIElementCreateSystemWide()
+                    )
+                ]
+            ]
+        )
+        var scanner = PermissionDialogScanner(
+            dependencies: .init(
+                configuration: .init(permissionDialogProcessIDs: { [processID] }),
+                axClient: axClient,
+                uptimeNanoseconds: { 0 },
+                logger: Logger(label: "tests.permission")
+            )
+        )
+
+        #expect(scanner.scanAndApprove().approvedWindowCount == 1)
+    }
+
+    @Test func connectionMatcherAcceptsHeadingInWindowTitle() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Allow “Any agent” to access Xcode?",
+            textValues: []
+        )
+        #expect(
+            XcodePermissionDialogAutomation.Matcher.connectionDecision(
+                for: snapshot,
+                processID: 10620
+            ) != nil
+        )
+    }
+
+    @Test(arguments: [
+        XcodePermissionDialogAutomation.ButtonSnapshot(role: "AXButton", identifier: "action-button-1"),
+        makeButton(title: "許可"),
+        makeButton(title: "Allow", role: "AXStaticText"),
+    ])
+    func connectionMatcherRequiresAnAllowButton(button: XcodePermissionDialogAutomation.ButtonSnapshot) {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Allow “Any agent” to access Xcode?",
+            textValues: [],
+            defaultButton: button
+        )
+        #expect(
+            XcodePermissionDialogAutomation.Matcher.connectionDecision(
+                for: snapshot,
+                processID: 10620
+            ) == nil
+        )
+    }
+
+    @Test(arguments: [
+        ("com.example.OtherApp", "AXDialog", "Allow"),
+        ("com.apple.dt.Xcode", "AXStandardWindow", "Allow"),
+        ("com.apple.dt.Xcode", "AXDialog", "Don't Allow"),
+        ("com.apple.dt.Xcode", "AXDialog", "OK"),
+    ])
+    func connectionMatcherRejectsOtherAppsWindowsAndActions(
+        bundleIdentifier: String,
+        subrole: String,
+        buttonTitle: String
+    ) {
+        let decision = XcodePermissionDialogAutomation.Matcher.connectionDecision(
+            for: makeIndependentAgentSnapshot(
+                processBundleIdentifier: bundleIdentifier,
+                subrole: subrole,
+                buttonTitle: buttonTitle
+            ),
+            processID: 10620
+        )
+
+        #expect(decision == nil)
+    }
+
+    @Test(arguments: [
+        ("Allow “Codex Release benchmark” to access a folder?", "The agent wants to access this folder."),
+        ("Allow “Codex Release benchmark” to run a shell command?", "The agent wants to run a shell command."),
+        ("Allow access", "The agent wants to use Xcode’s tools to perform actions like building, testing, or modifying code."),
+        ("許可", "エージェント 別のエージェント がフォルダへのアクセスを要求しています。"),
+        ("Allow access", "The agent wants to use Xcode's tools."),
+        ("Allow “Codex Release benchmark” to access Xcode? Extra text", ""),
+        ("Allow “Codex Release benchmark to access Xcode?", ""),
+        ("Allow “” to access Xcode?", ""),
+    ])
+    func connectionMatcherRejectsUnrelatedPermissionRequests(title: String, explanation: String) {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: title,
+            textValues: [explanation, "Path: /usr/bin/python3\nPID: 21719"]
+        )
+        #expect(
+            XcodePermissionDialogAutomation.Matcher.connectionDecision(
+                for: snapshot,
+                processID: 10620
+            ) == nil
+        )
+    }
+
+    @Test func scannerApprovesIndependentConnectionWithoutAgentCandidates() {
+        let processID: pid_t = 10620
+        let axClient = RecordingAXClient(
+            status: .trusted,
+            windowsByProcessID: [
+                processID: [
+                    XcodePermissionDialogAutomation.AXWindow(
+                        processID: processID,
+                        snapshot: makeIndependentAgentSnapshot(),
+                        defaultButton: AXUIElementCreateSystemWide()
+                    ),
+                    XcodePermissionDialogAutomation.AXWindow(
+                        processID: processID,
+                        snapshot: makeSnapshot(
+                            processBundleIdentifier: "com.apple.dt.Xcode",
+                            title: "Allow folder access?",
+                            textValues: ["XcodeMCPKit PID 6119"]
+                        ),
+                        defaultButton: AXUIElementCreateSystemWide()
+                    ),
+                ]
+            ]
+        )
+        var scanner = PermissionDialogScanner(
+            dependencies: .init(
+                configuration: .init(permissionDialogProcessIDs: { [processID] }),
+                axClient: axClient,
+                uptimeNanoseconds: { 0 },
+                logger: Logger(label: "tests.permission")
+            )
+        )
+
+        let result = scanner.scanAndApprove()
+        #expect(result.inspectedWindowCount == 2)
+        #expect(result.matchedWindowCount == 1)
+        #expect(result.approvedWindowCount == 1)
+        #expect(axClient.snapshot().pressCalls == 1)
+    }
+
     @Test func matcherMatchesWhenSingleTextNodeContainsAssistantNameAndPID() {
         let snapshot = makeSnapshot(
             processBundleIdentifier: "com.apple.dt.Xcode",
@@ -866,6 +1049,29 @@ private func makeSnapshot(
         hasProxy: hasProxy,
         defaultButton: defaultButton,
         cancelButton: cancelButton
+    )
+}
+
+private func makeIndependentAgentSnapshot(
+    processBundleIdentifier: String = "com.apple.dt.Xcode",
+    subrole: String = "AXDialog",
+    buttonTitle: String = "Allow"
+) -> XcodePermissionDialogAutomation.WindowSnapshot {
+    makeSnapshot(
+        processBundleIdentifier: processBundleIdentifier,
+        title: "",
+        textValues: [
+            "Allow “Codex Release benchmark” to access Xcode?",
+            """
+            The agent wants to use Xcode’s tools to perform actions like building, testing, or modifying code.
+
+            Path: /\u{200B}Applications/\u{200B}Xcode_27.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python
+            PID: 21719
+            Signed by: com.apple.python3
+            """,
+        ],
+        subrole: subrole,
+        defaultButton: makeButton(title: buttonTitle)
     )
 }
 

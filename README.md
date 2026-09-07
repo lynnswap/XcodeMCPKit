@@ -76,8 +76,11 @@ Xcode 27 also supports [optional headless MCP access](#optional-headless-mcp-acc
 xcode-mcp-proxy-server --auto-approve
 ```
 
-`--auto-approve` clicks the Xcode **Allow** button for the proxy's own connections
-in both GUI and headless modes. In
+`--auto-approve` clicks **Allow** on recognized Xcode MCP connection dialogs for
+all agents, including Python scripts and other clients that launch `mcpbridge`
+directly. It matches the English heading `Allow “…” to access Xcode?` and an
+`Allow` button; the agent name, process details, and explanatory text do not
+affect approval. It applies in both GUI and headless modes while the proxy is running. In
 **System Settings > Privacy & Security > Accessibility**, allow the app that
 launches the proxy (for example, Terminal or iTerm).
 
@@ -134,7 +137,7 @@ xcode-mcp-proxy --help
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialize still has a bounded handshake timeout. |
 | `--config path` | TOML config path. |
 | `--xcode-mode automatic|gui|headless` | Select Xcode routing. `automatic` (default) uses enabled headless MCP when available and otherwise uses GUI routing. `headless` fails instead of falling back. |
-| `--auto-approve` | Automatically approve the Xcode permission dialog. Requires Accessibility permission. |
+| `--auto-approve` | Automatically approve Xcode MCP connection dialogs for all agents, including direct connections outside the proxy. Requires Accessibility permission. |
 | `--refresh-code-issues-mode proxy|upstream` | Serve `XcodeRefreshCodeIssuesInFile` through proxy diagnostics (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`). |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port and start a new one. |
 

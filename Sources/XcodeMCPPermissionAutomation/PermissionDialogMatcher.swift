@@ -11,6 +11,33 @@ extension XcodePermissionDialogAutomation {
             "AXSystemDialog",
         ])
 
+        static func connectionDecision(
+            for snapshot: XcodePermissionDialogAutomation.WindowSnapshot,
+            processID: pid_t
+        ) -> XcodePermissionDialogAutomation.MatchDecision? {
+            guard passesStructuralChecks(snapshot),
+                normalizedText(snapshot.defaultButton?.role) == "axbutton",
+                normalizedText(snapshot.defaultButton?.title) == "allow"
+            else {
+                return nil
+            }
+
+            // Xcode can expose the heading as AXStaticText while AXTitle is empty.
+            let hasConnectionTitle = normalizedTextNodes(for: snapshot).contains { text in
+                text.range(
+                    of: #"(?s)^allow (?:“.+”|".+") to access xcode\?$"#,
+                    options: .regularExpression
+                ) != nil
+            }
+            guard hasConnectionTitle else {
+                return nil
+            }
+            return XcodePermissionDialogAutomation.MatchDecision(
+                fingerprint: fingerprint(for: snapshot, processID: processID),
+                defaultButtonTitle: normalizedButtonDescription(snapshot.defaultButton)
+            )
+        }
+
         static func decision(
             for snapshot: XcodePermissionDialogAutomation.WindowSnapshot,
             processID: pid_t,
