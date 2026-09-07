@@ -210,7 +210,10 @@ Enable headless access:
 sudo xcrun mcp-server enable
 ```
 
-Or enable it with all agents always allowed, skipping approval prompts:
+On first workspace access, approve the agent and containing folder in Xcode
+Service when prompted.
+
+Or enable it with all agents always allowed:
 
 ```bash
 sudo xcrun mcp-server enable --unsafe-always-allow-all-agents
