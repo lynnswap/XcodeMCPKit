@@ -75,7 +75,10 @@ disabled, enable it separately with
 silently falling back. Xcode Service can request manual agent and folder
 approval on the first `XcodeOpenWorkspace` call. `approvalPolicy: .automatic`
 handles recognized Xcode MCP connection dialogs for all agents in either routing
-mode, including clients that connect directly through `mcpbridge`. It does not grant headless agent or folder permissions.
+mode, including clients that connect directly through `mcpbridge`. Existing
+configured-agent matching is preserved; the English connection heading with an
+`Allow` button also accepts other agents. It does not grant headless agent or
+folder permissions.
 
 Custom upstream commands keep their existing unbound behavior and require
 `xcodeMode: .automatic`.

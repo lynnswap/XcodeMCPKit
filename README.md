@@ -78,9 +78,10 @@ xcode-mcp-proxy-server --auto-approve
 
 `--auto-approve` clicks **Allow** on recognized Xcode MCP connection dialogs for
 all agents, including Python scripts and other clients that launch `mcpbridge`
-directly. It matches the English heading `Allow “…” to access Xcode?` and an
-`Allow` button; the agent name, process details, and explanatory text do not
-affect approval. It applies in both GUI and headless modes while the proxy is running. In
+directly. Existing approval based on the proxy's agent name, PID, and executable
+path is preserved. Additionally, the English heading `Allow “…” to access Xcode?`
+with an `Allow` button is approved for any agent. It applies in both GUI and
+headless modes while the proxy is running. In
 **System Settings > Privacy & Security > Accessibility**, allow the app that
 launches the proxy (for example, Terminal or iTerm).
 
