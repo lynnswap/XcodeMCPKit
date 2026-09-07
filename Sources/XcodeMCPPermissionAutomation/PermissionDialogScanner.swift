@@ -124,8 +124,16 @@ struct PermissionDialogScanner {
         }
 
         let configuration = dependencies.configuration
-        let agentPathCandidates = configuration.agentPathCandidates()
-        let assistantNameCandidates = configuration.assistantNameCandidates()
+        let agentPathCandidates: Set<String>
+        let assistantNameCandidates: Set<String>
+        switch configuration.agentScope {
+        case .allConnections:
+            agentPathCandidates = []
+            assistantNameCandidates = []
+        case .matching(let paths, let names, _):
+            agentPathCandidates = paths()
+            assistantNameCandidates = names()
+        }
         logMonitoringIfNeeded(agentPathCandidates: agentPathCandidates)
 
         var visibleFingerprints: Set<String> = []
@@ -197,21 +205,25 @@ struct PermissionDialogScanner {
                     continue
                 }
 
-                if agentProcessIDCandidates == nil {
-                    agentProcessIDCandidates = configuration.agentProcessIDCandidates()
-                }
-                guard let resolvedAgentProcessIDCandidates = agentProcessIDCandidates else {
-                    preconditionFailure("agent process PID candidates were not resolved")
-                }
-                guard
-                    let decision = XcodePermissionDialogAutomation.Matcher.decision(
+                let decision: XcodePermissionDialogAutomation.MatchDecision?
+                switch configuration.agentScope {
+                case .allConnections:
+                    decision = XcodePermissionDialogAutomation.Matcher.connectionDecision(
+                        for: window.snapshot,
+                        processID: processID
+                    )
+                case .matching(_, _, let processIDs):
+                    let candidates = agentProcessIDCandidates ?? processIDs()
+                    agentProcessIDCandidates = candidates
+                    decision = XcodePermissionDialogAutomation.Matcher.decision(
                         for: window.snapshot,
                         processID: processID,
                         agentPathCandidates: agentPathCandidates,
                         assistantNameCandidates: assistantNameCandidates,
-                        serverProcessIDCandidates: resolvedAgentProcessIDCandidates
+                        serverProcessIDCandidates: candidates
                     )
-                else {
+                }
+                guard let decision else {
                     visibleInspectionFingerprints.insert(
                         inspectionFingerprint(processID: processID, snapshot: window.snapshot)
                     )
@@ -220,7 +232,7 @@ struct PermissionDialogScanner {
                         snapshot: window.snapshot,
                         agentPathCandidates: agentPathCandidates,
                         assistantNameCandidates: assistantNameCandidates,
-                        agentProcessIDCandidates: resolvedAgentProcessIDCandidates
+                        agentProcessIDCandidates: agentProcessIDCandidates ?? []
                     )
                     continue
                 }
@@ -362,8 +374,15 @@ struct PermissionDialogScanner {
             return
         }
 
+        let reason: String
+        switch dependencies.configuration.agentScope {
+        case .allConnections:
+            reason = "unrecognized MCP connection dialog"
+        case .matching:
+            reason = "agent identity did not match"
+        }
         dependencies.logger.debug(
-            "Observed a structurally eligible Xcode modal window that did not match the assistant-name plus PID/path guard; auto-approve skipped.",
+            "Skipped Xcode modal window: \(reason).",
             metadata: inspectionMetadata(
                 processID: processID,
                 snapshot: snapshot,

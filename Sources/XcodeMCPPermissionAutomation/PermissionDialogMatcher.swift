@@ -11,6 +11,47 @@ extension XcodePermissionDialogAutomation {
             "AXSystemDialog",
         ])
 
+        static func connectionDecision(
+            for snapshot: XcodePermissionDialogAutomation.WindowSnapshot,
+            processID: pid_t
+        ) -> XcodePermissionDialogAutomation.MatchDecision? {
+            guard passesStructuralChecks(snapshot),
+                normalizedText(snapshot.defaultButton?.role) == "axbutton",
+                looksLikeAllowButton(normalizedButtonDescription(snapshot.defaultButton))
+            else {
+                return nil
+            }
+
+            let textNodes = normalizedTextNodes(for: snapshot).map {
+                $0.replacingOccurrences(of: "’", with: "'")
+            }
+            // Xcode exposes generic AppKit identifiers for this alert. The
+            // connection-specific title and explanatory copy distinguish it
+            // from tool, folder, and other modal permission requests.
+            let hasConnectionTitle = textNodes.contains { text in
+                text.hasPrefix("allow ") && text.hasSuffix(" to access xcode?")
+            }
+            let hasConnectionExplanation = textNodes.contains { text in
+                text.contains("the agent wants to use xcode's tools to perform actions like building, testing, or modifying code.")
+            }
+            let namedAgentRequests = [
+                #"^エージェント .+ が xcode のツール使用を要求しています。$"#,
+                #"^the agent .+ wants to use xcode's tools(?: for .+)?\.$"#,
+            ]
+            let hasNamedAgentRequest = textNodes.contains { text in
+                namedAgentRequests.contains { request in
+                    text.range(of: request, options: .regularExpression) != nil
+                }
+            }
+            guard (hasConnectionTitle && hasConnectionExplanation) || hasNamedAgentRequest else {
+                return nil
+            }
+            return XcodePermissionDialogAutomation.MatchDecision(
+                fingerprint: fingerprint(for: snapshot, processID: processID),
+                defaultButtonTitle: normalizedButtonDescription(snapshot.defaultButton)
+            )
+        }
+
         static func decision(
             for snapshot: XcodePermissionDialogAutomation.WindowSnapshot,
             processID: pid_t,

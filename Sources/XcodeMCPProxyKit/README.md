@@ -74,8 +74,8 @@ disabled, enable it separately with
 `sudo xcrun mcp-server enable`; explicit `.headless` fails startup instead of
 silently falling back. Xcode Service can request manual agent and folder
 approval on the first `XcodeOpenWorkspace` call. `approvalPolicy: .automatic`
-handles Xcode connection dialogs for the proxy's own connections in either
-routing mode. It does not grant headless agent or folder permissions.
+handles recognized Xcode MCP connection dialogs for all agents in either routing
+mode, including clients that connect directly through `mcpbridge`. It does not grant headless agent or folder permissions.
 
 Custom upstream commands keep their existing unbound behavior and require
 `xcodeMode: .automatic`.
