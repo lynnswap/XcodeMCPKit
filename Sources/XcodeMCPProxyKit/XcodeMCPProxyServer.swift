@@ -115,8 +115,9 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         /// Automatically approve Xcode MCP connection dialogs for all agents,
         /// including agents connecting directly to Xcode outside this proxy.
         ///
-        /// Matches the English heading `Allow “…” to access Xcode?` and an
-        /// `Allow` button. This requires macOS Accessibility permission for the host process.
+        /// Preserves configured-agent identity matching and additionally accepts
+        /// the English heading `Allow “…” to access Xcode?` with an `Allow` button
+        /// for other agents. Requires macOS Accessibility permission for the host process.
         case automatic
     }
 
@@ -577,12 +578,33 @@ public final class XcodeMCPProxyServer: Sendable {
                 headlessMCPAvailability: {
                     try await statusClient.availability()
                 },
-                makeAutoApprover: { _, runtime in
-                    XcodePermissionDialogAutomation.AutoApprover(
+                makeAutoApprover: { config, runtime in
+                    let additionalCandidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(
+                        config: config,
+                        executableLookupClient: executableLookupClient
+                    )
+                    return XcodePermissionDialogAutomation.AutoApprover(
                         configuration: .init(
                             permissionDialogProcessIDs: {
                                 runtime.inventorySnapshot().permissionDialogProcessIDs
-                            }
+                            },
+                            agentPathCandidates: {
+                                let processBoundCandidates = runtime.inventorySnapshot()
+                                    .xcodeTargets.map(\.mcpBridgePath)
+                                return XcodePermissionDialogAutomation.AutoApprover
+                                    .executablePathCandidates(
+                                    additional:
+                                        additionalCandidates + processBoundCandidates
+                                )
+                            },
+                            assistantNameCandidates: {
+                                Set(XcodeMCPProxyServer.permissionDialogAssistantNameCandidates(config: config))
+                            },
+                            agentProcessIDCandidates: {
+                                XcodePermissionDialogAutomation.AutoApprover
+                                    .descendantProcessIDCandidates()
+                            },
+                            agentScope: .allAgents
                         ),
                         logger: ProxyLogging.make("xcode.permission")
                     )
@@ -772,6 +794,24 @@ public final class XcodeMCPProxyServer: Sendable {
             return "pending"
         }
         return "disabled"
+    }
+
+    static func additionalPermissionDialogExecutableCandidates(
+        config: ProxyConfig,
+        executableLookupClient: ExecutableLookupClient = .liveValue
+    ) -> [String] {
+        PermissionDialogExecutableResolver.additionalExecutableCandidates(
+            config: config,
+            executableLookupClient: executableLookupClient
+        )
+    }
+
+    private static func permissionDialogAssistantNameCandidates(config: ProxyConfig) -> [String] {
+        var candidates = Set<String>(["XcodeMCPKit"])
+        if let name = config.initializeParamsOverride?.clientName, name.isEmpty == false {
+            candidates.insert(name)
+        }
+        return Array(candidates)
     }
 }
 

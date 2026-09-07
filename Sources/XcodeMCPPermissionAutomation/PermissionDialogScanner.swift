@@ -124,16 +124,8 @@ struct PermissionDialogScanner {
         }
 
         let configuration = dependencies.configuration
-        let agentPathCandidates: Set<String>
-        let assistantNameCandidates: Set<String>
-        switch configuration.agentScope {
-        case .allConnections:
-            agentPathCandidates = []
-            assistantNameCandidates = []
-        case .matching(let paths, let names, _):
-            agentPathCandidates = paths()
-            assistantNameCandidates = names()
-        }
+        let agentPathCandidates = configuration.agentPathCandidates()
+        let assistantNameCandidates = configuration.assistantNameCandidates()
         logMonitoringIfNeeded(agentPathCandidates: agentPathCandidates)
 
         var visibleFingerprints: Set<String> = []
@@ -205,22 +197,19 @@ struct PermissionDialogScanner {
                     continue
                 }
 
-                let decision: XcodePermissionDialogAutomation.MatchDecision?
-                switch configuration.agentScope {
-                case .allConnections:
+                let candidates = agentProcessIDCandidates ?? configuration.agentProcessIDCandidates()
+                agentProcessIDCandidates = candidates
+                var decision = XcodePermissionDialogAutomation.Matcher.decision(
+                    for: window.snapshot,
+                    processID: processID,
+                    agentPathCandidates: agentPathCandidates,
+                    assistantNameCandidates: assistantNameCandidates,
+                    serverProcessIDCandidates: candidates
+                )
+                if decision == nil, case .allAgents = configuration.agentScope {
                     decision = XcodePermissionDialogAutomation.Matcher.connectionDecision(
                         for: window.snapshot,
                         processID: processID
-                    )
-                case .matching(_, _, let processIDs):
-                    let candidates = agentProcessIDCandidates ?? processIDs()
-                    agentProcessIDCandidates = candidates
-                    decision = XcodePermissionDialogAutomation.Matcher.decision(
-                        for: window.snapshot,
-                        processID: processID,
-                        agentPathCandidates: agentPathCandidates,
-                        assistantNameCandidates: assistantNameCandidates,
-                        serverProcessIDCandidates: candidates
                     )
                 }
                 guard let decision else {
@@ -376,9 +365,9 @@ struct PermissionDialogScanner {
 
         let reason: String
         switch dependencies.configuration.agentScope {
-        case .allConnections:
-            reason = "unrecognized MCP connection dialog"
-        case .matching:
+        case .allAgents:
+            reason = "neither configured agent nor connection heading matched"
+        case .configuredAgent:
             reason = "agent identity did not match"
         }
         dependencies.logger.debug(

@@ -10,7 +10,7 @@
 
 ### Compatibility
 
-- `XcodeMCPProxyServerConfiguration.ApprovalPolicy.automatic` and `--auto-approve` approve recognized MCP connection dialogs for all agents, including connections outside the proxy. The diagnostic remains limited to explicit agent identities.
+- `XcodeMCPProxyServerConfiguration.ApprovalPolicy.automatic` and `--auto-approve` approve recognized MCP connection dialogs for all agents, including connections outside the proxy. Existing configured-agent matching is preserved and the connection-heading rule adds other agents. The diagnostic remains limited to explicit agent identities.
 - Do not add a public Swift library product. The extracted module is package-internal and changes in lockstep with the proxy.
 - Add one maintainer executable product. It is not added to the release installer.
 
@@ -55,7 +55,7 @@ This is an internal target rather than a separate package because all consumers 
 | Concern | Owner after migration |
 | --- | --- |
 | Running Xcode/helper membership in the proxy | `XcodeProcessEventMonitor` |
-| All connections versus explicit agent identities | Proxy and diagnostic composition roots |
+| Proxy executable/name/PID candidates and approval scope | `XcodeMCPProxyKit` composition root |
 | AX authorization and window/button I/O | `XcodeMCPPermissionAutomation.AXClient` |
 | Connection-dialog recognition and explicit identity matching | `XcodeMCPPermissionAutomation.Matcher` |
 | One scan's match, retry suppression, press, and diagnostics | `XcodeMCPPermissionAutomation.Scanner` |
@@ -72,16 +72,17 @@ package enum XcodePermissionDialogAutomation {
     package static func isAllowedProcessBundleIdentifier(_ identifier: String?) -> Bool
 
     package struct Configuration: Sendable {
-        package init(
-            permissionDialogProcessIDs: @escaping @Sendable () -> [pid_t],
-            pollInterval: Duration = .milliseconds(250)
-        )
+        package enum AgentScope: Sendable {
+            case configuredAgent
+            case allAgents
+        }
 
         package init(
             permissionDialogProcessIDs: @escaping @Sendable () -> [pid_t],
             agentPathCandidates: @escaping @Sendable () -> Set<String>,
             assistantNameCandidates: @escaping @Sendable () -> Set<String>,
             agentProcessIDCandidates: @escaping @Sendable () -> Set<pid_t>,
+            agentScope: AgentScope = .configuredAgent,
             pollInterval: Duration = .milliseconds(250)
         )
     }
@@ -123,7 +124,14 @@ let approver = XcodePermissionDialogAutomation.AutoApprover(
     configuration: .init(
         permissionDialogProcessIDs: {
             runtime.inventorySnapshot().permissionDialogProcessIDs
-        }
+        },
+        agentPathCandidates: { proxyExecutableCandidates(config, runtime) },
+        assistantNameCandidates: { assistantNames(config) },
+        agentProcessIDCandidates: {
+            XcodePermissionDialogAutomation.AutoApprover
+                .descendantProcessIDCandidates()
+        },
+        agentScope: .allAgents
     ),
     logger: ProxyLogging.make("xcode.permission")
 )

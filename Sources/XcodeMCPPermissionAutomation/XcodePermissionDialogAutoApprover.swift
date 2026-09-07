@@ -4,43 +4,32 @@ import Logging
 
 extension XcodePermissionDialogAutomation {
     package struct Configuration: Sendable {
-        enum AgentScope: Sendable {
-            case allConnections
-            case matching(
-                paths: @Sendable () -> Set<String>,
-                names: @Sendable () -> Set<String>,
-                processIDs: @Sendable () -> Set<pid_t>
-            )
+        package enum AgentScope: Sendable {
+            case configuredAgent
+            case allAgents
         }
 
         let permissionDialogProcessIDs: @Sendable () -> [pid_t]
+        let agentPathCandidates: @Sendable () -> Set<String>
+        let assistantNameCandidates: @Sendable () -> Set<String>
+        let agentProcessIDCandidates: @Sendable () -> Set<pid_t>
         let agentScope: AgentScope
         let pollInterval: Duration
-
-        package init(
-            permissionDialogProcessIDs: @escaping @Sendable () -> [pid_t],
-            pollInterval: Duration = .milliseconds(250)
-        ) {
-            precondition(pollInterval > .zero, "pollInterval must be positive")
-            self.permissionDialogProcessIDs = permissionDialogProcessIDs
-            self.agentScope = .allConnections
-            self.pollInterval = pollInterval
-        }
 
         package init(
             permissionDialogProcessIDs: @escaping @Sendable () -> [pid_t],
             agentPathCandidates: @escaping @Sendable () -> Set<String>,
             assistantNameCandidates: @escaping @Sendable () -> Set<String>,
             agentProcessIDCandidates: @escaping @Sendable () -> Set<pid_t>,
+            agentScope: AgentScope = .configuredAgent,
             pollInterval: Duration = .milliseconds(250)
         ) {
             precondition(pollInterval > .zero, "pollInterval must be positive")
             self.permissionDialogProcessIDs = permissionDialogProcessIDs
-            self.agentScope = .matching(
-                paths: agentPathCandidates,
-                names: assistantNameCandidates,
-                processIDs: agentProcessIDCandidates
-            )
+            self.agentPathCandidates = agentPathCandidates
+            self.assistantNameCandidates = assistantNameCandidates
+            self.agentProcessIDCandidates = agentProcessIDCandidates
+            self.agentScope = agentScope
             self.pollInterval = pollInterval
         }
     }

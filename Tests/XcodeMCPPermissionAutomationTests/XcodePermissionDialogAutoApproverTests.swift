@@ -61,7 +61,13 @@ struct XcodePermissionDialogAutoApproverTests {
         )
         var scanner = PermissionDialogScanner(
             dependencies: .init(
-                configuration: .init(permissionDialogProcessIDs: { [processID] }),
+                configuration: .init(
+                    permissionDialogProcessIDs: { [processID] },
+                    agentPathCandidates: { ["/tmp/xcode-mcp-proxy-server"] },
+                    assistantNameCandidates: { ["XcodeMCPKit"] },
+                    agentProcessIDCandidates: { [6119] },
+                    agentScope: .allAgents
+                ),
                 axClient: axClient,
                 uptimeNanoseconds: { 0 },
                 logger: Logger(label: "tests.permission")
@@ -168,7 +174,7 @@ struct XcodePermissionDialogAutoApproverTests {
                         snapshot: makeSnapshot(
                             processBundleIdentifier: "com.apple.dt.Xcode",
                             title: "Allow folder access?",
-                            textValues: ["XcodeMCPKit PID 6119"]
+                            textValues: ["Some unrelated request"]
                         ),
                         defaultButton: AXUIElementCreateSystemWide()
                     ),
@@ -177,7 +183,13 @@ struct XcodePermissionDialogAutoApproverTests {
         )
         var scanner = PermissionDialogScanner(
             dependencies: .init(
-                configuration: .init(permissionDialogProcessIDs: { [processID] }),
+                configuration: .init(
+                    permissionDialogProcessIDs: { [processID] },
+                    agentPathCandidates: { ["/tmp/xcode-mcp-proxy-server"] },
+                    assistantNameCandidates: { ["XcodeMCPKit"] },
+                    agentProcessIDCandidates: { [6119] },
+                    agentScope: .allAgents
+                ),
                 axClient: axClient,
                 uptimeNanoseconds: { 0 },
                 logger: Logger(label: "tests.permission")
@@ -189,6 +201,121 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(result.matchedWindowCount == 1)
         #expect(result.approvedWindowCount == 1)
         #expect(axClient.snapshot().pressCalls == 1)
+    }
+
+    private static let legacyApprovalCases: [
+        ([String], XcodePermissionDialogAutomation.ButtonSnapshot, Set<String>, Set<String>)
+    ] = [
+        (["XcodeMCPKit PID 6119"], makeButton(title: "OK"), Set(["XcodeMCPKit"]), Set<String>()),
+        (["XcodeMCPKit", "6119"], makeButton(title: "Zulassen"), Set(["XcodeMCPKit"]), Set<String>()),
+        (["エージェント XcodeMCPKit が Xcode のツール使用を要求しています。"], makeButton(title: "許可"), Set(["XcodeMCPKit"]), Set<String>()),
+        (["XcodeMCPKit"], XcodePermissionDialogAutomation.ButtonSnapshot(role: "AXButton", identifier: "action-button-1"), Set(["XcodeMCPKit"]), Set<String>()),
+        (["XcodeMCPKit at /tmp/xcode-mcp-proxy-server"], makeButton(title: "OK"), Set(["XcodeMCPKit"]), Set(["/tmp/xcode-mcp-proxy-server"])),
+        (["The agent at /tmp/xcode-mcp-proxy-server wants to use Xcode's tools."], makeButton(title: "Allow"), Set<String>(), Set(["/tmp/xcode-mcp-proxy-server"])),
+        (["The agent Custom MCP, PID 6119 wants to use Xcode's tools."], makeButton(title: "Allow"), Set(["Custom MCP"]), Set<String>()),
+    ]
+
+    @Test(arguments: Self.legacyApprovalCases)
+    func allAgentScannerPreservesLegacyApprovalsWithoutConnectionHeading(
+        textValues: [String],
+        button: XcodePermissionDialogAutomation.ButtonSnapshot,
+        names: Set<String>,
+        paths: Set<String>
+    ) {
+        let processID: pid_t = 4317
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Access",
+            textValues: textValues,
+            defaultButton: button
+        )
+        #expect(
+            XcodePermissionDialogAutomation.Matcher.decision(
+                for: snapshot,
+                processID: processID,
+                agentPathCandidates: paths,
+                assistantNameCandidates: names,
+                serverProcessIDCandidates: [6119]
+            ) != nil
+        )
+        #expect(
+            XcodePermissionDialogAutomation.Matcher.connectionDecision(
+                for: snapshot,
+                processID: processID
+            ) == nil
+        )
+        let axClient = RecordingAXClient(
+            status: .trusted,
+            windowsByProcessID: [
+                processID: [XcodePermissionDialogAutomation.AXWindow(
+                    processID: processID,
+                    snapshot: snapshot,
+                    defaultButton: AXUIElementCreateSystemWide()
+                )]
+            ]
+        )
+        var scanner = PermissionDialogScanner(
+            dependencies: .init(
+                configuration: .init(
+                    permissionDialogProcessIDs: { [processID] },
+                    agentPathCandidates: { paths },
+                    assistantNameCandidates: { names },
+                    agentProcessIDCandidates: { [6119] },
+                    agentScope: .allAgents
+                ),
+                axClient: axClient,
+                uptimeNanoseconds: { 0 },
+                logger: Logger(label: "tests.permission")
+            )
+        )
+        #expect(scanner.scanAndApprove().approvedWindowCount == 1)
+        #expect(axClient.snapshot().pressCalls == 1)
+    }
+
+    @Test func allAgentScannerApprovesBothKindsAndPressesOverlappingMatchOnce() {
+        let processID: pid_t = 4317
+        let snapshots = [
+            makeSnapshot(
+                processBundleIdentifier: "com.apple.dt.Xcode",
+                title: "許可",
+                textValues: ["エージェント XcodeMCPKit が Xcode のツール使用を要求しています。"],
+                defaultButton: makeButton(title: "許可")
+            ),
+            makeIndependentAgentSnapshot(),
+            makeSnapshot(
+                processBundleIdentifier: "com.apple.dt.Xcode",
+                title: "Allow “XcodeMCPKit” to access Xcode?",
+                textValues: ["PID: 6119"]
+            ),
+        ]
+        let axClient = RecordingAXClient(
+            status: .trusted,
+            windowsByProcessID: [processID: snapshots.map { snapshot in
+                XcodePermissionDialogAutomation.AXWindow(
+                    processID: processID,
+                    snapshot: snapshot,
+                    defaultButton: AXUIElementCreateSystemWide()
+                )
+            }]
+        )
+        var scanner = PermissionDialogScanner(
+            dependencies: .init(
+                configuration: .init(
+                    permissionDialogProcessIDs: { [processID] },
+                    agentPathCandidates: { [] },
+                    assistantNameCandidates: { ["XcodeMCPKit"] },
+                    agentProcessIDCandidates: { [6119] },
+                    agentScope: .allAgents
+                ),
+                axClient: axClient,
+                uptimeNanoseconds: { 0 },
+                logger: Logger(label: "tests.permission")
+            )
+        )
+        let result = scanner.scanAndApprove()
+        #expect(result.matchedWindowCount == 3)
+        #expect(result.approvedWindowCount == 3)
+        #expect(axClient.snapshot().pressCalls == 3)
     }
 
     @Test func matcherMatchesWhenSingleTextNodeContainsAssistantNameAndPID() {
@@ -667,7 +794,8 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(axClient.snapshot().pressCalls == 2)
     }
 
-    @Test func scannerDoesNotEnumerateChildProcessesForOrdinaryWindows() {
+    @Test(arguments: [XcodePermissionDialogAutomation.Configuration.AgentScope.configuredAgent, .allAgents])
+    func scannerDoesNotEnumerateChildProcessesForOrdinaryWindows(scope: XcodePermissionDialogAutomation.Configuration.AgentScope) {
         let processID: pid_t = 4316
         let axClient = RecordingAXClient(
             status: .trusted,
@@ -696,7 +824,8 @@ struct XcodePermissionDialogAutoApproverTests {
                     agentProcessIDCandidates: {
                         childProcessScanCount.increment()
                         return []
-                    }
+                    },
+                    agentScope: scope
                 ),
                 axClient: axClient,
                 uptimeNanoseconds: { 0 },
@@ -711,7 +840,8 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(childProcessScanCount.value() == 0)
     }
 
-    @Test func scannerRefreshesAgentPathCandidatesBetweenScans() {
+    @Test(arguments: [XcodePermissionDialogAutomation.Configuration.AgentScope.configuredAgent, .allAgents])
+    func scannerRefreshesAgentPathCandidatesBetweenScans(scope: XcodePermissionDialogAutomation.Configuration.AgentScope) {
         let processID: pid_t = 4317
         let bridgePath = "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge"
         let axClient = RecordingAXClient(
@@ -741,7 +871,8 @@ struct XcodePermissionDialogAutoApproverTests {
                         candidateCounter.nextCandidateSet(first: [], later: [bridgePath])
                     },
                     assistantNameCandidates: { [] },
-                    agentProcessIDCandidates: { [] }
+                    agentProcessIDCandidates: { [] },
+                    agentScope: scope
                 ),
                 axClient: axClient,
                 uptimeNanoseconds: { 0 },

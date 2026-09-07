@@ -20,9 +20,10 @@
     owned polling lifecycle shared by the proxy and maintainer diagnostic.
   - Owns one scanner task per caller-supplied PID so a slow helper AX call does
     not delay approval of another Xcode process's dialog.
-  - Consumes caller-supplied Xcode/helper identities. The proxy selects all MCP
-    connections; the diagnostic supplies explicit agent identities. It does not
-    own process inventory or launch processes.
+  - Consumes caller-supplied Xcode/helper and agent identities. The proxy adds
+    connection-heading matching to configured-agent matching; the diagnostic
+    uses only configured-agent matching. It does not own process inventory or
+    launch processes.
 - `XcodeMCPPermissionApproverTool`
   - Maintainer executable that validates explicit existing PIDs and runs the
     shared permission automation until interrupted. It never launches
