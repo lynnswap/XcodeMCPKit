@@ -59,30 +59,15 @@ source ~/.zshrc
 
 ### 1. Enable Xcode MCP Access
 
-XcodeMCPKit automatically uses Xcode 27's headless MCP service when it is
-available and enabled. This lets the proxy start before a project or workspace
-is open in the Xcode app. Enabling the service is an optional, one-time system
-setup performed by you:
-
-```bash
-sudo xcrun mcp-server enable
-```
-
-XcodeMCPKit never runs `sudo` or changes Xcode MCP permissions. If Xcode 27
-provides the service but it is disabled, startup prints the command above and
-continues with GUI Xcode routing. Older Xcode versions also continue with GUI
-routing.
-
-For GUI routing, open your project in Xcode, choose
+Open your project in Xcode, choose
 **Xcode > Settings > Intelligence**, and turn on
 **Allow external agents to use Xcode tools** under **Model Context Protocol**.
 See [Giving external agents access to Xcode][apple-xcode-mcp-access].
 
 This global Xcode setting is separate from the per-connection **Allow** dialog.
-`--auto-approve` handles the GUI dialog; it does not enable headless MCP access.
-The first headless `XcodeOpenWorkspace` call can separately ask you to approve
-the agent and containing folder. Review that request in Xcode Service and
-approve it manually; XcodeMCPKit does not broaden headless permissions.
+`--auto-approve` handles the GUI dialog.
+
+Xcode 27 also supports [optional headless MCP access](#optional-headless-mcp-access-xcode-27).
 
 ### 2. Start the Proxy Server
 
@@ -211,6 +196,23 @@ Only the following cases need changes:
   `MCP-Protocol-Version: 2025-06-18`. Include
   `Accept: application/json, text/event-stream` on `POST /mcp`, and do not send
   JSON-RPC batch requests.
+
+## Optional: Headless MCP Access (Xcode 27)
+
+Xcode 27 can serve MCP requests without a project or workspace open in the
+Xcode app. This is optional for XcodeMCPKit.
+
+Enable headless access:
+
+```bash
+sudo xcrun mcp-server enable
+```
+
+Or enable it with all agents always allowed, skipping approval prompts:
+
+```bash
+sudo xcrun mcp-server enable --unsafe-always-allow-all-agents
+```
 
 ## Troubleshooting
 
