@@ -356,7 +356,8 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         let eventLoop = group.next()
         let eventSource = ProxyRuntimeEventSource()
         let processEventMonitor: XcodeProcessEventMonitor? =
-            config.xcodeMode == .headless ? nil : XcodeProcessEventMonitor()
+            config.xcodeMode != .headless || config.usesPermissionDialogAutomation
+            ? XcodeProcessEventMonitor() : nil
         let coordinator = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
