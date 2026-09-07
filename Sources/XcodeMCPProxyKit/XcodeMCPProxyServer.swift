@@ -115,7 +115,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         /// Automatically approve Xcode MCP connection dialogs for all agents,
         /// including agents connecting directly to Xcode outside this proxy.
         ///
-        /// This requires macOS Accessibility permission for the host process.
+        /// Matches the English heading `Allow “…” to access Xcode?` and an
+        /// `Allow` button. This requires macOS Accessibility permission for the host process.
         case automatic
     }
 

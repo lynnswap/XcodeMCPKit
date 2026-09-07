@@ -17,33 +17,19 @@ extension XcodePermissionDialogAutomation {
         ) -> XcodePermissionDialogAutomation.MatchDecision? {
             guard passesStructuralChecks(snapshot),
                 normalizedText(snapshot.defaultButton?.role) == "axbutton",
-                looksLikeAllowButton(normalizedButtonDescription(snapshot.defaultButton))
+                normalizedText(snapshot.defaultButton?.title) == "allow"
             else {
                 return nil
             }
 
-            let textNodes = normalizedTextNodes(for: snapshot).map {
-                $0.replacingOccurrences(of: "’", with: "'")
+            // Xcode can expose the heading as AXStaticText while AXTitle is empty.
+            let hasConnectionTitle = normalizedTextNodes(for: snapshot).contains { text in
+                text.range(
+                    of: #"(?s)^allow (?:“.+”|".+") to access xcode\?$"#,
+                    options: .regularExpression
+                ) != nil
             }
-            // Xcode exposes generic AppKit identifiers for this alert. The
-            // connection-specific title and explanatory copy distinguish it
-            // from tool, folder, and other modal permission requests.
-            let hasConnectionTitle = textNodes.contains { text in
-                text.hasPrefix("allow ") && text.hasSuffix(" to access xcode?")
-            }
-            let hasConnectionExplanation = textNodes.contains { text in
-                text.contains("the agent wants to use xcode's tools to perform actions like building, testing, or modifying code.")
-            }
-            let namedAgentRequests = [
-                #"^エージェント .+ が xcode のツール使用を要求しています。$"#,
-                #"^the agent .+ wants to use xcode's tools(?: for .+)?\.$"#,
-            ]
-            let hasNamedAgentRequest = textNodes.contains { text in
-                namedAgentRequests.contains { request in
-                    text.range(of: request, options: .regularExpression) != nil
-                }
-            }
-            guard (hasConnectionTitle && hasConnectionExplanation) || hasNamedAgentRequest else {
+            guard hasConnectionTitle else {
                 return nil
             }
             return XcodePermissionDialogAutomation.MatchDecision(

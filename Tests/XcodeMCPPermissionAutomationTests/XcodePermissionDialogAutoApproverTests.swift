@@ -36,14 +36,12 @@ struct XcodePermissionDialogAutoApproverTests {
     }
 
     @Test(arguments: [
-        ("エージェント XcodeMCPKit が Xcode のツール使用を要求しています。", "許可"),
-        ("エージェント 別のエージェント が Xcode のツール使用を要求しています。", "許可"),
-        ("エージェント XcodeMCPKit、プロセス識別子 7001 が Xcode のツール使用を要求しています。", "許可"),
-        ("The agent Custom MCP, PID 4317 wants to use Xcode's tools.", "Allow"),
-        ("The agent at /tmp/mcpbridge wants to use Xcode's tools for XcodeMCPKit.", "Allow"),
-        ("The agent Other Client wants to use Xcode’s tools.", "Allow"),
+        (#"Allow "Codex Release benchmark" to access Xcode?"#, [String]()),
+        ("Allow “Other agent” to access Xcode?", ["An updated explanation."]),
+        ("Allow “別のエージェント” to access Xcode?", ["PID: 7001", "Path: /unrelated/python"]),
+        ("Allow “Multiline\nagent” to access Xcode?", ["Beschreibung der Anfrage."]),
     ])
-    func scannerApprovesExistingConnectionCopyWithoutIdentityRestrictions(text: String, buttonTitle: String) {
+    func scannerApprovesConnectionHeadingAndAllowRegardlessOfBody(title: String, body: [String]) {
         let processID: pid_t = 10620
         let axClient = RecordingAXClient(
             status: .trusted,
@@ -53,9 +51,8 @@ struct XcodePermissionDialogAutoApproverTests {
                         processID: processID,
                         snapshot: makeSnapshot(
                             processBundleIdentifier: "com.apple.dt.Xcode",
-                            title: "許可",
-                            textValues: [text],
-                            defaultButton: makeButton(title: buttonTitle)
+                            title: "",
+                            textValues: [title] + body
                         ),
                         defaultButton: AXUIElementCreateSystemWide()
                     )
@@ -72,6 +69,40 @@ struct XcodePermissionDialogAutoApproverTests {
         )
 
         #expect(scanner.scanAndApprove().approvedWindowCount == 1)
+    }
+
+    @Test func connectionMatcherAcceptsHeadingInWindowTitle() {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Allow “Any agent” to access Xcode?",
+            textValues: []
+        )
+        #expect(
+            XcodePermissionDialogAutomation.Matcher.connectionDecision(
+                for: snapshot,
+                processID: 10620
+            ) != nil
+        )
+    }
+
+    @Test(arguments: [
+        XcodePermissionDialogAutomation.ButtonSnapshot(role: "AXButton", identifier: "action-button-1"),
+        makeButton(title: "許可"),
+        makeButton(title: "Allow", role: "AXStaticText"),
+    ])
+    func connectionMatcherRequiresAnAllowButton(button: XcodePermissionDialogAutomation.ButtonSnapshot) {
+        let snapshot = makeSnapshot(
+            processBundleIdentifier: "com.apple.dt.Xcode",
+            title: "Allow “Any agent” to access Xcode?",
+            textValues: [],
+            defaultButton: button
+        )
+        #expect(
+            XcodePermissionDialogAutomation.Matcher.connectionDecision(
+                for: snapshot,
+                processID: 10620
+            ) == nil
+        )
     }
 
     @Test(arguments: [
@@ -99,10 +130,13 @@ struct XcodePermissionDialogAutoApproverTests {
 
     @Test(arguments: [
         ("Allow “Codex Release benchmark” to access a folder?", "The agent wants to access this folder."),
-        ("Allow “Codex Release benchmark” to access Xcode?", "The agent wants to run a shell command."),
+        ("Allow “Codex Release benchmark” to run a shell command?", "The agent wants to run a shell command."),
         ("Allow access", "The agent wants to use Xcode’s tools to perform actions like building, testing, or modifying code."),
         ("許可", "エージェント 別のエージェント がフォルダへのアクセスを要求しています。"),
         ("Allow access", "The agent wants to use Xcode's tools."),
+        ("Allow “Codex Release benchmark” to access Xcode? Extra text", ""),
+        ("Allow “Codex Release benchmark to access Xcode?", ""),
+        ("Allow “” to access Xcode?", ""),
     ])
     func connectionMatcherRejectsUnrelatedPermissionRequests(title: String, explanation: String) {
         let snapshot = makeSnapshot(
