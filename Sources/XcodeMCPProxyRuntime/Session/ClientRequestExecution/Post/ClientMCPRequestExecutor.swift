@@ -150,17 +150,6 @@ final class ClientMCPRequestExecutor: Sendable {
         }
 
         let responseID = JSONRPC.Message.Inspector.requestID(from: requestObject)
-        if sessionManager.isInitialized() == false {
-            return immediate(
-                Self.makeExpectedInitializeResolution(
-                    requestID: responseID,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream
-                ),
-                on: eventLoop
-            )
-        }
-
         switch routeToolCall(
             object: requestObject,
             bodyData: bodyData,

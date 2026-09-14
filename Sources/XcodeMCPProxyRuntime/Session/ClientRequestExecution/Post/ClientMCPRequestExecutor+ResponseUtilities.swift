@@ -51,27 +51,6 @@ extension ClientMCPRequestExecutor {
         return .nanoseconds(Int64((remainingSeconds * 1_000_000_000).rounded(.up)))
     }
 
-    static func makeExpectedInitializeResolution(
-        requestID: JSONRPC.ID?,
-        sessionID: String,
-        prefersEventStream: Bool
-    ) -> ClientMCPRequestExecutor.Resolution {
-        guard let requestID else {
-            return .plain(
-                status: .unprocessableEntity,
-                body: "expected initialize request",
-                sessionID: sessionID
-            )
-        }
-        return .mcpError(
-            id: requestID,
-            code: -32000,
-            message: "expected initialize request",
-            sessionID: sessionID,
-            prefersEventStream: prefersEventStream
-        )
-    }
-
     static func makeUpstreamUnavailableResolution(
         responseID: JSONRPC.ID?,
         sessionID: String,

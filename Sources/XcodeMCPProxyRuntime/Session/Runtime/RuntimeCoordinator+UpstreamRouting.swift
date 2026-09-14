@@ -194,26 +194,47 @@ extension RuntimeCoordinator {
         guard proof.slotID == slotID,
               upstreamTopology.validate(proof) else { return }
         let bridgeRecovery = upstreamHealthManager.currentBridgeRecovery(for: proof)
-        guard clearUpstreamState(proof: proof) else { return }
-        let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
-        guard let globalInit else { return }
+        var cleared: UpstreamHealthManager.ClearedUpstreamState?
+        var supportUpdate: CanonicalHandshakeState.SupportEligibilityUpdate?
+        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
+        // Detach request mappings before the slot becomes eligible for another
+        // handshake. A sibling exit can otherwise initialize this slot while
+        // this exit is still removing its previous requests.
+        let globalInit = initializeManager.captureUpstreamExit {
+            upstreamTopology.withValidatedSnapshot(proof) { topologySnapshot in
+                upstreamRouter.reset(proof: proof)
+                guard let result = upstreamHealthManager.clearUpstreamState(proof) else {
+                    return false
+                }
+                cleared = result
+                supportUpdate = commitSupportEligibilityAfterHealthMutation(
+                    topologySnapshot: topologySnapshot,
+                    detachedProof: proof,
+                    processEligibility: &processEligibility
+                )
+                return true
+            } == true
+        }
+        guard let globalInit, let cleared, let supportUpdate, let processEligibility else { return }
+        applyProcessControlPlaneTransition(processEligibility.transition)
+        applySupportEligibilityCompletion(.init(update: supportUpdate, publication: nil))
+        finishClearingUpstreamState(
+            proof: proof,
+            cleared: cleared,
+            resetsProcessRouteActivation: true
+        )
+        testHooks.upstreamExitStateCleared?(upstreamIndex)
         let suppressProcessRouteWarmRestart =
             clearsInitializedProcessRouteActivationBeforeCatalog(upstreamIndex: upstreamIndex)
 
         let exitedActivePrimaryInitialize =
             globalInit.primaryInitUpstreamIndex == upstreamIndex && globalInit.wasInFlight
-        if exitedActivePrimaryInitialize {
-            if let upstreamID = globalInit.primaryInitUpstreamID {
-                upstreamRouter.remove(proof: proof, upstreamID: upstreamID)
-            }
-        }
         if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
             markXcodeProcessRouteUnavailable(
                 upstreamIndex: upstreamIndex,
                 reason: "upstream_exit_\(status)"
             )
         }
-        upstreamRouter.reset(proof: proof)
         releaseLeases(
             leaseManager.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
@@ -234,19 +255,21 @@ extension RuntimeCoordinator {
             if retryPrimaryInitializeOnAlternativeUpstream(
                 failedUpstreamIndex: upstreamIndex,
                 failedUpstreamID: nil,
-                reason: "primary_upstream_exit_\(status)"
+                reason: "primary_upstream_exit_\(status)",
+                matching: globalInit.primaryInitializePhase
             ) {
                 return
             }
-            guard let failure = initializeManager.completePrimaryInitializeFailure() else {
-                return
-            }
-            failure.timeout?.cancel()
-            failure.recoveryTimeout?.cancel()
-            for item in failure.pending {
-                removePendingInitializeSessionIfCurrent(item)
-                item.eventLoop.execute {
-                    item.promise.fail(TimeoutError())
+            if let failure = initializeManager.completePrimaryInitializeFailure(
+                matching: globalInit.primaryInitializePhase
+            ) {
+                failure.timeout?.cancel()
+                failure.recoveryTimeout?.cancel()
+                for item in failure.pending {
+                    removePendingInitializeSessionIfCurrent(item)
+                    item.eventLoop.execute {
+                        item.promise.fail(TimeoutError())
+                    }
                 }
             }
         }

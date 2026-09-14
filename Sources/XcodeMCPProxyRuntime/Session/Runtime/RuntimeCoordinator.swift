@@ -48,6 +48,7 @@ final class WeakRuntimeCoordinatorBox: @unchecked Sendable {
 
 struct RuntimeCoordinatorTestHooks: Sendable {
     var upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)?
+    var upstreamExitStateCleared: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
     var toolsListPrewarmCompleted: (@Sendable () -> Void)?
     var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
@@ -78,6 +79,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
 
     init(
         upstreamEventHandled: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
+        upstreamExitStateCleared: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
         toolsListPrewarmCompleted: (@Sendable () -> Void)? = nil,
         upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
@@ -107,6 +109,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         healthProbeResponseWaiterWillRegister: (@Sendable () -> Void)? = nil,
     ) {
         self.upstreamEventHandled = upstreamEventHandled
+        self.upstreamExitStateCleared = upstreamExitStateCleared
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
         self.toolsListPrewarmCompleted = toolsListPrewarmCompleted
         self.upstreamInitialized = upstreamInitialized

@@ -102,12 +102,12 @@ final class InitializeManager: Sendable {
     }
 
     struct ExitResult: Sendable {
-        let pending: [PendingInitialize]
-        let timeout: RuntimeScheduledTimeout?
         let hadGlobalInit: Bool
-        let wasInFlight: Bool
-        let primaryInitUpstreamIndex: Int?
-        let primaryInitUpstreamID: Int64?
+        let primaryInitializePhase: PrimaryInitializePhase
+
+        var wasInFlight: Bool { primaryInitializePhase.isInFlight }
+        var primaryInitUpstreamIndex: Int? { primaryInitializePhase.upstreamIndex }
+        var primaryInitUpstreamID: Int64? { primaryInitializePhase.upstreamID }
     }
 
     struct PendingRemovalResult: Sendable {
@@ -437,13 +437,18 @@ final class InitializeManager: Sendable {
         }
     }
 
-    func preparePrimaryInitializeRetry(upstreamIndex: Int) -> Bool {
+    func preparePrimaryInitializeRetry(
+        upstreamIndex: Int,
+        matching expectedPhase: PrimaryInitializePhase? = nil
+    ) -> Bool {
         state.withLockedValue { state in
             guard !state.isShuttingDown,
                   brokerState.initializeResult() == nil,
-                  state.primaryInitializePhase == .idle,
                   state.initPending.isEmpty == false
             else {
+                return false
+            }
+            if let expectedPhase, state.primaryInitializePhase != expectedPhase {
                 return false
             }
             state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
@@ -562,17 +567,14 @@ final class InitializeManager: Sendable {
         }
     }
 
-    func reopenPrimaryInitializeForRetry() {
-        state.withLockedValue { state in
-            state.primaryInitializePhase = .idle
-            state.primaryInitializeRequiresPendingWaiter = false
-            state.primaryInitializeReadinessToken = nil
-        }
-    }
-
-    func completePrimaryInitializeFailure() -> FailureResult? {
+    func completePrimaryInitializeFailure(
+        matching expectedPhase: PrimaryInitializePhase? = nil
+    ) -> FailureResult? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
+            if let expectedPhase, state.primaryInitializePhase != expectedPhase {
+                return nil
+            }
             let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
             let shouldRetryEagerInitialize = consumeWarmInitRecoveryIntentLocked(
                 state: &state,
@@ -630,27 +632,15 @@ final class InitializeManager: Sendable {
         }
     }
 
-    func handleUpstreamExit(upstreamIndex: Int) -> ExitResult? {
+    func captureUpstreamExit(detach: () -> Bool = { true }) -> ExitResult? {
         state.withLockedValue { state in
-            guard !state.isShuttingDown else { return nil }
-            let result = ExitResult(
-                pending: state.initPending,
-                timeout: state.initTimeout,
+            guard !state.isShuttingDown, detach() else { return nil }
+            // Releasing the attempt here would let delayed exit cleanup cancel
+            // a replacement handshake. Retry or failure settles the captured phase.
+            return ExitResult(
                 hadGlobalInit: brokerState.initializeResult() != nil,
-                wasInFlight: state.primaryInitializePhase.isInFlight,
-                primaryInitUpstreamIndex: state.primaryInitializePhase.upstreamIndex,
-                primaryInitUpstreamID: state.primaryInitializePhase.upstreamID
+                primaryInitializePhase: state.primaryInitializePhase
             )
-
-            if state.primaryInitializePhase.upstreamIndex == upstreamIndex,
-               state.primaryInitializePhase.isInFlight
-            {
-                state.primaryInitializePhase = .idle
-                state.primaryInitializeRequiresPendingWaiter = false
-                state.primaryInitializeReadinessToken = nil
-            }
-
-            return result
         }
     }
 

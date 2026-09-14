@@ -219,7 +219,7 @@ extension RuntimeCoordinator {
         reason: String
     ) {
         let upstreamIndex = operationLease.upstreamIndex
-        let globalInit = initializeManager.handleUpstreamExit(upstreamIndex: upstreamIndex)
+        let globalInit = initializeManager.captureUpstreamExit()
         if globalInit?.primaryInitUpstreamIndex == upstreamIndex,
            let upstreamID = globalInit?.primaryInitUpstreamID {
             upstreamRouter.remove(proof: operationLease.proof, upstreamID: upstreamID)
@@ -240,7 +240,8 @@ extension RuntimeCoordinator {
            retryPrimaryInitializeOnAlternativeUpstream(
                failedUpstreamIndex: upstreamIndex,
                failedUpstreamID: nil,
-               reason: "xcode_process_removed_\(reason)"
+               reason: "xcode_process_removed_\(reason)",
+               matching: globalInit?.primaryInitializePhase
            ) {
             return
         }

@@ -227,7 +227,8 @@ extension RuntimeCoordinator {
     func retryPrimaryInitializeOnAlternativeUpstream(
         failedUpstreamIndex: Int,
         failedUpstreamID: Int64?,
-        reason: String
+        reason: String,
+        matching expectedPhase: InitializeManager.PrimaryInitializePhase? = nil
     ) -> Bool {
         guard processRoutingEnabled else {
             return false
@@ -256,9 +257,10 @@ extension RuntimeCoordinator {
                 )
             }
         }
-        initializeManager.reopenPrimaryInitializeForRetry()
-        guard initializeManager.preparePrimaryInitializeRetry(upstreamIndex: retryUpstreamIndex)
-        else {
+        guard initializeManager.preparePrimaryInitializeRetry(
+            upstreamIndex: retryUpstreamIndex,
+            matching: expectedPhase
+        ) else {
             return false
         }
         startPrimaryInitializeRequestWhenReady(applyBackoff: true)
