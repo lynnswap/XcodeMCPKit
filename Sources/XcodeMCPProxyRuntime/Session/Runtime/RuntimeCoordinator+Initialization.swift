@@ -98,7 +98,7 @@ extension RuntimeCoordinator {
             return
         }
         if processRouteActivationOwnsPrimaryInitialize(upstreamIndex: upstreamIndex) {
-            _ = initializeManager.yieldPrimaryInitializeToRouteActivation(
+            _ = initializeManager.releasePrimaryInitialize(
                 upstreamIndex: upstreamIndex
             )
             return
@@ -133,7 +133,7 @@ extension RuntimeCoordinator {
             upstreamID,
             for: initializeClaim
         ) else {
-            _ = initializeManager.yieldPrimaryInitializeToRouteActivation(
+            _ = initializeManager.releasePrimaryInitialize(
                 upstreamIndex: upstreamIndex,
                 upstreamID: upstreamID
             )
@@ -325,7 +325,7 @@ extension RuntimeCoordinator {
                 || hasOtherInitializeRouteInFlight(excluding: upstreamIndex)
             if anotherRouteCanPublish {
                 if handlesPrimaryInitialize {
-                    _ = initializeManager.yieldPrimaryInitializeToRouteActivation(
+                    _ = initializeManager.releasePrimaryInitialize(
                         upstreamIndex: upstreamIndex,
                         upstreamID: upstreamID
                     )
@@ -622,7 +622,7 @@ extension RuntimeCoordinator {
             return
         }
         if handlesPrimaryInitialize {
-            _ = initializeManager.yieldPrimaryInitializeToRouteActivation(
+            _ = initializeManager.releasePrimaryInitialize(
                 upstreamIndex: upstreamIndex,
                 upstreamID: upstreamID
             )
@@ -782,7 +782,7 @@ extension RuntimeCoordinator {
         if processRoutingEnabled {
             if treatsAsPrimary {
                 initializeManager.rearmInitTimeoutForRetry { makeInitTimeout() }?.cancel()
-                _ = initializeManager.yieldPrimaryInitializeToRouteActivation(
+                _ = initializeManager.releasePrimaryInitialize(
                     upstreamIndex: upstreamIndex,
                     upstreamID: expectedUpstreamID
                 )
@@ -799,7 +799,7 @@ extension RuntimeCoordinator {
             excluding: participantLease.topologyProof
         ) || anyActiveRecoveryInFlight()
         if anotherRouteCanPublish {
-            _ = initializeManager.yieldPrimaryInitializeToRouteActivation(
+            _ = initializeManager.releasePrimaryInitialize(
                 upstreamIndex: upstreamIndex,
                 upstreamID: expectedUpstreamID
             )
@@ -841,7 +841,7 @@ extension RuntimeCoordinator {
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             return
         }
-        _ = initializeManager.yieldPrimaryInitializeToRouteActivation(
+        _ = initializeManager.releasePrimaryInitialize(
             upstreamIndex: upstreamIndex,
             upstreamID: expectedUpstreamID
         )

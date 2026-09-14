@@ -4592,6 +4592,42 @@ struct RuntimeCoordinatorInitializationTests {
         #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
     }
 
+    @Test(arguments: [false, true])
+    func processRetirementPreservesOnlyClientOwnedInitializeDeadlines(hasPendingClient: Bool)
+        async throws
+    {
+        let upstream = TestUpstreamClient()
+        let timeouts = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeouts.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(
+                    target: xcodeProcessTarget(processID: 27104, xcodeVersion: "27.0"),
+                    upstreamIndices: [0]
+                )
+            ],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        fixture.manager.startEagerInitializePrimary()
+        _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let existingClient = hasPendingClient ? fixture.registerInitialize(requestID: 1) : nil
+        fixture.manager.reconcileXcodeProcessTargets([], reason: "test_process_disappeared")
+        let newClient = fixture.registerInitialize(requestID: 2, sessionID: "new-client")
+
+        if let existingClient {
+            #expect(timeouts.scheduledCount() == 1)
+            #expect(timeouts.fire(at: 0))
+            await #expect(throws: TimeoutError.self) { try await existingClient.get() }
+        } else {
+            #expect(timeouts.scheduledCount() == 2)
+            #expect(timeouts.fire(at: 0) == false)
+            #expect(timeouts.fire(at: 1))
+        }
+        await #expect(throws: TimeoutError.self) { try await newClient.get() }
+    }
+
     @Test func sessionManagerEagerExitGivesReplacementInitializeANewTimeout() async throws {
         let upstream0 = TestUpstreamClient()
         let upstream1 = TestUpstreamClient()
@@ -6502,7 +6538,7 @@ struct RuntimeCoordinatorInitializationTests {
         let initialSent = await upstream.sent()
         let initialID = try extractUpstreamID(from: initialSent[0])
 
-        #expect(manager.initializeManager.yieldPrimaryInitializeToRouteActivation(
+        #expect(manager.initializeManager.releasePrimaryInitialize(
             upstreamIndex: 0,
             upstreamID: initialID
         ))

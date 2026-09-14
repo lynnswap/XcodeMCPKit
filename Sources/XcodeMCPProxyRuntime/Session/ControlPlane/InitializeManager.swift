@@ -319,11 +319,12 @@ final class InitializeManager: Sendable {
         }
     }
 
-    func yieldPrimaryInitializeToRouteActivation(
+    func releasePrimaryInitialize(
         upstreamIndex: Int,
         upstreamID: Int64? = nil
     ) -> Bool {
-        state.withLockedValue { state in
+        var timeout: RuntimeScheduledTimeout?
+        let released = state.withLockedValue { state in
             let matches: Bool
             switch state.primaryInitializePhase {
             case .pendingSend(let currentUpstreamIndex):
@@ -338,8 +339,14 @@ final class InitializeManager: Sendable {
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
             state.primaryInitializeReadinessToken = nil
+            if state.initPending.isEmpty {
+                timeout = state.initTimeout
+                state.initTimeout = nil
+            }
             return true
         }
+        timeout?.cancel()
+        return released
     }
 
     func registerInitialize(

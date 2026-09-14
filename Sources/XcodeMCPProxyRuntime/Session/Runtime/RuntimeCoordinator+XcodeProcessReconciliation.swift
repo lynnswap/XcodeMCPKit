@@ -245,6 +245,12 @@ extension RuntimeCoordinator {
            ) {
             return
         }
+        if retiredPrimaryInitialize {
+            _ = initializeManager.releasePrimaryInitialize(
+                upstreamIndex: upstreamIndex,
+                upstreamID: globalInit?.primaryInitUpstreamID
+            )
+        }
     }
 
     private func restartPrimaryInitializeAfterRetiringCachedProcessRoute() {
