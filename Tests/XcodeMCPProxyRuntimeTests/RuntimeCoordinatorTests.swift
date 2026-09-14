@@ -4592,6 +4592,78 @@ struct RuntimeCoordinatorInitializationTests {
         #expect(manager.testStateSnapshot().upstream(id: 1)?.isInitialized == true)
     }
 
+    @Test(arguments: [false, true])
+    func processRetirementPreservesOnlyClientOwnedInitializeDeadlines(hasPendingClient: Bool)
+        async throws
+    {
+        let upstream = TestUpstreamClient()
+        let timeouts = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeouts.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(
+                    target: xcodeProcessTarget(processID: 27104, xcodeVersion: "27.0"),
+                    upstreamIndices: [0]
+                )
+            ],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        fixture.manager.startEagerInitializePrimary()
+        _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let existingClient = hasPendingClient ? fixture.registerInitialize(requestID: 1) : nil
+        fixture.manager.reconcileXcodeProcessTargets([], reason: "test_process_disappeared")
+        let newClient = fixture.registerInitialize(requestID: 2, sessionID: "new-client")
+
+        if let existingClient {
+            #expect(timeouts.scheduledCount() == 1)
+            #expect(timeouts.fire(at: 0))
+            await #expect(throws: TimeoutError.self) { try await existingClient.get() }
+        } else {
+            #expect(timeouts.scheduledCount() == 2)
+            #expect(timeouts.fire(at: 0) == false)
+            #expect(timeouts.fire(at: 1))
+        }
+        await #expect(throws: TimeoutError.self) { try await newClient.get() }
+    }
+
+    @Test func sessionManagerEagerExitGivesReplacementInitializeANewTimeout() async throws {
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let timeouts = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream0, upstream1],
+            scheduleRuntimeTimeout: timeouts.scheduler(),
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(
+                    target: xcodeProcessTarget(processID: 27103, xcodeVersion: "27.0"),
+                    upstreamIndices: [0]
+                ),
+                XcodeProcessRoute(
+                    target: xcodeProcessTarget(processID: 26603, xcodeVersion: "26.6"),
+                    upstreamIndices: [1]
+                ),
+            ],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        fixture.manager.startEagerInitializePrimary()
+        _ = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        #expect(timeouts.scheduledCount() == 1)
+
+        await upstream0.yield(.exit(1))
+        let replacement = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        let client = fixture.registerInitialize(requestID: 1)
+        timeouts.fire(at: 0)
+        await upstream1.yield(.message(try makeInitializeResponse(
+            id: extractUpstreamID(from: replacement)
+        )))
+        let response = try decodeJSON(from: try await client.get())
+        #expect(response["result"] != nil)
+        #expect(fixture.manager.isInitialized())
+    }
+
     @Test func sessionManagerRetriesProcessPrimaryInitializeWhenSendIsUnavailable()
         async throws
     {
@@ -5396,6 +5468,68 @@ struct RuntimeCoordinatorInitializationTests {
         #expect(manager.canonicalHandshakeState.initializeResult() != nil)
     }
 
+    @Test func sessionManagerReleasedInitializeTimeoutCannotFailReplacement() async throws {
+        let upstream = TestUpstreamClient()
+        let timeouts = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeouts.scheduler(),
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.startEagerInitializePrimary()
+        let first = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(manager.initializeManager.releasePrimaryInitialize(
+            upstreamIndex: 0,
+            upstreamID: try extractUpstreamID(from: first)
+        ))
+        #expect(manager.clearUpstreamState(upstreamIndex: 0))
+        #expect(timeouts.isCancelled(at: 0))
+
+        let client = fixture.registerInitialize(requestID: 2, sessionID: "replacement-client")
+        let replacement = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        #expect(timeouts.fireIgnoringCancellation(at: 0))
+        await upstream.yield(.message(try makeInitializeResponse(
+            id: extractUpstreamID(from: replacement)
+        )))
+        let response = try decodeJSON(from: try await client.get())
+        #expect(response["result"] != nil)
+        #expect(manager.isInitialized())
+    }
+
+    @Test(arguments: [false, true])
+    func sessionManagerRearmedInitializeTimeoutIgnoresPriorCallback(completeWithResponse: Bool)
+        async throws
+    {
+        let upstream = TestUpstreamClient()
+        let timeouts = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeouts.scheduler(),
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        let client = fixture.registerInitialize(requestID: 1)
+        let request = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        manager.initializeManager.rearmInitTimeoutForRetry { manager.makeInitTimeout(id: $0) }?.cancel()
+        #expect(timeouts.isCancelled(at: 0))
+        #expect(timeouts.fireIgnoringCancellation(at: 0))
+        #expect(manager.initializeManager.pendingInitializes().count == 1)
+
+        if completeWithResponse {
+            await upstream.yield(.message(try makeInitializeResponse(
+                id: extractUpstreamID(from: request)
+            )))
+            let response = try decodeJSON(from: try await client.get())
+            #expect(response["result"] != nil)
+        } else {
+            #expect(timeouts.fire(at: 1))
+            await #expect(throws: TimeoutError.self) { try await client.get() }
+        }
+    }
+
     @Test func initializeManagerRearmsRetryTimeoutOnlyWhilePendingInitializesRemain() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
@@ -5404,10 +5538,10 @@ struct RuntimeCoordinatorInitializationTests {
         let factoryCalls = NIOLockedValueBox(0)
 
         let staleCancelled = NIOLockedValueBox(false)
-        _ = manager.replaceInitTimeout(
+        _ = manager.replaceInitTimeout { _ in
             RuntimeScheduledTimeout { staleCancelled.withLockedValue { $0 = true } }
-        )
-        manager.rearmInitTimeoutForRetry {
+        }
+        manager.rearmInitTimeoutForRetry { _ in
             factoryCalls.withLockedValue { $0 += 1 }
             return RuntimeScheduledTimeout {}
         }?.cancel()
@@ -5422,10 +5556,10 @@ struct RuntimeCoordinatorInitializationTests {
             on: eventLoop
         )
         let replacedCancelled = NIOLockedValueBox(false)
-        _ = manager.replaceInitTimeout(
+        _ = manager.replaceInitTimeout { _ in
             RuntimeScheduledTimeout { replacedCancelled.withLockedValue { $0 = true } }
-        )
-        manager.rearmInitTimeoutForRetry {
+        }
+        manager.rearmInitTimeoutForRetry { _ in
             factoryCalls.withLockedValue { $0 += 1 }
             return RuntimeScheduledTimeout {}
         }?.cancel()
@@ -5433,10 +5567,10 @@ struct RuntimeCoordinatorInitializationTests {
         #expect(factoryCalls.withLockedValue { $0 } == 1)
 
         let keptCancelled = NIOLockedValueBox(false)
-        _ = manager.replaceInitTimeout(
+        _ = manager.replaceInitTimeout { _ in
             RuntimeScheduledTimeout { keptCancelled.withLockedValue { $0 = true } }
-        )
-        #expect(manager.rearmInitTimeoutForRetry { nil } == nil)
+        }
+        #expect(manager.rearmInitTimeoutForRetry { _ in nil } == nil)
         #expect(keptCancelled.withLockedValue { $0 } == false)
 
         let shutdownState = manager.beginShutdown()
@@ -6466,7 +6600,10 @@ struct RuntimeCoordinatorInitializationTests {
         let initialSent = await upstream.sent()
         let initialID = try extractUpstreamID(from: initialSent[0])
 
-        manager.initializeManager.reopenPrimaryInitializeForRetry()
+        #expect(manager.initializeManager.releasePrimaryInitialize(
+            upstreamIndex: 0,
+            upstreamID: initialID
+        ))
         manager.handleInitializedNotificationSendOverload(
             upstreamIndex: 0,
             expectedUpstreamID: initialID,
@@ -14882,6 +15019,119 @@ struct RuntimeCoordinatorWindowRoutingTests {
         #expect(methodName(from: initializedNotification) == "notifications/initialized")
         #expect(methodName(from: queuedRequest) == "tools/list")
 
+    }
+
+    @Test func sessionManagerRecoversWhenInitializeTimesOutDuringUpstreamExit() async throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let stateCleared = TestSignal()
+        let resumeExit = DispatchSemaphore(value: 0)
+        let recovered = TestSignal()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5),
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamExitStateCleared: { _ in
+                    stateCleared.signal()
+                    resumeExit.wait()
+                },
+                upstreamInitialized: { _ in recovered.signal() }
+            )
+        )
+        defer { manager.shutdownAndWait() }
+        defer { resumeExit.signal() }
+
+        let initial = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: 1)!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        _ = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        await upstream.yield(.exit(1))
+        try await stateCleared.wait(description: "waiting for exit before initialize settlement")
+        manager.failInitPending(error: TimeoutError())
+        do {
+            _ = try await initial.get()
+            Issue.record("the expired initialize request should fail")
+        } catch {
+            #expect(error is TimeoutError)
+        }
+        resumeExit.signal()
+
+        let recovery = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        #expect(methodName(from: recovery) == "initialize")
+        await upstream.yield(.message(try makeInitializeResponse(
+            id: extractUpstreamID(from: recovery)
+        )))
+        try await recovered.wait(description: "waiting for recovery after initialize timeout")
+        #expect(manager.isInitialized())
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.initInFlight == false)
+    }
+
+    @Test func sessionManagerConcurrentUpstreamExitsPreserveRecoveryInitialize() async throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream0 = TestUpstreamClient()
+        let upstream1 = TestUpstreamClient()
+        let initializedUpstreams = LockedRecordedValues<Int>()
+        let primaryStateCleared = TestSignal()
+        let resumePrimaryExit = DispatchSemaphore(value: 0)
+        let config = makeConfig(requestTimeout: 5)
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamExitStateCleared: { index in
+                    guard index == 0 else { return }
+                    primaryStateCleared.signal()
+                    resumePrimaryExit.wait()
+                },
+                upstreamInitialized: { initializedUpstreams.append($0) }
+            )
+        )
+        defer { manager.shutdownAndWait() }
+        defer { resumePrimaryExit.signal() }
+
+        let initial = manager.registerInitialize(
+            originalID: JSONRPC.ID(any: 1)!,
+            requestObject: makeInitializeRequest(id: 1),
+            on: eventLoop
+        )
+        let firstPrimary = try await sentValue(from: upstream0, at: 0, timeout: .seconds(2))
+        await upstream0.yield(.message(try makeInitializeResponse(
+            id: extractUpstreamID(from: firstPrimary)
+        )))
+        _ = try await initial.get()
+        let firstSecondary = try await sentValue(from: upstream1, at: 0, timeout: .seconds(2))
+        await upstream1.yield(.message(try makeInitializeResponse(
+            id: extractUpstreamID(from: firstSecondary)
+        )))
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0, 1])
+
+        await upstream0.yield(.exit(1))
+        try await primaryStateCleared.wait(description: "waiting for primary exit detachment")
+        await upstream1.yield(.exit(1))
+        let recovery = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
+        #expect(methodName(from: recovery) == "initialize")
+        resumePrimaryExit.signal()
+        await upstream0.yield(.message(try makeInitializeResponse(
+            id: extractUpstreamID(from: recovery)
+        )))
+        let recovered = try await waitForRecordedValue(
+            initializedUpstreams,
+            at: 2,
+            description: "waiting for initialization after concurrent upstream exits"
+        )
+        #expect(recovered == 0)
+        #expect(manager.isInitialized())
+        #expect(manager.testStateSnapshot().upstream(id: 0)?.initInFlight == false)
+        let initialized = try await sentValue(from: upstream0, at: 3, timeout: .seconds(2))
+        #expect(methodName(from: initialized) == "notifications/initialized")
     }
 
     @Test func sessionManagerSecondaryExitClearsCachedInitializeResultWhenPrimaryAlreadyDown()

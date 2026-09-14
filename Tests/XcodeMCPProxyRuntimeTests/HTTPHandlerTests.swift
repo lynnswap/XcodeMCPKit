@@ -1066,6 +1066,46 @@ struct HTTPHandlerTests {
         #expect(sessionManager.requestSuccessNotificationCount() == 0)
     }
 
+    @Test(arguments: ["XcodeListWorkspaces", "XcodeListSchemes"])
+    func httpInitializedSessionSurvivesUpstreamRecovery(toolName: String) async throws {
+        let config = makeHTTPConfig(requestTimeout: 1)
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let sessionManager = TestRuntimeCoordinator(
+            config: config,
+            upstreamRequestResponder: { _, _, id in
+                .immediate(try makeToolSuccessResponse(id: id, text: "recovered"))
+            }
+        )
+        try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
+        let sessionID = try await initializeHTTPChannel(channel)
+        sessionManager.setInitialized(false)
+        sessionManager.setAvailableUpstreamIndex(nil)
+
+        try postJSON(toolsCallPayload(id: 2, name: toolName, arguments: [:]), sessionID: sessionID, to: channel)
+        let unavailable = try await collectResponse(from: channel)
+        let errorObject = try #require(
+            JSONSerialization.jsonObject(with: Data(unavailable.body.utf8)) as? [String: Any]
+        )
+        let error = try #require(errorObject["error"] as? [String: Any])
+        #expect((error["code"] as? NSNumber)?.intValue == -32001)
+        #expect(error["message"] as? String == "upstream unavailable")
+        #expect(sessionManager.isSessionInitialized(id: sessionID))
+        #expect(sessionManager.sentUpstreamCount() == 0)
+
+        sessionManager.setAvailableUpstreamIndex(0)
+        sessionManager.setInitialized(true)
+        try postJSON(toolsCallPayload(id: 3, name: toolName, arguments: [:]), sessionID: sessionID, to: channel)
+        let recovered = try await collectResponse(from: channel)
+        let resultObject = try #require(
+            JSONSerialization.jsonObject(with: Data(recovered.body.utf8)) as? [String: Any]
+        )
+        #expect(recovered.head.status == .ok)
+        #expect(resultObject["result"] != nil)
+        #expect(resultObject["error"] == nil)
+        #expect(sessionManager.sentUpstreamCount() == 1)
+    }
+
     @Test func httpJSONRPCResponseIsForwardedAndAcceptedWithoutWaiting() async throws {
         let config = makeHTTPConfig()
         let channel = EmbeddedChannel()

@@ -102,12 +102,12 @@ final class InitializeManager: Sendable {
     }
 
     struct ExitResult: Sendable {
-        let pending: [PendingInitialize]
-        let timeout: RuntimeScheduledTimeout?
         let hadGlobalInit: Bool
-        let wasInFlight: Bool
-        let primaryInitUpstreamIndex: Int?
-        let primaryInitUpstreamID: Int64?
+        let primaryInitializePhase: PrimaryInitializePhase
+
+        var wasInFlight: Bool { primaryInitializePhase.isInFlight }
+        var primaryInitUpstreamIndex: Int? { primaryInitializePhase.upstreamIndex }
+        var primaryInitUpstreamID: Int64? { primaryInitializePhase.upstreamID }
     }
 
     struct PendingRemovalResult: Sendable {
@@ -128,13 +128,18 @@ final class InitializeManager: Sendable {
         let isShuttingDown: Bool
     }
 
+    private struct InitializeTimeout: Sendable {
+        let id: UUID
+        let scheduled: RuntimeScheduledTimeout
+    }
+
     private struct State: Sendable {
         var initPending: [PendingInitialize] = []
         var primaryInitializePhase: PrimaryInitializePhase = .idle
         var primaryInitializeRequiresPendingWaiter = false
         var primaryInitializeReadinessToken: UpstreamReadinessWaiterToken?
         var cancelledPrimaryInitializeAttempts: [CancelledPrimaryInitializeAttempt] = []
-        var initTimeout: RuntimeScheduledTimeout?
+        var initTimeout: InitializeTimeout?
         var isShuttingDown = false
         var didWarmSecondary = false
         var warmInitRecoveryIntent: WarmInitRecoveryIntent = .none
@@ -171,7 +176,7 @@ final class InitializeManager: Sendable {
             state.cancelledPrimaryInitializeAttempts.removeAll()
             let pending = state.initPending
             state.initPending.removeAll()
-            let timeout = state.initTimeout
+            let timeout = state.initTimeout?.scheduled
             state.initTimeout = nil
             return (pending, timeout, recoveryTimeout)
         }
@@ -228,13 +233,13 @@ final class InitializeManager: Sendable {
                     state.primaryInitializePhase = .idle
                     state.primaryInitializeRequiresPendingWaiter = false
                     state.primaryInitializeReadinessToken = nil
-                    timeout = state.initTimeout
+                    timeout = state.initTimeout?.scheduled
                     state.initTimeout = nil
                 } else if state.primaryInitializePhase.isInFlight == false {
                     cancelledPrimaryUpstreamIndex = nil
                     cancelledPrimaryUpstreamID = nil
                     cancelledPrimaryReadinessToken = nil
-                    timeout = state.initTimeout
+                    timeout = state.initTimeout?.scheduled
                     state.initTimeout = nil
                 } else {
                     cancelledPrimaryUpstreamIndex = nil
@@ -319,11 +324,12 @@ final class InitializeManager: Sendable {
         }
     }
 
-    func yieldPrimaryInitializeToRouteActivation(
+    func releasePrimaryInitialize(
         upstreamIndex: Int,
         upstreamID: Int64? = nil
     ) -> Bool {
-        state.withLockedValue { state in
+        var timeout: RuntimeScheduledTimeout?
+        let released = state.withLockedValue { state in
             let matches: Bool
             switch state.primaryInitializePhase {
             case .pendingSend(let currentUpstreamIndex):
@@ -338,8 +344,14 @@ final class InitializeManager: Sendable {
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
             state.primaryInitializeReadinessToken = nil
+            if state.initPending.isEmpty {
+                timeout = state.initTimeout?.scheduled
+                state.initTimeout = nil
+            }
             return true
         }
+        timeout?.cancel()
+        return released
     }
 
     func registerInitialize(
@@ -437,13 +449,18 @@ final class InitializeManager: Sendable {
         }
     }
 
-    func preparePrimaryInitializeRetry(upstreamIndex: Int) -> Bool {
+    func preparePrimaryInitializeRetry(
+        upstreamIndex: Int,
+        matching expectedPhase: PrimaryInitializePhase? = nil
+    ) -> Bool {
         state.withLockedValue { state in
             guard !state.isShuttingDown,
                   brokerState.initializeResult() == nil,
-                  state.primaryInitializePhase == .idle,
                   state.initPending.isEmpty == false
             else {
+                return false
+            }
+            if let expectedPhase, state.primaryInitializePhase != expectedPhase {
                 return false
             }
             state.primaryInitializePhase = .pendingSend(upstreamIndex: upstreamIndex)
@@ -493,7 +510,7 @@ final class InitializeManager: Sendable {
             state.didWarmSecondary = true
             let pending = state.initPending
             state.initPending.removeAll()
-            let timeout = state.initTimeout
+            let timeout = state.initTimeout?.scheduled
             state.initTimeout = nil
             return ParticipantCompletion(
                 commit: initializeCommit,
@@ -527,7 +544,7 @@ final class InitializeManager: Sendable {
             let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
             let pending = state.initPending
             state.initPending.removeAll()
-            let timeout = state.initTimeout
+            let timeout = state.initTimeout?.scheduled
             state.initTimeout = nil
             return SupportEligibilityCompletion(
                 update: update,
@@ -556,23 +573,24 @@ final class InitializeManager: Sendable {
             let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
             let pending = state.initPending
             state.initPending.removeAll()
-            let timeout = state.initTimeout
+            let timeout = state.initTimeout?.scheduled
             state.initTimeout = nil
             return (pending, result, timeout, recoveryTimeout)
         }
     }
 
-    func reopenPrimaryInitializeForRetry() {
-        state.withLockedValue { state in
-            state.primaryInitializePhase = .idle
-            state.primaryInitializeRequiresPendingWaiter = false
-            state.primaryInitializeReadinessToken = nil
-        }
-    }
-
-    func completePrimaryInitializeFailure() -> FailureResult? {
+    func completePrimaryInitializeFailure(
+        matching expectedPhase: PrimaryInitializePhase? = nil,
+        timeoutID: UUID? = nil
+    ) -> FailureResult? {
         state.withLockedValue { state in
             guard !state.isShuttingDown else { return nil }
+            if let expectedPhase, state.primaryInitializePhase != expectedPhase {
+                return nil
+            }
+            if let timeoutID, state.initTimeout?.id != timeoutID {
+                return nil
+            }
             let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
             let shouldRetryEagerInitialize = consumeWarmInitRecoveryIntentLocked(
                 state: &state,
@@ -580,7 +598,7 @@ final class InitializeManager: Sendable {
             )
             let upstreamID = state.primaryInitializePhase.upstreamID
             let upstreamIndex = state.primaryInitializePhase.upstreamIndex
-            let timeout = state.initTimeout
+            let timeout = state.initTimeout?.scheduled
             state.primaryInitializePhase = .idle
             state.primaryInitializeRequiresPendingWaiter = false
             state.primaryInitializeReadinessToken = nil
@@ -598,10 +616,15 @@ final class InitializeManager: Sendable {
         }
     }
 
-    func replaceInitTimeout(_ timeout: RuntimeScheduledTimeout) -> RuntimeScheduledTimeout? {
+    func replaceInitTimeout(
+        makeTimeout: (UUID) -> RuntimeScheduledTimeout?
+    ) -> RuntimeScheduledTimeout? {
         state.withLockedValue { state in
-            let existing = state.initTimeout
-            state.initTimeout = timeout
+            guard !state.isShuttingDown else { return nil }
+            let id = UUID()
+            guard let timeout = makeTimeout(id) else { return nil }
+            let existing = state.initTimeout?.scheduled
+            state.initTimeout = InitializeTimeout(id: id, scheduled: timeout)
             return existing
         }
     }
@@ -613,44 +636,33 @@ final class InitializeManager: Sendable {
     /// attempt from arming its own fresh window and could fail it early.
     /// Returns the timeout the caller must cancel.
     func rearmInitTimeoutForRetry(
-        makeTimeout: () -> RuntimeScheduledTimeout?
+        makeTimeout: (UUID) -> RuntimeScheduledTimeout?
     ) -> RuntimeScheduledTimeout? {
         state.withLockedValue { state in
             guard state.initPending.isEmpty == false else {
-                let stale = state.initTimeout
+                let stale = state.initTimeout?.scheduled
                 state.initTimeout = nil
                 return stale
             }
-            guard let timeout = makeTimeout() else {
+            let id = UUID()
+            guard let timeout = makeTimeout(id) else {
                 return nil
             }
-            let previous = state.initTimeout
-            state.initTimeout = timeout
+            let previous = state.initTimeout?.scheduled
+            state.initTimeout = InitializeTimeout(id: id, scheduled: timeout)
             return previous
         }
     }
 
-    func handleUpstreamExit(upstreamIndex: Int) -> ExitResult? {
+    func captureUpstreamExit(detach: () -> Bool = { true }) -> ExitResult? {
         state.withLockedValue { state in
-            guard !state.isShuttingDown else { return nil }
-            let result = ExitResult(
-                pending: state.initPending,
-                timeout: state.initTimeout,
+            guard !state.isShuttingDown, detach() else { return nil }
+            // Releasing the attempt here would let delayed exit cleanup cancel
+            // a replacement handshake. Retry or failure settles the captured phase.
+            return ExitResult(
                 hadGlobalInit: brokerState.initializeResult() != nil,
-                wasInFlight: state.primaryInitializePhase.isInFlight,
-                primaryInitUpstreamIndex: state.primaryInitializePhase.upstreamIndex,
-                primaryInitUpstreamID: state.primaryInitializePhase.upstreamID
+                primaryInitializePhase: state.primaryInitializePhase
             )
-
-            if state.primaryInitializePhase.upstreamIndex == upstreamIndex,
-               state.primaryInitializePhase.isInFlight
-            {
-                state.primaryInitializePhase = .idle
-                state.primaryInitializeRequiresPendingWaiter = false
-                state.primaryInitializeReadinessToken = nil
-            }
-
-            return result
         }
     }
 
@@ -669,7 +681,7 @@ final class InitializeManager: Sendable {
             let recoveryTimeout = Self.invalidatePendingRecovery(state: &state)
             let result = (
                 pending: state.initPending,
-                timeout: state.initTimeout,
+                timeout: state.initTimeout?.scheduled,
                 recoveryTimeout: recoveryTimeout
             )
             state.initPending.removeAll()
