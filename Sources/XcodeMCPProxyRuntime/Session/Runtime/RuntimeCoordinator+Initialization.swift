@@ -781,7 +781,7 @@ extension RuntimeCoordinator {
 
         if processRoutingEnabled {
             if treatsAsPrimary {
-                initializeManager.rearmInitTimeoutForRetry { makeInitTimeout() }?.cancel()
+                initializeManager.rearmInitTimeoutForRetry { makeInitTimeout(id: $0) }?.cancel()
                 _ = initializeManager.releasePrimaryInitialize(
                     upstreamIndex: upstreamIndex,
                     upstreamID: expectedUpstreamID
@@ -902,7 +902,7 @@ extension RuntimeCoordinator {
         let handlesPrimaryInitialize = treatsAsPrimary || isCurrentPrimaryInitializeUpstream(upstreamIndex)
         if processRoutingEnabled {
             if handlesPrimaryInitialize {
-                initializeManager.rearmInitTimeoutForRetry { makeInitTimeout() }?.cancel()
+                initializeManager.rearmInitTimeoutForRetry { makeInitTimeout(id: $0) }?.cancel()
             }
             if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) {
                 startProcessRouteActivation(for: route)
@@ -926,7 +926,7 @@ extension RuntimeCoordinator {
             // timeout (never disarm first) so the pending promises stay
             // timeout-guarded at every instant. A retry with no waiters
             // drops the armed timeout instead of re-arming it.
-            initializeManager.rearmInitTimeoutForRetry { makeInitTimeout() }?.cancel()
+            initializeManager.rearmInitTimeoutForRetry { makeInitTimeout(id: $0) }?.cancel()
             if hasHealthySecondary {
                 initializeManager.setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
@@ -940,7 +940,7 @@ extension RuntimeCoordinator {
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 
-    func makeInitTimeout() -> RuntimeScheduledTimeout? {
+    func makeInitTimeout(id: UUID) -> RuntimeScheduledTimeout? {
         guard
             let timeoutAmount = MCP.MethodDispatcher.timeoutForInitialize(
                 defaultSeconds: config.requestTimeout)
@@ -949,20 +949,16 @@ extension RuntimeCoordinator {
         }
         return scheduleRuntimeTimeout(timeoutAmount) { [weak self] in
             guard let self else { return }
-            self.failInitPending(error: TimeoutError())
+            self.failInitPending(error: TimeoutError(), timeoutID: id)
         }
     }
 
     func scheduleInitTimeout() {
-        guard let timeout = makeInitTimeout() else {
-            return
-        }
-        let previous = initializeManager.replaceInitTimeout(timeout)
-        previous?.cancel()
+        initializeManager.replaceInitTimeout { makeInitTimeout(id: $0) }?.cancel()
     }
 
-    func failInitPending(error: Error) {
-        let result = initializeManager.completePrimaryInitializeFailure()
+    func failInitPending(error: Error, timeoutID: UUID? = nil) {
+        let result = initializeManager.completePrimaryInitializeFailure(timeoutID: timeoutID)
         guard let result else { return }
         cancelPrimaryInitializeReadinessWaiter()
         result.timeout?.cancel()

@@ -5468,6 +5468,68 @@ struct RuntimeCoordinatorInitializationTests {
         #expect(manager.canonicalHandshakeState.initializeResult() != nil)
     }
 
+    @Test func sessionManagerReleasedInitializeTimeoutCannotFailReplacement() async throws {
+        let upstream = TestUpstreamClient()
+        let timeouts = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeouts.scheduler(),
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.startEagerInitializePrimary()
+        let first = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        #expect(manager.initializeManager.releasePrimaryInitialize(
+            upstreamIndex: 0,
+            upstreamID: try extractUpstreamID(from: first)
+        ))
+        #expect(manager.clearUpstreamState(upstreamIndex: 0))
+        #expect(timeouts.isCancelled(at: 0))
+
+        let client = fixture.registerInitialize(requestID: 2, sessionID: "replacement-client")
+        let replacement = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        #expect(timeouts.fireIgnoringCancellation(at: 0))
+        await upstream.yield(.message(try makeInitializeResponse(
+            id: extractUpstreamID(from: replacement)
+        )))
+        let response = try decodeJSON(from: try await client.get())
+        #expect(response["result"] != nil)
+        #expect(manager.isInitialized())
+    }
+
+    @Test(arguments: [false, true])
+    func sessionManagerRearmedInitializeTimeoutIgnoresPriorCallback(completeWithResponse: Bool)
+        async throws
+    {
+        let upstream = TestUpstreamClient()
+        let timeouts = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [upstream],
+            scheduleRuntimeTimeout: timeouts.scheduler(),
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        let client = fixture.registerInitialize(requestID: 1)
+        let request = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        manager.initializeManager.rearmInitTimeoutForRetry { manager.makeInitTimeout(id: $0) }?.cancel()
+        #expect(timeouts.isCancelled(at: 0))
+        #expect(timeouts.fireIgnoringCancellation(at: 0))
+        #expect(manager.initializeManager.pendingInitializes().count == 1)
+
+        if completeWithResponse {
+            await upstream.yield(.message(try makeInitializeResponse(
+                id: extractUpstreamID(from: request)
+            )))
+            let response = try decodeJSON(from: try await client.get())
+            #expect(response["result"] != nil)
+        } else {
+            #expect(timeouts.fire(at: 1))
+            await #expect(throws: TimeoutError.self) { try await client.get() }
+        }
+    }
+
     @Test func initializeManagerRearmsRetryTimeoutOnlyWhilePendingInitializesRemain() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
@@ -5476,10 +5538,10 @@ struct RuntimeCoordinatorInitializationTests {
         let factoryCalls = NIOLockedValueBox(0)
 
         let staleCancelled = NIOLockedValueBox(false)
-        _ = manager.replaceInitTimeout(
+        _ = manager.replaceInitTimeout { _ in
             RuntimeScheduledTimeout { staleCancelled.withLockedValue { $0 = true } }
-        )
-        manager.rearmInitTimeoutForRetry {
+        }
+        manager.rearmInitTimeoutForRetry { _ in
             factoryCalls.withLockedValue { $0 += 1 }
             return RuntimeScheduledTimeout {}
         }?.cancel()
@@ -5494,10 +5556,10 @@ struct RuntimeCoordinatorInitializationTests {
             on: eventLoop
         )
         let replacedCancelled = NIOLockedValueBox(false)
-        _ = manager.replaceInitTimeout(
+        _ = manager.replaceInitTimeout { _ in
             RuntimeScheduledTimeout { replacedCancelled.withLockedValue { $0 = true } }
-        )
-        manager.rearmInitTimeoutForRetry {
+        }
+        manager.rearmInitTimeoutForRetry { _ in
             factoryCalls.withLockedValue { $0 += 1 }
             return RuntimeScheduledTimeout {}
         }?.cancel()
@@ -5505,10 +5567,10 @@ struct RuntimeCoordinatorInitializationTests {
         #expect(factoryCalls.withLockedValue { $0 } == 1)
 
         let keptCancelled = NIOLockedValueBox(false)
-        _ = manager.replaceInitTimeout(
+        _ = manager.replaceInitTimeout { _ in
             RuntimeScheduledTimeout { keptCancelled.withLockedValue { $0 = true } }
-        )
-        #expect(manager.rearmInitTimeoutForRetry { nil } == nil)
+        }
+        #expect(manager.rearmInitTimeoutForRetry { _ in nil } == nil)
         #expect(keptCancelled.withLockedValue { $0 } == false)
 
         let shutdownState = manager.beginShutdown()
