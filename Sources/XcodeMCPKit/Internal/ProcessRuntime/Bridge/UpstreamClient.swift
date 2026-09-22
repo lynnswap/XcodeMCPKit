@@ -8,6 +8,7 @@ extension Upstream {
         case stderr(String)
         case stdoutProtocolViolation(StdioFramer.ProtocolViolation)
         case stdoutBufferSize(Int)
+        case stdoutClosed
         case exit(Int32)
     }
 

@@ -7628,6 +7628,45 @@ struct RuntimeCoordinatorRecoveryTests {
         }
     }
 
+    @Test func malformedCatalogReturnsProtocolErrorWithoutWaitingForTimeout() async throws {
+        let config = makeConfig(requestTimeout: 30)
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(config: config, upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let sessionID = "invalid-catalog"
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        let executor = ClientMCPRequestExecutor(
+            config: config, sessionManager: fixture.manager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout)
+        )
+        let sentCount = await upstream.sentCount()
+        let operation = try executor.handle(
+            bodyData: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: 81, method: "tools/list")),
+            headerSessionID: sessionID, headerSessionExists: true,
+            prefersEventStream: false, eventLoop: fixture.eventLoop
+        )
+        let request = try await sentValue(from: upstream, at: sentCount, timeout: .seconds(2))
+        let requestID = try #require(JSONRPC.ID(any: extractUpstreamID(from: request)))
+        await upstream.yield(.message(try JSONRPC.Wire.resultResponseData(
+            id: requestID, result: .object(["tools": .string("private malformed catalog")])
+        )))
+        let resolution = try await waitWithTimeout("malformed catalog should fail immediately", timeout: .seconds(2)) {
+            try await operation.future.get()
+        }
+        guard case .responseData(let data, _, _) = resolution else {
+            Issue.record("expected JSON-RPC response")
+            return
+        }
+        let response = try JSONRPC.Wire.object(fromData: data)
+        let error = try #require(JSONRPC.Wire.errorPayload(inResponseObject: response))
+        #expect(error.code == -32603)
+        #expect(error.message == "invalid upstream response")
+        #expect((response["id"] as? NSNumber)?.intValue == 81)
+        #expect(!String(decoding: data, as: UTF8.self).contains("private malformed catalog"))
+    }
+
     @Test func sessionManagerLateToolsListResponseDoesNotReseedCanonicalCatalog() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
@@ -18074,6 +18113,50 @@ struct RuntimeCoordinatorSchedulingTests {
         }
         #expect(isQuarantined)
         #expect(manager.chooseUpstreamIndex() == nil)
+    }
+
+    @Test func sessionManagerStdoutClosureFailsUnboundedPendingRequests() async throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 0), eventLoop: eventLoop,
+            upstreams: [upstream], startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        let operationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        manager.observeUpstreamEvents(operationLease)
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.seedCanonicalToolsCatalog(try #require(JSONValue(any: ["tools": []])), sourceUpstream: 0)
+        let sessionID = "stdout-eof"
+        let session = manager.session(id: sessionID)
+        let originalID = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
+        let pending = session.router.registerRequest(idKey: originalID.key, on: eventLoop)
+        let leaseID = manager.createRequestLease(descriptor: .init(
+            sessionID: sessionID, label: "tools/call:Pending",
+            expectsResponse: true, isTopLevelClientRequest: true
+        ))
+        manager.activateRequestLease(
+            leaseID, requestIDKey: originalID.key, upstreamIndex: 0, timeout: nil
+        )
+        _ = manager.assignUpstreamID(
+            sessionID: sessionID, originalID: originalID, upstreamIndex: 0
+        )
+        await upstream.yield(.stdoutClosed)
+        do {
+            _ = try await waitWithTimeout("stdout EOF should fail pending request") {
+                try await pending.get()
+            }
+            Issue.record("pending request survived stdout EOF")
+        } catch {
+            #expect(error is UpstreamSlotScheduler.AcquisitionError)
+        }
+        #expect(manager.cachedToolsListResult() == nil)
+        let snapshot = manager.debugSnapshot()
+        let lease = try #require(snapshot.leases.first { $0.leaseID == leaseID.uuidString })
+        #expect(lease.releaseReason == "upstreamUnavailable")
+        #expect(snapshot.upstreams[0].activeCorrelatedRequestCount == 0)
     }
 
     @Test func sessionManagerUpstreamExitClearsCanonicalToolsCatalogImmediately() async throws {

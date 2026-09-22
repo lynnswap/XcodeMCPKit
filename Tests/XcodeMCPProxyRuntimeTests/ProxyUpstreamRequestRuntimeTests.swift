@@ -184,7 +184,7 @@ struct ProxyUpstreamRequestRuntimeTests {
         runtime.recordRequestSucceeded(sessionID: "session-3", started: started)
         #expect(port.successes().map(\.requestIDKey) == ["1"])
 
-        runtime.recordRequestTimedOut(
+        runtime.recordRequestFailed(
             sessionID: "session-3",
             started: started,
             accountTimeout: true
@@ -208,7 +208,7 @@ struct ProxyUpstreamRequestRuntimeTests {
             routerPendingToken: UUID(),
             future: eventLoop.makeSucceededFuture(ByteBuffer())
         )
-        alreadyAccountedRuntime.recordRequestTimedOut(
+        alreadyAccountedRuntime.recordRequestFailed(
             sessionID: "session-4",
             started: alreadyAccountedStarted,
             accountTimeout: false

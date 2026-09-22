@@ -822,7 +822,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             originalID: originalID
         )
         guard plan.deliverManually == false else {
-            throw ControlPlane.Error.invalidResponse("timeout")
+            throw TimeoutError()
         }
         guard let object = try? JSONSerialization.jsonObject(
             with: plan.data,
@@ -896,11 +896,11 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease,
+        operationLease: UpstreamOperationLease?,
         after _: UpstreamRequestSendCompletion?
     ) {
         _ = leaseID
-        if let first = requestIDKeys.first {
+        if let operationLease, let first = requestIDKeys.first {
             onRequestTimeout(
                 sessionID: sessionID,
                 requestIDKey: first,

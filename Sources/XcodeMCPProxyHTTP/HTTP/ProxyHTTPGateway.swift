@@ -1,3 +1,4 @@
+import Foundation
 import Logging
 import NIO
 import NIOConcurrencyHelpers
@@ -66,13 +67,16 @@ package final class ProxyHTTPGateway: ProxyHTTPGatewayServing, Sendable {
         private enum Phase {
             case idle
             case running
-            case stopped
+            case stopping(Task<Void, any Error>)
+            case stopped((any Error)?)
         }
 
         private let configuration: ProxyHTTPConfiguration
         private let runtime: any ProxyRuntimeServing
         private let logger: Logger
         private let cancellationAuthority: CancellationAuthority
+        private let bind: @Sendable (ServerBootstrap, String, Int) async throws -> Channel
+        private let shutdownGroup: @Sendable (EventLoopGroup) async throws -> Void
         private var phase: Phase = .idle
         private var resources: Resources?
 
@@ -80,16 +84,22 @@ package final class ProxyHTTPGateway: ProxyHTTPGatewayServing, Sendable {
             configuration: ProxyHTTPConfiguration,
             runtime: any ProxyRuntimeServing,
             logger: Logger,
-            cancellationAuthority: CancellationAuthority
+            cancellationAuthority: CancellationAuthority,
+            bind: @escaping @Sendable (ServerBootstrap, String, Int) async throws -> Channel,
+            shutdownGroup: @escaping @Sendable (EventLoopGroup) async throws -> Void
         ) {
             self.configuration = configuration
             self.runtime = runtime
             self.logger = logger
             self.cancellationAuthority = cancellationAuthority
+            self.bind = bind
+            self.shutdownGroup = shutdownGroup
         }
 
         func start() async throws -> ProxyHTTPEndpoint {
-            precondition(phase == .idle, "HTTP gateway may only be started once")
+            guard case .idle = phase else {
+                preconditionFailure("HTTP gateway may only be started once")
+            }
 
             let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
             let tracker = ProxyAcceptedChannelTracker()
@@ -122,7 +132,8 @@ package final class ProxyHTTPGateway: ProxyHTTPGatewayServing, Sendable {
                     using: bootstrap,
                     host: configuration.listenHost,
                     port: configuration.listenPort,
-                    logger: logger
+                    logger: logger,
+                    bind: bind
                 )
                 guard let first = boundChannels.first else {
                     preconditionFailure("HTTP binding completed without a listening channel")
@@ -142,23 +153,32 @@ package final class ProxyHTTPGateway: ProxyHTTPGatewayServing, Sendable {
                     port: first.localAddress?.port ?? configuration.listenPort
                 )
             } catch {
-                for channel in boundChannels {
-                    channel.close(mode: .all, promise: nil)
+                let operationError = error
+                let failures = await release(
+                    Resources(
+                        group: group,
+                        acceptedChannelTracker: tracker,
+                        listenChannels: boundChannels,
+                        childInitializer: childInitializer
+                    )
+                )
+                phase = .stopped(Self.cleanupError(failures))
+                if let failure = Self.cleanupError(failures, operationError: operationError) {
+                    throw failure
                 }
-                if boundChannels.isEmpty == false {
-                    try? await EventLoopFuture.andAllSucceed(
-                        boundChannels.map(\.closeFuture),
-                        on: group.next()
-                    ).get()
-                }
-                await childInitializer.shutdown()
-                try? await group.shutdownGracefully()
-                phase = .stopped
-                throw error
+                throw operationError
             }
         }
 
         func waitUntilShutdown() async throws {
+            if case .stopping(let task) = phase {
+                try await task.value
+                return
+            }
+            if case .stopped(let error) = phase {
+                if let error { throw error }
+                return
+            }
             guard let resources else { return }
             try await EventLoopFuture.andAllSucceed(
                 resources.listenChannels.map(\.closeFuture),
@@ -167,66 +187,109 @@ package final class ProxyHTTPGateway: ProxyHTTPGatewayServing, Sendable {
         }
 
         func shutdown() async throws {
-            guard phase == .running, let resources else { return }
-            phase = .stopped
-            var firstError: (any Error)?
-
-            do {
-                for channel in resources.listenChannels {
-                    channel.close(mode: .all, promise: nil)
-                }
-                try await EventLoopFuture.andAllSucceed(
-                    resources.listenChannels.map(\.closeFuture),
-                    on: resources.group.next()
-                ).get()
-
-                while true {
-                    let accepted = resources.acceptedChannelTracker.snapshot()
-                    guard accepted.isEmpty == false else { break }
-                    for channel in accepted {
-                        channel.close(mode: .all, promise: nil)
-                    }
-                    try await EventLoopFuture.andAllSucceed(
-                        accepted.map(\.closeFuture),
-                        on: resources.group.next()
-                    ).get()
-                }
-            } catch {
-                firstError = error
+            if case .stopping(let task) = phase {
+                try await task.value
+                return
             }
+            if case .stopped(let error) = phase {
+                if let error { throw error }
+                return
+            }
+            guard case .running = phase, let resources else { return }
+            let task = Task {
+                let error = Self.cleanupError(await release(resources))
+                cancellationAuthority.clear()
+                self.resources = nil
+                phase = .stopped(error)
+                if let error { throw error }
+            }
+            phase = .stopping(task)
+            try await task.value
+        }
+
+        private func release(_ resources: Resources) async -> [(String, any Error)] {
+            var failures = await Self.closeChannels(resources.listenChannels, role: "listener")
+            failures += await Self.closeChannels(
+                resources.acceptedChannelTracker.snapshot(),
+                role: "accepted"
+            )
 
             await resources.childInitializer.shutdown()
             do {
-                try await resources.group.shutdownGracefully()
+                try await shutdownGroup(resources.group)
             } catch {
-                if firstError == nil {
-                    firstError = error
+                failures.append(("event loop group", error))
+            }
+            return failures
+        }
+
+        private static func closeChannels(_ channels: [Channel], role: String) async -> [(String, any Error)] {
+            // closeFuture only signals closure; the close operation's future carries errors.
+            let closing = channels.map { channel in
+                let operation = channel.close(mode: .all).flatMapError { error in
+                    if case ChannelError.alreadyClosed = error {
+                        return channel.closeFuture
+                    }
+                    return channel.eventLoop.makeFailedFuture(error)
+                }
+                return (channel, operation)
+            }
+            var failures: [(String, any Error)] = []
+            for (channel, operation) in closing {
+                do {
+                    try await operation.get()
+                    try await channel.closeFuture.get()
+                } catch {
+                    let address = channel.localAddress.map(String.init(describing:)) ?? "unknown address"
+                    failures.append(("\(role) channel \(address)", error))
                 }
             }
+            return failures
+        }
 
-            cancellationAuthority.clear()
-            self.resources = nil
-            if let firstError {
-                throw firstError
+        private static func cleanupError(
+            _ failures: [(String, any Error)],
+            operationError: (any Error)? = nil
+        ) -> NSError? {
+            guard !failures.isEmpty else { return nil }
+            var causes: [any Error] = []
+            var details: [String] = []
+            if let operationError {
+                causes.append(operationError)
+                details.append("HTTP gateway startup failed: \(operationError)")
             }
+            for (resource, error) in failures {
+                causes.append(error)
+                details.append("Failed to release \(resource): \(error)")
+            }
+            details.append("HTTP resource release may be incomplete.")
+            return NSError(
+                domain: "XcodeMCPProxyHTTP.Cleanup",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: details.joined(separator: "\n"),
+                    NSMultipleUnderlyingErrorsKey: causes,
+                ]
+            )
         }
 
         private static func bindChannels(
             using bootstrap: ServerBootstrap,
             host: String,
             port: Int,
-            logger: Logger
+            logger: Logger,
+            bind: @Sendable (ServerBootstrap, String, Int) async throws -> Channel
         ) async throws -> [Channel] {
             if host != "localhost" {
-                return [try await bootstrap.bind(host: host, port: port).get()]
+                return [try await bind(bootstrap, host, port)]
             }
 
             do {
-                let v4 = try await bootstrap.bind(host: "127.0.0.1", port: port).get()
+                let v4 = try await bind(bootstrap, "127.0.0.1", port)
                 let v4Port = v4.localAddress?.port ?? port
                 guard v4Port > 0 else { return [v4] }
                 do {
-                    let v6 = try await bootstrap.bind(host: "::1", port: v4Port).get()
+                    let v6 = try await bind(bootstrap, "::1", v4Port)
                     return [v4, v6]
                 } catch {
                     logger.warning(
@@ -240,7 +303,7 @@ package final class ProxyHTTPGateway: ProxyHTTPGatewayServing, Sendable {
                     "Failed to bind IPv4 loopback; attempting IPv6 only",
                     metadata: ["error": "\(error)"]
                 )
-                return [try await bootstrap.bind(host: "::1", port: port).get()]
+                return [try await bind(bootstrap, "::1", port)]
             }
         }
     }
@@ -251,7 +314,13 @@ package final class ProxyHTTPGateway: ProxyHTTPGatewayServing, Sendable {
     package init(
         configuration: ProxyHTTPConfiguration,
         runtime: any ProxyRuntimeServing,
-        logger: Logger
+        logger: Logger,
+        bind: @escaping @Sendable (ServerBootstrap, String, Int) async throws -> Channel = {
+            try await $0.bind(host: $1, port: $2).get()
+        },
+        shutdownGroup: @escaping @Sendable (EventLoopGroup) async throws -> Void = {
+            try await $0.shutdownGracefully()
+        }
     ) {
         let cancellationAuthority = CancellationAuthority()
         self.cancellationAuthority = cancellationAuthority
@@ -259,7 +328,9 @@ package final class ProxyHTTPGateway: ProxyHTTPGatewayServing, Sendable {
             configuration: configuration,
             runtime: runtime,
             logger: logger,
-            cancellationAuthority: cancellationAuthority
+            cancellationAuthority: cancellationAuthority,
+            bind: bind,
+            shutdownGroup: shutdownGroup
         )
     }
 

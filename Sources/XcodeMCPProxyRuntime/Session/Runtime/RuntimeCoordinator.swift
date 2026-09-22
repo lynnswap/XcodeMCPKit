@@ -275,7 +275,7 @@ protocol RuntimeRequestLeasePort: Sendable {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease,
+        operationLease: UpstreamOperationLease?,
         after requestSendCompletion: UpstreamRequestSendCompletion?
     )
     func abandonRequestLease(
@@ -292,7 +292,7 @@ extension RuntimeRequestLeasePort {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease
+        operationLease: UpstreamOperationLease?
     ) {
         handleRequestLeaseTimeout(
             leaseID,
@@ -793,6 +793,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return Set(upstreamTopology.snapshot().slotIDs.map(\.rawValue)).subtracting(active)
         }
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
+            isLeaseLive: { [leaseManager] in leaseManager.isLive($0) },
             canUseUpstream: {
                 [weak upstreamHealthManager] upstreamIndex in
                 let nowUptimeNs = uptimeProvider()
@@ -1005,6 +1006,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     )
                 case .stdoutBufferSize(let size):
                     self.handleBufferedStdoutBytes(size, upstreamIndex: upstreamIndex)
+                case .stdoutClosed:
+                    self.handleUpstreamStdoutClosed(
+                        upstreamIndex: upstreamIndex,
+                        proof: operationLease.proof
+                    )
+                    if self.processRoutingEnabled {
+                        self.triggerXcodeProcessReconcile(reason: "upstream_stdout_closed")
+                    }
                 case .exit(let status):
                     self.handleUpstreamExit(
                         status,
@@ -1656,11 +1665,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
             }
-            return eventLoop.makeFailedFuture(TimeoutError())
+            return eventLoop.makeFailedFuture(ControlPlane.Error.invalidResponse("invalid initialize response"))
         }
 
         if shuttingDown {
-            return eventLoop.makeFailedFuture(TimeoutError())
+            return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }
 
         if pendingPromise != nil {
@@ -1673,7 +1682,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
 
         guard let promise = pendingPromise else {
-            return eventLoop.makeFailedFuture(TimeoutError())
+            return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }
         return promise.futureResult
     }

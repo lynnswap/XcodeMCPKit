@@ -104,19 +104,13 @@ extension XcodeMCPProxyServer {
                 )
             }
 
+            let server = dependencies.makeServer(preparedConfiguration)
+            let endpoint: Endpoint
             do {
-                let server = dependencies.makeServer(preparedConfiguration)
-                _ = try await server.start()
-                do {
-                    try await server.waitUntilShutdown()
-                    try await server.shutdown()
-                } catch {
-                    try? await server.shutdown()
-                    throw error
-                }
-                return 0
+                endpoint = try await server.start()
             } catch {
-                if serverConfig.bindAddress.port > 0, dependencies.isAddressAlreadyInUse(error) {
+                if !(error is CleanupError), serverConfig.bindAddress.port > 0,
+                   dependencies.isAddressAlreadyInUse(error) {
                     let diagnostic = XcodeMCPProxyServer.PortInUseError(
                         host: serverConfig.bindAddress.host,
                         port: serverConfig.bindAddress.port,
@@ -130,6 +124,24 @@ extension XcodeMCPProxyServer {
                 }
                 throw error
             }
+
+            do {
+                try await server.waitUntilShutdown()
+            } catch {
+                let operationError = error
+                do {
+                    try await server.shutdown()
+                } catch {
+                    throw CleanupError(
+                        operationError: operationError,
+                        cleanupError: error,
+                        endpoint: endpoint
+                    )
+                }
+                throw operationError
+            }
+            try await server.shutdown()
+            return 0
         }
     }
 }
