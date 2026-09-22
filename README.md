@@ -249,13 +249,20 @@ swift run xcode-mcp-permission-approver \
   --assistant-name XcodeMCPKit
 ```
 
-Release:
+Release: save the approved notes in a UTF-8 file, create a draft targeting the
+approved full commit SHA on `main`, then start the release workflow:
 
 ```bash
-gh workflow run release.yml --ref main -f version=v0.11.0
+gh release create v0.17.0 --repo lynnswap/XcodeMCPKit --draft \
+  --target <approved-commit-sha> --title v0.17.0 \
+  --notes-file /path/to/release-notes.md
+gh workflow run release.yml --repo lynnswap/XcodeMCPKit --ref main -f version=v0.17.0
 ```
 
-Edit the draft release notes, then publish the release manually.
+CI runs the checks, builds and verifies the assets, then attaches them and
+publishes the same draft while preserving its title and notes. Failed checks
+leave the draft unpublished. See the [release flow](Docs/maintainer-architecture.md#release-flow)
+for existing drafts, prereleases, and retries.
 
 - Module boundaries, release flow, live tests, benchmarks:
   [Maintainer Architecture](Docs/maintainer-architecture.md)

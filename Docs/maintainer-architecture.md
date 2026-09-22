@@ -203,21 +203,51 @@ These are used by the default CI workflow and release workflow, and intentionall
 
 ## Release Flow
 
-- Entry point:
-  - `gh workflow run release.yml --ref main -f version=v1.2.3`
-- Behavior:
-  - Runs only from the default branch.
-  - Runs `scripts/check.sh`.
-  - Builds the arm64 archive, `SHA256SUMS.txt`, and `install.sh` on GitHub Actions.
-  - `SHA256SUMS.txt` covers both the archive and `install.sh`.
-  - Verifies checksums, archive contents, and regenerated installer contents.
-  - Creates the release tag for the default-branch commit.
-  - Creates a draft GitHub Release with generated notes.
-  - Rerunning the workflow repairs an existing draft for the same tag when it points to the same default-branch commit.
-  - Maintainers edit the draft release notes and publish manually.
-- Distribution:
-  - GitHub Releases publish `install.sh`, `xcode-mcp-proxy-darwin-arm64.tar.gz`, and `SHA256SUMS.txt`.
-  - x86_64 and universal archives are not produced.
+Create a draft with the approved version, title, notes, and source commit, then
+dispatch `release.yml` from the default branch. A successful run attaches the
+verified assets and publishes that same release automatically. Its title and
+notes are preserved; no local process needs to wait for the run.
+
+```bash
+gh release create v1.2.3 --repo lynnswap/XcodeMCPKit --draft \
+  --target <approved-commit-sha> --title v1.2.3 \
+  --notes-file /path/to/release-notes.md
+gh workflow run release.yml --repo lynnswap/XcodeMCPKit --ref main -f version=v1.2.3
+```
+
+For a prerelease, add `--prerelease` when creating the draft. The workflow retains
+that setting. An existing draft prepared in GitHub can target `main`; the first
+job pins it to the workflow's full commit SHA. A draft already targeting a SHA
+must match the workflow commit. Creating or editing a draft does not start the
+workflow; dispatch it once with the draft's tag.
+
+The workflow runs package tests and the process/STDIO adapter suites, builds the
+arm64 archive, and verifies checksums, archive contents, and generated installer
+contents. The publish job downloads the build's artifact by ID, checks it against
+the build's archive digest, uploads the three assets, and verifies their uploaded
+digests before publishing. It creates any missing tag at the tested commit before
+making the draft public. A tag creation conflict or failure stops publication;
+an existing tag must point to the tested commit. The target stays fixed even if
+`main` advances during the run.
+
+Failures before publication leave the draft available. Rerun failed jobs to reuse
+successful builds; uploads replace the draft's assets with the verified files.
+If publication fails after tag creation, the tag remains at the tested commit
+and is reused on retry.
+Remove unrelated draft attachments before retrying publication. Keep the tag,
+target commit, and prerelease setting unchanged during a run. Title and note edits
+are preserved. If publication succeeded but confirmation failed, rerunning the
+publish job verifies the public release's assets and tag without modifying it.
+
+GitHub Releases contain `install.sh`, `xcode-mcp-proxy-darwin-arm64.tar.gz`, and
+`SHA256SUMS.txt`. The checksum file covers both the archive and installer.
+x86_64 and universal archives are not produced.
+
+Release orchestration tests run in CI and locally with:
+
+```bash
+python3 -m unittest discover -s scripts/tests -v
+```
 
 ## Stress Suite
 
