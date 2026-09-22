@@ -8,7 +8,8 @@ enum LocalPostHandling {
         future: EventLoopFuture<ByteBuffer>,
         sessionID: String,
         errorSessionID: String?,
-        originalID: JSONRPC.ID
+        originalID: JSONRPC.ID,
+        task: Task<Void, Never>? = nil
     )
     case immediateResponse(data: Data, sessionID: String)
     case mcpError(id: JSONRPC.ID?, code: Int, message: String, sessionID: String?)
@@ -185,7 +186,7 @@ struct LocalMCPResponder {
         operation: @escaping LocalResultOperation
     ) -> LocalPostHandling {
         let promise = eventLoop.makePromise(of: ByteBuffer.self)
-        Task {
+        let task = Task {
             do {
                 let result = try await operation()
                 let buffer = try Self.encodeResultBuffer(id: originalID, result: result)
@@ -209,7 +210,8 @@ struct LocalMCPResponder {
             future: promise.futureResult,
             sessionID: sessionID,
             errorSessionID: sessionID,
-            originalID: originalID
+            originalID: originalID,
+            task: task
         )
     }
 

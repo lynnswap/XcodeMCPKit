@@ -317,6 +317,7 @@ func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler 
         (0..<upstreamCount).map { _ in TestUpstreamClient() as any UpstreamSlotControlling }
     )
     return UpstreamSlotScheduler(
+        isLeaseLive: { _ in true },
         canUseUpstream: { upstreamIndex in
             UpstreamHealthManager.UseEvaluation(
                 proof: topology.snapshot().proof(UpstreamSlotID(rawValue: upstreamIndex)),
@@ -1229,6 +1230,7 @@ enum ScriptedDocumentationResponse: Sendable {
     case hang
     case notEnabled
     case exit
+    case stdoutClosed
 }
 
 struct ScriptedDocumentationSessionPlan: Sendable {
@@ -1580,6 +1582,8 @@ actor ScriptedDocumentationSession: UpstreamSession {
             )
         case .exit:
             continuation.yield(.exit(1))
+        case .stdoutClosed:
+            continuation.yield(.stdoutClosed)
         }
     }
 
