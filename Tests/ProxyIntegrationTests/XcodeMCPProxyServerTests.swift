@@ -196,8 +196,27 @@ struct XcodeMCPProxyServerTests {
         #expect(controller.detectExistingServerProcessIDs("localhost", 8765) == [456])
     }
 
-    @Test func forceRestartTerminatesOnlyTheRequestedEndpointOwners() {
+    @Test(arguments: ["localhost", "my-mac.local"])
+    func forceRestartTerminatesOnlyTheRequestedEndpointOwners(host: String) {
         let processes = RestartProcessFixture()
+        let controller = ExistingProxyServerProcessController.live(
+            clock: processes.clock,
+            currentProcessID: { 999 },
+            processControl: processes.client
+        )
+        var warnings: [String] = []
+
+        #expect(controller.terminateExistingServer(host, 8765) { warnings.append($0) })
+
+        #expect(processes.terminatedProcessIDs == [456, 567])
+        #expect(warnings.count == 2)
+        #expect(warnings.contains { $0.contains("pid: 456") })
+        #expect(warnings.contains { $0.contains("pid: 567") })
+        #expect(processes.aliveProcessIDs == [123, 321, 789, 999])
+    }
+
+    @Test func forceRestartRechecksLaterPIDAfterEarlierTermination() {
+        let processes = RestartProcessFixture(reuseSecondPIDOnTermination: true)
         let controller = ExistingProxyServerProcessController.live(
             clock: processes.clock,
             currentProcessID: { 999 },
@@ -207,11 +226,10 @@ struct XcodeMCPProxyServerTests {
 
         #expect(controller.terminateExistingServer("localhost", 8765) { warnings.append($0) })
 
-        #expect(processes.terminatedProcessIDs == [456, 567])
-        #expect(warnings.count == 2)
-        #expect(warnings.contains { $0.contains("pid: 456") })
-        #expect(warnings.contains { $0.contains("pid: 567") })
-        #expect(processes.aliveProcessIDs == [123, 321, 789, 999])
+        #expect(processes.terminatedProcessIDs == [456])
+        #expect(processes.aliveProcessIDs == [123, 321, 567, 789, 999])
+        #expect(warnings.count == 1)
+        #expect(warnings.first?.contains("pid: 456") == true)
     }
 
     @Test func portInUseDiagnosticFormatsMessage() throws {
@@ -1172,9 +1190,11 @@ private final class RestartProcessFixture: Sendable {
         var aliveProcessIDs: Set<Int> = [123, 321, 456, 567, 789, 999]
         var terminatedProcessIDs: [Int] = []
         var now = Date(timeIntervalSince1970: 0)
+        var secondPIDWasReused = false
     }
 
     private let state = NIOLockedValueBox(State())
+    private let reuseSecondPIDOnTermination: Bool
     private let processes: [Int: ProcessInfo] = [
         123: .init(host: "127.0.0.1", port: 9000, executable: "xcode-mcp-proxy-server"),
         321: .init(host: "10.0.0.5", port: 8765, executable: "xcode-mcp-proxy-server"),
@@ -1183,6 +1203,10 @@ private final class RestartProcessFixture: Sendable {
         789: .init(host: "127.0.0.1", port: 8765, executable: "python3"),
         999: .init(host: "127.0.0.1", port: 8765, executable: "xcode-mcp-proxy-server"),
     ]
+
+    init(reuseSecondPIDOnTermination: Bool = false) {
+        self.reuseSecondPIDOnTermination = reuseSecondPIDOnTermination
+    }
 
     var aliveProcessIDs: [Int] { state.withLockedValue { $0.aliveProcessIDs.sorted() } }
     var terminatedProcessIDs: [Int] { state.withLockedValue { $0.terminatedProcessIDs } }
@@ -1213,7 +1237,9 @@ private final class RestartProcessFixture: Sendable {
                     Issue.record("unexpected process lookup: \(arguments)")
                     return nil
                 }
-                return "/tmp/\(process.executable) --listen \(process.host):\(process.port)"
+                let executable = pid == 567 && self.state.withLockedValue({ $0.secondPIDWasReused })
+                    ? "python3" : process.executable
+                return "/tmp/\(executable) --listen \(process.host):\(process.port)"
             },
             sendSignal: { pid, signal in
                 self.state.withLockedValue { state in
@@ -1224,9 +1250,16 @@ private final class RestartProcessFixture: Sendable {
                         #expect(signal == SIGTERM)
                         state.terminatedProcessIDs.append(pid)
                         state.aliveProcessIDs.remove(pid)
+                        if pid == 456, self.reuseSecondPIDOnTermination {
+                            state.secondPIDWasReused = true
+                        }
                     }
                     return ProcessSignalResult(result: 0, errnoValue: 0)
                 }
+            },
+            resolveHostAddresses: { host in
+                #expect(host == "my-mac.local")
+                return ["127.0.0.1", "::1"]
             }
         )
     }

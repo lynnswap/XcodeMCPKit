@@ -61,16 +61,13 @@ struct ExistingProxyServerProcessController: DependencyClient {
         currentProcessID: @Sendable () -> Int,
         processControl: ProcessControlClient
     ) -> Bool {
-        let processIDs = detectExistingServerProcessIDs(
-            host: host,
-            port: port,
-            processControl: processControl
-        )
+        let processIDs = processControl.listeningProcessIDs(onTCPPort: port, matchingHost: host)
         guard !processIDs.isEmpty else { return false }
 
         let currentPID = currentProcessID()
         var didTerminate = false
         for processID in processIDs where processID != currentPID {
+            guard isProxyServerProcess(pid: processID, processControl: processControl) else { continue }
             emitWarning(terminationWarning(port: port, pid: processID))
             if processControl.terminate(processID: processID, clock: clock) {
                 didTerminate = true

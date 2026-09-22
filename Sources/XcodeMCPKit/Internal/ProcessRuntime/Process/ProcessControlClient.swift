@@ -14,13 +14,16 @@ package struct ProcessSignalResult: Sendable {
 package struct ProcessControlClient: Sendable {
     package var runCommand: @Sendable (_ launchPath: String, _ arguments: [String]) -> String?
     package var sendSignal: @Sendable (_ processID: Int, _ signal: Int32) -> ProcessSignalResult
+    package var resolveHostAddresses: @Sendable (_ host: String) -> [String]
 
     package init(
         runCommand: @escaping @Sendable (_ launchPath: String, _ arguments: [String]) -> String?,
-        sendSignal: @escaping @Sendable (_ processID: Int, _ signal: Int32) -> ProcessSignalResult
+        sendSignal: @escaping @Sendable (_ processID: Int, _ signal: Int32) -> ProcessSignalResult,
+        resolveHostAddresses: (@Sendable (_ host: String) -> [String])? = nil
     ) {
         self.runCommand = runCommand
         self.sendSignal = sendSignal
+        self.resolveHostAddresses = resolveHostAddresses ?? Self.defaultResolveHostAddresses
     }
 
     package static let liveValue = Self(
@@ -56,6 +59,10 @@ package struct ProcessControlClient: Sendable {
     }
 
     package func listeningProcessIDs(onTCPPort port: Int, matchingHost host: String) -> [Int] {
+        let normalizedHost = Self.normalizeHost(host)
+        let matchingHosts = Self.isWildcardHost(normalizedHost) || normalizedHost == "localhost"
+            ? [normalizedHost]
+            : resolveHostAddresses(normalizedHost)
         guard let output = runCommand(
             "/usr/sbin/lsof",
             ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpn"]
@@ -63,7 +70,7 @@ package struct ProcessControlClient: Sendable {
             return []
         }
 
-        return Self.listeningProcessIDs(fromLsofOutput: output, matchingHost: host)
+        return Self.listeningProcessIDs(fromLsofOutput: output, matchingHosts: matchingHosts)
     }
 
     @discardableResult
@@ -146,7 +153,11 @@ package struct ProcessControlClient: Sendable {
     }
 
     package static func listeningProcessIDs(fromLsofOutput output: String, matchingHost host: String) -> [Int] {
-        let matchAllHosts = isWildcardHost(host)
+        listeningProcessIDs(fromLsofOutput: output, matchingHosts: [host])
+    }
+
+    private static func listeningProcessIDs(fromLsofOutput output: String, matchingHosts: [String]) -> [Int] {
+        let matchAllHosts = matchingHosts.contains(where: isWildcardHost)
 
         var processIDs: [Int] = []
         processIDs.reserveCapacity(4)
@@ -171,7 +182,7 @@ package struct ProcessControlClient: Sendable {
             if first == "n", !matchAllHosts {
                 let name = String(rawLine.dropFirst())
                 if let listenerHost = extractListenerHost(fromLsofName: name),
-                   hostMatches(requestedHost: host, actualHost: listenerHost) {
+                   matchingHosts.contains(where: { hostMatches(requestedHost: $0, actualHost: listenerHost) }) {
                     currentMatched = true
                 }
             }
@@ -180,6 +191,39 @@ package struct ProcessControlClient: Sendable {
 
         var seen = Set<Int>()
         return processIDs.filter { seen.insert($0).inserted }
+    }
+
+    private static func defaultResolveHostAddresses(_ host: String) -> [String] {
+        var hints = unsafe addrinfo()
+        unsafe hints.ai_family = AF_UNSPEC
+        unsafe hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard unsafe getaddrinfo(host, nil, &hints, &result) == 0 else { return [] }
+        defer { unsafe freeaddrinfo(result) }
+
+        var addresses: [String] = []
+        var next = unsafe result
+        while let entry = unsafe next {
+            let address = unsafe entry.pointee
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let bufferLength = socklen_t(buffer.count)
+            if unsafe getnameinfo(
+                address.ai_addr,
+                address.ai_addrlen,
+                &buffer,
+                bufferLength,
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 {
+                addresses.append(String(
+                    decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                    as: UTF8.self
+                ))
+            }
+            unsafe next = address.ai_next
+        }
+        return addresses
     }
 
     private static func firstLine(_ output: String?) -> String? {
