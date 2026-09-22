@@ -83,6 +83,10 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
                     stream.continuation.yield(.closed("protocol violation: \(violation.reason.rawValue)"))
                     stream.continuation.finish()
                     return
+                case .stdoutClosed:
+                    stream.continuation.yield(.closed("mcpbridge stdout closed"))
+                    stream.continuation.finish()
+                    return
                 case .exit(let status):
                     stream.continuation.yield(.closed("process exited with status \(status)"))
                     stream.continuation.finish()

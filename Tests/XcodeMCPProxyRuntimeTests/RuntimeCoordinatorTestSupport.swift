@@ -1229,6 +1229,7 @@ enum ScriptedDocumentationResponse: Sendable {
     case hang
     case notEnabled
     case exit
+    case stdoutClosed
 }
 
 struct ScriptedDocumentationSessionPlan: Sendable {
@@ -1580,6 +1581,8 @@ actor ScriptedDocumentationSession: UpstreamSession {
             )
         case .exit:
             continuation.yield(.exit(1))
+        case .stdoutClosed:
+            continuation.yield(.stdoutClosed)
         }
     }
 

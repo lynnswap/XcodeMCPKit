@@ -1005,6 +1005,14 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     )
                 case .stdoutBufferSize(let size):
                     self.handleBufferedStdoutBytes(size, upstreamIndex: upstreamIndex)
+                case .stdoutClosed:
+                    self.handleUpstreamStdoutClosed(
+                        upstreamIndex: upstreamIndex,
+                        proof: operationLease.proof
+                    )
+                    if self.processRoutingEnabled {
+                        self.triggerXcodeProcessReconcile(reason: "upstream_stdout_closed")
+                    }
                 case .exit(let status):
                     self.handleUpstreamExit(
                         status,
