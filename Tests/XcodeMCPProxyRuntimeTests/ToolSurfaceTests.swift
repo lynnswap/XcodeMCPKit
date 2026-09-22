@@ -501,7 +501,7 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease,
+        operationLease: UpstreamOperationLease?,
         after requestSendCompletion: UpstreamRequestSendCompletion?
     ) {}
 

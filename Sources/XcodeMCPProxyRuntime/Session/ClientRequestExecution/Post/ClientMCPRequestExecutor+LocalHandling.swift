@@ -76,7 +76,8 @@ extension ClientMCPRequestExecutor {
         sessionID: String,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
-        admittedHandle: CancellationHandle? = nil
+        admittedHandle: CancellationHandle? = nil,
+        requestDeadline: Date?
     ) -> ToolCallRouting {
         if let toolName = blockedToolName(from: object) {
             return .local(
@@ -109,13 +110,7 @@ extension ClientMCPRequestExecutor {
             sessionID: sessionID,
             requestIDKeys: [responseID.key]
         )
-        let deadline = timeoutDeadline(
-            for: requestTimeoutOverride
-                ?? Self.topLevelRequestTimeoutOverride(
-                    method: "tools/call",
-                    defaultSeconds: requestTimeoutSeconds
-                )
-        )
+        let deadline = requestDeadline
         let promise = eventLoop.makePromise(of: Data?.self)
         let task = Task { [self] in
             let responseData: Data?

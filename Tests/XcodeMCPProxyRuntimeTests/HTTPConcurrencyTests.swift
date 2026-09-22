@@ -222,21 +222,23 @@ struct HTTPConcurrencyTests {
 
     private func cancellationOperation(
         _ payload: [String: Any], service: ClientMCPRequestExecutor, loop: EmbeddedEventLoop,
-        sessionID: String = "cancel-session"
+        sessionID: String = "cancel-session", requestTimeoutOverride: TimeAmount? = nil
     ) throws -> ClientMCPRequestExecutor.Operation {
         service.handle(
             bodyData: try JSONSerialization.data(withJSONObject: payload),
             headerSessionID: sessionID, headerSessionExists: true,
-            prefersEventStream: false, eventLoop: loop
+            prefersEventStream: false, eventLoop: loop,
+            requestTimeoutOverride: requestTimeoutOverride
         )
     }
 
     private func cancellationFixture(
-        upstreamCount: Int, testHooks: RuntimeCoordinatorTestHooks = .init()
+        upstreamCount: Int, testHooks: RuntimeCoordinatorTestHooks = .init(),
+        requestTimeout: TimeInterval = 60, deadlineClock: ClockClient = .liveValue
     ) throws -> (
         RuntimeCoordinator, ClientMCPRequestExecutor, EmbeddedEventLoop, [EmbeddedControlledUpstreamClient]
     ) {
-        var config = makeEmbeddedConfig(requestTimeout: 60)
+        var config = makeEmbeddedConfig(requestTimeout: requestTimeout)
         config.upstreamProcessCount = upstreamCount
         let loop = EmbeddedEventLoop()
         let upstreams = (0..<upstreamCount).map { _ in EmbeddedControlledUpstreamClient() }
@@ -258,7 +260,8 @@ struct HTTPConcurrencyTests {
         let service = ClientMCPRequestExecutor(
             config: config, sessionManager: manager,
             refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout)
+            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout),
+            deadlineClock: deadlineClock
         )
         return (manager, service, loop, upstreams)
     }
@@ -393,120 +396,75 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
-    @Test func httpQueuedWaitDoesNotConsumeRequestTimeout() async throws {
-        let upstream = EmbeddedControlledUpstreamClient()
-        let config = makeEmbeddedConfig(requestTimeout: 0.15)
-        let eventLoop = EmbeddedEventLoop()
-        let sessionManager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            startImmediately: false
+    @Test(arguments: [0.10, 0.20])
+    func queuedRequestsUseTheirOriginalDeadline(waitSeconds: Double) async throws {
+        let clock = ManualDateClock()
+        let (manager, service, loop, upstreams) = try cancellationFixture(
+            upstreamCount: 1, requestTimeout: 10, deadlineClock: clock.client
         )
-        defer {
-            sessionManager.shutdownAndWait()
+        defer { manager.shutdownAndWait() }
+        let upstream = upstreams[0]
+        let first = try cancellationOperation(
+            executeSnippetPayload(id: 300, tabIdentifier: "windowtab-first"),
+            service: service, loop: loop, requestTimeoutOverride: .seconds(10)
+        )
+        loop.run()
+        await manager.drainRuntimeTasksForTesting()
+        _ = try await waitForUpstreamRequestCount(upstream, count: 1)
+        let second = try cancellationOperation(
+            executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued"), service: service, loop: loop,
+            requestTimeoutOverride: .milliseconds(150)
+        )
+        loop.run()
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
+        clock.advance(by: waitSeconds)
+        loop.advanceTime(by: .milliseconds(Int64(waitSeconds * 1_000)))
+        loop.run()
+        let expiresInQueue = waitSeconds >= 0.15
+        #expect(manager.debugSnapshot().queuedRequestCount == (expiresInQueue ? 0 : 1))
+
+        let response = try #require(upstream.takeNextResponse(label: "tools/call:ExecuteSnippet"))
+        manager.routeUpstreamMessage(response, upstreamIndex: 0)
+        loop.run()
+        guard case .responseData = try await first.future.get() else {
+            Issue.record("the blocker should retain its independent timeout budget")
+            return
         }
-
-        ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
-        let deadlineClock = ManualDateClock()
-        let service = ClientMCPRequestExecutor(
-            config: config,
-            sessionManager: sessionManager,
-            refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
-                defaultRequestTimeoutSeconds: config.requestTimeout
-            ),
-            deadlineClock: deadlineClock.client
-        )
-        let sessionID = "session-queued-timeout-budget"
-
-        func makeBodyData(_ payload: [String: Any]) throws -> Data {
-            try JSONSerialization.data(withJSONObject: payload, options: [])
+        if !expiresInQueue {
+            await manager.drainRuntimeTasksForTesting()
+            _ = try await waitForUpstreamRequestCount(upstream, count: 2)
+            clock.advance(by: 0.06)
+            loop.advanceTime(by: .milliseconds(60))
         }
-
-        func handlePost(_ payload: [String: Any]) throws -> ClientMCPRequestExecutor.Operation {
-            service.handle(
-                bodyData: try makeBodyData(payload),
-                headerSessionID: sessionID,
-                headerSessionExists: true,
-                prefersEventStream: false,
-                eventLoop: eventLoop
-            )
+        loop.run()
+        guard case .mcpError(let id, -32000, "upstream timeout", _, _) = try await second.future.get() else {
+            Issue.record("queue wait and execution must share the original deadline")
+            return
         }
-
-        func responseObject(
-            from resolution: ClientMCPRequestExecutor.Resolution
-        ) throws -> [String: Any] {
-            guard case .responseData(let data, _, _) = resolution else {
-                throw ConcurrencyTestError.invalidResponse
-            }
-            return try #require(
-                JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
-            )
+        #expect(id?.key == "301")
+        await manager.drainRuntimeTasksForTesting()
+        let calls = upstream.recordedMessages().filter {
+            MCPJSONValue($0).objectValue?["method"] == .string("tools/call")
         }
-
-        _ = sessionManager.session(id: sessionID)
-        sessionManager.sessionRegistry.markInitialized(
-            id: sessionID,
-            negotiatedProtocolVersion: MCP.ProtocolVersion.current
+        #expect(calls.count == (expiresInQueue ? 1 : 2))
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
+        if !expiresInQueue {
+            #expect(upstream.discardNextResponse(label: "tools/call:ExecuteSnippet"))
+        }
+        let nextMessageCount = upstream.recordedMessages().count + 1
+        let third = try cancellationOperation(
+            executeSnippetPayload(id: 302, tabIdentifier: "windowtab-after-timeout"), service: service, loop: loop
         )
-        sessionManager.markUpstreamInitialized(upstreamIndex: 0)
-        seedCanonicalInitializeForTesting(
-            on: sessionManager,
-            result: try #require(
-                JSONValue(any: [
-                    "protocolVersion": MCP.ProtocolVersion.current,
-                    "capabilities": [String: Any](),
-                ])
-            ),
-            sourceUpstream: 0
-        )
-        sessionManager.seedCanonicalToolsCatalog(executeSnippetToolsCatalog(), sourceUpstream: 0)
-        upstream.clearRecordedRequests()
-
-        let firstOperation = try handlePost(
-            executeSnippetPayload(id: 300, tabIdentifier: "windowtab-queued-timeout-1")
-        )
-        eventLoop.run()
-        await sessionManager.drainRuntimeTasksForTesting()
-        let firstRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 1)
-        #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
-
-        let secondOperation = try handlePost(
-            executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued-timeout-2")
-        )
-        eventLoop.run()
-        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
-
-        deadlineClock.advance(by: config.requestTimeout)
-        eventLoop.run()
-        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
-
-        let firstResponseData = try #require(
-            upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
-        )
-        sessionManager.routeUpstreamMessage(firstResponseData, upstreamIndex: 0)
-        eventLoop.run()
-        let firstObject = try responseObject(from: try await firstOperation.future.get())
-        #expect((firstObject["id"] as? NSNumber)?.intValue == 300)
-        #expect(firstObject["error"] == nil)
-
-        eventLoop.run()
-        await sessionManager.drainRuntimeTasksForTesting()
-        let secondRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 2)
-        #expect(secondRequestLabels == [
-            "tools/call:ExecuteSnippet",
-            "tools/call:ExecuteSnippet",
-        ])
-        let secondResponseData = try #require(
-            upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
-        )
-        sessionManager.routeUpstreamMessage(secondResponseData, upstreamIndex: 0)
-        eventLoop.run()
-
-        let secondObject = try responseObject(from: try await secondOperation.future.get())
-        #expect((secondObject["id"] as? NSNumber)?.intValue == 301)
-        #expect(secondObject["error"] == nil)
+        loop.run()
+        await manager.drainRuntimeTasksForTesting()
+        _ = try await waitForUpstreamRequestCount(upstream, count: nextMessageCount)
+        let thirdResponse = try #require(upstream.takeNextResponse(label: "tools/call:ExecuteSnippet"))
+        manager.routeUpstreamMessage(thirdResponse, upstreamIndex: 0)
+        loop.run()
+        guard case .responseData = try await third.future.get() else {
+            Issue.record("timed-out queued work must not occupy the next request's slot")
+            return
+        }
     }
 
     @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() async throws {

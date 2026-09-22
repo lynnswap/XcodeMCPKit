@@ -116,7 +116,7 @@ extension ClientMCPRequestExecutor {
             let requestIDKeys: [String]
         }
 
-        private enum TerminalReason: Sendable { case completed, cancelled }
+        private enum TerminalReason: Sendable { case completed, cancelled, timedOut }
 
         private struct State: Sendable {
             var requestIDKeys: [String]
@@ -153,6 +153,14 @@ extension ClientMCPRequestExecutor {
 
         var wasCancelled: Bool {
             state.withLockedValue { $0.terminalReason == .cancelled }
+        }
+
+        var wasTimedOut: Bool {
+            state.withLockedValue { $0.terminalReason == .timedOut }
+        }
+
+        var wasInterrupted: Bool {
+            state.withLockedValue { $0.terminalReason == .cancelled || $0.terminalReason == .timedOut }
         }
 
         func activate(operationLease: UpstreamOperationLease) -> Bool {
@@ -229,10 +237,30 @@ extension ClientMCPRequestExecutor {
                     & RuntimeRequestLeasePort
                     & ProxyUpstreamRequestRuntimePort
         ) {
+            _ = interrupt(using: runtime, reason: .cancelled)
+        }
+
+        @discardableResult
+        func timeOut(
+            using runtime:
+                any RuntimeSessionRegistryPort
+                    & RuntimeRequestLeasePort
+                    & ProxyUpstreamRequestRuntimePort
+        ) -> Bool {
+            interrupt(using: runtime, reason: .timedOut)
+        }
+
+        private func interrupt(
+            using runtime:
+                any RuntimeSessionRegistryPort
+                    & RuntimeRequestLeasePort
+                    & ProxyUpstreamRequestRuntimePort,
+            reason: TerminalReason
+        ) -> Bool {
             let snapshot = state.withLockedValue {
                 state -> CancellationSnapshot? in
                 guard !state.isTerminal else { return nil }
-                state.terminalReason = .cancelled
+                state.terminalReason = reason
                 let snapshot = CancellationSnapshot(
                     activeRequest: state.activeRequest,
                     refreshTask: state.refreshTask,
@@ -243,10 +271,10 @@ extension ClientMCPRequestExecutor {
                 state.childHandles = []
                 return snapshot
             }
-            guard let snapshot else { return }
+            guard let snapshot else { return false }
             snapshot.refreshTask?.cancel()
             for childHandle in snapshot.childHandles {
-                childHandle.cancel(using: runtime)
+                _ = childHandle.interrupt(using: runtime, reason: reason)
             }
             if let routerPendingToken = snapshot.activeRequest?.routerPendingToken,
                runtime.hasSession(id: sessionID) {
@@ -261,13 +289,24 @@ extension ClientMCPRequestExecutor {
                     )
                 }
             }
-            runtime.abandonRequestLease(
-                leaseID,
-                sessionID: sessionID,
-                requestIDKeys: snapshot.requestIDKeys,
-                operationLease: snapshot.activeRequest?.cancellationOperationLease,
-                after: snapshot.activeRequest?.requestSendCompletion
-            )
+            if reason == .timedOut {
+                runtime.handleRequestLeaseTimeout(
+                    leaseID,
+                    sessionID: sessionID,
+                    requestIDKeys: snapshot.requestIDKeys,
+                    operationLease: snapshot.activeRequest?.cancellationOperationLease,
+                    after: snapshot.activeRequest?.requestSendCompletion
+                )
+            } else {
+                runtime.abandonRequestLease(
+                    leaseID,
+                    sessionID: sessionID,
+                    requestIDKeys: snapshot.requestIDKeys,
+                    operationLease: snapshot.activeRequest?.cancellationOperationLease,
+                    after: snapshot.activeRequest?.requestSendCompletion
+                )
+            }
+            return true
         }
     }
 }
