@@ -1,4 +1,4 @@
-import XcodeMCPKit
+import XcodeMCPCore
 import NIOConcurrencyHelpers
 
 final class UpstreamRouter: Sendable {

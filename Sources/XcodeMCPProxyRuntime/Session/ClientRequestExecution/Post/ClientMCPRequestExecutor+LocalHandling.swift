@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import NIOFoundationCompat
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension ClientMCPRequestExecutor {
     enum ToolCallRouting {

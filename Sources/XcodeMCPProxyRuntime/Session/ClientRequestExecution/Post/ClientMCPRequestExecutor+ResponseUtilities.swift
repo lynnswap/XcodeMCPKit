@@ -1,6 +1,6 @@
 import Foundation
 import NIO
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension ClientMCPRequestExecutor {
     static func topLevelRequestTimeoutOverride(

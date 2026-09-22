@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPKit
+import XcodeMCPCore
 
 package struct ProxyRuntimeConfiguration: Sendable {
     package enum XcodeMode: String, Sendable {

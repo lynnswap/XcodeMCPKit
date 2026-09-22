@@ -1,6 +1,6 @@
 import Foundation
 import NIOConcurrencyHelpers
-import XcodeMCPKit
+import XcodeMCPCore
 
 enum ControlPlane {}
 

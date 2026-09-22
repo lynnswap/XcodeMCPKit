@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPKit
+import XcodeMCPCore
 
 #if canImport(AppKit)
 import AppKit

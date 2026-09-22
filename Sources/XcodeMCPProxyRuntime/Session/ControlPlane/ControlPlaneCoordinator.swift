@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPKit
+import XcodeMCPCore
 
 actor ControlPlaneCoordinator {
     typealias ToolsCatalogLoader =

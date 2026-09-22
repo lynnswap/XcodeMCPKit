@@ -4,7 +4,7 @@ import NIO
 import NIOFoundationCompat
 import NIOHTTP1
 import NIOConcurrencyHelpers
-import XcodeMCPKit
+import XcodeMCPCore
 import XcodeMCPProxyRuntime
 
 final class HTTPHandler: ChannelInboundHandler, Sendable {

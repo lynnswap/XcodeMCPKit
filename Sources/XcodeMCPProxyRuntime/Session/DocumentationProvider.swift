@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import Logging
 import NIO
-import XcodeMCPKit
+import XcodeMCPCore
 
 enum DocumentationProvider {}
 

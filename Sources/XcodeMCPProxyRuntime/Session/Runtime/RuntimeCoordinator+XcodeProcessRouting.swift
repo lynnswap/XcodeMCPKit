@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 import NIOCore
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension RuntimeCoordinator {
     struct ProcessRouteUsabilityEvaluation: Sendable {

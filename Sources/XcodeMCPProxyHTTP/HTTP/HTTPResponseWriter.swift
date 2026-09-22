@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import NIO
 import NIOHTTP1
-import XcodeMCPKit
+import XcodeMCPCore
 import XcodeMCPProxyRuntime
 
 struct HTTPResponseWriter: Sendable {

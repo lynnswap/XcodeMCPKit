@@ -1,5 +1,5 @@
 import Testing
-import XcodeMCPKit
+import XcodeMCPCore
 @testable import XcodeMCPCoreTestSupport
 
 @Suite struct AsyncTaskSupervisorTests {

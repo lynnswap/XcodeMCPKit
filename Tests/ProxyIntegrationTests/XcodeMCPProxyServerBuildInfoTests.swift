@@ -1,3 +1,4 @@
+@testable import XcodeMCPCore
 import Testing
 import XcodeMCPKit
 @testable import XcodeMCPProxyKit

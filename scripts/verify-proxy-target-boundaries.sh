@@ -71,47 +71,28 @@ reject_matches \
     Sources/XcodeMCPPermissionApproverTool
 
 package_description="$(swift package describe --type json)"
-runtime_dependencies="$(
-    jq -r '.targets[] | select(.name == "XcodeMCPProxyRuntime") | .target_dependencies | sort | join(",")' \
-        <<< "${package_description}"
-)"
-http_dependencies="$(
-    jq -r '.targets[] | select(.name == "XcodeMCPProxyHTTP") | .target_dependencies | sort | join(",")' \
-        <<< "${package_description}"
-)"
-facade_dependencies="$(
-    jq -r '.targets[] | select(.name == "XcodeMCPProxyKit") | .target_dependencies | sort | join(",")' \
-        <<< "${package_description}"
-)"
-permission_automation_dependencies="$(
-    jq -r '.targets[] | select(.name == "XcodeMCPPermissionAutomation") | (.target_dependencies // []) | sort | join(",")' \
-        <<< "${package_description}"
-)"
-permission_tool_dependencies="$(
-    jq -r '.targets[] | select(.name == "XcodeMCPPermissionApproverTool") | .target_dependencies | sort | join(",")' \
-        <<< "${package_description}"
-)"
-
-if [ "${runtime_dependencies}" != "XcodeMCPKit" ]; then
-    echo "error: unexpected XcodeMCPProxyRuntime target dependencies: ${runtime_dependencies}" >&2
-    exit 1
-fi
-if [ "${http_dependencies}" != "XcodeMCPKit,XcodeMCPProxyRuntime" ]; then
-    echo "error: unexpected XcodeMCPProxyHTTP target dependencies: ${http_dependencies}" >&2
-    exit 1
-fi
-if [[ ",${facade_dependencies}," != *",XcodeMCPProxyHTTP,"* ]] \
-    || [[ ",${facade_dependencies}," != *",XcodeMCPProxyRuntime,"* ]] \
-    || [[ ",${facade_dependencies}," != *",XcodeMCPPermissionAutomation,"* ]]; then
-    echo "error: XcodeMCPProxyKit must compose Runtime, HTTP, and permission automation: ${facade_dependencies}" >&2
-    exit 1
-fi
-if [ -n "${permission_automation_dependencies}" ]; then
-    echo "error: unexpected XcodeMCPPermissionAutomation target dependencies: ${permission_automation_dependencies}" >&2
-    exit 1
-fi
-if [ "${permission_tool_dependencies}" != "XcodeMCPPermissionAutomation" ]; then
-    echo "error: unexpected XcodeMCPPermissionApproverTool target dependencies: ${permission_tool_dependencies}" >&2
+if ! jq -e '
+    .targets | map({key: .name, value: (.target_dependencies // [])}) | from_entries as $graph |
+    def dependencies($target):
+        [$graph[$target][]? as $child | $child, dependencies($child)[]] | unique;
+    def excludes($target; $forbidden):
+        (dependencies($target) - $forbidden) == dependencies($target);
+    def directlyUses($target; $dependency):
+        ($graph[$target] | index($dependency)) != null;
+    excludes("XcodeMCPCore"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit", "XcodeMCPPermissionAutomation"]) and
+    excludes("XcodeMCPKit"; ["XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit", "XcodeMCPPermissionAutomation"]) and
+    excludes("XcodeMCPProxyRuntime"; ["XcodeMCPKit", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
+    excludes("XcodeMCPProxyHTTP"; ["XcodeMCPKit", "XcodeMCPProxyKit"]) and
+    excludes("XcodeMCPPermissionAutomation"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
+    directlyUses("XcodeMCPKit"; "XcodeMCPCore") and
+    directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPCore") and
+    directlyUses("XcodeMCPProxyHTTP"; "XcodeMCPCore") and
+    directlyUses("XcodeMCPProxyKit"; "XcodeMCPProxyRuntime") and
+    directlyUses("XcodeMCPProxyKit"; "XcodeMCPProxyHTTP") and
+    directlyUses("XcodeMCPProxyKit"; "XcodeMCPPermissionAutomation") and
+    directlyUses("XcodeMCPPermissionApproverTool"; "XcodeMCPPermissionAutomation")
+' <<< "${package_description}" >/dev/null; then
+    echo "error: package dependencies violate the shared-core or proxy ownership boundaries" >&2
     exit 1
 fi
 

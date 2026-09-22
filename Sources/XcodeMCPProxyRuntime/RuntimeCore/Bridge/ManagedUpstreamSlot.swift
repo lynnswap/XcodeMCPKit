@@ -1,4 +1,4 @@
-import XcodeMCPKit
+import XcodeMCPCore
 import Foundation
 
 struct ManagedUpstreamStopPlan: Sendable {

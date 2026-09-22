@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPKit
+import XcodeMCPCore
 
 struct CatalogEpoch: Sendable, Hashable {
     fileprivate let rawValue: UInt64

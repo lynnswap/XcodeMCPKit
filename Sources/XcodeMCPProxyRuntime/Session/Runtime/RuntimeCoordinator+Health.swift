@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import NIO
 import NIOFoundationCompat
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension RuntimeCoordinator {
     enum WarmInitializeMode: Sendable {

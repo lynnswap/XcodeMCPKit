@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPKit
+import XcodeMCPCore
 
 struct ToolSurface: Sendable {
     struct RewriteResult: Sendable {

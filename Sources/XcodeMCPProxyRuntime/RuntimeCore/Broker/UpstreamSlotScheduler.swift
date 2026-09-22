@@ -1,4 +1,4 @@
-import XcodeMCPKit
+import XcodeMCPCore
 import Foundation
 import Logging
 import NIO

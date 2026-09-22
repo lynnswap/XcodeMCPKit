@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPKit
+import XcodeMCPCore
 
 enum ToolCatalogStartupLogFormatter {
     struct Process: Sendable, Equatable {
