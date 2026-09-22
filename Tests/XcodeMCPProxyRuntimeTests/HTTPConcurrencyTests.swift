@@ -396,6 +396,13 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
+    @Test func methodSpecificAdmissionDeadlineUsesMCPMethodCap() {
+        let timeout = ClientMCPRequestExecutor.topLevelRequestTimeoutOverride(
+            method: "resources/list", defaultSeconds: 60
+        )
+        #expect(timeout?.nanoseconds == 20_000_000_000)
+    }
+
     @Test(arguments: [0.10, 0.20])
     func queuedRequestsUseTheirOriginalDeadline(waitSeconds: Double) async throws {
         let clock = ManualDateClock()

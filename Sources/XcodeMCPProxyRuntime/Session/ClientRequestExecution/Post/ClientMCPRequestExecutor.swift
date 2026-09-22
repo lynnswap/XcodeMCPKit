@@ -105,7 +105,10 @@ final class ClientMCPRequestExecutor: Sendable {
         }
 
         let requestDeadline = timeoutDeadline(for: requestTimeoutOverride
-            ?? Self.topLevelRequestTimeoutOverride(method: nil, defaultSeconds: requestTimeoutSeconds))
+            ?? Self.topLevelRequestTimeoutOverride(
+                method: JSONRPC.Message.Inspector.method(from: requestObject),
+                defaultSeconds: requestTimeoutSeconds
+            ))
         let admittedHandle: CancellationHandle?
         let requestKey: RequestKey?
         if parentCancellationHandle == nil,
