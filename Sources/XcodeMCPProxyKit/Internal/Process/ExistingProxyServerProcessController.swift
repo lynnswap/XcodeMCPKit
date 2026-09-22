@@ -1,7 +1,6 @@
 import XcodeMCPCore
 import Foundation
 import XcodeMCPKit
-import XcodeMCPProxyRuntime
 
 struct ExistingProxyServerProcessController: DependencyClient {
     var terminateExistingServer:
@@ -28,7 +27,6 @@ struct ExistingProxyServerProcessController: DependencyClient {
     )
 
     static func live(
-        discoveryClient: DiscoveryClient = .liveValue,
         clock: ClockClient = .liveValue,
         currentProcessID: @escaping @Sendable () -> Int = {
             Int(ProcessInfo.processInfo.processIdentifier)
@@ -41,7 +39,6 @@ struct ExistingProxyServerProcessController: DependencyClient {
                     host: host,
                     port: port,
                     emitWarning: emitWarning,
-                    discoveryClient: discoveryClient,
                     clock: clock,
                     currentProcessID: currentProcessID,
                     processControl: processControl
@@ -51,7 +48,6 @@ struct ExistingProxyServerProcessController: DependencyClient {
                 detectExistingServerProcessIDs(
                     host: host,
                     port: port,
-                    discoveryClient: discoveryClient,
                     processControl: processControl
                 )
             }
@@ -62,30 +58,10 @@ struct ExistingProxyServerProcessController: DependencyClient {
         host: String,
         port: Int,
         emitWarning: (String) -> Void,
-        discoveryClient: DiscoveryClient,
         clock: ClockClient,
         currentProcessID: @Sendable () -> Int,
         processControl: ProcessControlClient
     ) -> Bool {
-        if let record = discoveryClient.read(nil),
-           record.port == port,
-           ProcessControlClient.hostMatches(requestedHost: host, actualHost: record.host) {
-            let currentPID = currentProcessID()
-            if record.pid != currentPID,
-               isProxyServerProcess(pid: record.pid, processControl: processControl) {
-                emitWarning(terminationWarning(port: port, pid: record.pid))
-                if processControl.terminate(processID: record.pid, clock: clock) {
-                    processControl.waitForNoListeningProcesses(
-                        onTCPPort: port,
-                        matchingHost: host,
-                        timeout: 2.0,
-                        clock: clock
-                    )
-                    return true
-                }
-            }
-        }
-
         let processIDs = processControl.listeningProcessIDs(onTCPPort: port, matchingHost: host)
         guard !processIDs.isEmpty else { return false }
 
@@ -112,26 +88,12 @@ struct ExistingProxyServerProcessController: DependencyClient {
     private static func detectExistingServerProcessIDs(
         host: String,
         port: Int,
-        discoveryClient: DiscoveryClient,
         processControl: ProcessControlClient
     ) -> [Int] {
-        var processIDs: [Int] = []
-        processIDs.reserveCapacity(4)
-
-        if let record = discoveryClient.read(nil),
-           record.port == port,
-           ProcessControlClient.hostMatches(requestedHost: host, actualHost: record.host),
-           isProxyServerProcess(pid: record.pid, processControl: processControl) {
-            processIDs.append(record.pid)
+        // A cached discovery PID can be reused by a process serving a different endpoint.
+        processControl.listeningProcessIDs(onTCPPort: port, matchingHost: host).filter {
+            isProxyServerProcess(pid: $0, processControl: processControl)
         }
-
-        for processID in processControl.listeningProcessIDs(onTCPPort: port, matchingHost: host)
-        where isProxyServerProcess(pid: processID, processControl: processControl) {
-            processIDs.append(processID)
-        }
-
-        var seen = Set<Int>()
-        return processIDs.filter { seen.insert($0).inserted }
     }
 
     private static func terminationWarning(port: Int, pid: Int) -> String {

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import NIOCore
 
 package struct ProcessSignalResult: Sendable {
     package let result: Int32
@@ -14,13 +15,16 @@ package struct ProcessSignalResult: Sendable {
 package struct ProcessControlClient: Sendable {
     package var runCommand: @Sendable (_ launchPath: String, _ arguments: [String]) -> String?
     package var sendSignal: @Sendable (_ processID: Int, _ signal: Int32) -> ProcessSignalResult
+    package var resolveHostAddress: @Sendable (_ host: String, _ port: Int) -> String?
 
     package init(
         runCommand: @escaping @Sendable (_ launchPath: String, _ arguments: [String]) -> String?,
-        sendSignal: @escaping @Sendable (_ processID: Int, _ signal: Int32) -> ProcessSignalResult
+        sendSignal: @escaping @Sendable (_ processID: Int, _ signal: Int32) -> ProcessSignalResult,
+        resolveHostAddress: (@Sendable (_ host: String, _ port: Int) -> String?)? = nil
     ) {
         self.runCommand = runCommand
         self.sendSignal = sendSignal
+        self.resolveHostAddress = resolveHostAddress ?? Self.defaultResolveHostAddress
     }
 
     package static let liveValue = Self(
@@ -56,6 +60,14 @@ package struct ProcessControlClient: Sendable {
     }
 
     package func listeningProcessIDs(onTCPPort port: Int, matchingHost host: String) -> [Int] {
+        let normalizedHost = Self.normalizeHost(host)
+        let matchingHost: String
+        if Self.isWildcardHost(normalizedHost) || normalizedHost == "localhost" {
+            matchingHost = normalizedHost
+        } else {
+            guard let resolved = resolveHostAddress(normalizedHost, port) else { return [] }
+            matchingHost = resolved
+        }
         guard let output = runCommand(
             "/usr/sbin/lsof",
             ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpn"]
@@ -63,7 +75,7 @@ package struct ProcessControlClient: Sendable {
             return []
         }
 
-        return Self.listeningProcessIDs(fromLsofOutput: output, matchingHost: host)
+        return Self.listeningProcessIDs(fromLsofOutput: output, matchingHost: matchingHost)
     }
 
     @discardableResult
@@ -180,6 +192,11 @@ package struct ProcessControlClient: Sendable {
 
         var seen = Set<Int>()
         return processIDs.filter { seen.insert($0).inserted }
+    }
+
+    private static func defaultResolveHostAddress(_ host: String, _ port: Int) -> String? {
+        // Match ServerBootstrap.bind(host:port:), which selects one resolved address.
+        try? SocketAddress.makeAddressResolvingHost(host, port: port).ipAddress
     }
 
     private static func firstLine(_ output: String?) -> String? {
