@@ -101,7 +101,8 @@ extension JSONRPC {
             guard !(any is NSNull) else { return nil }
 
             if let string = any as? String {
-                key = string
+                // A string ID must not alias a number with the same spelling.
+                key = "s:\(string)"
                 value = .string(string)
                 return
             }

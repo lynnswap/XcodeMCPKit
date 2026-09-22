@@ -662,8 +662,7 @@ private extension InitializedMCPClientSession {
 
     func jsonRPCIDKey(_ value: JSONValue) -> String? {
         switch value {
-        case .string(let value): value
-        case .number(let value): value.stringValue
+        case .string, .number: JSONRPC.ID(any: value.foundationObject)?.key
         case .object, .array, .bool, .null: nil
         }
     }

@@ -779,7 +779,7 @@ private extension MCPClientSessionAuthority {
     private nonisolated static func makeHiddenRecoveryHandshake(
         _ handshake: RecoveryHandshake
     ) throws -> HiddenHandshake {
-        let id = "xcode-mcp-recovery-\(UUID().uuidString)"
+        let id = JSONRPC.ID(any: "xcode-mcp-recovery-\(UUID().uuidString)")!
         let payload: Data
         let sendsInitialized: Bool
         switch handshake {
@@ -799,13 +799,13 @@ private extension MCPClientSessionAuthority {
             sendsInitialized = true
         case .forwarded(let forwarded):
             var object = try JSONRPC.Wire.object(fromData: forwarded.requestData)
-            object["id"] = id
+            object["id"] = id.value.foundationObject
             payload = try JSONRPC.Wire.data(from: object)
             sendsInitialized = forwarded.initializedObserved
         }
         return HiddenHandshake(
             request: try MCPClientEnvelope(data: payload),
-            responseIDKey: id,
+            responseIDKey: id.key,
             sendsInitialized: sendsInitialized
         )
     }
@@ -1096,7 +1096,7 @@ private extension MCPClientSessionAuthority {
         on connection: Connection,
         deadline: Deadline?
     ) async throws {
-        let id = "xcode-mcp-internal-\(UUID().uuidString)"
+        let id = JSONRPC.ID(any: "xcode-mcp-internal-\(UUID().uuidString)")!
         let payload = try JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
             id: id,
             method: "initialize",
@@ -1111,7 +1111,7 @@ private extension MCPClientSessionAuthority {
         ))
         let response = try await sendHiddenRequest(
             MCPClientEnvelope(data: payload),
-            responseIDKey: id,
+            responseIDKey: id.key,
             connection: connection,
             deadline: deadline
         )
