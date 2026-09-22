@@ -2,7 +2,7 @@ import Foundation
 import NIO
 import NIOHTTP1
 import XcodeMCPCore
-import XcodeMCPProxyRuntime
+import XcodeMCPProxyRuntimeContract
 
 extension HTTPHandler {
     func sendPostResolution(

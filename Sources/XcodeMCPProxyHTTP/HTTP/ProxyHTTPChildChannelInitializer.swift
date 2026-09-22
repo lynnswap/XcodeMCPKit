@@ -1,7 +1,7 @@
 import Logging
 import NIO
 import NIOHTTP1
-import XcodeMCPProxyRuntime
+import XcodeMCPProxyRuntimeContract
 
 package final class ProxyHTTPChildChannelInitializer: @unchecked Sendable {
     private let config: ProxyHTTPConfiguration

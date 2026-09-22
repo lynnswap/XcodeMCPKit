@@ -4,7 +4,7 @@ import NIO
 import NIOHTTP1
 import NIOConcurrencyHelpers
 import XcodeMCPCore
-import XcodeMCPProxyRuntime
+import XcodeMCPProxyRuntimeContract
 
 final class SSEHub: Sendable {
     enum AddResult {
@@ -96,7 +96,7 @@ final class SSEHub: Sendable {
     }
 
     private let state = NIOLockedValueBox(State())
-    private let logger: Logger = ProxyLogging.make("sse")
+    private let logger: Logger = Logger(label: "XcodeMCPProxy.sse")
 
     var hasActiveClients: Bool {
         state.withLockedValue { $0.hasActiveClients() }

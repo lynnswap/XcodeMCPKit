@@ -3,7 +3,7 @@ import Logging
 import NIO
 import NIOHTTP1
 import XcodeMCPCore
-import XcodeMCPProxyRuntime
+import XcodeMCPProxyRuntimeContract
 
 struct HTTPResponseWriter: Sendable {
     private let logger: Logger

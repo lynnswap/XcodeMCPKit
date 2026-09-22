@@ -1,3 +1,4 @@
+import XcodeMCPProxyRuntimeContract
 @testable import XcodeMCPCore
 import Testing
 import XcodeMCPKit

@@ -12,12 +12,16 @@
     completion for both the direct SDK and the proxy STDIO adapter.
   - `InitializedMCPClientSession` owns request IDs, response correlation, and
     request-scoped progress lanes; it does not own transport/session lifecycle.
+- `XcodeMCPProxyRuntimeContract`
+  - Package request/reply/session/snapshot values and serving protocols shared
+    by Runtime, HTTP, and facade composition. No execution state or I/O owner.
 - `XcodeMCPProxyRuntime`
   - Proxy control plane, request/session ownership, Xcode routing, upstream
     topology, documentation providers, and feature workflows.
 - `XcodeMCPProxyHTTP`
   - HTTP listener lifecycle, transport validation, response encoding, and SSE delivery.
-  - Uses the package runtime serving contract; it does not own runtime policy.
+  - Depends on the runtime contract and Core without linking the concrete Runtime.
+    It does not own runtime policy.
 - `XcodeMCPProxyKit`
   - Public server/adapter embedding facades and composition of runtime, HTTP,
     discovery publication, and permission automation.
@@ -97,7 +101,9 @@
   converted at this SDK boundary and do not become public aliases.
 - Runtime and HTTP depend on Core rather than the public SDK. Runtime owns
   execution policy and request lifetimes; HTTP owns network delivery. The
-  current runtime serving protocol connects these two owners.
+  runtime serving protocol in `XcodeMCPProxyRuntimeContract` connects these
+  two owners. The contract retains the NIOCore timeout value without exposing
+  channels or event loops.
 - `XcodeMCPProxyKit` composes Runtime, HTTP, permission automation, and the SDK
   session authority used by its STDIO adapter. Its internal files contain
   facade, CLI, installation, and launch concerns.

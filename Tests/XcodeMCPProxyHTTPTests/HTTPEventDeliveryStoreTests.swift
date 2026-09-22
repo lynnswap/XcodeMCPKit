@@ -5,7 +5,7 @@ import NIOHTTP1
 import Testing
 
 @testable import XcodeMCPProxyHTTP
-import XcodeMCPProxyRuntime
+import XcodeMCPProxyRuntimeContract
 
 @Suite
 struct HTTPEventDeliveryStoreTests {

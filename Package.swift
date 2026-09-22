@@ -82,8 +82,14 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
+            name: "XcodeMCPProxyRuntimeContract",
+            dependencies: ["XcodeMCPCore", .product(name: "NIOCore", package: "swift-nio")],
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "XcodeMCPProxyRuntime",
             dependencies: [
+                "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -95,8 +101,8 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyHTTP",
             dependencies: [
+                "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
-                "XcodeMCPProxyRuntime",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -115,6 +121,7 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyKit",
             dependencies: [
+                "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPPermissionAutomation",
@@ -237,6 +244,7 @@ let package = Package(
         .testTarget(
             name: "XcodeMCPProxyRuntimeTests",
             dependencies: [
+                "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPProxyKit",
@@ -290,7 +298,7 @@ let package = Package(
         .testTarget(
             name: "XcodeMCPProxyHTTPTests",
             dependencies: [
-                "XcodeMCPProxyRuntime",
+                "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPProxyHTTP",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -317,6 +325,7 @@ let package = Package(
         .testTarget(
             name: "ProxyIntegrationTests",
             dependencies: [
+                "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPProxyKit",
