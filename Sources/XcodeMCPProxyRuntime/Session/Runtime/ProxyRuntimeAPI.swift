@@ -437,12 +437,14 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
     }
 
     package func cancelForDeinit() {
+        requestExecutor.cancelRequests()
         coordinator.cancelForDeinit()
         eventSource.finish()
         ownedEventLoopGroup?.shutdownGracefully { _ in }
     }
 
     package func shutdown() async {
+        requestExecutor.cancelRequests()
         await coordinator.shutdown()
         eventSource.finish()
         try? await ownedEventLoopGroup?.shutdownGracefully()
@@ -512,6 +514,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
 
     package func removeSession(_ id: ProxySessionID) {
         guard coordinator.hasSession(id: id.rawValue) else { return }
+        requestExecutor.cancelRequests(in: id.rawValue)
         coordinator.removeSession(id: id.rawValue)
     }
 

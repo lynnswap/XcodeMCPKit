@@ -275,7 +275,7 @@ protocol RuntimeRequestLeasePort: Sendable {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease,
+        operationLease: UpstreamOperationLease?,
         after requestSendCompletion: UpstreamRequestSendCompletion?
     )
     func abandonRequestLease(
@@ -292,7 +292,7 @@ extension RuntimeRequestLeasePort {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease
+        operationLease: UpstreamOperationLease?
     ) {
         handleRequestLeaseTimeout(
             leaseID,
@@ -793,6 +793,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return Set(upstreamTopology.snapshot().slotIDs.map(\.rawValue)).subtracting(active)
         }
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
+            isLeaseLive: { [leaseManager] in leaseManager.isLive($0) },
             canUseUpstream: {
                 [weak upstreamHealthManager] upstreamIndex in
                 let nowUptimeNs = uptimeProvider()

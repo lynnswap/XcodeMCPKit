@@ -21,7 +21,7 @@ extension ClientMCPRequestExecutor {
         eventLoop: EventLoop
     ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
         switch handling {
-        case .pendingResponse(let future, let sessionID, let errorSessionID, let originalID):
+        case .pendingResponse(let future, let sessionID, let errorSessionID, let originalID, _):
             return future.map { buffer in
                 var buffer = buffer
                 guard let data = buffer.readData(length: buffer.readableBytes) else {
@@ -76,7 +76,9 @@ extension ClientMCPRequestExecutor {
         bodyData: Data,
         sessionID: String,
         eventLoop: EventLoop,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        admittedHandle: CancellationHandle? = nil,
+        requestDeadline: Date?
     ) -> ToolCallRouting {
         if let toolName = blockedToolName(from: object) {
             return .local(
@@ -104,19 +106,12 @@ extension ClientMCPRequestExecutor {
             parsedRequestJSON: object,
             responseID: responseID
         )
-        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let cancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
-            leaseID: leaseID,
+        let cancellationHandle = admittedHandle ?? ClientMCPRequestExecutor.CancellationHandle(
+            leaseID: sessionManager.createRequestLease(descriptor: descriptor),
             sessionID: sessionID,
             requestIDKeys: [responseID.key]
         )
-        let deadline = timeoutDeadline(
-            for: requestTimeoutOverride
-                ?? Self.topLevelRequestTimeoutOverride(
-                    method: "tools/call",
-                    defaultSeconds: requestTimeoutSeconds
-                )
-        )
+        let deadline = requestDeadline
         let promise = eventLoop.makePromise(of: Data?.self)
         let task = Task { [self] in
             let responseData: Data?

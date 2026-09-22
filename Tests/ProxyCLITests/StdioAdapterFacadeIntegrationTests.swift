@@ -10,6 +10,30 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized)
 struct StdioAdapterFacadeIntegrationTests {
+    @Test func stdioCancellationReachesHTTPWhileTheRequestIsPending() async throws {
+        let cancellation = #"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}"#
+        let result = try await StdioAdapterFacadeHarness.run(
+            responseMode: .json,
+            gatedResponseMethods: ["tools/list"],
+            stdinLines: [initializeRequest, initializedNotification, toolsListRequest, cancellation],
+            timeoutDescription: "STDIO cancellation should bypass a pending request",
+            whileRunning: { server in
+                _ = try await waitWithTimeout("waiting for tools/list") {
+                    try await server.recorder.nextRequest { $0.bodyMethod == "tools/list" }
+                }
+                let notification = try await waitWithTimeout("waiting for cancellation before response") {
+                    try await server.recorder.nextRequest { $0.bodyMethod == "notifications/cancelled" }
+                }
+                #expect(notification.cancelledRequestID == .number(.int(2)))
+                #expect(notification.sessionID == "server-session")
+                let gate = try #require(server.responseGate)
+                gate.release("tools/list")
+            }
+        )
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+    }
+
     @Test func stdioAdapterFacadeRoundTripsJSONOverModernStubHTTPServer() async throws {
         try await runStdioAdapterFacadeRoundTrip(responseMode: .json)
     }
@@ -854,6 +878,7 @@ private struct StubMCPHTTPErrorResponse: @unchecked Sendable {
 private struct StubMCPHTTPRequest: Sendable {
     let httpMethod: String
     let bodyMethod: String?
+    let cancelledRequestID: JSONValue?
     let sessionID: String?
     let protocolVersion: String?
     let accept: String?
@@ -1179,6 +1204,7 @@ private final class StubMCPHTTPHandler: ChannelInboundHandler, @unchecked Sendab
             StubMCPHTTPRequest(
                 httpMethod: requestHead.method.rawValue,
                 bodyMethod: requestObject?["method"] as? String,
+                cancelledRequestID: ((requestObject?["params"] as? [String: Any])?["requestId"]).flatMap { JSONValue(any: $0) },
                 sessionID: requestHead.headers.first(name: "MCP-Session-Id"),
                 protocolVersion: requestHead.headers.first(name: "MCP-Protocol-Version"),
                 accept: requestHead.headers.first(name: "Accept"),
