@@ -24,8 +24,8 @@ def run(arguments, *, input=None):
     return result.stdout
 
 
-def api(endpoint, *, fields=None, paginate=False):
-    arguments = ["gh", "api", "--method", "PATCH" if fields is not None else "GET", endpoint]
+def api(endpoint, *, fields=None, paginate=False, method=None):
+    arguments = ["gh", "api", "--method", method or ("PATCH" if fields is not None else "GET"), endpoint]
     if paginate:
         arguments += ["--paginate", "--slurp"]
     if fields is not None:
@@ -60,6 +60,7 @@ def validate_tag(repository, version, source_sha):
     commit = tag_commit(repository, version)
     if commit is not None and commit != source_sha:
         raise ReleaseError("Release tag already points to a different commit.")
+    return commit
 
 
 def require_draft(release, version, source_sha, prerelease=None):
@@ -137,7 +138,12 @@ def publish(version, source_sha, release_id, prerelease, directory, archive_sha2
     release = api(endpoint)
     require_draft(release, version, source_sha, prerelease)
     verify_uploads(release, checksums)
-    validate_tag(repository, version, source_sha)
+    if validate_tag(repository, version, source_sha) is None:
+        # Claim the tag before publication: GitHub ignores target_commitish for existing tags.
+        # A concurrent ref creation fails here, while the release is still a draft.
+        api(f"repos/{repository}/git/refs", method="POST", fields={
+            "ref": f"refs/tags/{version}", "sha": source_sha,
+        })
     # Publish the same release and keep its current title and notes untouched.
     published = api(endpoint, fields={
         "tag_name": version, "target_commitish": source_sha,

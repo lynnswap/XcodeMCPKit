@@ -54,6 +54,8 @@ class ReleaseTests(unittest.TestCase):
         self.api_calls = []
         self.uploads = []
         self.after_upload = lambda: None
+        self.before_tag_create = lambda: None
+        self.before_publish = lambda: None
         self.real_run = release.run
         env = {
             "GITHUB_ACTIONS": "true", "GITHUB_REF": "refs/heads/main", "RELEASE_BRANCH": "main",
@@ -65,7 +67,7 @@ class ReleaseTests(unittest.TestCase):
         self.api_mock = context.enter_context(patch.object(release, "api", side_effect=self.fake_api))
         context.enter_context(patch.object(release, "run", side_effect=self.fake_run))
 
-    def fake_api(self, endpoint, *, fields=None, paginate=False):
+    def fake_api(self, endpoint, *, fields=None, paginate=False, method=None):
         self.api_calls.append((endpoint, copy.deepcopy(fields)))
         prefix = f"repos/{self.repository}"
         if endpoint == f"{prefix}/releases?per_page=100":
@@ -73,10 +75,19 @@ class ReleaseTests(unittest.TestCase):
             return [[], [copy.deepcopy(self.draft)]]
         if endpoint == f"{prefix}/git/matching-refs/tags/{self.version}":
             return [] if self.tag is None else [{"ref": f"refs/tags/{self.version}", "object": copy.deepcopy(self.tag)}]
+        if endpoint == f"{prefix}/git/refs":
+            self.assertEqual(method, "POST")
+            self.before_tag_create()
+            if self.tag is not None:
+                raise release.ReleaseError("Reference already exists")
+            self.tag = {"type": "commit", "sha": fields["sha"]}
+            return {"ref": fields["ref"], "object": copy.deepcopy(self.tag)}
         if endpoint == f"{prefix}/releases/17":
             if fields is not None:
                 self.assertNotIn("name", fields)
                 self.assertNotIn("body", fields)
+                if fields.get("draft") is False:
+                    self.before_publish()
                 self.draft.update(fields)
                 if fields.get("draft") is False and self.tag is None:
                     self.tag = {"type": "commit", "sha": self.sha}
@@ -180,6 +191,56 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(self.draft["prerelease"])
         self.assertEqual(self.draft["name"], "Edited title")
         self.assertEqual(self.draft["body"], "Edited notes\n")
+
+    def test_tag_is_pinned_before_publication(self):
+        def check_tag():
+            self.assertEqual(self.tag, {"type": "commit", "sha": self.sha})
+            self.assertTrue(self.draft["draft"])
+        self.before_publish = check_tag
+        self.publish()
+        self.assertIn((f"repos/{self.repository}/git/refs", {
+            "ref": f"refs/tags/{self.version}", "sha": self.sha,
+        }), self.api_calls)
+
+    def test_existing_matching_tag_is_not_recreated(self):
+        self.tag = {"type": "commit", "sha": self.sha}
+        self.publish()
+        self.assertFalse(any(endpoint.endswith("/git/refs") for endpoint, _ in self.api_calls))
+
+    def test_tag_creation_conflict_stops_before_publication(self):
+        for competing_sha in (self.sha, "b" * 40):
+            with self.subTest(competing_sha=competing_sha):
+                self.tag = None
+                def create_competing_tag():
+                    self.tag = {"type": "commit", "sha": competing_sha}
+                self.before_tag_create = create_competing_tag
+                with self.assertRaisesRegex(release.ReleaseError, "Reference already exists"):
+                    self.publish()
+                self.assertEqual(self.tag["sha"], competing_sha)
+                self.assert_no_publication()
+
+    def test_tag_creation_failure_leaves_draft(self):
+        def fail():
+            raise release.ReleaseError("Tag creation unavailable")
+        self.before_tag_create = fail
+        with self.assertRaisesRegex(release.ReleaseError, "Tag creation unavailable"):
+            self.publish()
+        self.assertIsNone(self.tag)
+        self.assert_no_publication()
+
+    def test_retry_after_publish_failure_reuses_created_tag(self):
+        def fail():
+            raise release.ReleaseError("Publication unavailable")
+        self.before_publish = fail
+        with self.assertRaisesRegex(release.ReleaseError, "Publication unavailable"):
+            self.publish()
+        self.assertTrue(self.draft["draft"])
+        self.assertEqual(self.tag["sha"], self.sha)
+        self.before_publish = lambda: None
+        self.api_calls.clear()
+        self.publish()
+        self.assertFalse(self.draft["draft"])
+        self.assertFalse(any(endpoint.endswith("/git/refs") for endpoint, _ in self.api_calls))
 
     def test_publish_repairs_partial_draft_uploads(self):
         self.draft["assets"] = [{"name": "install.sh", "state": "starter", "digest": None}]

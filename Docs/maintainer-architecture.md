@@ -225,12 +225,15 @@ The workflow runs package tests and the process/STDIO adapter suites, builds the
 arm64 archive, and verifies checksums, archive contents, and generated installer
 contents. The publish job downloads the build's artifact by ID, checks it against
 the build's archive digest, uploads the three assets, and verifies their uploaded
-digests before publishing. GitHub creates the tag at publication if it does not
-already exist; an existing tag must point to the tested commit. The target stays
-fixed even if `main` advances during the run.
+digests before publishing. It creates any missing tag at the tested commit before
+making the draft public. A tag creation conflict or failure stops publication;
+an existing tag must point to the tested commit. The target stays fixed even if
+`main` advances during the run.
 
 Failures before publication leave the draft available. Rerun failed jobs to reuse
 successful builds; uploads replace the draft's assets with the verified files.
+If publication fails after tag creation, the tag remains at the tested commit
+and is reused on retry.
 Remove unrelated draft attachments before retrying publication. Keep the tag,
 target commit, and prerelease setting unchanged during a run. Title and note edits
 are preserved. If publication succeeded but confirmation failed, rerunning the
