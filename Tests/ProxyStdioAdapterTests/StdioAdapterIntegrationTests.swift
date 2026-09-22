@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Logging
 import Synchronization
 import Testing
@@ -8,11 +9,38 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized)
 struct StdioAdapterContractTests {
+    @Test func outputAcquisitionFailureStopsTheAcquiredInputChannel() async throws {
+        let pipe = Pipe()
+        defer {
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+        }
+        let reader = try StdioInputChannel(handle: pipe.fileHandleForReading)
+        let transport = StalledStdioAdapterTransport()
+        do {
+            _ = try StdioAdapter(
+                requestTimeout: nil, inputReader: reader,
+                output: FileHandle(fileDescriptor: -1, closeOnDealloc: false),
+                recipe: MCPTransportRecipe { transport }, shutdownPolicy: .live
+            )
+            reader.stop()
+            Issue.record("output descriptor acquisition should fail")
+        } catch {
+            let error = error as NSError
+            #expect(error.domain == NSPOSIXErrorDomain)
+            #expect(error.code == Int(EBADF))
+        }
+        try await waitWithTimeout("failed initializer should release the input descriptor") {
+            await reader.waitUntilStopped()
+        }
+        #expect(fcntl(pipe.fileHandleForReading.fileDescriptor, F_GETFD) != -1)
+    }
+
     @Test func startIsOneShotAndStopIsIdempotent() async throws {
         let transport = StalledStdioAdapterTransport()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
-        let adapter = StdioAdapter(
+        let adapter = try StdioAdapter(
             requestTimeout: nil,
             input: inputPipe.fileHandleForReading,
             output: outputPipe.fileHandleForWriting,
@@ -40,7 +68,7 @@ struct StdioAdapterContractTests {
             let transport = StalledStdioAdapterTransport()
             let inputPipe = Pipe()
             let outputPipe = Pipe()
-            let adapter = StdioAdapter(
+            let adapter = try StdioAdapter(
                 requestTimeout: nil,
                 input: inputPipe.fileHandleForReading,
                 output: outputPipe.fileHandleForWriting,
@@ -61,7 +89,7 @@ struct StdioAdapterContractTests {
         let transport = StalledStdioAdapterTransport()
         let inputReader = DeinitObservingStdioInputReader()
         let outputPipe = Pipe()
-        var adapter: StdioAdapter? = StdioAdapter(
+        var adapter: StdioAdapter? = try StdioAdapter(
             requestTimeout: nil,
             inputReader: inputReader,
             output: outputPipe.fileHandleForWriting,
@@ -106,7 +134,7 @@ struct StdioAdapterContractTests {
             },
             sleepForTimeInterval: { _ in }
         )
-        let adapter = StdioAdapter(
+        let adapter = try StdioAdapter(
             requestTimeout: nil,
             inputReader: inputReader,
             output: outputPipe.fileHandleForWriting,
@@ -132,7 +160,7 @@ struct StdioAdapterContractTests {
         let client = StalledStdioAdapterTransport()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
-        let adapter = StdioAdapter(
+        let adapter = try StdioAdapter(
             requestTimeout: nil,
             input: inputPipe.fileHandleForReading,
             output: outputPipe.fileHandleForWriting,
@@ -206,7 +234,7 @@ struct StdioAdapterContractTests {
         let client = StalledStdioAdapterTransport(stallsInitialize: true)
         let inputPipe = Pipe()
         let outputPipe = Pipe()
-        let adapter = StdioAdapter(
+        let adapter = try StdioAdapter(
             requestTimeout: nil,
             input: inputPipe.fileHandleForReading,
             output: outputPipe.fileHandleForWriting,
@@ -232,7 +260,7 @@ struct StdioAdapterContractTests {
 
     @Test func writerBoundsAdmissionAndStopInterruptsAFullPipe() async throws {
         let outputPipe = Pipe()
-        let writer = StdioWriter(
+        let writer = try StdioWriter(
             handle: outputPipe.fileHandleForWriting,
             logger: Logger(label: "StdioWriterContractTests")
         )
@@ -271,7 +299,7 @@ struct StdioAdapterContractTests {
             try? output.close()
             try? FileManager.default.removeItem(at: url)
         }
-        let writer = StdioWriter(handle: output, logger: Logger(label: "StdioWriterContractTests"))
+        let writer = try StdioWriter(handle: output, logger: Logger(label: "StdioWriterContractTests"))
         let message = Data(repeating: 0x61, count: 5 * 1024 * 1024)
 
         #expect(await writer.send(message))
@@ -285,7 +313,7 @@ struct StdioAdapterContractTests {
         let client = StalledStdioAdapterTransport()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
-        let adapter = StdioAdapter(
+        let adapter = try StdioAdapter(
             requestTimeout: nil,
             input: inputPipe.fileHandleForReading,
             output: outputPipe.fileHandleForWriting,
@@ -331,7 +359,7 @@ struct StdioAdapterContractTests {
         let client = StalledStdioAdapterTransport()
         let inputPipe = Pipe()
         let outputPipe = Pipe()
-        let adapter = StdioAdapter(
+        let adapter = try StdioAdapter(
             requestTimeout: nil,
             input: inputPipe.fileHandleForReading,
             output: outputPipe.fileHandleForWriting,

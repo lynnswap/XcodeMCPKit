@@ -40,9 +40,11 @@ private final class StdioOutputChannel: @unchecked Sendable {
     private let callbackQueue = DispatchQueue(label: "XcodeMCPProxy.StdioWriter.io")
     private let terminal: Terminal
 
-    init(handle: FileHandle) {
+    init(handle: FileHandle) throws {
         let descriptor = dup(handle.fileDescriptor)
-        precondition(descriptor >= 0, "STDIO output FileHandle must be open")
+        guard descriptor >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
         let terminal = Terminal()
         self.terminal = terminal
         self.channel = DispatchIO(
@@ -113,8 +115,8 @@ actor StdioWriter {
     private var queuedBytes = 0
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(handle: FileHandle, logger: Logger) {
-        self.channel = StdioOutputChannel(handle: handle)
+    init(handle: FileHandle, logger: Logger) throws {
+        self.channel = try StdioOutputChannel(handle: handle)
         self.logger = logger
     }
 
