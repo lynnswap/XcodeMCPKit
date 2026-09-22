@@ -1878,8 +1878,14 @@ final class ProcessControlPlaneAuthority: Sendable {
         _ reason: CatalogInvalidationReason
     ) -> ProcessControlPlaneTransition {
         state.withLockedValue { state in
-            state.catalogEpoch = CatalogEpoch(rawValue: state.catalogEpoch.rawValue &+ 1)
-            var effects = Self.invalidateAttempts(in: &state)
+            var effects: [ProcessControlPlaneEffect] = []
+            switch reason {
+            case .toolsChanged:
+                break
+            case .reset, .routeMembershipChanged, .exposureChanged:
+                state.catalogEpoch = CatalogEpoch(rawValue: state.catalogEpoch.rawValue &+ 1)
+                effects = Self.invalidateAttempts(in: &state)
+            }
             switch reason {
             case .reset:
                 state.catalogsByProcessID.removeAll()
@@ -1897,11 +1903,17 @@ final class ProcessControlPlaneAuthority: Sendable {
                     state.recordsByKey[key] = record
                 }
             case .toolsChanged(let proof):
-                if let record = Self.activeRecords(in: state).first(where: {
-                    $0.route.upstreamIndices.contains(proof.slotID.rawValue)
-                }) {
+                if let key = state.order.first(where: {
+                    guard let record = state.recordsByKey[$0], record.state == .active else { return false }
+                    return record.route.upstreamIndices.contains(proof.slotID.rawValue)
+                }), var record = state.recordsByKey[key] {
+                    effects.append(contentsOf: record.attempt?.detachedEffects() ?? [])
+                    record.attempt = nil
+                    state.recordsByKey[key] = record
                     Self.removeCatalog(processID: record.route.target.processID, from: &state)
                 } else {
+                    effects.append(contentsOf: state.unboundAttempt?.detachedEffects() ?? [])
+                    state.unboundAttempt = nil
                     state.unboundCatalogRaw = nil
                     state.unboundCatalogSource = nil
                 }
