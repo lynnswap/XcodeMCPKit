@@ -886,6 +886,47 @@ struct XcodeMCPProxyServerTests {
         #expect(runtime.shutdownCount == 1)
     }
 
+    @Test func gatewayAcquisitionFailurePreservesBothCausesThroughThePublicServer() async throws {
+        let runtime = StartupInventoryRuntime()
+        let groupShutdownCount = NIOLockedValueBox(0)
+        let server = XcodeMCPProxyServer(
+            configuration: .init(
+                bindAddress: .init(host: "127.0.0.1", port: 0),
+                discovery: .disabled
+            ),
+            dependencies: .init(
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in runtime },
+                makeHTTPGateway: { configuration, runtime, logger in
+                    ProxyHTTPGateway(
+                        configuration: configuration,
+                        runtime: runtime,
+                        logger: logger,
+                        bind: { _, _, _ in throw XcodeMCPProxyServer.LifecycleError.failedToBind },
+                        shutdownGroup: { group in
+                            groupShutdownCount.withLockedValue { $0 += 1 }
+                            try await group.shutdownGracefully()
+                            throw GatewayShutdownFailure.expected
+                        }
+                    )
+                }
+            )
+        )
+
+        let error = try await #require(throws: XcodeMCPProxyServer.CleanupError.self) {
+            _ = try await server.start()
+        }
+
+        let operationErrors = (error.operationError as NSError).underlyingErrors
+        #expect(operationErrors.contains { $0 as? XcodeMCPProxyServer.LifecycleError == .failedToBind })
+        let cleanupErrors = (error.cleanupError as NSError).underlyingErrors
+        #expect(cleanupErrors.contains { $0 as? GatewayShutdownFailure == .expected })
+        #expect(error.endpoint == nil)
+        await #expect(throws: XcodeMCPProxyServer.CleanupError.self) { try await server.shutdown() }
+        #expect(groupShutdownCount.withLockedValue { $0 } == 1)
+        #expect(runtime.shutdownCount == 1)
+    }
+
     @Test func runningShutdownSharesReleaseFailureWithoutRepeatingCleanup() async throws {
         let gateway = ControlledShutdownGateway()
         let runtime = StartupInventoryRuntime()
