@@ -6,6 +6,15 @@ import XcodeMCPCoreTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct XcodeMCPTests {
+    @Test func responseWithWrongIDScalarTypeCannotCompleteRequest() async throws {
+        let transport = FakeXcodeMCPTransport(emitsWrongTypedResponseFirst: true)
+        let client = try await XcodeMCP(transport: transport)
+        defer { closeAfterTest(client) }
+
+        let tools = try await client.listTools()
+        #expect(tools.map(\.name) == ["DocumentationSearch"])
+    }
+
     @Test func asyncInitializerPerformsMCPHandshake() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(
@@ -3234,6 +3243,7 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
     private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
     private let initializeResult: MCPJSONValue
     private let responseErrors: [String: MCPJSONValue]
+    private let emitsWrongTypedResponseFirst: Bool
     private let progressBeforeResponseCount: Int
     private let emitsProgressBarrierServerRequest: Bool
     private let transportCloseGate: ManualGate?
@@ -3254,6 +3264,7 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
             "capabilities": .object([:]),
         ]),
         responseErrors: [String: MCPJSONValue] = [:],
+        emitsWrongTypedResponseFirst: Bool = false,
         progressBeforeResponseCount: Int = 1,
         emitsProgressBarrierServerRequest: Bool = false,
         transportCloseGate: ManualGate? = nil
@@ -3263,6 +3274,7 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
         self.continuation = stream.continuation
         self.initializeResult = initializeResult
         self.responseErrors = responseErrors
+        self.emitsWrongTypedResponseFirst = emitsWrongTypedResponseFirst
         self.progressBeforeResponseCount = progressBeforeResponseCount
         self.emitsProgressBarrierServerRequest = emitsProgressBarrierServerRequest
         self.transportCloseGate = transportCloseGate
@@ -3320,6 +3332,13 @@ private actor FakeXcodeMCPTransport: XcodeMCPTransport {
             }
         }
 
+        if emitsWrongTypedResponseFirst, case .integer(let number) = id {
+            try yieldMessage([
+                "jsonrpc": .string("2.0"),
+                "id": .string(String(number)),
+                "result": .string("wrong ID type"),
+            ])
+        }
         if let error = responseErrors[method] {
             try yieldMessage([
                 "jsonrpc": .string("2.0"),
