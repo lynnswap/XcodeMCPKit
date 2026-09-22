@@ -98,6 +98,17 @@ extension RuntimeCoordinator {
                 break
             }
             guard upstreamTopology.validate(proof) else { return }
+            if case .notification("notifications/tools/list_changed") =
+                JSONRPC.Message.Inspector.kind(of: object) {
+                let transition = processControlPlane.invalidateCatalog(.toolsChanged(proof))
+                // Forward the upstream notification after invalidation without synthesizing a duplicate.
+                applyProcessControlPlaneTransition(ProcessControlPlaneTransition(
+                    addedRoutes: transition.addedRoutes,
+                    retiredRoutes: transition.retiredRoutes,
+                    effects: transition.effects,
+                    publishesToolsListChanged: false
+                ))
+            }
             routeUnmappedUpstreamMessage(data, operationLease: operationLease)
             return
         }

@@ -2356,6 +2356,33 @@ struct XcodeMCPTests {
         await cyclingClient.close()
     }
 
+    @Test(arguments: ["", " "])
+    func listToolsTreatsEveryStringCursorAsOpaque(token: String) async throws {
+        let transport = LifecycleContractTransport(name: "opaque") { cursor, _ in
+            lifecycleToolsPage(names: [cursor == nil ? "First" : "Last"], nextCursor: cursor == nil ? token : nil)
+        }
+        let client = try await XcodeMCP(transport: transport)
+        #expect(try await client.listTools().map(\.name) == ["First", "Last"])
+        let cursors = await transport.sentMessages().filter { $0.method == "tools/list" }
+            .map { $0.params?.objectValue?["cursor"]?.stringValue }
+        #expect(cursors == [nil, token])
+        await client.close()
+    }
+
+    @Test(arguments: [MCPJSONValue.null, .integer(4)])
+    func listToolsRejectsNonStringCursor(cursor: MCPJSONValue) async throws {
+        let transport = LifecycleContractTransport(name: "invalid-cursor") { _, _ in
+            var page = lifecycleToolsPage(names: ["Partial"], nextCursor: nil).objectValue!
+            page["nextCursor"] = cursor
+            return .object(page)
+        }
+        let client = try await XcodeMCP(transport: transport)
+        await #expect(throws: XcodeMCPError.invalidResponse("tools/list returned an invalid cursor")) {
+            _ = try await client.listTools()
+        }
+        await client.close()
+    }
+
     @Test func listToolsRestartsPageOneAfterRecoveryWithinOneReplayBudget() async throws {
         let first = LifecycleContractTransport(
             name: "old",

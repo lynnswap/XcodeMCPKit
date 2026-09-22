@@ -338,9 +338,9 @@ public actor XcodeMCP {
                 throw XcodeMCPError.invalidResponse("tools/list result is missing tools")
             }
             tools.append(contentsOf: try page.map { try MCPTool(json: $0) })
-            guard let nextCursor = result["nextCursor"]?.stringValue,
-                  nextCursor.isEmpty == false else {
-                return tools
+            guard let rawCursor = result["nextCursor"] else { return tools }
+            guard let nextCursor = rawCursor.stringValue else {
+                throw XcodeMCPError.invalidResponse("tools/list returned an invalid cursor")
             }
             guard seenCursors.insert(nextCursor).inserted else {
                 throw XcodeMCPError.invalidResponse("tools/list returned a cursor cycle")

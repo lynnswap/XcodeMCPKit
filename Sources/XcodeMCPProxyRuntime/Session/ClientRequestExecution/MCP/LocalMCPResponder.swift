@@ -46,6 +46,9 @@ struct LocalMCPResponder {
         guard let originalID = JSONRPC.Message.Inspector.requestID(from: object) else {
             throw ControlPlane.Error.invalidResponse("missing id")
         }
+        if let params = object["params"] as? [String: Any], params["cursor"] != nil {
+            throw ControlPlane.Error.upstreamRPC(code: -32602, message: "invalid tools/list cursor")
+        }
         let result = try await sessionManager.sharedToolsList(
             sessionID: sessionID,
             requestTimeoutOverride: requestTimeoutOverride
@@ -128,6 +131,15 @@ struct LocalMCPResponder {
             sessionManager.isInitialized(),
             let originalID = JSONRPC.Message.Inspector.requestID(from: object)
         {
+            // The proxy publishes one complete catalog and never issues client cursors.
+            if let params = object["params"] as? [String: Any], params["cursor"] != nil {
+                return .mcpError(
+                    id: originalID,
+                    code: -32602,
+                    message: "invalid tools/list cursor",
+                    sessionID: headerSessionID
+                )
+            }
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)
             }

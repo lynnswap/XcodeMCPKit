@@ -36,6 +36,38 @@ private func seedCanonicalInitializeForTesting(
 
 @Suite(.serialized, .asyncTestCleanup)
 struct HTTPConcurrencyTests {
+    @Test func httpAndSwiftClientExposeCompletePaginatedCatalog() async throws {
+        let upstream = PaginatedCatalogUpstream()
+        let server = try TestHTTPServer.start(upstream: upstream)
+        do {
+            let client = try await XcodeMCP(configuration: .init(
+                transport: .streamableHTTP(endpoint: server.url), requestTimeout: .seconds(5)
+            ))
+            do {
+                let tools = try await client.listTools()
+                #expect(Set(tools.map(\.name)) == Set(["FirstPage", "LastPage"]))
+                #expect(await upstream.cursors() == [nil, "opaque / token?=α"])
+                let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 100))
+                let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
+                let (toolsResponse, body) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 101))
+                #expect(toolsResponse.statusCode == 200)
+                let result = try #require(body["result"] as? [String: Any])
+                let descriptors = try #require(result["tools"] as? [[String: Any]])
+                #expect(Set(descriptors.compactMap { $0["name"] as? String }) == Set(["FirstPage", "LastPage"]))
+                #expect(result["nextCursor"] == nil)
+                #expect(await upstream.cursors().count == 2)
+            } catch {
+                await client.close()
+                throw error
+            }
+            await client.close()
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test(arguments: ["ExecuteSnippet", "XcodeListWindows"])
     func httpCancellationDoesNotWaitBehindTheRequest(toolName: String) async throws {
         let upstream = ControlledUpstreamClient()
@@ -56,6 +88,7 @@ struct HTTPConcurrencyTests {
             )
             #expect(cancellation.statusCode == 202)
             #expect(try await request.statusCode == 202)
+
         } catch {
             try? await server.shutdown()
             throw error
@@ -1075,6 +1108,49 @@ private struct TestHTTPServer {
                 await sessionManager.shutdown()
             }
         )
+    }
+}
+
+private actor PaginatedCatalogUpstream: UpstreamSlotControlling {
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private var requestedCursors: [String?] = []
+
+    init() {
+        (events, continuation) = AsyncStream.makeStream()
+    }
+
+    func start() async {}
+    func stop() async { continuation.finish() }
+    func cursors() -> [String?] { requestedCursors }
+
+    func send(_ data: Data) async -> Upstream.SendResult {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = object["id"] else { return .accepted }
+        let result: [String: Any]
+        switch object["method"] as? String {
+        case "initialize":
+            result = [
+                "protocolVersion": MCP.ProtocolVersion.current,
+                "capabilities": ["tools": ["listChanged": true]],
+                "serverInfo": ["name": "paginated-test", "version": "1"],
+            ]
+        case "tools/list":
+            let cursor = (object["params"] as? [String: Any])?["cursor"] as? String
+            requestedCursors.append(cursor)
+            var page: [String: Any] = ["tools": [[
+                "name": cursor == nil ? "FirstPage" : "LastPage",
+                "inputSchema": ["type": "object"],
+            ]]]
+            if cursor == nil { page["nextCursor"] = "opaque / token?=α" }
+            result = page
+        default:
+            result = [:]
+        }
+        if let response = try? JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "id": id, "result": result]) {
+            continuation.yield(.message(response))
+        }
+        return .accepted
     }
 }
 
