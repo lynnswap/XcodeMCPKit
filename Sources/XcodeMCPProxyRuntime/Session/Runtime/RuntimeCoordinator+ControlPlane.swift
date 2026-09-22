@@ -901,6 +901,77 @@ extension RuntimeCoordinator {
         throw UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
+    func loadToolsCatalogFromRoute(
+        _ route: ControlPlane.Route,
+        requestTimeout: TimeAmount?,
+        rpcHandle: ControlPlane.RPCHandle,
+        startedAt: UInt64,
+        purpose: String,
+        label: String = "tools/list"
+    ) async throws -> CanonicalToolsCatalogLoadResult {
+        let deadline = deadlineUptimeNanoseconds(for: requestTimeout)
+        let currentPage = NIOLockedValueBox<ControlPlane.RPCHandle?>(nil)
+        guard rpcHandle.installCancelWithDelivery({ [self] snapshot, delivery in
+            guard let page = currentPage.withLockedValue({ $0 }),
+                  let pageDelivery = page.cancel(cause: snapshot.cause) else {
+                delivery.complete(.noLongerApplicable)
+                return
+            }
+            if addRuntimeTask({ delivery.complete(await pageDelivery.wait()) }) == false {
+                delivery.complete(.rejected)
+            }
+        }) else {
+            throw CancellationError()
+        }
+        defer { rpcHandle.markFinished() }
+        var sourceProof: UpstreamTopologyProof?
+        var pageRoute = route
+        var pagination = ToolsListPagination()
+        repeat {
+            try Task.checkCancellation()
+            let pageHandle = ControlPlane.RPCHandle()
+            currentPage.withLockedValue { $0 = pageHandle }
+            guard rpcHandle.isCancelled() == false else {
+                throw CancellationError()
+            }
+            let remainingTimeout = timeAmount(until: deadline)
+            guard remainingTimeout?.nanoseconds != 0 else { throw TimeoutError() }
+            let response = try await performControlPlaneRPC(
+                route: pageRoute,
+                purpose: purpose,
+                label: label,
+                requestObject: JSONRPC.Wire.requestObject(
+                    id: "__control-plane-tools-\(UUID().uuidString)",
+                    method: "tools/list",
+                    params: pagination.nextCursor.map { .object(["cursor": .string($0)]) }
+                ),
+                requestTimeout: remainingTimeout,
+                rpcHandle: pageHandle,
+                expectedUpstreamProof: sourceProof
+            )
+            sourceProof = response.operationLease.proof
+            pageRoute = .pinnedUpstream(response.upstreamIndex)
+            do {
+                try pagination.append(extractJSONRPCResult(from: response.responseData))
+            } catch {
+                throw ControlPlane.RequestError(
+                    route: pageRoute,
+                    operationLease: response.operationLease,
+                    underlying: error
+                )
+            }
+        } while pagination.nextCursor != nil
+        try Task.checkCancellation()
+        guard rpcHandle.isCancelled() == false, let sourceProof else {
+            throw CancellationError()
+        }
+        return CanonicalToolsCatalogLoadResult(
+            rawResult: pagination.result,
+            sourceProof: sourceProof,
+            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+        )
+    }
+
     private func loadCanonicalToolsCatalogFromRoute(
         _ route: ControlPlane.Route,
         requestTimeout: TimeAmount?,
@@ -911,35 +982,17 @@ extension RuntimeCoordinator {
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let nowUptimeNs = nowUptimeNanoseconds()
         do {
-            let response = try await performControlPlaneRPC(
-                route: route,
-                purpose: purpose,
-                label: "tools/list",
-                requestObject: JSONRPC.Wire.requestObject(
-                    id: "__control-plane-tools-\(UUID().uuidString)",
-                    method: "tools/list"
-                ),
+            let result = try await loadToolsCatalogFromRoute(
+                route,
                 requestTimeout: requestTimeout,
-                rpcHandle: rpcHandle
+                rpcHandle: rpcHandle,
+                startedAt: startedAt,
+                purpose: purpose
             )
-            let result = try extractJSONRPCResult(from: response.responseData)
-            guard isValidToolsListResult(result) else {
-                markToolsListRefreshFailed(
-                    response.operationLease.proof,
-                    nowUptimeNs: nowUptimeNs,
-                    reason: "invalid_response"
-                )
-                throw ControlPlane.Error.invalidResponse("invalid tools/list result")
+            if let proof = result.sourceProof {
+                markToolsListRefreshSucceeded(proof, nowUptimeNs: nowUptimeNs)
             }
-            markToolsListRefreshSucceeded(
-                response.operationLease.proof,
-                nowUptimeNs: nowUptimeNs
-            )
-            return CanonicalToolsCatalogLoadResult(
-                rawResult: result,
-                sourceProof: response.operationLease.proof,
-                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
-            )
+            return result
         } catch let error as ControlPlane.RequestError {
             if error.underlying is CancellationError {
                 throw error.underlying
@@ -1015,6 +1068,7 @@ extension RuntimeCoordinator {
         requestObject: [String: Any],
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlane.RPCHandle? = nil,
+        expectedUpstreamProof: UpstreamTopologyProof? = nil,
         responseIDOverride: JSONRPC.ID? = nil,
         throwsOnRPCError: Bool = true
     ) async throws -> ControlPlane.RPCResponse {
@@ -1104,6 +1158,12 @@ extension RuntimeCoordinator {
                 preferredUpstreamIndex: preferredUpstreamIndex
             ) { [self, requestTemplate, originalID] selectedOperationLease in
                 let selectedUpstreamIndex = selectedOperationLease.upstreamIndex
+                if let expectedUpstreamProof,
+                   selectedOperationLease.proof != expectedUpstreamProof {
+                    return self.eventLoop.makeFailedFuture(
+                        UpstreamSlotScheduler.AcquisitionError.unavailable
+                    )
+                }
                 if rpcHandle.isCancelled() {
                     return self.eventLoop.makeFailedFuture(CancellationError())
                 }
