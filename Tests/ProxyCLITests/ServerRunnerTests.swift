@@ -300,6 +300,52 @@ struct ServerRunnerTests {
         #expect(diagnostic.contains("--force-restart"))
     }
 
+    @Test(arguments: [false, true])
+    func serverLauncherPreservesWaitAndShutdownFailures(waitFails: Bool) async throws {
+        let server = ShutdownFailingProxyServer(waitFails: waitFails)
+        let errors = CapturedLines()
+        let launcher = makeServerLauncher(makeServer: { _ in server })
+
+        let exitCode = await launcher.run(
+            arguments: ["xcode-mcp-proxy-server", "--listen", "127.0.0.1:9002"],
+            environment: [:],
+            stdout: { _ in },
+            stderr: { errors.append($0) }
+        )
+
+        #expect(exitCode == 1)
+        #expect(server.shutdownCount == 1)
+        let diagnostic = try #require(errors.snapshot().first)
+        #expect(errors.snapshot().count == 1)
+        #expect(diagnostic.contains("gateway cleanup failed"))
+        #expect(diagnostic.contains("listener wait failed") == waitFails)
+    }
+
+    @Test func startupCleanupFailureIsNotReplacedByPortInUseDiagnostic() async throws {
+        let error = XcodeMCPProxyServer.CleanupError(
+            operationError: AddressAlreadyInUseError(),
+            cleanupError: LaunchCleanupFailure.expected,
+            endpoint: nil
+        )
+        let errors = CapturedLines()
+        let launcher = makeServerLauncher(
+            makeServer: { _ in FailingProxyServer(error: error) },
+            isAddressAlreadyInUse: { _ in true }
+        )
+
+        let exitCode = await launcher.run(
+            arguments: ["xcode-mcp-proxy-server"],
+            environment: [:],
+            stdout: { _ in },
+            stderr: { errors.append($0) }
+        )
+
+        #expect(exitCode == 1)
+        let diagnostic = try #require(errors.snapshot().first)
+        #expect(diagnostic.contains("AddressAlreadyInUseError"))
+        #expect(diagnostic.contains("gateway cleanup failed"))
+    }
+
     @Test func serverRunnerDryRunPrintsResolvedCommandFromLaunchPlan() async throws {
         let configURL = try makeServerConfigFile()
         defer { try? FileManager.default.removeItem(at: configURL) }
@@ -459,6 +505,37 @@ private func makeServerConfigFile() throws -> URL {
 private struct UnexpectedServerLaunchAction: Error {}
 
 private struct AddressAlreadyInUseError: Error {}
+
+private enum LaunchCleanupFailure: Error, CustomStringConvertible {
+    case expected
+    var description: String { "gateway cleanup failed" }
+}
+
+private enum LaunchWaitFailure: Error, CustomStringConvertible {
+    case expected
+    var description: String { "listener wait failed" }
+}
+
+private final class ShutdownFailingProxyServer: XcodeMCPProxyServer.LaunchServer {
+    private let waitFails: Bool
+    private let shutdowns = LockedBox(0)
+
+    init(waitFails: Bool) { self.waitFails = waitFails }
+    var shutdownCount: Int { shutdowns.snapshot() }
+
+    func start() async throws -> XcodeMCPProxyServer.Endpoint {
+        .init(host: "127.0.0.1", port: 9002)
+    }
+
+    func waitUntilShutdown() async throws {
+        if waitFails { throw LaunchWaitFailure.expected }
+    }
+
+    func shutdown() async throws {
+        shutdowns.withValue { $0 += 1 }
+        throw LaunchCleanupFailure.expected
+    }
+}
 
 private final class FailingProxyServer: XcodeMCPProxyServer.LaunchServer {
     private let error: any Error

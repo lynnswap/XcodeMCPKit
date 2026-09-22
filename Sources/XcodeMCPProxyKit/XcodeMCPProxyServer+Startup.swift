@@ -114,24 +114,19 @@ extension XcodeMCPProxyServer {
                     task.cancel()
                 }
             } catch {
-                startupTask = nil
                 phase = .stopped
+                lastEndpoint = (error as? CleanupError)?.endpoint
                 throw error
             }
 
             startupTask = nil
-            if phase == .stopped {
+            if shutdownRequested {
+                try await shutdown()
                 throw LifecycleError.shutdownInProgress
-            }
-            if resources == nil {
-                resources = acquired
-                lastEndpoint = acquired.endpoint
             }
 
-            if shutdownRequested {
-                try await finishShutdown(using: resources ?? acquired)
-                throw LifecycleError.shutdownInProgress
-            }
+            resources = acquired
+            lastEndpoint = acquired.endpoint
 
             acquired.runtime.start()
             acquired.autoApprover?.start()
@@ -189,25 +184,35 @@ extension XcodeMCPProxyServer {
         }
 
         func waitUntilShutdown() async throws {
+            if let shutdownTask {
+                try await shutdownTask.value
+                return
+            }
             switch phase {
             case .idle, .stopped:
+                if let startupTask {
+                    do {
+                        _ = try await startupTask.value
+                    } catch let error as CleanupError {
+                        throw error
+                    } catch {
+                        // The startup error was reported by start(); its cleanup completed.
+                    }
+                }
                 return
             case .starting:
                 guard let startupTask else { return }
                 let acquired = try await startupTask.value
-                try await Self.waitForListenerClose(acquired)
+                if let shutdownTask {
+                    try await shutdownTask.value
+                } else {
+                    try await Self.waitForListenerClose(acquired)
+                }
             case .running:
                 guard let resources else { return }
                 try await Self.waitForListenerClose(resources)
             case .stopping:
-                if let shutdownTask {
-                    try await shutdownTask.value
-                } else if let startupTask {
-                    _ = try? await startupTask.value
-                    if let shutdownTask {
-                        try await shutdownTask.value
-                    }
-                }
+                return
             }
         }
 
@@ -219,69 +224,42 @@ extension XcodeMCPProxyServer {
                 return
             }
 
-            switch phase {
-            case .idle:
+            let startupTask = self.startupTask
+            let resources = self.resources
+            guard startupTask != nil || resources != nil else {
                 phase = .stopped
-                return
-            case .stopped:
-                return
-            case .starting:
-                phase = .stopping
-                guard let startupTask else {
-                    phase = .stopped
-                    return
-                }
-                startupTask.cancel()
-                do {
-                    let acquired = try await startupTask.value
-                    self.startupTask = nil
-                    resources = acquired
-                    lastEndpoint = acquired.endpoint
-                    try await finishShutdown(using: acquired)
-                } catch {
-                    self.startupTask = nil
-                    phase = .stopped
-                    // Acquisition owns and completes its own unwind. A failed
-                    // start leaves shutdown with nothing else to release.
-                }
-            case .running:
-                guard let resources else {
-                    phase = .stopped
-                    return
-                }
-                try await finishShutdown(using: resources)
-            case .stopping:
-                if let shutdownTask {
-                    try await shutdownTask.value
-                }
-            }
-        }
-
-        private func finishShutdown(using resources: Resources) async throws {
-            if phase == .stopped {
-                return
-            }
-            if let shutdownTask {
-                try await shutdownTask.value
                 return
             }
             phase = .stopping
-            terminalUpstreams = Self.stoppedUpstreams(from: resources.runtime.snapshot())
+            startupTask?.cancel()
             let task = Task {
-                try await Self.release(resources)
+                defer {
+                    self.startupTask = nil
+                    self.resources = nil
+                    phase = .stopped
+                }
+                let acquired: Resources
+                if let startupTask {
+                    do {
+                        acquired = try await startupTask.value
+                    } catch let error as CleanupError {
+                        lastEndpoint = error.endpoint
+                        throw error
+                    } catch {
+                        // Acquisition already completed its unwind successfully.
+                        return
+                    }
+                } else if let resources {
+                    acquired = resources
+                } else {
+                    return
+                }
+                lastEndpoint = acquired.endpoint
+                terminalUpstreams = Self.stoppedUpstreams(from: acquired.runtime.snapshot())
+                try await Self.release(acquired)
             }
             shutdownTask = task
-            do {
-                try await task.value
-                self.resources = nil
-                shutdownTask = nil
-                phase = .stopped
-            } catch {
-                self.resources = nil
-                shutdownTask = nil
-                phase = .stopped
-                throw error
-            }
+            try await task.value
         }
 
         private func logStartupSummary(for resources: Resources) {
@@ -333,11 +311,13 @@ extension XcodeMCPProxyServer {
                 logger
             )
 
+            var endpoint: Endpoint?
             do {
                 let resolvedEndpoint = try await httpGateway.start()
                 let resolvedHost = resolvedEndpoint.host
                 let resolvedPort = resolvedEndpoint.port
-                let endpoint = Endpoint(host: resolvedHost, port: resolvedPort)
+                let boundEndpoint = Endpoint(host: resolvedHost, port: resolvedPort)
+                endpoint = boundEndpoint
                 try writeDiscovery(
                     configuration.discovery,
                     resolvedHost: resolvedHost,
@@ -351,14 +331,27 @@ extension XcodeMCPProxyServer {
                     httpGateway: httpGateway,
                     runtime: runtime,
                     autoApprover: autoApprover,
-                    endpoint: endpoint,
+                    endpoint: boundEndpoint,
                     xcodeMode: modeResolution.xcodeMode
                 )
             } catch {
+                let operationError = error
                 autoApprover?.cancel()
-                try? await httpGateway.shutdown()
+                var cleanupError: (any Error)?
+                do {
+                    try await httpGateway.shutdown()
+                } catch {
+                    cleanupError = error
+                }
                 await runtime.shutdown()
-                throw error
+                if let cleanupError {
+                    throw CleanupError(
+                        operationError: operationError,
+                        cleanupError: cleanupError,
+                        endpoint: endpoint
+                    )
+                }
+                throw operationError
             }
         }
 

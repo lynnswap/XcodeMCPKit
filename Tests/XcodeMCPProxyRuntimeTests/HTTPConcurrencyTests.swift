@@ -510,7 +510,7 @@ struct HTTPConcurrencyTests {
 
     @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() async throws {
         let upstream = EmbeddedControlledUpstreamClient()
-        let config = makeEmbeddedConfig(requestTimeout: 0.15)
+        let config = makeEmbeddedConfig(requestTimeout: 10)
         let firstChannel = EmbeddedChannel()
         let secondChannel = EmbeddedChannel()
         let sessionManager = RuntimeCoordinator(
@@ -575,7 +575,7 @@ struct HTTPConcurrencyTests {
         secondChannel.embeddedEventLoop.run()
         #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
 
-        firstChannel.embeddedEventLoop.advanceTime(by: .milliseconds(150))
+        firstChannel.embeddedEventLoop.advanceTime(by: .seconds(10))
         firstChannel.embeddedEventLoop.run()
         let firstResponse = try collectEmbeddedResponse(from: firstChannel)
         #expect(firstResponse.head.status == .ok)

@@ -424,6 +424,26 @@ public final class XcodeMCPProxyServer: Sendable {
         case failedToCreateDiscoveryRecord
     }
 
+    /// An operation failed and releasing its resources also failed.
+    public struct CleanupError: Error, CustomStringConvertible, Sendable {
+        /// The failure that caused cleanup to begin.
+        public let operationError: any Error
+
+        /// The failure encountered while releasing resources.
+        public let cleanupError: any Error
+
+        /// The bound endpoint, if startup reached the listening stage.
+        ///
+        /// The cleanup failure may mean that this endpoint or other HTTP
+        /// resources have not been fully released.
+        public let endpoint: Endpoint?
+
+        /// Describes both failures and the potentially incomplete cleanup.
+        public var description: String {
+            "\(operationError); shutdown also failed: \(cleanupError). Resource release may be incomplete."
+        }
+    }
+
     /// A sanitized point-in-time view of server health.
     public struct Status: Equatable, Sendable {
         /// Server lifecycle phase.
@@ -704,6 +724,8 @@ public final class XcodeMCPProxyServer: Sendable {
     /// Shutdown stops permission automation, closes listening and accepted
     /// channels, shuts down the runtime coordinator, and terminates the event
     /// loop group.
+    /// Repeated calls return the result of the same shutdown attempt, including
+    /// any resource-release failure.
     public func shutdown() async throws {
         try await lifecycle.shutdown()
     }

@@ -302,7 +302,7 @@ extension RuntimeCoordinator {
                 for item in failure.pending {
                     removePendingInitializeSessionIfCurrent(item)
                     item.eventLoop.execute {
-                        item.promise.fail(TimeoutError())
+                        item.promise.fail(UpstreamSlotScheduler.AcquisitionError.unavailable)
                     }
                 }
             }
@@ -1413,7 +1413,7 @@ extension RuntimeCoordinator {
             ) {
                 return
             }
-            failInitPending(error: TimeoutError())
+            failInitPending(error: ControlPlane.Error.invalidResponse("upstream stdout protocol violation"))
         }
 
         if processRoutingEnabled {
