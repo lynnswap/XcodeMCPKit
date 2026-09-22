@@ -1,3 +1,4 @@
+@testable import XcodeMCPCore
 import Darwin
 import Foundation
 import NIO

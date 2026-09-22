@@ -1,6 +1,6 @@
 import Foundation
 import NIOConcurrencyHelpers
-import XcodeMCPKit
+import XcodeMCPCore
 
 /// Owns initialize-result compatibility, concurrent route participation, and
 /// the set of initialized upstreams that support the canonical handshake.

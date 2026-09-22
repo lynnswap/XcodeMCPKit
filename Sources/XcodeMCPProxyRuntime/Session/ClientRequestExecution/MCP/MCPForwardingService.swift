@@ -1,6 +1,6 @@
 import Foundation
 import NIO
-import XcodeMCPKit
+import XcodeMCPCore
 
 struct MCPForwardingService: Sendable {
     typealias PreparedRequest = ProxyUpstreamRequestRuntime.PreparedRequest

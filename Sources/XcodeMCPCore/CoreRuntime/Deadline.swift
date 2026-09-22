@@ -1,4 +1,4 @@
-import NIO
+import NIOCore
 
 /// A monotonic (uptime-based) point in time bounding one request.
 /// Create it once at the entry point with `fromNow` and pass it down by

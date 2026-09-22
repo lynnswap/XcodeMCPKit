@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension RuntimeCoordinator {
     private enum ServerInitiatedRoutingPolicy: Equatable {

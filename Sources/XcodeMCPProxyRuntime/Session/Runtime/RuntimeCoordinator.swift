@@ -3,7 +3,7 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
-import XcodeMCPKit
+import XcodeMCPCore
 
 final class SessionContext: Sendable {
     let id: String
@@ -487,7 +487,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             let id: Int
             let isInitialized: Bool
             let initInFlight: Bool
-            let healthState: XcodeMCPKit.Upstream.HealthState
+            let healthState: XcodeMCPCore.Upstream.HealthState
         }
 
         struct Session: Sendable {

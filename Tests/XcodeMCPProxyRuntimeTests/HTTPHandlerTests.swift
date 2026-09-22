@@ -1,3 +1,4 @@
+@testable import XcodeMCPCore
 import Foundation
 import NIO
 import NIOConcurrencyHelpers

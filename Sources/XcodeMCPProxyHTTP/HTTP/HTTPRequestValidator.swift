@@ -1,6 +1,6 @@
 import Foundation
 import NIOHTTP1
-import XcodeMCPKit
+import XcodeMCPCore
 
 enum HTTPRequestValidationFailure: Error {
     case notAcceptable

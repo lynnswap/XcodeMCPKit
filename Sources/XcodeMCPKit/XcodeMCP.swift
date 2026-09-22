@@ -1,3 +1,4 @@
+import XcodeMCPCore
 import Foundation
 
 /// Settings used to connect to and initialize an MCP endpoint.

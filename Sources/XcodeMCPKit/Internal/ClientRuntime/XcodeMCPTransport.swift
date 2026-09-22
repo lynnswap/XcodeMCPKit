@@ -1,3 +1,4 @@
+import XcodeMCPCore
 import Foundation
 
 package enum XcodeMCPTransportEvent: Sendable {
@@ -7,15 +8,6 @@ package enum XcodeMCPTransportEvent: Sendable {
     case sessionExpired(sessionID: String)
 }
 
-package struct MCPConnectionHeaders: Sendable, Equatable {
-    package var sessionID: String?
-    package var protocolVersion: String?
-
-    package init(sessionID: String? = nil, protocolVersion: String? = nil) {
-        self.sessionID = sessionID
-        self.protocolVersion = protocolVersion
-    }
-}
 
 package enum MCPDeliveryCertainty: Sendable, Equatable {
     case rejectedBeforeProcessing

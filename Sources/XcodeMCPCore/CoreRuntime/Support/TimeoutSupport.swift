@@ -1,5 +1,5 @@
 import Foundation
-import NIO
+import NIOCore
 
 package func makeRequestTimeout(_ seconds: TimeInterval) -> TimeAmount? {
     guard seconds > 0 else { return nil }

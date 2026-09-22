@@ -143,7 +143,7 @@ struct PublicProductContractTests {
                         .defaultIsolation(nil),
                     ]
                 ),
-                .target(
+                .executableTarget(
                     name: "XcodeMCPKitTestingClient",
                     dependencies: [
                         .product(name: "XcodeMCPKit", package: "XcodeMCPKit"),
@@ -664,7 +664,7 @@ private let removedSurfaceChecks: [(
     (
         "XcodeMCPKitClientUsesProtocolHelper",
         """
-        import XcodeMCPKit
+        import XcodeMCPCore
 
         func compileOnlyRuntimeProtocolHelperShouldNotBeVisible() {
             _ = MCP.ProtocolVersion.current
@@ -1057,6 +1057,12 @@ func compileOnlyTestingRuntimeSurface() async throws {
     await client.close()
 
     _ = toolCalls
+}
+@main
+struct ClientSmoke {
+    static func main() async throws {
+        try await compileOnlyTestingRuntimeSurface()
+    }
 }
 """
 

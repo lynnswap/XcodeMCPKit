@@ -56,12 +56,17 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "XcodeMCPKit",
+            name: "XcodeMCPCore",
             dependencies: [
                 .product(name: "Logging", package: "swift-log"),
-                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
+            name: "XcodeMCPKit",
+            dependencies: ["XcodeMCPCore"],
             path: "Sources/XcodeMCPKit",
             exclude: ["README.md"],
             swiftSettings: strictSwiftSettings
@@ -69,6 +74,7 @@ let package = Package(
         .target(
             name: "XcodeMCPKitTesting",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPKit",
             ],
             path: "Sources/XcodeMCPKitTesting",
@@ -78,7 +84,7 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyRuntime",
             dependencies: [
-                "XcodeMCPKit",
+                "XcodeMCPCore",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
@@ -89,7 +95,7 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyHTTP",
             dependencies: [
-                "XcodeMCPKit",
+                "XcodeMCPCore",
                 "XcodeMCPProxyRuntime",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -109,6 +115,7 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyKit",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPPermissionAutomation",
                 "XcodeMCPProxyRuntime",
@@ -126,6 +133,7 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyTestSupport",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPCoreTestSupport",
                 "XcodeMCPKit",
                 "XcodeMCPProxyKit",
@@ -138,7 +146,7 @@ let package = Package(
         .target(
             name: "XcodeMCPCoreTestSupport",
             dependencies: [
-                "XcodeMCPKit",
+                "XcodeMCPCore",
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
             path: "Tests/XcodeMCPCoreTestSupport",
@@ -188,6 +196,7 @@ let package = Package(
         .testTarget(
             name: "XcodeMCPKitTests",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPCoreTestSupport",
                 "XcodeMCPKit",
             ],
@@ -197,6 +206,7 @@ let package = Package(
         .testTarget(
             name: "XcodeMCPKitTestingTests",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPCoreTestSupport",
                 "XcodeMCPKit",
                 "XcodeMCPKitTesting",
@@ -208,7 +218,7 @@ let package = Package(
             name: "XcodeMCPCoreTests",
             dependencies: [
                 "XcodeMCPCoreTestSupport",
-                "XcodeMCPKit",
+                "XcodeMCPCore",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
@@ -227,6 +237,7 @@ let package = Package(
         .testTarget(
             name: "XcodeMCPProxyRuntimeTests",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPProxyKit",
                 "XcodeMCPProxyRuntime",
@@ -244,6 +255,7 @@ let package = Package(
         .testTarget(
             name: "XcodeMCPProcessRuntimeTests",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPCoreTestSupport",
                 "XcodeMCPKit",
             ],
@@ -253,6 +265,7 @@ let package = Package(
         .testTarget(
             name: "ProxyStdioAdapterTests",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPProxyKit",
                 "XcodeMCPProxyTestSupport",
@@ -263,6 +276,7 @@ let package = Package(
         .testTarget(
             name: "ProxyStressTests",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPProxyRuntime",
                 "XcodeMCPProxyHTTP",
@@ -289,6 +303,7 @@ let package = Package(
         .testTarget(
             name: "ProxyCLITests",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPProxyKit",
                 "XcodeMCPProxyRuntime",
@@ -302,6 +317,7 @@ let package = Package(
         .testTarget(
             name: "ProxyIntegrationTests",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPProxyKit",
                 "XcodeMCPProxyRuntime",
@@ -335,6 +351,7 @@ let package = Package(
         .testTarget(
             name: "ProxyLiveMCPBridgeTests",
             dependencies: [
+                "XcodeMCPCore",
                 "XcodeMCPKit",
                 "XcodeMCPPermissionAutomation",
                 "XcodeMCPProxyKit",

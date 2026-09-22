@@ -2,6 +2,9 @@
 
 ## Module Layout
 
+- `XcodeMCPCore`
+  - Package-internal JSON-RPC, framing, clocks, HTTP wire I/O, and subprocess ownership.
+  - Shared by the SDK and proxy without depending on either consumer.
 - `XcodeMCPKit`
   - Public client SDK facade and MCP value types.
   - Package-scoped `MCPClientSessionAuthority` owns transport recipes,
@@ -9,10 +12,15 @@
     completion for both the direct SDK and the proxy STDIO adapter.
   - `InitializedMCPClientSession` owns request IDs, response correlation, and
     request-scoped progress lanes; it does not own transport/session lifecycle.
+- `XcodeMCPProxyRuntime`
+  - Proxy control plane, request/session ownership, Xcode routing, upstream
+    topology, documentation providers, and feature workflows.
+- `XcodeMCPProxyHTTP`
+  - HTTP listener lifecycle, transport validation, response encoding, and SSE delivery.
+  - Uses the package runtime serving contract; it does not own runtime policy.
 - `XcodeMCPProxyKit`
-  - Public server/adapter embedding facades plus internal HTTP gateway, proxy
-    control plane, Xcode routing, upstream topology, discovery, and feature
-    workflows.
+  - Public server/adapter embedding facades and composition of runtime, HTTP,
+    discovery publication, and permission automation.
   - CLI composition, installer implementation, build metadata, and launch
     diagnostics are package/executable concerns rather than public library API.
 - `XcodeMCPPermissionAutomation`
@@ -62,10 +70,10 @@
   - DocumentationProvider discovery schedules one generation-fenced retry per
     unavailable attempt. It consumes the same cached snapshot and is cancelled
     by success, replacement, reset, or shutdown; it never rescans OS processes.
-- `XcodeMCPProxyKit` HTTP gateway internals
+- `XcodeMCPProxyHTTP` gateway
   - `HTTPRequestSecurityPolicy` validates Origin for every route before any
-    side effect. The gateway also owns server-issued session IDs, negotiated
-    protocol-version enforcement, and typed single-message transport concerns.
+    side effect. The gateway enforces session headers and negotiated protocol
+    versions using runtime-owned session state and parses individual messages.
   - Rejects JSON-RPC batch arrays at the HTTP boundary without invoking the
     session or upstream.
   - Tool-specific response shaping lives in dedicated surface helpers, not inline in forwarding hot paths.
@@ -81,14 +89,18 @@
 
 ## Dependency Direction
 
-- `XcodeMCPKit` owns SDK protocol/runtime primitives and must not depend on
-  proxy-only modules. Avoid introducing gateway/session/Xcode proxy knowledge
-  here.
-- `XcodeMCPProxyKit` depends on `XcodeMCPKit` and `ArgumentParser`, and owns
-  proxy session/config state, public proxy facades, CLI composition, installer
-  helpers, and HTTP gateway internals. Low-level proxy implementation files live under
-  `Sources/XcodeMCPProxyKit/Internal`, including session implementation files
-  under `Sources/XcodeMCPProxyKit/Internal/Session`.
+- `XcodeMCPCore` contains package implementation shared by the SDK and proxy.
+  It depends on Logging, NIOCore, and NIOConcurrencyHelpers; no consumer target
+  may become a dependency of Core. Shared declarations retain package access.
+- `XcodeMCPKit` depends on Core and owns the public client API, domain values,
+  session authority, progress, and transport wrappers. Core wire values are
+  converted at this SDK boundary and do not become public aliases.
+- Runtime and HTTP depend on Core rather than the public SDK. Runtime owns
+  execution policy and request lifetimes; HTTP owns network delivery. The
+  current runtime serving protocol connects these two owners.
+- `XcodeMCPProxyKit` composes Runtime, HTTP, permission automation, and the SDK
+  session authority used by its STDIO adapter. Its internal files contain
+  facade, CLI, installation, and launch concerns.
 - `XcodeMCPPermissionAutomation` depends only on `Logging`. `XcodeMCPProxyKit`
   and `XcodeMCPPermissionApproverTool` depend on it; the automation target does
   not depend back on proxy/runtime targets.
@@ -97,9 +109,12 @@
   `ProxyBuildInfoTool` is a standalone build-tool dependency of
   `ProxyBuildInfoPlugin`.
 
-Run `swift test -Xswiftc -strict-concurrency=minimal` after moving files or changing imports;
-the default suite includes public product compile contract tests and proxy
-contract tests that exercise package and product boundaries.
+Use the relevant `xcodebuild test` schemes with an explicit macOS destination
+when moving files or changing imports. Core tests use Core directly; SDK and
+proxy integration tests keep their actual consumer dependencies. Public product
+contract tests compile consumers from a separate package. Run
+`scripts/verify-proxy-target-boundaries.sh` to check dependency direction;
+private implementation targets are not new public products.
 
 ## Protocol Boundaries
 

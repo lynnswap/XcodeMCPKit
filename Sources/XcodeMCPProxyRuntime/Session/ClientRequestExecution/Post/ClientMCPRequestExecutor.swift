@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPKit
+import XcodeMCPCore
 
 final class ClientMCPRequestExecutor: Sendable {
     struct FilteredToolCallRequest: Sendable {

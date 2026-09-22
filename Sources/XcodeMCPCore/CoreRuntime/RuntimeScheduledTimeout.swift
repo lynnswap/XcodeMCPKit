@@ -1,4 +1,4 @@
-import NIO
+import NIOCore
 
 package final class RuntimeScheduledTimeout: @unchecked Sendable {
     private let cancelImpl: @Sendable () -> Void

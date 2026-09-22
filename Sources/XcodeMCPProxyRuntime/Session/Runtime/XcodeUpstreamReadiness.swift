@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension UpstreamReadinessGate {
     /// The live gate for the stock xcrun mcpbridge upstream: hold

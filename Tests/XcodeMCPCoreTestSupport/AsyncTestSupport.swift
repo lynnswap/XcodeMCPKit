@@ -1,7 +1,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 import Testing
-import XcodeMCPKit
+import XcodeMCPCore
 
 /// Runs synchronous `defer`-registered test cleanup without blocking the
 /// cooperative executor that must make the cleanup operation progress.
@@ -96,28 +96,6 @@ package func registerAsyncTestCleanup(
         return true
     }
     return true
-}
-
-/// Registers terminal client cleanup with the active test scope.
-package func closeAfterTest(_ client: XcodeMCP) {
-    precondition(
-        registerAsyncTestCleanup(
-            description: "XcodeMCP client close failed",
-            operation: { await client.close() }
-        ),
-        "closeAfterTest requires an AsyncTestCleanupTrait scope"
-    )
-}
-
-/// Registers terminal session cleanup with the active test scope.
-package func closeAfterTest(_ session: InitializedMCPClientSession) {
-    precondition(
-        registerAsyncTestCleanup(
-            description: "initialized MCP session close failed",
-            operation: { await session.close() }
-        ),
-        "closeAfterTest requires an AsyncTestCleanupTrait scope"
-    )
 }
 
 package struct AsyncTestTimeoutError: Error, CustomStringConvertible {

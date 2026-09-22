@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPKit
+import XcodeMCPCore
 
 package struct ProxySessionID: Hashable, Sendable {
     package let rawValue: String

@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import NIOHTTP1
-import XcodeMCPKit
+import XcodeMCPCore
 import XcodeMCPProxyRuntime
 
 extension HTTPHandler {

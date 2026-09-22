@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 import NIO
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension RefreshCodeIssues.Workflow {
     /// Every proxy-mode bail-out funnels through here: record the debug

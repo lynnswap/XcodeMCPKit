@@ -3,7 +3,7 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import NIOFoundationCompat
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension ClientMCPRequestExecutor {
     enum Status: Sendable, Equatable {

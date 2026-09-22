@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPKit
+import XcodeMCPCore
 
 enum RuntimeDocumentationProviderRouteResolution {
     case ready(DocumentationProviderRoute)

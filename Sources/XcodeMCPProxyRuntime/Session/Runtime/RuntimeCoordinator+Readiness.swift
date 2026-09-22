@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension RuntimeCoordinator {
     func runWhenUpstreamReady(

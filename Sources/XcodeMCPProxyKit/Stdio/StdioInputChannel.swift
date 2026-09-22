@@ -1,3 +1,4 @@
+import XcodeMCPCore
 import Darwin
 import Dispatch
 import Foundation

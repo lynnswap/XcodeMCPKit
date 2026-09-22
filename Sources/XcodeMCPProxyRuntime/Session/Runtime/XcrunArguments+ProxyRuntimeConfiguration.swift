@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension XcrunArguments {
     /// Whether the configured upstream is the stock `xcrun ... mcpbridge`

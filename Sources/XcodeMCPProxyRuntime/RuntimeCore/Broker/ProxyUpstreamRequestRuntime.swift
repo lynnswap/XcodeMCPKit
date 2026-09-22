@@ -1,7 +1,7 @@
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPKit
+import XcodeMCPCore
 
 final class UpstreamRequestSendCompletion: @unchecked Sendable {
     enum Outcome: Sendable, Equatable {

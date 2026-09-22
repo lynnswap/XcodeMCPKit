@@ -1,5 +1,5 @@
 import Foundation
-import XcodeMCPKit
+import XcodeMCPCore
 
 extension RefreshCodeIssues {
     struct QueueSnapshot: Codable, Sendable {

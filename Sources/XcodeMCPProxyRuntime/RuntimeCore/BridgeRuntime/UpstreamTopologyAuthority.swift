@@ -1,5 +1,5 @@
 import NIOConcurrencyHelpers
-import XcodeMCPKit
+import XcodeMCPCore
 
 struct UpstreamTopologyProof: Sendable, Hashable {
     let slotID: UpstreamSlotID
