@@ -53,8 +53,8 @@ actor StdioAdapter {
         requestTimeout: Duration?,
         input: FileHandle = .standardInput,
         output: FileHandle = .standardOutput
-    ) {
-        self.init(
+    ) throws {
+        try self.init(
             upstreamURL: upstreamURL,
             requestTimeout: requestTimeout,
             input: input,
@@ -69,7 +69,7 @@ actor StdioAdapter {
         input: FileHandle,
         output: FileHandle,
         shutdownPolicy: StdioAdapterShutdownPolicy
-    ) {
+    ) throws {
         let recipe = MCPTransportRecipe {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.waitsForConnectivity = true
@@ -82,7 +82,7 @@ actor StdioAdapter {
                 clock: shutdownPolicy.clock
             )
         }
-        self.init(
+        try self.init(
             requestTimeout: requestTimeout,
             input: input,
             output: output,
@@ -97,10 +97,10 @@ actor StdioAdapter {
         output: FileHandle,
         recipe: MCPTransportRecipe,
         shutdownPolicy: StdioAdapterShutdownPolicy
-    ) {
-        self.init(
+    ) throws {
+        try self.init(
             requestTimeout: requestTimeout,
-            inputReader: StdioInputChannel(handle: input),
+            inputReader: try StdioInputChannel(handle: input),
             output: output,
             recipe: recipe,
             shutdownPolicy: shutdownPolicy
@@ -113,12 +113,17 @@ actor StdioAdapter {
         output: FileHandle,
         recipe: MCPTransportRecipe,
         shutdownPolicy: StdioAdapterShutdownPolicy
-    ) {
+    ) throws {
         self.requestTimeout = requestTimeout
         self.inputReader = inputReader
         let logger = ProxyLogging.make("stdio.adapter")
         self.logger = logger
-        self.outputWriter = StdioWriter(handle: output, logger: logger)
+        do {
+            self.outputWriter = try StdioWriter(handle: output, logger: logger)
+        } catch {
+            inputReader.stop()
+            throw error
+        }
         self.shutdownPolicy = shutdownPolicy
         self.authority = MCPClientSessionAuthority.makeForwarded(
             recipe: recipe,

@@ -15,7 +15,7 @@ struct StdioInputChannelTests {
 
     private func expectRoundTrip(byteCount: Int) async throws {
         let pipe = Pipe()
-        let channel = StdioInputChannel(handle: pipe.fileHandleForReading)
+        let channel = try StdioInputChannel(handle: pipe.fileHandleForReading)
         let expected = Data(
             (0..<byteCount).map { UInt8(truncatingIfNeeded: $0) }
         )
@@ -53,7 +53,7 @@ struct StdioInputChannelTests {
 
     @Test func stopInterruptsActiveReadAndWaitsForDescriptorCleanup() async throws {
         let pipe = Pipe()
-        let channel = StdioInputChannel(handle: pipe.fileHandleForReading)
+        let channel = try StdioInputChannel(handle: pipe.fileHandleForReading)
         let firstRead = Task {
             try await channel.read()
         }
@@ -77,7 +77,7 @@ struct StdioInputChannelTests {
     @Test func stopBeforeReadLeavesCallerHandleOpenAndIsIdempotent() async throws {
         let pipe = Pipe()
         let callerDescriptor = pipe.fileHandleForReading.fileDescriptor
-        let channel = StdioInputChannel(handle: pipe.fileHandleForReading)
+        let channel = try StdioInputChannel(handle: pipe.fileHandleForReading)
 
         channel.stop()
         channel.stop()

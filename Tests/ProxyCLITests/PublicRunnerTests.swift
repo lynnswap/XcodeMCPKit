@@ -1,10 +1,35 @@
 import Foundation
+import Darwin
 import Testing
 import XcodeMCPKit
 import XcodeMCPProxyKit
 
 @Suite
 struct PublicRunnerTests {
+    @Test(arguments: [true, false])
+    func adapterInitializerPropagatesDescriptorErrors(invalidInput: Bool) throws {
+        let pipe = Pipe()
+        defer {
+            try? pipe.fileHandleForReading.close()
+            try? pipe.fileHandleForWriting.close()
+        }
+        let invalid = FileHandle(fileDescriptor: -1, closeOnDealloc: false)
+        do {
+            _ = try XcodeMCPProxyStdioAdapter(
+                configuration: .init(endpoint: .url(URL(string: "http://127.0.0.1:1/mcp")!)),
+                input: invalidInput ? invalid : pipe.fileHandleForReading,
+                output: invalidInput ? pipe.fileHandleForWriting : invalid
+            )
+            Issue.record("invalid descriptor should throw")
+        } catch {
+            let error = error as NSError
+            #expect(error.domain == NSPOSIXErrorDomain)
+            #expect(error.code == Int(EBADF))
+        }
+        #expect(fcntl(pipe.fileHandleForReading.fileDescriptor, F_GETFD) != -1)
+        #expect(fcntl(pipe.fileHandleForWriting.fileDescriptor, F_GETFD) != -1)
+    }
+
     @Test func adapterPublicLifecycleIsOneShotAndStopIsIdempotent() async throws {
         let input = Pipe()
         let output = Pipe()

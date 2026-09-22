@@ -38,9 +38,11 @@ final class StdioInputChannel: StdioInputReading, @unchecked Sendable {
     private var isReadOperationActive = false
     private var activeOperationByteCount = 0
 
-    init(handle: FileHandle) {
+    init(handle: FileHandle) throws {
         let descriptor = dup(handle.fileDescriptor)
-        precondition(descriptor >= 0, "STDIO input FileHandle must be open")
+        guard descriptor >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
 
         let terminal = AsyncTerminalSignal()
         self.terminal = terminal
