@@ -161,29 +161,7 @@ struct XcodeMCPProxyServerTests {
         #expect(config.refreshCodeIssuesMode == .upstream)
     }
 
-    @Test func existingServerControllerDetectsOnlyProxyServerProcesses() throws {
-        let record = DiscoveryRecord(
-            url: "http://localhost:8765/mcp",
-            host: "localhost",
-            port: 8765,
-            pid: 123,
-            updatedAt: Date(timeIntervalSince1970: 1)
-        )
-        let discoveryClient = DiscoveryClient.live(
-            defaultFileURL: { URL(fileURLWithPath: "/unused/endpoint.json") },
-            loadRecord: { _ in record },
-            persistRecord: { _, _ in
-                Issue.record("detect should not persist discovery records")
-            },
-            createDirectory: { _ in
-                Issue.record("detect should not create directories")
-            },
-            isProcessAlive: { pid in
-                #expect(pid == record.pid)
-                return true
-            },
-            now: { Date(timeIntervalSince1970: 2) }
-        )
+    @Test func existingServerControllerDetectsOnlyListeningProxyServerProcesses() throws {
         let processControl = ProcessControlClient(
             runCommand: { launchPath, arguments in
                 switch (launchPath, arguments) {
@@ -196,8 +174,6 @@ struct XcodeMCPProxyServerTests {
                         f9
                         n127.0.0.1:8765
                         """
-                case ("/bin/ps", ["-ww", "-p", "123", "-o", "command="]):
-                    return "/tmp/xcode-mcp-proxy-server --listen localhost:8765\n"
                 case ("/bin/ps", ["-ww", "-p", "456", "-o", "command="]):
                     return "/usr/local/bin/xcode-mcp-proxy-server --listen localhost:8765\n"
                 case ("/bin/ps", ["-ww", "-p", "789", "-o", "command="]):
@@ -213,12 +189,29 @@ struct XcodeMCPProxyServerTests {
             }
         )
         let controller = ExistingProxyServerProcessController.live(
-            discoveryClient: discoveryClient,
             currentProcessID: { 999 },
             processControl: processControl
         )
 
-        #expect(controller.detectExistingServerProcessIDs("localhost", 8765) == [123, 456])
+        #expect(controller.detectExistingServerProcessIDs("localhost", 8765) == [456])
+    }
+
+    @Test func forceRestartTerminatesOnlyTheRequestedEndpointOwners() {
+        let processes = RestartProcessFixture()
+        let controller = ExistingProxyServerProcessController.live(
+            clock: processes.clock,
+            currentProcessID: { 999 },
+            processControl: processes.client
+        )
+        var warnings: [String] = []
+
+        #expect(controller.terminateExistingServer("localhost", 8765) { warnings.append($0) })
+
+        #expect(processes.terminatedProcessIDs == [456, 567])
+        #expect(warnings.count == 2)
+        #expect(warnings.contains { $0.contains("pid: 456") })
+        #expect(warnings.contains { $0.contains("pid: 567") })
+        #expect(processes.aliveProcessIDs == [123, 321, 789, 999])
     }
 
     @Test func portInUseDiagnosticFormatsMessage() throws {
@@ -1165,6 +1158,77 @@ private final class RecordingUpstreamSlot: @unchecked Sendable, UpstreamSlotCont
     func send(_ data: Data) async -> Upstream.SendResult {
         _ = data
         return .accepted
+    }
+}
+
+private final class RestartProcessFixture: Sendable {
+    private struct ProcessInfo: Sendable {
+        let host: String
+        let port: Int
+        let executable: String
+    }
+
+    private struct State {
+        var aliveProcessIDs: Set<Int> = [123, 321, 456, 567, 789, 999]
+        var terminatedProcessIDs: [Int] = []
+        var now = Date(timeIntervalSince1970: 0)
+    }
+
+    private let state = NIOLockedValueBox(State())
+    private let processes: [Int: ProcessInfo] = [
+        123: .init(host: "127.0.0.1", port: 9000, executable: "xcode-mcp-proxy-server"),
+        321: .init(host: "10.0.0.5", port: 8765, executable: "xcode-mcp-proxy-server"),
+        456: .init(host: "127.0.0.1", port: 8765, executable: "xcode-mcp-proxy-server"),
+        567: .init(host: "[::1]", port: 8765, executable: "xcode-mcp-proxy-server"),
+        789: .init(host: "127.0.0.1", port: 8765, executable: "python3"),
+        999: .init(host: "127.0.0.1", port: 8765, executable: "xcode-mcp-proxy-server"),
+    ]
+
+    var aliveProcessIDs: [Int] { state.withLockedValue { $0.aliveProcessIDs.sorted() } }
+    var terminatedProcessIDs: [Int] { state.withLockedValue { $0.terminatedProcessIDs } }
+
+    var clock: ClockClient {
+        ClockClient(
+            now: { self.state.withLockedValue { $0.now } },
+            uptimeNanoseconds: { 0 },
+            sleep: { _ in },
+            sleepForTimeInterval: { interval in
+                self.state.withLockedValue { $0.now.addTimeInterval(interval) }
+            }
+        )
+    }
+
+    var client: ProcessControlClient {
+        ProcessControlClient(
+            runCommand: { path, arguments in
+                if path == "/usr/sbin/lsof" {
+                    #expect(arguments == ["-nP", "-iTCP:8765", "-sTCP:LISTEN", "-Fpn"])
+                    return self.aliveProcessIDs.compactMap { pid in
+                        guard let process = self.processes[pid], process.port == 8765 else { return nil }
+                        return "p\(pid)\nn\(process.host):\(process.port)"
+                    }.joined(separator: "\n")
+                }
+                #expect(path == "/bin/ps")
+                guard arguments.count == 5, let pid = Int(arguments[2]), let process = self.processes[pid] else {
+                    Issue.record("unexpected process lookup: \(arguments)")
+                    return nil
+                }
+                return "/tmp/\(process.executable) --listen \(process.host):\(process.port)"
+            },
+            sendSignal: { pid, signal in
+                self.state.withLockedValue { state in
+                    guard state.aliveProcessIDs.contains(pid) else {
+                        return ProcessSignalResult(result: -1, errnoValue: ESRCH)
+                    }
+                    if signal != 0 {
+                        #expect(signal == SIGTERM)
+                        state.terminatedProcessIDs.append(pid)
+                        state.aliveProcessIDs.remove(pid)
+                    }
+                    return ProcessSignalResult(result: 0, errnoValue: 0)
+                }
+            }
+        )
     }
 }
 
