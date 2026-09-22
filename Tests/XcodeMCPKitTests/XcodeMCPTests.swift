@@ -598,6 +598,48 @@ struct XcodeMCPTests {
         await xcode.close()
     }
 
+    @Test(arguments: [
+        MCPJSONValue.double(1e100), .double(-1e100), .double(0.5), .string("invalid"), .null,
+    ])
+    func invalidServerErrorCodeLeavesClientUsable(code: MCPJSONValue) async throws {
+        let transport = FakeXcodeMCPTransport(responseErrors: [
+            "server/fails": .object(["code": code, "message": .string("invalid code")])
+        ])
+        let xcode = try await XcodeMCP(transport: transport)
+        defer { closeAfterTest(xcode) }
+
+        await #expect(throws: XcodeMCPError.invalidResponse(
+            "JSON-RPC error code is not a representable integer"
+        )) {
+            _ = try await xcode.request("server/fails")
+        }
+
+        #expect(try await xcode.listTools().isEmpty == false)
+        await xcode.close()
+        #expect(await transport.closeCount() == 1)
+    }
+
+    @Test func validServerErrorPreservesCodeMessageAndData() async throws {
+        let detail: MCPJSONValue = .object(["reason": .string("denied")])
+        let transport = FakeXcodeMCPTransport(responseErrors: [
+            "server/fails": .object([
+                "code": .double(-32001),
+                "message": .string("permission denied"),
+                "data": detail,
+            ])
+        ])
+        let xcode = try await XcodeMCP(transport: transport)
+        defer { closeAfterTest(xcode) }
+
+        await #expect(throws: XcodeMCPError.serverError(
+            code: -32001,
+            message: "permission denied",
+            data: detail
+        )) {
+            _ = try await xcode.request("server/fails")
+        }
+    }
+
     @Test func unsupportedServerRequestGetsInternalErrorResponse() async throws {
         let transport = FakeXcodeMCPTransport()
         let xcode = try await XcodeMCP(transport: transport)
