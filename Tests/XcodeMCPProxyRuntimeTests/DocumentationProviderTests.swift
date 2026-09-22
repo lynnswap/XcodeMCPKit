@@ -2548,8 +2548,10 @@ struct DocumentationProviderTests {
         #expect(await localProvider.requestedQueries() == ["SwiftData"])
     }
 
-    @Test func documentationProviderUsesNewestAssetFallbackBeforeOlderCandidateWhenTransportThrows()
-        async throws
+    @Test(arguments: [ScriptedDocumentationResponse.exit, .stdoutClosed])
+    func documentationProviderUsesNewestAssetFallbackBeforeOlderCandidateWhenTransportThrows(
+        terminalResponse: ScriptedDocumentationResponse
+    ) async throws
     {
         let older = xcodeProcessTarget(processID: 760, xcodeVersion: "26.6")
         let newest = xcodeProcessTarget(processID: 761, xcodeVersion: "27.0")
@@ -2568,7 +2570,7 @@ struct DocumentationProviderTests {
                         serverVersion: "27.0",
                         toolCount: 47,
                         includesDocumentationSearch: true,
-                        firstDocumentationResponse: .exit
+                        firstDocumentationResponse: terminalResponse
                     ),
                 ],
             ]
@@ -2586,10 +2588,12 @@ struct DocumentationProviderTests {
             localSearchProvider: localProvider
         )
 
-        let outcome = try await manager.callDocumentationSearch(
-            requestData: makeDocumentationSearchRequest(id: 98, query: "ModelActor"),
-            requestTimeoutOverride: .seconds(1)
-        )
+        let outcome = try await waitWithTimeout("documentation response stream closed", timeout: .seconds(2)) {
+            try await manager.callDocumentationSearch(
+                requestData: makeDocumentationSearchRequest(id: 98, query: "ModelActor"),
+                requestTimeoutOverride: .seconds(30)
+            )
+        }
 
         guard case .handled(let responseData, let invalidatedProvider) = outcome else {
             Issue.record("expected handled outcome, got \(outcome)")

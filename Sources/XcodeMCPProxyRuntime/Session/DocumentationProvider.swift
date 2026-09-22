@@ -2248,7 +2248,7 @@ actor DocumentationProviderConnection {
         switch event {
         case .message(let data):
             handleMessage(data)
-        case .exit, .stdoutProtocolViolation:
+        case .exit, .stdoutClosed, .stdoutProtocolViolation:
             failAll(UpstreamSlotScheduler.AcquisitionError.unavailable)
         case .stderr, .stdoutBufferSize:
             break

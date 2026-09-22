@@ -201,6 +201,29 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         proof: UpstreamTopologyProof
     ) {
+        handleUpstreamUnavailable(
+            reason: "upstream_exit_\(status)",
+            leaseReleaseReason: .upstreamExit,
+            upstreamIndex: upstreamIndex,
+            proof: proof
+        )
+    }
+
+    func handleUpstreamStdoutClosed(upstreamIndex: Int, proof: UpstreamTopologyProof) {
+        handleUpstreamUnavailable(
+            reason: "upstream_stdout_closed",
+            leaseReleaseReason: .upstreamUnavailable,
+            upstreamIndex: upstreamIndex,
+            proof: proof
+        )
+    }
+
+    private func handleUpstreamUnavailable(
+        reason: String,
+        leaseReleaseReason: LeaseManager.ReleaseReason,
+        upstreamIndex: Int,
+        proof: UpstreamTopologyProof
+    ) {
         let slotID = UpstreamSlotID(rawValue: upstreamIndex)
         guard proof.slotID == slotID,
               upstreamTopology.validate(proof) else { return }
@@ -243,20 +266,20 @@ extension RuntimeCoordinator {
         if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
             markXcodeProcessRouteUnavailable(
                 upstreamIndex: upstreamIndex,
-                reason: "upstream_exit_\(status)"
+                reason: reason
             )
         }
         releaseLeases(
             leaseManager.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
-                reason: .upstreamExit
+                reason: leaseReleaseReason
             )
         )
 
         if let bridgeRecovery, exitedActivePrimaryInitialize == false {
             replaceProcessBridgeRecoveryChannelAndScheduleRetry(
                 bridgeRecovery,
-                reason: "upstream_exit_\(status)"
+                reason: reason
             )
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             return
@@ -266,7 +289,7 @@ extension RuntimeCoordinator {
             if retryPrimaryInitializeOnAlternativeUpstream(
                 failedUpstreamIndex: upstreamIndex,
                 failedUpstreamID: nil,
-                reason: "primary_upstream_exit_\(status)",
+                reason: "primary_\(reason)",
                 matching: globalInit.primaryInitializePhase
             ) {
                 return
