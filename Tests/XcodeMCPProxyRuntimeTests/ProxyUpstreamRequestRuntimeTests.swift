@@ -8,6 +8,30 @@ import XcodeMCPKit
 
 @Suite
 struct ProxyUpstreamRequestRuntimeTests {
+    @Test func responseRouterDistinguishesNumericAndStringRequestIDs() throws {
+        let eventLoop = EmbeddedEventLoop()
+        let router = JSONRPCResponseRouter(
+            requestTimeout: nil,
+            hasActiveClients: { false },
+            sendNotification: { _ in }
+        )
+        let number = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
+        let string = try #require(JSONRPC.ID(any: "1"))
+        let numericResponse = router.registerRequest(idKey: number.key, on: eventLoop)
+        let stringResponse = router.registerRequest(idKey: string.key, on: eventLoop)
+        let stringData = try JSONRPC.Wire.resultResponseData(id: string, result: .string("string"))
+        let numericData = try JSONRPC.Wire.resultResponseData(id: number, result: .string("number"))
+
+        router.handleIncoming(stringData)
+        router.handleIncoming(numericData)
+        eventLoop.run()
+
+        var stringBuffer = try stringResponse.wait()
+        var numericBuffer = try numericResponse.wait()
+        #expect(stringBuffer.readBytes(length: stringBuffer.readableBytes) == Array(stringData))
+        #expect(numericBuffer.readBytes(length: numericBuffer.readableBytes) == Array(numericData))
+    }
+
     @Test func prepareRequestSelectsUpstreamAndAssignsRuntimeIDs() throws {
         let port = RecordingUpstreamRuntimePort(chosenUpstreamIndex: 2)
         let runtime = ProxyUpstreamRequestRuntime(port: port)
@@ -33,7 +57,7 @@ struct ProxyUpstreamRequestRuntimeTests {
         #expect(port.assignments() == [
             RecordingUpstreamRuntimePort.Assignment(
                 sessionID: "session-1",
-                requestIDKey: "client-1",
+                requestIDKey: "s:client-1",
                 upstreamIndex: 2
             )
         ])
@@ -95,7 +119,7 @@ struct ProxyUpstreamRequestRuntimeTests {
         #expect(port.activations() == [
             RecordingUpstreamRuntimePort.Activation(
                 leaseID: leaseID,
-                requestIDKey: "client-2",
+                requestIDKey: "s:client-2",
                 upstreamIndex: 1,
                 timeout: .seconds(3),
                 progressTokenMapping: ProgressTokenMapping(
@@ -232,7 +256,7 @@ struct ProxyUpstreamRequestRuntimeTests {
         #expect(port.sentRequests().isEmpty)
         let removal = try #require(port.removals().first)
         #expect(removal.sessionID == "session-cancelled-registration")
-        #expect(removal.requestIDKey == "cancelled-registration")
+        #expect(removal.requestIDKey == JSONRPC.ID(any: "cancelled-registration")?.key)
         #expect(removal.proof == prepared.operationLease.proof)
     }
 
@@ -277,7 +301,7 @@ struct ProxyUpstreamRequestRuntimeTests {
         #expect(removals.count == 1)
         let removal = try #require(removals.first)
         #expect(removal.sessionID == "session-stale")
-        #expect(removal.requestIDKey == "client-stale")
+        #expect(removal.requestIDKey == JSONRPC.ID(any: "client-stale")?.key)
         #expect(removal.upstreamIndex == prepared.upstreamIndex)
         #expect(removal.proof == prepared.operationLease.proof)
     }
@@ -327,7 +351,7 @@ struct ProxyUpstreamRequestRuntimeTests {
         }
         let removal = try #require(port.removals().first)
         #expect(removal.sessionID == "session-async-stale")
-        #expect(removal.requestIDKey == "client-async-stale")
+        #expect(removal.requestIDKey == JSONRPC.ID(any: "client-async-stale")?.key)
         #expect(removal.proof == prepared.operationLease.proof)
     }
 }

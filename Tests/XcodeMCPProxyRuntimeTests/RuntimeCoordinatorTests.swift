@@ -4800,7 +4800,7 @@ struct RuntimeCoordinatorInitializationTests {
         let clientID = JSONRPC.ID(any: "xcode-mcp-proxy.server-request.1")!
         let route = try #require(session.serverRequestTracker.consume(clientID: clientID))
         #expect(route.upstreamIndex == 0)
-        #expect(route.upstreamID.key == "server-request-1")
+        #expect(route.upstreamID.value == .string("server-request-1"))
         #expect(session.serverRequestTracker.consume(clientID: clientID) == nil)
     }
 
@@ -4973,8 +4973,8 @@ struct RuntimeCoordinatorInitializationTests {
         let secondRoute = try #require(tracker.consume(clientID: secondClientID))
         #expect(firstRoute.upstreamIndex == 0)
         #expect(secondRoute.upstreamIndex == 1)
-        #expect(firstRoute.upstreamID.key == "duplicate")
-        #expect(secondRoute.upstreamID.key == "duplicate")
+        #expect(firstRoute.upstreamID.value == .string("duplicate"))
+        #expect(secondRoute.upstreamID.value == .string("duplicate"))
     }
 
     @Test func serverRequestTrackerExpiresUnansweredRoutes() async throws {
@@ -5015,8 +5015,8 @@ struct RuntimeCoordinatorInitializationTests {
         )
 
         #expect(tracker.consume(clientID: first, now: now) == nil)
-        #expect(tracker.consume(clientID: second, now: now)?.upstreamID.key == "second")
-        #expect(tracker.consume(clientID: third, now: now)?.upstreamID.key == "third")
+        #expect(tracker.consume(clientID: second, now: now)?.upstreamID.value == .string("second"))
+        #expect(tracker.consume(clientID: third, now: now)?.upstreamID.value == .string("third"))
     }
 
     @Test func sessionManagerRoutesServerInitiatedRequestToOwningSession() async throws {
@@ -5076,7 +5076,7 @@ struct RuntimeCoordinatorInitializationTests {
         #expect(firstSession.serverRequestTracker.consume(clientID: clientID) == nil)
         let route = try #require(secondSession.serverRequestTracker.consume(clientID: clientID))
         #expect(route.upstreamIndex == 0)
-        #expect(route.upstreamID.key == "server-request-1")
+        #expect(route.upstreamID.value == .string("server-request-1"))
     }
 
     @Test func sessionManagerRoutesProgressNotificationOnlyToOwningSession() async throws {

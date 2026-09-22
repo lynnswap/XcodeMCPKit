@@ -662,8 +662,7 @@ private extension InitializedMCPClientSession {
 
     func jsonRPCIDKey(_ value: JSONValue) -> String? {
         switch value {
-        case .string(let value): value
-        case .number(let value): value.stringValue
+        case .string, .number: JSONRPC.ID(any: value.foundationObject)?.key
         case .object, .array, .bool, .null: nil
         }
     }
@@ -672,11 +671,14 @@ private extension InitializedMCPClientSession {
         guard case .object(let object) = value else {
             return .invalidResponse("JSON-RPC error is not an object")
         }
-        let code: Int
+        let code: Int?
         switch object["code"] {
         case .number(.int(let value)): code = Int(value)
-        case .number(.double(let value)): code = Int(value)
-        default: code = 0
+        case .number(.double(let value)): code = Int(exactly: value)
+        default: code = nil
+        }
+        guard let code else {
+            return .invalidResponse("JSON-RPC error code is not a representable integer")
         }
         let message: String
         if case .string(let value) = object["message"] { message = value } else { message = "MCP server error" }
