@@ -263,6 +263,24 @@ struct StdioAdapterContractTests {
         outputPipe.fileHandleForReading.closeFile()
     }
 
+    @Test func writerAcceptsOneLargeMessageWithoutWeakeningQueuedWriteAdmission() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        #expect(FileManager.default.createFile(atPath: url.path, contents: nil))
+        let output = try FileHandle(forWritingTo: url)
+        defer {
+            try? output.close()
+            try? FileManager.default.removeItem(at: url)
+        }
+        let writer = StdioWriter(handle: output, logger: Logger(label: "StdioWriterContractTests"))
+        let message = Data(repeating: 0x61, count: 5 * 1024 * 1024)
+
+        #expect(await writer.send(message))
+        await writer.finish()
+
+        #expect(try Data(contentsOf: url) == message + Data("\n".utf8))
+        #expect(await writer.pendingByteCount() == 0)
+    }
+
     @Test func adapterStopInterruptsBlockedOutputAndWaitsForWriterTerminal() async throws {
         let client = StalledStdioAdapterTransport()
         let inputPipe = Pipe()

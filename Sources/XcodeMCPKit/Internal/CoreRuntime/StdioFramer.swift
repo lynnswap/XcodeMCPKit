@@ -7,7 +7,6 @@ package final class StdioFramer {
             case unexpectedTopLevelArray
             case invalidContentLengthHeader
             case invalidJSON
-            case bufferLimitExceeded
         }
 
         package let reason: Reason
@@ -63,7 +62,6 @@ package final class StdioFramer {
         case invalid
     }
 
-    private let bufferHardLimit = 4 * 1024 * 1024
     private let previewLimit = 200
 
     private var buffer = Data()
@@ -86,6 +84,10 @@ package final class StdioFramer {
                 continue
             }
             break
+        }
+
+        if firstNonWhitespaceIndex(from: buffer.startIndex) == nil {
+            buffer.removeAll(keepingCapacity: false)
         }
 
         let protocolViolation = protocolViolationIfNeeded()
@@ -137,7 +139,7 @@ package final class StdioFramer {
         else {
             return nil
         }
-        guard buffer.count >= headerEndIndex + length else {
+        guard length <= buffer.endIndex - headerEndIndex else {
             return nil
         }
 
@@ -152,9 +154,6 @@ package final class StdioFramer {
 
     private func protocolViolationIfNeeded() -> StdioFramer.ProtocolViolation? {
         guard let firstIndex = firstNonWhitespaceIndex(from: buffer.startIndex) else {
-            if buffer.count > bufferHardLimit {
-                return makeProtocolViolation(reason: .bufferLimitExceeded)
-            }
             return nil
         }
 
@@ -162,9 +161,6 @@ package final class StdioFramer {
             guard let headerEndIndex = contentLengthHeaderEndIndex(from: firstIndex) else {
                 if hasMalformedContentLengthPrefixWithoutDelimiter(from: firstIndex) {
                     return makeProtocolViolation(reason: .invalidContentLengthHeader)
-                }
-                if buffer.count > bufferHardLimit {
-                    return makeProtocolViolation(reason: .bufferLimitExceeded)
                 }
                 return nil
             }
@@ -177,7 +173,10 @@ package final class StdioFramer {
                 return makeProtocolViolation(reason: .invalidContentLengthHeader)
             }
 
-            guard buffer.count >= headerEndIndex + length else {
+            guard length <= Int.max - headerEndIndex else {
+                return makeProtocolViolation(reason: .invalidContentLengthHeader)
+            }
+            guard length <= buffer.endIndex - headerEndIndex else {
                 return nil
             }
 
@@ -202,9 +201,6 @@ package final class StdioFramer {
             }
             return makeProtocolViolation(reason: .invalidJSON)
         case .incomplete:
-            if buffer.count > bufferHardLimit {
-                return makeProtocolViolation(reason: .bufferLimitExceeded)
-            }
             return nil
         case .invalid:
             return makeProtocolViolation(reason: .invalidJSON)

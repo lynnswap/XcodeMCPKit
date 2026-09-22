@@ -143,16 +143,44 @@ struct StdioFramerTests {
         #expect(result.protocolViolation?.reason == .invalidJSON)
     }
 
-    @Test func stdioFramerFailsOversizedIncompleteJSONAtHardLimit() {
+    @Test(arguments: [false, true])
+    func stdioFramerAcceptsLargeMessagesRegardlessOfChunking(contentLength: Bool) {
+        let text = String(repeating: "x", count: 5 * 1024 * 1024)
+        let message = Data(#"{"jsonrpc":"2.0","id":1,"result":{"text":"\#(text)"}}"#.utf8)
+        let header = contentLength ? Data("Content-Length: \(message.count)\r\n\r\n".utf8) : Data()
+        let wire = header + message
+
+        let whole = StdioFramer().append(wire)
+        #expect(whole.messages == [message])
+        #expect(whole.protocolViolation == nil)
+
         let framer = StdioFramer()
-        let text = String(repeating: "x", count: 4 * 1024 * 1024)
-        let payload = #"{"jsonrpc":"2.0","id":1,"result":{"text":"\#(text)"#
+        let split = 4 * 1024 * 1024 + 1
+        let prefix = framer.append(Data(wire.prefix(split)))
+        #expect(prefix.messages.isEmpty)
+        #expect(prefix.protocolViolation == nil)
+        let suffix = framer.append(Data(wire.dropFirst(split)))
+        #expect(suffix.messages == whole.messages)
+        #expect(suffix.protocolViolation == nil)
+        #expect(suffix.bufferedByteCount == 0)
+    }
 
-        let result = framer.append(Data(payload.utf8))
-
+    @Test func stdioFramerRejectsUnrepresentableContentLengthWithoutOverflow() {
+        let result = StdioFramer().append(Data("Content-Length: \(Int.max)\r\n\r\n".utf8))
         #expect(result.messages.isEmpty)
-        #expect(result.bufferedByteCount == payload.utf8.count)
-        #expect(result.protocolViolation?.reason == .bufferLimitExceeded)
+        #expect(result.protocolViolation?.reason == .invalidContentLengthHeader)
+    }
+
+    @Test func stdioFramerDiscardsWhitespaceBetweenMessages() {
+        let framer = StdioFramer()
+        for _ in 0..<5 {
+            let result = framer.append(Data(repeating: 0x20, count: 1024 * 1024))
+            #expect(result.messages.isEmpty)
+            #expect(result.protocolViolation == nil)
+            #expect(result.bufferedByteCount == 0)
+        }
+        let message = Data(#"{"jsonrpc":"2.0","id":1}"#.utf8)
+        #expect(framer.append(message).messages == [message])
     }
 
     @Test func stdioFramerTreatsContentLengthLookingLogLineAsProtocolViolation() {
