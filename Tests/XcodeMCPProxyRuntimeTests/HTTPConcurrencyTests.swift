@@ -62,6 +62,49 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
+    @Test(arguments: [false, true])
+    func cancelledLeaseCannotBeQueuedAfterCancellation(upstreamBusy: Bool) async throws {
+        let (manager, _, loop, _) = try cancellationFixture(upstreamCount: 1)
+        defer { manager.shutdownAndWait() }
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "cancel-session", label: "tools/call:ExecuteSnippet",
+            expectsResponse: true, isTopLevelClientRequest: true
+        )
+        let blocker = loop.makePromise(of: Void.self)
+        let blockerLease = manager.createRequestLease(descriptor: descriptor)
+        if upstreamBusy {
+            let future: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+                leaseID: blockerLease, descriptor: descriptor, on: loop
+            ) { _ in blocker.futureResult }
+            future.whenFailure { _ in }
+            loop.run()
+        }
+        let cancelledLease = manager.createRequestLease(descriptor: descriptor)
+        manager.abandonRequestLease(
+            cancelledLease, sessionID: "cancel-session", requestIDKeys: [], operationLease: nil
+        )
+        let cancelled: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: cancelledLease, descriptor: descriptor, on: loop
+        ) { _ in
+            Issue.record("a settled lease must never acquire an upstream")
+            return loop.makeSucceededFuture(())
+        }
+        loop.run()
+        await #expect(throws: CancellationError.self) { try await cancelled.get() }
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
+        manager.completeRequestLease(blockerLease)
+        blocker.succeed(())
+        loop.run()
+        let nextLease = manager.createRequestLease(descriptor: descriptor)
+        let next: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: nextLease, descriptor: descriptor, on: loop
+        ) { _ in loop.makeSucceededFuture(()) }
+        loop.run()
+        try await next.get()
+        manager.completeRequestLease(nextLease)
+        #expect(manager.upstreamSlotScheduler.debugSnapshot().activeLeaseCountByUpstream.isEmpty)
+    }
+
     @Test func cancellationDuringAdmissionPreventsDispatch() async throws {
         let onQueued = NIOLockedValueBox<(@Sendable () -> Void)?>(nil)
         let (manager, service, loop, upstreams) = try cancellationFixture(
