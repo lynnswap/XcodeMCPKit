@@ -206,6 +206,21 @@ struct StdioFramerTests {
         #expect(messages == [first, second])
     }
 
+    @Test(arguments: [#"{"result":truX"#, #"{"key" nope"#, "[01", "[1.e", "[1e+]", "[falseX"])
+    func stdioFramerRejectsInvalidPrefixesWithoutWaitingForClosure(prefix: String) {
+        let result = StdioFramer().append(Data(prefix.utf8))
+        #expect(result.messages.isEmpty)
+        #expect(result.protocolViolation?.reason == .invalidJSON)
+    }
+
+    @Test(arguments: [#"{"result":{},}"#, "[1,]"], [false, true])
+    func stdioFramerRejectsTrailingCommas(json: String, contentLength: Bool) {
+        let header = contentLength ? "Content-Length: \(json.utf8.count)\r\n\r\n" : ""
+        let result = StdioFramer().append(Data((header + json).utf8))
+        #expect(result.messages.isEmpty)
+        #expect(result.protocolViolation?.reason == .invalidJSON)
+    }
+
     @Test func stdioFramerDiscardsWhitespaceBetweenMessages() {
         let framer = StdioFramer()
         for _ in 0..<5 {

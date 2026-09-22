@@ -362,68 +362,172 @@ package final class StdioFramer {
         return result
     }
 
-    // This scanner only locates a complete object/array; Foundation validates
-    // its JSON grammar. Its cursor survives appends so body bytes are visited once.
+    // Keep lexical and container state across appends so invalid prefixes fail
+    // promptly without rescanning the accumulated body. Foundation validates
+    // the completed payload's encoding after strict JSON framing succeeds.
     private struct JSONBoundaryScanner {
+        private enum ObjectState { case keyOrEnd, key, colon, value, commaOrEnd }
+        private enum ArrayState { case valueOrEnd, value, commaOrEnd }
+        private enum Frame { case object(ObjectState), array(ArrayState) }
+        private enum Token {
+            case string(isKey: Bool, escaped: Bool, unicodeDigits: Int)
+            case literal([UInt8], next: Int)
+            case number(NumberState)
+        }
+        private enum NumberState {
+            case minus, zero, integer, decimalPoint, fraction, exponent, exponentSign, exponentDigits
+
+            var canEnd: Bool {
+                switch self {
+                case .zero, .integer, .fraction, .exponentDigits: true
+                case .minus, .decimalPoint, .exponent, .exponentSign: false
+                }
+            }
+
+            func next(_ byte: UInt8) -> Self? {
+                switch self {
+                case .minus:
+                    if byte == 0x30 { return .zero }
+                    if (0x31...0x39).contains(byte) { return .integer }
+                case .zero, .integer:
+                    if self == .integer, (0x30...0x39).contains(byte) { return .integer }
+                    if byte == 0x2E { return .decimalPoint }
+                    if byte == 0x65 || byte == 0x45 { return .exponent }
+                case .decimalPoint, .fraction:
+                    if (0x30...0x39).contains(byte) { return .fraction }
+                    if self == .fraction, byte == 0x65 || byte == 0x45 { return .exponent }
+                case .exponent:
+                    if byte == 0x2B || byte == 0x2D { return .exponentSign }
+                    if (0x30...0x39).contains(byte) { return .exponentDigits }
+                case .exponentSign, .exponentDigits:
+                    if (0x30...0x39).contains(byte) { return .exponentDigits }
+                }
+                return nil
+            }
+        }
+
         var cursor: Data.Index
-        private var closingDelimiters: [UInt8] = []
-        private var isInString = false
-        private var isEscaped = false
-        private var unicodeDigitsRemaining = 0
+        private var frames: [Frame] = []
+        private var token: Token?
         private var terminalResult: JSONPrefixParseResult?
 
-        init(cursor: Data.Index) {
-            self.cursor = cursor
-        }
+        init(cursor: Data.Index) { self.cursor = cursor }
 
         mutating func scan(in data: Data, through endIndex: Data.Index) -> JSONPrefixParseResult {
             if let terminalResult { return terminalResult }
             while cursor < endIndex {
                 let byte = data[cursor]
-                cursor += 1
-                if isInString {
-                    if unicodeDigitsRemaining > 0 {
-                        guard (0x30...0x39).contains(byte) || (0x41...0x46).contains(byte)
-                            || (0x61...0x66).contains(byte) else {
-                            return finish(.invalid)
-                        }
-                        unicodeDigitsRemaining -= 1
-                    } else if isEscaped {
-                        isEscaped = false
-                        switch byte {
-                        case 0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74:
-                            break
-                        case 0x75:
-                            unicodeDigitsRemaining = 4
-                        default:
-                            return finish(.invalid)
-                        }
-                    } else if byte == 0x5C {
-                        isEscaped = true
-                    } else if byte == 0x22 {
-                        isInString = false
-                    } else if byte < 0x20 {
+                if case .number(let number) = token {
+                    if let next = number.next(byte) {
+                        token = .number(next)
+                        cursor += 1
+                    } else if number.canEnd,
+                              Self.isWhitespace(byte) || byte == 0x2C || byte == 0x5D || byte == 0x7D {
+                        token = nil
+                        finishValue()
+                    } else {
                         return finish(.invalid)
                     }
-                } else {
-                    switch byte {
-                    case 0x7B:
-                        closingDelimiters.append(0x7D)
-                    case 0x5B:
-                        closingDelimiters.append(0x5D)
-                    case 0x7D, 0x5D:
-                        guard closingDelimiters.popLast() == byte else {
+                    continue
+                }
+
+                cursor += 1
+                if let token {
+                    switch token {
+                    case .string(let isKey, let escaped, let unicodeDigits):
+                        if unicodeDigits > 0 {
+                            guard (0x30...0x39).contains(byte) || (0x41...0x46).contains(byte)
+                                || (0x61...0x66).contains(byte) else { return finish(.invalid) }
+                            self.token = .string(isKey: isKey, escaped: false, unicodeDigits: unicodeDigits - 1)
+                        } else if escaped {
+                            switch byte {
+                            case 0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74:
+                                self.token = .string(isKey: isKey, escaped: false, unicodeDigits: 0)
+                            case 0x75:
+                                self.token = .string(isKey: isKey, escaped: false, unicodeDigits: 4)
+                            default:
+                                return finish(.invalid)
+                            }
+                        } else if byte == 0x5C {
+                            self.token = .string(isKey: isKey, escaped: true, unicodeDigits: 0)
+                        } else if byte == 0x22 {
+                            self.token = nil
+                            if isKey { frames[frames.count - 1] = .object(.colon) }
+                            else { finishValue() }
+                        } else if byte < 0x20 {
                             return finish(.invalid)
                         }
-                        if closingDelimiters.isEmpty { return finish(.complete(cursor)) }
-                    case 0x22:
-                        isInString = true
-                    default:
+                    case .literal(let bytes, let next):
+                        guard byte == bytes[next] else { return finish(.invalid) }
+                        if next + 1 == bytes.count {
+                            self.token = nil
+                            finishValue()
+                        } else {
+                            self.token = .literal(bytes, next: next + 1)
+                        }
+                    case .number:
                         break
+                    }
+                    continue
+                }
+
+                if Self.isWhitespace(byte) { continue }
+                switch frames.last {
+                case .object(.keyOrEnd) where byte == 0x7D,
+                     .object(.commaOrEnd) where byte == 0x7D,
+                     .array(.valueOrEnd) where byte == 0x5D,
+                     .array(.commaOrEnd) where byte == 0x5D:
+                    frames.removeLast()
+                    if frames.isEmpty { return finish(.complete(cursor)) }
+                    finishValue()
+                case .object(.keyOrEnd), .object(.key):
+                    guard byte == 0x22 else { return finish(.invalid) }
+                    token = .string(isKey: true, escaped: false, unicodeDigits: 0)
+                case .object(.colon):
+                    guard byte == 0x3A else { return finish(.invalid) }
+                    frames[frames.count - 1] = .object(.value)
+                case .object(.commaOrEnd):
+                    guard byte == 0x2C else { return finish(.invalid) }
+                    frames[frames.count - 1] = .object(.key)
+                case .array(.commaOrEnd):
+                    guard byte == 0x2C else { return finish(.invalid) }
+                    frames[frames.count - 1] = .array(.value)
+                case .object(.value), .array(.value), .array(.valueOrEnd):
+                    guard beginValue(byte) else { return finish(.invalid) }
+                case nil:
+                    guard byte == 0x7B || byte == 0x5B, beginValue(byte) else {
+                        return finish(.invalid)
                     }
                 }
             }
             return .incomplete
+        }
+
+        private mutating func beginValue(_ byte: UInt8) -> Bool {
+            switch byte {
+            case 0x7B: frames.append(.object(.keyOrEnd))
+            case 0x5B: frames.append(.array(.valueOrEnd))
+            case 0x22: token = .string(isKey: false, escaped: false, unicodeDigits: 0)
+            case 0x74: token = .literal(Array("true".utf8), next: 1)
+            case 0x66: token = .literal(Array("false".utf8), next: 1)
+            case 0x6E: token = .literal(Array("null".utf8), next: 1)
+            case 0x2D: token = .number(.minus)
+            case 0x30: token = .number(.zero)
+            case 0x31...0x39: token = .number(.integer)
+            default: return false
+            }
+            return true
+        }
+
+        private mutating func finishValue() {
+            switch frames[frames.count - 1] {
+            case .object: frames[frames.count - 1] = .object(.commaOrEnd)
+            case .array: frames[frames.count - 1] = .array(.commaOrEnd)
+            }
+        }
+
+        private static func isWhitespace(_ byte: UInt8) -> Bool {
+            byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
         }
 
         private mutating func finish(_ result: JSONPrefixParseResult) -> JSONPrefixParseResult {
