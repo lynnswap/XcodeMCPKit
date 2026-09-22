@@ -625,11 +625,15 @@ struct RuntimeCoordinatorSchedulingTests {
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreams: [upstream0, upstream1]
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { initializedUpstreams.append($0) }
+            )
         )
         defer { manager.shutdownAndWait() }
 
@@ -646,6 +650,7 @@ struct RuntimeCoordinatorSchedulingTests {
 
         _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
         _ = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0, 1])
 
         await upstream0.yield(.exit(1))
         let warmRetry = try await sentValue(from: upstream0, at: 2, timeout: .seconds(2))
@@ -764,11 +769,15 @@ struct RuntimeCoordinatorSchedulingTests {
         let eventLoop = group.next()
         let upstream0 = ToggleableOverloadUpstreamClient()
         let upstream1 = TestUpstreamClient()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreams: [upstream0, upstream1]
+            upstreams: [upstream0, upstream1],
+            testHooks: RuntimeCoordinatorTestHooks(
+                upstreamInitialized: { initializedUpstreams.append($0) }
+            )
         )
         defer { manager.shutdownAndWait() }
 
@@ -785,6 +794,7 @@ struct RuntimeCoordinatorSchedulingTests {
 
         _ = try await sentValue(from: upstream0, at: 1, timeout: .seconds(2))
         _ = try await sentValue(from: upstream1, at: 1, timeout: .seconds(2))
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0, 1])
 
         let secondaryLease = manager.operationLeaseForTest(upstreamIndex: 1)
         manager.markRequestTimedOut(secondaryLease)

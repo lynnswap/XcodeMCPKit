@@ -51,10 +51,18 @@ struct CoreHTTPClientLifecycleTests {
 
     @Test func streamableHTTPConcurrentCloseDeletesAndInvalidatesOnce() async throws {
         let stub = CoreHTTPStub()
-        let invalidations = CoreSessionInvalidations()
-        let session = stub.makeSession(delegate: invalidations)
+        let invalidations = DeterministicRecorder<Void>()
+        let session = stub.makeSession()
         defer { session.invalidateAndCancel(); stub.remove() }
-        let client = StreamableHTTPMCPClient(endpoint: stub.endpoint, urlSession: session, urlSessionOwnership: .owned)
+        let client = StreamableHTTPMCPClient(
+            endpoint: stub.endpoint,
+            urlSession: session,
+            urlSessionOwnership: .owned,
+            invalidateURLSession: { session in
+                session.invalidateAndCancel()
+                invalidations.record(())
+            }
+        )
         await client.startEventStream(headers: stub.headers)
         _ = try await stub.requests.nextValue(matching: { $0 == "GET" })
         let started = DeterministicRecorder<Void>()
@@ -71,14 +79,14 @@ struct CoreHTTPClientLifecycleTests {
         }
         _ = try await started.nextValue(at: 1)
         _ = try await stub.requests.nextValue(matching: { $0 == "DELETE" })
-        for _ in 0..<100 { await Task.yield() }
         #expect(stub.requests.snapshot().filter { $0 == "DELETE" }.count == 1)
         #expect(completed.snapshot().isEmpty)
+        #expect(invalidations.snapshot().isEmpty)
         stub.finishDelete()
         try await waitWithTimeout("close callers did not finish") { await first.value; await second.value }
-        _ = try await invalidations.calls.nextValue(at: 0)
         #expect(completed.snapshot().count == 2)
-        #expect(invalidations.calls.snapshot().count == 1)
+        // Count the client's invalidation calls rather than Foundation's deferred delegate teardown.
+        #expect(invalidations.snapshot().count == 1)
         #expect(stub.requests.snapshot().filter { $0 == "DELETE" }.count == 1)
     }
 
@@ -123,10 +131,10 @@ private final class CoreHTTPStub: @unchecked Sendable {
         CoreHTTPRegistry.shared.insert(self)
     }
 
-    func makeSession(delegate: (any URLSessionDelegate)? = nil) -> URLSession {
+    func makeSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [CoreHTTPURLProtocol.self]
-        return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        return URLSession(configuration: config, delegate: nil, delegateQueue: nil)
     }
 
     func start(_ connection: CoreHTTPURLProtocol) {
@@ -189,11 +197,6 @@ private final class CoreHTTPURLProtocol: URLProtocol, @unchecked Sendable {
         stub.start(self)
     }
     override func stopLoading() { if let url = request.url { CoreHTTPRegistry.shared.lookup(url)?.stop(self) } }
-}
-
-private final class CoreSessionInvalidations: NSObject, URLSessionDelegate, @unchecked Sendable {
-    let calls = DeterministicRecorder<Void>()
-    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) { calls.record(()) }
 }
 
 // Completion of this task remains independently controlled after cancellation.

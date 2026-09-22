@@ -51,7 +51,8 @@ package final class StreamableHTTPMCPClient: Sendable {
         urlSessionOwnership: StreamableHTTPURLSessionOwnership,
         eventStreamReconnectSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
             try await Task.sleep(for: duration)
-        }
+        },
+        invalidateURLSession: @escaping @Sendable (URLSession) -> Void = { $0.invalidateAndCancel() }
     ) {
         let eventPair = AsyncStream.makeStream(of: Data.self)
         let expirationPair = AsyncStream.makeStream(of: String.self)
@@ -59,7 +60,8 @@ package final class StreamableHTTPMCPClient: Sendable {
         self.urlSession = urlSession
         self.urlSessionOwnership = urlSessionOwnership
         self.urlSessionInvalidationAuthority = StreamableHTTPURLSessionInvalidationAuthority(
-            ownership: urlSessionOwnership
+            ownership: urlSessionOwnership,
+            invalidateURLSession: invalidateURLSession
         )
         self.eventStreamReconnectSleep = eventStreamReconnectSleep
         self.events = eventPair.stream
@@ -528,10 +530,15 @@ private final class StreamableHTTPCloseAuthority: Sendable {
 
 private final class StreamableHTTPURLSessionInvalidationAuthority: Sendable {
     private let isOwned: Bool
+    private let invalidateURLSession: @Sendable (URLSession) -> Void
     private let isInvalidated = Mutex(false)
 
-    init(ownership: StreamableHTTPURLSessionOwnership) {
+    init(
+        ownership: StreamableHTTPURLSessionOwnership,
+        invalidateURLSession: @escaping @Sendable (URLSession) -> Void
+    ) {
         self.isOwned = ownership == .owned
+        self.invalidateURLSession = invalidateURLSession
     }
 
     func invalidate(_ urlSession: URLSession) {
@@ -542,7 +549,7 @@ private final class StreamableHTTPURLSessionInvalidationAuthority: Sendable {
             return true
         }
         if shouldInvalidate {
-            urlSession.invalidateAndCancel()
+            invalidateURLSession(urlSession)
         }
     }
 }
