@@ -109,14 +109,15 @@ struct ProcessControlClientTests {
                 Issue.record("listener lookup must not send signals")
                 return ProcessSignalResult(result: -1, errnoValue: ESRCH)
             },
-            resolveHostAddresses: { host in
+            resolveHostAddress: { host, port in
                 #expect(host == "my-mac.local")
-                return resolutionFails ? [] : ["192.0.2.1", "2001:db8::1"]
+                #expect(port == 8765)
+                return resolutionFails ? nil : "192.0.2.1"
             }
         )
 
         #expect(client.listeningProcessIDs(onTCPPort: 8765, matchingHost: "my-mac.local")
-            == (resolutionFails ? [] : [111, 222, 444]))
+            == (resolutionFails ? [] : [111, 444]))
     }
 
     @Test func systemResolverPreservesNumericAddressFamilies() {
@@ -125,8 +126,8 @@ struct ProcessControlClientTests {
             sendSignal: { _, _ in ProcessSignalResult(result: -1, errnoValue: ESRCH) }
         )
 
-        #expect(client.resolveHostAddresses("127.0.0.1") == ["127.0.0.1"])
-        #expect(client.resolveHostAddresses("::1") == ["::1"])
+        #expect(client.resolveHostAddress("127.0.0.1", 8765) == "127.0.0.1")
+        #expect(client.resolveHostAddress("::1", 8765) == "::1")
     }
 
     @Test func executableNameUsesFirstCommandTokenFromPSOutput() throws {

@@ -208,11 +208,10 @@ struct XcodeMCPProxyServerTests {
 
         #expect(controller.terminateExistingServer(host, 8765) { warnings.append($0) })
 
-        #expect(processes.terminatedProcessIDs == [456, 567])
-        #expect(warnings.count == 2)
+        #expect(processes.terminatedProcessIDs == (host == "localhost" ? [456, 567] : [456]))
+        #expect(warnings.count == (host == "localhost" ? 2 : 1))
         #expect(warnings.contains { $0.contains("pid: 456") })
-        #expect(warnings.contains { $0.contains("pid: 567") })
-        #expect(processes.aliveProcessIDs == [123, 321, 789, 999])
+        #expect(processes.aliveProcessIDs == (host == "localhost" ? [123, 321, 789, 999] : [123, 321, 567, 789, 999]))
     }
 
     @Test func forceRestartRechecksLaterPIDAfterEarlierTermination() {
@@ -1257,9 +1256,10 @@ private final class RestartProcessFixture: Sendable {
                     return ProcessSignalResult(result: 0, errnoValue: 0)
                 }
             },
-            resolveHostAddresses: { host in
+            resolveHostAddress: { host, port in
                 #expect(host == "my-mac.local")
-                return ["127.0.0.1", "::1"]
+                #expect(port == 8765)
+                return "127.0.0.1"
             }
         )
     }

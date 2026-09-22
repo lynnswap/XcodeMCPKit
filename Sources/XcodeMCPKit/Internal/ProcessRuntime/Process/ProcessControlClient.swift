@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import NIOCore
 
 package struct ProcessSignalResult: Sendable {
     package let result: Int32
@@ -14,16 +15,16 @@ package struct ProcessSignalResult: Sendable {
 package struct ProcessControlClient: Sendable {
     package var runCommand: @Sendable (_ launchPath: String, _ arguments: [String]) -> String?
     package var sendSignal: @Sendable (_ processID: Int, _ signal: Int32) -> ProcessSignalResult
-    package var resolveHostAddresses: @Sendable (_ host: String) -> [String]
+    package var resolveHostAddress: @Sendable (_ host: String, _ port: Int) -> String?
 
     package init(
         runCommand: @escaping @Sendable (_ launchPath: String, _ arguments: [String]) -> String?,
         sendSignal: @escaping @Sendable (_ processID: Int, _ signal: Int32) -> ProcessSignalResult,
-        resolveHostAddresses: (@Sendable (_ host: String) -> [String])? = nil
+        resolveHostAddress: (@Sendable (_ host: String, _ port: Int) -> String?)? = nil
     ) {
         self.runCommand = runCommand
         self.sendSignal = sendSignal
-        self.resolveHostAddresses = resolveHostAddresses ?? Self.defaultResolveHostAddresses
+        self.resolveHostAddress = resolveHostAddress ?? Self.defaultResolveHostAddress
     }
 
     package static let liveValue = Self(
@@ -60,9 +61,13 @@ package struct ProcessControlClient: Sendable {
 
     package func listeningProcessIDs(onTCPPort port: Int, matchingHost host: String) -> [Int] {
         let normalizedHost = Self.normalizeHost(host)
-        let matchingHosts = Self.isWildcardHost(normalizedHost) || normalizedHost == "localhost"
-            ? [normalizedHost]
-            : resolveHostAddresses(normalizedHost)
+        let matchingHost: String
+        if Self.isWildcardHost(normalizedHost) || normalizedHost == "localhost" {
+            matchingHost = normalizedHost
+        } else {
+            guard let resolved = resolveHostAddress(normalizedHost, port) else { return [] }
+            matchingHost = resolved
+        }
         guard let output = runCommand(
             "/usr/sbin/lsof",
             ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpn"]
@@ -70,7 +75,7 @@ package struct ProcessControlClient: Sendable {
             return []
         }
 
-        return Self.listeningProcessIDs(fromLsofOutput: output, matchingHosts: matchingHosts)
+        return Self.listeningProcessIDs(fromLsofOutput: output, matchingHost: matchingHost)
     }
 
     @discardableResult
@@ -153,11 +158,7 @@ package struct ProcessControlClient: Sendable {
     }
 
     package static func listeningProcessIDs(fromLsofOutput output: String, matchingHost host: String) -> [Int] {
-        listeningProcessIDs(fromLsofOutput: output, matchingHosts: [host])
-    }
-
-    private static func listeningProcessIDs(fromLsofOutput output: String, matchingHosts: [String]) -> [Int] {
-        let matchAllHosts = matchingHosts.contains(where: isWildcardHost)
+        let matchAllHosts = isWildcardHost(host)
 
         var processIDs: [Int] = []
         processIDs.reserveCapacity(4)
@@ -182,7 +183,7 @@ package struct ProcessControlClient: Sendable {
             if first == "n", !matchAllHosts {
                 let name = String(rawLine.dropFirst())
                 if let listenerHost = extractListenerHost(fromLsofName: name),
-                   matchingHosts.contains(where: { hostMatches(requestedHost: $0, actualHost: listenerHost) }) {
+                   hostMatches(requestedHost: host, actualHost: listenerHost) {
                     currentMatched = true
                 }
             }
@@ -193,37 +194,9 @@ package struct ProcessControlClient: Sendable {
         return processIDs.filter { seen.insert($0).inserted }
     }
 
-    private static func defaultResolveHostAddresses(_ host: String) -> [String] {
-        var hints = unsafe addrinfo()
-        unsafe hints.ai_family = AF_UNSPEC
-        unsafe hints.ai_socktype = SOCK_STREAM
-        var result: UnsafeMutablePointer<addrinfo>?
-        guard unsafe getaddrinfo(host, nil, &hints, &result) == 0 else { return [] }
-        defer { unsafe freeaddrinfo(result) }
-
-        var addresses: [String] = []
-        var next = unsafe result
-        while let entry = unsafe next {
-            let address = unsafe entry.pointee
-            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            let bufferLength = socklen_t(buffer.count)
-            if unsafe getnameinfo(
-                address.ai_addr,
-                address.ai_addrlen,
-                &buffer,
-                bufferLength,
-                nil,
-                0,
-                NI_NUMERICHOST
-            ) == 0 {
-                addresses.append(String(
-                    decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
-                    as: UTF8.self
-                ))
-            }
-            unsafe next = address.ai_next
-        }
-        return addresses
+    private static func defaultResolveHostAddress(_ host: String, _ port: Int) -> String? {
+        // Match ServerBootstrap.bind(host:port:), which selects one resolved address.
+        try? SocketAddress.makeAddressResolvingHost(host, port: port).ipAddress
     }
 
     private static func firstLine(_ output: String?) -> String? {
