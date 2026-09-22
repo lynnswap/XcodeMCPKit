@@ -6,8 +6,8 @@ package final class StdioFramer {
             case unexpectedLeadingByte
             case unexpectedTopLevelArray
             case invalidContentLengthHeader
+            case headerTooLarge
             case invalidJSON
-            case bufferLimitExceeded
         }
 
         package let reason: Reason
@@ -63,10 +63,11 @@ package final class StdioFramer {
         case invalid
     }
 
-    private let bufferHardLimit = 4 * 1024 * 1024
+    private let maximumHeaderBytes = 4 * 1024 * 1024
     private let previewLimit = 200
 
     private var buffer = Data()
+    private var rawJSONScanner: JSONBoundaryScanner?
 
     package init() {}
 
@@ -77,6 +78,11 @@ package final class StdioFramer {
 
         var messages: [Data] = []
         while true {
+            if rawJSONScanner == nil,
+               let first = firstNonWhitespaceIndex(from: buffer.startIndex),
+               first > buffer.startIndex {
+                buffer.removeSubrange(buffer.startIndex..<first)
+            }
             if let message = nextContentLengthMessage() {
                 messages.append(message)
                 continue
@@ -86,6 +92,11 @@ package final class StdioFramer {
                 continue
             }
             break
+        }
+
+        if firstNonWhitespaceIndex(from: buffer.startIndex) == nil {
+            buffer.removeAll(keepingCapacity: false)
+            rawJSONScanner = nil
         }
 
         let protocolViolation = protocolViolationIfNeeded()
@@ -106,7 +117,7 @@ package final class StdioFramer {
             return nil
         }
 
-        guard case .complete(let messageEnd) = jsonPrefixParseResult(from: startIndex) else {
+        guard case .complete(let messageEnd) = scanRawJSON(from: startIndex) else {
             return nil
         }
 
@@ -116,6 +127,7 @@ package final class StdioFramer {
         }
 
         buffer.removeSubrange(0..<messageEnd)
+        rawJSONScanner = nil
         return message
     }
 
@@ -130,6 +142,7 @@ package final class StdioFramer {
             return nil
         }
 
+        guard headerEndIndex - startIndex <= maximumHeaderBytes else { return nil }
         let headerData = buffer.subdata(in: startIndex..<headerEndIndex)
         guard
             let headerText = String(data: headerData, encoding: .utf8),
@@ -137,7 +150,7 @@ package final class StdioFramer {
         else {
             return nil
         }
-        guard buffer.count >= headerEndIndex + length else {
+        guard length <= buffer.endIndex - headerEndIndex else {
             return nil
         }
 
@@ -152,23 +165,23 @@ package final class StdioFramer {
 
     private func protocolViolationIfNeeded() -> StdioFramer.ProtocolViolation? {
         guard let firstIndex = firstNonWhitespaceIndex(from: buffer.startIndex) else {
-            if buffer.count > bufferHardLimit {
-                return makeProtocolViolation(reason: .bufferLimitExceeded)
-            }
             return nil
         }
 
         if isPotentialContentLengthHeaderPrefix(at: firstIndex) {
             guard let headerEndIndex = contentLengthHeaderEndIndex(from: firstIndex) else {
+                if buffer.endIndex - firstIndex > maximumHeaderBytes {
+                    return makeProtocolViolation(reason: .headerTooLarge)
+                }
                 if hasMalformedContentLengthPrefixWithoutDelimiter(from: firstIndex) {
                     return makeProtocolViolation(reason: .invalidContentLengthHeader)
-                }
-                if buffer.count > bufferHardLimit {
-                    return makeProtocolViolation(reason: .bufferLimitExceeded)
                 }
                 return nil
             }
 
+            guard headerEndIndex - firstIndex <= maximumHeaderBytes else {
+                return makeProtocolViolation(reason: .headerTooLarge)
+            }
             let headerData = buffer.subdata(in: firstIndex..<headerEndIndex)
             guard
                 let headerText = String(data: headerData, encoding: .utf8),
@@ -177,7 +190,10 @@ package final class StdioFramer {
                 return makeProtocolViolation(reason: .invalidContentLengthHeader)
             }
 
-            guard buffer.count >= headerEndIndex + length else {
+            guard length <= Int.max - headerEndIndex else {
+                return makeProtocolViolation(reason: .invalidContentLengthHeader)
+            }
+            guard length <= buffer.endIndex - headerEndIndex else {
                 return nil
             }
 
@@ -194,7 +210,7 @@ package final class StdioFramer {
             return makeProtocolViolation(reason: .unexpectedLeadingByte)
         }
 
-        switch jsonPrefixParseResult(from: firstIndex) {
+        switch scanRawJSON(from: firstIndex) {
         case .complete(let messageEnd):
             let message = buffer.subdata(in: firstIndex..<messageEnd)
             if isValidJSONObjectOrArray(message) {
@@ -202,9 +218,6 @@ package final class StdioFramer {
             }
             return makeProtocolViolation(reason: .invalidJSON)
         case .incomplete:
-            if buffer.count > bufferHardLimit {
-                return makeProtocolViolation(reason: .bufferLimitExceeded)
-            }
             return nil
         case .invalid:
             return makeProtocolViolation(reason: .invalidJSON)
@@ -238,7 +251,8 @@ package final class StdioFramer {
         guard rootByte == 0x7B || rootByte == 0x5B else {
             return nil
         }
-        guard case .complete(let messageEnd) = jsonPrefixParseResult(from: startIndex) else {
+        var scanner = JSONBoundaryScanner(cursor: startIndex)
+        guard case .complete(let messageEnd) = scanner.scan(in: buffer, through: range.upperBound) else {
             return nil
         }
         guard messageEnd <= range.upperBound else {
@@ -341,213 +355,185 @@ package final class StdioFramer {
         return nil
     }
 
-    private func jsonPrefixParseResult(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        parseJSONValuePrefix(from: startIndex)
+    private func scanRawJSON(from startIndex: Data.Index) -> JSONPrefixParseResult {
+        var scanner = rawJSONScanner ?? JSONBoundaryScanner(cursor: startIndex)
+        let result = scanner.scan(in: buffer, through: buffer.endIndex)
+        rawJSONScanner = scanner
+        return result
     }
 
-    private func parseJSONValuePrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        let index = skipWhitespace(from: startIndex)
-        guard index < buffer.endIndex else { return .incomplete }
-
-        switch buffer[index] {
-        case 0x7B:
-            return parseJSONObjectPrefix(from: index)
-        case 0x5B:
-            return parseJSONArrayPrefix(from: index)
-        case 0x22:
-            return parseJSONStringPrefix(from: index)
-        case 0x74:
-            return parseJSONLiteralPrefix("true", from: index)
-        case 0x66:
-            return parseJSONLiteralPrefix("false", from: index)
-        case 0x6E:
-            return parseJSONLiteralPrefix("null", from: index)
-        case 0x2D, 0x30 ... 0x39:
-            return parseJSONNumberPrefix(from: index)
-        default:
-            return .invalid
+    // Keep lexical and container state across appends so invalid prefixes fail
+    // promptly without rescanning the accumulated body. Foundation validates
+    // the completed payload's encoding after strict JSON framing succeeds.
+    private struct JSONBoundaryScanner {
+        private enum ObjectState { case keyOrEnd, key, colon, value, commaOrEnd }
+        private enum ArrayState { case valueOrEnd, value, commaOrEnd }
+        private enum Frame { case object(ObjectState), array(ArrayState) }
+        private enum Token {
+            case string(isKey: Bool, escaped: Bool, unicodeDigits: Int)
+            case literal([UInt8], next: Int)
+            case number(NumberState)
         }
-    }
+        private enum NumberState {
+            case minus, zero, integer, decimalPoint, fraction, exponent, exponentSign, exponentDigits
 
-    private func parseJSONObjectPrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        var index = skipWhitespace(from: buffer.index(after: startIndex))
-        guard index < buffer.endIndex else { return .incomplete }
-        if buffer[index] == 0x7D {
-            return .complete(buffer.index(after: index))
-        }
-
-        while true {
-            switch parseJSONStringPrefix(from: index) {
-            case .complete(let nextIndex):
-                index = skipWhitespace(from: nextIndex)
-            case .incomplete:
-                return .incomplete
-            case .invalid:
-                return .invalid
-            }
-
-            guard index < buffer.endIndex else { return .incomplete }
-            guard buffer[index] == 0x3A else { return .invalid }
-            index = skipWhitespace(from: buffer.index(after: index))
-
-            switch parseJSONValuePrefix(from: index) {
-            case .complete(let nextIndex):
-                index = skipWhitespace(from: nextIndex)
-            case .incomplete:
-                return .incomplete
-            case .invalid:
-                return .invalid
-            }
-
-            guard index < buffer.endIndex else { return .incomplete }
-            let byte = buffer[index]
-            if byte == 0x2C {
-                index = skipWhitespace(from: buffer.index(after: index))
-                guard index < buffer.endIndex else { return .incomplete }
-                continue
-            }
-            if byte == 0x7D {
-                return .complete(buffer.index(after: index))
-            }
-            return .invalid
-        }
-    }
-
-    private func parseJSONArrayPrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        var index = skipWhitespace(from: buffer.index(after: startIndex))
-        guard index < buffer.endIndex else { return .incomplete }
-        if buffer[index] == 0x5D {
-            return .complete(buffer.index(after: index))
-        }
-
-        while true {
-            switch parseJSONValuePrefix(from: index) {
-            case .complete(let nextIndex):
-                index = skipWhitespace(from: nextIndex)
-            case .incomplete:
-                return .incomplete
-            case .invalid:
-                return .invalid
-            }
-
-            guard index < buffer.endIndex else { return .incomplete }
-            let byte = buffer[index]
-            if byte == 0x2C {
-                index = skipWhitespace(from: buffer.index(after: index))
-                guard index < buffer.endIndex else { return .incomplete }
-                continue
-            }
-            if byte == 0x5D {
-                return .complete(buffer.index(after: index))
-            }
-            return .invalid
-        }
-    }
-
-    private func parseJSONStringPrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        guard startIndex < buffer.endIndex, buffer[startIndex] == 0x22 else { return .invalid }
-
-        var index = buffer.index(after: startIndex)
-        var isEscaped = false
-        var pendingUnicodeDigits = 0
-
-        while index < buffer.endIndex {
-            let byte = buffer[index]
-            if pendingUnicodeDigits > 0 {
-                guard isHexDigit(byte) else { return .invalid }
-                pendingUnicodeDigits -= 1
-            } else if isEscaped {
-                switch byte {
-                case 0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74:
-                    isEscaped = false
-                case 0x75:
-                    isEscaped = false
-                    pendingUnicodeDigits = 4
-                default:
-                    return .invalid
+            var canEnd: Bool {
+                switch self {
+                case .zero, .integer, .fraction, .exponentDigits: true
+                case .minus, .decimalPoint, .exponent, .exponentSign: false
                 }
-            } else if byte == 0x5C {
-                isEscaped = true
-            } else if byte == 0x22 {
-                return .complete(buffer.index(after: index))
-            } else if byte < 0x20 {
-                return .invalid
             }
 
-            index = buffer.index(after: index)
-        }
-
-        return .incomplete
-    }
-
-    private func parseJSONLiteralPrefix(_ literal: StaticString, from startIndex: Data.Index)
-        -> JSONPrefixParseResult
-    {
-        let bytes = Array(String(describing: literal).utf8)
-        var index = startIndex
-
-        for expected in bytes {
-            guard index < buffer.endIndex else { return .incomplete }
-            guard buffer[index] == expected else { return .invalid }
-            index = buffer.index(after: index)
-        }
-
-        if index < buffer.endIndex, !isJSONValueTerminator(buffer[index]) {
-            return .invalid
-        }
-        return .complete(index)
-    }
-
-    private func parseJSONNumberPrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        var index = startIndex
-        let start = index
-
-        if buffer[index] == 0x2D {
-            index = buffer.index(after: index)
-            guard index < buffer.endIndex else { return .incomplete }
-        }
-
-        guard index < buffer.endIndex else { return .incomplete }
-        switch buffer[index] {
-        case 0x30:
-            index = buffer.index(after: index)
-            if index < buffer.endIndex, isDigit(buffer[index]) {
-                return .invalid
+            func next(_ byte: UInt8) -> Self? {
+                switch self {
+                case .minus:
+                    if byte == 0x30 { return .zero }
+                    if (0x31...0x39).contains(byte) { return .integer }
+                case .zero, .integer:
+                    if self == .integer, (0x30...0x39).contains(byte) { return .integer }
+                    if byte == 0x2E { return .decimalPoint }
+                    if byte == 0x65 || byte == 0x45 { return .exponent }
+                case .decimalPoint, .fraction:
+                    if (0x30...0x39).contains(byte) { return .fraction }
+                    if self == .fraction, byte == 0x65 || byte == 0x45 { return .exponent }
+                case .exponent:
+                    if byte == 0x2B || byte == 0x2D { return .exponentSign }
+                    if (0x30...0x39).contains(byte) { return .exponentDigits }
+                case .exponentSign, .exponentDigits:
+                    if (0x30...0x39).contains(byte) { return .exponentDigits }
+                }
+                return nil
             }
-        case 0x31 ... 0x39:
-            repeat {
-                index = buffer.index(after: index)
-            } while index < buffer.endIndex && isDigit(buffer[index])
-        default:
-            return index == start ? .invalid : .incomplete
         }
 
-        if index < buffer.endIndex, buffer[index] == 0x2E {
-            index = buffer.index(after: index)
-            guard index < buffer.endIndex else { return .incomplete }
-            guard isDigit(buffer[index]) else { return .invalid }
-            repeat {
-                index = buffer.index(after: index)
-            } while index < buffer.endIndex && isDigit(buffer[index])
-        }
+        var cursor: Data.Index
+        private var frames: [Frame] = []
+        private var token: Token?
+        private var terminalResult: JSONPrefixParseResult?
 
-        if index < buffer.endIndex, buffer[index] == 0x45 || buffer[index] == 0x65 {
-            index = buffer.index(after: index)
-            guard index < buffer.endIndex else { return .incomplete }
-            if buffer[index] == 0x2B || buffer[index] == 0x2D {
-                index = buffer.index(after: index)
-                guard index < buffer.endIndex else { return .incomplete }
+        init(cursor: Data.Index) { self.cursor = cursor }
+
+        mutating func scan(in data: Data, through endIndex: Data.Index) -> JSONPrefixParseResult {
+            if let terminalResult { return terminalResult }
+            while cursor < endIndex {
+                let byte = data[cursor]
+                if case .number(let number) = token {
+                    if let next = number.next(byte) {
+                        token = .number(next)
+                        cursor += 1
+                    } else if number.canEnd,
+                              Self.isWhitespace(byte) || byte == 0x2C || byte == 0x5D || byte == 0x7D {
+                        token = nil
+                        finishValue()
+                    } else {
+                        return finish(.invalid)
+                    }
+                    continue
+                }
+
+                cursor += 1
+                if let token {
+                    switch token {
+                    case .string(let isKey, let escaped, let unicodeDigits):
+                        if unicodeDigits > 0 {
+                            guard (0x30...0x39).contains(byte) || (0x41...0x46).contains(byte)
+                                || (0x61...0x66).contains(byte) else { return finish(.invalid) }
+                            self.token = .string(isKey: isKey, escaped: false, unicodeDigits: unicodeDigits - 1)
+                        } else if escaped {
+                            switch byte {
+                            case 0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74:
+                                self.token = .string(isKey: isKey, escaped: false, unicodeDigits: 0)
+                            case 0x75:
+                                self.token = .string(isKey: isKey, escaped: false, unicodeDigits: 4)
+                            default:
+                                return finish(.invalid)
+                            }
+                        } else if byte == 0x5C {
+                            self.token = .string(isKey: isKey, escaped: true, unicodeDigits: 0)
+                        } else if byte == 0x22 {
+                            self.token = nil
+                            if isKey { frames[frames.count - 1] = .object(.colon) }
+                            else { finishValue() }
+                        } else if byte < 0x20 {
+                            return finish(.invalid)
+                        }
+                    case .literal(let bytes, let next):
+                        guard byte == bytes[next] else { return finish(.invalid) }
+                        if next + 1 == bytes.count {
+                            self.token = nil
+                            finishValue()
+                        } else {
+                            self.token = .literal(bytes, next: next + 1)
+                        }
+                    case .number:
+                        break
+                    }
+                    continue
+                }
+
+                if Self.isWhitespace(byte) { continue }
+                switch frames.last {
+                case .object(.keyOrEnd) where byte == 0x7D,
+                     .object(.commaOrEnd) where byte == 0x7D,
+                     .array(.valueOrEnd) where byte == 0x5D,
+                     .array(.commaOrEnd) where byte == 0x5D:
+                    frames.removeLast()
+                    if frames.isEmpty { return finish(.complete(cursor)) }
+                    finishValue()
+                case .object(.keyOrEnd), .object(.key):
+                    guard byte == 0x22 else { return finish(.invalid) }
+                    token = .string(isKey: true, escaped: false, unicodeDigits: 0)
+                case .object(.colon):
+                    guard byte == 0x3A else { return finish(.invalid) }
+                    frames[frames.count - 1] = .object(.value)
+                case .object(.commaOrEnd):
+                    guard byte == 0x2C else { return finish(.invalid) }
+                    frames[frames.count - 1] = .object(.key)
+                case .array(.commaOrEnd):
+                    guard byte == 0x2C else { return finish(.invalid) }
+                    frames[frames.count - 1] = .array(.value)
+                case .object(.value), .array(.value), .array(.valueOrEnd):
+                    guard beginValue(byte) else { return finish(.invalid) }
+                case nil:
+                    guard byte == 0x7B || byte == 0x5B, beginValue(byte) else {
+                        return finish(.invalid)
+                    }
+                }
             }
-            guard isDigit(buffer[index]) else { return .invalid }
-            repeat {
-                index = buffer.index(after: index)
-            } while index < buffer.endIndex && isDigit(buffer[index])
+            return .incomplete
         }
 
-        if index < buffer.endIndex, !isJSONValueTerminator(buffer[index]) {
-            return .invalid
+        private mutating func beginValue(_ byte: UInt8) -> Bool {
+            switch byte {
+            case 0x7B: frames.append(.object(.keyOrEnd))
+            case 0x5B: frames.append(.array(.valueOrEnd))
+            case 0x22: token = .string(isKey: false, escaped: false, unicodeDigits: 0)
+            case 0x74: token = .literal(Array("true".utf8), next: 1)
+            case 0x66: token = .literal(Array("false".utf8), next: 1)
+            case 0x6E: token = .literal(Array("null".utf8), next: 1)
+            case 0x2D: token = .number(.minus)
+            case 0x30: token = .number(.zero)
+            case 0x31...0x39: token = .number(.integer)
+            default: return false
+            }
+            return true
         }
-        return .complete(index)
+
+        private mutating func finishValue() {
+            switch frames[frames.count - 1] {
+            case .object: frames[frames.count - 1] = .object(.commaOrEnd)
+            case .array: frames[frames.count - 1] = .array(.commaOrEnd)
+            }
+        }
+
+        private static func isWhitespace(_ byte: UInt8) -> Bool {
+            byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+        }
+
+        private mutating func finish(_ result: JSONPrefixParseResult) -> JSONPrefixParseResult {
+            terminalResult = result
+            return result
+        }
     }
 
     private func skipWhitespace(from startIndex: Data.Index) -> Data.Index {
@@ -560,18 +546,6 @@ package final class StdioFramer {
 
     private func isWhitespace(_ byte: UInt8) -> Bool {
         byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
-    }
-
-    private func isDigit(_ byte: UInt8) -> Bool {
-        byte >= 0x30 && byte <= 0x39
-    }
-
-    private func isHexDigit(_ byte: UInt8) -> Bool {
-        isDigit(byte) || (byte >= 0x41 && byte <= 0x46) || (byte >= 0x61 && byte <= 0x66)
-    }
-
-    private func isJSONValueTerminator(_ byte: UInt8) -> Bool {
-        isWhitespace(byte) || byte == 0x2C || byte == 0x5D || byte == 0x7D
     }
 
     private func preview(of data: Data) -> String {
