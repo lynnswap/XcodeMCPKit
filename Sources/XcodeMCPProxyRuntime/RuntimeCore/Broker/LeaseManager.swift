@@ -153,6 +153,10 @@ final class LeaseManager: Sendable {
         return leaseID
     }
 
+    func isLive(_ leaseID: ID) -> Bool {
+        state.withLockedValue { $0.leasesByID[leaseID] != nil }
+    }
+
     func activateLease(
         _ leaseID: LeaseManager.ID,
         requestIDKey: String?,

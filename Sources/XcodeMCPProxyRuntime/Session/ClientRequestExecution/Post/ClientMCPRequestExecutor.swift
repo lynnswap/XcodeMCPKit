@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import NIO
+import NIOConcurrencyHelpers
 import XcodeMCPKit
 
 final class ClientMCPRequestExecutor: Sendable {
@@ -9,6 +10,13 @@ final class ClientMCPRequestExecutor: Sendable {
         let localResponseData: Data?
         let forwardedResponseID: JSONRPC.ID?
     }
+
+    private struct RequestKey: Hashable {
+        let sessionID: String
+        let id: String
+    }
+
+    private let activeCancellations = NIOLockedValueBox<[RequestKey: CancellationHandle]>([:])
 
     let sessionManager: any RuntimeClientMCPRequestPort
     let disabledToolNames: Set<String>
@@ -96,6 +104,105 @@ final class ClientMCPRequestExecutor: Sendable {
             )
         }
 
+        let methodTimeout = Self.topLevelRequestTimeoutOverride(
+            method: JSONRPC.Message.Inspector.method(from: requestObject),
+            defaultSeconds: requestTimeoutSeconds
+        )
+        let requestDeadline = timeoutDeadline(
+            for: Self.minimumRequestTimeout(requestTimeoutOverride, methodTimeout)
+        )
+        let admittedHandle: CancellationHandle?
+        let requestKey: RequestKey?
+        if parentCancellationHandle == nil,
+           let sessionID = headerSessionID, !sessionID.isEmpty,
+           case .request(let method, let id) = JSONRPC.Message.Inspector.kind(of: requestObject),
+           method != "initialize" {
+            let leaseID = sessionManager.createRequestLease(descriptor: Self.topLevelRequestDescriptor(
+                sessionID: sessionID, parsedRequestJSON: requestObject, responseID: id
+            ))
+            let handle = CancellationHandle(leaseID: leaseID, sessionID: sessionID, requestIDKeys: [id.key])
+            let key = RequestKey(sessionID: sessionID, id: id.key)
+            activeCancellations.withLockedValue { $0[key] = handle }
+            admittedHandle = handle
+            requestKey = key
+        } else {
+            admittedHandle = nil
+            requestKey = nil
+        }
+        let operation = makeOperation(
+            requestObject: requestObject,
+            bodyData: bodyData,
+            headerSessionID: headerSessionID,
+            headerSessionExists: headerSessionExists,
+            prefersEventStream: prefersEventStream,
+            eventLoop: eventLoop,
+            requestTimeoutOverride: requestTimeoutOverride,
+            parentCancellationHandle: parentCancellationHandle,
+            admittedHandle: admittedHandle,
+            requestDeadline: requestDeadline
+        )
+        guard let handle = admittedHandle, let key = requestKey else { return operation }
+        let sessionID = key.sessionID
+        let responseID = JSONRPC.Message.Inspector.requestID(from: requestObject)
+        let timeoutResolution = Resolution.mcpError(
+            id: responseID, code: -32000, message: "upstream timeout",
+            sessionID: sessionID, prefersEventStream: prefersEventStream
+        )
+        let promise = eventLoop.makePromise(of: Resolution.self)
+        let timeoutTask = requestDeadline.map { deadline in
+            eventLoop.scheduleTask(in: remainingRequestTimeout(until: deadline) ?? .nanoseconds(0)) {
+                if handle.timeOut(using: self.sessionManager) {
+                    promise.succeed(timeoutResolution)
+                }
+            }
+        }
+        operation.future.map { resolution in
+            if handle.wasTimedOut { return timeoutResolution }
+            return handle.wasCancelled ? .empty(status: .accepted, sessionID: sessionID) : resolution
+        }.flatMapError { error in
+            if handle.wasTimedOut { return eventLoop.makeSucceededFuture(timeoutResolution) }
+            if handle.wasCancelled {
+                return eventLoop.makeSucceededFuture(.empty(status: .accepted, sessionID: sessionID))
+            }
+            return eventLoop.makeFailedFuture(error)
+        }.cascade(to: promise)
+        let future = promise.futureResult
+        let registrations = activeCancellations
+        let finishesAtAdmission = operation.cancellationHandle == nil
+        future.whenComplete { _ in
+            timeoutTask?.cancel()
+            handle.markCompleted()
+            if finishesAtAdmission, !handle.wasInterrupted {
+                self.sessionManager.completeRequestLease(handle.leaseID)
+            }
+            registrations.withLockedValue { registrations in
+                if registrations[key] === handle { registrations.removeValue(forKey: key) }
+            }
+        }
+        return Operation(future: future, cancellationHandle: handle)
+    }
+
+    func cancelRequests(in sessionID: String? = nil) {
+        let handles = activeCancellations.withLockedValue { registrations in
+            let selected = registrations.filter { sessionID == nil || $0.key.sessionID == sessionID }
+            for key in selected.keys { registrations.removeValue(forKey: key) }
+            return Array(selected.values)
+        }
+        for handle in handles { handle.cancel(using: sessionManager) }
+    }
+
+    private func makeOperation(
+        requestObject: [String: Any],
+        bodyData: Data,
+        headerSessionID: String?,
+        headerSessionExists: Bool,
+        prefersEventStream: Bool,
+        eventLoop: EventLoop,
+        requestTimeoutOverride: TimeAmount?,
+        parentCancellationHandle: CancellationHandle?,
+        admittedHandle: CancellationHandle?,
+        requestDeadline: Date?
+    ) -> Operation {
         if let localHandling = localResponder.handle(
             object: requestObject,
             headerSessionID: headerSessionID,
@@ -103,14 +210,33 @@ final class ClientMCPRequestExecutor: Sendable {
             eventLoop: eventLoop,
             requestTimeoutOverride: requestTimeoutOverride
         ) {
-            return ClientMCPRequestExecutor.Operation(
-                future: resolveLocalHandling(
-                    localHandling,
-                    prefersEventStream: prefersEventStream,
-                    eventLoop: eventLoop
-                ),
-                cancellationHandle: nil
+            let future = resolveLocalHandling(
+                localHandling,
+                prefersEventStream: prefersEventStream,
+                eventLoop: eventLoop
             )
+            var handle: CancellationHandle?
+            if case .pendingResponse(_, let sessionID, _, let id, let task?) = localHandling {
+                let localHandle = admittedHandle ?? CancellationHandle(
+                    leaseID: sessionManager.createRequestLease(descriptor: Self.topLevelRequestDescriptor(
+                        sessionID: sessionID, parsedRequestJSON: requestObject, responseID: id
+                    )),
+                    sessionID: sessionID, requestIDKeys: [id.key]
+                )
+                localHandle.bindRefreshTask(task)
+                if let parentCancellationHandle,
+                   !parentCancellationHandle.bindChildHandle(localHandle) {
+                    localHandle.cancel(using: sessionManager)
+                }
+                future.whenComplete { _ in
+                    localHandle.markCompleted()
+                    if !localHandle.wasInterrupted {
+                        self.sessionManager.completeRequestLease(localHandle.leaseID)
+                    }
+                }
+                handle = localHandle
+            }
+            return Operation(future: future, cancellationHandle: handle)
         }
 
         guard let sessionID = headerSessionID, sessionID.isEmpty == false else {
@@ -124,6 +250,25 @@ final class ClientMCPRequestExecutor: Sendable {
                 .plain(status: .notFound, body: "session not found", sessionID: sessionID),
                 on: eventLoop
             )
+        }
+
+        if case .notification("notifications/cancelled") = JSONRPC.Message.Inspector.kind(of: requestObject) {
+            if let params = requestObject["params"] as? [String: Any],
+               let rawID = params["requestId"],
+               let value = JSONValue(any: rawID) {
+                let id: JSONRPC.ID?
+                switch value {
+                case .string, .number: id = JSONRPC.ID(any: rawID)
+                case .array, .object, .bool, .null: id = nil
+                }
+                if let id,
+                   let handle = activeCancellations.withLockedValue({
+                       $0[RequestKey(sessionID: sessionID, id: id.key)]
+                   }) {
+                    cancel(handle, source: .clientNotification)
+                }
+            }
+            return immediate(.empty(status: .accepted, sessionID: sessionID), on: eventLoop)
         }
 
         switch JSONRPC.Message.Inspector.kind(of: requestObject) {
@@ -155,7 +300,9 @@ final class ClientMCPRequestExecutor: Sendable {
             bodyData: bodyData,
             sessionID: sessionID,
             eventLoop: eventLoop,
-            requestTimeoutOverride: requestTimeoutOverride
+            requestTimeoutOverride: requestTimeoutOverride,
+            admittedHandle: admittedHandle,
+            requestDeadline: requestDeadline
         ) {
         case .local(let responseData):
             return immediate(
@@ -197,7 +344,9 @@ final class ClientMCPRequestExecutor: Sendable {
                 prefersEventStream: prefersEventStream,
                 eventLoop: eventLoop,
                 requestTimeoutOverride: requestTimeoutOverride,
-                parentCancellationHandle: parentCancellationHandle
+                parentCancellationHandle: parentCancellationHandle,
+                admittedHandle: admittedHandle,
+                requestDeadline: requestDeadline
             )
         }
     }
@@ -208,7 +357,9 @@ final class ClientMCPRequestExecutor: Sendable {
         prefersEventStream: Bool,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
-        parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
+        parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle?,
+        admittedHandle: CancellationHandle? = nil,
+        requestDeadline: Date?
     ) -> ClientMCPRequestExecutor.Operation {
         guard let forwardedBodyData = filteredRequest.bodyData else {
             return immediate(
@@ -239,12 +390,12 @@ final class ClientMCPRequestExecutor: Sendable {
             parsedRequestJSON: forwardedRequestJSON,
             responseID: filteredRequest.forwardedResponseID
         )
-        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let cancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
-            leaseID: leaseID,
+        let cancellationHandle = admittedHandle ?? ClientMCPRequestExecutor.CancellationHandle(
+            leaseID: sessionManager.createRequestLease(descriptor: descriptor),
             sessionID: sessionID,
             requestIDKeys: filteredRequest.forwardedResponseID.map { [$0.key] } ?? []
         )
+        let leaseID = cancellationHandle.leaseID
         if let parentCancellationHandle,
             parentCancellationHandle.bindChildHandle(cancellationHandle) == false
         {
@@ -252,13 +403,7 @@ final class ClientMCPRequestExecutor: Sendable {
             return immediate(.empty(status: .accepted, sessionID: sessionID), on: eventLoop)
         }
 
-        let forwardingDeadline = timeoutDeadline(
-            for: requestTimeoutOverride
-                ?? Self.topLevelRequestTimeoutOverride(
-                    method: nil,
-                    defaultSeconds: requestTimeoutSeconds
-                )
-        )
+        let forwardingDeadline = requestDeadline
         let session = sessionManager.session(id: sessionID)
 
         if refreshCodeIssuesRequest(from: forwardedRequestJSON) != nil,
@@ -314,7 +459,7 @@ final class ClientMCPRequestExecutor: Sendable {
         @Sendable func route(
             _ decision: ToolRoutingDecision
         ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
-            guard cancellationHandle.isCancelled == false else {
+            guard cancellationHandle.isTerminal == false else {
                 return eventLoop.makeSucceededFuture(.empty(status: .accepted, sessionID: sessionID))
             }
             func forward(
@@ -331,6 +476,10 @@ final class ClientMCPRequestExecutor: Sendable {
                     on: eventLoop,
                     preferredUpstreamIndices: preferredUpstreamIndices
                 ) { operationLease in
+                    let remainingTimeout = forwardingTimeout()
+                    if forwardingDeadline != nil, remainingTimeout == nil {
+                        return timeoutResolution()
+                    }
                     guard cancellationHandle.activate(operationLease: operationLease) else {
                         return eventLoop.makeFailedFuture(CancellationError())
                     }

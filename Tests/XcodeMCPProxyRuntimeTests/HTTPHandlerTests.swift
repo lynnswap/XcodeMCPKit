@@ -1927,7 +1927,8 @@ struct HTTPHandlerTests {
                 prefersEventStream: false,
                 eventLoop: group.next(),
                 requestTimeoutOverride: nil,
-                parentCancellationHandle: nil
+                parentCancellationHandle: nil,
+                requestDeadline: service.timeoutDeadline(for: .seconds(2))
             )
 
             let resolution = try await operation.future.get()
