@@ -18815,7 +18815,7 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
     }
 
-    @Test func upstreamSlotSchedulerSerializesTopLevelRequestsPerSessionAcrossUpstreams()
+    @Test func upstreamSlotSchedulerUsesIdleUpstreamForTheSameSession()
         async throws
     {
         let eventLoop = EmbeddedEventLoop()
@@ -18864,7 +18864,7 @@ struct RuntimeCoordinatorSchedulingTests {
                 }
             },
             failUnavailable: {
-                Issue.record("second request should wait for the session slot, not fail unavailable")
+                Issue.record("second request should use the idle upstream")
             },
             failCancelled: {
                 Issue.record("second request should not be cancelled")
@@ -18888,7 +18888,7 @@ struct RuntimeCoordinatorSchedulingTests {
                 }
             },
             failUnavailable: {
-                Issue.record("third request should use the other upstream")
+                Issue.record("third request should wait for an occupied upstream to be released")
             },
             failCancelled: {
                 Issue.record("third request should not be cancelled")
@@ -18896,13 +18896,13 @@ struct RuntimeCoordinatorSchedulingTests {
         )
         eventLoop.run()
 
-        #expect(started.withLockedValue { $0 } == ["first@0", "third@1"])
+        #expect(started.withLockedValue { $0 } == ["first@0", "second@1"])
         #expect(scheduler.debugSnapshot().queuedRequestCount == 1)
 
-        scheduler.releaseUpstreamSlot(upstreamIndex: 0, leaseID: firstLeaseID)
+        scheduler.releaseUpstreamSlot(upstreamIndex: 1, leaseID: secondLeaseID)
         eventLoop.run()
 
-        #expect(started.withLockedValue { $0 } == ["first@0", "third@1", "second@0"])
+        #expect(started.withLockedValue { $0 } == ["first@0", "second@1", "third@1"])
         #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
     }
 
