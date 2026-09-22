@@ -253,22 +253,28 @@ let package = Package(
             ],
             swiftSettings: strictSwiftSettings
         ),
+        .target(
+            name: "XcodeMCPProxyRuntimeTestSupport",
+            dependencies: [
+                "XcodeMCPCore", "XcodeMCPProxyRuntime", "XcodeMCPProxyTestSupport",
+                .product(name: "NIOCore", package: "swift-nio"),
+            ],
+            path: "Tests/XcodeMCPProxyRuntimeTestSupport",
+            swiftSettings: strictSwiftSettings
+        ),
         .testTarget(
             name: "XcodeMCPProxyRuntimeTests",
             dependencies: [
+                "XcodeMCPProxyRuntimeTestSupport",
                 "XcodeMCPDocumentationSearch",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
-                "XcodeMCPKit",
-                "XcodeMCPProxyKit",
                 "XcodeMCPProxyRuntime",
-                "XcodeMCPProxyHTTP",
                 "XcodeMCPProxyTestSupport",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Tests/XcodeMCPProxyRuntimeTests",
             swiftSettings: strictSwiftSettings
@@ -278,7 +284,6 @@ let package = Package(
             dependencies: [
                 "XcodeMCPCore",
                 "XcodeMCPCoreTestSupport",
-                "XcodeMCPKit",
             ],
             path: "Tests/XcodeMCPProcessRuntimeTests",
             swiftSettings: strictSwiftSettings
@@ -338,6 +343,7 @@ let package = Package(
         .testTarget(
             name: "ProxyIntegrationTests",
             dependencies: [
+                "XcodeMCPProxyRuntimeTestSupport",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 "XcodeMCPKit",

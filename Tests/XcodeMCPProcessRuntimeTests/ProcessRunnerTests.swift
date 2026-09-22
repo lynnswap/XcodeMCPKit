@@ -1,9 +1,7 @@
 @testable import XcodeMCPCore
 import Foundation
 import Testing
-import XcodeMCPCoreTestSupport
-
-@testable import XcodeMCPKit
+@testable import XcodeMCPCoreTestSupport
 
 @Suite
 struct ProcessRunnerTests {

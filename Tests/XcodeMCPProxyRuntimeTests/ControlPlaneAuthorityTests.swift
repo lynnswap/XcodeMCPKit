@@ -1,9 +1,9 @@
+@testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPCore
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import Testing
-import XcodeMCPKit
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyRuntime
 

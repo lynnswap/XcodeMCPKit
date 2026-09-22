@@ -1,3 +1,4 @@
+@testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPDocumentationSearch
 @testable import XcodeMCPCore
 import Foundation
@@ -5,7 +6,6 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
-import XcodeMCPKit
 @testable import XcodeMCPProxyRuntime
 import XcodeMCPProxyTestSupport
 

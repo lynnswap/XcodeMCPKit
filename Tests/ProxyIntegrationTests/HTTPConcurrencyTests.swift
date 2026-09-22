@@ -1,3 +1,4 @@
+@testable import XcodeMCPProxyRuntimeTestSupport
 import XcodeMCPProxyRuntimeContract
 @testable import XcodeMCPCore
 import Foundation

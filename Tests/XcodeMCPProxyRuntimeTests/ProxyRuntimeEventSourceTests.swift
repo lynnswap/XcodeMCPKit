@@ -1,3 +1,4 @@
+@testable import XcodeMCPProxyRuntimeTestSupport
 import XcodeMCPProxyRuntimeContract
 import Foundation
 import NIO

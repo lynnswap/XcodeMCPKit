@@ -1,3 +1,4 @@
+@testable import XcodeMCPProxyRuntimeTestSupport
 import NIOConcurrencyHelpers
 import Testing
 
