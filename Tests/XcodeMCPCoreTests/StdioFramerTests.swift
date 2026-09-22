@@ -171,6 +171,41 @@ struct StdioFramerTests {
         #expect(result.protocolViolation?.reason == .invalidContentLengthHeader)
     }
 
+    @Test(arguments: [false, true])
+    func stdioFramerBoundsHeadersIndependentlyOfBodySize(delimited: Bool) {
+        let header = "Content-Length:" + String(repeating: " ", count: 4 * 1024 * 1024)
+            + (delimited ? "1\r\n\r\n{}" : "")
+        let result = StdioFramer().append(Data(header.utf8))
+        #expect(result.messages.isEmpty)
+        #expect(result.protocolViolation?.reason == .headerTooLarge)
+    }
+
+    @Test func stdioFramerReassemblesLargeBodyFromPipeSizedChunks() {
+        let message = Data(("{\"text\":\"" + String(repeating: "x", count: 16 * 1024 * 1024) + "\"}").utf8)
+        let framer = StdioFramer()
+        var messages: [Data] = []
+        for offset in stride(from: 0, to: message.count, by: 64 * 1024) {
+            let end = min(offset + 64 * 1024, message.count)
+            let result = framer.append(message.subdata(in: offset..<end))
+            #expect(result.protocolViolation == nil)
+            messages.append(contentsOf: result.messages)
+        }
+        #expect(messages == [message])
+    }
+
+    @Test func stdioFramerPreservesEscapesAndNestedValuesAcrossEveryByteBoundary() {
+        let first = Data(#"{"text":"quote\" slash\\ unicode\u007D braces{}[]","values":[true,null,-1.25e+2,{"key":"値"}]}"#.utf8)
+        let second = Data(#"[{"second":false}]"#.utf8)
+        let framer = StdioFramer()
+        var messages: [Data] = []
+        for byte in first + Data("\n".utf8) + second {
+            let result = framer.append(Data([byte]))
+            #expect(result.protocolViolation == nil)
+            messages.append(contentsOf: result.messages)
+        }
+        #expect(messages == [first, second])
+    }
+
     @Test func stdioFramerDiscardsWhitespaceBetweenMessages() {
         let framer = StdioFramer()
         for _ in 0..<5 {

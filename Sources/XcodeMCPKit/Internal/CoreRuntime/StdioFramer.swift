@@ -6,6 +6,7 @@ package final class StdioFramer {
             case unexpectedLeadingByte
             case unexpectedTopLevelArray
             case invalidContentLengthHeader
+            case headerTooLarge
             case invalidJSON
         }
 
@@ -62,9 +63,11 @@ package final class StdioFramer {
         case invalid
     }
 
+    private let maximumHeaderBytes = 4 * 1024 * 1024
     private let previewLimit = 200
 
     private var buffer = Data()
+    private var rawJSONScanner: JSONBoundaryScanner?
 
     package init() {}
 
@@ -75,6 +78,11 @@ package final class StdioFramer {
 
         var messages: [Data] = []
         while true {
+            if rawJSONScanner == nil,
+               let first = firstNonWhitespaceIndex(from: buffer.startIndex),
+               first > buffer.startIndex {
+                buffer.removeSubrange(buffer.startIndex..<first)
+            }
             if let message = nextContentLengthMessage() {
                 messages.append(message)
                 continue
@@ -88,6 +96,7 @@ package final class StdioFramer {
 
         if firstNonWhitespaceIndex(from: buffer.startIndex) == nil {
             buffer.removeAll(keepingCapacity: false)
+            rawJSONScanner = nil
         }
 
         let protocolViolation = protocolViolationIfNeeded()
@@ -108,7 +117,7 @@ package final class StdioFramer {
             return nil
         }
 
-        guard case .complete(let messageEnd) = jsonPrefixParseResult(from: startIndex) else {
+        guard case .complete(let messageEnd) = scanRawJSON(from: startIndex) else {
             return nil
         }
 
@@ -118,6 +127,7 @@ package final class StdioFramer {
         }
 
         buffer.removeSubrange(0..<messageEnd)
+        rawJSONScanner = nil
         return message
     }
 
@@ -132,6 +142,7 @@ package final class StdioFramer {
             return nil
         }
 
+        guard headerEndIndex - startIndex <= maximumHeaderBytes else { return nil }
         let headerData = buffer.subdata(in: startIndex..<headerEndIndex)
         guard
             let headerText = String(data: headerData, encoding: .utf8),
@@ -159,12 +170,18 @@ package final class StdioFramer {
 
         if isPotentialContentLengthHeaderPrefix(at: firstIndex) {
             guard let headerEndIndex = contentLengthHeaderEndIndex(from: firstIndex) else {
+                if buffer.endIndex - firstIndex > maximumHeaderBytes {
+                    return makeProtocolViolation(reason: .headerTooLarge)
+                }
                 if hasMalformedContentLengthPrefixWithoutDelimiter(from: firstIndex) {
                     return makeProtocolViolation(reason: .invalidContentLengthHeader)
                 }
                 return nil
             }
 
+            guard headerEndIndex - firstIndex <= maximumHeaderBytes else {
+                return makeProtocolViolation(reason: .headerTooLarge)
+            }
             let headerData = buffer.subdata(in: firstIndex..<headerEndIndex)
             guard
                 let headerText = String(data: headerData, encoding: .utf8),
@@ -193,7 +210,7 @@ package final class StdioFramer {
             return makeProtocolViolation(reason: .unexpectedLeadingByte)
         }
 
-        switch jsonPrefixParseResult(from: firstIndex) {
+        switch scanRawJSON(from: firstIndex) {
         case .complete(let messageEnd):
             let message = buffer.subdata(in: firstIndex..<messageEnd)
             if isValidJSONObjectOrArray(message) {
@@ -234,7 +251,8 @@ package final class StdioFramer {
         guard rootByte == 0x7B || rootByte == 0x5B else {
             return nil
         }
-        guard case .complete(let messageEnd) = jsonPrefixParseResult(from: startIndex) else {
+        var scanner = JSONBoundaryScanner(cursor: startIndex)
+        guard case .complete(let messageEnd) = scanner.scan(in: buffer, through: range.upperBound) else {
             return nil
         }
         guard messageEnd <= range.upperBound else {
@@ -337,213 +355,81 @@ package final class StdioFramer {
         return nil
     }
 
-    private func jsonPrefixParseResult(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        parseJSONValuePrefix(from: startIndex)
+    private func scanRawJSON(from startIndex: Data.Index) -> JSONPrefixParseResult {
+        var scanner = rawJSONScanner ?? JSONBoundaryScanner(cursor: startIndex)
+        let result = scanner.scan(in: buffer, through: buffer.endIndex)
+        rawJSONScanner = scanner
+        return result
     }
 
-    private func parseJSONValuePrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        let index = skipWhitespace(from: startIndex)
-        guard index < buffer.endIndex else { return .incomplete }
+    // This scanner only locates a complete object/array; Foundation validates
+    // its JSON grammar. Its cursor survives appends so body bytes are visited once.
+    private struct JSONBoundaryScanner {
+        var cursor: Data.Index
+        private var closingDelimiters: [UInt8] = []
+        private var isInString = false
+        private var isEscaped = false
+        private var unicodeDigitsRemaining = 0
+        private var terminalResult: JSONPrefixParseResult?
 
-        switch buffer[index] {
-        case 0x7B:
-            return parseJSONObjectPrefix(from: index)
-        case 0x5B:
-            return parseJSONArrayPrefix(from: index)
-        case 0x22:
-            return parseJSONStringPrefix(from: index)
-        case 0x74:
-            return parseJSONLiteralPrefix("true", from: index)
-        case 0x66:
-            return parseJSONLiteralPrefix("false", from: index)
-        case 0x6E:
-            return parseJSONLiteralPrefix("null", from: index)
-        case 0x2D, 0x30 ... 0x39:
-            return parseJSONNumberPrefix(from: index)
-        default:
-            return .invalid
-        }
-    }
-
-    private func parseJSONObjectPrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        var index = skipWhitespace(from: buffer.index(after: startIndex))
-        guard index < buffer.endIndex else { return .incomplete }
-        if buffer[index] == 0x7D {
-            return .complete(buffer.index(after: index))
+        init(cursor: Data.Index) {
+            self.cursor = cursor
         }
 
-        while true {
-            switch parseJSONStringPrefix(from: index) {
-            case .complete(let nextIndex):
-                index = skipWhitespace(from: nextIndex)
-            case .incomplete:
-                return .incomplete
-            case .invalid:
-                return .invalid
-            }
-
-            guard index < buffer.endIndex else { return .incomplete }
-            guard buffer[index] == 0x3A else { return .invalid }
-            index = skipWhitespace(from: buffer.index(after: index))
-
-            switch parseJSONValuePrefix(from: index) {
-            case .complete(let nextIndex):
-                index = skipWhitespace(from: nextIndex)
-            case .incomplete:
-                return .incomplete
-            case .invalid:
-                return .invalid
-            }
-
-            guard index < buffer.endIndex else { return .incomplete }
-            let byte = buffer[index]
-            if byte == 0x2C {
-                index = skipWhitespace(from: buffer.index(after: index))
-                guard index < buffer.endIndex else { return .incomplete }
-                continue
-            }
-            if byte == 0x7D {
-                return .complete(buffer.index(after: index))
-            }
-            return .invalid
-        }
-    }
-
-    private func parseJSONArrayPrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        var index = skipWhitespace(from: buffer.index(after: startIndex))
-        guard index < buffer.endIndex else { return .incomplete }
-        if buffer[index] == 0x5D {
-            return .complete(buffer.index(after: index))
-        }
-
-        while true {
-            switch parseJSONValuePrefix(from: index) {
-            case .complete(let nextIndex):
-                index = skipWhitespace(from: nextIndex)
-            case .incomplete:
-                return .incomplete
-            case .invalid:
-                return .invalid
-            }
-
-            guard index < buffer.endIndex else { return .incomplete }
-            let byte = buffer[index]
-            if byte == 0x2C {
-                index = skipWhitespace(from: buffer.index(after: index))
-                guard index < buffer.endIndex else { return .incomplete }
-                continue
-            }
-            if byte == 0x5D {
-                return .complete(buffer.index(after: index))
-            }
-            return .invalid
-        }
-    }
-
-    private func parseJSONStringPrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        guard startIndex < buffer.endIndex, buffer[startIndex] == 0x22 else { return .invalid }
-
-        var index = buffer.index(after: startIndex)
-        var isEscaped = false
-        var pendingUnicodeDigits = 0
-
-        while index < buffer.endIndex {
-            let byte = buffer[index]
-            if pendingUnicodeDigits > 0 {
-                guard isHexDigit(byte) else { return .invalid }
-                pendingUnicodeDigits -= 1
-            } else if isEscaped {
-                switch byte {
-                case 0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74:
-                    isEscaped = false
-                case 0x75:
-                    isEscaped = false
-                    pendingUnicodeDigits = 4
-                default:
-                    return .invalid
+        mutating func scan(in data: Data, through endIndex: Data.Index) -> JSONPrefixParseResult {
+            if let terminalResult { return terminalResult }
+            while cursor < endIndex {
+                let byte = data[cursor]
+                cursor += 1
+                if isInString {
+                    if unicodeDigitsRemaining > 0 {
+                        guard (0x30...0x39).contains(byte) || (0x41...0x46).contains(byte)
+                            || (0x61...0x66).contains(byte) else {
+                            return finish(.invalid)
+                        }
+                        unicodeDigitsRemaining -= 1
+                    } else if isEscaped {
+                        isEscaped = false
+                        switch byte {
+                        case 0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74:
+                            break
+                        case 0x75:
+                            unicodeDigitsRemaining = 4
+                        default:
+                            return finish(.invalid)
+                        }
+                    } else if byte == 0x5C {
+                        isEscaped = true
+                    } else if byte == 0x22 {
+                        isInString = false
+                    } else if byte < 0x20 {
+                        return finish(.invalid)
+                    }
+                } else {
+                    switch byte {
+                    case 0x7B:
+                        closingDelimiters.append(0x7D)
+                    case 0x5B:
+                        closingDelimiters.append(0x5D)
+                    case 0x7D, 0x5D:
+                        guard closingDelimiters.popLast() == byte else {
+                            return finish(.invalid)
+                        }
+                        if closingDelimiters.isEmpty { return finish(.complete(cursor)) }
+                    case 0x22:
+                        isInString = true
+                    default:
+                        break
+                    }
                 }
-            } else if byte == 0x5C {
-                isEscaped = true
-            } else if byte == 0x22 {
-                return .complete(buffer.index(after: index))
-            } else if byte < 0x20 {
-                return .invalid
             }
-
-            index = buffer.index(after: index)
+            return .incomplete
         }
 
-        return .incomplete
-    }
-
-    private func parseJSONLiteralPrefix(_ literal: StaticString, from startIndex: Data.Index)
-        -> JSONPrefixParseResult
-    {
-        let bytes = Array(String(describing: literal).utf8)
-        var index = startIndex
-
-        for expected in bytes {
-            guard index < buffer.endIndex else { return .incomplete }
-            guard buffer[index] == expected else { return .invalid }
-            index = buffer.index(after: index)
+        private mutating func finish(_ result: JSONPrefixParseResult) -> JSONPrefixParseResult {
+            terminalResult = result
+            return result
         }
-
-        if index < buffer.endIndex, !isJSONValueTerminator(buffer[index]) {
-            return .invalid
-        }
-        return .complete(index)
-    }
-
-    private func parseJSONNumberPrefix(from startIndex: Data.Index) -> JSONPrefixParseResult {
-        var index = startIndex
-        let start = index
-
-        if buffer[index] == 0x2D {
-            index = buffer.index(after: index)
-            guard index < buffer.endIndex else { return .incomplete }
-        }
-
-        guard index < buffer.endIndex else { return .incomplete }
-        switch buffer[index] {
-        case 0x30:
-            index = buffer.index(after: index)
-            if index < buffer.endIndex, isDigit(buffer[index]) {
-                return .invalid
-            }
-        case 0x31 ... 0x39:
-            repeat {
-                index = buffer.index(after: index)
-            } while index < buffer.endIndex && isDigit(buffer[index])
-        default:
-            return index == start ? .invalid : .incomplete
-        }
-
-        if index < buffer.endIndex, buffer[index] == 0x2E {
-            index = buffer.index(after: index)
-            guard index < buffer.endIndex else { return .incomplete }
-            guard isDigit(buffer[index]) else { return .invalid }
-            repeat {
-                index = buffer.index(after: index)
-            } while index < buffer.endIndex && isDigit(buffer[index])
-        }
-
-        if index < buffer.endIndex, buffer[index] == 0x45 || buffer[index] == 0x65 {
-            index = buffer.index(after: index)
-            guard index < buffer.endIndex else { return .incomplete }
-            if buffer[index] == 0x2B || buffer[index] == 0x2D {
-                index = buffer.index(after: index)
-                guard index < buffer.endIndex else { return .incomplete }
-            }
-            guard isDigit(buffer[index]) else { return .invalid }
-            repeat {
-                index = buffer.index(after: index)
-            } while index < buffer.endIndex && isDigit(buffer[index])
-        }
-
-        if index < buffer.endIndex, !isJSONValueTerminator(buffer[index]) {
-            return .invalid
-        }
-        return .complete(index)
     }
 
     private func skipWhitespace(from startIndex: Data.Index) -> Data.Index {
@@ -556,18 +442,6 @@ package final class StdioFramer {
 
     private func isWhitespace(_ byte: UInt8) -> Bool {
         byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
-    }
-
-    private func isDigit(_ byte: UInt8) -> Bool {
-        byte >= 0x30 && byte <= 0x39
-    }
-
-    private func isHexDigit(_ byte: UInt8) -> Bool {
-        isDigit(byte) || (byte >= 0x41 && byte <= 0x46) || (byte >= 0x61 && byte <= 0x66)
-    }
-
-    private func isJSONValueTerminator(_ byte: UInt8) -> Bool {
-        isWhitespace(byte) || byte == 0x2C || byte == 0x5D || byte == 0x7D
     }
 
     private func preview(of data: Data) -> String {
