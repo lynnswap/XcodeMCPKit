@@ -354,6 +354,26 @@ private func makeFakeXcodeApp(root: URL) throws -> XcodeProcessTarget {
 
 @Suite(.serialized, .asyncTestCleanup)
 struct DocumentationProviderTests {
+    @Test func sessionBackedDocumentationProviderFindsDescriptorOnLaterPage() async throws {
+        let target = xcodeProcessTarget(processID: 120, xcodeVersion: "27.0")
+        let session = PaginatedDocumentationSession()
+        let transport = SessionBackedDocumentationProviderTransport(
+            sessionFactory: FixedDocumentationSessionFactory(session: session)
+        )
+        let route = try await transport.openRoute(for: target, requestTimeout: .seconds(2), initializeParams: [:])
+        do {
+            let catalog = try await transport.toolsList(route: route, timeout: .seconds(2))
+            #expect(Set(toolNames(in: catalog)) == Set(["FirstPage", "DocumentationSearch"]))
+            #expect(documentationDescriptorDescription(in: catalog) == "docs-27.0")
+            #expect(await session.cursors() == [nil, "docs-next"])
+            if case .object(let object) = catalog { #expect(object["nextCursor"] == nil) }
+        } catch {
+            await transport.shutdown()
+            throw error
+        }
+        await transport.shutdown()
+    }
+
     @Test func documentationProviderConnectionCancelsEventReaderOnDeinit() async throws {
         let terminated = TestSignal()
         var connection: DocumentationProviderConnection? = DocumentationProviderConnection(
@@ -1385,7 +1405,17 @@ struct DocumentationProviderTests {
         #expect(methodName(from: toolsRequest) == "tools/list")
         let toolsRequestID = try extractUpstreamID(from: toolsRequest)
         await yieldMessage(
-            try makeDocumentationToolsListResponse(id: toolsRequestID, version: "27.0"),
+            try JSONRPC.Wire.resultResponseData(
+                id: JSONRPC.ID(any: toolsRequestID)!,
+                result: .object(["tools": .array([]), "nextCursor": .string("docs-next")])
+            ),
+            to: upstream
+        )
+        let nextToolsRequest = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        let nextObject = try #require(try JSONSerialization.jsonObject(with: nextToolsRequest) as? [String: Any])
+        #expect((nextObject["params"] as? [String: Any])?["cursor"] as? String == "docs-next")
+        await yieldMessage(
+            try makeDocumentationToolsListResponse(id: extractUpstreamID(from: nextToolsRequest), version: "27.0"),
             to: upstream
         )
         let update = await prewarmUpdate
@@ -1399,7 +1429,7 @@ struct DocumentationProviderTests {
             requestData: makeDocumentationSearchRequest(id: 91, query: "UIView"),
             requestTimeoutOverride: .seconds(1)
         )
-        let searchRequest = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
+        let searchRequest = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         #expect(methodName(from: searchRequest) == "tools/call")
         #expect(try documentationSearchQuery(in: searchRequest) == "UIView")
         let searchRequestID = try extractUpstreamID(from: searchRequest)
@@ -1419,7 +1449,7 @@ struct DocumentationProviderTests {
         #expect(invalidatedProvider == false)
         #expect(try responseID(in: responseData) == 91)
         #expect(try toolContentText(in: responseData) == "{\"answer\":\"route\"}")
-        #expect(await upstream.sentCount() == 2)
+        #expect(await upstream.sentCount() == 3)
     }
 
     @Test func runtimeDocumentationTransportDoesNotFallbackWhileUpstreamRouteIsInitializing()
@@ -6935,5 +6965,40 @@ private actor HangingDocumentationEventSession: UpstreamSession {
 
     func stop() async {
         continuation.finish()
+    }
+}
+
+private actor PaginatedDocumentationSession: UpstreamSession {
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private var requestedCursors: [String?] = []
+
+    init() { (events, continuation) = AsyncStream.makeStream() }
+    nonisolated func cancel() {}
+    func stop() async { continuation.finish() }
+    func cursors() -> [String?] { requestedCursors }
+
+    func send(_ data: Data) async -> Upstream.SendResult {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawID = object["id"], let id = JSONRPC.ID(any: rawID) else { return .accepted }
+        let result: JSONValue
+        if object["method"] as? String == "tools/list" {
+            let cursor = (object["params"] as? [String: Any])?["cursor"] as? String
+            requestedCursors.append(cursor)
+            if cursor == nil {
+                result = .object([
+                    "tools": .array([.object(["name": .string("FirstPage")])]),
+                    "nextCursor": .string("docs-next"),
+                ])
+            } else {
+                result = .object(["tools": .array([documentationDescriptor(version: "27.0")])])
+            }
+        } else {
+            result = .object(["serverInfo": .object(["name": .string("docs-test"), "version": .string("27.0")])])
+        }
+        if let response = try? JSONRPC.Wire.resultResponseData(id: id, result: result) {
+            continuation.yield(.message(response))
+        }
+        return .accepted
     }
 }

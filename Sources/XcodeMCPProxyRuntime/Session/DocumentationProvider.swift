@@ -2371,11 +2371,20 @@ actor SessionBackedDocumentationProviderTransport: DocumentationProviderRouting 
         guard let connection = connections[route.id] else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        let toolsList = try await connection.call(
-            try Self.makeToolsListRequestData(),
-            timeout: timeout
-        )
-        return try DocumentationProviderManager.resultValue(from: toolsList)
+        let deadline = Deadline.fromNow(timeout, clock: clock)
+        var pagination = ToolsListPagination()
+        repeat {
+            try Task.checkCancellation()
+            let remaining = deadline?.remaining()
+            guard remaining?.nanoseconds != 0 else { throw TimeoutError() }
+            let toolsList = try await connection.call(
+                try Self.makeToolsListRequestData(cursor: pagination.nextCursor),
+                timeout: remaining
+            )
+            try pagination.append(DocumentationProviderManager.resultValue(from: toolsList))
+        } while pagination.nextCursor != nil
+        try Task.checkCancellation()
+        return pagination.result
     }
 
     func callDocumentationSearch(
@@ -2445,11 +2454,12 @@ actor SessionBackedDocumentationProviderTransport: DocumentationProviderRouting 
         )
     }
 
-    private static func makeToolsListRequestData() throws -> Data {
+    private static func makeToolsListRequestData(cursor: String?) throws -> Data {
         try JSONRPC.Wire.data(
             from: JSONRPC.Wire.requestObject(
                 id: "tools-list",
-                method: "tools/list"
+                method: "tools/list",
+                params: cursor.map { .object(["cursor": .string($0)]) }
             )
         )
     }

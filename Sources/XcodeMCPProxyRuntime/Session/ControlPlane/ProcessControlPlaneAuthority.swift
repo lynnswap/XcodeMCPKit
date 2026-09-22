@@ -53,6 +53,7 @@ struct ActivationLease: Sendable, Hashable {
 
 enum CatalogInvalidationReason: Sendable {
     case reset
+    case toolsChanged(UpstreamTopologyProof)
     case routeMembershipChanged
     case exposureChanged
 }
@@ -1894,6 +1895,15 @@ final class ProcessControlPlaneAuthority: Sendable {
                             : []
                     ))
                     state.recordsByKey[key] = record
+                }
+            case .toolsChanged(let proof):
+                if let record = Self.activeRecords(in: state).first(where: {
+                    $0.route.upstreamIndices.contains(proof.slotID.rawValue)
+                }) {
+                    Self.removeCatalog(processID: record.route.target.processID, from: &state)
+                } else {
+                    state.unboundCatalogRaw = nil
+                    state.unboundCatalogSource = nil
                 }
             case .routeMembershipChanged, .exposureChanged:
                 break

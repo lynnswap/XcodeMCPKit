@@ -2173,7 +2173,7 @@ struct HTTPHandlerTests {
         #expect(sessionManager.refreshToolsListCallCount() == 0)
     }
 
-    @Test func httpToolsListUsesCachedResultWhenParamsArePresent() async throws {
+    @Test func httpToolsListRejectsUnissuedCursorWithoutCacheLookup() async throws {
         let config = makeHTTPConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -2208,7 +2208,7 @@ struct HTTPHandlerTests {
         let sessionID = initResponse.head.headers.first(name: "Mcp-Session-Id")
         #expect(sessionID?.isEmpty == false)
 
-        // tools/list with params should still be served from cache (Codex startup stability).
+        // An aggregate catalog never issues a downstream cursor.
         let toolsPayload: [String: Any] = [
             "jsonrpc": "2.0",
             "id": 2,
@@ -2239,9 +2239,9 @@ struct HTTPHandlerTests {
         let responseID = (responseObject?["id"] as? NSNumber)?.intValue
         #expect(responseID == 2)
 
-        let result = responseObject?["result"] as? [String: Any]
-        let tools = result?["tools"] as? [Any]
-        #expect(tools?.count == 0)
+        let error = responseObject?["error"] as? [String: Any]
+        #expect((error?["code"] as? NSNumber)?.intValue == -32602)
+        #expect(responseObject?["result"] == nil)
 
         #expect(sessionManager.sentUpstreamCount() == 0)
         #expect(sessionManager.assignedUpstreamIDCount() == 0)
@@ -2364,7 +2364,7 @@ struct HTTPHandlerTests {
             "id": 2,
             "method": "tools/list",
             "params": [
-                "cursor": "cursor-1"
+                "_meta": ["trace": "first"]
             ],
         ]
         let toolsData = try JSONSerialization.data(withJSONObject: toolsPayload, options: [])
@@ -2391,7 +2391,7 @@ struct HTTPHandlerTests {
             "id": 3,
             "method": "tools/list",
             "params": [
-                "cursor": "cursor-2"
+                "_meta": ["trace": "second"]
             ],
         ]
         let toolsData2 = try JSONSerialization.data(withJSONObject: toolsPayload2, options: [])
