@@ -401,6 +401,7 @@ struct HTTPConcurrencyTests {
             method: "resources/list", defaultSeconds: 60
         )
         #expect(timeout?.nanoseconds == 20_000_000_000)
+        #expect(ClientMCPRequestExecutor.minimumRequestTimeout(.seconds(60), timeout)?.nanoseconds == 20_000_000_000)
     }
 
     @Test(arguments: [0.10, 0.20])
