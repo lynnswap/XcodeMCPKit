@@ -908,7 +908,7 @@ extension RuntimeCoordinator {
         _ leaseID: LeaseManager.ID,
         sessionID: String,
         requestIDKeys: [String],
-        operationLease: UpstreamOperationLease,
+        operationLease: UpstreamOperationLease?,
         after requestSendCompletion: UpstreamRequestSendCompletion?
     ) {
         _ = handleRequestLeaseTimeoutWithCancellationDelivery(

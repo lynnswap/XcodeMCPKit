@@ -104,6 +104,13 @@ final class ClientMCPRequestExecutor: Sendable {
             )
         }
 
+        let methodTimeout = Self.topLevelRequestTimeoutOverride(
+            method: JSONRPC.Message.Inspector.method(from: requestObject),
+            defaultSeconds: requestTimeoutSeconds
+        )
+        let requestDeadline = timeoutDeadline(
+            for: Self.minimumRequestTimeout(requestTimeoutOverride, methodTimeout)
+        )
         let admittedHandle: CancellationHandle?
         let requestKey: RequestKey?
         if parentCancellationHandle == nil,
@@ -131,23 +138,41 @@ final class ClientMCPRequestExecutor: Sendable {
             eventLoop: eventLoop,
             requestTimeoutOverride: requestTimeoutOverride,
             parentCancellationHandle: parentCancellationHandle,
-            admittedHandle: admittedHandle
+            admittedHandle: admittedHandle,
+            requestDeadline: requestDeadline
         )
         guard let handle = admittedHandle, let key = requestKey else { return operation }
         let sessionID = key.sessionID
-        let future = operation.future.map { resolution in
-            handle.wasCancelled ? .empty(status: .accepted, sessionID: sessionID) : resolution
+        let responseID = JSONRPC.Message.Inspector.requestID(from: requestObject)
+        let timeoutResolution = Resolution.mcpError(
+            id: responseID, code: -32000, message: "upstream timeout",
+            sessionID: sessionID, prefersEventStream: prefersEventStream
+        )
+        let promise = eventLoop.makePromise(of: Resolution.self)
+        let timeoutTask = requestDeadline.map { deadline in
+            eventLoop.scheduleTask(in: remainingRequestTimeout(until: deadline) ?? .nanoseconds(0)) {
+                if handle.timeOut(using: self.sessionManager) {
+                    promise.succeed(timeoutResolution)
+                }
+            }
+        }
+        operation.future.map { resolution in
+            if handle.wasTimedOut { return timeoutResolution }
+            return handle.wasCancelled ? .empty(status: .accepted, sessionID: sessionID) : resolution
         }.flatMapError { error in
+            if handle.wasTimedOut { return eventLoop.makeSucceededFuture(timeoutResolution) }
             if handle.wasCancelled {
                 return eventLoop.makeSucceededFuture(.empty(status: .accepted, sessionID: sessionID))
             }
             return eventLoop.makeFailedFuture(error)
-        }
+        }.cascade(to: promise)
+        let future = promise.futureResult
         let registrations = activeCancellations
         let finishesAtAdmission = operation.cancellationHandle == nil
         future.whenComplete { _ in
+            timeoutTask?.cancel()
             handle.markCompleted()
-            if finishesAtAdmission, !handle.wasCancelled {
+            if finishesAtAdmission, !handle.wasInterrupted {
                 self.sessionManager.completeRequestLease(handle.leaseID)
             }
             registrations.withLockedValue { registrations in
@@ -175,7 +200,8 @@ final class ClientMCPRequestExecutor: Sendable {
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
         parentCancellationHandle: CancellationHandle?,
-        admittedHandle: CancellationHandle?
+        admittedHandle: CancellationHandle?,
+        requestDeadline: Date?
     ) -> Operation {
         if let localHandling = localResponder.handle(
             object: requestObject,
@@ -204,7 +230,7 @@ final class ClientMCPRequestExecutor: Sendable {
                 }
                 future.whenComplete { _ in
                     localHandle.markCompleted()
-                    if !localHandle.wasCancelled {
+                    if !localHandle.wasInterrupted {
                         self.sessionManager.completeRequestLease(localHandle.leaseID)
                     }
                 }
@@ -275,7 +301,8 @@ final class ClientMCPRequestExecutor: Sendable {
             sessionID: sessionID,
             eventLoop: eventLoop,
             requestTimeoutOverride: requestTimeoutOverride,
-            admittedHandle: admittedHandle
+            admittedHandle: admittedHandle,
+            requestDeadline: requestDeadline
         ) {
         case .local(let responseData):
             return immediate(
@@ -318,7 +345,8 @@ final class ClientMCPRequestExecutor: Sendable {
                 eventLoop: eventLoop,
                 requestTimeoutOverride: requestTimeoutOverride,
                 parentCancellationHandle: parentCancellationHandle,
-                admittedHandle: admittedHandle
+                admittedHandle: admittedHandle,
+                requestDeadline: requestDeadline
             )
         }
     }
@@ -330,7 +358,8 @@ final class ClientMCPRequestExecutor: Sendable {
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
         parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle?,
-        admittedHandle: CancellationHandle? = nil
+        admittedHandle: CancellationHandle? = nil,
+        requestDeadline: Date?
     ) -> ClientMCPRequestExecutor.Operation {
         guard let forwardedBodyData = filteredRequest.bodyData else {
             return immediate(
@@ -374,13 +403,7 @@ final class ClientMCPRequestExecutor: Sendable {
             return immediate(.empty(status: .accepted, sessionID: sessionID), on: eventLoop)
         }
 
-        let forwardingDeadline = timeoutDeadline(
-            for: requestTimeoutOverride
-                ?? Self.topLevelRequestTimeoutOverride(
-                    method: nil,
-                    defaultSeconds: requestTimeoutSeconds
-                )
-        )
+        let forwardingDeadline = requestDeadline
         let session = sessionManager.session(id: sessionID)
 
         if refreshCodeIssuesRequest(from: forwardedRequestJSON) != nil,
@@ -453,6 +476,10 @@ final class ClientMCPRequestExecutor: Sendable {
                     on: eventLoop,
                     preferredUpstreamIndices: preferredUpstreamIndices
                 ) { operationLease in
+                    let remainingTimeout = forwardingTimeout()
+                    if forwardingDeadline != nil, remainingTimeout == nil {
+                        return timeoutResolution()
+                    }
                     guard cancellationHandle.activate(operationLease: operationLease) else {
                         return eventLoop.makeFailedFuture(CancellationError())
                     }

@@ -193,7 +193,7 @@ extension ClientMCPRequestExecutor {
 
         let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
         started.future.whenComplete { result in
-            if cancellationHandle?.wasCancelled == true {
+            if cancellationHandle?.wasInterrupted == true {
                 promise.succeed(.empty(status: .accepted, sessionID: sessionID))
                 return
             }
