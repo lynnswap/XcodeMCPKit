@@ -82,11 +82,15 @@ if ! jq -e '
     excludes("XcodeMCPCore"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit", "XcodeMCPPermissionAutomation"]) and
     excludes("XcodeMCPKit"; ["XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit", "XcodeMCPPermissionAutomation"]) and
     excludes("XcodeMCPProxyRuntime"; ["XcodeMCPKit", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
-    excludes("XcodeMCPProxyHTTP"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyKit"]) and
+    excludes("XcodeMCPProxyHTTP"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPDocumentationSearch", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyRuntimeContract"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPPermissionAutomation"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     directlyUses("XcodeMCPKit"; "XcodeMCPCore") and
     directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPCore") and
+    directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPDocumentationSearch") and
+    directlyUses("XcodeMCPDocumentationSearch"; "XcodeMCPCore") and
+    excludes("XcodeMCPDocumentationSearch"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyRuntimeContract", "XcodeMCPProxyKit"]) and
+    excludes("XcodeMCPDocumentationSearchTests"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     directlyUses("XcodeMCPProxyHTTP"; "XcodeMCPCore") and
     directlyUses("XcodeMCPProxyHTTP"; "XcodeMCPProxyRuntimeContract") and
     directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPProxyRuntimeContract") and

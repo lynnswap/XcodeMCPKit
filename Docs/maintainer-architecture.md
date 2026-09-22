@@ -12,6 +12,11 @@
     completion for both the direct SDK and the proxy STDIO adapter.
   - `InitializedMCPClientSession` owns request IDs, response correlation, and
     request-scoped progress lanes; it does not own transport/session lifecycle.
+- `XcodeMCPDocumentationSearch`
+  - Installed documentation assets, selection cache, generated helper source,
+    helper preparation/invocation, and asset repair operations.
+  - Takes immutable installation/query values and returns typed documents.
+    It does not own Xcode process inventory, MCP sessions, or provider routing.
 - `XcodeMCPProxyRuntimeContract`
   - Package request/reply/session/snapshot values and serving protocols shared
     by Runtime, HTTP, and facade composition. No execution state or I/O owner.
@@ -100,7 +105,9 @@
   session authority, progress, and transport wrappers. Core wire values are
   converted at this SDK boundary and do not become public aliases.
 - Runtime and HTTP depend on Core rather than the public SDK. Runtime owns
-  execution policy and request lifetimes; HTTP owns network delivery. The
+  execution policy and request lifetimes; HTTP owns network delivery. Runtime
+  adapts typed documentation backend results to the MCP protocol and chooses
+  providers; the backend depends only on Core and NIOCore. The
   runtime serving protocol in `XcodeMCPProxyRuntimeContract` connects these
   two owners. The contract retains the NIOCore timeout value without exposing
   channels or event loops.
@@ -117,7 +124,9 @@
 
 Use the relevant `xcodebuild test` schemes with an explicit macOS destination
 when moving files or changing imports. Core tests use Core directly; SDK and
-proxy integration tests keep their actual consumer dependencies. Public product
+proxy integration tests keep their actual consumer dependencies. Documentation
+backend tests use lower process fakes and shared filesystem fixtures without
+linking the runtime coordinator. Public product
 contract tests compile consumers from a separate package. Run
 `scripts/verify-proxy-target-boundaries.sh` to check dependency direction;
 private implementation targets are not new public products.

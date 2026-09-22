@@ -87,8 +87,14 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
+            name: "XcodeMCPDocumentationSearch",
+            dependencies: ["XcodeMCPCore", .product(name: "NIOCore", package: "swift-nio")],
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "XcodeMCPProxyRuntime",
             dependencies: [
+                "XcodeMCPDocumentationSearch",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 .product(name: "Logging", package: "swift-log"),
@@ -140,10 +146,7 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyTestSupport",
             dependencies: [
-                "XcodeMCPCore",
                 "XcodeMCPCoreTestSupport",
-                "XcodeMCPKit",
-                "XcodeMCPProxyKit",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
             ],
@@ -242,8 +245,18 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
+            name: "XcodeMCPDocumentationSearchTests",
+            dependencies: [
+                "XcodeMCPDocumentationSearch", "XcodeMCPCore", "XcodeMCPProxyTestSupport",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+            ],
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
             name: "XcodeMCPProxyRuntimeTests",
             dependencies: [
+                "XcodeMCPDocumentationSearch",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 "XcodeMCPKit",
