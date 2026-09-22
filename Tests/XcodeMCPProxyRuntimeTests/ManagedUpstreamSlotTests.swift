@@ -69,6 +69,30 @@ struct ManagedUpstreamSlotTests {
         #expect(await session.stopCount() == 1)
     }
 
+    @Test func managedUpstreamSlotReportsStdoutClosureBeforeCleanupCompletes() async throws {
+        let session = RecordingUpstreamSession(delaysStopCompletion: true)
+        let slot = ManagedUpstreamSlot(factory: RecordingUpstreamSessionFactory(session: session))
+        await slot.start()
+        #expect(await slot.send(Data()) == .accepted)
+        let eventTask = Task {
+            var iterator = slot.events.makeAsyncIterator()
+            return await iterator.next()
+        }
+        await session.emit(.stdoutClosed)
+        guard case .stdoutClosed = await eventTask.value else {
+            Issue.record("expected stdout closure before process cleanup")
+            await session.releaseStop()
+            await slot.stop()
+            return
+        }
+        await session.waitForStopToStart()
+        #expect(await slot.send(Data()) == .unavailable(.notStarted))
+        #expect(await session.stopCount() == 1)
+        await session.releaseStop()
+        await slot.stop()
+        #expect(await session.stopCount() == 1)
+    }
+
     @Test func managedUpstreamSlotWaitsForCancelledStartSettlementAndLateSessionStop()
         async throws
     {

@@ -227,6 +227,11 @@ actor ManagedUpstreamSlot: UpstreamSlotControlling {
         continuation.yield(event)
 
         switch event {
+        case .stdoutClosed:
+            current = nil
+            let stopTask = startStopIfNeeded(running)
+            await stopTask.value
+            markStopFinished(running)
         case .stdoutProtocolViolation, .exit:
             current = nil
         case .message, .stderr, .stdoutBufferSize:

@@ -540,13 +540,13 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     }
 
     package func send(_ data: Data) async -> Upstream.SendResult {
-        if isStopping {
-            logger.warning("Upstream send skipped because session is stopping")
-            return .unavailable(.shuttingDown)
-        }
         if didFinishEvents || terminationObserved {
             logger.warning("Upstream send skipped because session has terminated")
             return .unavailable(.terminated)
+        }
+        if isStopping {
+            logger.warning("Upstream send skipped because session is stopping")
+            return .unavailable(.shuttingDown)
         }
         guard let driver else {
             logger.warning("Upstream send skipped because session never started")
@@ -691,6 +691,12 @@ private extension ProcessBackedUpstreamSession {
 
     func handleStdoutEOF() {
         stdoutDrained = true
+        if !terminationObserved, !isStopping, !didFinishEvents {
+            // The stdout task has delivered every complete response before EOF.
+            // Notify request owners before waiting for process cleanup.
+            continuation.yield(.stdoutClosed)
+            _ = beginStop(suppressExitEvent: false)
+        }
         finishEventsIfNeeded()
     }
 
