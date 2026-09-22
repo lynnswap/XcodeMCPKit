@@ -132,7 +132,6 @@ private final class CoreHTTPStub: @unchecked Sendable {
     func start(_ connection: CoreHTTPURLProtocol) {
         let method = connection.request.httpMethod ?? "GET"
         lock.withLock { connections[ObjectIdentifier(connection)] = connection }
-        requests.record(method)
         if method == "GET" {
             let response = HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/event-stream"])!
             connection.client?.urlProtocol(connection, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -141,7 +140,11 @@ private final class CoreHTTPStub: @unchecked Sendable {
                 _ = lock.withLock { connections.removeValue(forKey: ObjectIdentifier(connection)) }
                 connection.client?.urlProtocolDidFinishLoading(connection)
             }
+        } else if method == "DELETE" {
+            let response = HTTPURLResponse(url: endpoint, statusCode: 202, httpVersion: "HTTP/1.1", headerFields: [:])!
+            connection.client?.urlProtocol(connection, didReceive: response, cacheStoragePolicy: .notAllowed)
         }
+        requests.record(method)
     }
 
     func stop(_ connection: CoreHTTPURLProtocol) {
@@ -156,8 +159,6 @@ private final class CoreHTTPStub: @unchecked Sendable {
             return values
         }
         for connection in pending {
-            let response = HTTPURLResponse(url: endpoint, statusCode: 202, httpVersion: "HTTP/1.1", headerFields: ["Content-Length": "0"])!
-            connection.client?.urlProtocol(connection, didReceive: response, cacheStoragePolicy: .notAllowed)
             connection.client?.urlProtocolDidFinishLoading(connection)
         }
     }
