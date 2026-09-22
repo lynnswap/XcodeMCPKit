@@ -1467,6 +1467,41 @@ struct ControlPlaneAuthorityTests {
         #expect(manager.processControlPlane.canonicalToolsCatalogRaw() == nil)
     }
 
+    @Test func toolsChangePreservesOtherRoutesInFlightCatalogs() throws {
+        let first = xcodeProcessTarget(processID: 41014, xcodeVersion: "27.0")
+        let second = xcodeProcessTarget(processID: 41015, xcodeVersion: "26.4")
+        let authority = makeAuthority([(first, [0]), (second, [1])])
+        let firstRoute = try #require(authority.route(forProcessID: first.processID))
+        let secondRoute = try #require(authority.route(forProcessID: second.processID))
+        let (firstLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: firstRoute.id, preferredUpstreamProof: testTopologyProof(0), nowUptimeNanoseconds: 1
+        ))
+        let (secondLease, _) = try #require(authority.beginCatalogAttempt(
+            routeID: secondRoute.id, preferredUpstreamProof: testTopologyProof(1), nowUptimeNanoseconds: 1
+        ))
+        let firstRPC = ControlPlane.RPCHandle()
+        let secondRPC = ControlPlane.RPCHandle()
+        _ = authority.attach(.rpc(firstRPC), to: firstLease)
+        _ = authority.attach(.rpc(secondRPC), to: secondLease)
+        let change = authority.invalidateCatalog(.toolsChanged(testTopologyProof(0)))
+        for effect in change.effects {
+            if case .cancelRPC(let rpc) = effect { rpc.cancel() }
+        }
+        #expect(firstRPC.isCancelled())
+        #expect(!secondRPC.isCancelled())
+        #expect(!authority.validateCatalogLoad(firstLease))
+        #expect(authority.validateCatalogLoad(secondLease))
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("Second"), source: testTopologyProof(1)),
+            lease: secondLease, nowUptimeNanoseconds: 2
+        ) else {
+            Issue.record("another route's notification must not invalidate this catalog lease")
+            return
+        }
+        #expect(authority.catalog(forProcessID: second.processID) != nil)
+        #expect(authority.catalog(forProcessID: first.processID) == nil)
+    }
+
     @Test func unrelatedRouteAdditionDoesNotInvalidateInFlightCatalogLoad() throws {
         let first = xcodeProcessTarget(processID: 41014, xcodeVersion: "27.0")
         let second = xcodeProcessTarget(processID: 41015, xcodeVersion: "26.4")

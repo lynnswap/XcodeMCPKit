@@ -299,20 +299,16 @@ extension RuntimeCoordinator {
         guard let upstreamIndex = route.upstreamIndex else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
-        let rpcHandle = ControlPlane.RPCHandle()
         do {
-            let response = try await performControlPlaneRPC(
-                route: .pinnedUpstream(upstreamIndex),
-                purpose: "documentation-tools",
-                label: "tools/list:DocumentationProvider",
-                requestObject: JSONRPC.Wire.requestObject(
-                    id: "__documentation-tools-\(UUID().uuidString)",
-                    method: "tools/list"
-                ),
+            let result = try await loadToolsCatalogFromRoute(
+                .pinnedUpstream(upstreamIndex),
                 requestTimeout: requestTimeout,
-                rpcHandle: rpcHandle
+                rpcHandle: ControlPlane.RPCHandle(),
+                startedAt: nowUptimeNanoseconds(),
+                purpose: "documentation-tools",
+                label: "tools/list:DocumentationProvider"
             )
-            return try extractJSONRPCResult(from: response.responseData)
+            return result.rawResult
         } catch let error as ControlPlane.RequestError {
             throw error.underlying
         }

@@ -7916,17 +7916,19 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(methodName(from: latestRequest) == "tools/list")
         let olderRequest = try await sentValue(from: olderUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: olderRequest) == "tools/list")
-        await latestUpstream.yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: latestRequest),
-                    tools: [
-                        toolDescriptor(name: "SharedTool", description: "from-27"),
-                        toolDescriptor(name: "Only27", description: "new-only"),
-                    ],
-                )
-            )
-        )
+        await latestUpstream.yield(.message(try JSONRPC.Wire.resultResponseData(
+            id: JSONRPC.ID(any: try extractUpstreamID(from: latestRequest))!,
+            result: try jsonValue([
+                "tools": [toolDescriptor(name: "SharedTool", description: "from-27")],
+                "nextCursor": "latest-second-page",
+            ])
+        )))
+        let latestSecondRequest = try await sentValue(from: latestUpstream, at: 1, timeout: .seconds(2))
+        #expect(manager.cachedToolsListResult(forUpstreamIndex: 1) == nil)
+        await latestUpstream.yield(.message(try makeDocumentationToolsListResponse(
+            id: try extractUpstreamID(from: latestSecondRequest),
+            tools: [toolDescriptor(name: "Only27", description: "new-only")]
+        )))
         let partial = try await waitWithTimeout("waiting for available process catalog") {
             try await task.value
         }
@@ -7982,6 +7984,13 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(latestCatalog.exposurePolicy == "available_route_catalog_surface")
         #expect(latestCatalog.extraBeyondExposedCatalog == ["Only26"])
         #expect(latestCatalog.schemaConflicts == [])
+
+        manager.routeUpstreamMessage(
+            try JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(method: "notifications/tools/list_changed")),
+            upstreamIndex: 1
+        )
+        #expect(manager.processControlPlane.catalog(forProcessID: latestTarget.processID) == nil)
+        #expect(toolNames(in: manager.processControlPlane.catalog(forProcessID: olderTarget.processID)!.rawResult) == ["Only26"])
     }
 
     @Test func sessionManagerToolsListUnionsFallbackCatalogAfterOwnerIsLearned()
@@ -10314,6 +10323,149 @@ struct RuntimeCoordinatorRecoveryTests {
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorCatalogTests {
+    @Test func paginatedCatalogKeepsCursorOnTheFirstUpstream() async throws {
+        let first = TestUpstreamClient()
+        let second = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [first, second], startImmediately: false)
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 0
+        )
+        let load = Task {
+            try await manager.loadCanonicalToolsCatalog(requestTimeout: .seconds(5), rpcHandle: .init())
+        }
+        let firstPage = try await sentValue(from: first, at: 0, timeout: .seconds(2))
+        await first.yield(.message(try paginatedToolsResponse(request: firstPage, names: ["First"], nextCursor: .string("second"))))
+        let lastPage = try await sentValue(from: first, at: 1, timeout: .seconds(2))
+        #expect(await second.sentCount() == 0)
+        await first.yield(.message(try paginatedToolsResponse(request: lastPage, names: ["Last"])))
+        let catalog = try await load.value
+        #expect(Set(toolNames(in: catalog.rawResult)) == Set(["First", "Last"]))
+        #expect(catalog.sourceProof?.slotID.rawValue == 0)
+    }
+
+    @Test func paginatedCatalogCollectsEveryPageAndReloadsAfterChange() async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: "pagination")
+        let manager = fixture.manager
+
+        for iteration in 0..<2 {
+            let load = Task {
+                try await manager.sharedToolsList(sessionID: "pagination", requestTimeoutOverride: .seconds(5))
+            }
+            let offset = 2 + iteration * 2
+            let first = try await sentValue(from: upstream, at: offset, timeout: .seconds(2))
+            let firstObject = try #require(try JSONSerialization.jsonObject(with: first) as? [String: Any])
+            #expect(firstObject["params"] == nil)
+            await upstream.yield(.message(try paginatedToolsResponse(
+                request: first, names: ["First\(iteration)"], nextCursor: .string("opaque / token?=α")
+            )))
+            let second = try await sentValue(from: upstream, at: offset + 1, timeout: .seconds(2))
+            let object = try #require(try JSONSerialization.jsonObject(with: second) as? [String: Any])
+            #expect((object["params"] as? [String: Any])?["cursor"] as? String == "opaque / token?=α")
+            #expect(manager.cachedToolsListResult() == nil)
+            await upstream.yield(.message(try paginatedToolsResponse(request: second, names: ["Last\(iteration)"])))
+            let result = try await load.value
+            #expect(Set(toolNames(in: result)) == Set(["First\(iteration)", "Last\(iteration)"]))
+            if case .object(let object) = result { #expect(object["nextCursor"] == nil) }
+            #expect(manager.cachedToolsListResult() != nil)
+            if iteration == 0 {
+                manager.routeUpstreamMessage(
+                    try JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(method: "notifications/tools/list_changed")),
+                    upstreamIndex: 0
+                )
+                #expect(manager.cachedToolsListResult() == nil)
+            }
+        }
+    }
+
+    @Test(arguments: [JSONValue.string("again"), .number(.int(7)), .null])
+    func paginatedCatalogRejectsInvalidContinuationWithoutPublishingPartialCatalog(nextCursor: JSONValue) async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        _ = try await fixture.initializePrimary(on: upstream)
+        let load = Task {
+            try await fixture.manager.loadCanonicalToolsCatalog(requestTimeout: .seconds(5), rpcHandle: .init())
+        }
+        let first = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        await upstream.yield(.message(try paginatedToolsResponse(request: first, names: ["First"], nextCursor: .string("again"))))
+        let second = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        await upstream.yield(.message(try paginatedToolsResponse(request: second, names: ["Second"], nextCursor: nextCursor)))
+        await #expect(throws: ControlPlane.Error.self) { _ = try await load.value }
+        #expect(fixture.manager.cachedToolsListResult() == nil)
+        #expect(await upstream.sentCount() == 4)
+    }
+
+    @Test func paginatedCatalogPreservesPageError() async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        _ = try await fixture.initializePrimary(on: upstream)
+        let load = Task {
+            try await fixture.manager.loadCanonicalToolsCatalog(requestTimeout: .seconds(5), rpcHandle: .init())
+        }
+        let first = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        await upstream.yield(.message(try paginatedToolsResponse(request: first, names: ["First"], nextCursor: .string(""))))
+        let second = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        await upstream.yield(.message(try JSONRPC.Wire.data(from: JSONRPC.Wire.errorResponseObject(
+            id: JSONRPC.ID(any: try extractUpstreamID(from: second)), code: -32602, message: "expired cursor"
+        ))))
+        do {
+            _ = try await load.value
+            Issue.record("page error must fail the catalog load")
+        } catch ControlPlane.Error.upstreamRPC(let code, let message) {
+            #expect(code == -32602)
+            #expect(message == "expired cursor")
+        }
+        #expect(fixture.manager.cachedToolsListResult() == nil)
+    }
+
+    @Test func paginatedCatalogCancelsTheCurrentPage() async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        _ = try await fixture.initializePrimary(on: upstream)
+        let handle = ControlPlane.RPCHandle()
+        let load = Task {
+            try await fixture.manager.loadCanonicalToolsCatalog(requestTimeout: .seconds(5), rpcHandle: handle)
+        }
+        let first = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        await upstream.yield(.message(try paginatedToolsResponse(request: first, names: ["First"], nextCursor: .string("second"))))
+        let second = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        let delivery = try #require(handle.cancel())
+        _ = await delivery.wait()
+        await #expect(throws: CancellationError.self) { _ = try await load.value }
+        let cancellation = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
+        #expect(try extractCancellationRequestID(from: cancellation) == extractUpstreamID(from: second))
+        #expect(fixture.manager.cachedToolsListResult() == nil)
+        #expect(fixture.manager.debugSnapshot().upstreams[0].activeCorrelatedRequestCount == 0)
+    }
+
+    @Test func paginatedCatalogDoesNotResetDeadlineForNextPage() async throws {
+        let upstream = TestUpstreamClient()
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream], clock: clocks.clock)
+        defer { fixture.shutdownAndWait() }
+        _ = try await fixture.initializePrimary(on: upstream)
+        let load = Task {
+            try await fixture.manager.loadCanonicalToolsCatalog(requestTimeout: .seconds(5), rpcHandle: .init())
+        }
+        let first = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
+        clocks.uptimeClock.advance(by: .seconds(6))
+        await upstream.yield(.message(try paginatedToolsResponse(request: first, names: ["First"], nextCursor: .string("second"))))
+        await #expect(throws: TimeoutError.self) { _ = try await load.value }
+        #expect(fixture.manager.cachedToolsListResult() == nil)
+        #expect(await upstream.sentCount() == 3)
+    }
+
     @Test func sessionManagerToolsListResyncsRemainingCatalogWhenUncatalogedProcessRouteRetires()
         async throws
     {
@@ -19298,4 +19450,12 @@ private final class RecordingXcodeTargetDiscovery: XcodeTargetDiscovering, @unch
         calls.append(call)
         return targets
     }
+}
+
+private func paginatedToolsResponse(request: Data, names: [String], nextCursor: JSONValue? = nil) throws -> Data {
+    var result: [String: JSONValue] = ["tools": .array(names.map { .object(["name": .string($0)]) })]
+    result["nextCursor"] = nextCursor
+    return try JSONRPC.Wire.resultResponseData(
+        id: JSONRPC.ID(any: try extractUpstreamID(from: request))!, result: .object(result)
+    )
 }
