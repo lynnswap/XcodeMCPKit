@@ -374,7 +374,7 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         )
     }
 
-    func recordRequestTimedOut(
+    func recordRequestFailed(
         sessionID: String,
         started: StartedRequest,
         accountTimeout: Bool

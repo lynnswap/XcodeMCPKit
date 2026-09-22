@@ -36,12 +36,13 @@ extension ClientMCPRequestExecutor {
                     sessionID: Self.isJSONRPCErrorResponse(data) ? errorSessionID : sessionID,
                     prefersEventStream: prefersEventStream
                 )
-            }.flatMapError { _ in
-                eventLoop.makeSucceededFuture(
+            }.flatMapError { error in
+                let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+                return eventLoop.makeSucceededFuture(
                     .mcpError(
                         id: originalID,
-                        code: -32000,
-                        message: "upstream timeout",
+                        code: mapped.code,
+                        message: mapped.message,
                         sessionID: errorSessionID,
                         prefersEventStream: prefersEventStream
                     )

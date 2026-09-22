@@ -57,25 +57,39 @@ extension ControlPlane {
 /// upstream-acquisition failure surfaces as.
 extension ControlPlane {
     enum ErrorMapper {
+        static func underlyingError(_ error: Swift.Error) -> Swift.Error {
+            if let requestError = error as? ControlPlane.RequestError {
+                return underlyingError(requestError.underlying)
+            }
+            return error
+        }
+
         static func jsonRPCError(for error: Swift.Error) -> (code: Int, message: String) {
+            let error = underlyingError(error)
+            if error is TimeoutError {
+                return (-32000, "upstream timeout")
+            }
+            if error is CancellationError {
+                return (-32800, "request cancelled")
+            }
             if let error = error as? DocumentationProvider.UnavailableReason {
                 return (-32001, error.message)
             }
             if error is UpstreamSlotScheduler.AcquisitionError {
                 return (-32001, "upstream unavailable")
             }
-            if let error = error as? ControlPlane.RequestError {
-                return jsonRPCError(for: error.underlying)
+            if case ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology = error {
+                return (-32001, "upstream unavailable")
             }
             if let error = error as? ControlPlane.Error {
                 switch error {
                 case .invalidResponse:
-                    return (-32000, "upstream timeout")
+                    return (-32603, "invalid upstream response")
                 case .upstreamRPC(let code, let message):
                     return (code, message)
                 }
             }
-            return (-32000, "upstream timeout")
+            return (-32603, "upstream request failed")
         }
     }
 }
@@ -1224,7 +1238,10 @@ extension RuntimeCoordinator {
                     admission: nil,
                     requestSendCompletion: requestSendCompletion,
                     onRejected: {
-                        _ = session.router.cancelPending(token: registration.token)
+                        _ = session.router.failPending(
+                            token: registration.token,
+                            error: UpstreamSlotScheduler.AcquisitionError.unavailable
+                        )
                         self.removeUpstreamIDMapping(
                             sessionID: internalSessionID,
                             requestIDKey: originalID.key,
@@ -1233,7 +1250,10 @@ extension RuntimeCoordinator {
                     }
                 )
                 guard sent else {
-                    _ = session.router.cancelPending(token: registration.token)
+                    _ = session.router.failPending(
+                        token: registration.token,
+                        error: UpstreamSlotScheduler.AcquisitionError.unavailable
+                    )
                     self.abandonRequestLease(
                         leaseID,
                         sessionID: internalSessionID,
@@ -1372,7 +1392,7 @@ extension RuntimeCoordinator {
         } catch JSONRPC.Wire.DecodingFailure.messageWasNotObject {
             throw ControlPlane.Error.invalidResponse("response was not an object")
         } catch {
-            throw error
+            throw ControlPlane.Error.invalidResponse("invalid JSON response")
         }
     }
 

@@ -154,7 +154,7 @@ extension RuntimeCoordinator {
                 }
             )
         } else {
-            failInitPending(error: TimeoutError())
+            failInitPending(error: ControlPlane.Error.invalidResponse("invalid initialize response"))
         }
     }
 
@@ -349,7 +349,7 @@ extension RuntimeCoordinator {
                 if let errorObject = object["error"] as? [String: Any], !errorObject.isEmpty {
                     completeInitPendingWithError(errorObject)
                 } else {
-                    failInitPending(error: TimeoutError())
+                    failInitPending(error: ControlPlane.Error.invalidResponse("invalid initialize response"))
                 }
             } else {
                 retryInitializeAfterTerminalFailure(
@@ -553,7 +553,7 @@ extension RuntimeCoordinator {
                 }
             } else {
                 item.eventLoop.execute {
-                    item.promise.fail(TimeoutError())
+                    item.promise.fail(ControlPlane.Error.invalidResponse("invalid initialize response"))
                 }
             }
         }
@@ -685,7 +685,7 @@ extension RuntimeCoordinator {
                 }
             } else {
                 item.eventLoop.execute {
-                    item.promise.fail(TimeoutError())
+                    item.promise.fail(ControlPlane.Error.invalidResponse("invalid initialize response"))
                 }
             }
         }
