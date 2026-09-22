@@ -39,6 +39,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
 
     @Test func headlessStockBridgeBuildsOnlyUnboundUpstreamsDespiteGUITargets() throws {
         try withEnvironmentVariables(["MCP_XCODE_PID": "5678"]) {
+            let developerDirectory = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
             var config = makeConfig(requestTimeout: 0)
             config.xcodeMode = .headless
 
@@ -53,7 +54,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             let upstream = try #require(plan.upstreams.first)
             let environment = try upstreamEnvironment(from: upstream)
             #expect(environment["MCP_XCODE_PID"] == nil)
-            #expect(environment["DEVELOPER_DIR"] == nil)
+            #expect(environment["DEVELOPER_DIR"] == developerDirectory)
         }
     }
 
@@ -897,6 +898,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
         manager.applyProcessControlPlaneTransition(
             manager.processControlPlane.resetAttempt(processID: target.processID)
         )
+        // The scheduler records creation before the runtime task attaches (or cancels) the timer.
+        await manager.drainRuntimeTasksForTesting()
         #expect(timeoutScheduler.isCancelled(at: obsoleteRetryIndex))
 
         let rejectedLease = try prepareRetryLease(at: 3)

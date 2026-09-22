@@ -113,7 +113,7 @@ struct HTTPConcurrencyTests {
                 leaseID: blockerLease, descriptor: descriptor, on: loop
             ) { _ in blocker.futureResult }
             future.whenFailure { _ in }
-            loop.run()
+            await loop.run()
         }
         let cancelledLease = manager.createRequestLease(descriptor: descriptor)
         manager.abandonRequestLease(
@@ -125,17 +125,17 @@ struct HTTPConcurrencyTests {
             Issue.record("a settled lease must never acquire an upstream")
             return loop.makeSucceededFuture(())
         }
-        loop.run()
+        await loop.run()
         await #expect(throws: CancellationError.self) { try await cancelled.get() }
         #expect(manager.debugSnapshot().queuedRequestCount == 0)
         manager.completeRequestLease(blockerLease)
         blocker.succeed(())
-        loop.run()
+        await loop.run()
         let nextLease = manager.createRequestLease(descriptor: descriptor)
         let next: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
             leaseID: nextLease, descriptor: descriptor, on: loop
         ) { _ in loop.makeSucceededFuture(()) }
-        loop.run()
+        await loop.run()
         try await next.get()
         manager.completeRequestLease(nextLease)
         #expect(manager.upstreamSlotScheduler.debugSnapshot().activeLeaseCountByUpstream.isEmpty)
@@ -166,9 +166,9 @@ struct HTTPConcurrencyTests {
         let operation = try cancellationOperation(
             executeSnippetPayload(id: 991, tabIdentifier: "windowtab-cancel"), service: service, loop: loop
         )
-        loop.run()
+        await loop.run()
         await manager.drainRuntimeTasksForTesting()
-        loop.run()
+        await loop.run()
         guard case .empty(.accepted, _) = try await operation.future.get() else {
             Issue.record("cancellation during admission must finish the original request")
             return
@@ -184,7 +184,7 @@ struct HTTPConcurrencyTests {
             executeSnippetPayload(id: 991, tabIdentifier: "windowtab-cancel"),
             service: service, loop: loop
         )
-        loop.run()
+        await loop.run()
         await manager.drainRuntimeTasksForTesting()
         let ownerIndex = try #require(upstreams.indices.first { !upstreams[$0].recordedMessages().isEmpty })
         let owner = upstreams[ownerIndex]
@@ -194,10 +194,10 @@ struct HTTPConcurrencyTests {
         #expect(requestID != .integer(991))
 
         let cancellation = try cancellationOperation(cancellationPayload(id: 991), service: service, loop: loop)
-        loop.run()
+        await loop.run()
         await manager.drainRuntimeTasksForTesting()
         _ = try await waitForUpstreamRequestCount(owner, count: 2)
-        loop.run()
+        await loop.run()
         let message = try #require(owner.recordedMessages().last)
         let params = try #require(MCPJSONValue(message).objectValue?["params"]?.objectValue)
         #expect(params["requestId"] == requestID)
@@ -217,22 +217,22 @@ struct HTTPConcurrencyTests {
         let active = try cancellationOperation(
             executeSnippetPayload(id: 1, tabIdentifier: "windowtab-active"), service: service, loop: loop
         )
-        loop.run()
+        await loop.run()
         await manager.drainRuntimeTasksForTesting()
         _ = try await waitForUpstreamRequestCount(upstream, count: 1)
         var queuedBody = executeSnippetPayload(id: 2, tabIdentifier: "windowtab-queued")
         queuedBody["id"] = "1"
         let queued = try cancellationOperation(queuedBody, service: service, loop: loop)
-        loop.run()
+        await loop.run()
         #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         _ = try cancellationOperation(cancellationPayload(id: 1), service: service, loop: loop, sessionID: "other-session")
         _ = try cancellationOperation(cancellationPayload(id: true), service: service, loop: loop)
         _ = try cancellationOperation(cancellationPayload(id: 999), service: service, loop: loop)
         _ = try cancellationOperation(cancellationPayload(id: "1"), service: service, loop: loop)
-        loop.run()
+        await loop.run()
         await manager.drainRuntimeTasksForTesting()
-        loop.run()
+        await loop.run()
         guard case .empty(.accepted, _) = try await queued.future.get() else {
             Issue.record("queued request was not cancelled")
             return
@@ -242,13 +242,13 @@ struct HTTPConcurrencyTests {
 
         let response = try #require(upstream.takeNextResponse(label: "tools/call:ExecuteSnippet"))
         manager.routeUpstreamMessage(response, upstreamIndex: 0)
-        loop.run()
+        await loop.run()
         guard case .responseData = try await active.future.get() else {
             Issue.record("cancellation affected the numeric ID or another session")
             return
         }
         _ = try cancellationOperation(cancellationPayload(id: 1), service: service, loop: loop)
-        loop.run()
+        await loop.run()
         #expect(upstream.recordedMessages().count == 1)
     }
 
@@ -257,7 +257,7 @@ struct HTTPConcurrencyTests {
     }
 
     private func cancellationOperation(
-        _ payload: [String: Any], service: ClientMCPRequestExecutor, loop: EmbeddedEventLoop,
+        _ payload: [String: Any], service: ClientMCPRequestExecutor, loop: NIOAsyncTestingEventLoop,
         sessionID: String = "cancel-session", requestTimeoutOverride: TimeAmount? = nil
     ) throws -> ClientMCPRequestExecutor.Operation {
         service.handle(
@@ -272,11 +272,11 @@ struct HTTPConcurrencyTests {
         upstreamCount: Int, testHooks: RuntimeCoordinatorTestHooks = .init(),
         requestTimeout: TimeInterval = 60, deadlineClock: ClockClient = .liveValue
     ) throws -> (
-        RuntimeCoordinator, ClientMCPRequestExecutor, EmbeddedEventLoop, [EmbeddedControlledUpstreamClient]
+        RuntimeCoordinator, ClientMCPRequestExecutor, NIOAsyncTestingEventLoop, [EmbeddedControlledUpstreamClient]
     ) {
         var config = makeEmbeddedConfig(requestTimeout: requestTimeout)
         config.upstreamProcessCount = upstreamCount
-        let loop = EmbeddedEventLoop()
+        let loop = NIOAsyncTestingEventLoop()
         let upstreams = (0..<upstreamCount).map { _ in EmbeddedControlledUpstreamClient() }
         let manager = RuntimeCoordinator(
             config: config, eventLoop: loop, upstreams: upstreams,
@@ -452,24 +452,24 @@ struct HTTPConcurrencyTests {
             executeSnippetPayload(id: 300, tabIdentifier: "windowtab-first"),
             service: service, loop: loop, requestTimeoutOverride: .seconds(10)
         )
-        loop.run()
+        await loop.run()
         await manager.drainRuntimeTasksForTesting()
         _ = try await waitForUpstreamRequestCount(upstream, count: 1)
         let second = try cancellationOperation(
             executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued"), service: service, loop: loop,
             requestTimeoutOverride: .milliseconds(150)
         )
-        loop.run()
+        await loop.run()
         #expect(manager.debugSnapshot().queuedRequestCount == 1)
         clock.advance(by: waitSeconds)
-        loop.advanceTime(by: .milliseconds(Int64(waitSeconds * 1_000)))
-        loop.run()
+        await loop.advanceTime(by: .milliseconds(Int64(waitSeconds * 1_000)))
+        await loop.run()
         let expiresInQueue = waitSeconds >= 0.15
         #expect(manager.debugSnapshot().queuedRequestCount == (expiresInQueue ? 0 : 1))
 
         let response = try #require(upstream.takeNextResponse(label: "tools/call:ExecuteSnippet"))
         manager.routeUpstreamMessage(response, upstreamIndex: 0)
-        loop.run()
+        await loop.run()
         guard case .responseData = try await first.future.get() else {
             Issue.record("the blocker should retain its independent timeout budget")
             return
@@ -478,9 +478,9 @@ struct HTTPConcurrencyTests {
             await manager.drainRuntimeTasksForTesting()
             _ = try await waitForUpstreamRequestCount(upstream, count: 2)
             clock.advance(by: 0.06)
-            loop.advanceTime(by: .milliseconds(60))
+            await loop.advanceTime(by: .milliseconds(60))
         }
-        loop.run()
+        await loop.run()
         guard case .mcpError(let id, -32000, "upstream timeout", _, _) = try await second.future.get() else {
             Issue.record("queue wait and execution must share the original deadline")
             return
@@ -499,12 +499,12 @@ struct HTTPConcurrencyTests {
         let third = try cancellationOperation(
             executeSnippetPayload(id: 302, tabIdentifier: "windowtab-after-timeout"), service: service, loop: loop
         )
-        loop.run()
+        await loop.run()
         await manager.drainRuntimeTasksForTesting()
         _ = try await waitForUpstreamRequestCount(upstream, count: nextMessageCount)
         let thirdResponse = try #require(upstream.takeNextResponse(label: "tools/call:ExecuteSnippet"))
         manager.routeUpstreamMessage(thirdResponse, upstreamIndex: 0)
-        loop.run()
+        await loop.run()
         guard case .responseData = try await third.future.get() else {
             Issue.record("timed-out queued work must not occupy the next request's slot")
             return
@@ -514,8 +514,8 @@ struct HTTPConcurrencyTests {
     @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() async throws {
         let upstream = EmbeddedControlledUpstreamClient()
         let config = makeEmbeddedConfig(requestTimeout: 10)
-        let firstChannel = EmbeddedChannel()
-        let secondChannel = EmbeddedChannel()
+        let firstChannel = await NIOAsyncTestingChannel(handlers: [])
+        let secondChannel = await NIOAsyncTestingChannel(handlers: [])
         let sessionManager = RuntimeCoordinator(
             config: config,
             eventLoop: firstChannel.eventLoop,
@@ -524,17 +524,21 @@ struct HTTPConcurrencyTests {
         )
         defer {
             sessionManager.shutdownAndWait()
-            _ = try? firstChannel.finish()
-            _ = try? secondChannel.finish()
+            registerAsyncTestCleanup(description: "finishing first HTTP test channel") {
+                _ = try await firstChannel.finish()
+            }
+            registerAsyncTestCleanup(description: "finishing second HTTP test channel") {
+                _ = try await secondChannel.finish()
+            }
         }
 
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
-        try addEmbeddedHTTPHandler(
+        try await addAsyncHTTPHandler(
             to: firstChannel,
             config: config,
             sessionManager: sessionManager
         )
-        try addEmbeddedHTTPHandler(
+        try await addAsyncHTTPHandler(
             to: secondChannel,
             config: config,
             sessionManager: sessionManager
@@ -560,33 +564,33 @@ struct HTTPConcurrencyTests {
         sessionManager.seedCanonicalToolsCatalog(executeSnippetToolsCatalog(), sourceUpstream: 0)
         upstream.clearRecordedRequests()
 
-        try postEmbeddedJSON(
+        try await postAsyncJSON(
             executeSnippetPayload(id: 700, tabIdentifier: "windowtab-timeout"),
             sessionID: sessionID,
             to: firstChannel
         )
-        firstChannel.embeddedEventLoop.run()
+        await firstChannel.testingEventLoop.run()
         await sessionManager.drainRuntimeTasksForTesting()
         let firstRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 1)
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
-        try postEmbeddedJSON(
+        try await postAsyncJSON(
             executeSnippetPayload(id: 701, tabIdentifier: "windowtab-timeout-2"),
             sessionID: sessionID,
             to: secondChannel
         )
-        secondChannel.embeddedEventLoop.run()
+        await secondChannel.testingEventLoop.run()
         #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
 
-        firstChannel.embeddedEventLoop.advanceTime(by: .seconds(10))
-        firstChannel.embeddedEventLoop.run()
-        let firstResponse = try collectEmbeddedResponse(from: firstChannel)
+        await firstChannel.testingEventLoop.advanceTime(by: .seconds(10))
+        await firstChannel.testingEventLoop.run()
+        let firstResponse = try await collectAsyncResponse(from: firstChannel)
         #expect(firstResponse.head.status == .ok)
         let firstObject = try jsonObject(from: firstResponse.body)
         #expect((firstObject["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
 
         await sessionManager.drainRuntimeTasksForTesting()
-        secondChannel.embeddedEventLoop.run()
+        await secondChannel.testingEventLoop.run()
         await sessionManager.drainRuntimeTasksForTesting()
         let secondRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 3)
         #expect(secondRequestLabels == [
@@ -600,9 +604,9 @@ struct HTTPConcurrencyTests {
             upstream.takeNextResponse(label: "tools/call:ExecuteSnippet")
         )
         sessionManager.routeUpstreamMessage(secondResponseData, upstreamIndex: 0)
-        secondChannel.embeddedEventLoop.run()
+        await secondChannel.testingEventLoop.run()
 
-        let secondResponse = try collectEmbeddedResponse(from: secondChannel)
+        let secondResponse = try await collectAsyncResponse(from: secondChannel)
         #expect(secondResponse.head.status == .ok)
         let secondObject = try jsonObject(from: secondResponse.body)
         #expect((secondObject["id"] as? NSNumber)?.intValue == 701)
@@ -2150,28 +2154,35 @@ private func makeEmbeddedConfig(requestTimeout: TimeInterval) -> ProxyRuntimeCon
     return config
 }
 
-private func addEmbeddedHTTPHandler(
-    to channel: EmbeddedChannel,
+private func addAsyncHTTPHandler(
+    to channel: NIOAsyncTestingChannel,
     config: ProxyRuntimeConfiguration,
     sessionManager: any RuntimeCoordinating
-) throws {
-    try addHTTPHandler(
-        to: channel,
-        config: HTTPTestConfiguration(
-            runtime: config,
-            listenHost: "127.0.0.1",
-            listenPort: 0,
-            maxBodyBytes: config.maxMessageBytes
-        ),
-        sessionManager: sessionManager
-    )
+) async throws {
+    try await channel.testingEventLoop.executeInContext {
+        let runtime = ProxyRuntime(
+            config: config,
+            coordinator: sessionManager,
+            eventLoop: channel.eventLoop,
+            eventSource: ProxyRuntimeEventSource()
+        )
+        let handler = HTTPHandler(
+            config: ProxyHTTPConfiguration(
+                listenHost: "127.0.0.1",
+                listenPort: 0,
+                maxBodyBytes: config.maxMessageBytes
+            ),
+            controlService: HTTPControlService(runtime: runtime)
+        )
+        try channel.pipeline.syncOperations.addHandler(handler)
+    }
 }
 
-private func postEmbeddedJSON(
+private func postAsyncJSON(
     _ payload: [String: Any],
     sessionID: String?,
-    to channel: EmbeddedChannel
-) throws {
+    to channel: NIOAsyncTestingChannel
+) async throws {
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
     head.headers.add(name: "Accept", value: "application/json, text/event-stream")
@@ -2182,43 +2193,33 @@ private func postEmbeddedJSON(
     }
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
-    try channel.writeInbound(HTTPServerRequestPart.head(head))
-    try channel.writeInbound(HTTPServerRequestPart.body(body))
-    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    try await channel.writeInbound(HTTPServerRequestPart.head(head))
+    try await channel.writeInbound(HTTPServerRequestPart.body(body))
+    try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 }
 
-private func collectEmbeddedResponse(
-    from channel: EmbeddedChannel
-) throws -> (head: HTTPResponseHead, body: String) {
-    drainEmbeddedCompletions(for: channel)
-    channel.embeddedEventLoop.run()
-    drainEmbeddedCompletions(for: channel)
-    channel.embeddedEventLoop.run()
-
-    var responseHead: HTTPResponseHead?
-    var bodyBuffer = channel.allocator.buffer(capacity: 0)
-
-    while let part = try channel.readOutbound(as: HTTPServerResponsePart.self) {
-        switch part {
-        case .head(let head):
-            responseHead = head
-        case .body(let body):
-            switch body {
-            case .byteBuffer(var buffer):
-                bodyBuffer.writeBuffer(&buffer)
-            case .fileRegion:
-                break
+private func collectAsyncResponse(
+    from channel: NIOAsyncTestingChannel
+) async throws -> (head: HTTPResponseHead, body: String) {
+    try await waitWithTimeout("waiting for HTTP test response") {
+        var responseHead: HTTPResponseHead?
+        var bodyBuffer = channel.allocator.buffer(capacity: 0)
+        while true {
+            switch try await channel.waitForOutboundWrite(as: HTTPServerResponsePart.self) {
+            case .head(let head):
+                responseHead = head
+            case .body(let body):
+                if case .byteBuffer(var buffer) = body {
+                    bodyBuffer.writeBuffer(&buffer)
+                }
+            case .end:
+                guard let responseHead else {
+                    throw ConcurrencyTestError.invalidResponse
+                }
+                return (responseHead, bodyBuffer.readString(length: bodyBuffer.readableBytes) ?? "")
             }
-        case .end:
-            break
         }
     }
-
-    guard let responseHead else {
-        throw ConcurrencyTestError.invalidResponse
-    }
-    let body = bodyBuffer.readString(length: bodyBuffer.readableBytes) ?? ""
-    return (responseHead, body)
 }
 
 private func jsonObject(from string: String) throws -> [String: Any] {
