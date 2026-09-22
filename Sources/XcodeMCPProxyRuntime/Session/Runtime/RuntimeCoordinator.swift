@@ -793,6 +793,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return Set(upstreamTopology.snapshot().slotIDs.map(\.rawValue)).subtracting(active)
         }
         self.upstreamSlotScheduler = UpstreamSlotScheduler(
+            isLeaseLive: { [leaseManager] in leaseManager.isLive($0) },
             canUseUpstream: {
                 [weak upstreamHealthManager] upstreamIndex in
                 let nowUptimeNs = uptimeProvider()

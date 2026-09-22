@@ -949,12 +949,10 @@ extension RuntimeCoordinator {
             }
             markRequestTimedOut(operationLease)
         }
+        let release = leaseManager.timeoutLease(leaseID)
         upstreamSlotScheduler.cancelQueuedRequest(leaseID: leaseID)
         let cancellationDelivery = cancellationDelivery(waitingFor: cancellationDeliveries)
-        settleRequestLease(
-            leaseManager.timeoutLease(leaseID),
-            after: cancellationDelivery
-        )
+        settleRequestLease(release, after: cancellationDelivery)
         return cancellationDelivery
     }
 
@@ -994,16 +992,14 @@ extension RuntimeCoordinator {
                 }
             }
         }
+        let release = leaseManager.failLease(
+            leaseID,
+            terminalState: .abandoned,
+            reason: .clientDisconnected
+        )
         upstreamSlotScheduler.cancelQueuedRequest(leaseID: leaseID)
         let cancellationDelivery = cancellationDelivery(waitingFor: deliveries)
-        settleRequestLease(
-            leaseManager.failLease(
-                leaseID,
-                terminalState: .abandoned,
-                reason: .clientDisconnected
-            ),
-            after: cancellationDelivery
-        )
+        settleRequestLease(release, after: cancellationDelivery)
         return cancellationDelivery
     }
 

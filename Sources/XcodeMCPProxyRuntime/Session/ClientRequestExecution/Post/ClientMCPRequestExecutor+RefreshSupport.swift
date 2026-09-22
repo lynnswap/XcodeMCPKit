@@ -362,7 +362,7 @@ extension ClientMCPRequestExecutor {
             metadata: [
                 "lease_id": .string(handle.leaseID.uuidString),
                 "session": .string(handle.sessionID),
-                "disconnect_source": .string(source.rawValue),
+                "cancellation_source": .string(source.rawValue),
                 "request_ids": .string(handle.requestIDKeys.joined(separator: ",")),
             ]
         )

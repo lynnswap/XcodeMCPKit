@@ -77,6 +77,7 @@ final class UpstreamSlotScheduler: Sendable {
         var reservationsByLeaseID: [LeaseManager.ID: Reservation] = [:]
     }
 
+    private let isLeaseLive: @Sendable (LeaseManager.ID) -> Bool
     private let logger: Logger
     private let state: NIOLockedValueBox<State>
     private let canUseUpstream: @Sendable (Int) -> UpstreamHealthManager.UseEvaluation
@@ -89,6 +90,7 @@ final class UpstreamSlotScheduler: Sendable {
 
     init(
         logger: Logger = XcodeMCPRuntimeLogging.make("upstream.scheduler"),
+        isLeaseLive: @escaping @Sendable (LeaseManager.ID) -> Bool,
         canUseUpstream: @escaping @Sendable (Int) -> UpstreamHealthManager.UseEvaluation,
         selectUpstream: @escaping @Sendable (Set<Int>) -> UpstreamHealthManager.SelectionResult,
         operationLease: @escaping @Sendable (UpstreamTopologyProof) -> UpstreamOperationLease?,
@@ -96,6 +98,7 @@ final class UpstreamSlotScheduler: Sendable {
         applyHealthEffects: @escaping @Sendable ([UpstreamHealthManager.Effect]) -> Void = { _ in },
         testHooks: UpstreamSlotSchedulerTestHooks = .noop
     ) {
+        self.isLeaseLive = isLeaseLive
         self.logger = logger
         self.canUseUpstream = canUseUpstream
         self.selectUpstream = selectUpstream
@@ -152,9 +155,15 @@ final class UpstreamSlotScheduler: Sendable {
             failCancelled: failCancelled
         )
 
-        let queuedRequestCount = state.withLockedValue { state in
+        let queuedRequestCount = state.withLockedValue { state -> Int? in
+            // Cancellation settles the lease before acquiring this lock to remove queued work.
+            guard isLeaseLive(leaseID) else { return nil }
             state.pendingRequests.append(request)
             return state.pendingRequests.count
+        }
+        guard let queuedRequestCount else {
+            eventLoop.execute { request.failCancelled() }
+            return
         }
         testHooks.requestQueued(leaseID, descriptor, queuedRequestCount)
         dispatchQueuedRequestsIfPossible()

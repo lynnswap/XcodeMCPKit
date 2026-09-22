@@ -1,6 +1,7 @@
 import Foundation
 import NIO
 import NIOEmbedded
+import NIOConcurrencyHelpers
 import NIOHTTP1
 import Testing
 import XcodeMCPKit
@@ -34,6 +35,234 @@ private func seedCanonicalInitializeForTesting(
 
 @Suite(.serialized, .asyncTestCleanup)
 struct HTTPConcurrencyTests {
+    @Test(arguments: ["ExecuteSnippet", "XcodeListWindows"])
+    func httpCancellationDoesNotWaitBehindTheRequest(toolName: String) async throws {
+        let upstream = ControlledUpstreamClient()
+        let server = try TestHTTPServer.start(upstream: upstream, requestTimeout: 60)
+        do {
+            let (initialized, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
+            let sessionID = try #require(initialized.value(forHTTPHeaderField: "Mcp-Session-Id"))
+            await drainInitialToolsCatalogWarmupIfNeeded(server: server, upstream: upstream)
+            await upstream.clearRecordedRequests()
+            async let request = postStatusOnly(
+                url: server.url, sessionID: sessionID,
+                payload: toolCallPayload(id: 991, name: toolName, arguments: [:]), timeout: 2
+            )
+            _ = try await upstream.waitForNonInitializeRequest(label: "tools/call:\(toolName)")
+            let cancellation = try await postStatusOnly(
+                url: server.url, sessionID: sessionID,
+                payload: cancellationPayload(id: 991), timeout: 2
+            )
+            #expect(cancellation.statusCode == 202)
+            #expect(try await request.statusCode == 202)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
+    @Test(arguments: [false, true])
+    func cancelledLeaseCannotBeQueuedAfterCancellation(upstreamBusy: Bool) async throws {
+        let (manager, _, loop, _) = try cancellationFixture(upstreamCount: 1)
+        defer { manager.shutdownAndWait() }
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "cancel-session", label: "tools/call:ExecuteSnippet",
+            expectsResponse: true, isTopLevelClientRequest: true
+        )
+        let blocker = loop.makePromise(of: Void.self)
+        let blockerLease = manager.createRequestLease(descriptor: descriptor)
+        if upstreamBusy {
+            let future: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+                leaseID: blockerLease, descriptor: descriptor, on: loop
+            ) { _ in blocker.futureResult }
+            future.whenFailure { _ in }
+            loop.run()
+        }
+        let cancelledLease = manager.createRequestLease(descriptor: descriptor)
+        manager.abandonRequestLease(
+            cancelledLease, sessionID: "cancel-session", requestIDKeys: [], operationLease: nil
+        )
+        let cancelled: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: cancelledLease, descriptor: descriptor, on: loop
+        ) { _ in
+            Issue.record("a settled lease must never acquire an upstream")
+            return loop.makeSucceededFuture(())
+        }
+        loop.run()
+        await #expect(throws: CancellationError.self) { try await cancelled.get() }
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
+        manager.completeRequestLease(blockerLease)
+        blocker.succeed(())
+        loop.run()
+        let nextLease = manager.createRequestLease(descriptor: descriptor)
+        let next: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: nextLease, descriptor: descriptor, on: loop
+        ) { _ in loop.makeSucceededFuture(()) }
+        loop.run()
+        try await next.get()
+        manager.completeRequestLease(nextLease)
+        #expect(manager.upstreamSlotScheduler.debugSnapshot().activeLeaseCountByUpstream.isEmpty)
+    }
+
+    @Test func cancellationDuringAdmissionPreventsDispatch() async throws {
+        let onQueued = NIOLockedValueBox<(@Sendable () -> Void)?>(nil)
+        let (manager, service, loop, upstreams) = try cancellationFixture(
+            upstreamCount: 1,
+            testHooks: RuntimeCoordinatorTestHooks(upstreamRequestQueued: { _, _, _ in
+                let action = onQueued.withLockedValue { action in
+                    defer { action = nil }
+                    return action
+                }
+                action?()
+            })
+        )
+        defer { manager.shutdownAndWait() }
+        let cancellationData = try JSONSerialization.data(withJSONObject: cancellationPayload(id: 991))
+        onQueued.withLockedValue { action in
+            action = {
+                _ = service.handle(
+                    bodyData: cancellationData, headerSessionID: "cancel-session",
+                    headerSessionExists: true, prefersEventStream: false, eventLoop: loop
+                )
+            }
+        }
+        let operation = try cancellationOperation(
+            executeSnippetPayload(id: 991, tabIdentifier: "windowtab-cancel"), service: service, loop: loop
+        )
+        loop.run()
+        await manager.drainRuntimeTasksForTesting()
+        loop.run()
+        guard case .empty(.accepted, _) = try await operation.future.get() else {
+            Issue.record("cancellation during admission must finish the original request")
+            return
+        }
+        #expect(upstreams[0].recordedMessages().isEmpty)
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
+    }
+
+    @Test func cancellationUsesTheOriginalUpstreamAndRewrittenID() async throws {
+        let (manager, service, loop, upstreams) = try cancellationFixture(upstreamCount: 2)
+        defer { manager.shutdownAndWait() }
+        let operation = try cancellationOperation(
+            executeSnippetPayload(id: 991, tabIdentifier: "windowtab-cancel"),
+            service: service, loop: loop
+        )
+        loop.run()
+        await manager.drainRuntimeTasksForTesting()
+        let ownerIndex = try #require(upstreams.indices.first { !upstreams[$0].recordedMessages().isEmpty })
+        let owner = upstreams[ownerIndex]
+        _ = try await waitForUpstreamRequestCount(owner, count: 1)
+        let original = try #require(owner.recordedMessages().first)
+        let requestID = try #require(MCPJSONValue(original).objectValue?["id"])
+        #expect(requestID != .integer(991))
+
+        let cancellation = try cancellationOperation(cancellationPayload(id: 991), service: service, loop: loop)
+        loop.run()
+        await manager.drainRuntimeTasksForTesting()
+        _ = try await waitForUpstreamRequestCount(owner, count: 2)
+        loop.run()
+        let message = try #require(owner.recordedMessages().last)
+        let params = try #require(MCPJSONValue(message).objectValue?["params"]?.objectValue)
+        #expect(params["requestId"] == requestID)
+        #expect(upstreams[1 - ownerIndex].recordedMessages().isEmpty)
+        guard case .empty(.accepted, _) = try await cancellation.future.get(),
+              case .empty(.accepted, _) = try await operation.future.get() else {
+            Issue.record("cancelled requests must finish without a JSON-RPC result")
+            return
+        }
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
+    }
+
+    @Test func queuedCancellationPreservesOtherSessionsAndIDScalarTypes() async throws {
+        let (manager, service, loop, upstreams) = try cancellationFixture(upstreamCount: 1)
+        defer { manager.shutdownAndWait() }
+        let upstream = upstreams[0]
+        let active = try cancellationOperation(
+            executeSnippetPayload(id: 1, tabIdentifier: "windowtab-active"), service: service, loop: loop
+        )
+        loop.run()
+        await manager.drainRuntimeTasksForTesting()
+        _ = try await waitForUpstreamRequestCount(upstream, count: 1)
+        var queuedBody = executeSnippetPayload(id: 2, tabIdentifier: "windowtab-queued")
+        queuedBody["id"] = "1"
+        let queued = try cancellationOperation(queuedBody, service: service, loop: loop)
+        loop.run()
+        #expect(manager.debugSnapshot().queuedRequestCount == 1)
+
+        _ = try cancellationOperation(cancellationPayload(id: 1), service: service, loop: loop, sessionID: "other-session")
+        _ = try cancellationOperation(cancellationPayload(id: true), service: service, loop: loop)
+        _ = try cancellationOperation(cancellationPayload(id: 999), service: service, loop: loop)
+        _ = try cancellationOperation(cancellationPayload(id: "1"), service: service, loop: loop)
+        loop.run()
+        await manager.drainRuntimeTasksForTesting()
+        loop.run()
+        guard case .empty(.accepted, _) = try await queued.future.get() else {
+            Issue.record("queued request was not cancelled")
+            return
+        }
+        #expect(upstream.recordedMessages().count == 1)
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
+
+        let response = try #require(upstream.takeNextResponse(label: "tools/call:ExecuteSnippet"))
+        manager.routeUpstreamMessage(response, upstreamIndex: 0)
+        loop.run()
+        guard case .responseData = try await active.future.get() else {
+            Issue.record("cancellation affected the numeric ID or another session")
+            return
+        }
+        _ = try cancellationOperation(cancellationPayload(id: 1), service: service, loop: loop)
+        loop.run()
+        #expect(upstream.recordedMessages().count == 1)
+    }
+
+    private func cancellationPayload(id: Any) -> [String: Any] {
+        ["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": id]]
+    }
+
+    private func cancellationOperation(
+        _ payload: [String: Any], service: ClientMCPRequestExecutor, loop: EmbeddedEventLoop,
+        sessionID: String = "cancel-session"
+    ) throws -> ClientMCPRequestExecutor.Operation {
+        service.handle(
+            bodyData: try JSONSerialization.data(withJSONObject: payload),
+            headerSessionID: sessionID, headerSessionExists: true,
+            prefersEventStream: false, eventLoop: loop
+        )
+    }
+
+    private func cancellationFixture(
+        upstreamCount: Int, testHooks: RuntimeCoordinatorTestHooks = .init()
+    ) throws -> (
+        RuntimeCoordinator, ClientMCPRequestExecutor, EmbeddedEventLoop, [EmbeddedControlledUpstreamClient]
+    ) {
+        var config = makeEmbeddedConfig(requestTimeout: 60)
+        config.upstreamProcessCount = upstreamCount
+        let loop = EmbeddedEventLoop()
+        let upstreams = (0..<upstreamCount).map { _ in EmbeddedControlledUpstreamClient() }
+        let manager = RuntimeCoordinator(
+            config: config, eventLoop: loop, upstreams: upstreams,
+            testHooks: testHooks, startImmediately: false
+        )
+        for sessionID in ["cancel-session", "other-session"] {
+            _ = manager.session(id: sessionID)
+            manager.sessionRegistry.markInitialized(id: sessionID, negotiatedProtocolVersion: MCP.ProtocolVersion.current)
+        }
+        for index in upstreams.indices { manager.markUpstreamInitialized(upstreamIndex: index) }
+        seedCanonicalInitializeForTesting(
+            on: manager,
+            result: .object(["protocolVersion": .string(MCP.ProtocolVersion.current), "capabilities": .object([:])]),
+            sourceUpstream: 0
+        )
+        manager.seedCanonicalToolsCatalog(executeSnippetToolsCatalog(), sourceUpstream: 0)
+        let service = ClientMCPRequestExecutor(
+            config: config, sessionManager: manager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout)
+        )
+        return (manager, service, loop, upstreams)
+    }
+
     @Test func httpConcurrentInitializeRequests() async throws {
         let server = try TestHTTPServer.start()
         let url = server.url
@@ -983,6 +1212,7 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
     private struct State {
         var sentRequests: [SentRequest] = []
         var requestHistory: [String] = []
+        var messages: [JSONValue] = []
         var requestLabelBaseline = 0
         var requestLabelCount = 0
     }
@@ -1023,8 +1253,11 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
         return .accepted
     }
 
+    func recordedMessages() -> [JSONValue] { withLock { $0.messages } }
+
     func clearRecordedRequests() {
         withLock {
+            $0.messages.removeAll()
             $0.sentRequests.removeAll()
             $0.requestHistory.removeAll()
             $0.requestLabelBaseline = $0.requestLabelCount
@@ -1080,6 +1313,7 @@ private final class EmbeddedControlledUpstreamClient: UpstreamSlotControlling, @
         let label = requestLabel(from: object)
         let responseData = makeDefaultResponse(id: object["id"], method: method)
         withLock {
+            $0.messages.append(JSONValue(any: object)!)
             $0.sentRequests.append(SentRequest(label: label, responseData: responseData))
             $0.requestHistory.append(label)
             $0.requestLabelCount += 1

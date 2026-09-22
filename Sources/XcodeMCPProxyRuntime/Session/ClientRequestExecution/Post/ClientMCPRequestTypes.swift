@@ -66,6 +66,7 @@ extension ClientMCPRequestExecutor {
 
     enum CancellationSource: String, Sendable {
         case channelInactive
+        case clientNotification
         case responseWriteFailure
     }
 
@@ -115,12 +116,15 @@ extension ClientMCPRequestExecutor {
             let requestIDKeys: [String]
         }
 
+        private enum TerminalReason: Sendable { case completed, cancelled }
+
         private struct State: Sendable {
             var requestIDKeys: [String]
             var activeRequest: ActiveRequest?
             var refreshTask: Task<Void, Never>?
             var childHandles: [ClientMCPRequestExecutor.CancellationHandle] = []
-            var isTerminal = false
+            var terminalReason: TerminalReason?
+            var isTerminal: Bool { terminalReason != nil }
         }
 
         let leaseID: LeaseManager.ID
@@ -143,8 +147,12 @@ extension ClientMCPRequestExecutor {
             state.withLockedValue { $0.requestIDKeys }
         }
 
-        var isCancelled: Bool {
+        var isTerminal: Bool {
             state.withLockedValue { $0.isTerminal }
+        }
+
+        var wasCancelled: Bool {
+            state.withLockedValue { $0.terminalReason == .cancelled }
         }
 
         func activate(operationLease: UpstreamOperationLease) -> Bool {
@@ -189,7 +197,7 @@ extension ClientMCPRequestExecutor {
 
         func markCompleted() {
             state.withLockedValue { state in
-                state.isTerminal = true
+                if state.terminalReason == nil { state.terminalReason = .completed }
                 state.refreshTask = nil
                 state.childHandles.removeAll()
             }
@@ -224,7 +232,7 @@ extension ClientMCPRequestExecutor {
             let snapshot = state.withLockedValue {
                 state -> CancellationSnapshot? in
                 guard !state.isTerminal else { return nil }
-                state.isTerminal = true
+                state.terminalReason = .cancelled
                 let snapshot = CancellationSnapshot(
                     activeRequest: state.activeRequest,
                     refreshTask: state.refreshTask,

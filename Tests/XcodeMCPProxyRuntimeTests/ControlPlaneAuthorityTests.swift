@@ -2083,6 +2083,7 @@ struct ControlPlaneAuthorityTests {
         let started = NIOLockedValueBox<[UpstreamTopologyProof]>([])
         let failedUnavailable = NIOLockedValueBox(0)
         let scheduler = UpstreamSlotScheduler(
+            isLeaseLive: { _ in true },
             canUseUpstream: { _ in .init(proof: oldProof, effects: []) },
             selectUpstream: { _ in .init(proof: oldProof, effects: []) },
             operationLease: { topology.operationLease(for: $0) },
