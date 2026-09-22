@@ -305,6 +305,7 @@ let package = Package(
                 "XcodeMCPKit",
                 "XcodeMCPProxyKit",
                 "XcodeMCPProxyRuntime",
+                "XcodeMCPProxyHTTP",
                 "XcodeMCPProxyTestSupport",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),

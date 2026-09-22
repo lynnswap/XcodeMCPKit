@@ -46,6 +46,11 @@ after listener and accepted channels, runtime activity, permission automation,
 and event-loop resources have stopped. A server instance is one-shot; construct
 a new instance after shutdown.
 
+Concurrent and repeated `shutdown()` calls return the same shutdown result.
+If startup and its cleanup both fail, `XcodeMCPProxyServer.CleanupError` retains
+both errors and any bound endpoint. A cleanup failure means resource release
+may be incomplete, even though the server lifecycle has stopped.
+
 ### Server configuration
 
 `XcodeMCPProxyServerConfiguration` exposes the supported embedding choices:

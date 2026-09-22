@@ -3,6 +3,7 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPKit
+@testable import XcodeMCPProxyHTTP
 @testable import XcodeMCPProxyKit
 @testable import XcodeMCPProxyRuntime
 import Testing
@@ -797,6 +798,120 @@ struct XcodeMCPProxyServerTests {
         try await shutdown(probeGroup)
     }
 
+    @Test(arguments: [false, true])
+    func shutdownDuringStartupReportsCleanupFailure(discoveryFails: Bool) async throws {
+        let gateway = ControlledShutdownGateway(holdStartup: true)
+        let runtime = StartupInventoryRuntime()
+        let autoApprover = RecordingAutoApprover()
+        var discovery = DiscoveryClient.testValue
+        if discoveryFails {
+            discovery.write = { _, _ in throw DiscoveryWriteFailure.expected }
+        }
+        let server = XcodeMCPProxyServer(
+            configuration: .init(approvalPolicy: .automatic),
+            dependencies: .init(
+                discoveryClient: discovery,
+                makeAutoApprover: { _, _ in autoApprover },
+                makeRuntime: { _ in runtime },
+                makeHTTPGateway: { _, _, _ in gateway }
+            )
+        )
+        let start = Task { try await server.start() }
+        try await gateway.startBegan.wait(description: "waiting for gateway startup")
+        let firstShutdown = Task { try await server.shutdown() }
+        try await gateway.startCancelled.wait(description: "waiting for startup cancellation")
+        let secondShutdown = Task { try await server.shutdown() }
+        let waiter = Task { try await server.waitUntilShutdown() }
+        gateway.allowStart.signal()
+        try await gateway.shutdownBegan.wait(description: "waiting for gateway cleanup")
+        gateway.allowShutdown.signal()
+
+        let startError = await #expect(throws: (any Error).self) { _ = try await start.value }
+        let firstError = await #expect(throws: (any Error).self) { try await firstShutdown.value }
+        let secondError = await #expect(throws: (any Error).self) { try await secondShutdown.value }
+        let waiterError = await #expect(throws: (any Error).self) { try await waiter.value }
+        for error in [startError, firstError, secondError, waiterError] {
+            if discoveryFails {
+                let failure = try #require(error as? XcodeMCPProxyServer.CleanupError)
+                #expect(failure.operationError as? DiscoveryWriteFailure == .expected)
+                #expect(failure.cleanupError as? GatewayShutdownFailure == .expected)
+                #expect(failure.endpoint == gateway.endpoint)
+            } else {
+                #expect(error as? GatewayShutdownFailure == .expected)
+            }
+        }
+        let repeatedError = await #expect(throws: (any Error).self) { try await server.shutdown() }
+        #expect(discoveryFails
+            ? repeatedError is XcodeMCPProxyServer.CleanupError
+            : repeatedError as? GatewayShutdownFailure == .expected)
+        #expect(gateway.shutdownCount == 1)
+        #expect(runtime.shutdownCount == 1)
+        #expect(autoApprover.cancelCount == 1)
+        let status = await server.snapshot()
+        #expect(status.phase == .stopped)
+        #expect(status.endpoint == gateway.endpoint)
+    }
+
+    @Test func startupFailurePreservesItsCleanupFailureAndBoundEndpoint() async throws {
+        let gateway = ControlledShutdownGateway()
+        gateway.allowShutdown.signal()
+        let runtime = StartupInventoryRuntime()
+        var discovery = DiscoveryClient.testValue
+        discovery.write = { _, _ in throw DiscoveryWriteFailure.expected }
+        let server = XcodeMCPProxyServer(
+            configuration: .init(),
+            dependencies: .init(
+                discoveryClient: discovery,
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in runtime },
+                makeHTTPGateway: { _, _, _ in gateway }
+            )
+        )
+
+        let error = try await #require(throws: XcodeMCPProxyServer.CleanupError.self) {
+            _ = try await server.start()
+        }
+
+        #expect(error.operationError as? DiscoveryWriteFailure == .expected)
+        #expect(error.cleanupError as? GatewayShutdownFailure == .expected)
+        #expect(error.endpoint == gateway.endpoint)
+        #expect((await server.snapshot()).endpoint == gateway.endpoint)
+        await #expect(throws: XcodeMCPProxyServer.CleanupError.self) {
+            try await server.waitUntilShutdown()
+        }
+        await #expect(throws: XcodeMCPProxyServer.CleanupError.self) {
+            try await server.shutdown()
+        }
+        #expect(gateway.shutdownCount == 1)
+        #expect(runtime.shutdownCount == 1)
+    }
+
+    @Test func runningShutdownSharesReleaseFailureWithoutRepeatingCleanup() async throws {
+        let gateway = ControlledShutdownGateway()
+        let runtime = StartupInventoryRuntime()
+        let server = XcodeMCPProxyServer(
+            configuration: .init(discovery: .disabled),
+            dependencies: .init(
+                makeAutoApprover: { _, _ in RecordingAutoApprover() },
+                makeRuntime: { _ in runtime },
+                makeHTTPGateway: { _, _, _ in gateway }
+            )
+        )
+        _ = try await server.start()
+        let first = Task { try await server.shutdown() }
+        try await gateway.shutdownBegan.wait(description: "waiting for gateway cleanup")
+        let second = Task { try await server.shutdown() }
+        gateway.allowShutdown.signal()
+
+        await #expect(throws: GatewayShutdownFailure.expected) { try await first.value }
+        await #expect(throws: GatewayShutdownFailure.expected) { try await second.value }
+        await #expect(throws: GatewayShutdownFailure.expected) { try await server.shutdown() }
+        await #expect(throws: GatewayShutdownFailure.expected) { try await server.waitUntilShutdown() }
+        #expect(gateway.shutdownCount == 1)
+        #expect(runtime.shutdownCount == 1)
+        #expect((await server.snapshot()).phase == .stopped)
+    }
+
     @Test func statusSnapshotExposesOnlySanitizedContractFields() async throws {
         let upstream = RecordingUpstreamSlot()
         let config = ProxyConfig(
@@ -888,6 +1003,58 @@ struct XcodeMCPProxyServerTests {
 
 private enum DiscoveryWriteFailure: Error {
     case expected
+}
+
+private enum GatewayShutdownFailure: Error {
+    case expected
+}
+
+private final class ControlledShutdownGateway: ProxyHTTPGatewayServing, Sendable {
+    let endpoint = XcodeMCPProxyServer.Endpoint(host: "127.0.0.1", port: 9876)
+    let startBegan = TestSignal()
+    let startCancelled = TestSignal()
+    let allowStart = TestSignal()
+    let shutdownBegan = TestSignal()
+    let allowShutdown = TestSignal()
+    private let holdStartup: Bool
+    private let shutdowns = NIOLockedValueBox(0)
+
+    init(holdStartup: Bool = false) {
+        self.holdStartup = holdStartup
+    }
+
+    var shutdownCount: Int { shutdowns.withLockedValue { $0 } }
+
+    func start() async throws -> ProxyHTTPEndpoint {
+        startBegan.signal()
+        if holdStartup {
+            let completion = Task {
+                try await allowStart.wait(timeout: .seconds(5), description: "releasing gateway startup")
+            }
+            try await withTaskCancellationHandler {
+                try await completion.value
+            } onCancel: {
+                self.startCancelled.signal()
+            }
+        }
+        return ProxyHTTPEndpoint(host: endpoint.host, port: endpoint.port)
+    }
+
+    func waitUntilShutdown() async throws {
+        try await allowShutdown.wait(timeout: .seconds(5), description: "waiting for gateway shutdown")
+    }
+
+    func shutdown() async throws {
+        shutdowns.withLockedValue { $0 += 1 }
+        shutdownBegan.signal()
+        let completion = Task {
+            try await allowShutdown.wait(timeout: .seconds(5), description: "releasing gateway shutdown")
+        }
+        try await completion.value
+        throw GatewayShutdownFailure.expected
+    }
+
+    func cancelForDeinit() {}
 }
 
 private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermissionDialogAutoApprover {
@@ -988,6 +1155,7 @@ private final class CancellationControlledHeadlessAvailability: @unchecked Senda
 private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeServing {
     private struct State {
         var started = false
+        var shutdownCount = 0
         var inventoryReadCount = 0
         var readInventoryBeforeStart = false
     }
@@ -997,6 +1165,8 @@ private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeSe
     var inventoryReadCount: Int {
         state.withLockedValue(\.inventoryReadCount)
     }
+
+    var shutdownCount: Int { state.withLockedValue(\.shutdownCount) }
 
     var readInventoryBeforeStart: Bool {
         state.withLockedValue(\.readInventoryBeforeStart)
@@ -1008,7 +1178,7 @@ private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeSe
 
     func cancelForDeinit() {}
 
-    func shutdown() async {}
+    func shutdown() async { state.withLockedValue { $0.shutdownCount += 1 } }
 
     func subscribeToEvents(
         _ receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void
