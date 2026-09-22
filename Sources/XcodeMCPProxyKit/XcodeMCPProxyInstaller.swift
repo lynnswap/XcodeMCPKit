@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Destination and mode settings for a source install.
@@ -194,22 +195,59 @@ package struct XcodeMCPProxyInstaller: Sendable {
             try buildProducts(Self.binaryNames, repoRoot)
         }
 
-        for binary in plan.binaries {
-            guard fileManager.fileExists(atPath: binary.sourceURL.path) else {
-                throw Error.message(
-                    "\(binary.name) not found next to installer (run with `swift run -c release` from the repo root)"
+        // Staging on the destination filesystem lets rename replace each executable atomically.
+        let stagingDirectory = plan.binDirectory.appendingPathComponent(
+            ".xcode-mcp-install-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: stagingDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        var installed: [Binary] = []
+        var activeBinary: Binary?
+        var failures: [String] = []
+        do {
+            for binary in plan.binaries {
+                activeBinary = binary
+                let stagedURL = stagingDirectory.appendingPathComponent(binary.name)
+                try fileManager.copyItem(
+                    at: binary.sourceURL.resolvingSymlinksInPath(),
+                    to: stagedURL
+                )
+                try fileManager.setAttributes(
+                    [.posixPermissions: 0o755],
+                    ofItemAtPath: stagedURL.path
                 )
             }
 
-            if fileManager.fileExists(atPath: binary.destinationURL.path) {
-                try fileManager.removeItem(at: binary.destinationURL)
+            for binary in plan.binaries {
+                activeBinary = binary
+                let stagedURL = stagingDirectory.appendingPathComponent(binary.name)
+                guard unsafe rename(stagedURL.path, binary.destinationURL.path) == 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                installed.append(binary)
+                stdout("Installed \(binary.name) to \(binary.destinationURL.path)")
             }
-            try fileManager.copyItem(at: binary.sourceURL, to: binary.destinationURL)
-            try fileManager.setAttributes(
-                [.posixPermissions: 0o755],
-                ofItemAtPath: binary.destinationURL.path
-            )
-            stdout("Installed \(binary.name) to \(binary.destinationURL.path)")
+        } catch {
+            failures.append("Failed to install \(activeBinary?.name ?? "executables"): \(error)")
+        }
+
+        do {
+            try fileManager.removeItem(at: stagingDirectory)
+        } catch {
+            failures.append("Failed to remove staging directory \(stagingDirectory.path): \(error)")
+        }
+
+        if !failures.isEmpty {
+            let installedPaths = installed.map(\.destinationURL.path)
+            let remainingPaths = plan.binaries.dropFirst(installed.count).map(\.destinationURL.path)
+            failures.append("Installed: \(installedPaths.isEmpty ? "none" : installedPaths.joined(separator: ", "))")
+            failures.append("Not installed: \(remainingPaths.isEmpty ? "none" : remainingPaths.joined(separator: ", "))")
+            throw Error.message(failures.joined(separator: "\n"))
         }
     }
 
