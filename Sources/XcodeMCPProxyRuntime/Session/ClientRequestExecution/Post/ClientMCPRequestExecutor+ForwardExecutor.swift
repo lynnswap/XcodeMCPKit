@@ -227,6 +227,34 @@ extension ClientMCPRequestExecutor {
                         prefersEventStream: prefersEventStream
                     )
                 )
+            case .failure(let error):
+                if error is CancellationError {
+                    cancellationHandle?.cancel(using: self.sessionManager)
+                } else {
+                    cancellationHandle?.markCompleted()
+                    self.sessionManager.failRequestLease(
+                        leaseID,
+                        terminalState: .failed,
+                        reason: .invalidUpstreamResponse
+                    )
+                }
+                self.logFinishedRequest(
+                    leaseID: leaseID,
+                    sessionID: sessionID,
+                    upstreamIndex: prepared.upstreamIndex,
+                    responseID: responseID,
+                    reason: error is CancellationError ? "cancelled" : "upstreamFailure"
+                )
+                let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+                promise.succeed(
+                    .mcpError(
+                        id: responseID,
+                        code: mapped.code,
+                        message: mapped.message,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                )
             case .invalidUpstreamResponse:
                 cancellationHandle?.markCompleted()
                 self.sessionManager.failRequestLease(

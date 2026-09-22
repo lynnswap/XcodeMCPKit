@@ -1665,11 +1665,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             if let buffer = encodeInitializeResponse(originalID: originalID, result: cachedResult) {
                 return eventLoop.makeSucceededFuture(buffer)
             }
-            return eventLoop.makeFailedFuture(TimeoutError())
+            return eventLoop.makeFailedFuture(ControlPlane.Error.invalidResponse("invalid initialize response"))
         }
 
         if shuttingDown {
-            return eventLoop.makeFailedFuture(TimeoutError())
+            return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }
 
         if pendingPromise != nil {
@@ -1682,7 +1682,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         }
 
         guard let promise = pendingPromise else {
-            return eventLoop.makeFailedFuture(TimeoutError())
+            return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
         }
         return promise.futureResult
     }

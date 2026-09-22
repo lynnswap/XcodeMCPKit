@@ -7629,6 +7629,45 @@ struct RuntimeCoordinatorRecoveryTests {
         }
     }
 
+    @Test func malformedCatalogReturnsProtocolErrorWithoutWaitingForTimeout() async throws {
+        let config = makeConfig(requestTimeout: 30)
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(config: config, upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        let sessionID = "invalid-catalog"
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: sessionID)
+        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
+        let executor = ClientMCPRequestExecutor(
+            config: config, sessionManager: fixture.manager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout)
+        )
+        let sentCount = await upstream.sentCount()
+        let operation = try executor.handle(
+            bodyData: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: 81, method: "tools/list")),
+            headerSessionID: sessionID, headerSessionExists: true,
+            prefersEventStream: false, eventLoop: fixture.eventLoop
+        )
+        let request = try await sentValue(from: upstream, at: sentCount, timeout: .seconds(2))
+        let requestID = try #require(JSONRPC.ID(any: extractUpstreamID(from: request)))
+        await upstream.yield(.message(try JSONRPC.Wire.resultResponseData(
+            id: requestID, result: .object(["tools": .string("private malformed catalog")])
+        )))
+        let resolution = try await waitWithTimeout("malformed catalog should fail immediately", timeout: .seconds(2)) {
+            try await operation.future.get()
+        }
+        guard case .responseData(let data, _, _) = resolution else {
+            Issue.record("expected JSON-RPC response")
+            return
+        }
+        let response = try JSONRPC.Wire.object(fromData: data)
+        let error = try #require(JSONRPC.Wire.errorPayload(inResponseObject: response))
+        #expect(error.code == -32603)
+        #expect(error.message == "invalid upstream response")
+        #expect((response["id"] as? NSNumber)?.intValue == 81)
+        #expect(!String(decoding: data, as: UTF8.self).contains("private malformed catalog"))
+    }
+
     @Test func sessionManagerLateToolsListResponseDoesNotReseedCanonicalCatalog() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }

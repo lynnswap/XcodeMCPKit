@@ -11,6 +11,7 @@ struct MCPForwardingService: Sendable {
         case timeout
         case upstreamUnavailable
         case invalidUpstreamResponse
+        case failure(any Error)
     }
 
     private let config: ProxyRuntimeConfiguration
@@ -128,21 +129,23 @@ struct MCPForwardingService: Sendable {
             return .success(responseData)
 
         case .failure(let error):
-            let staleUpstreamTopology: Bool
-            if case ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology = error {
-                staleUpstreamTopology = true
-            } else {
-                staleUpstreamTopology = false
-            }
-            upstreamRuntime.recordRequestTimedOut(
+            let error = ControlPlane.ErrorMapper.underlyingError(error)
+            let isTimeout = error is TimeoutError
+            upstreamRuntime.recordRequestFailed(
                 sessionID: sessionID,
                 started: started,
-                accountTimeout: accountTimeout && staleUpstreamTopology == false
+                accountTimeout: accountTimeout && isTimeout
             )
-            if staleUpstreamTopology {
+            if isTimeout {
+                return .timeout
+            }
+            if error is UpstreamSlotScheduler.AcquisitionError {
                 return .upstreamUnavailable
             }
-            return .timeout
+            if case ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology = error {
+                return .upstreamUnavailable
+            }
+            return .failure(error)
         }
     }
 
@@ -370,6 +373,18 @@ struct MCPForwardingService: Sendable {
             )
             return .unavailable
         case .invalidUpstreamResponse:
+            internalCancellationHandle.markCompleted()
+            sessionManager.failRequestLease(
+                leaseID,
+                terminalState: .failed,
+                reason: .invalidUpstreamResponse
+            )
+            return .unavailable
+        case .failure(let error):
+            if error is CancellationError {
+                internalCancellationHandle.cancel(using: sessionManager)
+                return .cancelled
+            }
             internalCancellationHandle.markCompleted()
             sessionManager.failRequestLease(
                 leaseID,

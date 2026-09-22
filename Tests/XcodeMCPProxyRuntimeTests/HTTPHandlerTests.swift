@@ -1384,7 +1384,9 @@ struct HTTPHandlerTests {
         let config = makeHTTPConfig(requestTimeout: 0.1)
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
-        let sessionManager = TestRuntimeCoordinator(config: config)
+        let sessionManager = TestRuntimeCoordinator(config: config, upstreamPlanResponder: { _, _ in
+            .manual(Data())
+        })
         try addHTTPHandler(to: channel, config: config, sessionManager: sessionManager)
 
         let initPayload: [String: Any] = [
@@ -1410,7 +1412,7 @@ struct HTTPHandlerTests {
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
             "id": 2001,
-            "method": "tools/list",
+            "method": "resources/read",
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
@@ -1424,9 +1426,7 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        // tools/list now runs through the shared bootstrap owner, so the client session does
-        // not hold a direct upstream mapping while it waits.
-        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 1)
         advanceEventLoopTime(on: channel, by: .milliseconds(300))
 
         let response = try await collectResponse(from: channel)
@@ -2885,6 +2885,117 @@ struct HTTPHandlerTests {
         #expect(resources.isEmpty)
     }
 
+    @Test(arguments: UpstreamFailureCase.allCases)
+    func localPendingFailuresKeepTheirClassification(failure: UpstreamFailureCase) async throws {
+        let config = makeHTTPConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        let executor = ClientMCPRequestExecutor(
+            config: config.runtime, sessionManager: sessionManager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout)
+        )
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let id = try #require(JSONRPC.ID(any: 501))
+        let resolution = try await executor.resolveLocalHandling(
+            .pendingResponse(
+                future: eventLoop.makeFailedFuture(failure.error),
+                sessionID: "error-session", errorSessionID: nil, originalID: id
+            ),
+            prefersEventStream: false,
+            eventLoop: eventLoop
+        ).get()
+        guard case .mcpError(let responseID, let code, let message, let sessionID, _) = resolution else {
+            Issue.record("expected JSON-RPC error")
+            return
+        }
+        #expect(responseID?.key == id.key)
+        #expect(code == failure.code)
+        #expect(message == failure.message)
+        #expect(sessionID == nil)
+    }
+
+    @Test(arguments: UpstreamFailureCase.allCases)
+    func forwardingFailuresOnlyAccountActualTimeouts(failure: UpstreamFailureCase) throws {
+        let config = makeHTTPConfig()
+        let sessionManager = TestRuntimeCoordinator(config: config)
+        let service = MCPForwardingService(configuration: config.runtime, sessionManager: sessionManager)
+        let request = JSONRPC.Wire.requestObject(id: 502, method: "resources/read")
+        let prepared = try #require(try service.prepareRequest(
+            bodyData: JSONRPC.Wire.data(from: request), parsedRequestJSON: request,
+            sessionID: "failed-forward"
+        ))
+        let eventLoop = EmbeddedEventLoop()
+        let started = MCPForwardingService.StartedRequest(
+            transform: prepared.transform, operationLease: prepared.operationLease,
+            requestTimeout: nil, routerPendingToken: UUID(),
+            future: eventLoop.makeSucceededFuture(ByteBuffer())
+        )
+        #expect(sessionManager.mappedUpstreamRequestCount() == 1)
+        let resolution = service.resolveResponse(
+            .failure(failure.error), started: started, sessionID: "failed-forward"
+        )
+        switch resolution {
+        case .timeout:
+            #expect(failure == .timeout)
+        case .upstreamUnavailable:
+            #expect(failure == .unavailable || failure == .staleRoute)
+        case .failure(let error):
+            let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+            #expect(mapped.code == failure.code)
+            #expect(mapped.message == failure.message)
+        default:
+            Issue.record("unexpected response resolution")
+        }
+        #expect(sessionManager.requestTimeoutNotificationCount() == (failure == .timeout ? 1 : 0))
+        #expect(sessionManager.requestSuccessNotificationCount() == 0)
+        #expect(sessionManager.mappedUpstreamRequestCount() == 0)
+    }
+
+    @Test(arguments: UpstreamFailureCase.allCases)
+    func forwardedRequestFailuresKeepTheirClassification(failure: UpstreamFailureCase) async throws {
+        let config = makeHTTPConfig(requestTimeout: 30)
+        let manager = TestRuntimeCoordinator(config: config, upstreamPlanResponder: { _, _ in
+            .manual(Data())
+        })
+        manager.setInitialized(true)
+        let executor = ClientMCPRequestExecutor(
+            config: config.runtime, sessionManager: manager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout)
+        )
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let sessionID = "failed-request"
+        let session = manager.session(id: sessionID)
+        let operation = try executor.handle(
+            bodyData: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: 503, method: "resources/read")),
+            headerSessionID: sessionID, headerSessionExists: true,
+            prefersEventStream: false, eventLoop: group.next()
+        )
+        #expect(session.router.failPending(idKey: "503", error: failure.error))
+        let resolution = try await waitWithTimeout("forwarded failure should not await a deadline") {
+            try await operation.future.get()
+        }
+        if failure == .cancelled {
+            guard case .empty(.accepted, _) = resolution else {
+                Issue.record("cancelled HTTP request must finish without a JSON-RPC response")
+                return
+            }
+            #expect(manager.mappedUpstreamRequestCount() == 0)
+            return
+        }
+        guard case .mcpError(let id, let code, let message, _, _) = resolution else {
+            Issue.record("expected JSON-RPC error")
+            return
+        }
+        #expect(id?.key == "503")
+        #expect(code == failure.code)
+        #expect(message == failure.message)
+        #expect(manager.mappedUpstreamRequestCount() == 0)
+    }
+
     @Test func forwardingServiceRejectsCancelledRegistrationBeforeSending() throws {
         let config = makeHTTPConfig()
         let sessionManager = TestRuntimeCoordinator(config: config)
@@ -3650,4 +3761,43 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
     }
 
+}
+
+enum UpstreamFailureCase: CaseIterable, Sendable {
+    case timeout, unavailable, staleRoute, cancelled, invalidResponse, upstreamRPC, unknown
+
+    var error: any Error {
+        let cause: any Error
+        switch self {
+        case .timeout: cause = TimeoutError()
+        case .unavailable: cause = UpstreamSlotScheduler.AcquisitionError.unavailable
+        case .staleRoute: cause = ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology
+        case .cancelled: cause = CancellationError()
+        case .invalidResponse: cause = ControlPlane.Error.invalidResponse("private upstream payload")
+        case .upstreamRPC: cause = ControlPlane.Error.upstreamRPC(code: -32602, message: "Invalid params")
+        case .unknown: cause = NSError(domain: "failure", code: 1, userInfo: [NSLocalizedDescriptionKey: "private payload"])
+        }
+        return ControlPlane.RequestError(route: .anyHealthy, upstreamIndex: 0, underlying: cause)
+    }
+
+    var code: Int {
+        switch self {
+        case .timeout: -32000
+        case .unavailable, .staleRoute: -32001
+        case .cancelled: -32800
+        case .invalidResponse, .unknown: -32603
+        case .upstreamRPC: -32602
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .timeout: "upstream timeout"
+        case .unavailable, .staleRoute: "upstream unavailable"
+        case .cancelled: "request cancelled"
+        case .invalidResponse: "invalid upstream response"
+        case .upstreamRPC: "Invalid params"
+        case .unknown: "upstream request failed"
+        }
+    }
 }
