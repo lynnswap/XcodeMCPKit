@@ -822,7 +822,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
             originalID: originalID
         )
         guard plan.deliverManually == false else {
-            throw ControlPlane.Error.invalidResponse("timeout")
+            throw TimeoutError()
         }
         guard let object = try? JSONSerialization.jsonObject(
             with: plan.data,

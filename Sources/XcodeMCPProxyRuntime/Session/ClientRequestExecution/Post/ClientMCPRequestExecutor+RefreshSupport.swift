@@ -173,6 +173,18 @@ extension ClientMCPRequestExecutor {
                 return .upstreamUnavailable(responseID: responseID)
             case .invalidUpstreamResponse:
                 return .invalidUpstreamResponse
+            case .failure(let error):
+                if error is CancellationError {
+                    cancellationHandle?.cancel(using: sessionManager)
+                    return .cancelled(responseID: responseID)
+                }
+                let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+                guard let data = Self.makeJSONRPCErrorResponseData(
+                    id: responseID, code: mapped.code, message: mapped.message
+                ) else {
+                    return .invalidUpstreamResponse
+                }
+                return .success(data)
             }
         } catch is CancellationError {
             cancellationHandle?.cancel(using: sessionManager)
