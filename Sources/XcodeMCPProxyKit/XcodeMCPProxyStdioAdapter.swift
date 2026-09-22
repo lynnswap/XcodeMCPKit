@@ -47,6 +47,7 @@ public final class XcodeMCPProxyStdioAdapter: Sendable {
     ///
     /// Invalid endpoints and non-positive timeouts are rejected before an
     /// internal session is created. `nil` is the only disabled timeout value.
+    /// File descriptor duplication failures are reported as POSIX errors.
     public convenience init(
         configuration: XcodeMCPProxyStdioAdapterConfiguration = .init(),
         input: FileHandle = .standardInput,
@@ -72,7 +73,7 @@ public final class XcodeMCPProxyStdioAdapter: Sendable {
             )
         }
         let endpoint = try AdapterEndpointResolver.resolve(configuration.endpoint)
-        self.adapter = StdioAdapter(
+        self.adapter = try StdioAdapter(
             upstreamURL: endpoint,
             requestTimeout: configuration.requestTimeout,
             input: input,
