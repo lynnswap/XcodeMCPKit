@@ -4,7 +4,7 @@ import NIO
 import Testing
 
 @testable import XcodeMCPProxyHTTP
-import XcodeMCPProxyRuntime
+import XcodeMCPProxyRuntimeContract
 
 struct ProxyHTTPGatewayTests {
     @Test func shutdownClosesListenerAndReleasesPort() async throws {

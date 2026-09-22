@@ -1,3 +1,4 @@
+import XcodeMCPProxyRuntimeContract
 import XcodeMCPCore
 import Foundation
 import Logging

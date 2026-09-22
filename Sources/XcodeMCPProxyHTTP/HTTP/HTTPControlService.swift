@@ -3,7 +3,7 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPCore
-import XcodeMCPProxyRuntime
+import XcodeMCPProxyRuntimeContract
 
 struct HTTPNotificationOverflowWarning: Equatable, Sendable {
     let sessionID: ProxySessionID
@@ -36,7 +36,7 @@ final class HTTPEventDeliveryStore: Sendable {
     }
 
     private let sessions = NIOLockedValueBox<[ProxySessionID: SessionDelivery]>([:])
-    private let logger = ProxyLogging.make("http.sse")
+    private let logger = Logger(label: "XcodeMCPProxy.http.sse")
     private let bufferLimit: Int
     private let notificationOverflowWarningIntervalNanoseconds: UInt64
     private let uptimeNanoseconds: @Sendable () -> UInt64

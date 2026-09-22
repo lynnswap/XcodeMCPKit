@@ -5,7 +5,7 @@ import NIOFoundationCompat
 import NIOHTTP1
 import NIOConcurrencyHelpers
 import XcodeMCPCore
-import XcodeMCPProxyRuntime
+import XcodeMCPProxyRuntimeContract
 
 final class HTTPHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = HTTPServerRequestPart
@@ -41,7 +41,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     let requestSecurityPolicy: HTTPRequestSecurityPolicy
     let scheduleResponseCompletion:
         @Sendable (EventLoop, @escaping @Sendable () -> Void) -> Void
-    let logger: Logger = ProxyLogging.make("http")
+    let logger: Logger = Logger(label: "XcodeMCPProxy.http")
 
     init(
         config: ProxyHTTPConfiguration,
@@ -55,7 +55,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     ) {
         self.config = config
         self.controlService = controlService
-        self.responseWriter = HTTPResponseWriter(logger: ProxyLogging.make("http.response"))
+        self.responseWriter = HTTPResponseWriter(logger: Logger(label: "XcodeMCPProxy.http.response"))
         self.requestSecurityPolicy = HTTPRequestSecurityPolicy(
             configuredHost: config.listenHost,
             configuredPort: config.listenPort

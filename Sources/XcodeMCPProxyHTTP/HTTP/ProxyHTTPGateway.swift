@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import NIO
 import NIOConcurrencyHelpers
-import XcodeMCPProxyRuntime
+import XcodeMCPProxyRuntimeContract
 
 package struct ProxyHTTPEndpoint: Equatable, Sendable {
     package let host: String

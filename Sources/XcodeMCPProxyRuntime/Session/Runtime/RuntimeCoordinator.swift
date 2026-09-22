@@ -1,3 +1,4 @@
+import XcodeMCPProxyRuntimeContract
 import Foundation
 import Logging
 import NIO
