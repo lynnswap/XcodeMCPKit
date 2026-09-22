@@ -10347,7 +10347,7 @@ struct RuntimeCoordinatorCatalogTests {
         }
     }
 
-    @Test(arguments: [JSONValue.string("again"), .number(.int(7))])
+    @Test(arguments: [JSONValue.string("again"), .number(.int(7)), .null])
     func paginatedCatalogRejectsInvalidContinuationWithoutPublishingPartialCatalog(nextCursor: JSONValue) async throws {
         let upstream = TestUpstreamClient()
         let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
