@@ -88,6 +88,48 @@ struct ProcessControlClientTests {
         )
     }
 
+    @Test(arguments: [false, true])
+    func resolvesNamedHostsAgainstNumericListeners(resolutionFails: Bool) {
+        let client = ProcessControlClient(
+            runCommand: { path, arguments in
+                #expect(path == "/usr/sbin/lsof")
+                #expect(arguments == ["-nP", "-iTCP:8765", "-sTCP:LISTEN", "-Fpn"])
+                return """
+                p111
+                n192.0.2.1:8765
+                p222
+                n[2001:db8::1]:8765
+                p333
+                n192.0.2.2:8765
+                p444
+                n*:8765
+                """
+            },
+            sendSignal: { _, _ in
+                Issue.record("listener lookup must not send signals")
+                return ProcessSignalResult(result: -1, errnoValue: ESRCH)
+            },
+            resolveHostAddress: { host, port in
+                #expect(host == "my-mac.local")
+                #expect(port == 8765)
+                return resolutionFails ? nil : "192.0.2.1"
+            }
+        )
+
+        #expect(client.listeningProcessIDs(onTCPPort: 8765, matchingHost: "my-mac.local")
+            == (resolutionFails ? [] : [111, 444]))
+    }
+
+    @Test func systemResolverPreservesNumericAddressFamilies() {
+        let client = ProcessControlClient(
+            runCommand: { _, _ in nil },
+            sendSignal: { _, _ in ProcessSignalResult(result: -1, errnoValue: ESRCH) }
+        )
+
+        #expect(client.resolveHostAddress("127.0.0.1", 8765) == "127.0.0.1")
+        #expect(client.resolveHostAddress("::1", 8765) == "::1")
+    }
+
     @Test func executableNameUsesFirstCommandTokenFromPSOutput() throws {
         let commandRecorder = CommandRecorder(
             outputs: [

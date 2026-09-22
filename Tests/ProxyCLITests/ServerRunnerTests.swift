@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 import XcodeMCPProxyRuntime
 
@@ -298,6 +299,47 @@ struct ServerRunnerTests {
         #expect(diagnostic.contains("listen 127.0.0.1:9002"))
         #expect(diagnostic.contains("pid: 321"))
         #expect(diagnostic.contains("--force-restart"))
+    }
+
+    @Test func forceRestartLeavesNonProxyListenerRunningAndReportsPortInUse() async throws {
+        let processControl = ProcessControlClient(
+            runCommand: { path, arguments in
+                switch (path, arguments) {
+                case ("/usr/sbin/lsof", ["-nP", "-iTCP:9002", "-sTCP:LISTEN", "-Fpn"]):
+                    return "p123\nn127.0.0.1:9002"
+                case ("/bin/ps", ["-ww", "-p", "123", "-o", "command="]):
+                    return "/usr/bin/python3 other-server.py"
+                default:
+                    Issue.record("unexpected process lookup: \(path) \(arguments)")
+                    return nil
+                }
+            },
+            sendSignal: { _, _ in
+                Issue.record("non-proxy listener must not receive signals")
+                return ProcessSignalResult(result: 0, errnoValue: 0)
+            }
+        )
+        let controller = ExistingProxyServerProcessController.live(processControl: processControl)
+        let errors = CapturedLines()
+        let launcher = makeServerLauncher(
+            forceRestartExistingServer: controller.terminateExistingServer,
+            makeServer: { _ in FailingProxyServer(error: AddressAlreadyInUseError()) },
+            isAddressAlreadyInUse: { _ in true },
+            detectExistingServerProcessIDs: controller.detectExistingServerProcessIDs
+        )
+
+        let exitCode = await launcher.run(
+            arguments: ["xcode-mcp-proxy-server", "--listen", "127.0.0.1:9002", "--force-restart"],
+            environment: [:],
+            stdout: { _ in },
+            stderr: { errors.append($0) }
+        )
+
+        #expect(exitCode == 1)
+        #expect(errors.snapshot().count == 1)
+        let diagnostic = try #require(errors.snapshot().first)
+        #expect(diagnostic.contains("listen 127.0.0.1:9002 is already in use"))
+        #expect(!diagnostic.contains("Detected"))
     }
 
     @Test(arguments: [false, true])
