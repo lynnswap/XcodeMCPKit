@@ -155,4 +155,3 @@ package protocol ProxyRuntimeServing: Sendable {
     func debugSnapshotData(includeSensitivePayloads: Bool) -> Data?
     func reset() async
 }
-
