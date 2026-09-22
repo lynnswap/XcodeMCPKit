@@ -18115,6 +18115,50 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(manager.chooseUpstreamIndex() == nil)
     }
 
+    @Test func sessionManagerStdoutClosureFailsUnboundedPendingRequests() async throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let upstream = TestUpstreamClient()
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 0), eventLoop: eventLoop,
+            upstreams: [upstream], startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        let operationLease = manager.operationLeaseForTest(upstreamIndex: 0)
+        manager.observeUpstreamEvents(operationLease)
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.seedCanonicalToolsCatalog(try #require(JSONValue(any: ["tools": []])), sourceUpstream: 0)
+        let sessionID = "stdout-eof"
+        let session = manager.session(id: sessionID)
+        let originalID = try #require(JSONRPC.ID(any: NSNumber(value: 1)))
+        let pending = session.router.registerRequest(idKey: originalID.key, on: eventLoop)
+        let leaseID = manager.createRequestLease(descriptor: .init(
+            sessionID: sessionID, label: "tools/call:Pending",
+            expectsResponse: true, isTopLevelClientRequest: true
+        ))
+        manager.activateRequestLease(
+            leaseID, requestIDKey: originalID.key, upstreamIndex: 0, timeout: nil
+        )
+        _ = manager.assignUpstreamID(
+            sessionID: sessionID, originalID: originalID, upstreamIndex: 0
+        )
+        await upstream.yield(.stdoutClosed)
+        do {
+            _ = try await waitWithTimeout("stdout EOF should fail pending request") {
+                try await pending.get()
+            }
+            Issue.record("pending request survived stdout EOF")
+        } catch {
+            #expect(error is UpstreamSlotScheduler.AcquisitionError)
+        }
+        #expect(manager.cachedToolsListResult() == nil)
+        let snapshot = manager.debugSnapshot()
+        let lease = try #require(snapshot.leases.first { $0.leaseID == leaseID.uuidString })
+        #expect(lease.releaseReason == "upstreamUnavailable")
+        #expect(snapshot.upstreams[0].activeCorrelatedRequestCount == 0)
+    }
+
     @Test func sessionManagerUpstreamExitClearsCanonicalToolsCatalogImmediately() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }

@@ -193,6 +193,130 @@ struct UpstreamProcessTests {
         #expect(fakeDriver.snapshot().stopOutputCount == 1)
     }
 
+    @Test func stdoutEOFFailsUnboundedRequestsAfterDeliveringTheFinalResponse() async throws {
+        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
+        let scheduler = ControlledTerminationDelayScheduler()
+        let transport = try await UpstreamProcessXcodeMCPTransport.start(config: .init(
+            command: "/fake/upstream",
+            args: [],
+            environment: [:],
+            maxQueuedWriteBytes: 64 * 1024,
+            terminationSignalGrace: .seconds(30),
+            terminationDelayScheduler: scheduler,
+            driverFactory: StaticUpstreamProcessDriverFactory(fakeDriver)
+        ))
+        defer {
+            fakeDriver.emitTermination(status: 0)
+            Task { await transport.close(headers: .init()) }
+        }
+        let initialize = Task {
+            try await InitializedMCPClientSession.start(
+                transport: transport,
+                configuration: .init(
+                    clientName: "EOFTest", clientVersion: "1", capabilities: [:],
+                    requestTimeout: nil
+                )
+            )
+        }
+        defer { initialize.cancel() }
+        let initializeMessage = try await fakeDriver.nextStdinMessage(method: "initialize")
+        let initializeID = try #require(initializeMessage["id"])
+        fakeDriver.emitStdout(try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": initializeID.foundationObject,
+            "result": [
+                "protocolVersion": "2025-06-18", "capabilities": [:],
+                "serverInfo": ["name": "EOFTest", "version": "1"],
+            ],
+        ]))
+        let session = try await initialize.value
+        defer { Task { await session.close() } }
+        let finalRequest = Task {
+            try await session.request("final", deadline: nil, replayPolicy: .never)
+        }
+        let pendingRequest = Task {
+            try await session.request("pending", deadline: nil, replayPolicy: .never)
+        }
+        defer {
+            finalRequest.cancel()
+            pendingRequest.cancel()
+        }
+        let finalMessage = try await fakeDriver.nextStdinMessage(method: "final")
+        _ = try await fakeDriver.nextStdinMessage(method: "pending")
+        let finalID = try #require(finalMessage["id"])
+        fakeDriver.emitStdout(try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": finalID.foundationObject,
+            "result": ["text": "last response"],
+        ]))
+        fakeDriver.finishStdout()
+
+        let result = try await waitWithTimeout("final response before EOF") {
+            try await finalRequest.value
+        }
+        #expect(result == .object(["text": .string("last response")]))
+        let error = try await waitWithTimeout("pending request should fail before process exit") {
+            switch await pendingRequest.result {
+            case .success:
+                Issue.record("unanswered request succeeded after stdout EOF")
+                return nil as MCPBridgeRuntimeError?
+            case .failure(let error):
+                return error as? MCPBridgeRuntimeError
+            }
+        }
+        guard case .transportUnavailable = error else {
+            Issue.record("expected transport failure, got \(String(describing: error))")
+            return
+        }
+        do {
+            _ = try await waitWithTimeout("subsequent request should report unavailable") {
+                try await session.request("afterEOF", deadline: nil)
+            }
+            Issue.record("request after EOF succeeded")
+        } catch {
+            guard case .transportUnavailable = error as? MCPBridgeRuntimeError else {
+                Issue.record("expected unavailable transport after EOF, got \(error)")
+                return
+            }
+        }
+        #expect(fakeDriver.snapshot().forceTerminateCount == 0)
+        #expect(fakeDriver.stdinWrites().filter {
+            (try? JSONDecoder().decode(MCPJSONValue.self, from: $0))?["method"] == .string("pending")
+        }.count == 1)
+
+        let delay = try await scheduler.nextScheduledDelay()
+        delay.fire()
+        await session.close()
+        #expect(fakeDriver.snapshot().terminateCount == 1)
+        #expect(fakeDriver.snapshot().forceTerminateCount == 1)
+    }
+
+    @Test func stdoutEOFStartsBoundedCleanupAndRejectsFurtherSends() async throws {
+        let scheduler = ControlledTerminationDelayScheduler()
+        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
+        let session = try await makeFakeUpstreamSession(
+            fakeDriver, terminationSignalGrace: .seconds(30),
+            terminationDelayScheduler: scheduler
+        )
+        let events = UpstreamEventRecorder(session.events)
+        defer {
+            events.cancel()
+            fakeDriver.emitTermination(status: 0)
+            Task { await session.stop() }
+        }
+        fakeDriver.finishStdout()
+        _ = try await events.nextEvent {
+            if case .stdoutClosed = $0 { return true }
+            return false
+        }
+        #expect(await session.send(Data("next".utf8)) == .unavailable(.shuttingDown))
+        let delay = try await scheduler.nextScheduledDelay()
+        #expect(fakeDriver.snapshot().terminateCount == 1)
+        #expect(fakeDriver.snapshot().forceTerminateCount == 0)
+        delay.fire()
+        await session.stop()
+        #expect(fakeDriver.snapshot().forceTerminateCount == 1)
+        #expect(fakeDriver.snapshot().stopOutputCount == 1)
+    }
+
     @Test func upstreamSessionStopIsIdempotentAndSuppressesExit() async throws {
         let fakeDriver = FakeUpstreamProcessDriver()
         let session = try await makeFakeUpstreamSession(fakeDriver)
@@ -322,6 +446,33 @@ struct UpstreamProcessTests {
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct LiveUpstreamProcessSmokeTests {
+    @Test func upstreamProcessLiveSmokeStopsChildAfterStdoutEOF() async throws {
+        let config = UpstreamProcess.Config(
+            command: "/bin/sh",
+            args: ["-c", "trap '' TERM; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'; exec 1>&-; while :; do sleep 1; done"],
+            environment: ProcessInfo.processInfo.environment,
+            maxQueuedWriteBytes: 1024,
+            terminationSignalGrace: .milliseconds(50)
+        )
+        try await withLiveUpstreamSession(config: config) { session in
+            let events = try await waitWithTimeout("live stdout EOF cleanup", timeout: .seconds(5)) {
+                var observed: [Upstream.Event] = []
+                for await event in session.events { observed.append(event) }
+                return observed
+            }
+            let responseIndex = try #require(events.firstIndex {
+                if case .message = $0 { return true }
+                return false
+            })
+            let closureIndex = try #require(events.firstIndex {
+                if case .stdoutClosed = $0 { return true }
+                return false
+            })
+            #expect(responseIndex < closureIndex)
+            #expect(await session.send(Data()) == .unavailable(.terminated))
+        }
+    }
+
     @Test func upstreamProcessLiveSmokeDrainsMessageStderrAndExit() async throws {
         let config = UpstreamProcess.Config(
             command: "/bin/sh",
@@ -515,6 +666,7 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
     private let terminatesOnTerminate: Bool
     private let terminatesOnForceTerminate: Bool
     private let stopOutputRecorder = DeterministicRecorder<Void>()
+    private let stdinRecorder = DeterministicRecorder<Data>()
     private let stdinTerminal = AsyncTerminalSignal()
     private let stdoutTerminal = AsyncTerminalSignal()
     private let stderrTerminal = AsyncTerminalSignal()
@@ -566,7 +718,7 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
     }
 
     func sendStdin(_ payload: Data) -> Upstream.SendResult {
-        lock.withLock {
+        let result: Upstream.SendResult = lock.withLock {
             guard state.isRunning else {
                 return .unavailable(.terminated)
             }
@@ -578,6 +730,16 @@ private final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
             state.queuedWriteSizes.append(payload.count)
             return .accepted
         }
+        if result == .accepted { stdinRecorder.record(payload) }
+        return result
+    }
+
+    func nextStdinMessage(method: String) async throws -> [String: MCPJSONValue] {
+        let data = try await stdinRecorder.nextValue { data in
+            (try? JSONDecoder().decode(MCPJSONValue.self, from: data))?
+                .objectValue?["method"] == .string(method)
+        }
+        return try #require(JSONDecoder().decode(MCPJSONValue.self, from: data).objectValue)
     }
 
     func closeStdin() {
