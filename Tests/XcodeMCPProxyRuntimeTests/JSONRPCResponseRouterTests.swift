@@ -4,7 +4,6 @@ import NIO
 import NIOConcurrencyHelpers
 import NIOEmbedded
 import Testing
-import XcodeMCPKit
 @testable import XcodeMCPProxyRuntime
 
 @Suite

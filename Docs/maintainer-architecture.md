@@ -131,6 +131,43 @@ contract tests compile consumers from a separate package. Run
 `scripts/verify-proxy-target-boundaries.sh` to check dependency direction;
 private implementation targets are not new public products.
 
+## Focused Test Ownership
+
+| Test target | Owner and coverage |
+| --- | --- |
+| `XcodeMCPCoreTests` | Wire/framing primitives and low-level HTTP transport lifecycle; no SDK or proxy implementation dependency. |
+| `XcodeMCPProcessRuntimeTests` | Process I/O and termination through fake drivers and opt-in live smoke cases; no SDK dependency. |
+| `XcodeMCPDocumentationSearchTests` | Assets, repair, helper generation and invocation through lower process fakes. |
+| `XcodeMCPProxyHTTPTests` | HTTP/SSE delivery and gateway lifecycle using the runtime contract fake. |
+| `XcodeMCPProxyRuntimeTests` | Coordination, scheduling, routing and provider policy; no HTTP or facade dependency. |
+| `ProxyIntegrationTests` | Actual HTTP/runtime composition and public configuration paths. |
+
+When Xcode provides a matching test scheme, run it directly. For example:
+
+```sh
+xcodebuild test -workspace XcodeMCPKit.xcworkspace -scheme XcodeMCPProxyRuntimeTests -destination 'platform=macOS'
+```
+
+Use `swift build --target XcodeMCPProxyRuntimeTests -v` to inspect that target's
+compilation graph. `swift test --filter` selects execution and may build other
+test targets; it is not proof of compilation isolation. SDK transport-integration
+cases remain in `XcodeMCPKitTests`; use a package test scheme containing that
+target, or `swift test --filter XcodeMCPKitTests` if the generated SDK scheme
+has no test action. Xcode may group other targets into a package test scheme
+rather than generate a dedicated scheme for every target.
+
+`XcodeMCPCoreTestSupport` owns generic clocks and process-I/O fakes. Shared
+proxy synchronization and filesystem fixtures stay in `XcodeMCPProxyTestSupport`.
+`XcodeMCPProxyRuntimeTestSupport` shares lower upstream fakes and coordinator
+fixture helpers between unit and integration tests through testable imports;
+it does not add production API or test-only production branches. Fixtures used
+by only one suite remain with that suite.
+
+The seven coordinator suites keep their CI filter names and live in separate
+files. HTTP/configuration integration cases run in the remaining shard. When
+moving tests, compare discovery identifiers with module/suite moves accounted
+for, then verify each identifier is selected by exactly one CI shard.
+
 ## Protocol Boundaries
 
 - `stdout`

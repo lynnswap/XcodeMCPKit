@@ -1,3 +1,4 @@
+@testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPCore
 import Darwin
 import Foundation

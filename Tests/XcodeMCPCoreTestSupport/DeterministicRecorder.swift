@@ -1,5 +1,4 @@
 import Foundation
-import XcodeMCPCoreTestSupport
 
 final class DeterministicRecorder<Value: Sendable>: @unchecked Sendable {
     private struct IndexedWaiter {

@@ -1,3 +1,4 @@
+@testable import XcodeMCPProxyRuntimeTestSupport
 import NIO
 import Testing
 import XcodeMCPProxyTestSupport

@@ -1,8 +1,8 @@
+@testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPCore
 import Foundation
 import NIO
 import Testing
-import XcodeMCPKit
 @testable import XcodeMCPProxyRuntime
 
 
