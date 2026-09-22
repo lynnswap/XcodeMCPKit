@@ -124,7 +124,7 @@ actor StdioWriter {
         if payload.last != 0x0A {
             payload.append(0x0A)
         }
-        guard queuedBytes + payload.count <= maxQueuedBytes else {
+        guard queuedBytes == 0 || payload.count <= maxQueuedBytes - queuedBytes else {
             logger.error(
                 "STDIO output queue exceeded its byte limit",
                 metadata: [

@@ -74,7 +74,6 @@ final class UpstreamSlotScheduler: Sendable {
     private struct State: Sendable {
         var pendingRequests: [PendingRequest] = []
         var activeLeaseIDsByUpstream: [Int: LeaseManager.ID] = [:]
-        var activeTopLevelLeaseIDsBySession: [String: LeaseManager.ID] = [:]
         var reservationsByLeaseID: [LeaseManager.ID: Reservation] = [:]
     }
 
@@ -179,15 +178,7 @@ final class UpstreamSlotScheduler: Sendable {
                   state.activeLeaseIDsByUpstream[upstreamIndex] == leaseID
             else { return nil }
             state.activeLeaseIDsByUpstream.removeValue(forKey: upstreamIndex)
-            if let reservation = state.reservationsByLeaseID.removeValue(forKey: leaseID),
-                reservation.request.descriptor.isTopLevelClientRequest,
-                state.activeTopLevelLeaseIDsBySession[reservation.request.descriptor.sessionID]
-                    == leaseID
-            {
-                state.activeTopLevelLeaseIDsBySession.removeValue(
-                    forKey: reservation.request.descriptor.sessionID
-                )
-            }
+            state.reservationsByLeaseID.removeValue(forKey: leaseID)
             return upstreamIndex
         }
         guard let releasedUpstreamIndex else { return }
@@ -215,14 +206,6 @@ final class UpstreamSlotScheduler: Sendable {
                     == reservation.request.leaseID
                 {
                     state.activeLeaseIDsByUpstream.removeValue(forKey: reservation.upstreamIndex)
-                }
-                if reservation.request.descriptor.isTopLevelClientRequest,
-                    state.activeTopLevelLeaseIDsBySession[reservation.request.descriptor.sessionID]
-                        == reservation.request.leaseID
-                {
-                    state.activeTopLevelLeaseIDsBySession.removeValue(
-                        forKey: reservation.request.descriptor.sessionID
-                    )
                 }
             }
             state.reservationsByLeaseID = state.reservationsByLeaseID.filter { _, reservation in
@@ -264,14 +247,6 @@ final class UpstreamSlotScheduler: Sendable {
                 state.reservationsByLeaseID.removeValue(forKey: leaseID)
                 if state.activeLeaseIDsByUpstream[reservation.upstreamIndex] == leaseID {
                     state.activeLeaseIDsByUpstream.removeValue(forKey: reservation.upstreamIndex)
-                }
-                if reservation.request.descriptor.isTopLevelClientRequest,
-                    state.activeTopLevelLeaseIDsBySession[reservation.request.descriptor.sessionID]
-                        == leaseID
-                {
-                    state.activeTopLevelLeaseIDsBySession.removeValue(
-                        forKey: reservation.request.descriptor.sessionID
-                    )
                 }
                 return .reserved(reservation.request, reservation.upstreamIndex)
             }
@@ -326,7 +301,6 @@ final class UpstreamSlotScheduler: Sendable {
                 .map(\.request)
             state.pendingRequests.removeAll()
             state.activeLeaseIDsByUpstream.removeAll()
-            state.activeTopLevelLeaseIDsBySession.removeAll()
             state.reservationsByLeaseID.removeAll()
             return pendingRequests + reservedRequests
         }
@@ -367,12 +341,6 @@ final class UpstreamSlotScheduler: Sendable {
                 var unavailablePendingIndex: Int?
 
                 for (pendingIndex, request) in state.pendingRequests.enumerated() {
-                    if request.descriptor.isTopLevelClientRequest,
-                        state.activeTopLevelLeaseIDsBySession[request.descriptor.sessionID] != nil
-                    {
-                        continue
-                    }
-
                     if request.preferredUpstreamIndices.isEmpty == false {
                         var preferredCandidateIsOccupied = false
                         var preferredRecoveryStarted = false
@@ -438,10 +406,6 @@ final class UpstreamSlotScheduler: Sendable {
                     request: pendingRequest,
                     operationLease: chosenOperationLease
                 )
-                if pendingRequest.descriptor.isTopLevelClientRequest {
-                    state.activeTopLevelLeaseIDsBySession[pendingRequest.descriptor.sessionID] =
-                        pendingRequest.leaseID
-                }
                 ready.append((pendingRequest, chosenOperationLease))
             }
 
