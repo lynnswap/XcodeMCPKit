@@ -1,4 +1,4 @@
-import XcodeMCPKit
+import XcodeMCPCore
 
 struct ToolsListPagination {
     private(set) var nextCursor: String?
