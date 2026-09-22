@@ -826,11 +826,10 @@ extension HTTPHandlerTests {
             service.cancel(cancellationHandle)
             await documentationRelease.signal()
 
-            do {
-                _ = try await operation.future.get()
-                Issue.record("cancelled documentation request should not complete successfully")
-            } catch {
-                #expect(error is CancellationError)
+            if case .empty(.accepted, _) = try await operation.future.get() {
+                // MCP cancellation ends the HTTP request without a JSON-RPC response.
+            } else {
+                Issue.record("cancelled documentation request should finish with HTTP 202")
             }
             let abandonedLease = try #require(
                 sessionManager.leaseDebugSnapshots().first { $0.state == .abandoned }
