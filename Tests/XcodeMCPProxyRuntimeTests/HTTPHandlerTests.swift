@@ -2977,6 +2977,14 @@ struct HTTPHandlerTests {
         let resolution = try await waitWithTimeout("forwarded failure should not await a deadline") {
             try await operation.future.get()
         }
+        if failure == .cancelled {
+            guard case .empty(.accepted, _) = resolution else {
+                Issue.record("cancelled HTTP request must finish without a JSON-RPC response")
+                return
+            }
+            #expect(manager.mappedUpstreamRequestCount() == 0)
+            return
+        }
         guard case .mcpError(let id, let code, let message, _, _) = resolution else {
             Issue.record("expected JSON-RPC error")
             return
