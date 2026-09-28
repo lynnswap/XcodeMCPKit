@@ -48,7 +48,8 @@ struct HTTPConcurrencyTests {
             do {
                 let tools = try await client.listTools()
                 #expect(Set(tools.map(\.name)) == Set(["FirstPage", "LastPage"]))
-                #expect(await upstream.cursors() == [nil, "opaque / token?=α"])
+                let firstCursors = await upstream.cursors()
+                #expect(Array(firstCursors.suffix(2)) == [nil, "opaque / token?=α"])
                 let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 100))
                 let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
                 let (toolsResponse, body) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 101))
@@ -57,7 +58,9 @@ struct HTTPConcurrencyTests {
                 let descriptors = try #require(result["tools"] as? [[String: Any]])
                 #expect(Set(descriptors.compactMap { $0["name"] as? String }) == Set(["FirstPage", "LastPage"]))
                 #expect(result["nextCursor"] == nil)
-                #expect(await upstream.cursors().count == 2)
+                let refreshedCursors = await upstream.cursors()
+                #expect(Array(refreshedCursors.suffix(2)) == [nil, "opaque / token?=α"])
+                #expect(refreshedCursors.count == firstCursors.count + 2)
             } catch {
                 await client.close()
                 throw error

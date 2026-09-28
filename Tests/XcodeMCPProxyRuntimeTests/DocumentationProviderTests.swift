@@ -2512,6 +2512,8 @@ struct DocumentationProviderTests {
             ]),
             sourceUpstream: 0
         )
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        await upstream.respondToToolsLists(with: try #require(manager.cachedToolsListResult()))
 
         let result = try await manager.sharedToolsList(
             sessionID: "session-docs-tools",
@@ -2553,6 +2555,8 @@ struct DocumentationProviderTests {
             ]),
             sourceUpstream: 0
         )
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        await upstream.respondToToolsLists(with: try #require(manager.cachedToolsListResult()))
 
         manager.prewarmDocumentationProvider()
         try await prewarmStarted.wait(description: "documentation prewarm started")
@@ -2603,6 +2607,8 @@ struct DocumentationProviderTests {
             ]),
             sourceUpstream: 0
         )
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        await upstream.respondToToolsLists(with: try #require(manager.cachedToolsListResult()))
 
         manager.prewarmDocumentationProvider()
         try await waitWithTimeout("waiting for documentation prewarm") {
@@ -2655,6 +2661,8 @@ struct DocumentationProviderTests {
             ]),
             sourceUpstream: 0
         )
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        await upstream.respondToToolsLists(with: try #require(manager.cachedToolsListResult()))
 
         let result = try await manager.sharedToolsList(
             sessionID: "session-docs-unavailable",
@@ -2696,13 +2704,15 @@ struct DocumentationProviderTests {
             ]),
             sourceUpstream: 0
         )
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        await upstream.respondToToolsLists(with: try #require(manager.cachedToolsListResult()))
 
         let result = try await waitWithTimeout(
             "tools/list should not call the documentation provider"
         ) {
             try await manager.sharedToolsList(
                 sessionID: "session-docs-timeout",
-                requestTimeoutOverride: .milliseconds(1)
+                requestTimeoutOverride: .seconds(1)
             )
         }
 
@@ -2842,6 +2852,8 @@ struct DocumentationProviderTests {
             ]),
             sourceUpstream: 0
         )
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        await upstream.respondToToolsLists(with: try #require(manager.cachedToolsListResult()))
         _ = try await manager.sharedToolsList(
             sessionID: "session-docs-recovery-failed",
             requestTimeoutOverride: nil

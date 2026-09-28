@@ -10,6 +10,25 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorCatalogTests {
+    @Test func unchangedCatalogDoesNotNotifyWhenItsSourceBridgeChanges() throws {
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .headless
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [TestUpstreamClient(), TestUpstreamClient()], startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        let session = manager.session(id: "catalog-observer")
+        manager.sessionRegistry.markInitialized(id: "catalog-observer", negotiatedProtocolVersion: MCP.ProtocolVersion.current)
+        for index in 0...1 { manager.markUpstreamInitialized(upstreamIndex: index) }
+        let tools = [toolDescriptor(name: "DocumentationSearch")]
+        try seedUnboundToolCatalog(on: manager, upstreamIndex: 0, tools: tools)
+        _ = session.router.drainBufferedNotifications()
+        try seedUnboundToolCatalog(on: manager, upstreamIndex: 1, tools: tools)
+        #expect(manager.processControlPlane.canonicalSourceUpstream() == 1)
+        #expect(session.router.drainBufferedNotifications().isEmpty)
+    }
+
     @Test func explicitCatalogRequestDiscoversToolsWithoutChangeNotification() async throws {
         let upstream = TestUpstreamClient()
         let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
