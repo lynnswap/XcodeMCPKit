@@ -10,6 +10,27 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorCatalogTests {
+    @Test func explicitCatalogRequestDiscoversToolsWithoutChangeNotification() async throws {
+        let upstream = TestUpstreamClient()
+        let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
+        defer { fixture.shutdownAndWait() }
+        _ = try await fixture.initializePrimary(on: upstream, sessionID: "refresh")
+
+        for names in [["BuildProject"], ["BuildProject", "DocumentationSearch"], ["BuildProject"]] {
+            let offset = await upstream.sentCount()
+            let load = Task {
+                try await fixture.manager.sharedToolsList(
+                    sessionID: "refresh",
+                    requestTimeoutOverride: .seconds(5)
+                )
+            }
+            let request = try await sentValue(from: upstream, at: offset, timeout: .seconds(2))
+            await upstream.yield(.message(try paginatedToolsResponse(request: request, names: names)))
+            #expect(Set(toolNames(in: try await load.value)) == Set(names))
+            #expect(Set(toolNames(in: try #require(fixture.manager.cachedToolsListResult()))) == Set(names))
+        }
+    }
+
     @Test func paginatedCatalogKeepsCursorOnTheFirstUpstream() async throws {
         let first = TestUpstreamClient()
         let second = TestUpstreamClient()
@@ -268,10 +289,17 @@ struct RuntimeCoordinatorCatalogTests {
             at: 0,
             timeout: .seconds(2)
         )
-        let available = try await manager.sharedToolsList(
-            sessionID: "session-resync-cleared-process-catalog",
-            requestTimeoutOverride: nil
-        )
+        let refresh = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-resync-cleared-process-catalog",
+                requestTimeoutOverride: nil
+            )
+        }
+        let remainingRequest = try await sentValue(from: remainingUpstream, at: 0, timeout: .seconds(2))
+        await remainingUpstream.yield(.message(try paginatedToolsResponse(
+            request: remainingRequest, names: ["RemainingOnlyTool"]
+        )))
+        let available = try await refresh.value
         #expect(toolNames(in: available) == ["RemainingOnlyTool"])
         await clearedSibling.yield(
             .message(
@@ -405,10 +433,17 @@ struct RuntimeCoordinatorCatalogTests {
             processIDs: [coldTarget.processID]
         )
         let coldRequest = try await sentValue(from: coldUpstream, at: 0, timeout: .seconds(2))
-        let stillAvailable = try await manager.sharedToolsList(
-            sessionID: "session-process-catalog-after-cold-warms",
-            requestTimeoutOverride: nil
-        )
+        let refresh = Task {
+            try await manager.sharedToolsList(
+                sessionID: "session-process-catalog-after-cold-warms",
+                requestTimeoutOverride: nil
+            )
+        }
+        let refreshedWarmRequest = try await sentValue(from: warmUpstream, at: 1, timeout: .seconds(2))
+        await warmUpstream.yield(.message(try paginatedToolsResponse(
+            request: refreshedWarmRequest, names: ["WarmOnlyTool"]
+        )))
+        let stillAvailable = try await refresh.value
         #expect(toolNames(in: stillAvailable) == ["WarmOnlyTool"])
         await coldUpstream.yield(
             .message(
@@ -426,7 +461,7 @@ struct RuntimeCoordinatorCatalogTests {
                 == Set(["ColdOnlyTool", "WarmOnlyTool"])
         )
         #expect(await coldUpstream.sentCount() == 1)
-        #expect(await warmUpstream.sentCount() == 1)
+        #expect(await warmUpstream.sentCount() == 2)
     }
 
     @Test func documentationCandidatesIgnoreWorkspaceOwnersAndKeepUsableProcesses()

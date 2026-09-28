@@ -128,9 +128,6 @@ actor ControlPlaneCoordinator {
         guard acceptsNewLoads else {
             throw CancellationError()
         }
-        if let rawResult = cachedToolsCatalog() {
-            return rawResult
-        }
         guard deadlineExceeded(deadlineUptimeNs) == false else {
             throw TimeoutError()
         }

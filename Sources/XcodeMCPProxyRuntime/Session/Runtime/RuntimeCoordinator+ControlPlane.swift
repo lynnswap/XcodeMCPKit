@@ -225,39 +225,18 @@ extension RuntimeCoordinator {
         let currentSurface = processControlPlane.availableToolCatalogSurface(
             processIDs: exposedProcessIDs
         )
-        if let surface = currentSurface,
-           let sourceProof = surface.sourceProof,
-           surface.processIDs == exposedProcessIDs {
-            return CanonicalToolsCatalogLoadResult(
-                rawResult: surface.rawResult,
-                sourceProof: sourceProof,
-                durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
-            )
-        }
-
         let cachedProcessIDs = currentSurface?.processIDs ?? []
-        let uncachedExposures = exposure.routes.filter {
-            cachedProcessIDs.contains($0.route.target.processID) == false
-        }
-        guard uncachedExposures.isEmpty == false else {
-            throw UpstreamSlotScheduler.AcquisitionError.unavailable
-        }
-        let uncachedProcessIDs = Set(uncachedExposures.map(\.route.target.processID))
-        if let surface = currentSurface,
-           let sourceProof = surface.sourceProof {
+        let uncachedProcessIDs = exposedProcessIDs.subtracting(cachedProcessIDs)
+        if cachedProcessIDs.isEmpty == false {
             refreshMissingProcessToolsCatalogsIfNeeded(
                 reason: "foreground_partial_catalog",
                 processIDs: uncachedProcessIDs
             )
-            return CanonicalToolsCatalogLoadResult(
-                rawResult: surface.rawResult,
-                sourceProof: sourceProof,
-                durationMilliseconds: elapsedMilliseconds(
-                    sinceUptimeNanoseconds: startedAt
-                )
-            )
         }
-        let routes = uncachedExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
+        let requestedExposures = exposure.routes.filter {
+            cachedProcessIDs.isEmpty || cachedProcessIDs.contains($0.route.target.processID)
+        }
+        let routes = requestedExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
             guard let preferred = exposure.usableUpstreamIDs.first,
                   let preferredProof = upstreamTopology.operationLease(for: preferred)?.proof,
                   let (lease, transition) = beginProcessCatalogAttemptIfRunning(
@@ -289,7 +268,7 @@ extension RuntimeCoordinator {
             deadlineUptimeNs: deadlineUptimeNs,
             startedAt: startedAt,
             exposedProcessIDs: exposedProcessIDs,
-            returnAfterFirstSuccess: true
+            returnAfterFirstSuccess: cachedProcessIDs.isEmpty
         )
         refreshMissingProcessToolsCatalogsIfNeeded(
             reason: "foreground_first_catalog",
