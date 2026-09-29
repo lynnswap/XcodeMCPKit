@@ -147,9 +147,9 @@ device state or own the device-session lifecycle itself.
   single source of truth.
 - The live verifier records progress notifications for build/test operations
   and preserves their raw fields in its report.
-- The verifier supports mixed catalogs and resolves its fixture owner. It reuses
-  an existing Service workspace and closes only one it opened after confirming
-  its absence from the initial inventory.
+- The verifier supports mixed catalogs. GUI calls keep the resolved tab selector.
+  Service runs create a dedicated workspace and call Open before inventory,
+  preserving first-use approval and existing shared workspaces.
 - Live verification remains opt-in and never enables or broadly approves
   headless access.
 

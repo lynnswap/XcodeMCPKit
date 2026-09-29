@@ -1,22 +1,21 @@
 import Foundation
 import XcodeMCPKit
 
-@main
-struct XcodeMCPProxyToolVerifier {
-    static func main() async {
+package enum ProxyToolVerifierCommand {
+    package static func run(arguments: [String]) async -> Int32 {
         do {
-            let options = try VerifierOptions(arguments: Array(CommandLine.arguments.dropFirst()))
+            let options = try VerifierOptions(arguments: arguments)
             let runner = ProxyToolVerifier(options: options)
             let hasFailures = try await runner.run()
-            Foundation.exit(hasFailures ? 1 : 0)
+            return hasFailures ? 1 : 0
         } catch {
             FileHandle.standardError.write(Data("error: \(errorDescription(error))\n".utf8))
-            Foundation.exit(1)
+            return 1
         }
     }
 }
 
-private struct VerifierOptions {
+struct VerifierOptions {
     var host = "127.0.0.1"
     var port = 18_765
     var upstreamProcesses = 2
@@ -93,7 +92,7 @@ private struct VerifierOptions {
     }
 }
 
-private struct ProxyToolVerifier {
+struct ProxyToolVerifier {
     let options: VerifierOptions
     let fileManager = FileManager.default
 
@@ -136,11 +135,12 @@ private struct ProxyToolVerifier {
         }
     }
 
-    private func verify(
+    func verify(
         client: XcodeMCP,
         fixture: FixtureLayout,
         outputRoot: URL
     ) async throws -> Bool {
+        var fixture = fixture
         var tools = try await client.listTools()
         var records: [ToolVerificationRecord] = []
         var fixtureTab: String?
@@ -168,22 +168,8 @@ private struct ProxyToolVerifier {
             tools = try await client.listTools()
         }
         let workspaceSurface: WorkspaceToolSurface = fixtureTab == nil ? .service : .gui
-        var serviceInventory: MCPJSONValue?
         if workspaceSurface == .service {
-            let inventory = await call("XcodeListWorkspaces", arguments: [:], client: client)
-            records.append(inventory)
-            guard inventory.status == .passed, let result = inventory.rawResult else {
-                throw VerifierFailure("Cannot determine Service fixture ownership: \(inventory.detail)")
-            }
-            serviceInventory = result
-            // Inventory waits for a usable Service connection. Refresh the catalog
-            // because the first list may have contained only the ready GUI tools.
-            tools = try await client.listTools()
-            let missing = workspaceLifecycleToolNames.subtracting(Set(tools.map(\.name)))
-            guard missing.isEmpty else {
-                throw VerifierFailure("Fixture is not open in GUI Xcode and Service tools are unavailable: "
-                    + missing.sorted().joined(separator: ", "))
-            }
+            fixture = try makeServiceFixture(from: fixture)
         }
         var state = VerificationState(
             fixture: fixture,
@@ -192,11 +178,6 @@ private struct ProxyToolVerifier {
         )
         state.tabIdentifier = fixtureTab
         let reportURL = outputRoot.appendingPathComponent("report.json")
-
-        try writeToolCatalog(
-            ToolCatalogArtifact(toolCount: tools.count, tools: tools.map(\.raw)),
-            to: outputRoot.appendingPathComponent("tool-catalog.json")
-        )
 
         func currentReport() -> VerificationReport {
             VerificationReport(
@@ -212,21 +193,24 @@ private struct ProxyToolVerifier {
         }
 
         do {
-            if let serviceInventory {
-                if let identifier = try parseServiceWorkspace(from: serviceInventory, path: fixture.rootWorkspaceURL.path) {
-                    state.workspaceIdentifier = identifier
-                    state.workspaceReportedPath = fixture.rootWorkspaceURL.path
-                } else {
-                    let openRecord = await call(
-                        "XcodeOpenWorkspace",
-                        arguments: ["path": .string(fixture.rootWorkspaceURL.path)],
-                        client: client
-                    )
-                    records.append(openRecord)
-                    try state.observe(toolName: "XcodeOpenWorkspace", record: openRecord)
-                }
+            if workspaceSurface == .service {
+                let openRecord = await call(
+                    "XcodeOpenWorkspace",
+                    arguments: ["path": .string(fixture.rootWorkspaceURL.path)],
+                    client: client
+                )
+                records.append(openRecord)
+                try state.observe(toolName: "XcodeOpenWorkspace", record: openRecord)
+                // Open is also the first-use approval bootstrap. Once it succeeds,
+                // the Service catalog can join an initially GUI-only catalog.
+                tools = try await client.listTools()
+                state.updateTools(tools)
                 try writeReport(currentReport(), to: reportURL, announce: false)
             }
+            try writeToolCatalog(
+                ToolCatalogArtifact(toolCount: tools.count, tools: tools.map(\.raw)),
+                to: outputRoot.appendingPathComponent("tool-catalog.json")
+            )
 
             let executionPlan = toolExecutionOrder(
                 availableTools: state.availableTools,
@@ -307,6 +291,27 @@ private struct ProxyToolVerifier {
             try? writeReport(currentReport(), to: reportURL, announce: false)
             throw error
         }
+    }
+
+    private func makeServiceFixture(from fixture: FixtureLayout) throws -> FixtureLayout {
+        // Service Open is not reference-counted. A fresh workspace gives this run
+        // close authority without querying shared workspaces before approval.
+        let workspace = fixture.outputRoot.appendingPathComponent(
+            "ServiceFixture-\(UUID().uuidString).xcworkspace", isDirectory: true
+        )
+        try fileManager.createDirectory(at: workspace, withIntermediateDirectories: false)
+        let root = XMLElement(name: "Workspace")
+        root.addAttribute(XMLNode.attribute(withName: "version", stringValue: "1.0") as! XMLNode)
+        let reference = XMLElement(name: "FileRef")
+        reference.addAttribute(XMLNode.attribute(
+            withName: "location", stringValue: "absolute:" + fixture.xcodeProjectURL.path
+        ) as! XMLNode)
+        root.addChild(reference)
+        let document = XMLDocument(rootElement: root)
+        try document.xmlData(options: .nodePrettyPrint).write(
+            to: workspace.appendingPathComponent("contents.xcworkspacedata")
+        )
+        return FixtureLayout(repoRoot: fixture.repoRoot, outputRoot: fixture.outputRoot, workspaceURL: workspace)
     }
 
     private func call(
@@ -662,9 +667,9 @@ private struct WorkspaceVerificationRecord: Codable {
 
 private struct VerificationState {
     let fixture: FixtureLayout
-    let toolsByName: [String: MCPTool]
+    private(set) var toolsByName: [String: MCPTool]
     let workspaceSurface: WorkspaceToolSurface
-    let availableTools: Set<String>
+    private(set) var availableTools: Set<String>
     var tabIdentifier: String?
     var workspaceIdentifier: String?
     var workspaceReportedPath: String?
@@ -691,6 +696,11 @@ private struct VerificationState {
         }
         self.workspaceSurface = workspaceSurface
         self.availableTools = Set(tools.map(\.name))
+    }
+
+    mutating func updateTools(_ tools: [MCPTool]) {
+        toolsByName = tools.reduce(into: [:]) { $0[$1.name] = $1 }
+        availableTools = Set(tools.map(\.name))
     }
 
     var workspaceRecord: WorkspaceVerificationRecord {
@@ -729,8 +739,9 @@ private struct VerificationState {
     }
 
     func executionDecision(for toolName: String) throws -> ToolExecutionDecision {
-        if workspaceSurface == .service, toolName == "XcodeListWindows" {
-            return .skip("fixture is owned by Xcode Service")
+        if workspaceSurface == .service,
+           ["XcodeListWindows", "XcodeGetCurrentFile", "XcodeListNavigatorIssues"].contains(toolName) {
+            return .skip("tool requires GUI window, editor, or navigator state")
         }
         if workspaceSurface == .service,
            toolName == "DeviceInteractionStartSession",
@@ -1008,10 +1019,10 @@ private struct VerificationState {
             guard schema.properties.contains("tabIdentifier") else {
                 throw ToolPlanUnavailable(reason: "tool has no GUI tab selector")
             }
-            guard schema.properties.contains("workspaceIdentifier") else {
-                throw ToolPlanUnavailable(reason: "GUI schema has no workspaceIdentifier argument")
+            guard let tabIdentifier else {
+                throw VerifierFailure("fixture GUI tab has not been resolved")
             }
-            result["workspaceIdentifier"] = .string(fixture.rootWorkspaceURL.path)
+            result["tabIdentifier"] = .string(tabIdentifier)
             return result
         }
     }
@@ -1115,12 +1126,17 @@ private struct ToolInputSchema {
     }
 }
 
-private struct FixtureLayout {
+struct FixtureLayout {
     let repoRoot: URL
     let outputRoot: URL
 
-    var rootWorkspaceURL: URL {
-        repoRoot.appendingPathComponent("XcodeMCPKit.xcworkspace", isDirectory: true)
+    let rootWorkspaceURL: URL
+
+    init(repoRoot: URL, outputRoot: URL, workspaceURL: URL? = nil) {
+        self.repoRoot = repoRoot
+        self.outputRoot = outputRoot
+        self.rootWorkspaceURL = workspaceURL
+            ?? repoRoot.appendingPathComponent("XcodeMCPKit.xcworkspace", isDirectory: true)
     }
 
     var projectRootURL: URL {
@@ -1535,40 +1551,6 @@ private func parseWindowTab(
         }
     }
     return nil
-}
-
-private func parseServiceWorkspace(from value: MCPJSONValue, path: String) throws -> String? {
-    var identifiers = Set<String>()
-    func visit(_ value: Any) {
-        if let object = value as? [String: Any] {
-            if let identifier = object["workspaceIdentifier"] as? String,
-               let workspacePath = (object["workspacePath"] ?? object["path"]) as? String,
-               normalizePath(workspacePath) == normalizePath(path) {
-                identifiers.insert(identifier)
-            }
-            object.values.forEach(visit)
-        } else if let array = value as? [Any] {
-            array.forEach(visit)
-        } else if let text = value as? String,
-                  let json = try? JSONSerialization.jsonObject(with: Data(text.utf8)) {
-            visit(json)
-        }
-    }
-    visit(value.jsonObject)
-    for text in allStrings(from: value) {
-        for line in text.split(whereSeparator: \.isNewline) {
-            let row = String(line)
-            if let identifier = extractValue(after: "workspaceIdentifier:", before: ", workspacePath: ", in: row),
-               let workspacePath = extractValue(after: "workspacePath:", before: nil, in: row),
-               normalizePath(workspacePath) == normalizePath(path) {
-                identifiers.insert(identifier)
-            }
-        }
-    }
-    guard identifiers.count <= 1 else {
-        throw VerifierFailure("Multiple Service workspaces match the fixture path")
-    }
-    return identifiers.first
 }
 
 private func parseFirstString(named key: String, from value: MCPJSONValue) -> String? {

@@ -41,7 +41,7 @@ let package = Package(
         ),
         .executable(
             name: "xcode-mcp-proxy-tool-verifier",
-            targets: ["XcodeMCPProxyToolVerifier"]
+            targets: ["XcodeMCPProxyToolVerifierCLI"]
         ),
         .executable(
             name: "xcode-mcp-permission-approver",
@@ -180,6 +180,11 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
+            name: "XcodeMCPProxyToolVerifierCLI",
+            dependencies: ["XcodeMCPProxyToolVerifier"],
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "XcodeMCPProxyToolVerifier",
             dependencies: ["XcodeMCPKit"],
             exclude: ["README.md"],
@@ -324,6 +329,11 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Tests/XcodeMCPProxyHTTPTests",
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "ProxyToolVerifierTests",
+            dependencies: ["XcodeMCPProxyToolVerifier", "XcodeMCPKitTesting"],
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(

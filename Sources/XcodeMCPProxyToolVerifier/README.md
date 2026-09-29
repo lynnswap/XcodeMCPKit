@@ -28,17 +28,16 @@ The verifier:
 - opens `XcodeMCPKit.xcworkspace` in Xcode unless `--no-open-xcode` is supplied
 - waits for the GUI fixture it opened to appear, even when Service becomes ready first
 - with `--no-open-xcode`, reuses an available GUI fixture or prepares a Service fixture
-- reuses a matching Service workspace or calls `XcodeOpenWorkspace` when absent
-- uses the standard `workspaceIdentifier` argument with the GUI workspace path
-  or the Service's returned identifier
+- creates a uniquely named Service workspace referencing the fixture project,
+  then calls `XcodeOpenWorkspace` as the first-use approval bootstrap
+- uses the resolved GUI `tabIdentifier` or the Service's returned `workspaceIdentifier`
 - uses the tracked fixture project in `Fixtures/ProxyToolVerifierFixture`
 - reads and records the complete live `tools/list` catalog
 - calls each tool with a fixture-safe plan one at a time; unknown tools and
   tools without safe arguments remain in the report as `not-planned`
 - records raw progress notification fields for build and test operations
-- closes the Service workspace it opened after confirming it was absent from
-  the initial inventory, including when later verification fails; existing
-  Service workspaces stay open
+- closes only its dedicated Service workspace, including when later verification
+  fails; existing Service workspaces stay open
 - writes `ProxyToolVerifierOutput/report.json`
 - prints the tested tool list at the end
 

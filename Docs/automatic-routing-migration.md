@@ -51,5 +51,8 @@ bridge environment variable.
 ## Live verifier
 
 Remove `--xcode-mode`. Use `--no-open-xcode` to skip opening a GUI fixture window.
-The verifier resolves the fixture's actual owner from the inventories and records
-that owner in its report. Catalog artifacts are now named `tool-catalog.json`.
+The verifier waits for the GUI fixture it opens, or prepares a dedicated Service
+workspace when no GUI fixture is available with `--no-open-xcode`. Service Open
+performs first-use approval; cleanup closes only that dedicated workspace. The
+report records the selected backend. Catalog artifacts are now named
+`tool-catalog.json`.
