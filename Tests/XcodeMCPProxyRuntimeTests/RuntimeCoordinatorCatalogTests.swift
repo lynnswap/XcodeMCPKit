@@ -176,6 +176,54 @@ struct RuntimeCoordinatorCatalogTests {
             Set(["DocumentationSearch", "UpdatedGUI"]))
     }
 
+    @Test(arguments: [false, true])
+    func automaticCatalogRetriesBackendThatFailedBeforeItsSibling(serviceFails: Bool) async throws {
+        let service = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        let target = xcodeProcessTarget(processID: 771, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [service, gui],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        for index in 0...1 { manager.markUpstreamInitialized(upstreamIndex: index) }
+        seedCoordinatorSuiteInitialize(
+            on: manager, result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 0
+        )
+        let load = Task { try await manager.sharedToolsList(sessionID: "partial-failure", requestTimeoutOverride: .seconds(3)) }
+        let serviceRequest = try await sentValue(from: service, at: 0, timeout: .seconds(2))
+        let guiRequest = try await sentValue(from: gui, at: 0, timeout: .seconds(2))
+        let failed = serviceFails ? service : gui
+        let healthy = serviceFails ? gui : service
+        let failedRequest = serviceFails ? serviceRequest : guiRequest
+        let healthyRequest = serviceFails ? guiRequest : serviceRequest
+        await failed.yield(.message(try JSONRPC.Wire.errorResponseData(
+            id: JSONRPC.ID(any: extractUpstreamID(from: failedRequest)), code: -32001, message: "temporarily unavailable"
+        )))
+        try await waitWithTimeout("failed backend released its catalog attempt", timeout: .seconds(2)) {
+            while manager.processControlPlane.snapshot().attempts.contains(where: {
+                serviceFails ? $0.routeID == nil : $0.routeID?.processID == target.processID
+            }) {
+                await Task.yield()
+            }
+        }
+        await healthy.yield(.message(try makeDocumentationToolsListResponse(
+            id: extractUpstreamID(from: healthyRequest), tools: [toolDescriptor(name: "HealthyTool")]
+        )))
+        #expect(toolNames(in: try await load.value).contains("HealthyTool"))
+        let retry = try await failed.nextSent(startingAt: 1, matching: { methodName(from: $0) == "tools/list" })
+        await failed.yield(.message(try makeDocumentationToolsListResponse(
+            id: extractUpstreamID(from: retry), tools: [toolDescriptor(name: "RecoveredTool")]
+        )))
+        await manager.drainRuntimeTasksForTesting()
+        #expect(Set(toolNames(in: try #require(manager.cachedToolsListResult()))) == Set(["HealthyTool", "RecoveredTool"]))
+    }
+
     @Test func unchangedCatalogDoesNotNotifyWhenItsSourceBridgeChanges() throws {
         var config = makeConfig(requestTimeout: 5)
         config.xcodeMode = .headless

@@ -144,7 +144,7 @@ extension RuntimeCoordinator {
             return try await loadUnboundToolsCatalog(requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
         }
 
-        var pending: Set<CatalogBackendGroup> = [.gui, .service]
+        var incomplete: Set<CatalogBackendGroup> = [.gui, .service]
         let result = try await withThrowingTaskGroup(
             of: (CatalogBackendGroup, Result<CanonicalToolsCatalogLoadResult, any Error>).self
         ) { group in
@@ -164,9 +164,9 @@ extension RuntimeCoordinator {
             }
             var lastError: any Error = UpstreamSlotScheduler.AcquisitionError.unavailable
             while let (backend, outcome) = try await group.next() {
-                pending.remove(backend)
                 switch outcome {
                 case .success(let result):
+                    incomplete.remove(backend)
                     group.cancelAll()
                     return result
                 case .failure(let error):
@@ -177,10 +177,10 @@ extension RuntimeCoordinator {
         }
         try Task.checkCancellation()
         // Continue incomplete refreshes under the runtime's lifetime after foreground cancellation drains.
-        if pending.contains(.gui) {
+        if incomplete.contains(.gui) {
             refreshProcessToolsCatalogsIfNeeded(reason: "client_tools_list", refreshCached: true)
         }
-        if pending.contains(.service) {
+        if incomplete.contains(.service) {
             refreshDefaultBackendToolsCatalogIfNeeded()
         }
         return CanonicalToolsCatalogLoadResult(

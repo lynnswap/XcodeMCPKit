@@ -1195,6 +1195,22 @@ struct DocumentationProviderTests {
         #expect(environments[3]["MCP_XCODE_PID"] == "\(pinned.processID)")
     }
 
+    @Test func guiCompositionStartsWithNoFallbackWhenDiscoveryIsEmpty() {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .gui
+        config.disabledToolNames = [DocumentationProvider.ToolCatalog.toolName]
+        let manager = RuntimeCoordinator(
+            config: config, eventLoop: group.next(),
+            xcodeTargetDiscovery: CountingXcodeTargetDiscovery(targets: []), startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        #expect(manager.processRoutingEnabled)
+        #expect(manager.upstreamSlotIDs.isEmpty)
+        #expect(manager.defaultBackendUpstreamIndices.isEmpty)
+    }
+
     @Test func runtimeCoordinatorUsesXcodeDiscoveryWhenProcessRoutingIsEnabled()
         throws
     {
