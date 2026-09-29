@@ -1168,6 +1168,19 @@ extension RuntimeCoordinator {
         responseIDOverride: JSONRPC.ID? = nil,
         throwsOnRPCError: Bool = true
     ) async throws -> ControlPlane.RPCResponse {
+        let preferredUpstreamIndices: [Int]?
+        switch route {
+        case .anyHealthy:
+            preferredUpstreamIndices = nil
+        case .pinnedUpstream(let index):
+            preferredUpstreamIndices = [index]
+        case .xcodeService:
+            let indices = upstreamTopology.snapshot().entries.compactMap { entry in
+                entry.backend == .xcodeService ? entry.id.rawValue : nil
+            }
+            guard !indices.isEmpty else { throw UpstreamSlotScheduler.AcquisitionError.unavailable }
+            preferredUpstreamIndices = indices
+        }
         let requestDeadlineUptimeNs = deadlineUptimeNanoseconds(for: requestTimeout)
         let internalSessionID = controlPlaneSessionID(for: purpose, route: route)
         let session = session(id: internalSessionID)
@@ -1189,13 +1202,6 @@ extension RuntimeCoordinator {
             isTopLevelClientRequest: false
         )
         let leaseID = createRequestLease(descriptor: descriptor)
-        let preferredUpstreamIndex: Int? =
-            switch route {
-            case .anyHealthy:
-                nil
-            case .pinnedUpstream(let upstreamIndex):
-                upstreamIndex
-            }
         let installedCancellationHandler = rpcHandle.installCancelWithDelivery {
             [self, router] snapshot, cancellationDelivery in
             if let registrationToken = snapshot.registrationToken {
@@ -1252,7 +1258,7 @@ extension RuntimeCoordinator {
                 leaseID: leaseID,
                 descriptor: descriptor,
                 on: eventLoop,
-                preferredUpstreamIndex: preferredUpstreamIndex
+                preferredUpstreamIndices: preferredUpstreamIndices
             ) { [self, requestTemplate, originalID] selectedOperationLease in
                 let selectedUpstreamIndex = selectedOperationLease.upstreamIndex
                 if let expectedUpstreamProof,
@@ -1515,6 +1521,8 @@ extension RuntimeCoordinator {
         switch route {
         case .none, .some(.anyHealthy):
             suffix = "any"
+        case .some(.xcodeService):
+            suffix = "xcode-service"
         case .some(.pinnedUpstream(let upstreamIndex)):
             suffix = "pinned-\(upstreamIndex)"
         }

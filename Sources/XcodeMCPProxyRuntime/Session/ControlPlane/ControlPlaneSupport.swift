@@ -7,12 +7,15 @@ enum ControlPlane {}
 extension ControlPlane {
     enum Route: Hashable, Sendable {
         case anyHealthy
+        case xcodeService
         case pinnedUpstream(Int)
 
         var debugLabel: String {
             switch self {
             case .anyHealthy:
                 return "any_healthy"
+            case .xcodeService:
+                return "xcode_service"
             case .pinnedUpstream(let upstreamIndex):
                 return "pinned_\(upstreamIndex)"
             }

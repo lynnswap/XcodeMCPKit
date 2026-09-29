@@ -502,7 +502,7 @@ extension RuntimeCoordinator {
                let path = request.workspacePath,
                let proof = admission.upstreamProofs.first {
                 return await serviceWorkspacePathRoutingDecision(
-                    for: request, path: path, upstreamIndex: proof.slotID.rawValue,
+                    for: request, path: path, route: .pinnedUpstream(proof.slotID.rawValue),
                     expectedUpstreamProof: proof,
                     deadline: timeoutDeadline(for: requestTimeoutOverride
                         ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: config.requestTimeout))
@@ -609,17 +609,8 @@ extension RuntimeCoordinator {
                 return .reject(errors: toolRoutingErrors(for: request, message: "Unable to resolve the selected Xcode tab"))
             }
         }
-        let serviceIndices = defaultBackendUpstreamIndices
-        let excludedIndices = Set(upstreamTopology.snapshot().slotIDs.map(\.rawValue)).subtracting(serviceIndices)
-        let selection = upstreamHealthManager.chooseBestInitializedUpstream(
-            nowUptimeNs: nowUptimeNanoseconds(), occupiedUpstreams: excludedIndices
-        )
-        applyHealthEffects(selection.effects)
-        guard let upstreamIndex = selection.proof?.slotID.rawValue ?? serviceIndices.sorted().first else {
-            return .reject(errors: toolRoutingErrors(for: request, message: "No GUI owns the workspace and Xcode Service is not available"))
-        }
         return await serviceWorkspacePathRoutingDecision(
-            for: request, path: path, upstreamIndex: upstreamIndex, deadline: deadline
+            for: request, path: path, route: .xcodeService, deadline: deadline
         )
     }
 
@@ -634,7 +625,7 @@ extension RuntimeCoordinator {
     private func serviceWorkspacePathRoutingDecision(
         for request: ToolRoutingRequest,
         path: String,
-        upstreamIndex: Int,
+        route: ControlPlane.Route,
         expectedUpstreamProof: UpstreamTopologyProof? = nil,
         deadline: UInt64?
     ) async -> ToolRoutingDecision {
@@ -642,7 +633,7 @@ extension RuntimeCoordinator {
             try Task.checkCancellation()
             if let deadline, nowUptimeNanoseconds() >= deadline { throw TimeoutError() }
             let response = try await performControlPlaneRPC(
-                route: .pinnedUpstream(upstreamIndex), purpose: "workspaces",
+                route: route, purpose: "workspaces",
                 label: "tools/call:XcodeListWorkspaces",
                 requestObject: JSONRPC.Wire.requestObject(
                     id: "__control-plane-workspaces-\(UUID().uuidString)", method: "tools/call",
@@ -668,11 +659,19 @@ extension RuntimeCoordinator {
                         : "Multiple Service workspaces match '\(path)'; select a workspaceIdentifier from XcodeListWorkspaces"
                 ))
             }
+            let proofs: [UpstreamTopologyProof]
+            if let expectedUpstreamProof {
+                proofs = [expectedUpstreamProof]
+            } else {
+                let topology = upstreamTopology.snapshot()
+                proofs = topology.entries.compactMap { entry in
+                    entry.backend == .xcodeService ? topology.proof(entry.id) : nil
+                }
+            }
+            guard !proofs.isEmpty else { throw UpstreamSlotScheduler.AcquisitionError.unavailable }
             return .forwardAdmitted(
-                preferredUpstreamIndices: [response.upstreamIndex],
-                admission: RouteForwardingAdmission(
-                    upstreamProofs: [response.operationLease.proof], workspaceIdentifier: identifier
-                )
+                preferredUpstreamIndices: proofs.map { $0.slotID.rawValue },
+                admission: RouteForwardingAdmission(upstreamProofs: proofs, workspaceIdentifier: identifier)
             )
         } catch {
             return .reject(errors: toolRoutingErrors(

@@ -250,6 +250,72 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
+    @Test(arguments: [false, true])
+    func workspaceLookupWaitsForAnyAvailableServiceConnection(allBusy: Bool) async throws {
+        let first = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
+        let second = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
+        let siblingInitialized = TestSignal()
+        let lookupQueued = TestSignal()
+        let server = try TestHTTPServer.start(upstream: first, xcodeMode: .automatic, additionalUpstreams: [second],
+            testHooks: .init(upstreamInitialized: { index in
+                if index == 1 { siblingInitialized.signal() }
+            }, upstreamRequestQueued: { _, descriptor, _ in
+                if descriptor.label == "tools/call:XcodeListWorkspaces" { lookupQueued.signal() }
+            }))
+        do {
+            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
+            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
+            try await siblingInitialized.wait(description: "Service sibling initialization")
+            let manager = server.sessionManager
+            let loop = manager.eventLoop
+            var holds: [(LeaseManager.ID, EventLoopPromise<Void>)] = []
+            defer {
+                for (lease, completion) in holds {
+                    manager.completeRequestLease(lease)
+                    completion.succeed(())
+                }
+            }
+            for index in 0..<(allBusy ? 2 : 1) {
+                let descriptor = SessionRequestPipeline.Descriptor(
+                    sessionID: "busy-service-\(index)", label: "tools/call:BuildProject",
+                    expectsResponse: true, isTopLevelClientRequest: false)
+                let lease = manager.createRequestLease(descriptor: descriptor)
+                let completion = loop.makePromise(of: Void.self)
+                let started = TestSignal()
+                let future: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+                    leaseID: lease, descriptor: descriptor, on: loop, preferredUpstreamIndex: index
+                ) { _ in
+                    started.signal()
+                    return completion.futureResult
+                }
+                future.whenFailure { _ in }
+                holds.append((lease, completion))
+                try await started.wait(description: "busy Service connection")
+            }
+            let url = server.url
+            let request = Task { () throws -> JSONValue in
+                let (_, body) = try await postJSON(url: url, sessionID: sessionID,
+                    payload: toolCallPayload(id: 2, name: "BuildProject", arguments: ["workspaceIdentifier": "/Work/App.xcodeproj"]))
+                return try #require(JSONValue(any: body))
+            }
+            defer { request.cancel() }
+            if allBusy {
+                try await lookupQueued.wait(description: "workspace lookup queued behind busy Service connections")
+                let (lease, completion) = holds.removeLast()
+                manager.completeRequestLease(lease)
+                completion.succeed(())
+            }
+            let reply = try #require(try await request.value.foundationObject as? [String: Any])
+            #expect((reply["result"] as? [String: Any])?["isError"] as? Bool == false)
+            #expect(await first.recordedCalls() == [])
+            #expect(await second.recordedCalls() == ["XcodeListWorkspaces", "BuildProject"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func unavailableServiceDoesNotBlockGUICatalogOverHTTP() async throws {
         let service = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service")
         let gui = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "gui")
