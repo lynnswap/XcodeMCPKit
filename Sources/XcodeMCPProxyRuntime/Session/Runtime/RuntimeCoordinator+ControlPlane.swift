@@ -119,14 +119,34 @@ extension RuntimeCoordinator {
                 defaultSeconds: config.requestTimeout
             )
         let requestDeadlineUptimeNs = deadlineUptimeNanoseconds(for: effectiveRequestTimeout)
-        if processRoutingEnabled {
+        if processRoutingEnabled && defaultBackendUpstreamIndices.isEmpty {
             return try await loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
                 requestTimeout: effectiveRequestTimeout,
                 deadlineUptimeNs: requestDeadlineUptimeNs,
                 startedAt: startedAt
             )
         }
-        guard let preferredUpstream = upstreamSlotIDs.first else {
+        let result = try await loadUnboundToolsCatalog(
+            requestTimeout: effectiveRequestTimeout,
+            rpcHandle: rpcHandle,
+            startedAt: startedAt
+        )
+        if processRoutingEnabled {
+            refreshProcessToolsCatalogsIfNeeded(reason: "client_tools_list", refreshCached: true)
+        }
+        return CanonicalToolsCatalogLoadResult(
+            rawResult: processControlPlane.canonicalToolsCatalogRaw() ?? result.rawResult,
+            sourceProof: processControlPlane.canonicalSourceProof() ?? result.sourceProof,
+            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
+        )
+    }
+
+    private func loadUnboundToolsCatalog(
+        requestTimeout: TimeAmount?,
+        rpcHandle: ControlPlane.RPCHandle,
+        startedAt: UInt64
+    ) async throws -> CanonicalToolsCatalogLoadResult {
+        guard let preferredUpstream = defaultBackendUpstreamIndices.sorted().first.map(UpstreamSlotID.init(rawValue:)) else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
         guard let preferredProof = upstreamTopology.operationLease(
@@ -145,7 +165,7 @@ extension RuntimeCoordinator {
         do {
             let result = try await loadCanonicalToolsCatalogFromRoute(
                 .anyHealthy,
-                requestTimeout: effectiveRequestTimeout,
+                requestTimeout: requestTimeout,
                 rpcHandle: rpcHandle,
                 startedAt: startedAt,
                 purpose: "tools",

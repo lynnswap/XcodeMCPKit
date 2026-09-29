@@ -10,6 +10,46 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorCatalogTests {
+    @Test(arguments: [false, true])
+    func automaticCatalogDoesNotWaitForGUICatalogRefresh(cachedGUI: Bool) async throws {
+        let headless = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        config.prewarmToolsList = false
+        let target = xcodeProcessTarget(processID: 7017, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [headless, gui],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        for index in 0...1 { manager.markUpstreamInitialized(upstreamIndex: index) }
+        seedCoordinatorSuiteInitialize(
+            on: manager, result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 0
+        )
+        if cachedGUI {
+            try seedProcessToolCatalogs(on: manager, entries: [(target, 1, [toolDescriptor(name: "KnownGUI")])])
+        }
+        await headless.respondToToolsLists(with: try jsonValue(["tools": [toolDescriptor(name: "DocumentationSearch")]]))
+        for _ in 0..<2 {
+            let result = try await waitWithTimeout("headless catalog must not wait for GUI", timeout: .seconds(1)) {
+                try await manager.sharedToolsList(sessionID: "mixed-catalog", requestTimeoutOverride: .seconds(5))
+            }
+            #expect(toolNames(in: result).contains("DocumentationSearch"))
+        }
+        let query = try await sentValue(from: gui, at: 0, timeout: .seconds(2))
+        #expect(await gui.sentCount() == 1)
+        await gui.yield(.message(try makeDocumentationToolsListResponse(
+            id: extractUpstreamID(from: query), tools: [toolDescriptor(name: "UpdatedGUI")]
+        )))
+        await manager.drainRuntimeTasksForTesting()
+        #expect(Set(toolNames(in: try #require(manager.cachedToolsListResult()))) ==
+            Set(["DocumentationSearch", "UpdatedGUI"]))
+    }
+
     @Test func unchangedCatalogDoesNotNotifyWhenItsSourceBridgeChanges() throws {
         var config = makeConfig(requestTimeout: 5)
         config.xcodeMode = .headless

@@ -299,7 +299,6 @@ extension RuntimeCoordinator {
             lease: unavailable.cooldownLease,
             delayNanoseconds: cooldownNanoseconds
         )
-        removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
         logger.debug(
             "Temporarily ignoring Xcode process route",
             metadata: [
@@ -504,6 +503,12 @@ extension RuntimeCoordinator {
         if request.id != nil, request.toolName == "XcodeListWindows" {
             return .localXcodeListWindows
         }
+        if !hasOwnerHint(request), !defaultBackendUpstreamIndices.isEmpty {
+            let catalog = processControlPlane.unboundToolsCatalogRaw()
+            if catalog == nil || ProcessToolCatalogCodec.toolsByName(in: catalog)[request.toolName] != nil {
+                return .forwardAny(preferredUpstreamIndices: defaultBackendUpstreamIndices.sorted())
+            }
+        }
         guard isOwnerBoundRoutingRequest(request) else {
             if let catalogDecision = catalogToolRoutingDecision(
                 for: request
@@ -532,7 +537,7 @@ extension RuntimeCoordinator {
                 return
             }
             let routeID: ProcessRouteID?
-            if processRoutingEnabled {
+            if processRoutingEnabled && !defaultBackendUpstreamIndices.contains(operationLease.upstreamIndex) {
                 guard let route = xcodeProcessRoute(
                     forUpstreamIndex: operationLease.upstreamIndex
                 ),
@@ -595,7 +600,7 @@ extension RuntimeCoordinator {
             )
         }
         guard let affinityRouteID = affinity.routeID else {
-            guard processRoutingEnabled == false else {
+            guard defaultBackendUpstreamIndices.contains(affinity.upstreamProof.slotID.rawValue) else {
                 deviceInteractionAffinityAuthority.remove(key: key)
                 return .reject(
                     errors: deviceInteractionRoutingErrors(
@@ -1129,14 +1134,14 @@ extension RuntimeCoordinator {
 
     func isActiveProcessBoundUpstream(_ upstreamIndex: Int) -> Bool {
         guard processRoutingEnabled else { return true }
-        return xcodeProcessRoute(forUpstreamIndex: upstreamIndex) != nil
+        return defaultBackendUpstreamIndices.contains(upstreamIndex) || xcodeProcessRoute(forUpstreamIndex: upstreamIndex) != nil
     }
 
     func activeProcessBoundUpstreamIndices() -> Set<Int> {
         guard processRoutingEnabled else {
             return Set(upstreamSlotIDs.map(\.rawValue))
         }
-        return Set(xcodeProcessRoutes.flatMap(\.upstreamIndices))
+        return defaultBackendUpstreamIndices.union(xcodeProcessRoutes.flatMap(\.upstreamIndices))
     }
 
     func routableProcessBoundUpstreamIndices() -> Set<Int> {
@@ -1144,7 +1149,7 @@ extension RuntimeCoordinator {
             return Set(upstreamSlotIDs.map(\.rawValue))
         }
         let unavailable = unavailableXcodeProcessIDs()
-        return Set(
+        return defaultBackendUpstreamIndices.union(
             xcodeProcessRoutes
                 .filter { unavailable.contains($0.target.processID) == false }
                 .flatMap(\.upstreamIndices)
@@ -1159,9 +1164,7 @@ extension RuntimeCoordinator {
     }
 
     func secondaryUpstreamIndices(excluding upstreamIndex: Int) -> [Int] {
-        let candidates = processRoutingEnabled
-            ? xcodeProcessRoutes.flatMap(\.upstreamIndices)
-            : upstreamSlotIDs.map(\.rawValue)
+        let candidates = activeProcessBoundUpstreamIndices().sorted()
         return candidates.filter { $0 != upstreamIndex }
     }
 

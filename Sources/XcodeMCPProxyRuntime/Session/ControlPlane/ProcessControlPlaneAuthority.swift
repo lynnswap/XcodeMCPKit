@@ -15,22 +15,27 @@ struct CatalogLoadID: Sendable, Hashable {
     fileprivate let rawValue: Int
 }
 
+enum CatalogOwner: Sendable, Hashable {
+    case xcodeProcess(ProcessRouteID)
+    case defaultBackend
+}
+
 struct CatalogLease: Sendable, Hashable {
     fileprivate let catalogEpoch: CatalogEpoch
-    fileprivate let routeID: ProcessRouteID
+    fileprivate let owner: CatalogOwner
+    fileprivate var routeID: ProcessRouteID? {
+        if case .xcodeProcess(let routeID) = owner { return routeID }
+        return nil
+    }
     fileprivate let attemptID: CatalogAttemptID
     fileprivate let loadID: CatalogLoadID
     fileprivate let upstreamProof: UpstreamTopologyProof
 
-    var processID: pid_t { routeID.processID }
-    var routeIdentity: ProcessRouteID { routeID }
+    var routeIdentity: ProcessRouteID? { routeID }
     var attempt: Int { attemptID.rawValue }
     var upstreamID: UpstreamSlotID { upstreamProof.slotID }
     var upstreamIndex: Int { upstreamID.rawValue }
     var topologyProof: UpstreamTopologyProof { upstreamProof }
-    var activationLease: ActivationLease {
-        ActivationLease(routeID: routeID, attemptID: attemptID, upstreamProof: upstreamProof)
-    }
 }
 
 struct CatalogTimeoutReservation: Sendable, Hashable {
@@ -240,7 +245,7 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     struct AttemptSnapshot: Sendable, Equatable {
-        let routeID: ProcessRouteID
+        let routeID: ProcessRouteID?
         let attemptID: CatalogAttemptID
         let upstreamProof: UpstreamTopologyProof
         var upstreamID: UpstreamSlotID { upstreamProof.slotID }
@@ -1595,7 +1600,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                     Self.lease(
                         for: attempt,
                         loadID: loadID,
-                        routeID: Self.unboundRouteID,
+                        routeID: nil,
                         catalogEpoch: state.catalogEpoch
                     ),
                     .none
@@ -1621,7 +1626,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 Self.lease(
                     for: attempt,
                     loadID: loadID,
-                    routeID: Self.unboundRouteID,
+                    routeID: nil,
                     catalogEpoch: state.catalogEpoch
                 ),
                 ProcessControlPlaneTransition(
@@ -1637,7 +1642,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         to lease: CatalogLease
     ) -> ProcessControlPlaneTransition {
         state.withLockedValue { state in
-            if lease.routeID == Self.unboundRouteID {
+            if lease.routeID == nil {
                 guard var attempt = state.unboundAttempt,
                       Self.matches(lease: lease, attempt: attempt, state: state),
                       let effects = Self.attach(
@@ -1657,7 +1662,8 @@ final class ProcessControlPlaneAuthority: Sendable {
                     publishesToolsListChanged: false
                 )
             }
-            guard let key = Self.key(routeID: lease.routeID, in: state),
+            guard let routeID = lease.routeID,
+                  let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
                   var attempt = record.attempt,
                   Self.matches(lease: lease, attempt: attempt, state: state),
@@ -1685,8 +1691,8 @@ final class ProcessControlPlaneAuthority: Sendable {
         for lease: CatalogLease
     ) -> CatalogTimeoutReservation? {
         state.withLockedValue { state in
-            guard lease.routeID != Self.unboundRouteID,
-                  let key = Self.key(routeID: lease.routeID, in: state),
+            guard let routeID = lease.routeID,
+                  let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
                   var attempt = record.attempt,
                   Self.matches(lease: lease, attempt: attempt, state: state),
@@ -1714,7 +1720,8 @@ final class ProcessControlPlaneAuthority: Sendable {
     ) -> ProcessControlPlaneTransition {
         state.withLockedValue { state in
             let lease = reservation.catalogLease
-            guard let key = Self.key(routeID: lease.routeID, in: state),
+            guard let routeID = lease.routeID,
+                  let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
                   var attempt = record.attempt,
                   Self.matches(lease: lease, attempt: attempt, state: state),
@@ -1745,10 +1752,10 @@ final class ProcessControlPlaneAuthority: Sendable {
         state.withLockedValue { state in
             guard lease.catalogEpoch == state.catalogEpoch else { return false }
             let attempt: Attempt?
-            if lease.routeID == Self.unboundRouteID {
+            if lease.routeID == nil {
                 attempt = state.unboundAttempt
             } else {
-                attempt = Self.record(routeID: lease.routeID, in: state)?.attempt
+                attempt = lease.routeID.flatMap { Self.record(routeID: $0, in: state)?.attempt }
             }
             guard let attempt,
                   attempt.id == lease.attemptID,
@@ -1769,14 +1776,15 @@ final class ProcessControlPlaneAuthority: Sendable {
             guard lease.catalogEpoch == state.catalogEpoch else {
                 return .discarded(.catalogEpochChanged, .none)
             }
-            if lease.routeID == Self.unboundRouteID {
+            if lease.routeID == nil {
                 return Self.completeUnboundCatalog(
                     outcome,
                     lease: lease,
                     state: &state
                 )
             }
-            guard let key = Self.key(routeID: lease.routeID, in: state),
+            guard let routeID = lease.routeID,
+                  let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key] else {
                 return .discarded(.routeRetired, .none)
             }
@@ -2025,6 +2033,10 @@ final class ProcessControlPlaneAuthority: Sendable {
         state.withLockedValue(\.canonicalToolsCatalogRaw)
     }
 
+    func unboundToolsCatalogRaw() -> JSONValue? {
+        state.withLockedValue(\.unboundCatalogRaw)
+    }
+
     func canonicalSourceUpstream() -> Int? {
         state.withLockedValue { $0.canonicalSourceProof?.slotID.rawValue }
     }
@@ -2121,7 +2133,8 @@ final class ProcessControlPlaneAuthority: Sendable {
     )? {
         state.withLockedValue { state in
             guard lease.catalogEpoch == state.catalogEpoch,
-                  let key = Self.key(routeID: lease.routeID, in: state),
+                  case .xcodeProcess(let routeID) = lease.owner,
+                  let key = Self.key(routeID: routeID, in: state),
                   let record = state.recordsByKey[key],
                   var attempt = record.attempt,
                   attempt.id == lease.attemptID,
@@ -2243,7 +2256,8 @@ final class ProcessControlPlaneAuthority: Sendable {
             let lease = reservation.catalogLease
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
             guard lease.catalogEpoch == state.catalogEpoch,
-                  let key = Self.key(routeID: lease.routeID, in: state),
+                  case .xcodeProcess(let routeID) = lease.owner,
+                  let key = Self.key(routeID: routeID, in: state),
                   var record = state.recordsByKey[key],
                   var attempt = record.attempt,
                   Self.matches(lease: lease, attempt: attempt, state: state),
@@ -2291,7 +2305,8 @@ final class ProcessControlPlaneAuthority: Sendable {
     func handleRetryFired(_ lease: CatalogLease) -> Bool {
         state.withLockedValue { state in
             guard lease.catalogEpoch == state.catalogEpoch,
-            let key = Self.key(routeID: lease.routeID, in: state),
+            case .xcodeProcess(let routeID) = lease.owner,
+            let key = Self.key(routeID: routeID, in: state),
             var record = state.recordsByKey[key], var attempt = record.attempt,
             attempt.id == lease.attemptID,
             attempt.upstreamID == lease.upstreamID,
@@ -2806,12 +2821,12 @@ final class ProcessControlPlaneAuthority: Sendable {
     private static func lease(
         for attempt: Attempt,
         loadID: CatalogLoadID,
-        routeID: ProcessRouteID,
+        routeID: ProcessRouteID?,
         catalogEpoch: CatalogEpoch
     ) -> CatalogLease {
         CatalogLease(
             catalogEpoch: catalogEpoch,
-            routeID: routeID,
+            owner: routeID.map(CatalogOwner.xcodeProcess) ?? .defaultBackend,
             attemptID: attempt.id,
             loadID: loadID,
             upstreamProof: attempt.upstreamProof
@@ -2909,12 +2924,13 @@ final class ProcessControlPlaneAuthority: Sendable {
             resetToolsUnavailableWarningIncident(in: &state)
         }
         let previousRaw = state.canonicalToolsCatalogRaw
-        let activeRoutes = activeRoutes(in: state)
         let requiredProcessIDs = catalogRequiredProcessIDs(in: state)
-        if activeRoutes.isEmpty,
-           let raw = state.unboundCatalogRaw,
+        if let raw = state.unboundCatalogRaw,
            let source = state.unboundCatalogSource {
-            state.canonicalToolsCatalogRaw = raw
+            state.canonicalToolsCatalogRaw = ProcessToolCatalogCodec.merging(
+                preferred: raw,
+                additional: availableToolCatalogSurface(in: state, processIDs: requiredProcessIDs)?.rawResult
+            )
             state.canonicalSourceProof = source
         } else if requiredProcessIDs.isEmpty == false,
            let surface = availableToolCatalogSurface(
@@ -2962,12 +2978,12 @@ final class ProcessControlPlaneAuthority: Sendable {
             attempts: activeRecords(in: state).compactMap { record in
                 record.attempt.map { attemptSnapshot(routeID: record.route.id, attempt: $0) }
             } + (state.unboundAttempt.map {
-                [attemptSnapshot(routeID: unboundRouteID, attempt: $0)]
+                [attemptSnapshot(routeID: nil, attempt: $0)]
             } ?? [])
         )
     }
 
-    private static func attemptSnapshot(routeID: ProcessRouteID, attempt: Attempt) -> AttemptSnapshot {
+    private static func attemptSnapshot(routeID: ProcessRouteID?, attempt: Attempt) -> AttemptSnapshot {
         AttemptSnapshot(
             routeID: routeID,
             attemptID: attempt.id,
@@ -2993,11 +3009,6 @@ final class ProcessControlPlaneAuthority: Sendable {
             delayMilliseconds: delayMilliseconds
         )
     }
-
-    private static let unboundRouteID = ProcessRouteID(
-        processID: pid_t.min,
-        instanceGeneration: 0
-    )
 
     private static func completeUnboundCatalog(
         _ outcome: CatalogOutcome,
@@ -3076,6 +3087,14 @@ enum AttemptResource: Sendable {
 }
 
 enum ProcessToolCatalogCodec {
+    static func merging(preferred: JSONValue, additional: JSONValue?) -> JSONValue {
+        guard let additional, case .object(var result) = preferred else { return preferred }
+        var tools = toolsByName(in: additional)
+        tools.merge(toolsByName(in: preferred)) { _, preferred in preferred }
+        result["tools"] = .array(tools.keys.sorted().compactMap { tools[$0] })
+        return .object(result)
+    }
+
     static func toolsByName(in result: JSONValue?) -> [String: JSONValue] {
         guard let result,
               case .object(let object) = result,

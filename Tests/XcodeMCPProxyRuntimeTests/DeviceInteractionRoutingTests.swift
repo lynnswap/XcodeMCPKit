@@ -162,16 +162,17 @@ struct DeviceInteractionRoutingTests {
         #expect(fixture.manager.deviceInteractionAffinityAuthority.count() == 0)
     }
 
-    @Test func headlessUnboundPoolRoutesToExactCreatingUpstreamAndEvictsOnReplacement() throws {
+    @Test(arguments: [ProxyRuntimeConfiguration.XcodeMode.headless, .automatic])
+    func servicePoolRoutesToExactCreatingUpstreamAndEvictsOnReplacement(mode: ProxyRuntimeConfiguration.XcodeMode) throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { try? group.syncShutdownGracefully() }
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .headless
+        config.xcodeMode = mode
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: group.next(),
             upstreams: [TestUpstreamClient(), TestUpstreamClient()],
-            processRoutingEnabled: false,
+            processRoutingEnabled: mode == .automatic,
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }

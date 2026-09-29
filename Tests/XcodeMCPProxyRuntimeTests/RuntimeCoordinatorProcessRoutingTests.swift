@@ -10,6 +10,82 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorProcessRoutingTests {
+    @Test func automaticGUIReconnectUsesRouteCooldownWhileHeadlessStaysAvailable() async throws {
+        let headless = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 7014, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        config.prewarmToolsList = false
+        let scheduler = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [headless, gui],
+            scheduleRuntimeTimeout: scheduler.scheduler(),
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        for index in 0...1 {
+            manager.markUpstreamInitialized(upstreamIndex: index)
+            seedCoordinatorSuiteInitialize(
+                on: manager, result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+                sourceUpstream: index
+            )
+        }
+        try seedUnboundToolCatalog(on: manager, upstreamIndex: 0, tools: [toolDescriptor(name: "DocumentationSearch")])
+        try seedProcessToolCatalogs(on: manager, entries: [(target, 1, [toolDescriptor(name: "XcodeListWindows")])])
+        manager.handleUpstreamExit(1, upstreamIndex: 1, proof: manager.operationLeaseForTest(upstreamIndex: 1).proof)
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await gui.sentCount() == 0)
+        #expect(manager.unavailableXcodeProcessIDs().contains(target.processID))
+        let docs = manager.immediateToolRoutingDecision(for: toolsCallObject(
+            id: 127, name: "DocumentationSearch", arguments: ["query": "SwiftUI"]
+        ))
+        #expect(docs?.preferredUpstreamIndices == [0])
+    }
+
+    @Test func automaticKeepsHeadlessCatalogWhenGUIProcessStartsAndExits() async throws {
+        let headless = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 7012, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        config.prewarmToolsList = false
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [headless], processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in [gui] }, startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCoordinatorSuiteInitialize(
+            on: manager,
+            result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 0
+        )
+        try seedUnboundToolCatalog(
+            on: manager, upstreamIndex: 0, tools: [toolDescriptor(name: "DocumentationSearch")]
+        )
+        manager.reconcileXcodeProcessTargets([target], reason: "test_gui_launch")
+        let initialize = try await sentValue(from: gui, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: initialize) == "initialize")
+        await gui.yield(.message(try makeInitializeResponse(id: extractUpstreamID(from: initialize))))
+        let list = try await gui.nextSent(matching: { methodName(from: $0) == "tools/list" })
+        await gui.yield(.message(try makeDocumentationToolsListResponse(
+            id: extractUpstreamID(from: list), tools: [toolDescriptor(name: "XcodeListWindows")]
+        )))
+        await manager.drainRuntimeTasksForTesting()
+        #expect(manager.defaultBackendUpstreamIndices == [0])
+        #expect(Set(toolNames(in: try #require(manager.cachedToolsListResult()))) ==
+            Set(["DocumentationSearch", "XcodeListWindows"]))
+        manager.reconcileXcodeProcessTargets([], reason: "test_gui_exit")
+        #expect(try await gui.nextStopCount() == 1)
+        #expect(toolNames(in: try #require(manager.cachedToolsListResult())) == ["DocumentationSearch"])
+        #expect(manager.canonicalHandshakeState.initializeResult() != nil)
+        #expect(await headless.stopCount() == 0)
+    }
+
     @Test func defaultUpstreamsDoNotInjectXcodePIDEnvironment() async throws {
         let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
 

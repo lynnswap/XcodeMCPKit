@@ -191,7 +191,7 @@ enum XcodeConnectionModeResolver {
                         diagnostic: .notice(disabledNotice)
                     )
                 case .enabled:
-                    return Resolution(xcodeMode: .headless, diagnostic: nil)
+                    return Resolution(xcodeMode: .automatic, diagnostic: nil)
                 }
             } catch is CancellationError {
                 throw CancellationError()

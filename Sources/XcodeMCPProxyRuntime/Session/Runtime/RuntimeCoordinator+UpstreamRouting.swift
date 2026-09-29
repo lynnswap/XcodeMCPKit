@@ -1416,7 +1416,7 @@ extension RuntimeCoordinator {
             failInitPending(error: ControlPlane.Error.invalidResponse("upstream stdout protocol violation"))
         }
 
-        if processRoutingEnabled {
+        if processRoutingEnabled && !defaultBackendUpstreamIndices.contains(upstreamIndex) {
             return
         }
         let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex ?? 0

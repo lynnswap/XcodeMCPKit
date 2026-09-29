@@ -1011,6 +1011,43 @@ struct DocumentationProviderTests {
         ])
     }
 
+    @Test func automaticUpstreamPlanKeepsServiceAlongsideGUI() throws {
+        let target = xcodeProcessTarget(processID: 731, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        config.upstreamProcessCount = 2
+        let plan = MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(config), xcodeTargets: [target], processBoundRoutingEnabled: true
+        )
+        #expect(plan.upstreams.count == 4)
+        #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [2, 3])
+        for upstream in plan.upstreams.prefix(2) {
+            #expect(try upstreamEnvironment(from: upstream)["MCP_XCODE_PID"] == nil)
+        }
+        for upstream in plan.upstreams.suffix(2) {
+            #expect(try upstreamEnvironment(from: upstream)["MCP_XCODE_PID"] == "731")
+        }
+    }
+
+    @Test func backendOwnershipSurvivesReplacementAndGUIRetirement() throws {
+        let service = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        let guiID = UpstreamBackend.xcodeProcess(XcodeProcessID(rawValue: 732))
+        let topology = UpstreamTopologyAuthority([service], backend: { _ in .xcodeService })
+        let added = topology.append([gui], backend: guiID)
+        let serviceID = UpstreamSlotID(rawValue: 0)
+        let guiSlotID = try #require(added.addedIDs.first)
+        let proof = try #require(topology.operationLease(for: serviceID)?.proof)
+        let replacement = try #require(topology.replace(proof, with: TestUpstreamClient()))
+        #expect(replacement.snapshot.slotIDs(for: .xcodeService) == [serviceID])
+        #expect(replacement.snapshot.slotIDs(for: guiID) == [guiSlotID])
+        #expect(!topology.validate(proof))
+        let retired = topology.retire([guiSlotID])
+        #expect(retired.snapshot.slotIDs == [serviceID])
+        #expect(retired.snapshot.slotIDs(for: .xcodeService) == [serviceID])
+        #expect(retired.snapshot.slotIDs(for: guiID).isEmpty)
+    }
+
     @Test func defaultUpstreamPlanBindsEachSlotToSingleXcodeProcess() throws {
         let target = xcodeProcessTarget(processID: 710, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)

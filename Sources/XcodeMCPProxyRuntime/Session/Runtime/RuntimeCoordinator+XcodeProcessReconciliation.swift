@@ -149,7 +149,7 @@ extension RuntimeCoordinator {
         }
 
         let transition = commitUpstreamTopologyMutation {
-            upstreamTopology.append(slots)
+            upstreamTopology.append(slots, backend: .xcodeProcess(XcodeProcessID(target)))
         }
         let upstreamIndices = transition.addedIDs.map(\.rawValue)
         for id in transition.addedIDs {

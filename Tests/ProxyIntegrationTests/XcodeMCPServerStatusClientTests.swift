@@ -172,9 +172,9 @@ struct XcodeMCPServerStatusClientTests {
 
 @Suite
 struct XcodeConnectionModeResolverTests {
-    @Test func automaticUsesHeadlessOnlyWhenEnabled() async throws {
+    @Test func automaticCombinesGUIAndHeadlessWhenEnabled() async throws {
         let enabled = try await resolve(mode: .automatic, availability: .enabled)
-        #expect(enabled.xcodeMode == .headless)
+        #expect(enabled.xcodeMode == .automatic)
         #expect(enabled.diagnostic == nil)
 
         let unavailable = try await resolve(mode: .automatic, availability: .unavailable)

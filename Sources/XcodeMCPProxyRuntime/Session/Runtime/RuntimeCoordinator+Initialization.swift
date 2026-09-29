@@ -159,6 +159,11 @@ extension RuntimeCoordinator {
     }
 
     func primaryInitializeUpstreamIndex(excluding excludedUpstreamIndices: Set<Int> = []) -> Int? {
+        if let unbound = defaultBackendUpstreamIndices.sorted().first(where: {
+            !excludedUpstreamIndices.contains($0)
+        }) {
+            return unbound
+        }
         guard processRoutingEnabled else {
             return excludedUpstreamIndices.contains(0) ? nil : 0
         }
@@ -1147,7 +1152,6 @@ extension RuntimeCoordinator {
             )
         }
         debugRecorder.resetUpstream(upstreamIndex)
-        removeXcodeWindowOwners(forUpstreamIndex: upstreamIndex)
     }
 
     func commitSupportEligibilityAfterHealthMutation(
@@ -1291,6 +1295,9 @@ extension RuntimeCoordinator {
     func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) {
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
         if processRoutingEnabled {
+            for upstreamIndex in defaultBackendUpstreamIndices where upstreamIndex != resolvedPrimaryUpstreamIndex {
+                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
+            }
             for route in xcodeProcessRoutes {
                 if processControlPlane.catalog(forProcessID: route.target.processID) == nil {
                     startProcessRouteActivation(for: route)
