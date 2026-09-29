@@ -418,11 +418,18 @@ struct HTTPConcurrencyTests {
             )
             let labels = try await waitForUpstreamRequestCount(upstream, count: 1)
             #expect(labels == ["tools/list"])
+            try await waitWithTimeout("both HTTP requests joined the catalog load", timeout: .seconds(2)) {
+                while server.sessionManager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog != 2 {
+                    await Task.yield()
+                }
+            }
             #expect(await upstream.respondNext(label: "tools/list"))
             let firstResult = try await first
             let secondResult = try await second
             #expect(firstResult.0.statusCode == 200)
             #expect(secondResult.0.statusCode == 200)
+            #expect(firstResult.1["result"] != nil)
+            #expect(secondResult.1["result"] != nil)
             #expect((firstResult.1["id"] as? NSNumber)?.intValue == 100)
             #expect((secondResult.1["id"] as? NSNumber)?.intValue == 101)
             #expect(await upstream.nonInitializeLabels() == ["tools/list"])
@@ -469,11 +476,18 @@ struct HTTPConcurrencyTests {
             )
             let labels = try await waitForUpstreamRequestCount(upstream, count: 1)
             #expect(labels == ["tools/list"])
+            try await waitWithTimeout("both HTTP requests joined the catalog load", timeout: .seconds(2)) {
+                while server.sessionManager.debugSnapshot().controlPlane?.waiterCounts.toolsCatalog != 2 {
+                    await Task.yield()
+                }
+            }
             #expect(await upstream.respondNext(label: "tools/list"))
             let firstResult = try await first
             let secondResult = try await second
             #expect(firstResult.0.statusCode == 200)
             #expect(secondResult.0.statusCode == 200)
+            #expect(firstResult.1["result"] != nil)
+            #expect(secondResult.1["result"] != nil)
             #expect(await upstream.nonInitializeLabels() == ["tools/list"])
             #expect(server.sessionManager.cachedToolsListResult() != nil)
         } catch {
