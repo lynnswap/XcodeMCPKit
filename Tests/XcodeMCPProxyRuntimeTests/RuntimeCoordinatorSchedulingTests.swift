@@ -10,6 +10,95 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorSchedulingTests {
+    @Test func unavailableGenericSelectionIsSharedWithinEachDispatch() {
+        let eventLoop = EmbeddedEventLoop()
+        let topology = UpstreamTopologyAuthority([TestUpstreamClient(), TestUpstreamClient()])
+        let selectionState = NIOLockedValueBox((count: 0, serviceReady: false))
+        let started = NIOLockedValueBox<[Int]>([])
+        let scheduler = UpstreamSlotScheduler(
+            isLeaseLive: { _ in true },
+            canUseUpstream: { index in
+                .init(proof: topology.snapshot().proof(UpstreamSlotID(rawValue: index)), effects: [])
+            },
+            selectUpstream: { occupied in
+                let ready = selectionState.withLockedValue { state in
+                    state.count += 1
+                    return state.serviceReady
+                }
+                let proof = ready && !occupied.contains(0)
+                    ? topology.snapshot().proof(UpstreamSlotID(rawValue: 0)) : nil
+                return .init(proof: proof, effects: [])
+            },
+            operationLease: { topology.operationLease(for: $0) },
+            validateOperationLease: { topology.validate($0) }
+        )
+        defer { scheduler.reset(); eventLoop.run() }
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "selection-backlog", label: "tools/list", expectsResponse: true, isTopLevelClientRequest: false
+        )
+        for _ in 0..<32 {
+            scheduler.enqueueRequest(leaseID: UUID(), descriptor: descriptor, on: eventLoop,
+                starter: { lease in started.withLockedValue { $0.append(lease.upstreamIndex) } },
+                failUnavailable: { Issue.record("Service requests should remain queued") }, failCancelled: {})
+        }
+        #expect(selectionState.withLockedValue { $0.count } == 32)
+        scheduler.enqueueRequest(leaseID: UUID(), descriptor: descriptor, on: eventLoop, preferredUpstreamIndex: 1,
+            starter: { lease in started.withLockedValue { $0.append(lease.upstreamIndex) } },
+            failUnavailable: { Issue.record("GUI request should run") }, failCancelled: {})
+        eventLoop.run()
+        #expect(selectionState.withLockedValue { $0.count } == 33)
+        #expect(started.withLockedValue { $0 } == [1])
+        selectionState.withLockedValue { $0.serviceReady = true }
+        scheduler.wake()
+        eventLoop.run()
+        #expect(started.withLockedValue { $0 } == [1, 0])
+    }
+
+    @Test func unavailableServiceRequestDoesNotBlockReadyGUIRequest() async throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 759, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        let manager = RuntimeCoordinator(
+            config: config, eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "queue-backends", label: "tools/list", expectsResponse: true, isTopLevelClientRequest: false
+        )
+        let serviceLease = manager.createRequestLease(descriptor: descriptor)
+        let serviceStarted = NIOLockedValueBox<Int?>(nil)
+        let serviceFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: serviceLease, descriptor: descriptor, on: eventLoop
+        ) { lease in
+            serviceStarted.withLockedValue { $0 = lease.upstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+        serviceFuture.whenFailure { _ in }
+        let guiLease = manager.createRequestLease(descriptor: descriptor)
+        let guiStarted = NIOLockedValueBox<Int?>(nil)
+        let guiFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: guiLease, descriptor: descriptor, on: eventLoop, preferredUpstreamIndex: 1
+        ) { lease in
+            guiStarted.withLockedValue { $0 = lease.upstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+        guiFuture.whenFailure { _ in }
+        try await eventLoop.submit {}.get()
+        #expect(guiStarted.withLockedValue { $0 } == 1)
+        #expect(serviceStarted.withLockedValue { $0 } == nil)
+        manager.completeRequestLease(guiLease)
+        manager.abandonRequestLease(serviceLease, sessionID: descriptor.sessionID, requestIDKeys: [], operationLease: nil)
+        await #expect(throws: CancellationError.self) { try await serviceFuture.get() }
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
+    }
+
     @Test func sessionManagerQueuedPreferredRequestDoesNotBlockLaterGenericDispatch()
         async throws
     {

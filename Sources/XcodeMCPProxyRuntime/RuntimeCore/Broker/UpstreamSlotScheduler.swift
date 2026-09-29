@@ -342,6 +342,7 @@ final class UpstreamSlotScheduler: Sendable {
             var ready: [(PendingRequest, UpstreamOperationLease)] = []
             var unavailable: [PendingRequest] = []
             var healthEffects: [UpstreamHealthManager.Effect] = []
+            var genericSelectionUnavailable = false
 
             while state.pendingRequests.isEmpty == false {
                 let occupied = Set(state.activeLeaseIDsByUpstream.keys)
@@ -383,11 +384,13 @@ final class UpstreamSlotScheduler: Sendable {
                         }
                     }
 
+                    guard !genericSelectionUnavailable else { continue }
                     let selection = selectUpstream(occupied)
                     healthEffects.append(contentsOf: selection.effects)
                     guard let proof = selection.proof,
                           let selectedLease = operationLease(proof) else {
-                        break
+                        genericSelectionUnavailable = true
+                        continue
                     }
                     let selectedUpstreamIndex = selectedLease.upstreamIndex
                     guard state.activeLeaseIDsByUpstream[selectedUpstreamIndex] == nil else {
