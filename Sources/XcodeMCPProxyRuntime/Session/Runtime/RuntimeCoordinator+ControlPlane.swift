@@ -8,6 +8,21 @@ extension ControlPlane {
     enum Error: Swift.Error, Sendable {
         case invalidResponse(String)
         case upstreamRPC(code: Int, message: String)
+        case proxyFailure(code: Int, message: String)
+
+        init(rpc error: JSONRPC.Wire.ErrorPayload) {
+            if (error.code == -32001 && error.message == "upstream unavailable")
+                || (error.code == -32002 && error.message == "upstream overloaded") {
+                self = .proxyFailure(code: error.code, message: error.message)
+            } else {
+                self = .upstreamRPC(code: error.code, message: error.message)
+            }
+        }
+
+        var isProxyFailure: Bool {
+            if case .proxyFailure = self { return true }
+            return false
+        }
     }
 }
 
@@ -85,7 +100,7 @@ extension ControlPlane {
                 switch error {
                 case .invalidResponse:
                     return (-32603, "invalid upstream response")
-                case .upstreamRPC(let code, let message):
+                case .upstreamRPC(let code, let message), .proxyFailure(let code, let message):
                     return (code, message)
                 }
             }
@@ -1127,6 +1142,7 @@ extension RuntimeCoordinator {
             throw CancellationError()
         }
 
+        let response: ControlPlane.RPCResponse
         do {
             testHooks.controlPlaneRPCWillEnqueue?()
             let future: EventLoopFuture<ControlPlane.RPCResponse> = enqueueOnUpstreamSlot(
@@ -1328,7 +1344,7 @@ extension RuntimeCoordinator {
                     operationLease: nil
                 )
             }
-            let response = try await withTaskCancellationHandler {
+            response = try await withTaskCancellationHandler {
                 try await waitForEventLoopFuture(
                     future,
                     deadlineUptimeNs: requestDeadlineUptimeNs,
@@ -1339,42 +1355,6 @@ extension RuntimeCoordinator {
             } onCancel: {
                 rpcHandle.cancel()
             }
-            let responseObject = try extractJSONRPCResponseObject(from: response.responseData)
-            let isProxyUpstreamFailure = responseIsProxyUpstreamFailure(responseObject)
-            if responseObject["error"] != nil, throwsOnRPCError {
-                failRequestLease(
-                    leaseID,
-                    terminalState: .failed,
-                    reason: .invalidUpstreamResponse
-                )
-                throw ControlPlane.RequestError(
-                    route: route,
-                    operationLease: response.operationLease,
-                    underlying: ControlPlane.Error.upstreamRPC(
-                        code: extractJSONRPCErrorCode(from: responseObject) ?? -32000,
-                        message: extractJSONRPCErrorMessage(from: responseObject)
-                            ?? "upstream error"
-                    )
-                )
-            }
-            let responseData: Data
-            if let responseIDOverride {
-                responseData = try responseDataByReplacingJSONRPCID(
-                    in: responseObject,
-                    with: responseIDOverride
-                )
-            } else {
-                responseData = response.responseData
-            }
-            rpcHandle.markFinished()
-            if !isProxyUpstreamFailure {
-                markRequestSucceeded(response.operationLease)
-            }
-            completeRequestLease(leaseID)
-            return ControlPlane.RPCResponse(
-                responseData: responseData,
-                operationLease: response.operationLease
-            )
         } catch is CancellationError {
             throw CancellationError()
         } catch is TimeoutError {
@@ -1394,6 +1374,34 @@ extension RuntimeCoordinator {
             )
             throw error
         }
+        rpcHandle.markFinished()
+        let decoded: (object: [String: Any], error: JSONRPC.Wire.ErrorPayload?)
+        let responseData: Data
+        do {
+            decoded = try decodeJSONRPCResponse(from: response.responseData)
+            if let responseIDOverride {
+                responseData = try responseDataByReplacingJSONRPCID(in: decoded.object, with: responseIDOverride)
+            } else {
+                responseData = response.responseData
+            }
+        } catch {
+            failRequestLease(leaseID, terminalState: .failed, reason: .invalidUpstreamResponse)
+            throw ControlPlane.RequestError(route: route, operationLease: response.operationLease, underlying: error)
+        }
+        let rpcError = decoded.error.map(ControlPlane.Error.init(rpc:))
+        if rpcError?.isProxyFailure == true {
+            failRequestLease(
+                leaseID, terminalState: .failed,
+                reason: decoded.error?.code == -32002 ? .upstreamOverloaded : .upstreamUnavailable
+            )
+        } else {
+            markRequestSucceeded(response.operationLease)
+            completeRequestLease(leaseID)
+        }
+        if let rpcError, throwsOnRPCError {
+            throw ControlPlane.RequestError(route: route, operationLease: response.operationLease, underlying: rpcError)
+        }
+        return ControlPlane.RPCResponse(responseData: responseData, operationLease: response.operationLease)
     }
 
     func controlPlaneSessionID(
@@ -1411,27 +1419,39 @@ extension RuntimeCoordinator {
     }
 
     func extractJSONRPCResult(from responseData: Data) throws -> JSONValue {
-        let object = try extractJSONRPCResponseObject(from: responseData)
-        if let error = JSONRPC.Wire.errorPayload(inResponseObject: object) {
-            throw ControlPlane.Error.upstreamRPC(
-                code: error.code,
-                message: error.message
-            )
+        let decoded = try decodeJSONRPCResponse(from: responseData)
+        if let error = decoded.error {
+            throw ControlPlane.Error(rpc: error)
         }
-        guard let result = JSONRPC.Wire.resultValue(inResponseObject: object) else {
+        guard let result = JSONRPC.Wire.resultValue(inResponseObject: decoded.object) else {
             throw ControlPlane.Error.invalidResponse("missing result")
         }
         return result
     }
 
-    func extractJSONRPCResponseObject(from responseData: Data) throws -> [String: Any] {
+    private func decodeJSONRPCResponse(from responseData: Data) throws
+        -> (object: [String: Any], error: JSONRPC.Wire.ErrorPayload?)
+    {
+        let object: [String: Any]
         do {
-            return try JSONRPC.Wire.object(fromData: responseData)
-        } catch JSONRPC.Wire.DecodingFailure.messageWasNotObject {
-            throw ControlPlane.Error.invalidResponse("response was not an object")
+            object = try JSONRPC.Wire.object(fromData: responseData)
         } catch {
-            throw ControlPlane.Error.invalidResponse("invalid JSON response")
+            throw ControlPlane.Error.invalidResponse("response is not a JSON object")
         }
+        guard object["jsonrpc"] as? String == JSONRPC.Wire.version,
+              object["method"] == nil else {
+            throw ControlPlane.Error.invalidResponse("invalid JSON-RPC response envelope")
+        }
+        if object["error"] != nil {
+            guard let error = JSONRPC.Wire.errorPayload(inResponseObject: object) else {
+                throw ControlPlane.Error.invalidResponse("invalid JSON-RPC error response")
+            }
+            return (object, error)
+        }
+        guard object["result"] != nil else {
+            throw ControlPlane.Error.invalidResponse("missing result")
+        }
+        return (object, nil)
     }
 
     func responseDataByReplacingJSONRPCID(
@@ -1447,25 +1467,6 @@ extension RuntimeCoordinator {
         }
     }
 
-    func extractJSONRPCErrorMessage(from responseObject: [String: Any]) -> String? {
-        JSONRPC.Wire.errorPayload(inResponseObject: responseObject)?.message
-    }
-
-    func extractJSONRPCErrorCode(from responseObject: [String: Any]) -> Int? {
-        JSONRPC.Wire.errorPayload(inResponseObject: responseObject)?.code
-    }
-
-    func responseIsProxyUpstreamFailure(_ responseObject: [String: Any]) -> Bool {
-        guard
-            let code = extractJSONRPCErrorCode(from: responseObject),
-            let message = extractJSONRPCErrorMessage(from: responseObject)
-        else {
-            return false
-        }
-        return (code == -32001 && message == "upstream unavailable")
-            || (code == -32002 && message == "upstream overloaded")
-    }
-
     func controlPlaneFailureReason(for error: any Error) -> String {
         if error is TimeoutError {
             return "timeout"
@@ -1474,7 +1475,7 @@ extension RuntimeCoordinator {
             switch error {
             case .invalidResponse(let reason):
                 return reason
-            case .upstreamRPC(_, let message):
+            case .upstreamRPC(_, let message), .proxyFailure(_, let message):
                 return message
             }
         }
