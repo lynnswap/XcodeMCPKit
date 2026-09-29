@@ -179,6 +179,13 @@ disabled = ["RunAllTests", "RunSomeTests"]
 - Disabled tools: removed from `tools/list` and rejected on direct `tools/call`.
 - Config changes require restarting `xcode-mcp-proxy-server`.
 
+## Tool Discovery
+
+Each explicit `tools/list` request refreshes upstream catalogs. Concurrent requests
+share an in-flight refresh, so discovery observes additions and removals even when
+Xcode does not send a catalog-change notification. Switching the bridge that serves
+an unchanged catalog does not trigger another catalog-change notification.
+
 ## Migration
 
 ### v0.14.0

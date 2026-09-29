@@ -194,6 +194,26 @@ func toolsCallObject(
     return request
 }
 
+func seedUnboundToolCatalog(
+    on manager: RuntimeCoordinator,
+    upstreamIndex: Int,
+    tools: [[String: Any]]
+) throws {
+    let proof = try #require(manager.upstreamTopology.operationLease(
+        for: UpstreamSlotID(rawValue: upstreamIndex)
+    )?.proof)
+    let (lease, transition) = manager.processControlPlane.beginUnboundCatalogAttempt(
+        preferredUpstreamProof: proof,
+        nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+    )
+    manager.applyProcessControlPlaneTransition(transition)
+    manager.applyCatalogCommit(manager.processControlPlane.completeCatalog(
+        .usable(try jsonValue(["tools": tools]), source: proof),
+        lease: lease,
+        nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
+    ))
+}
+
 func seedProcessToolCatalogs(
     on manager: RuntimeCoordinator,
     entries: [(target: XcodeProcessTarget, upstreamIndex: Int, tools: [[String: Any]])]

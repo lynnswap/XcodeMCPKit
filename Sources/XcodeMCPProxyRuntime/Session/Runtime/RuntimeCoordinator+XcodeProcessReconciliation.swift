@@ -334,7 +334,7 @@ extension RuntimeCoordinator {
             }) else { return }
             applyProcessControlPlaneTransition(transition)
         }
-        refreshMissingProcessToolsCatalogsIfNeeded(
+        refreshProcessToolsCatalogsIfNeeded(
             reason: "pending_process_route_\(reason)",
             processIDs: pendingProcessIDs
         )
@@ -495,7 +495,7 @@ extension RuntimeCoordinator {
         guard shouldRefresh else {
             return
         }
-        refreshMissingProcessToolsCatalogsIfNeeded(
+        refreshProcessToolsCatalogsIfNeeded(
             reason: reason,
             processIDs: [route.target.processID]
         )

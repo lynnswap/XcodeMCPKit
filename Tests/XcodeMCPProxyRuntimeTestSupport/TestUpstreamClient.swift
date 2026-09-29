@@ -1,5 +1,6 @@
 @testable import XcodeMCPCore
 import Foundation
+import Testing
 @testable import XcodeMCPProxyRuntime
 import XcodeMCPProxyTestSupport
 
@@ -21,6 +22,7 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     private var blockedSend: CheckedContinuation<Upstream.SendResult, Never>?
     private var shouldBlockStop = false
     private var blockedStop: CheckedContinuation<Void, Never>?
+    private var toolsListResult: JSONValue?
 
     init() {
         var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
@@ -53,6 +55,16 @@ actor TestUpstreamClient: UpstreamSlotControlling {
     func send(_ data: Data) async -> Upstream.SendResult {
         await sentMessages.append(data)
         let method = methodName(from: data)
+        if method == "tools/list", let toolsListResult {
+            do {
+                let request = try JSONRPC.Wire.object(fromData: data)
+                if let id = JSONRPC.Message.Inspector.requestID(from: request) {
+                    continuation.yield(.message(try JSONRPC.Wire.resultResponseData(id: id, result: toolsListResult)))
+                }
+            } catch {
+                Issue.record(error)
+            }
+        }
         guard shouldBlockNextCancellation,
               method == "notifications/cancelled"
         else {
@@ -74,6 +86,10 @@ actor TestUpstreamClient: UpstreamSlotControlling {
 
     func blockNextCancellation() {
         shouldBlockNextCancellation = true
+    }
+
+    func respondToToolsLists(with result: JSONValue) {
+        toolsListResult = result
     }
 
     func waitForBlockedCancellation() async throws {

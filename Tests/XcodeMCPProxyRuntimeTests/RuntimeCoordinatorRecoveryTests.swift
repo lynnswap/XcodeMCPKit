@@ -1182,12 +1182,13 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["FallbackOnly"])
         manager.markUpstreamInitialized(upstreamIndex: 1)
         #expect(manager.cachedToolsListResult() == nil)
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_owner_catalog_background_refresh",
             processIDs: [ownerTarget.processID]
         )
         let ownerRequest = try await sentValue(from: ownerUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: ownerRequest) == "tools/list")
+        await fallbackUpstream.respondToToolsLists(with: try jsonValue(["tools": [toolDescriptor(name: "FallbackOnly")]]))
         let ownerResult = try await manager.sharedToolsList(
             sessionID: "session-process-catalog-after-owner",
             requestTimeoutOverride: nil
@@ -1212,7 +1213,7 @@ struct RuntimeCoordinatorRecoveryTests {
                     "FallbackOnly",
                     "OwnerOnly",
                 ]))
-        #expect(await fallbackUpstream.sentCount() == 1)
+        #expect(await fallbackUpstream.sentCount() == 2)
         #expect(await ownerUpstream.sentCount() == 1)
     }
 
@@ -1337,6 +1338,7 @@ struct RuntimeCoordinatorRecoveryTests {
             try await windowsTask.value
         }
 
+        await newerUpstream.respondToToolsLists(with: try jsonValue(["tools": [toolDescriptor(name: "NewerRouteOnly"), toolDescriptor(name: "XcodeListWindows")]]))
         let repeatedPartial = try await manager.sharedToolsList(
             sessionID: "session-process-catalog-existing-partial",
             requestTimeoutOverride: nil
@@ -1367,7 +1369,7 @@ struct RuntimeCoordinatorRecoveryTests {
                 )
             )
         )
-        let backgroundCommit = try await nextRecordedValue(catalogCommits, at: 1)
+        let backgroundCommit = try await nextRecordedValue(catalogCommits, at: 2)
         #expect(backgroundCommit.0 == olderTarget.processID)
         #expect(backgroundCommit.1 == 0)
         _ = try await waitWithTimeout("waiting for background catalog completion") {
@@ -1425,7 +1427,7 @@ struct RuntimeCoordinatorRecoveryTests {
             on: manager,
             entries: [(olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")])]
         )
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_cached_fresh_routes_background_refresh",
             processIDs: [middleTarget.processID, latestTarget.processID]
         )
@@ -1434,6 +1436,7 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(methodName(from: middleRequest) == "tools/list")
         let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: latestRequest) == "tools/list")
+        await olderUpstream.respondToToolsLists(with: try jsonValue(["tools": [toolDescriptor(name: "OlderRouteOnly")]]))
         let partial = try await manager.sharedToolsList(
             sessionID: "session-process-catalog-cached-union",
             requestTimeoutOverride: nil
@@ -1463,7 +1466,7 @@ struct RuntimeCoordinatorRecoveryTests {
             await manager.drainRuntimeTasksForTesting()
         }
         #expect(manager.cachedToolsListResult() != nil)
-        #expect(await olderUpstream.sentCount() == 0)
+        #expect(await olderUpstream.sentCount() == 1)
         #expect(await middleUpstream.sentCount() == 1)
         #expect(await latestUpstream.sentCount() == 1)
         #expect(
@@ -1519,13 +1522,14 @@ struct RuntimeCoordinatorRecoveryTests {
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")])
             ]
         )
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_cached_fresh_failure_background_refresh",
             processIDs: [latestTarget.processID]
         )
 
         let latestRequest = try await sentValue(from: latestUpstream, at: 0, timeout: .seconds(2))
         #expect(methodName(from: latestRequest) == "tools/list")
+        await olderUpstream.respondToToolsLists(with: try jsonValue(["tools": [toolDescriptor(name: "OlderRouteOnly")]]))
         let result = try await manager.sharedToolsList(
             sessionID: "session-process-catalog-cached-fresh-fails",
             requestTimeoutOverride: nil
@@ -1550,7 +1554,7 @@ struct RuntimeCoordinatorRecoveryTests {
         }
         #expect(manager.cachedToolsListResult() == nil)
         #expect(toolNames(in: manager.cachedToolsListResult(forUpstreamIndex: 0) ?? .null) == ["OlderRouteOnly"])
-        #expect(await olderUpstream.sentCount() == 0)
+        #expect(await olderUpstream.sentCount() == 1)
         #expect(await latestUpstream.sentCount() == 1)
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == nil)
         #expect(
@@ -1967,7 +1971,7 @@ struct RuntimeCoordinatorRecoveryTests {
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")])
             ]
         )
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_cached_partial_background_refresh",
             processIDs: [latestTarget.processID]
         )
@@ -1981,6 +1985,7 @@ struct RuntimeCoordinatorRecoveryTests {
             manager.debugSnapshot().processToolCatalogs.map(\.processID) == [
                 olderTarget.processID
             ])
+        await olderUpstream.respondToToolsLists(with: try jsonValue(["tools": [toolDescriptor(name: "OlderRouteOnly")]]))
         let partial = try await manager.sharedToolsList(
             sessionID: "session-process-catalog-cached-partial",
             requestTimeoutOverride: nil
@@ -2010,7 +2015,7 @@ struct RuntimeCoordinatorRecoveryTests {
             Set(toolNames(in: manager.cachedToolsListResult() ?? .null))
                 == Set(["LatestRouteOnly", "OlderRouteOnly"])
         )
-        #expect(toolsListRefreshes.withLockedValue { $0 } == ["1:true"])
+        #expect(toolsListRefreshes.withLockedValue { $0 } == ["0:true", "0:true", "1:true"])
     }
 
     @Test func sessionManagerEmptyProcessCatalogPreservesExistingCatalogButInvalidatesIncompleteSurface()
@@ -2060,7 +2065,7 @@ struct RuntimeCoordinatorRecoveryTests {
             ]
         )
 
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_empty_process_catalog",
             processIDs: [emptyTarget.processID]
         )
@@ -2196,7 +2201,7 @@ struct RuntimeCoordinatorRecoveryTests {
             sourceUpstream: 0
         )
 
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_single_empty_process_catalog",
             processIDs: [target.processID]
         )
@@ -2264,7 +2269,7 @@ struct RuntimeCoordinatorRecoveryTests {
             sourceUpstream: 0
         )
 
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_empty_process_catalog_reset",
             processIDs: [target.processID]
         )
@@ -3122,12 +3127,13 @@ struct RuntimeCoordinatorRecoveryTests {
                 == [remainingTarget.processID]
         )
         #expect(manager.processControlPlane.canonicalSourceUpstream() == 1)
+        await remainingUpstream.respondToToolsLists(with: try jsonValue(["tools": [toolDescriptor(name: "RemainingOnlyTool")]]))
         let result = try await manager.sharedToolsList(
             sessionID: "session-process-catalog-after-retire",
             requestTimeoutOverride: .seconds(5)
         )
         #expect(toolNames(in: result) == ["RemainingOnlyTool"])
-        #expect(await remainingUpstream.sentCount() == 0)
+        #expect(await remainingUpstream.sentCount() == 1)
     }
 
     @Test func sessionManagerRetiringCatalogedProcessRoutePublishesToolsListChangedOnce()

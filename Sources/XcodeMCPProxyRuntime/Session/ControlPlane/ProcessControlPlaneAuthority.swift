@@ -2909,7 +2909,6 @@ final class ProcessControlPlaneAuthority: Sendable {
             resetToolsUnavailableWarningIncident(in: &state)
         }
         let previousRaw = state.canonicalToolsCatalogRaw
-        let previousSource = state.canonicalSourceProof
         let activeRoutes = activeRoutes(in: state)
         let requiredProcessIDs = catalogRequiredProcessIDs(in: state)
         if activeRoutes.isEmpty,
@@ -2930,8 +2929,8 @@ final class ProcessControlPlaneAuthority: Sendable {
             state.canonicalToolsCatalogRaw = nil
             state.canonicalSourceProof = nil
         }
+        // Bridge rotation must not create a tools/list -> list_changed reload loop.
         return previousRaw != state.canonicalToolsCatalogRaw
-            || previousSource != state.canonicalSourceProof
     }
 
     private static func invalidateAttempts(in state: inout State) -> [ProcessControlPlaneEffect] {
