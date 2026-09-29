@@ -2003,6 +2003,8 @@ actor DocumentationProviderManager: DocumentationProviderManaging {
                 return .provider
             case .upstreamRPC:
                 return .request
+            case .proxyFailure:
+                return .provider
             }
         }
         let nsError = error as NSError
