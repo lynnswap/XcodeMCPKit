@@ -1587,13 +1587,15 @@ final class ProcessControlPlaneAuthority: Sendable {
 
     func beginUnboundCatalogAttempt(
         preferredUpstreamProof: UpstreamTopologyProof,
-        nowUptimeNanoseconds: UInt64
-    ) -> (CatalogLease, ProcessControlPlaneTransition) {
+        nowUptimeNanoseconds: UInt64,
+        allowsConcurrentLoad: Bool = true
+    ) -> (CatalogLease, ProcessControlPlaneTransition)? {
         state.withLockedValue { state in
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNanoseconds)
             if var attempt = state.unboundAttempt,
                attempt.phase == .loadingCatalog,
                attempt.upstreamProof == preferredUpstreamProof {
+                guard allowsConcurrentLoad || attempt.loads.isEmpty else { return nil }
                 let loadID = attempt.beginLoad()
                 state.unboundAttempt = attempt
                 return (

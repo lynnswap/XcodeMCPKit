@@ -250,12 +250,11 @@ extension RuntimeCoordinator {
                 lease = started.0
                 applyProcessControlPlaneTransition(started.1)
             } else {
-                let started = processControlPlane.beginUnboundCatalogAttempt(
-                    preferredUpstreamProof: try #require(
-                        upstreamTopology.operationLease(for: source)?.proof
-                    ),
+                let preferredProof = try #require(upstreamTopology.operationLease(for: source)?.proof)
+                let started = try #require(processControlPlane.beginUnboundCatalogAttempt(
+                    preferredUpstreamProof: preferredProof,
                     nowUptimeNanoseconds: nowUptimeNanoseconds()
-                )
+                ))
                 lease = started.0
                 applyProcessControlPlaneTransition(started.1)
             }

@@ -108,31 +108,65 @@ extension RuntimeCoordinator {
         case stale
     }
 
+    private enum CatalogBackendGroup: Hashable, Sendable {
+        case gui
+        case service
+    }
+
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlane.RPCHandle
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let startedAt = nowUptimeNanoseconds()
-        let effectiveRequestTimeout =
-            requestTimeout
-            ?? MCP.MethodDispatcher.timeoutForControlPlane(
-                defaultSeconds: config.requestTimeout
-            )
-        let requestDeadlineUptimeNs = deadlineUptimeNanoseconds(for: effectiveRequestTimeout)
+        let timeout = requestTimeout ?? MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
+        let deadline = deadlineUptimeNanoseconds(for: timeout)
         if processRoutingEnabled && defaultBackendUpstreamIndices.isEmpty {
             return try await loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
-                requestTimeout: effectiveRequestTimeout,
-                deadlineUptimeNs: requestDeadlineUptimeNs,
-                startedAt: startedAt
+                requestTimeout: timeout, deadlineUptimeNs: deadline, startedAt: startedAt
             )
         }
-        let result = try await loadUnboundToolsCatalog(
-            requestTimeout: effectiveRequestTimeout,
-            rpcHandle: rpcHandle,
-            startedAt: startedAt
-        )
-        if processRoutingEnabled {
+        guard processRoutingEnabled, !xcodeProcessRoutes.isEmpty else {
+            return try await loadUnboundToolsCatalog(requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
+        }
+
+        var pending: Set<CatalogBackendGroup> = [.gui, .service]
+        let result = try await withThrowingTaskGroup(
+            of: (CatalogBackendGroup, Result<CanonicalToolsCatalogLoadResult, any Error>).self
+        ) { group in
+            group.addTask {
+                do {
+                    return (.service, .success(try await self.loadUnboundToolsCatalog(
+                        requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt
+                    )))
+                } catch { return (.service, .failure(error)) }
+            }
+            group.addTask {
+                do {
+                    return (.gui, .success(try await self.loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
+                        requestTimeout: timeout, deadlineUptimeNs: deadline, startedAt: startedAt
+                    )))
+                } catch { return (.gui, .failure(error)) }
+            }
+            var lastError: any Error = UpstreamSlotScheduler.AcquisitionError.unavailable
+            while let (backend, outcome) = try await group.next() {
+                pending.remove(backend)
+                switch outcome {
+                case .success(let result):
+                    group.cancelAll()
+                    return result
+                case .failure(let error):
+                    lastError = error
+                }
+            }
+            throw lastError
+        }
+        try Task.checkCancellation()
+        // Continue incomplete refreshes under the runtime's lifetime after foreground cancellation drains.
+        if pending.contains(.gui) {
             refreshProcessToolsCatalogsIfNeeded(reason: "client_tools_list", refreshCached: true)
+        }
+        if pending.contains(.service) {
+            refreshDefaultBackendToolsCatalogIfNeeded()
         }
         return CanonicalToolsCatalogLoadResult(
             rawResult: processControlPlane.canonicalToolsCatalogRaw() ?? result.rawResult,
@@ -141,24 +175,58 @@ extension RuntimeCoordinator {
         )
     }
 
+    private func beginDefaultBackendCatalogLoad(allowsConcurrentLoad: Bool) -> CatalogLease? {
+        guard let upstreamID = defaultBackendUpstreamIndices.sorted().first.map(UpstreamSlotID.init(rawValue:)),
+              let proof = upstreamTopology.operationLease(for: upstreamID)?.proof else { return nil }
+        var attempt: (CatalogLease, ProcessControlPlaneTransition)?
+        guard initializeManager.performIfRunning({
+            attempt = processControlPlane.beginUnboundCatalogAttempt(
+                preferredUpstreamProof: proof,
+                nowUptimeNanoseconds: nowUptimeNanoseconds(),
+                allowsConcurrentLoad: allowsConcurrentLoad
+            )
+        }), let (lease, transition) = attempt else { return nil }
+        applyProcessControlPlaneTransition(transition)
+        return lease
+    }
+
+    private func refreshDefaultBackendToolsCatalogIfNeeded() {
+        guard let lease = beginDefaultBackendCatalogLoad(allowsConcurrentLoad: false) else { return }
+        let accepted = addRuntimeTask { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.loadUnboundToolsCatalog(
+                    lease: lease,
+                    requestTimeout: self.processRouteToolsCatalogRequestTimeoutAmount(),
+                    rpcHandle: .init(), startedAt: self.nowUptimeNanoseconds()
+                )
+            } catch is CancellationError {
+            } catch {
+                self.logger.debug("Service catalog refresh failed", metadata: ["error": .string(String(describing: error))])
+            }
+        }
+        if !accepted {
+            applyCatalogCommit(commitProcessCatalog(.failed, lease: lease, nowUptimeNanoseconds: nowUptimeNanoseconds()))
+        }
+    }
+
     private func loadUnboundToolsCatalog(
+        requestTimeout: TimeAmount?, rpcHandle: ControlPlane.RPCHandle, startedAt: UInt64
+    ) async throws -> CanonicalToolsCatalogLoadResult {
+        guard let lease = beginDefaultBackendCatalogLoad(allowsConcurrentLoad: true) else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        return try await loadUnboundToolsCatalog(
+            lease: lease, requestTimeout: requestTimeout, rpcHandle: rpcHandle, startedAt: startedAt
+        )
+    }
+
+    private func loadUnboundToolsCatalog(
+        lease: CatalogLease,
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlane.RPCHandle,
         startedAt: UInt64
     ) async throws -> CanonicalToolsCatalogLoadResult {
-        guard let preferredUpstream = defaultBackendUpstreamIndices.sorted().first.map(UpstreamSlotID.init(rawValue:)) else {
-            throw UpstreamSlotScheduler.AcquisitionError.unavailable
-        }
-        guard let preferredProof = upstreamTopology.operationLease(
-            for: preferredUpstream
-        )?.proof else {
-            throw UpstreamSlotScheduler.AcquisitionError.unavailable
-        }
-        let (lease, transition) = processControlPlane.beginUnboundCatalogAttempt(
-            preferredUpstreamProof: preferredProof,
-            nowUptimeNanoseconds: startedAt
-        )
-        applyProcessControlPlaneTransition(transition)
         applyProcessControlPlaneTransition(
             processControlPlane.attach(.rpc(rpcHandle), to: lease)
         )

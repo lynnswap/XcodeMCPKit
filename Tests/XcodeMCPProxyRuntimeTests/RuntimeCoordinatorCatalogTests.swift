@@ -38,16 +38,16 @@ struct RuntimeCoordinatorCatalogTests {
         #expect(alternatives.allSatisfy { $0["additionalProperties"] as? Bool == false })
     }
 
-    @Test(arguments: [false, true])
-    func automaticCatalogDoesNotWaitForGUICatalogRefresh(cachedGUI: Bool) async throws {
-        let headless = TestUpstreamClient()
+    @Test(arguments: [false, true], [false, true])
+    func automaticCatalogRemainsAvailableWhenOneBackendStalls(cachedGUI: Bool, serviceStalls: Bool) async throws {
+        let service = TestUpstreamClient()
         let gui = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
         config.xcodeMode = .automatic
         config.prewarmToolsList = false
         let target = xcodeProcessTarget(processID: 7017, xcodeVersion: "27.0")
         let fixture = RuntimeCoordinatorFixture(
-            config: config, upstreams: [headless, gui],
+            config: config, upstreams: [service, gui],
             xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])],
             startImmediately: false
         )
@@ -61,17 +61,26 @@ struct RuntimeCoordinatorCatalogTests {
         if cachedGUI {
             try seedProcessToolCatalogs(on: manager, entries: [(target, 1, [toolDescriptor(name: "KnownGUI")])])
         }
-        await headless.respondToToolsLists(with: try jsonValue(["tools": [toolDescriptor(name: "DocumentationSearch")]]))
-        for _ in 0..<2 {
-            let result = try await waitWithTimeout("headless catalog must not wait for GUI", timeout: .seconds(1)) {
-                try await manager.sharedToolsList(sessionID: "mixed-catalog", requestTimeoutOverride: .seconds(5))
-            }
-            #expect(toolNames(in: result).contains("DocumentationSearch"))
+        let refresh = Task {
+            try await manager.sharedToolsList(sessionID: "mixed-catalog", requestTimeoutOverride: .seconds(5))
         }
-        let query = try await sentValue(from: gui, at: 0, timeout: .seconds(2))
-        #expect(await gui.sentCount() == 1)
-        await gui.yield(.message(try makeDocumentationToolsListResponse(
-            id: extractUpstreamID(from: query), tools: [toolDescriptor(name: "UpdatedGUI")]
+        let serviceRequest = try await sentValue(from: service, at: 0, timeout: .seconds(2))
+        let guiRequest = try await sentValue(from: gui, at: 0, timeout: .seconds(2))
+        let fast = serviceStalls ? gui : service
+        let slow = serviceStalls ? service : gui
+        let fastRequest = serviceStalls ? guiRequest : serviceRequest
+        let fastName = serviceStalls ? "UpdatedGUI" : "DocumentationSearch"
+        await fast.yield(.message(try makeDocumentationToolsListResponse(
+            id: extractUpstreamID(from: fastRequest), tools: [toolDescriptor(name: fastName)]
+        )))
+        let result = try await waitWithTimeout("catalog must not wait for stalled backend", timeout: .seconds(1)) {
+            try await refresh.value
+        }
+        #expect(toolNames(in: result).contains(fastName))
+        let backgroundRequest = try await slow.nextSent(startingAt: 1, matching: { methodName(from: $0) == "tools/list" })
+        await slow.yield(.message(try makeDocumentationToolsListResponse(
+            id: extractUpstreamID(from: backgroundRequest),
+            tools: [toolDescriptor(name: serviceStalls ? "DocumentationSearch" : "UpdatedGUI")]
         )))
         await manager.drainRuntimeTasksForTesting()
         #expect(Set(toolNames(in: try #require(manager.cachedToolsListResult()))) ==
