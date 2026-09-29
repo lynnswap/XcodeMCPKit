@@ -111,12 +111,14 @@ struct HTTPConcurrencyTests {
             xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [guiOnly ? 0 : 1])]
                 + (hasSecondGUI ? [XcodeProcessRoute(target: otherTarget, upstreamIndices: [2])] : [])
         )
+        var stage = "initialize"
         do {
             let (initialized, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
             let sessionID = try #require(initialized.value(forHTTPHeaderField: "Mcp-Session-Id"))
             await server.sessionManager.drainRuntimeTasksForTesting()
+            stage = "tools/list"
             let (_, catalog) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 2))
-            let catalogResult = try #require(catalog["result"] as? [String: Any])
+            let catalogResult = try #require(catalog["result"] as? [String: Any], "catalog response: \(catalog)")
             let tools = try #require(catalogResult["tools"] as? [[String: Any]])
             let build = try #require(tools.first { $0["name"] as? String == "BuildProject" })
             let schema = try #require(build["inputSchema"] as? [String: Any])
@@ -145,6 +147,7 @@ struct HTTPConcurrencyTests {
             case "service-path", "lookup-error", "partial-inventory": arguments = ["workspaceIdentifier": "/Work/Service.xcodeproj"]
             default: arguments = ["workspaceIdentifier": "/Work/App.xcodeproj"]
             }
+            stage = "tools/call"
             let (_, reply) = try await postJSON(
                 url: server.url, sessionID: sessionID,
                 payload: toolCallPayload(id: 41, name: "BuildProject", arguments: arguments)
@@ -175,6 +178,12 @@ struct HTTPConcurrencyTests {
             #expect(!(serviceCalls + guiCalls).contains("XcodeOpenWorkspace"))
             #expect(!(serviceCalls + guiCalls).contains("XcodeCloseWorkspace"))
         } catch {
+            print("ROUTING DIAGNOSTIC", scenario, stage, error)
+            print("SERVICE TRAFFIC", await service.diagnosticTraffic())
+            print("GUI TRAFFIC", await gui.diagnosticTraffic())
+            print("SECOND GUI TRAFFIC", await secondGUI.diagnosticTraffic())
+            print("RUNTIME", server.sessionManager.debugSnapshot())
+            print("CONTROL PLANE", String(describing: server.sessionManager.controlPlaneDebugMirror.snapshot()))
             try? await server.shutdown()
             throw error
         }
@@ -1370,6 +1379,8 @@ private actor BackendCatalogUpstream: UpstreamSlotControlling {
     private let workspacePath: String
     private var inventoryFails = false
     private var calls: [String] = []
+    private var traffic: [String] = []
+    func diagnosticTraffic() -> [String] { traffic }
 
     func failInventory() { inventoryFails = true }
     func recordedCalls() -> [String] { calls }
@@ -1388,6 +1399,7 @@ private actor BackendCatalogUpstream: UpstreamSlotControlling {
         do {
             let object = try JSONRPC.Wire.object(fromData: data)
             guard let id = JSONRPC.Message.Inspector.requestID(from: object) else { return .accepted }
+            traffic.append(String(describing: object))
             let result: [String: Any]
             switch object["method"] as? String {
             case "initialize":
