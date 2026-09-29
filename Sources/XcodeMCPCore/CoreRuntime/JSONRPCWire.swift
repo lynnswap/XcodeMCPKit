@@ -243,18 +243,12 @@ extension JSONRPC {
         }
 
         package static func errorPayload(inResponseObject object: [String: Any]) -> ErrorPayload? {
-            guard let errorObject = object["error"] as? [String: Any] else {
-                return nil
-            }
-            let code: Int
-            if let number = errorObject["code"] as? NSNumber {
-                code = number.intValue
-            } else if let int = errorObject["code"] as? Int {
-                code = int
-            } else {
-                code = -32000
-            }
-            let message = errorObject["message"] as? String ?? "upstream error"
+            guard object["result"] == nil,
+                  let errorObject = object["error"] as? [String: Any],
+                  let number = errorObject["code"] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  let code = Int(number.stringValue) ?? Int(exactly: number.doubleValue),
+                  let message = errorObject["message"] as? String else { return nil }
             let data = errorObject["data"].flatMap(JSONValue.init(any:))
             return ErrorPayload(code: code, message: message, data: data)
         }

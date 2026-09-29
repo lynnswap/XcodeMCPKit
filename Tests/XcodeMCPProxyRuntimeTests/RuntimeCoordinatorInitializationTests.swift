@@ -712,7 +712,7 @@ struct RuntimeCoordinatorInitializationTests {
         _ = try await responseFuture.get()
     }
 
-    @Test func sessionManagerCompletesMalformedMappedUpstreamResponseWithError()
+    @Test func sessionManagerFailsMalformedMappedUpstreamResponse()
         async throws
     {
         let upstream = TestUpstreamClient()
@@ -745,11 +745,9 @@ struct RuntimeCoordinatorInitializationTests {
             upstreamIndex: 0
         )
 
-        let response = try decodeJSON(from: try await responseFuture.get())
-        #expect((response["id"] as? NSNumber)?.intValue == 42)
-        let error = try #require(response["error"] as? [String: Any])
-        #expect((error["code"] as? NSNumber)?.intValue == -32000)
-        #expect(error["message"] as? String == "invalid upstream response")
+        await #expect(throws: ControlPlane.Error.self) {
+            _ = try await responseFuture.get()
+        }
     }
 
     @Test func sessionManagerPreservesServerRequestRouteUntilForwardingSendAccepted()

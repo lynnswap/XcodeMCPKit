@@ -747,7 +747,8 @@ struct RuntimeCoordinatorRecoveryTests {
         }
     }
 
-    @Test func malformedCatalogReturnsProtocolErrorWithoutWaitingForTimeout() async throws {
+    @Test(arguments: ["catalog", "missing-payload", "invalid-method"])
+    func malformedReplyReturnsProtocolErrorWithoutWaitingForTimeout(kind: String) async throws {
         let config = makeConfig(requestTimeout: 30)
         let upstream = TestUpstreamClient()
         let fixture = RuntimeCoordinatorFixture(config: config, upstreams: [upstream])
@@ -762,19 +763,31 @@ struct RuntimeCoordinatorRecoveryTests {
         )
         let sentCount = await upstream.sentCount()
         let operation = try executor.handle(
-            bodyData: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: 81, method: "tools/list")),
+            bodyData: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
+                id: 81, method: kind == "catalog" ? "tools/list" : "tools/call",
+                params: kind == "catalog" ? nil : .object(["name": .string("Echo"), "arguments": .object([:])])
+            )),
             headerSessionID: sessionID, headerSessionExists: true,
             prefersEventStream: false, eventLoop: fixture.eventLoop
         )
         let request = try await sentValue(from: upstream, at: sentCount, timeout: .seconds(2))
         let requestID = try #require(JSONRPC.ID(any: extractUpstreamID(from: request)))
-        await upstream.yield(.message(try JSONRPC.Wire.resultResponseData(
-            id: requestID, result: .object(["tools": .string("private malformed catalog")])
-        )))
+        var reply: [String: Any] = ["jsonrpc": "2.0", "id": requestID.value.foundationObject]
+        switch kind {
+        case "catalog": reply["result"] = ["tools": "private malformed catalog"]
+        case "invalid-method": reply["method"] = 1
+        default: break
+        }
+        await upstream.yield(.message(try JSONRPC.Wire.data(from: reply)))
         let resolution = try await waitWithTimeout("malformed catalog should fail immediately", timeout: .seconds(2)) {
             try await operation.future.get()
         }
-        guard case .responseData(let data, _, _) = resolution else {
+        let data: Data
+        switch resolution {
+        case .responseData(let responseData, _, _): data = responseData
+        case .mcpError(let id, let code, let message, _, _):
+            data = try JSONRPC.Wire.errorResponseData(id: id, code: code, message: message)
+        default:
             Issue.record("expected JSON-RPC response")
             return
         }

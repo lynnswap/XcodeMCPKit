@@ -238,8 +238,7 @@ final class RuntimeDocumentationProviderTransport: DocumentationProviderRouting 
         guard let error = JSONRPC.Wire.errorPayload(fromResponseData: data) else {
             return false
         }
-        return (error.code == -32001 && error.message == "upstream unavailable")
-            || (error.code == -32002 && error.message == "upstream overloaded")
+        return ControlPlane.Error(rpc: error).isProxyFailure
     }
 }
 

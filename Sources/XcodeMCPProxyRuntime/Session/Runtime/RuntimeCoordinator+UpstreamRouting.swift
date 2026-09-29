@@ -158,24 +158,17 @@ extension RuntimeCoordinator {
         else {
             return .handled
         }
+        if case .malformed = JSONRPC.Message.Inspector.kind(of: object) {
+            sessionRegistry.contextIfPresent(id: sessionID)?.router.failPending(
+                idKey: originalID.key,
+                error: ControlPlane.Error.invalidResponse("invalid upstream response")
+            )
+            return .handled
+        }
         return .routed(
             sessionID: sessionID,
-            object: clientResponseObject(from: object, originalID: originalID)
+            object: JSONRPC.Wire.objectByReplacingID(in: object, with: originalID)
         )
-    }
-
-    private func clientResponseObject(
-        from object: [String: Any],
-        originalID: JSONRPC.ID
-    ) -> [String: Any] {
-        if case .malformed = JSONRPC.Message.Inspector.kind(of: object) {
-            return JSONRPC.Wire.errorResponseObject(
-                id: originalID,
-                code: -32000,
-                message: "invalid upstream response"
-            )
-        }
-        return JSONRPC.Wire.objectByReplacingID(in: object, with: originalID)
     }
 
     private func deliverClientResponseObject(

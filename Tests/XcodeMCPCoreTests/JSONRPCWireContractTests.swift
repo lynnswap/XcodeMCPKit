@@ -4,6 +4,26 @@ import XcodeMCPCore
 
 @Suite
 struct JSONRPCWireContractTests {
+    @Test func errorPayloadRejectsMalformedResponses() throws {
+        for raw in [
+            #"{"error":"garbage"}"#,
+            #"{"error":{"message":"missing code"}}"#,
+            #"{"error":{"code":-32000}}"#,
+            #"{"error":{"code":true,"message":"boolean"}}"#,
+            #"{"error":{"code":1.5,"message":"fraction"}}"#,
+            #"{"error":{"code":18446744073709551615,"message":"overflow"}}"#,
+            #"{"error":{"code":-32000,"message":1}}"#,
+            #"{"result":{},"error":{"code":-32000,"message":"both"}}"#
+        ] {
+            let object = try JSONRPC.Wire.object(fromData: Data(raw.utf8))
+            #expect(JSONRPC.Wire.errorPayload(inResponseObject: object) == nil)
+        }
+        for code in [Int.min, -32603, Int.max] {
+            let object = JSONRPC.Wire.errorResponseObject(id: nil, code: code, message: "valid")
+            #expect(JSONRPC.Wire.errorPayload(inResponseObject: object)?.code == code)
+        }
+    }
+
     @Test func requestAndResponseBuildersRemainStable() throws {
         let requestData = try JSONRPC.Wire.data(
             from: JSONRPC.Wire.requestObject(
