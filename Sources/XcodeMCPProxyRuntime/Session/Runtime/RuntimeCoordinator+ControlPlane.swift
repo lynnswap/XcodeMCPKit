@@ -353,12 +353,27 @@ extension RuntimeCoordinator {
                         )
                         throw TimeoutError()
                     } catch {
+                        let retriesActivation: Bool
+                        if case ControlPlane.Error.upstreamRPC = ControlPlane.ErrorMapper.underlyingError(error),
+                           let claim = self.upstreamHealthManager.currentCatalogActivationClaim(
+                               upstreamIndex: route.lease.upstreamIndex
+                           ), claim.topologyProof == route.lease.topologyProof {
+                            retriesActivation = true
+                        } else {
+                            retriesActivation = false
+                        }
                         let commit = self.commitProcessCatalog(
-                            .failed,
+                            retriesActivation ? .unusable : .failed,
                             lease: route.lease,
                             nowUptimeNanoseconds: self.nowUptimeNanoseconds()
                         )
-                        self.applyCatalogCommit(commit)
+                        let deliveries = self.applyCatalogCommit(commit)
+                        if retriesActivation {
+                            self.scheduleMissingProcessToolsCatalogRetry(
+                                processID: route.target.processID, lease: route.lease,
+                                after: deliveries, reason: "activation_catalog_rpc_error"
+                            )
+                        }
                         if let surface = self.processControlPlane.availableToolCatalogSurface(
                             processIDs: exposedProcessIDs
                         ), let surfaceSourceProof = surface.sourceProof {

@@ -10,6 +10,46 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorProcessRoutingTests {
+    @Test func processActivationRetriesCatalogRPCErrorWithoutRestartingConnection() async throws {
+        let existing = TestUpstreamClient()
+        let added = TestUpstreamClient()
+        let existingTarget = xcodeProcessTarget(processID: 791, xcodeVersion: "27.0")
+        let addedTarget = xcodeProcessTarget(processID: 792, xcodeVersion: "27.0")
+        let scheduler = RecordingRuntimeTimeoutScheduler()
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [existing], scheduleRuntimeTimeout: scheduler.scheduler(),
+            xcodeProcessRoutes: [XcodeProcessRoute(target: existingTarget, upstreamIndices: [0])],
+            processRoutingEnabled: true, dynamicUpstreamFactory: { _ in [added] }, startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        let initialized = fixture.registerInitialize(requestID: 1)
+        let initialRequest = try await existing.nextSent(at: 0)
+        await existing.yield(.message(try makeInitializeResponse(id: extractUpstreamID(from: initialRequest))))
+        _ = try await initialized.get()
+        try seedProcessToolCatalogs(on: manager, entries: [(existingTarget, 0, [toolDescriptor(name: "ExistingTool")])])
+        manager.reconcileXcodeProcessTargets([existingTarget, addedTarget], reason: "new_process")
+        let initialize = try await added.nextSent(matching: { methodName(from: $0) == "initialize" })
+        await added.yield(.message(try makeInitializeResponse(id: extractUpstreamID(from: initialize))))
+        let catalog = try await added.nextSent(matching: { methodName(from: $0) == "tools/list" })
+        let retryIndex = scheduler.scheduledEventCount()
+        let sentOffset = await added.sentCount()
+        await added.yield(.message(try JSONRPC.Wire.errorResponseData(
+            id: JSONRPC.ID(any: extractUpstreamID(from: catalog)), code: -32603, message: "catalog is warming"
+        )))
+        let retryTimer = try await scheduler.nextScheduled(at: retryIndex)
+        #expect(scheduler.fire(at: retryTimer))
+        let retry = try await sentValue(from: added, at: sentOffset, timeout: .seconds(2))
+        #expect(methodName(from: retry) == "tools/list")
+        await added.yield(.message(try makeDocumentationToolsListResponse(
+            id: extractUpstreamID(from: retry), tools: [toolDescriptor(name: "AddedTool")]
+        )))
+        await manager.drainRuntimeTasksForTesting()
+        #expect(manager.processControlPlane.catalog(forProcessID: addedTarget.processID)?.toolsByName["AddedTool"] != nil)
+        #expect(manager.upstreamHealthManager.currentCatalogActivationClaim(upstreamIndex: 1) == nil)
+        #expect(manager.isInitialized())
+    }
+
     @Test func defaultUpstreamsDoNotInjectXcodePIDEnvironment() async throws {
         let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
 
