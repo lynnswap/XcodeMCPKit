@@ -739,6 +739,10 @@ private struct VerificationState {
     }
 
     func executionDecision(for toolName: String) throws -> ToolExecutionDecision {
+        if workspaceSurface == .gui,
+           ["XcodeListWorkspaces", "DeviceInteractionStartWorkspaceSession"].contains(toolName) {
+            return .skip("tool requires an approved Service workspace")
+        }
         if workspaceSurface == .service,
            ["XcodeListWindows", "XcodeGetCurrentFile", "XcodeListNavigatorIssues"].contains(toolName) {
             return .skip("tool requires GUI window, editor, or navigator state")

@@ -18,7 +18,7 @@ struct ProxyToolVerifierTests {
                     "* tabIdentifier: second-tab, workspacePath: \(path)",
                 ].joined(separator: "\n"))])
             case "XcodeListWorkspaces":
-                return result(["message": ""])
+                return MCPToolResult(content: [], structuredContent: ["message": "Call XcodeOpenWorkspace for approval"], isError: true)
             case "XcodeListSchemes", "XcodeGetCurrentFile", "XcodeListNavigatorIssues":
                 #expect(call.arguments["tabIdentifier"] == "first-tab")
                 #expect(call.arguments["workspaceIdentifier"] == nil)
@@ -41,7 +41,7 @@ struct ProxyToolVerifierTests {
         let calls = await runtime.recordedToolCalls()
         #expect(calls.contains { $0.name == "XcodeListSchemes" })
         #expect(calls.contains { $0.name == "XcodeGetCurrentFile" })
-        #expect(!calls.contains { $0.name == "XcodeOpenWorkspace" || $0.name == "DeviceInteractionStartWorkspaceSession" })
+        #expect(!calls.contains { ["XcodeOpenWorkspace", "XcodeListWorkspaces", "DeviceInteractionStartWorkspaceSession"].contains($0.name) })
     }
 
     @Test(arguments: [false, true])
