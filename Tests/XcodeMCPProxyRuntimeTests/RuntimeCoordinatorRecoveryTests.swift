@@ -1182,7 +1182,7 @@ struct RuntimeCoordinatorRecoveryTests {
         #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["FallbackOnly"])
         manager.markUpstreamInitialized(upstreamIndex: 1)
         #expect(manager.cachedToolsListResult() == nil)
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_owner_catalog_background_refresh",
             processIDs: [ownerTarget.processID]
         )
@@ -1427,7 +1427,7 @@ struct RuntimeCoordinatorRecoveryTests {
             on: manager,
             entries: [(olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")])]
         )
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_cached_fresh_routes_background_refresh",
             processIDs: [middleTarget.processID, latestTarget.processID]
         )
@@ -1522,7 +1522,7 @@ struct RuntimeCoordinatorRecoveryTests {
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")])
             ]
         )
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_cached_fresh_failure_background_refresh",
             processIDs: [latestTarget.processID]
         )
@@ -1971,7 +1971,7 @@ struct RuntimeCoordinatorRecoveryTests {
                 (olderTarget, 0, [toolDescriptor(name: "OlderRouteOnly")])
             ]
         )
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_cached_partial_background_refresh",
             processIDs: [latestTarget.processID]
         )
@@ -2065,7 +2065,7 @@ struct RuntimeCoordinatorRecoveryTests {
             ]
         )
 
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_empty_process_catalog",
             processIDs: [emptyTarget.processID]
         )
@@ -2201,7 +2201,7 @@ struct RuntimeCoordinatorRecoveryTests {
             sourceUpstream: 0
         )
 
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_single_empty_process_catalog",
             processIDs: [target.processID]
         )
@@ -2269,7 +2269,7 @@ struct RuntimeCoordinatorRecoveryTests {
             sourceUpstream: 0
         )
 
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_empty_process_catalog_reset",
             processIDs: [target.processID]
         )

@@ -29,6 +29,48 @@ struct RuntimeCoordinatorCatalogTests {
         #expect(session.router.drainBufferedNotifications().isEmpty)
     }
 
+    @Test func refreshingCachedCatalogsReturnsBeforeAStalledProcess() async throws {
+        let healthy = TestUpstreamClient()
+        let stalled = TestUpstreamClient()
+        let first = xcodeProcessTarget(processID: 7011, xcodeVersion: "27.0")
+        let second = xcodeProcessTarget(processID: 7012, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(
+            config: makeConfig(requestTimeout: 5), upstreams: [healthy, stalled],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: first, upstreamIndices: [0]),
+                XcodeProcessRoute(target: second, upstreamIndices: [1])
+            ], startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        for index in 0...1 { manager.markUpstreamInitialized(upstreamIndex: index) }
+        seedCoordinatorSuiteInitialize(
+            on: manager,
+            result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 0
+        )
+        try seedProcessToolCatalogs(on: manager, entries: [
+            (first, 0, [toolDescriptor(name: "OldHealthy")]),
+            (second, 1, [toolDescriptor(name: "OldStalled")])
+        ])
+        let refresh = Task {
+            try await manager.sharedToolsList(sessionID: "cached-refresh", requestTimeoutOverride: .seconds(3))
+        }
+        let healthyRequest = try await sentValue(from: healthy, at: 0, timeout: .seconds(2))
+        let stalledRequest = try await sentValue(from: stalled, at: 0, timeout: .seconds(2))
+        await healthy.yield(.message(try paginatedToolsResponse(request: healthyRequest, names: ["DocumentationSearch"])))
+        let available = try await waitWithTimeout("return refreshed catalog without stalled peer", timeout: .seconds(1)) {
+            try await refresh.value
+        }
+        #expect(toolNames(in: available).contains("DocumentationSearch"))
+        let backgroundRequest = try await stalled.nextSent(startingAt: 1, matching: { methodName(from: $0) == "tools/list" })
+        #expect(try extractUpstreamID(from: backgroundRequest) != extractUpstreamID(from: stalledRequest))
+        await stalled.yield(.message(try paginatedToolsResponse(request: backgroundRequest, names: ["RecoveredPeer"])))
+        await manager.drainRuntimeTasksForTesting()
+        #expect(Set(toolNames(in: try #require(manager.cachedToolsListResult()))) == Set(["DocumentationSearch", "RecoveredPeer"]))
+        #expect(await healthy.sentCount() == 1)
+    }
+
     @Test func explicitCatalogRequestDiscoversToolsWithoutChangeNotification() async throws {
         let upstream = TestUpstreamClient()
         let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
@@ -299,7 +341,7 @@ struct RuntimeCoordinatorCatalogTests {
                 == [remainingTarget.processID]
         )
         #expect(manager.processControlPlane.canonicalSourceUpstream() == nil)
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_cleared_source_background_refresh",
             processIDs: [clearedTarget.processID]
         )
@@ -447,7 +489,7 @@ struct RuntimeCoordinatorCatalogTests {
 
         manager.markUpstreamInitialized(upstreamIndex: 0)
         #expect(manager.cachedToolsListResult() == nil)
-        manager.refreshMissingProcessToolsCatalogsIfNeeded(
+        manager.refreshProcessToolsCatalogsIfNeeded(
             reason: "test_cold_route_background_refresh",
             processIDs: [coldTarget.processID]
         )

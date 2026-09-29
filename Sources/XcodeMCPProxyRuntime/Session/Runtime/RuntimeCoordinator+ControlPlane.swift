@@ -228,7 +228,7 @@ extension RuntimeCoordinator {
         let cachedProcessIDs = currentSurface?.processIDs ?? []
         let uncachedProcessIDs = exposedProcessIDs.subtracting(cachedProcessIDs)
         if cachedProcessIDs.isEmpty == false {
-            refreshMissingProcessToolsCatalogsIfNeeded(
+            refreshProcessToolsCatalogsIfNeeded(
                 reason: "foreground_partial_catalog",
                 processIDs: uncachedProcessIDs
             )
@@ -268,9 +268,9 @@ extension RuntimeCoordinator {
             deadlineUptimeNs: deadlineUptimeNs,
             startedAt: startedAt,
             exposedProcessIDs: exposedProcessIDs,
-            returnAfterFirstSuccess: cachedProcessIDs.isEmpty
+            returnAfterFirstSuccess: true
         )
-        refreshMissingProcessToolsCatalogsIfNeeded(
+        refreshProcessToolsCatalogsIfNeeded(
             reason: "foreground_first_catalog",
             processIDs: uncachedProcessIDs
         )
@@ -288,7 +288,8 @@ extension RuntimeCoordinator {
         for route in routes {
             scheduleProcessRouteActivationCatalogTimeoutIfNeeded(lease: route.lease)
         }
-        return try await withThrowingTaskGroup(
+        var pendingProcessIDs = Set(routes.map { $0.target.processID })
+        let result = try await withThrowingTaskGroup(
             of: AvailableToolsCatalogOutcome.self,
             returning: CanonicalToolsCatalogLoadResult.self
         ) { group in
@@ -388,7 +389,8 @@ extension RuntimeCoordinator {
             var firstSuccess: CanonicalToolsCatalogLoadResult?
             while let outcome = try await group.next() {
                 switch outcome {
-                case .success(_, let result):
+                case .success(let route, let result):
+                    pendingProcessIDs.remove(route.target.processID)
                     if returnAfterFirstSuccess {
                         group.cancelAll()
                         return availableToolsCatalogSurfaceResult(
@@ -401,6 +403,7 @@ extension RuntimeCoordinator {
                         firstSuccess = result
                     }
                 case .failure(let route, let upstreamIndex, let error):
+                    pendingProcessIDs.remove(route.target.processID)
                     failures.append((target: route.target, upstreamIndex: upstreamIndex, error: error))
                 case .stale:
                     continue
@@ -422,11 +425,20 @@ extension RuntimeCoordinator {
             }
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
+        if returnAfterFirstSuccess, pendingProcessIDs.isEmpty == false {
+            refreshProcessToolsCatalogsIfNeeded(
+                reason: "foreground_remaining_catalogs",
+                processIDs: pendingProcessIDs,
+                refreshCached: true
+            )
+        }
+        return result
     }
 
-    func refreshMissingProcessToolsCatalogsIfNeeded(
+    func refreshProcessToolsCatalogsIfNeeded(
         reason: String,
-        processIDs requestedProcessIDs: Set<pid_t>? = nil
+        processIDs requestedProcessIDs: Set<pid_t>? = nil,
+        refreshCached: Bool = false
     ) {
         guard initializeManager.snapshot().isShuttingDown == false else { return }
         guard processRoutingEnabled else {
@@ -445,7 +457,7 @@ extension RuntimeCoordinator {
                requestedProcessIDs.contains($0.route.target.processID) == false {
                 return false
             }
-            return processControlPlane.catalog(forProcessID: $0.route.target.processID) == nil
+            return refreshCached || processControlPlane.catalog(forProcessID: $0.route.target.processID) == nil
         }
         let missingRoutes = missingExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
             guard let preferred = exposure.usableUpstreamIDs.first,
@@ -648,7 +660,7 @@ extension RuntimeCoordinator {
             else {
                 return
             }
-            self.refreshMissingProcessToolsCatalogsIfNeeded(
+            self.refreshProcessToolsCatalogsIfNeeded(
                 reason: "scheduled_\(reason)",
                 processIDs: [processID]
             )
