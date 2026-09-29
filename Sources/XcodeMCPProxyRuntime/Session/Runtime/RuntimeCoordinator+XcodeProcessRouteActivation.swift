@@ -706,7 +706,7 @@ extension RuntimeCoordinator {
                                 )
                             }) else { return }
                             self.applyProcessControlPlaneTransition(transition)
-                        } else if self.processRoutingEnabled == false {
+                        } else {
                             self.startUpstreamWarmInitialize(
                                 upstreamIndex: replacementLease.upstreamIndex,
                                 applyBackoff: true
