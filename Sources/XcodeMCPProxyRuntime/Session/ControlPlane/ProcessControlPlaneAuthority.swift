@@ -3199,7 +3199,7 @@ enum ProcessToolCatalogCodec {
         let tools = selected.keys.sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
         }.compactMap { selected[$0] }
-        return .object(["tools": .array(tools)])
+        return .object(["tools": .array(tools.map(exposingWorkspacePathSelector))])
     }
 
     static func schemaConflicts(

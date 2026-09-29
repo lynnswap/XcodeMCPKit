@@ -140,6 +140,12 @@ extension RuntimeCoordinator {
                 }
             }
 
+            if requiresCompleteInventory {
+                if let lastError { throw lastError }
+                if !xcodeWindowOwnerCandidateProcessIDs().isSubset(of: queriedProcessIDs) {
+                    throw UpstreamSlotScheduler.AcquisitionError.unavailable
+                }
+            }
             let orderedRouteResults = results.sorted { $0.ordinal < $1.ordinal }
             recordXcodeWindowOwners(fromOrderedRouteResults: orderedRouteResults)
             let orderedResults = orderedRouteResults.map {
@@ -147,12 +153,6 @@ extension RuntimeCoordinator {
                     $0.result,
                     upstreamIndex: $0.upstreamIndex
                 )
-            }
-            if requiresCompleteInventory {
-                if let lastError { throw lastError }
-                if usableProcessIDs != Set(xcodeProcessRoutes.map(\.target.processID)) {
-                    throw UpstreamSlotScheduler.AcquisitionError.unavailable
-                }
             }
             if let merged = Self.mergedXcodeListWindowsResult(orderedResults) {
                 return merged
@@ -578,15 +578,24 @@ extension RuntimeCoordinator {
         let deadline = timeoutDeadline(for: requestTimeoutOverride
             ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: config.requestTimeout))
         var resolution = cachedOwnerResolution(for: request)
-        var discoveryError: (any Error)?
-        if case .unresolved = resolution, !xcodeProcessRoutes.isEmpty {
+        let potentialOwnerProcessIDs = xcodeWindowOwnerCandidateProcessIDs()
+        let hasUnqueriedOwners = !potentialOwnerProcessIDs.isSubset(of: windowOwnershipAuthority.snapshot().inventoriedProcessIDs)
+        let needsDiscovery = switch resolution {
+        case .unresolved: true
+        default: hasUnqueriedOwners && request.tabIdentifier == nil
+        }
+        if needsDiscovery, !potentialOwnerProcessIDs.isEmpty {
             do {
                 _ = try await refreshXcodeWindowOwnersForRouting(
                     requestTimeoutOverride: requestTimeoutOverride,
                     requiresCompleteInventory: true
                 )
             } catch {
-                discoveryError = error
+                return .reject(errors: toolRoutingErrors(
+                    for: request,
+                    message: "Unable to determine GUI workspace ownership: "
+                        + ControlPlane.ErrorMapper.jsonRPCError(for: error).message
+                ))
             }
             resolution = cachedOwnerResolution(for: request)
         }
@@ -596,13 +605,6 @@ extension RuntimeCoordinator {
                 for: requestJSON, requestTimeoutOverride: requestTimeoutOverride
             )
         case .unresolved:
-            if let discoveryError {
-                return .reject(errors: toolRoutingErrors(
-                    for: request,
-                    message: "Unable to determine GUI workspace ownership: "
-                        + ControlPlane.ErrorMapper.jsonRPCError(for: discoveryError).message
-                ))
-            }
             if request.tabIdentifier != nil {
                 return .reject(errors: toolRoutingErrors(for: request, message: "Unable to resolve the selected Xcode tab"))
             }
@@ -619,6 +621,14 @@ extension RuntimeCoordinator {
         return await serviceWorkspacePathRoutingDecision(
             for: request, path: path, upstreamIndex: upstreamIndex, deadline: deadline
         )
+    }
+
+    private func xcodeWindowOwnerCandidateProcessIDs() -> Set<pid_t> {
+        Set(xcodeProcessRoutes.compactMap { route -> pid_t? in
+            let processID = route.target.processID
+            return processControlPlane.catalog(forProcessID: processID) == nil
+                || processControlPlane.hasTool("XcodeListWindows", processID: processID) ? processID : nil
+        })
     }
 
     private func serviceWorkspacePathRoutingDecision(
@@ -1452,7 +1462,7 @@ extension RuntimeCoordinator {
         return ToolRoutingRequest(
             id: JSONRPC.Message.Inspector.requestID(from: object),
             toolName: toolName,
-            tabIdentifier: arguments["tabIdentifier"] as? String,
+            tabIdentifier: (arguments["tabIdentifier"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             workspaceIdentifier: arguments["workspaceIdentifier"] as? String
         )
     }

@@ -86,11 +86,12 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
-    @Test(arguments: ["gui-path", "gui-only-path", "service-path", "opaque", "omitted", "stale-tab", "lookup-error", "known-owner-failure", "partial-inventory", "ambiguous"])
+    @Test(arguments: ["gui-path", "gui-only-path", "service-path", "opaque", "omitted", "stale-tab", "lookup-error", "known-owner-failure", "partial-inventory", "ambiguous", "partial-owner", "partial-list-owner", "known-owner-unrelated-failure"])
     func standardWorkspaceRoutingOverHTTP(scenario: String) async throws {
         let service = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "windowtab-opaque-service", workspacePath: "/Work/Service.xcodeproj")
         let gui = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "gui-tab")
-        let secondGUI = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "other-tab")
+        let secondGUI = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "other-tab",
+            workspacePath: scenario == "known-owner-unrelated-failure" ? "/Work/Other.xcodeproj" : "/Work/App.xcodeproj")
         let target = XcodeProcessTarget(
             processID: 752, appPath: "/Applications/Xcode.app",
             developerDir: "/Applications/Xcode.app/Contents/Developer",
@@ -102,12 +103,13 @@ struct HTTPConcurrencyTests {
             mcpbridgePath: "/Applications/OtherXcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
         )
         let ambiguous = scenario == "ambiguous"
+        let hasSecondGUI = ambiguous || scenario == "partial-owner" || scenario == "partial-list-owner" || scenario == "known-owner-unrelated-failure"
         let guiOnly = scenario == "gui-only-path"
         let server = try TestHTTPServer.start(
             upstream: guiOnly ? gui : service, xcodeMode: .automatic,
-            additionalUpstreams: guiOnly ? [] : (ambiguous ? [gui, secondGUI] : [gui]),
+            additionalUpstreams: guiOnly ? [] : (hasSecondGUI ? [gui, secondGUI] : [gui]),
             xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [guiOnly ? 0 : 1])]
-                + (ambiguous ? [XcodeProcessRoute(target: otherTarget, upstreamIndices: [2])] : [])
+                + (hasSecondGUI ? [XcodeProcessRoute(target: otherTarget, upstreamIndices: [2])] : [])
         )
         do {
             let (initialized, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
@@ -125,8 +127,16 @@ struct HTTPConcurrencyTests {
                 _ = try await postJSON(url: server.url, sessionID: sessionID, payload: toolCallPayload(id: 3, name: "XcodeListWindows", arguments: [:]))
                 server.sessionManager.markXcodeProcessRouteUnavailable(upstreamIndex: 1, reason: "test_owner_connection_failure")
             }
+            if scenario == "known-owner-unrelated-failure" {
+                _ = try await postJSON(url: server.url, sessionID: sessionID, payload: toolCallPayload(id: 3, name: "XcodeListWindows", arguments: [:]))
+                server.sessionManager.markXcodeProcessRouteUnavailable(upstreamIndex: 2, reason: "unrelated_owner_failure")
+            }
             if scenario == "partial-inventory" { await gui.failInventory() }
             if scenario == "lookup-error" { await service.failInventory() }
+            if scenario == "partial-owner" || scenario == "partial-list-owner" { await secondGUI.failInventory() }
+            if scenario == "partial-list-owner" {
+                _ = try await postJSON(url: server.url, sessionID: sessionID, payload: toolCallPayload(id: 3, name: "XcodeListWindows", arguments: [:]))
+            }
             let arguments: [String: Any]
             switch scenario {
             case "omitted": arguments = [:]
@@ -141,8 +151,13 @@ struct HTTPConcurrencyTests {
             )
             #expect(reply["id"] as? Int == 41)
             let result = try #require(reply["result"] as? [String: Any])
-            let fails = ["stale-tab", "lookup-error", "known-owner-failure", "partial-inventory", "ambiguous"].contains(scenario)
+            let fails = ["stale-tab", "lookup-error", "known-owner-failure", "partial-inventory", "ambiguous", "partial-owner", "partial-list-owner"].contains(scenario)
             #expect((result["isError"] as? Bool == true) == fails)
+            if scenario == "partial-owner" || scenario == "partial-list-owner" {
+                let (_, repeated) = try await postJSON(url: server.url, sessionID: sessionID,
+                    payload: toolCallPayload(id: 42, name: "BuildProject", arguments: arguments))
+                #expect((repeated["result"] as? [String: Any])?["isError"] as? Bool == true)
+            }
             let serviceCalls = await service.recordedCalls()
             let guiCalls = await gui.recordedCalls()
             if fails {
@@ -154,7 +169,7 @@ struct HTTPConcurrencyTests {
                 }
             } else {
                 let content = try #require(result["structuredContent"] as? [String: Any])
-                #expect(content["selector"] as? String == (scenario.hasPrefix("gui-") ? "tabIdentifier" : "workspaceIdentifier"))
+                #expect(content["selector"] as? String == ((scenario.hasPrefix("gui-") || scenario == "known-owner-unrelated-failure") ? "tabIdentifier" : "workspaceIdentifier"))
                 #expect((serviceCalls + guiCalls).filter { $0 == "BuildProject" }.count == 1)
             }
             #expect(!(serviceCalls + guiCalls).contains("XcodeOpenWorkspace"))
@@ -180,6 +195,29 @@ struct HTTPConcurrencyTests {
             let result = try #require(reply["result"] as? [String: Any])
             #expect(result["isError"] as? Bool == false)
             #expect(await upstream.recordedCalls() == ["BuildProject"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
+    @Test func customUpstreamKeepsItsNativeTabSchema() async throws {
+        let upstream = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "native-tab")
+        let server = try TestHTTPServer.start(upstream: upstream, xcodeMode: .custom)
+        do {
+            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
+            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
+            let (_, catalog) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 2))
+            let result = try #require(catalog["result"] as? [String: Any])
+            let tools = try #require(result["tools"] as? [[String: Any]])
+            let build = try #require(tools.first { $0["name"] as? String == "BuildProject" })
+            let schema = try #require(build["inputSchema"] as? [String: Any])
+            let properties = try #require(schema["properties"] as? [String: Any])
+            #expect(Set(properties.keys) == ["tabIdentifier"])
+            let (_, reply) = try await postJSON(url: server.url, sessionID: sessionID,
+                payload: toolCallPayload(id: 3, name: "BuildProject", arguments: ["tabIdentifier": "native-tab"]))
+            #expect((reply["result"] as? [String: Any])?["isError"] as? Bool == false)
         } catch {
             try? await server.shutdown()
             throw error

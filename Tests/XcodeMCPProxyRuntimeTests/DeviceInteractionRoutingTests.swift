@@ -233,6 +233,44 @@ struct DeviceInteractionRoutingTests {
         #expect(errors.map(\.message) == ["unknown device interaction session"])
     }
 
+    @Test func serviceWorkspacePathPreservesTheCreatingConnection() async throws {
+        let first = TestUpstreamClient()
+        let owner = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [first, owner], processRoutingEnabled: true, startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let creatingLease = manager.operationLeaseForTest(upstreamIndex: 1)
+        manager.recordDeviceInteractionAffinityIfNeeded(
+            requestData: try requestData(name: "DeviceInteractionStartWorkspaceSession", arguments: ["sessionIdentifier": "test"]),
+            responseData: try successfulToolResponse(structuredContent: ["interactionSessionKey": "device-key"]),
+            operationLease: creatingLease
+        )
+        let request = toolsCallObject(id: 3, name: "DeviceInteractionInstallAndRun", arguments: [
+            "interactionSessionKey": "device-key", "workspaceIdentifier": "/Work/App.xcodeproj"
+        ])
+        let task = Task { await manager.toolRoutingDecision(for: request, requestTimeoutOverride: .seconds(2)) }
+        let lookup = try await owner.nextSent(at: 0)
+        await owner.yield(.message(try makeJSONRPCResponse(
+            id: extractUpstreamID(from: lookup),
+            result: ["structuredContent": ["message": "* workspaceIdentifier: opaque-id, workspacePath: /Work/App.xcodeproj"]]
+        )))
+        let decision = await task.value
+        guard case .forwardAdmitted(let indices, let admission) = decision else {
+            Issue.record("expected the creating Service connection")
+            return
+        }
+        #expect(indices == [1])
+        #expect(admission.upstreamProofs == [creatingLease.proof])
+        #expect(admission.workspaceIdentifier == "opaque-id")
+        #expect(await first.sentCount() == 0)
+    }
+
     @Test func headlessUnboundPoolRejectsUnknownSessionInsteadOfGuessing() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
