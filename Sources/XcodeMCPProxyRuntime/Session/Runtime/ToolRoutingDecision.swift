@@ -27,11 +27,13 @@ struct RouteForwardingAdmission: Sendable {
     let route: ProcessControlPlaneAuthority.RouteAdmissionLease?
     let upstreamProofs: [UpstreamTopologyProof]
     let window: WindowRouteAdmission?
+    let workspaceIdentifier: String?
 
-    init(upstreamProofs: [UpstreamTopologyProof]) {
+    init(upstreamProofs: [UpstreamTopologyProof], workspaceIdentifier: String? = nil) {
         self.route = nil
         self.upstreamProofs = upstreamProofs
         self.window = nil
+        self.workspaceIdentifier = workspaceIdentifier
     }
 
     init(
@@ -42,6 +44,7 @@ struct RouteForwardingAdmission: Sendable {
         self.route = route
         self.upstreamProofs = upstreamProofs
         self.window = window
+        self.workspaceIdentifier = nil
     }
 
     func proof(for upstreamIndex: Int) -> UpstreamTopologyProof? {
@@ -56,10 +59,8 @@ struct WindowRouteAdmission: Sendable {
 }
 
 struct OwnerBoundRequestRewritePlan: Sendable {
-    let processID: pid_t
-    let rawTabIdentifierByProxyIdentifier: [String: String]
-    let singleRawTabIdentifierByWorkspacePath: [String: String]
-    let toolsRequiringTabIdentifier: Set<String>
+    let tabIdentifier: String?
+    let clientTabIdentifier: String?
 }
 
 struct ToolRoutingError: Sendable {

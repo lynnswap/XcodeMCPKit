@@ -186,7 +186,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var preferredUpstreamIndex: Int?
         var usablePreferredUpstreamIndices: Set<Int>?
         var toolRoutingDecision: ToolRoutingDecision?
-        var forceAsyncToolRoutingDecision = false
         var toolRoutingStarted: TestSignal?
         var toolRoutingGate: AsyncGate?
         var requestLeaseActivationHook: (@Sendable () -> Void)?
@@ -526,16 +525,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         synchronization.0?.signal()
         if let gate = synchronization.1 {
             try? await gate.wait()
-        }
-        if let decision = state.withLockedValue({ $0.toolRoutingDecision }) {
-            return decision
-        }
-        return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
-    }
-
-    func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
-        if state.withLockedValue({ $0.forceAsyncToolRoutingDecision }) {
-            return nil
         }
         if let decision = state.withLockedValue({ $0.toolRoutingDecision }) {
             return decision
@@ -1073,9 +1062,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         state.withLockedValue { $0.toolRoutingDecision = value }
     }
 
-    func setForceAsyncToolRoutingDecision(_ value: Bool) {
-        state.withLockedValue { $0.forceAsyncToolRoutingDecision = value }
-    }
 
     func setToolRoutingGate(started: TestSignal?, gate: AsyncGate?) {
         state.withLockedValue {

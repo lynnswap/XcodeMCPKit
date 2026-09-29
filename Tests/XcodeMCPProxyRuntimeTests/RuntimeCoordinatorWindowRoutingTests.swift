@@ -283,7 +283,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 for: toolsCallObject(
                     id: 8706,
                     name: "BuildProject",
-                    arguments: ["workspacePath": workspacePath]
+                    arguments: ["workspaceIdentifier": workspacePath]
                 )
             ) == nil
         )
@@ -293,7 +293,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
                 for: toolsCallObject(
                     id: 8706,
                     name: "BuildProject",
-                    arguments: ["workspacePath": workspacePath]
+                    arguments: ["workspaceIdentifier": workspacePath]
                 ),
                 requestTimeoutOverride: .seconds(2)
             )

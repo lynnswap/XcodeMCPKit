@@ -178,12 +178,25 @@ struct MCPForwardingService: Sendable {
         guard let parsedRequestJSONValue = JSONValue(any: requestObject) else {
             return .unavailable
         }
-        if upstreamIndexOverride == nil,
-            name == "XcodeListWindows"
-        {
+        var preferredUpstreamIndices: [Int]?
+        let admission: RouteForwardingAdmission?
+        switch await sessionManager.toolRoutingDecision(
+            for: requestObject,
+            requestTimeoutOverride: requestTimeoutOverride
+        ) {
+        case .forward(let resolvedUpstreamIndex):
+            preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
+            admission = nil
+        case .forwardAny(let resolvedUpstreamIndices):
+            preferredUpstreamIndices = resolvedUpstreamIndices
+            admission = nil
+        case .forwardAdmitted(let resolvedUpstreamIndices, let resolvedAdmission):
+            preferredUpstreamIndices = resolvedUpstreamIndices
+            admission = resolvedAdmission
+        case .localXcodeListWindows:
             do {
                 let result = try await sessionManager.liveXcodeListWindowsResult(
-                    route: .anyHealthy,
+                    route: upstreamIndexOverride.map(ControlPlane.Route.pinnedUpstream) ?? .anyHealthy,
                     requestTimeoutOverride: requestTimeoutOverride
                 )
                 guard let resultObject = result.foundationObject as? [String: Any] else {
@@ -200,32 +213,14 @@ struct MCPForwardingService: Sendable {
             } catch {
                 return .unavailable
             }
+        case .reject:
+            return .unavailable
         }
-
-        let preferredUpstreamIndices: [Int]?
-        let admission: RouteForwardingAdmission?
         if let upstreamIndexOverride {
-            preferredUpstreamIndices = [upstreamIndexOverride]
-            admission = nil
-        } else {
-            switch await sessionManager.toolRoutingDecision(
-                for: requestObject,
-                requestTimeoutOverride: requestTimeoutOverride
-            ) {
-            case .forward(let resolvedUpstreamIndex):
-                preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
-                admission = nil
-            case .forwardAny(let resolvedUpstreamIndices):
-                preferredUpstreamIndices = resolvedUpstreamIndices
-                admission = nil
-            case .forwardAdmitted(let resolvedUpstreamIndices, let resolvedAdmission):
-                preferredUpstreamIndices = resolvedUpstreamIndices
-                admission = resolvedAdmission
-            case .localXcodeListWindows:
-                return .unavailable
-            case .reject:
+            if let preferredUpstreamIndices, !preferredUpstreamIndices.contains(upstreamIndexOverride) {
                 return .unavailable
             }
+            preferredUpstreamIndices = [upstreamIndexOverride]
         }
 
         let descriptor = SessionRequestPipeline.Descriptor(

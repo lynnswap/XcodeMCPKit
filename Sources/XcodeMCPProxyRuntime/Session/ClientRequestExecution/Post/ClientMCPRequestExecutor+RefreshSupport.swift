@@ -255,12 +255,34 @@ extension ClientMCPRequestExecutor {
         leaseID: LeaseManager.ID,
         cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
     ) async -> RefreshCodeIssues.Workflow.ForwardAttemptResult {
-        await refreshWorkflow.run(
-            refreshRequest: refreshRequest,
+        guard let requestObject = try? JSONRPC.Wire.object(fromData: bodyData) else { return .invalidRequest }
+        let deadline = timeoutDeadline(for: requestTimeoutOverride
+            ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: requestTimeoutSeconds))
+        let decision = await sessionManager.toolRoutingDecision(
+            for: requestObject, requestTimeoutOverride: requestTimeoutOverride
+        )
+        let preferredUpstreamIndex = decision.preferredUpstreamIndices?.first
+        let resolvedRequest: RefreshCodeIssues.Request
+        switch decision {
+        case .reject(let errors):
+            guard let data = Self.makeToolRoutingErrorResponseData(errors: errors) else { return .invalidRequest }
+            return .success(data)
+        case .forwardAdmitted(_, let admission):
+            resolvedRequest = RefreshCodeIssues.Request(
+                tabIdentifier: admission.window?.rewritePlan.clientTabIdentifier ?? refreshRequest.tabIdentifier,
+                filePath: refreshRequest.filePath
+            )
+        default:
+            resolvedRequest = refreshRequest
+        }
+        let remainingTimeout = remainingRequestTimeout(until: deadline)
+        if deadline != nil, remainingTimeout == nil { return .timeout(responseID: responseID) }
+        return await refreshWorkflow.run(
+            refreshRequest: resolvedRequest,
             bodyData: bodyData,
             sessionID: sessionID,
             responseID: responseID,
-            requestTimeoutOverride: requestTimeoutOverride,
+            requestTimeoutOverride: remainingTimeout,
             eventLoop: eventLoop,
             windowsProvider: { sessionID, eventLoop, upstreamIndex, timeout in
                 try await self.listXcodeWindows(
@@ -272,7 +294,7 @@ extension ClientMCPRequestExecutor {
                 )
             },
             internalUpstreamChooser: { _ in
-                self.sessionManager.chooseUpstreamOperationLease()?.upstreamIndex
+                preferredUpstreamIndex ?? self.sessionManager.chooseUpstreamOperationLease()?.upstreamIndex
             },
             internalToolCaller: {
                 name, arguments, sessionID, eventLoop, upstreamIndexOverride, requestTimeoutOverride in

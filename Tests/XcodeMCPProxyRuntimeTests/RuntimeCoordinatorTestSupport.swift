@@ -134,7 +134,7 @@ func ownerBoundToolDescriptor(name: String) -> [String: Any] {
             "tabIdentifier": [
                 "type": "string",
             ],
-            "workspacePath": [
+            "workspaceIdentifier": [
                 "type": "string",
             ],
         ]

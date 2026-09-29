@@ -14,7 +14,8 @@ extension RefreshCodeIssues {
             return result
         }
 
-        let rewrittenTools = tools.compactMap { toolValue -> JSONValue? in
+        let rewrittenTools = tools.compactMap { nativeTool -> JSONValue? in
+            let toolValue = ProcessToolCatalogCodec.exposingWorkspacePathSelector(nativeTool)
             guard case .object(var toolObject) = toolValue else {
                 return toolValue
             }

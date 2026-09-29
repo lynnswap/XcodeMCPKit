@@ -289,7 +289,11 @@ struct WindowRoutingResolver {
 
         if let workspacePath {
             let workspaceIdentities = owners.identities.filter {
-                $0.workspacePath == workspacePath && eligibleProcessIDs.contains($0.processID)
+                $0.workspacePath == workspacePath
+            }
+            if tabIdentifier == nil, workspaceIdentities.count > 1 {
+                let candidates = workspaceIdentities.map(\.proxyTabIdentifier).sorted().joined(separator: ", ")
+                return .conflict("conflicting Xcode window owners for workspaceIdentifier '\(workspacePath)' (select tabIdentifier: \(candidates))")
             }
             let processIDs = Set(workspaceIdentities.map(\.processID))
             switch processIDs.count {
@@ -319,17 +323,19 @@ struct WindowRoutingResolver {
                         )
                     }
                 }
-                guard let routeProof = proof(processID: processID) else { return .unresolved }
+                guard let routeProof = proof(processID: processID) else {
+                    return .conflict("The Xcode process owning workspaceIdentifier '\(workspacePath)' is unavailable")
+                }
                 return .resolved(
                     processID: processID,
                     ownerLabel: workspacePath,
                     proof: routeProof
                 )
             default:
-                let candidates = processIDs.map(String.init).sorted().joined(separator: ",")
+                let candidates = workspaceIdentities.map(\.proxyTabIdentifier).sorted().joined(separator: ", ")
                 return .conflict(
-                    "conflicting Xcode window owners for workspacePath '\(workspacePath)'"
-                        + " (processes: \(candidates))"
+                    "conflicting Xcode window owners for workspaceIdentifier '\(workspacePath)'"
+                        + " (select tabIdentifier: \(candidates))"
                 )
             }
         }
@@ -337,7 +343,7 @@ struct WindowRoutingResolver {
         guard let tabIdentifier else { return .unresolved }
         let rawIdentities = owners.identities(
             forRawTabIdentifier: tabIdentifier,
-            eligibleProcessIDs: eligibleProcessIDs
+            eligibleProcessIDs: Set(owners.identities.map(\.processID))
         )
         switch rawIdentities.count {
         case 0:

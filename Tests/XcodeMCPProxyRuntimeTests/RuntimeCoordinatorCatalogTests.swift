@@ -161,10 +161,10 @@ struct RuntimeCoordinatorCatalogTests {
         }
         #expect(toolNames(in: result).contains(fastName))
         if serviceStalls {
-            let route = manager.immediateToolRoutingDecision(for: toolsCallObject(
+            let route = await manager.toolRoutingDecision(for: toolsCallObject(
                 id: 71, name: "UpdatedGUI", arguments: [:]
-            ))
-            #expect(route?.preferredUpstreamIndices == [1])
+            ), requestTimeoutOverride: nil)
+            #expect(route.preferredUpstreamIndices == [1])
         }
         let backgroundRequest = try await slow.nextSent(startingAt: 1, matching: { methodName(from: $0) == "tools/list" })
         await slow.yield(.message(try makeDocumentationToolsListResponse(
@@ -1133,7 +1133,7 @@ struct RuntimeCoordinatorCatalogTests {
             "params": [
                 "name": "XcodeSomeWorkspaceScopedTool",
                 "arguments": [
-                    "workspacePath": "/Work/B.xcworkspace"
+                    "workspaceIdentifier": "/Work/B.xcworkspace"
                 ],
             ],
         ]
@@ -1151,7 +1151,7 @@ struct RuntimeCoordinatorCatalogTests {
             "params": [
                 "name": "XcodeRead",
                 "arguments": [
-                    "workspacePath": "/Work/B.xcworkspace"
+                    "workspaceIdentifier": "/Work/B.xcworkspace"
                 ],
             ],
         ]
@@ -1415,7 +1415,7 @@ struct RuntimeCoordinatorCatalogTests {
             "params": [
                 "name": "XcodeSomeWorkspaceScopedTool",
                 "arguments": [
-                    "workspacePath": workspacePath
+                    "workspaceIdentifier": workspacePath
                 ],
             ],
         ]
@@ -1427,7 +1427,7 @@ struct RuntimeCoordinatorCatalogTests {
                 for: toolsCallObject(
                     id: 8701,
                     name: "XcodeSomeWorkspaceScopedTool",
-                    arguments: ["workspacePath": workspacePath]
+                    arguments: ["workspaceIdentifier": workspacePath]
                 ),
                 requestTimeoutOverride: .seconds(2)
             )
@@ -1469,7 +1469,7 @@ struct RuntimeCoordinatorCatalogTests {
         #expect(errors.first?.message.contains("conflicting Xcode window owners") == true)
     }
 
-    @Test func unavailableCachedWorkspaceOwnerDoesNotConflictWithAvailableOwner()
+    @Test func unavailableCachedWorkspaceOwnerIsNotReplacedByAnotherGUI()
         async throws
     {
         let group = borrowSharedTestEventLoopGroup()
@@ -1528,18 +1528,21 @@ struct RuntimeCoordinatorCatalogTests {
         let request = toolsCallObject(
             id: 8702,
             name: "BuildProject",
-            arguments: ["workspacePath": workspacePath]
+            arguments: ["workspaceIdentifier": workspacePath]
         )
-        #expect(manager.preferredUpstreamIndex(for: request) == 1)
+        #expect(manager.preferredUpstreamIndex(for: request) == nil)
         let decision = await manager.toolRoutingDecision(
             for: request,
             requestTimeoutOverride: .seconds(2)
         )
-        let preferredUpstreamIndices = try #require(decision.preferredUpstreamIndices)
-        #expect(preferredUpstreamIndices == [1])
+        guard case .reject(let errors) = decision else {
+            Issue.record("Known workspace owners must not be discarded after a connection failure")
+            return
+        }
+        #expect(errors.first?.message.contains("unavailable") == true)
     }
 
-    @Test func unusableCachedWorkspaceOwnerDoesNotConflictWithUsableOwner()
+    @Test func unusableCachedWorkspaceOwnerIsNotReplacedByAnotherGUI()
         async throws
     {
         let group = borrowSharedTestEventLoopGroup()
@@ -1592,15 +1595,18 @@ struct RuntimeCoordinatorCatalogTests {
         let request = toolsCallObject(
             id: 8708,
             name: "BuildProject",
-            arguments: ["workspacePath": workspacePath]
+            arguments: ["workspaceIdentifier": workspacePath]
         )
-        #expect(manager.preferredUpstreamIndex(for: request) == 1)
+        #expect(manager.preferredUpstreamIndex(for: request) == nil)
         let decision = await manager.toolRoutingDecision(
             for: request,
             requestTimeoutOverride: .seconds(2)
         )
-        let preferredUpstreamIndices = try #require(decision.preferredUpstreamIndices)
-        #expect(preferredUpstreamIndices == [1])
+        guard case .reject(let errors) = decision else {
+            Issue.record("Known workspace owners must not be discarded after a connection failure")
+            return
+        }
+        #expect(errors.first?.message.contains("unavailable") == true)
     }
 
     @Test func proxyTabIdentifierDisambiguatesDuplicateWorkspaceOwners() async throws {
@@ -1662,7 +1668,7 @@ struct RuntimeCoordinatorCatalogTests {
             name: "BuildProject",
             arguments: [
                 "tabIdentifier": proxyTabIdentifier,
-                "workspacePath": workspacePath,
+                "workspaceIdentifier": workspacePath,
             ]
         )
         #expect(manager.preferredUpstreamIndex(for: request) == 1)
@@ -1766,7 +1772,7 @@ struct RuntimeCoordinatorCatalogTests {
             name: "BuildProject",
             arguments: [
                 "tabIdentifier": proxyTabB,
-                "workspacePath": workspaceB,
+                "workspaceIdentifier": workspaceB,
             ]
         )
         #expect(manager.preferredUpstreamIndex(for: request) == 0)

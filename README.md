@@ -186,6 +186,30 @@ share an in-flight refresh, so discovery observes additions and removals even wh
 Xcode does not send a catalog-change notification. Switching the bridge that serves
 an unchanged catalog does not trigger another catalog-change notification.
 
+## Select a Workspace
+
+Pass an absolute project or workspace path in the standard `workspaceIdentifier`
+argument to a workspace-scoped tool. The proxy selects the GUI Xcode that owns
+that path and translates it to its native `tabIdentifier`. If no GUI owns the
+path, the proxy looks it up with `XcodeListWorkspaces` and forwards the native
+Service identifier. The workspace must already be open.
+
+You can also use a `tabIdentifier` from `XcodeListWindows` or an opaque Service
+`workspaceIdentifier` from Open/List directly. Selector arguments retain their
+native optionality. When multiple GUI tabs own a path, select one of the
+`tabIdentifier` candidates returned in the error. An unavailable known owner
+produces an error instead of redirecting the operation to another workspace.
+
+`XcodeListWindows` lists GUI windows; `XcodeListWorkspaces` lists Service
+workspaces. Open a Service workspace explicitly with `XcodeOpenWorkspace(path:)`
+and close it explicitly with `XcodeCloseWorkspace(workspaceIdentifier:)`, using
+the identifier returned by Open/List. Workspaces are shared: repeated Open calls
+do not give a client exclusive ownership. Neither client disconnect nor proxy
+shutdown closes them. `DocumentationSearch` needs no workspace selector.
+
+The former proxy-only `workspacePath` input argument is no longer supported.
+Native list results still include `workspacePath` as output.
+
 ## Migration
 
 ### v0.14.0
