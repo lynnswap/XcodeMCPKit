@@ -11,7 +11,7 @@ struct XcodeListWindowsEntry: Sendable, Equatable {
 }
 
 enum XcodeListWindowsMessageParser {
-    static func parse(_ message: String) -> [XcodeListWindowsEntry] {
+    static func parse(_ message: String, identifierKey: String = "tabIdentifier") -> [XcodeListWindowsEntry] {
         message
             .split(separator: "\n")
             .compactMap { line -> XcodeListWindowsEntry? in
@@ -20,7 +20,7 @@ enum XcodeListWindowsMessageParser {
                     rawLine.removeLast()
                 }
                 rawLine.removeLeadingSpacesAndTabs()
-                let prefix = "* tabIdentifier: "
+                let prefix = "* \(identifierKey): "
                 guard rawLine.hasPrefix(prefix) else { return nil }
                 let delimiter = ", workspacePath: "
                 let searchStart = rawLine.index(rawLine.startIndex, offsetBy: prefix.count)

@@ -55,8 +55,9 @@ The verified headless lifecycle is:
 3. Keep the returned `workspaceIdentifier` and optional `workspacePath`.
 4. Pass that identifier to workspace-scoped tools when their current schema
    advertises `workspaceIdentifier`.
-5. Call `XcodeCloseWorkspace` with the same identifier only if this client
-   opened the workspace.
+5. Call `XcodeCloseWorkspace` with the same identifier when the workspace is no
+   longer needed by its users. Repeated Open calls return the same shared handle;
+   they are not reference-counted.
 
 `XcodeOpenWorkspace` is also the first-use approval boundary for the agent
 identity and containing folder. Before approval, `XcodeListWorkspaces` and
@@ -66,8 +67,15 @@ shared service but does not replace this approval bootstrap.
 
 XcodeMCPKit never enables headless access, approves an agent or folder, broadens
 permission policy, or stops Xcode Service. The service is process-shared; a
-client owns only its `mcpbridge` child and workspace handles it explicitly
-acquired.
+client owns its `mcpbridge` child. Workspace lifecycle remains explicit and
+shared; disconnecting a client or stopping the proxy does not close workspaces.
+
+The proxy accepts an absolute path in the standard `workspaceIdentifier` input
+and resolves it to a GUI tab or an identifier returned by native Service
+workspace discovery. In the observed Xcode 27 Service, passing an opened
+project's path directly to a workspace tool returned an unknown-identifier
+error, while the opaque ID from Open succeeded. The proxy therefore uses the
+native inventory without deriving an identifier from its spelling.
 
 ### Schema differences
 

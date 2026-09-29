@@ -3114,6 +3114,25 @@ enum ProcessToolCatalogCodec {
         return .object(tool)
     }
 
+    static func exposingWorkspacePathSelector(_ value: JSONValue) -> JSONValue {
+        guard case .object(var tool) = value,
+              case .object(var schema)? = tool["inputSchema"],
+              case .object(var properties)? = schema["properties"],
+              properties["tabIdentifier"] != nil,
+              properties["workspaceIdentifier"] == nil else { return value }
+        properties.removeValue(forKey: "tabIdentifier")
+        properties["workspaceIdentifier"] = .object([
+            "type": .string("string"),
+            "description": .string("Absolute workspace path. The proxy selects its owning GUI Xcode or resolves an open Xcode Service workspace.")
+        ])
+        schema["properties"] = .object(properties)
+        if case .array(let required)? = schema["required"] {
+            schema["required"] = .array(required.map { $0 == .string("tabIdentifier") ? .string("workspaceIdentifier") : $0 })
+        }
+        tool["inputSchema"] = .object(schema)
+        return mergingTool(preferred: value, additional: .object(tool))
+    }
+
     static func toolsByName(in result: JSONValue?) -> [String: JSONValue] {
         guard let result,
               case .object(let object) = result,
@@ -3135,13 +3154,13 @@ enum ProcessToolCatalogCodec {
         guard case .object(let object) = tool,
               case .object(let schema)? = object["inputSchema"] else { return false }
         if case .object(let properties)? = schema["properties"],
-           properties["tabIdentifier"] != nil || properties["workspacePath"] != nil {
+           properties["tabIdentifier"] != nil || properties["workspaceIdentifier"] != nil {
             return true
         }
         if case .array(let required)? = schema["required"] {
             return required.contains { value in
                 guard case .string(let key) = value else { return false }
-                return key == "tabIdentifier" || key == "workspacePath"
+                return key == "tabIdentifier" || key == "workspaceIdentifier"
             }
         }
         return false
@@ -3180,7 +3199,7 @@ enum ProcessToolCatalogCodec {
         let tools = selected.keys.sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
         }.compactMap { selected[$0] }
-        return .object(["tools": .array(tools)])
+        return .object(["tools": .array(tools.map(exposingWorkspacePathSelector))])
     }
 
     static func schemaConflicts(

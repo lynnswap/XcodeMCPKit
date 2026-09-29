@@ -2,13 +2,14 @@
 import Foundation
 import NIO
 import Testing
+import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyRuntime
 
 @Suite(.serialized, .asyncTestCleanup)
 struct DeviceInteractionRoutingTests {
-    @Test func continuationRoutesToTheExactUpstreamThatCreatedTheSession() throws {
+    @Test func continuationRoutesToTheExactUpstreamThatCreatedTheSession() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { try? group.syncShutdownGracefully() }
+        defer { shutdownAndWait(group) }
         let target = xcodeProcessTarget(processID: 701, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5),
@@ -35,14 +36,13 @@ struct DeviceInteractionRoutingTests {
             operationLease: creatingLease
         )
 
-        let decision = try #require(
-            manager.immediateToolRoutingDecision(
-                for: toolsCallObject(
-                    id: 2,
-                    name: "DeviceInteractionSynthesize",
-                    arguments: ["interactSessionKey": "device-key"]
-                )
-            )
+        let decision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 2,
+                name: "DeviceInteractionSynthesize",
+                arguments: ["interactSessionKey": "device-key"]
+            ),
+            requestTimeoutOverride: nil
         )
         guard case .forwardAdmitted(let indices, let admission) = decision else {
             Issue.record("expected affinity-bound routing")
@@ -73,9 +73,7 @@ struct DeviceInteractionRoutingTests {
                 "tabIdentifier": proxyTabIdentifier,
             ]
         )
-        let installDecision = try #require(
-            manager.immediateToolRoutingDecision(for: installRequest)
-        )
+        let installDecision = await manager.toolRoutingDecision(for: installRequest, requestTimeoutOverride: nil)
         guard case .forwardAdmitted(let installIndices, let installAdmission) = installDecision else {
             Issue.record("expected affinity-bound workspace routing")
             return
@@ -99,7 +97,7 @@ struct DeviceInteractionRoutingTests {
         #expect(rewrittenArguments["tabIdentifier"] as? String == "raw-tab")
     }
 
-    @Test func successfulEndRemovesTheRecordedAffinity() throws {
+    @Test func successfulEndRemovesTheRecordedAffinity() async throws {
         let fixture = try makeSingleRouteFixture(processID: 702)
         defer { fixture.shutdown() }
 
@@ -122,14 +120,13 @@ struct DeviceInteractionRoutingTests {
             operationLease: fixture.operationLease
         )
 
-        let decision = try #require(
-            fixture.manager.immediateToolRoutingDecision(
-                for: toolsCallObject(
-                    id: 3,
-                    name: "DeviceInteractionEndSession",
-                    arguments: ["interactionSessionKey": "device-key"]
-                )
-            )
+        let decision = await fixture.manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 3,
+                name: "DeviceInteractionEndSession",
+                arguments: ["interactionSessionKey": "device-key"]
+            ),
+            requestTimeoutOverride: nil
         )
         guard case .reject(let errors) = decision else {
             Issue.record("ended session should no longer have affinity")
@@ -138,7 +135,7 @@ struct DeviceInteractionRoutingTests {
         #expect(errors.map(\.message) == ["unknown device interaction session"])
     }
 
-    @Test func upstreamReplacementInvalidatesAffinity() throws {
+    @Test func upstreamReplacementInvalidatesAffinity() async throws {
         let fixture = try makeSingleRouteFixture(processID: 703)
         defer { fixture.shutdown() }
 
@@ -163,9 +160,9 @@ struct DeviceInteractionRoutingTests {
     }
 
     @Test(arguments: [ProxyRuntimeConfiguration.XcodeMode.headless, .automatic])
-    func servicePoolRoutesToExactCreatingUpstreamAndEvictsOnReplacement(mode: ProxyRuntimeConfiguration.XcodeMode) throws {
+    func servicePoolRoutesToExactCreatingUpstreamAndEvictsOnReplacement(mode: ProxyRuntimeConfiguration.XcodeMode) async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { try? group.syncShutdownGracefully() }
+        defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
         config.xcodeMode = mode
         let manager = RuntimeCoordinator(
@@ -196,14 +193,13 @@ struct DeviceInteractionRoutingTests {
         )
         #expect(affinity.upstreamProof == creatingLease.proof)
         #expect(affinity.routeID == nil)
-        let routed = try #require(
-            manager.immediateToolRoutingDecision(
-                for: toolsCallObject(
-                    id: 6,
-                    name: "DeviceInteractionSynthesize",
-                    arguments: ["interactSessionKey": "headless-device-key"]
-                )
-            )
+        let routed = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 6,
+                name: "DeviceInteractionSynthesize",
+                arguments: ["interactSessionKey": "headless-device-key"]
+            ),
+            requestTimeoutOverride: nil
         )
         guard case .forwardAdmitted(let routedIndices, let routedAdmission) = routed else {
             Issue.record("expected exact unbound affinity routing")
@@ -222,14 +218,13 @@ struct DeviceInteractionRoutingTests {
         #expect(transition != nil)
         #expect(manager.deviceInteractionAffinityAuthority.count() == 0)
 
-        let afterReplacement = try #require(
-            manager.immediateToolRoutingDecision(
-                for: toolsCallObject(
-                    id: 7,
-                    name: "DeviceInteractionSynthesize",
-                    arguments: ["interactSessionKey": "headless-device-key"]
-                )
-            )
+        let afterReplacement = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 7,
+                name: "DeviceInteractionSynthesize",
+                arguments: ["interactSessionKey": "headless-device-key"]
+            ),
+            requestTimeoutOverride: nil
         )
         guard case .reject(let errors) = afterReplacement else {
             Issue.record("replaced unbound affinity should be rejected")
@@ -238,9 +233,47 @@ struct DeviceInteractionRoutingTests {
         #expect(errors.map(\.message) == ["unknown device interaction session"])
     }
 
-    @Test func headlessUnboundPoolRejectsUnknownSessionInsteadOfGuessing() throws {
+    @Test func serviceWorkspacePathPreservesTheCreatingConnection() async throws {
+        let first = TestUpstreamClient()
+        let owner = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [first, owner], processRoutingEnabled: true, startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let creatingLease = manager.operationLeaseForTest(upstreamIndex: 1)
+        manager.recordDeviceInteractionAffinityIfNeeded(
+            requestData: try requestData(name: "DeviceInteractionStartWorkspaceSession", arguments: ["sessionIdentifier": "test"]),
+            responseData: try successfulToolResponse(structuredContent: ["interactionSessionKey": "device-key"]),
+            operationLease: creatingLease
+        )
+        let request = toolsCallObject(id: 3, name: "DeviceInteractionInstallAndRun", arguments: [
+            "interactionSessionKey": "device-key", "workspaceIdentifier": "/Work/App.xcodeproj"
+        ])
+        let task = Task { await manager.toolRoutingDecision(for: request, requestTimeoutOverride: .seconds(2)) }
+        let lookup = try await owner.nextSent(at: 0)
+        await owner.yield(.message(try makeJSONRPCResponse(
+            id: extractUpstreamID(from: lookup),
+            result: ["structuredContent": ["message": "* workspaceIdentifier: opaque-id, workspacePath: /Work/App.xcodeproj"]]
+        )))
+        let decision = await task.value
+        guard case .forwardAdmitted(let indices, let admission) = decision else {
+            Issue.record("expected the creating Service connection")
+            return
+        }
+        #expect(indices == [1])
+        #expect(admission.upstreamProofs == [creatingLease.proof])
+        #expect(admission.workspaceIdentifier == "opaque-id")
+        #expect(await first.sentCount() == 0)
+    }
+
+    @Test func headlessUnboundPoolRejectsUnknownSessionInsteadOfGuessing() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { try? group.syncShutdownGracefully() }
+        defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
         config.xcodeMode = .headless
         let manager = RuntimeCoordinator(
@@ -252,14 +285,13 @@ struct DeviceInteractionRoutingTests {
         )
         defer { manager.shutdownAndWait() }
 
-        let decision = try #require(
-            manager.immediateToolRoutingDecision(
-                for: toolsCallObject(
-                    id: 8,
-                    name: "DeviceInteractionEndSession",
-                    arguments: ["interactionSessionKey": "external-key"]
-                )
-            )
+        let decision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 8,
+                name: "DeviceInteractionEndSession",
+                arguments: ["interactionSessionKey": "external-key"]
+            ),
+            requestTimeoutOverride: nil
         )
         guard case .reject(let errors) = decision else {
             Issue.record("multi-upstream unbound runtime must not guess a session owner")
@@ -268,9 +300,9 @@ struct DeviceInteractionRoutingTests {
         #expect(errors.map(\.message) == ["unknown device interaction session"])
     }
 
-    @Test func unboundRuntimeLeavesUnknownSessionHandlingToItsOnlyUpstream() throws {
+    @Test func unboundRuntimeLeavesUnknownSessionHandlingToItsOnlyUpstream() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { try? group.syncShutdownGracefully() }
+        defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
         config.xcodeMode = .headless
         let manager = RuntimeCoordinator(
@@ -282,14 +314,13 @@ struct DeviceInteractionRoutingTests {
         )
         defer { manager.shutdownAndWait() }
 
-        let decision = try #require(
-            manager.immediateToolRoutingDecision(
-                for: toolsCallObject(
-                    id: 4,
-                    name: "DeviceInteractionSynthesize",
-                    arguments: ["interactSessionKey": "external-key"]
-                )
-            )
+        let decision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 4,
+                name: "DeviceInteractionSynthesize",
+                arguments: ["interactSessionKey": "external-key"]
+            ),
+            requestTimeoutOverride: nil
         )
         guard case .forward(let preferred) = decision else {
             Issue.record("unbound runtime should preserve upstream handling")

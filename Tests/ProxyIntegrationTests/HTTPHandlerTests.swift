@@ -1427,7 +1427,13 @@ struct HTTPHandlerTests {
         try channel.writeInbound(HTTPServerRequestPart.body(body))
         try channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        #expect(sessionManager.mappedUpstreamRequestCount() == 1)
+        let sendDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while sessionManager.mappedUpstreamRequestCount() == 0 {
+            drainEmbeddedCompletions(for: channel)
+            channel.embeddedEventLoop.run()
+            guard ContinuousClock.now < sendDeadline else { throw AsyncTestTimeoutError(description: "waiting for routed request") }
+            await Task.yield()
+        }
         advanceEventLoopTime(on: channel, by: .milliseconds(300))
 
         let response = try await collectResponse(from: channel)
@@ -1451,7 +1457,6 @@ struct HTTPHandlerTests {
             }
         )
         sessionManager.setInitialized(true)
-        sessionManager.setForceAsyncToolRoutingDecision(true)
         sessionManager.setToolRoutingDecision(.forward(preferredUpstreamIndex: nil))
         let routingStarted = TestSignal()
         let routingGate = AsyncGate()
@@ -1472,7 +1477,7 @@ struct HTTPHandlerTests {
             let payload = toolsCallPayload(
                 id: 2002,
                 name: "BuildProject",
-                arguments: ["workspacePath": "/tmp/Project.xcworkspace"]
+                arguments: ["workspaceIdentifier": "/tmp/Project.xcworkspace"]
             )
             let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
             let operation = service.handle(
@@ -1523,7 +1528,7 @@ struct HTTPHandlerTests {
         let payload = toolsCallPayload(
             id: 2003,
             name: "BuildProject",
-            arguments: ["workspacePath": "/tmp/Project.xcworkspace"]
+            arguments: ["workspaceIdentifier": "/tmp/Project.xcworkspace"]
         )
         let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
 
@@ -2975,6 +2980,7 @@ struct HTTPHandlerTests {
             headerSessionID: sessionID, headerSessionExists: true,
             prefersEventStream: false, eventLoop: group.next()
         )
+        try await manager.waitForSentUpstreamCount(1)
         #expect(session.router.failPending(idKey: "503", error: failure.error))
         let resolution = try await waitWithTimeout("forwarded failure should not await a deadline") {
             try await operation.future.get()

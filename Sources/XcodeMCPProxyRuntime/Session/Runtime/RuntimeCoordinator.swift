@@ -220,7 +220,6 @@ protocol RuntimeToolRoutingPort: Sendable {
         for requestJSON: Any,
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision
-    func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision?
     func preferredUpstreamIndex(for requestJSON: Any) -> Int?
     func primaryUpstreamIndex(forXcodeProcessID processID: pid_t) -> Int?
     func liveXcodeListWindowsResult(
@@ -411,10 +410,6 @@ extension RuntimeToolRoutingPort {
         requestTimeoutOverride _: TimeAmount?
     ) async -> ToolRoutingDecision {
         .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
-    }
-
-    func immediateToolRoutingDecision(for _: Any) -> ToolRoutingDecision? {
-        nil
     }
 
     func preferredUpstreamIndex(for _: Any) -> Int? {

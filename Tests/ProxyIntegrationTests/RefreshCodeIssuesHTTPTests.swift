@@ -2722,7 +2722,7 @@ extension HTTPHandlerTests {
         )
         sessionManager.setInitialized(true)
         sessionManager.setAvailableUpstreamIndices([1])
-        sessionManager.setToolRoutingDecision(.forward(preferredUpstreamIndex: 0))
+        sessionManager.setToolRoutingDecision(.localXcodeListWindows)
 
         let forwardingService = MCPForwardingService(
             configuration: config.runtime,

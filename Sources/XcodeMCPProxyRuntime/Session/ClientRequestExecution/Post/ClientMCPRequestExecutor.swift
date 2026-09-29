@@ -294,7 +294,6 @@ final class ClientMCPRequestExecutor: Sendable {
             break
         }
 
-        let responseID = JSONRPC.Message.Inspector.requestID(from: requestObject)
         switch routeToolCall(
             object: requestObject,
             bodyData: bodyData,
@@ -598,15 +597,6 @@ final class ClientMCPRequestExecutor: Sendable {
                     admission: admission
                 )
             }
-        }
-
-        if let immediateDecision = sessionManager.immediateToolRoutingDecision(
-            for: forwardedRequestJSON
-        ) {
-            return ClientMCPRequestExecutor.Operation(
-                future: route(immediateDecision),
-                cancellationHandle: cancellationHandle
-            )
         }
 
         let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)

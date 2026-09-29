@@ -18,8 +18,11 @@ extension RuntimeCoordinator {
         let id: JSONRPC.ID?
         let toolName: String
         let tabIdentifier: String?
-        let workspacePath: String?
         let workspaceIdentifier: String?
+
+        var workspacePath: String? {
+            workspaceIdentifier.flatMap { $0.hasPrefix("/") ? $0 : nil }
+        }
     }
 
     private struct XcodeListWindowsRoute: Sendable {
@@ -46,7 +49,8 @@ extension RuntimeCoordinator {
 
     func liveXcodeListWindowsAcrossProcessRoutes(
         deadlineUptimeNs: UInt64?,
-        routeScope: XcodeListWindowsRouteScope
+        routeScope: XcodeListWindowsRouteScope,
+        requiresCompleteInventory: Bool = false
     ) async throws -> JSONValue {
         let exposure = processRouteExposure(policy: .windowDiscovery)
         let usableRoutes = exposure.routes.map { routeExposure in
@@ -136,6 +140,12 @@ extension RuntimeCoordinator {
                 }
             }
 
+            if requiresCompleteInventory {
+                if let lastError { throw lastError }
+                if !xcodeWindowOwnerCandidateProcessIDs().isSubset(of: queriedProcessIDs) {
+                    throw UpstreamSlotScheduler.AcquisitionError.unavailable
+                }
+            }
             let orderedRouteResults = results.sorted { $0.ordinal < $1.ordinal }
             recordXcodeWindowOwners(fromOrderedRouteResults: orderedRouteResults)
             let orderedResults = orderedRouteResults.map {
@@ -478,16 +488,6 @@ extension RuntimeCoordinator {
         for requestJSON: Any,
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision {
-        if let immediate = immediateToolRoutingDecision(for: requestJSON) {
-            return immediate
-        }
-        return await ownerBoundToolRoutingDecision(
-            for: requestJSON,
-            requestTimeoutOverride: requestTimeoutOverride
-        )
-    }
-
-    func immediateToolRoutingDecision(for requestJSON: Any) -> ToolRoutingDecision? {
         guard let object = requestJSON as? [String: Any],
               let request = toolRoutingRequest(in: object) else {
             return .forward(preferredUpstreamIndex: nil)
@@ -496,7 +496,44 @@ extension RuntimeCoordinator {
             for: object,
             request: request
         ) {
+            guard config.xcodeMode != .custom else { return affinityDecision }
+            if case .forwardAdmitted(_, let admission) = affinityDecision,
+               admission.route == nil,
+               let path = request.workspacePath,
+               let proof = admission.upstreamProofs.first {
+                return await serviceWorkspacePathRoutingDecision(
+                    for: request, path: path, route: .pinnedUpstream(proof.slotID.rawValue),
+                    expectedUpstreamProof: proof,
+                    deadline: timeoutDeadline(for: requestTimeoutOverride
+                        ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: config.requestTimeout))
+                )
+            }
             return affinityDecision
+        }
+        guard config.xcodeMode != .custom else { return .forward(preferredUpstreamIndex: nil) }
+        if ["XcodeOpenWorkspace", "XcodeCloseWorkspace", "XcodeListWorkspaces"].contains(request.toolName) {
+            guard request.tabIdentifier == nil,
+                  request.toolName != "XcodeCloseWorkspace" || request.workspacePath == nil else {
+                return .reject(errors: toolRoutingErrors(
+                    for: request,
+                    message: "Use the native Service workspaceIdentifier returned by Open or List to close a workspace"
+                ))
+            }
+            return serviceToolRoutingDecision(for: request)
+        }
+        if let identifier = request.workspaceIdentifier, request.workspacePath == nil, !identifier.isEmpty {
+            guard request.tabIdentifier == nil else {
+                return .reject(errors: toolRoutingErrors(
+                    for: request, message: "Specify either a Service workspaceIdentifier or a GUI tabIdentifier"
+                ))
+            }
+            return serviceToolRoutingDecision(for: request)
+        }
+        if let path = request.workspacePath {
+            return await workspacePathRoutingDecision(
+                for: requestJSON, request: request, path: path,
+                requestTimeoutOverride: requestTimeoutOverride
+            )
         }
         guard processRoutingEnabled else {
             return .forward(preferredUpstreamIndex: nil)
@@ -520,7 +557,128 @@ extension RuntimeCoordinator {
             }
             return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
         }
-        return nil
+        return await ownerBoundToolRoutingDecision(
+            for: requestJSON, requestTimeoutOverride: requestTimeoutOverride
+        )
+    }
+
+    private func serviceToolRoutingDecision(for request: ToolRoutingRequest) -> ToolRoutingDecision {
+        guard !defaultBackendUpstreamIndices.isEmpty else {
+            return .reject(errors: toolRoutingErrors(for: request, message: "Xcode Service is not available"))
+        }
+        return .forwardAny(preferredUpstreamIndices: defaultBackendUpstreamIndices.sorted())
+    }
+
+    private func workspacePathRoutingDecision(
+        for requestJSON: Any,
+        request: ToolRoutingRequest,
+        path: String,
+        requestTimeoutOverride: TimeAmount?
+    ) async -> ToolRoutingDecision {
+        let deadline = timeoutDeadline(for: requestTimeoutOverride
+            ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: config.requestTimeout))
+        var resolution = cachedOwnerResolution(for: request)
+        let potentialOwnerProcessIDs = xcodeWindowOwnerCandidateProcessIDs()
+        let hasUnqueriedOwners = !potentialOwnerProcessIDs.isSubset(of: windowOwnershipAuthority.snapshot().inventoriedProcessIDs)
+        let needsDiscovery = switch resolution {
+        case .unresolved: true
+        default: hasUnqueriedOwners && request.tabIdentifier == nil
+        }
+        if needsDiscovery, !potentialOwnerProcessIDs.isEmpty {
+            do {
+                _ = try await refreshXcodeWindowOwnersForRouting(
+                    requestTimeoutOverride: requestTimeoutOverride,
+                    requiresCompleteInventory: true
+                )
+            } catch {
+                return .reject(errors: toolRoutingErrors(
+                    for: request,
+                    message: "Unable to determine GUI workspace ownership: "
+                        + ControlPlane.ErrorMapper.jsonRPCError(for: error).message
+                ))
+            }
+            resolution = cachedOwnerResolution(for: request)
+        }
+        switch resolution {
+        case .resolved, .conflict:
+            return await ownerBoundToolRoutingDecision(
+                for: requestJSON, requestTimeoutOverride: requestTimeoutOverride
+            )
+        case .unresolved:
+            if request.tabIdentifier != nil {
+                return .reject(errors: toolRoutingErrors(for: request, message: "Unable to resolve the selected Xcode tab"))
+            }
+        }
+        return await serviceWorkspacePathRoutingDecision(
+            for: request, path: path, route: .xcodeService, deadline: deadline
+        )
+    }
+
+    private func xcodeWindowOwnerCandidateProcessIDs() -> Set<pid_t> {
+        Set(xcodeProcessRoutes.compactMap { route -> pid_t? in
+            let processID = route.target.processID
+            return processControlPlane.catalog(forProcessID: processID) == nil
+                || processControlPlane.hasTool("XcodeListWindows", processID: processID) ? processID : nil
+        })
+    }
+
+    private func serviceWorkspacePathRoutingDecision(
+        for request: ToolRoutingRequest,
+        path: String,
+        route: ControlPlane.Route,
+        expectedUpstreamProof: UpstreamTopologyProof? = nil,
+        deadline: UInt64?
+    ) async -> ToolRoutingDecision {
+        do {
+            try Task.checkCancellation()
+            if let deadline, nowUptimeNanoseconds() >= deadline { throw TimeoutError() }
+            let response = try await performControlPlaneRPC(
+                route: route, purpose: "workspaces",
+                label: "tools/call:XcodeListWorkspaces",
+                requestObject: JSONRPC.Wire.requestObject(
+                    id: "__control-plane-workspaces-\(UUID().uuidString)", method: "tools/call",
+                    params: .object(["name": .string("XcodeListWorkspaces"), "arguments": .object([:])])
+                ),
+                requestTimeout: timeAmount(until: deadline),
+                expectedUpstreamProof: expectedUpstreamProof
+            )
+            let result = try extractJSONRPCResult(from: response.responseData)
+            guard !Self.xcodeListWindowsIsErrorResult(result),
+                  let message = Self.xcodeListWindowsMessage(in: result) else {
+                return .reject(errors: toolRoutingErrors(
+                    for: request, message: Self.xcodeListWindowsMessage(in: result) ?? "Unable to list Service workspaces"
+                ))
+            }
+            let identifiers = Set(XcodeListWindowsMessageParser.parse(message, identifierKey: "workspaceIdentifier")
+                .filter { $0.workspacePath == path }.map(\.tabIdentifier))
+            guard identifiers.count == 1, let identifier = identifiers.first else {
+                return .reject(errors: toolRoutingErrors(
+                    for: request,
+                    message: identifiers.isEmpty
+                        ? "Workspace '\(path)' is not open in Xcode Service. Use XcodeOpenWorkspace explicitly."
+                        : "Multiple Service workspaces match '\(path)'; select a workspaceIdentifier from XcodeListWorkspaces"
+                ))
+            }
+            let proofs: [UpstreamTopologyProof]
+            if let expectedUpstreamProof {
+                proofs = [expectedUpstreamProof]
+            } else {
+                let topology = upstreamTopology.snapshot()
+                proofs = topology.entries.compactMap { entry in
+                    entry.backend == .xcodeService ? topology.proof(entry.id) : nil
+                }
+            }
+            guard !proofs.isEmpty else { throw UpstreamSlotScheduler.AcquisitionError.unavailable }
+            return .forwardAdmitted(
+                preferredUpstreamIndices: proofs.map { $0.slotID.rawValue },
+                admission: RouteForwardingAdmission(upstreamProofs: proofs, workspaceIdentifier: identifier)
+            )
+        } catch {
+            return .reject(errors: toolRoutingErrors(
+                for: request,
+                message: "Unable to resolve Service workspace: " + ControlPlane.ErrorMapper.jsonRPCError(for: error).message
+            ))
+        }
     }
 
     func recordDeviceInteractionAffinityIfNeeded(
@@ -841,30 +999,23 @@ extension RuntimeCoordinator {
         owners: WindowOwnershipSnapshot
     ) -> OwnerBoundRequestRewritePlan {
         let identities = owners.identities.filter { $0.processID == processID }
-        let rawByProxy = Dictionary(uniqueKeysWithValues: identities.map {
-            ($0.proxyTabIdentifier, $0.rawTabIdentifier)
-        })
-        let byWorkspace = Dictionary(grouping: identities, by: \.workspacePath)
-        let singleRawByWorkspace: [String: String] = byWorkspace.compactMapValues {
-            identities -> String? in
-            guard identities.count == 1 else { return nil }
-            return identities[0].rawTabIdentifier
+        let identity: WindowOwnershipIdentity?
+        if let identifier = request.tabIdentifier, !identifier.isEmpty {
+            identity = identities.first { $0.proxyTabIdentifier == identifier || $0.rawTabIdentifier == identifier }
+        } else if let path = request.workspacePath {
+            identity = identities.first { $0.workspacePath == path }
+        } else {
+            identity = nil
         }
-        let requiringTabIdentifier: Set<String> = processControlPlane.tool(
-            request.toolName,
-            processID: processID,
-            requiresArgument: "tabIdentifier"
-        ) ? [request.toolName] : []
         return OwnerBoundRequestRewritePlan(
-            processID: processID,
-            rawTabIdentifierByProxyIdentifier: rawByProxy,
-            singleRawTabIdentifierByWorkspacePath: singleRawByWorkspace,
-            toolsRequiringTabIdentifier: requiringTabIdentifier
+            tabIdentifier: identity?.rawTabIdentifier ?? request.tabIdentifier,
+            clientTabIdentifier: identity?.proxyTabIdentifier ?? request.tabIdentifier
         )
     }
 
     private func refreshXcodeWindowOwnersForRouting(
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        requiresCompleteInventory: Bool = false
     ) async throws -> JSONValue {
         let timeout =
             requestTimeoutOverride
@@ -875,7 +1026,8 @@ extension RuntimeCoordinator {
         let deadline = timeoutDeadline(for: timeout)
         return try await liveXcodeListWindowsAcrossProcessRoutes(
             deadlineUptimeNs: deadline,
-            routeScope: .ownerDiscovery
+            routeScope: .ownerDiscovery,
+            requiresCompleteInventory: requiresCompleteInventory
         )
     }
 
@@ -1219,40 +1371,25 @@ extension RuntimeCoordinator {
     func rewriteOwnerBoundRequest(
         bodyData: Data,
         parsedRequestJSON: Any,
-        upstreamIndex: Int
-    ) -> (bodyData: Data, parsedRequestJSON: Any) {
-        guard processRoutingEnabled,
-              let processID = processID(forUpstreamIndex: upstreamIndex) else {
-            return (bodyData, parsedRequestJSON)
-        }
-        guard let object = parsedRequestJSON as? [String: Any] else {
-            return (bodyData, parsedRequestJSON)
-        }
-        let rewritten = rewriteOwnerBoundRequestObject(object, processID: processID)
-        guard rewritten.changed else {
-            return (bodyData, parsedRequestJSON)
-        }
-        guard JSONSerialization.isValidJSONObject(rewritten.value),
-              let data = try? JSONSerialization.data(
-                withJSONObject: rewritten.value,
-                options: []
-              ) else {
-            return (bodyData, parsedRequestJSON)
-        }
-        return (data, rewritten.value)
-    }
-
-    func rewriteOwnerBoundRequest(
-        bodyData: Data,
-        parsedRequestJSON: Any,
         operationLease: UpstreamOperationLease,
         admission: RouteForwardingAdmission?
     ) -> (bodyData: Data, parsedRequestJSON: Any) {
         guard upstreamTopology.validate(operationLease),
-              let rewritePlan = admission?.window?.rewritePlan,
               let object = parsedRequestJSON as? [String: Any] else {
             return (bodyData, parsedRequestJSON)
         }
+        if let identifier = admission?.workspaceIdentifier,
+           var params = object["params"] as? [String: Any],
+           var arguments = params["arguments"] as? [String: Any] {
+            arguments["workspaceIdentifier"] = identifier
+            params["arguments"] = arguments
+            var rewritten = object
+            rewritten["params"] = params
+            if let data = try? JSONSerialization.data(withJSONObject: rewritten) {
+                return (data, rewritten)
+            }
+        }
+        guard let rewritePlan = admission?.window?.rewritePlan else { return (bodyData, parsedRequestJSON) }
         let rewritten = rewriteOwnerBoundRequestObject(object, plan: rewritePlan)
         guard rewritten.changed,
               JSONSerialization.isValidJSONObject(rewritten.value),
@@ -1271,97 +1408,18 @@ extension RuntimeCoordinator {
     ) -> (value: [String: Any], changed: Bool) {
         guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
               var params = object["params"] as? [String: Any],
-              let toolName = params["name"] as? String,
+              params["name"] is String,
               var arguments = params["arguments"] as? [String: Any] else {
             return (object, false)
         }
 
-        var rawTabIdentifier: String?
-        if let proxyIdentifier = arguments["tabIdentifier"] as? String,
-           proxyIdentifier.isEmpty == false {
-            rawTabIdentifier = plan.rawTabIdentifierByProxyIdentifier[proxyIdentifier]
-        } else if let workspacePath = arguments["workspacePath"] as? String,
-                  workspacePath.isEmpty == false,
-                  plan.toolsRequiringTabIdentifier.contains(toolName) {
-            rawTabIdentifier = plan.singleRawTabIdentifierByWorkspacePath[workspacePath]
-        }
-        guard let rawTabIdentifier,
-              arguments["tabIdentifier"] as? String != rawTabIdentifier else {
-            return (object, false)
-        }
+        guard let rawTabIdentifier = plan.tabIdentifier else { return (object, false) }
+        arguments.removeValue(forKey: "workspaceIdentifier")
         arguments["tabIdentifier"] = rawTabIdentifier
         params["arguments"] = arguments
         var rewritten = object
         rewritten["params"] = params
         return (rewritten, true)
-    }
-
-    private func rewriteOwnerBoundRequestObject(
-        _ object: [String: Any],
-        processID: pid_t
-    ) -> (value: [String: Any], changed: Bool) {
-        guard JSONRPC.Message.Inspector.method(from: object) == "tools/call",
-              var params = object["params"] as? [String: Any],
-              let toolName = params["name"] as? String,
-              var arguments = params["arguments"] as? [String: Any] else {
-            return (object, false)
-        }
-        var changed = false
-
-        if let tabIdentifier = arguments["tabIdentifier"] as? String,
-           tabIdentifier.isEmpty == false,
-           let rawTabIdentifier = rawTabIdentifierForForwarding(
-            tabIdentifier: tabIdentifier,
-            processID: processID
-           ),
-           rawTabIdentifier != tabIdentifier {
-            arguments["tabIdentifier"] = rawTabIdentifier
-            changed = true
-        } else if (arguments["tabIdentifier"] as? String)?.isEmpty ?? true,
-                  let workspacePath = arguments["workspacePath"] as? String,
-                  workspacePath.isEmpty == false,
-                  processControlPlane.tool(
-                    toolName,
-                    processID: processID,
-                    requiresArgument: "tabIdentifier"
-                  ),
-                  let rawTabIdentifier = singleRawTabIdentifier(
-                    workspacePath: workspacePath,
-                    processID: processID
-                  ) {
-            arguments["tabIdentifier"] = rawTabIdentifier
-            changed = true
-        }
-
-        guard changed else {
-            return (object, false)
-        }
-        params["arguments"] = arguments
-        var rewritten = object
-        rewritten["params"] = params
-        return (rewritten, true)
-    }
-
-    private func rawTabIdentifierForForwarding(
-        tabIdentifier: String,
-        processID: pid_t
-    ) -> String? {
-        let index = windowOwnershipAuthority.snapshot()
-        guard let identity = index.identity(forProxyTabIdentifier: tabIdentifier),
-              identity.processID == processID else { return nil }
-        return identity.rawTabIdentifier
-    }
-
-    private func singleRawTabIdentifier(
-        workspacePath: String,
-        processID: pid_t
-    ) -> String? {
-        let identities = windowOwnershipAuthority.snapshot().identities(
-            workspacePath: workspacePath,
-            processID: processID
-        )
-        guard identities.count == 1 else { return nil }
-        return identities[0].rawTabIdentifier
     }
 
     private func preferredUpstreamIndex(in object: [String: Any]) -> Int? {
@@ -1377,7 +1435,7 @@ extension RuntimeCoordinator {
         let tabIdentifier = (arguments["tabIdentifier"] as? String).flatMap {
             $0.isEmpty ? nil : $0
         }
-        let workspacePath = (arguments["workspacePath"] as? String).flatMap {
+        let workspacePath = (arguments["workspaceIdentifier"] as? String).flatMap {
             $0.isEmpty ? nil : $0
         }
         guard tabIdentifier != nil || workspacePath != nil,
@@ -1403,8 +1461,7 @@ extension RuntimeCoordinator {
         return ToolRoutingRequest(
             id: JSONRPC.Message.Inspector.requestID(from: object),
             toolName: toolName,
-            tabIdentifier: arguments["tabIdentifier"] as? String,
-            workspacePath: arguments["workspacePath"] as? String,
+            tabIdentifier: (arguments["tabIdentifier"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             workspaceIdentifier: arguments["workspaceIdentifier"] as? String
         )
     }

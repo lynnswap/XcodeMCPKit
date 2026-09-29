@@ -505,7 +505,7 @@ struct RuntimeCoordinatorWindowCatalogTests {
                 name: "BuildProject",
                 arguments: [
                     "tabIdentifier": "windowtab1",
-                    "workspacePath": "/Work/B.xcworkspace",
+                "workspaceIdentifier": "/Work/B.xcworkspace",
                 ]
             ),
             requestTimeoutOverride: .seconds(2)
@@ -563,7 +563,7 @@ struct RuntimeCoordinatorWindowCatalogTests {
                     name: "BuildProject",
                     arguments: [
                         "tabIdentifier": "windowtab1",
-                        "workspacePath": "/Work/Other.xcworkspace",
+                    "workspaceIdentifier": "/Work/Other.xcworkspace",
                     ]
                 )
             ) == nil
@@ -599,7 +599,7 @@ struct RuntimeCoordinatorWindowCatalogTests {
                             name: "BuildProject",
                             inputProperties: [
                                 "tabIdentifier": ["type": "string"],
-                                "workspacePath": ["type": "string"],
+                            "workspaceIdentifier": ["type": "string"],
                             ],
                             required: ["tabIdentifier"]
                         ),
@@ -643,26 +643,42 @@ struct RuntimeCoordinatorWindowCatalogTests {
             arguments: ["tabIdentifier": proxyTab]
         )
         let proxyTabData = try JSONSerialization.data(withJSONObject: proxyTabRequest, options: [])
+    let proxyTabDecision = await manager.toolRoutingDecision(
+        for: proxyTabRequest, requestTimeoutOverride: .seconds(2)
+    )
+    guard case .forwardAdmitted(_, let proxyTabAdmission) = proxyTabDecision else {
+        Issue.record("expected admitted GUI route")
+        return
+    }
         let rewrittenProxyTab = manager.rewriteOwnerBoundRequest(
             bodyData: proxyTabData,
             parsedRequestJSON: proxyTabRequest,
-            upstreamIndex: 0
+        operationLease: manager.operationLeaseForTest(upstreamIndex: 0),
+        admission: proxyTabAdmission
         )
         #expect(tabIdentifier(in: rewrittenProxyTab.bodyData) == "tab-a")
 
         let workspaceOnlyRequest = toolsCallObject(
             id: 9304,
             name: "BuildProject",
-            arguments: ["workspacePath": "/Work/A.xcworkspace"]
+        arguments: ["workspaceIdentifier": "/Work/A.xcworkspace"]
         )
         let workspaceOnlyData = try JSONSerialization.data(
             withJSONObject: workspaceOnlyRequest,
             options: []
         )
+    let workspaceOnlyDecision = await manager.toolRoutingDecision(
+        for: workspaceOnlyRequest, requestTimeoutOverride: .seconds(2)
+    )
+    guard case .forwardAdmitted(_, let workspaceOnlyAdmission) = workspaceOnlyDecision else {
+        Issue.record("expected admitted GUI route")
+        return
+    }
         let rewrittenWorkspaceOnly = manager.rewriteOwnerBoundRequest(
             bodyData: workspaceOnlyData,
             parsedRequestJSON: workspaceOnlyRequest,
-            upstreamIndex: 0
+        operationLease: manager.operationLeaseForTest(upstreamIndex: 0),
+        admission: workspaceOnlyAdmission
         )
         #expect(tabIdentifier(in: rewrittenWorkspaceOnly.bodyData) == "tab-a")
 
@@ -671,17 +687,25 @@ struct RuntimeCoordinatorWindowCatalogTests {
             name: "BuildProject",
             arguments: [
                 "tabIdentifier": "",
-                "workspacePath": "/Work/A.xcworkspace",
+            "workspaceIdentifier": "/Work/A.xcworkspace",
             ]
         )
         let emptyTabWorkspaceData = try JSONSerialization.data(
             withJSONObject: emptyTabWorkspaceRequest,
             options: []
         )
+    let emptyTabWorkspaceDecision = await manager.toolRoutingDecision(
+        for: emptyTabWorkspaceRequest, requestTimeoutOverride: .seconds(2)
+    )
+    guard case .forwardAdmitted(_, let emptyTabWorkspaceAdmission) = emptyTabWorkspaceDecision else {
+        Issue.record("expected admitted GUI route")
+        return
+    }
         let rewrittenEmptyTabWorkspace = manager.rewriteOwnerBoundRequest(
             bodyData: emptyTabWorkspaceData,
             parsedRequestJSON: emptyTabWorkspaceRequest,
-            upstreamIndex: 0
+        operationLease: manager.operationLeaseForTest(upstreamIndex: 0),
+        admission: emptyTabWorkspaceAdmission
         )
         #expect(tabIdentifier(in: rewrittenEmptyTabWorkspace.bodyData) == "tab-a")
 
@@ -1161,17 +1185,16 @@ struct RuntimeCoordinatorWindowCatalogTests {
             ]
         )
 
-        let decision = try #require(
-            manager.immediateToolRoutingDecision(
-                for: [
-                    "jsonrpc": "2.0",
-                    "id": 110,
-                    "method": "tools/call",
-                    "params": [
-                        "name": "Xcode27OnlyTool"
-                    ],
-                ]
-            )
+    let decision = await manager.toolRoutingDecision(
+            for: [
+                "jsonrpc": "2.0",
+                "id": 110,
+                "method": "tools/call",
+                "params": [
+                    "name": "Xcode27OnlyTool"
+                ],
+            ],
+            requestTimeoutOverride: nil
         )
 
         let preferredUpstreamIndices = try #require(decision.preferredUpstreamIndices)
@@ -1205,14 +1228,13 @@ struct RuntimeCoordinatorWindowCatalogTests {
             ]
         )
 
-        let decision = try #require(
-            manager.immediateToolRoutingDecision(
-                for: toolsCallObject(
-                    id: 118,
-                    name: "XcodeListWindows",
-                    arguments: [:]
-                )
-            )
+        let decision = await manager.toolRoutingDecision(
+            for: toolsCallObject(
+                id: 118,
+                name: "XcodeListWindows",
+                arguments: [:]
+            ),
+            requestTimeoutOverride: nil
         )
 
         guard case .localXcodeListWindows = decision else {

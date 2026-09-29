@@ -110,10 +110,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
         await manager.drainRuntimeTasksForTesting()
         #expect(await gui.sentCount() == 0)
         #expect(manager.unavailableXcodeProcessIDs().contains(target.processID))
-        let docs = manager.immediateToolRoutingDecision(for: toolsCallObject(
+        let docs = await manager.toolRoutingDecision(for: toolsCallObject(
             id: 127, name: "DocumentationSearch", arguments: ["query": "SwiftUI"]
-        ))
-        #expect(docs?.preferredUpstreamIndices == [0])
+        ), requestTimeoutOverride: nil)
+        #expect(docs.preferredUpstreamIndices == [0])
     }
 
     @Test func automaticKeepsHeadlessCatalogWhenGUIProcessStartsAndExits() async throws {
@@ -2526,7 +2526,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             for: toolsCallObject(
                 id: 27017,
                 name: "BuildProject",
-                arguments: ["workspacePath": secondWorkspacePath]
+                arguments: ["workspaceIdentifier": secondWorkspacePath]
             ),
             requestTimeoutOverride: .seconds(2)
         )

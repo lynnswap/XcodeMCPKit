@@ -43,6 +43,7 @@ struct WindowOwnershipSnapshot: Sendable {
 
     let epoch: WindowEpoch
     let identities: [WindowOwnershipIdentity]
+    let inventoriedProcessIDs: Set<pid_t>
 
     func identity(forProxyTabIdentifier identifier: String) -> WindowOwnershipIdentity? {
         identities.first { $0.proxyTabIdentifier == identifier }
@@ -107,6 +108,7 @@ final class WindowOwnershipAuthority: Sendable {
     private struct State: Sendable {
         var epoch = WindowEpoch(rawValue: 0)
         var identities: [WindowOwnershipIdentity] = []
+        var inventoriedProcessIDs: Set<pid_t> = []
     }
 
     private let state = NIOLockedValueBox(State())
@@ -127,7 +129,8 @@ final class WindowOwnershipAuthority: Sendable {
             let next = Self.normalized(
                 state.identities.filter { $0.processID != processID } + replacement
             )
-            guard next != state.identities else {
+            let newInventory = state.inventoriedProcessIDs.insert(processID).inserted
+            guard next != state.identities || newInventory else {
                 return WindowTransition(epoch: state.epoch, didChange: false)
             }
             state.identities = next
@@ -157,7 +160,9 @@ final class WindowOwnershipAuthority: Sendable {
                 }
             }
             next = Self.normalized(next)
-            guard next != state.identities else {
+            let newInventory = !replacedProcessIDs.isSubset(of: state.inventoriedProcessIDs)
+            state.inventoriedProcessIDs.formUnion(replacedProcessIDs)
+            guard next != state.identities || newInventory else {
                 return WindowTransition(epoch: state.epoch, didChange: false)
             }
             state.identities = next
@@ -170,7 +175,8 @@ final class WindowOwnershipAuthority: Sendable {
     func remove(processID: pid_t) -> WindowTransition {
         state.withLockedValue { state in
             let next = state.identities.filter { $0.processID != processID }
-            guard next != state.identities else {
+            let removedInventory = state.inventoriedProcessIDs.remove(processID) != nil
+            guard next != state.identities || removedInventory else {
                 return WindowTransition(epoch: state.epoch, didChange: false)
             }
             state.identities = next
@@ -182,10 +188,11 @@ final class WindowOwnershipAuthority: Sendable {
     @discardableResult
     func removeAll() -> WindowTransition {
         state.withLockedValue { state in
-            guard state.identities.isEmpty == false else {
+            guard !state.identities.isEmpty || !state.inventoriedProcessIDs.isEmpty else {
                 return WindowTransition(epoch: state.epoch, didChange: false)
             }
             state.identities.removeAll()
+            state.inventoriedProcessIDs.removeAll()
             state.epoch = WindowEpoch(rawValue: state.epoch.rawValue &+ 1)
             return WindowTransition(epoch: state.epoch, didChange: true)
         }
@@ -193,7 +200,7 @@ final class WindowOwnershipAuthority: Sendable {
 
     func snapshot() -> WindowOwnershipSnapshot {
         state.withLockedValue {
-            WindowOwnershipSnapshot(epoch: $0.epoch, identities: $0.identities)
+            WindowOwnershipSnapshot(epoch: $0.epoch, identities: $0.identities, inventoriedProcessIDs: $0.inventoriedProcessIDs)
         }
     }
 
@@ -289,7 +296,11 @@ struct WindowRoutingResolver {
 
         if let workspacePath {
             let workspaceIdentities = owners.identities.filter {
-                $0.workspacePath == workspacePath && eligibleProcessIDs.contains($0.processID)
+                $0.workspacePath == workspacePath
+            }
+            if tabIdentifier == nil, workspaceIdentities.count > 1 {
+                let candidates = workspaceIdentities.map(\.proxyTabIdentifier).sorted().joined(separator: ", ")
+                return .conflict("conflicting Xcode window owners for workspaceIdentifier '\(workspacePath)' (select tabIdentifier: \(candidates))")
             }
             let processIDs = Set(workspaceIdentities.map(\.processID))
             switch processIDs.count {
@@ -319,17 +330,19 @@ struct WindowRoutingResolver {
                         )
                     }
                 }
-                guard let routeProof = proof(processID: processID) else { return .unresolved }
+                guard let routeProof = proof(processID: processID) else {
+                    return .conflict("The Xcode process owning workspaceIdentifier '\(workspacePath)' is unavailable")
+                }
                 return .resolved(
                     processID: processID,
                     ownerLabel: workspacePath,
                     proof: routeProof
                 )
             default:
-                let candidates = processIDs.map(String.init).sorted().joined(separator: ",")
+                let candidates = workspaceIdentities.map(\.proxyTabIdentifier).sorted().joined(separator: ", ")
                 return .conflict(
-                    "conflicting Xcode window owners for workspacePath '\(workspacePath)'"
-                        + " (processes: \(candidates))"
+                    "conflicting Xcode window owners for workspaceIdentifier '\(workspacePath)'"
+                        + " (select tabIdentifier: \(candidates))"
                 )
             }
         }
@@ -337,7 +350,7 @@ struct WindowRoutingResolver {
         guard let tabIdentifier else { return .unresolved }
         let rawIdentities = owners.identities(
             forRawTabIdentifier: tabIdentifier,
-            eligibleProcessIDs: eligibleProcessIDs
+            eligibleProcessIDs: Set(owners.identities.map(\.processID))
         )
         switch rawIdentities.count {
         case 0:
