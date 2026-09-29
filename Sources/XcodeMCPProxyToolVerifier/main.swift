@@ -602,7 +602,7 @@ private struct ProxyToolVerifier {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(catalog).write(to: url, options: [.atomic])
-        print("Headless tool catalog: \(url.path)")
+        print("Tool catalog: \(url.path)")
     }
 
     private func printReport(_ report: VerificationReport) {
