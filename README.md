@@ -134,10 +134,9 @@ xcode-mcp-proxy --help
 |--------|-------------|
 | `--listen host:port` | Listen address. Defaults to `localhost:8765`. |
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. |
-| `--upstream-processes n` | Bridge count per GUI Xcode and the size of the Service/custom pool. Automatic mode maintains both GUI and enabled Service pools. Default: `1`, max: `10`. |
+| `--upstream-processes n` | Bridge count per GUI Xcode and the size of the enabled Xcode Service pool. Default: `1`, max: `10`. |
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialize still has a bounded handshake timeout. |
 | `--config path` | TOML config path. |
-| `--xcode-mode automatic|gui|headless` | Select Xcode routing. `automatic` (default) keeps enabled Xcode Service available alongside GUI Xcode processes. `headless` fails instead of falling back. |
 | `--auto-approve` | Automatically approve Xcode MCP connection dialogs for all agents, including direct connections outside the proxy. Requires Accessibility permission. |
 | `--refresh-code-issues-mode proxy|upstream` | Serve `XcodeRefreshCodeIssuesInFile` through proxy diagnostics (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`). |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port and start a new one. |
@@ -148,14 +147,22 @@ xcode-mcp-proxy --help
 |----------|-------------|
 | `LISTEN` | Listen address, for example `127.0.0.1:8765`. |
 | `HOST` / `PORT` | Listen host and port when `LISTEN` is unset. |
-| `MCP_XCODE_PID` | Set by the proxy on GUI process-bound upstream `mcpbridge` children. Automatic and headless routing remove inherited values from Service bridge children. Custom and GUI fallback upstreams pass inherited values through. |
-| `MCP_XCODE_SESSION_ID` | Optional explicit upstream Xcode MCP session ID. |
 | `MCP_XCODE_CONFIG` | TOML config path. `--config` takes precedence. |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream`. |
 | `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, or `critical`. Defaults to `info`; `debug` includes HTTP access and route-recovery telemetry. |
 | `XCODE_MCP_PROXY_ENDPOINT` | STDIO adapter upstream URL. `--url` takes precedence. |
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
 | `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root used to derive the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
+
+The proxy discovers GUI Xcode processes and includes Xcode Service when the
+selected Xcode provides it and access is enabled. Workspace arguments select the
+owner for each request; no server-wide mode, PID, Apple session ID, or custom
+bridge command is required. Inherited `MCP_XCODE_PID` and
+`MCP_XCODE_SESSION_ID` are removed before launching bridge children; the proxy
+sets a GUI child's PID from its discovered owner.
+
+See [automatic routing migration](Docs/automatic-routing-migration.md) for
+removed CLI flags and embedding symbols.
 
 ### TOML Configuration
 

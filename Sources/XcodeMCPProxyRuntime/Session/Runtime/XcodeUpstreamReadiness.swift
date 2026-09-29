@@ -2,17 +2,13 @@ import Foundation
 import XcodeMCPCore
 
 extension UpstreamReadinessGate {
-    /// The live gate for the stock xcrun mcpbridge upstream: hold
-    /// initialization until an Xcode process is available.
-    /// Any other upstream invocation gets the always-ready gate.
+    /// Service connections can initialize without a GUI process. Otherwise wait for Xcode.
     static func liveDefault(
         config: ProxyRuntimeConfiguration,
         clock: ClockClient,
         processEventMonitor: any XcodeProcessEventMonitoring
     ) -> UpstreamReadinessGate {
-        guard config.xcodeMode == .gui,
-            XcrunArguments.isDefaultMCPBridgeInvocation(config: config)
-        else {
+        guard !config.includesXcodeService else {
             return .alwaysReady()
         }
 

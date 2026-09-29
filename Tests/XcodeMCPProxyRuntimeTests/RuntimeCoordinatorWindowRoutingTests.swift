@@ -549,7 +549,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
 
         let task = Task {
             try await manager.liveXcodeListWindowsResult(
-                route: .anyHealthy,
+                route: .pinnedUpstream(0),
                 requestTimeoutOverride: .seconds(5)
             )
         }
@@ -605,7 +605,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
 
         let firstTask = Task {
             try await manager.liveXcodeListWindowsResult(
-                route: .anyHealthy,
+                route: .pinnedUpstream(0),
                 requestTimeoutOverride: .seconds(5)
             )
         }
@@ -618,14 +618,14 @@ struct RuntimeCoordinatorWindowRoutingTests {
             }
         }
         let firstLoad = try #require(
-            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .anyHealthy)
+            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .pinnedUpstream(0))
         )
 
         clocks.uptimeClock.advance(by: .nanoseconds(120_000_001))
 
         let secondTask = Task {
             try await manager.liveXcodeListWindowsResult(
-                route: .anyHealthy,
+                route: .pinnedUpstream(0),
                 requestTimeoutOverride: .seconds(5)
             )
         }
@@ -637,7 +637,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
             }
         }
         let promotedLoad = try #require(
-            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .anyHealthy)
+            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .pinnedUpstream(0))
         )
         #expect(promotedLoad.loadID != firstLoad.loadID)
         #expect(promotedLoad.waiterCount == 2)
@@ -658,7 +658,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
             }
         }
         let remainingLoad = try #require(
-            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .anyHealthy)
+            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .pinnedUpstream(0))
         )
         #expect(remainingLoad.loadID == promotedLoad.loadID)
         #expect(remainingLoad.waiterCount == 1)
@@ -679,7 +679,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
             }
         }
         #expect(
-            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .anyHealthy)?
+            await manager.controlPlaneCoordinator.windowLoadSnapshotForTesting(route: .pinnedUpstream(0))?
                 .loadID == nil
         )
         #expect(promotedLoad.rpcHandle.isCancelled())
@@ -715,7 +715,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
 
         let task = Task {
             try await manager.liveXcodeListWindowsResult(
-                route: .anyHealthy,
+                route: .pinnedUpstream(0),
                 requestTimeoutOverride: .seconds(5)
             )
         }
@@ -1040,7 +1040,6 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 5),
             upstreams: [initial],
-            processRoutingEnabled: false,
             unboundUpstreamFactory: {
                 replacement
             },
@@ -1536,7 +1535,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         _ = try await init2.get()
     }
 
-    @Test func sessionManagerPrimaryEagerRetryClearsCanonicalToolsCatalog() async throws {
+    @Test func sessionManagerPrimaryEagerRetryPreservesHealthyCanonicalToolsCatalog() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -1561,7 +1560,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
 
         manager.startPrimaryEagerRetry()
 
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.cachedToolsListResult() != nil)
     }
 
     @Test func sessionManagerKeepsQueuedRequestsWaitingWhileReinitializeIsInFlight() async throws {

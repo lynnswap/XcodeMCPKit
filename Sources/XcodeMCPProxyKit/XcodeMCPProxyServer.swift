@@ -13,19 +13,6 @@ import XcodeMCPProxyRuntime
 /// `XcodeMCPProxyKit`. Lower-level parser, discovery, filesystem, and
 /// session-routing types stay internal to the targets that own them.
 public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
-    /// Policy for selecting GUI Xcode routing or Xcode's headless MCP service.
-    public enum XcodeMode: String, Equatable, Sendable {
-        /// Use headless Xcode MCP when the selected Xcode supports it and it is
-        /// enabled; otherwise preserve GUI Xcode routing.
-        case automatic
-
-        /// Route through running GUI Xcode processes.
-        case gui
-
-        /// Require Xcode's headless MCP service.
-        case headless
-    }
-
     /// Address that the Streamable HTTP server binds.
     public struct BindAddress: Equatable, Sendable {
         /// Hostname or IP address for the server socket.
@@ -45,55 +32,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         /// Creates a loopback bind address.
         public static func localhost(port: Int = 8765) -> Self {
             Self(host: "localhost", port: port)
-        }
-    }
-
-    /// Upstream `mcpbridge` process policy.
-    ///
-    /// `processesPerXcode` is the number of process-bound bridges for each GUI
-    /// Xcode process. Headless and custom unbound routing use the same value as
-    /// the total bridge-pool size.
-    public enum Upstream: Equatable, Sendable {
-        /// Use Xcode's default `xcrun mcpbridge` invocation.
-        case defaultMCPBridge(processesPerXcode: Int = 1, sessionID: String? = nil)
-
-        /// Use an explicit upstream command and arguments.
-        case custom(
-            command: String,
-            arguments: [String],
-            processesPerXcode: Int = 1,
-            sessionID: String? = nil
-        )
-
-        var invocation: MCPBridgeInvocation {
-            switch self {
-            case .defaultMCPBridge:
-                return .defaultMCPBridge
-            case .custom(let command, let arguments, _, _):
-                return MCPBridgeInvocation(command: command, arguments: arguments)
-            }
-        }
-
-        var command: String {
-            invocation.command
-        }
-
-        var arguments: [String] {
-            invocation.arguments
-        }
-
-        var processesPerXcode: Int {
-            switch self {
-            case .defaultMCPBridge(let count, _), .custom(_, _, let count, _):
-                return count
-            }
-        }
-
-        var sessionID: String? {
-            switch self {
-            case .defaultMCPBridge(_, let sessionID), .custom(_, _, _, let sessionID):
-                return sessionID
-            }
         }
     }
 
@@ -218,8 +156,10 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// HTTP bind address.
     public var bindAddress: BindAddress
 
-    /// Upstream bridge process policy.
-    public var upstream: Upstream
+    /// Number of bridge connections for each GUI Xcode process and for enabled Xcode Service.
+    ///
+    /// The default is `1`. Starting the server requires a value in `1...10`.
+    public var upstreamProcessCount: Int
 
     /// Maximum accepted HTTP request body size in bytes.
     public var maxBodyBytes: Int
@@ -253,14 +193,11 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Optional proxy feature policy.
     public var featurePolicy: FeaturePolicy
 
-    /// Policy used to select GUI or headless Xcode MCP routing at startup.
-    public var xcodeMode: XcodeMode
-
     /// Creates a public proxy server configuration.
     ///
     /// - Parameters:
     ///   - bindAddress: HTTP bind address.
-    ///   - upstream: Upstream bridge process policy.
+    ///   - upstreamProcessCount: Bridge connections per GUI Xcode and Xcode Service, in `1...10`.
     ///   - maxBodyBytes: Maximum accepted HTTP request body size.
     ///   - requestTimeout: Request timeout, or `nil` to disable it.
     ///   - configurationFileURL: Optional TOML configuration file URL.
@@ -269,10 +206,9 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///   - featurePolicy: Optional proxy feature policy.
     ///   - toolPolicy: Explicit tool visibility policy.
     ///   - initializeHandshake: Explicit upstream initialize handshake override.
-    ///   - xcodeMode: GUI/headless selection policy for the stock upstream.
     public init(
         bindAddress: BindAddress = .localhost(),
-        upstream: Upstream = .defaultMCPBridge(),
+        upstreamProcessCount: Int = 1,
         maxBodyBytes: Int = 1_048_576,
         requestTimeout: Duration? = .seconds(300),
         configurationFileURL: URL? = nil,
@@ -280,11 +216,10 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         initializeHandshake: InitializeHandshake? = nil,
         discovery: Discovery = .defaultLocation,
         approvalPolicy: ApprovalPolicy = .manual,
-        featurePolicy: FeaturePolicy = .default,
-        xcodeMode: XcodeMode = .automatic
+        featurePolicy: FeaturePolicy = .default
     ) {
         self.bindAddress = bindAddress
-        self.upstream = upstream
+        self.upstreamProcessCount = upstreamProcessCount
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
         self.configurationFileURL = configurationFileURL
@@ -293,7 +228,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         self.discovery = discovery
         self.approvalPolicy = approvalPolicy
         self.featurePolicy = featurePolicy
-        self.xcodeMode = xcodeMode
     }
 
     init(serverProxyConfig proxyConfig: ProxyConfig) {
@@ -302,17 +236,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
                 host: proxyConfig.listenHost,
                 port: proxyConfig.listenPort
             ),
-            upstream: proxyConfig.upstreamKind == .stockMCPBridge
-                ? .defaultMCPBridge(
-                    processesPerXcode: proxyConfig.upstreamProcessCount,
-                    sessionID: proxyConfig.upstreamSessionID
-                )
-                : .custom(
-                    command: proxyConfig.upstreamCommand,
-                    arguments: proxyConfig.upstreamArgs,
-                    processesPerXcode: proxyConfig.upstreamProcessCount,
-                    sessionID: proxyConfig.upstreamSessionID
-                ),
+            upstreamProcessCount: proxyConfig.upstreamProcessCount,
             maxBodyBytes: proxyConfig.maxBodyBytes,
             requestTimeout: proxyConfig.requestTimeout > 0
                 ? .seconds(proxyConfig.requestTimeout)
@@ -325,17 +249,12 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
             featurePolicy: FeaturePolicy(
                 prewarmToolsList: proxyConfig.prewarmToolsList,
                 refreshCodeIssuesMode: RefreshCodeIssuesMode(proxyConfig.refreshCodeIssuesMode)
-            ),
-            xcodeMode: XcodeMode(proxyConfig.xcodeMode)
+            )
         )
     }
 
     var listenHost: String { bindAddress.host }
     var listenPort: Int { bindAddress.port }
-    var upstreamCommand: String { upstream.command }
-    var upstreamArguments: [String] { upstream.arguments }
-    var upstreamProcessCount: Int { upstream.processesPerXcode }
-    var upstreamSessionID: String? { upstream.sessionID }
     var configPath: String? { configurationFileURL?.path }
     var prewarmToolsList: Bool { featurePolicy.prewarmToolsList }
     var autoApproveXcodeDialog: Bool { approvalPolicy == .automatic }
@@ -343,14 +262,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         featurePolicy.refreshCodeIssuesMode
     }
 
-    var upstreamKind: ProxyConfig.UpstreamKind {
-        switch upstream {
-        case .defaultMCPBridge:
-            return .stockMCPBridge
-        case .custom:
-            return .custom
-        }
-    }
 }
 
 /// Embeddable Streamable HTTP proxy server for Xcode MCP.
@@ -539,7 +450,7 @@ public final class XcodeMCPProxyServer: Sendable {
         var processID: @Sendable () -> Int
         var loadFileConfiguration:
             @Sendable (URL) throws -> ProxyConfig.File.LoadedConfiguration
-        var headlessMCPAvailability:
+        var xcodeServiceAvailability:
             @Sendable () async throws -> XcodeMCPServerAvailability
         var makeAutoApprover:
             @Sendable (ProxyConfig, any ProxyRuntimeServing) -> any ProxyServerPermissionDialogAutoApprover
@@ -561,7 +472,7 @@ public final class XcodeMCPProxyServer: Sendable {
                 ProxyConfig.File.LoadedConfiguration = {
                     try ProxyConfig.File.Loader.loadStrict(configURL: $0)
                 },
-            headlessMCPAvailability: @escaping @Sendable () async throws ->
+            xcodeServiceAvailability: @escaping @Sendable () async throws ->
                 XcodeMCPServerAvailability = {
                     .unavailable
                 },
@@ -586,7 +497,7 @@ public final class XcodeMCPProxyServer: Sendable {
             self.executableLookupClient = executableLookupClient
             self.processID = processID
             self.loadFileConfiguration = loadFileConfiguration
-            self.headlessMCPAvailability = headlessMCPAvailability
+            self.xcodeServiceAvailability = xcodeServiceAvailability
             self.makeAutoApprover = makeAutoApprover
             self.makeRuntime = makeRuntime
             self.makeHTTPGateway = makeHTTPGateway
@@ -597,12 +508,11 @@ public final class XcodeMCPProxyServer: Sendable {
             let statusClient = XcodeMCPServerStatusClient()
             return Self(
                 executableLookupClient: executableLookupClient,
-                headlessMCPAvailability: {
+                xcodeServiceAvailability: {
                     try await statusClient.availability()
                 },
                 makeAutoApprover: { config, runtime in
                     let additionalCandidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(
-                        config: config,
                         executableLookupClient: executableLookupClient
                     )
                     return XcodePermissionDialogAutomation.AutoApprover(
@@ -740,17 +650,13 @@ public final class XcodeMCPProxyServer: Sendable {
         displayHost: String,
         port: Int,
         config: ProxyConfig,
-        xcodeMode: ProxyRuntimeConfiguration.XcodeMode,
+        includesXcodeService: Bool,
         upstreamProcessCount: Int,
         xcodeTargets: [ProxyRuntimeInventorySnapshot.XcodeTarget]
     ) -> String {
-        let runtimeConfiguration = config.runtimeConfiguration(xcodeMode: xcodeMode)
+        let runtimeConfiguration = config.runtimeConfiguration(includesXcodeService: includesXcodeService)
         let upstreamsPerXcode = max(1, min(config.upstreamProcessCount, 10))
-        let processRoutingActive =
-            xcodeTargets.isEmpty == false
-            && ProxyRuntime.supportsProcessBoundRouting(
-                configuration: runtimeConfiguration
-            )
+        let processRoutingActive = !xcodeTargets.isEmpty
         var lines = [
             "\(productMetadata.name) \(productMetadata.version)",
             "",
@@ -768,16 +674,10 @@ public final class XcodeMCPProxyServer: Sendable {
             )
         }
 
-        if xcodeMode == .headless {
-            lines.append("  Mode: headless")
-            lines.append("  Status: Xcode Service")
-        } else {
-            if xcodeMode == .automatic {
-                lines.append("  Mode: automatic")
-                lines.append("  Service: Xcode Service")
-            }
-            appendGUIXcodeStatus(xcodeTargets, to: &lines)
+        if includesXcodeService {
+            lines.append("  Service: Xcode Service")
         }
+        appendGUIXcodeStatus(xcodeTargets, to: &lines)
 
         lines.append(
             "  DocumentationSearch: \(documentationSearchStartupStatus(config: runtimeConfiguration))"
@@ -791,7 +691,7 @@ public final class XcodeMCPProxyServer: Sendable {
     ) {
         switch xcodeTargets.count {
         case 0:
-            lines.append("  Status: not detected")
+            lines.append("  GUI: not detected")
         case 1:
             if let target = xcodeTargets.first {
                 lines.append("  App: \(target.appPath)")
@@ -810,7 +710,7 @@ public final class XcodeMCPProxyServer: Sendable {
     private static func documentationSearchStartupStatus(
         config: ProxyRuntimeConfiguration
     ) -> String {
-        if config.xcodeMode.includesHeadlessService {
+        if config.includesXcodeService {
             return "upstream"
         }
         if ProxyRuntime.documentationSearchIsConfigured(
@@ -822,11 +722,9 @@ public final class XcodeMCPProxyServer: Sendable {
     }
 
     static func additionalPermissionDialogExecutableCandidates(
-        config: ProxyConfig,
         executableLookupClient: ExecutableLookupClient = .liveValue
     ) -> [String] {
         PermissionDialogExecutableResolver.additionalExecutableCandidates(
-            config: config,
             executableLookupClient: executableLookupClient
         )
     }
@@ -860,7 +758,7 @@ extension ProxyConfig {
         }
         guard (1...10).contains(config.upstreamProcessCount) else {
             throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration(
-                "upstream processesPerXcode must be in 1...10"
+                "upstreamProcessCount must be in 1...10"
             )
         }
         guard config.maxBodyBytes > 0 else {
@@ -893,12 +791,7 @@ extension ProxyConfig {
         var resolved = Self(
             listenHost: config.listenHost,
             listenPort: config.listenPort,
-            upstreamCommand: config.upstreamCommand,
-            upstreamArgs: config.upstreamArguments,
             upstreamProcessCount: config.upstreamProcessCount,
-            upstreamSessionID: config.upstreamSessionID,
-            upstreamKind: config.upstreamKind,
-            xcodeMode: ProxyConfig.XcodeMode(config.xcodeMode),
             maxBodyBytes: config.maxBodyBytes,
             requestTimeout: requestTimeout,
             configPath: config.configPath,
@@ -918,7 +811,6 @@ extension ProxyConfig {
                 ProxyConfig.File.InitializeHandshakeOverride(initializeHandshake)
             )
         }
-        try resolved.validateXcodeModeConfiguration()
         return resolved
     }
 }
@@ -962,32 +854,6 @@ private extension ProxyConfig.RefreshCodeIssuesMode {
             self = .proxy
         case .upstream:
             self = .upstream
-        }
-    }
-}
-
-private extension ProxyConfig.XcodeMode {
-    init(_ mode: XcodeMCPProxyServerConfiguration.XcodeMode) {
-        switch mode {
-        case .automatic:
-            self = .automatic
-        case .gui:
-            self = .gui
-        case .headless:
-            self = .headless
-        }
-    }
-}
-
-private extension XcodeMCPProxyServerConfiguration.XcodeMode {
-    init(_ mode: ProxyConfig.XcodeMode) {
-        switch mode {
-        case .automatic:
-            self = .automatic
-        case .gui:
-            self = .gui
-        case .headless:
-            self = .headless
         }
     }
 }

@@ -39,8 +39,7 @@ extension RuntimeCoordinator {
     private func startXcodeProcessDiscoveryWhenReadyForPrimaryInitialize(
         applyBackoff: Bool
     ) -> Bool {
-        guard processRoutingEnabled,
-              xcodeTargetDiscovery != nil,
+        guard xcodeTargetDiscovery != nil,
               xcodeProcessRoutes.isEmpty,
               upstreamReadinessGate.isEnabled
         else {
@@ -164,9 +163,6 @@ extension RuntimeCoordinator {
         }) {
             return unbound
         }
-        guard processRoutingEnabled else {
-            return excludedUpstreamIndices.contains(0) ? nil : 0
-        }
 
         let unavailable = unavailableXcodeProcessIDs()
         for route in xcodeProcessRoutes {
@@ -235,9 +231,6 @@ extension RuntimeCoordinator {
         reason: String,
         matching expectedPhase: InitializeManager.PrimaryInitializePhase? = nil
     ) -> Bool {
-        guard processRoutingEnabled else {
-            return false
-        }
         guard let retryUpstreamIndex = primaryInitializeRetryUpstreamIndex(
             failedUpstreamIndex: failedUpstreamIndex
         ) else {
@@ -302,22 +295,16 @@ extension RuntimeCoordinator {
         let activePrimaryInitializeUpstreamIndex =
             initializeManager.activePrimaryInitializeUpstreamIndex()
         let canPromoteWarmInitializeToPrimary =
-            processRoutingEnabled
-            && isPrimaryInitialize == false
+            isPrimaryInitialize == false
             && activePrimaryInitializeUpstreamIndex == nil
             && canonicalHandshakeState.initializeResult() == nil
         let handlesPrimaryInitialize = isPrimaryInitialize
             || canPromoteWarmInitializeToPrimary
-            || (
-                !processRoutingEnabled
-                    && isCurrentPrimaryInitializeUpstream(upstreamIndex)
-                    && activePrimaryInitializeUpstreamIndex == nil
-            )
 
         guard let resultValue = object["result"], let result = JSONValue(any: resultValue) else {
             guard clearUpstreamState(
                 initializeClaim: ownership.initializeClaim,
-                resetsProcessRouteActivation: processRoutingEnabled
+                resetsProcessRouteActivation: true
             ) else { return }
             if completePendingInitializesUsingCachedResultIfAvailable() {
                 retryInitializeAfterTerminalFailure(
@@ -783,42 +770,18 @@ extension RuntimeCoordinator {
             )
             return
         }
-
-        if processRoutingEnabled {
-            if treatsAsPrimary {
-                initializeManager.rearmInitTimeoutForRetry { makeInitTimeout(id: $0) }?.cancel()
-                _ = initializeManager.releasePrimaryInitialize(
-                    upstreamIndex: upstreamIndex,
-                    upstreamID: expectedUpstreamID
-                )
-            }
-            retryInitializeAfterTerminalFailure(
-                ownership: ownership,
-                upstreamIndex: upstreamIndex
-            )
-            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-            return
-        }
-
-        let anotherRouteCanPublish = canonicalHandshakeState.hasInitializeParticipants(
-            excluding: participantLease.topologyProof
-        ) || anyActiveRecoveryInFlight()
-        if anotherRouteCanPublish {
+        if treatsAsPrimary {
+            initializeManager.rearmInitTimeoutForRetry { makeInitTimeout(id: $0) }?.cancel()
             _ = initializeManager.releasePrimaryInitialize(
                 upstreamIndex: upstreamIndex,
                 upstreamID: expectedUpstreamID
             )
-            retryInitializeAfterTerminalFailure(
-                ownership: ownership,
-                upstreamIndex: upstreamIndex
-            )
-            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-            return
         }
-        recoverFromInitializedNotificationFailure(
-            upstreamIndex: upstreamIndex,
-            treatsAsPrimary: treatsAsPrimary
+        retryInitializeAfterTerminalFailure(
+            ownership: ownership,
+            upstreamIndex: upstreamIndex
         )
+        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 
     func handleInitializeIncompatibility(
@@ -898,51 +861,6 @@ extension RuntimeCoordinator {
                 for: UpstreamSlotID(rawValue: candidate)
             )?.initInFlight == true
         }
-    }
-
-    func recoverFromInitializedNotificationFailure(
-        upstreamIndex: Int,
-        treatsAsPrimary: Bool
-    ) {
-        let handlesPrimaryInitialize = treatsAsPrimary || isCurrentPrimaryInitializeUpstream(upstreamIndex)
-        if processRoutingEnabled {
-            if handlesPrimaryInitialize {
-                initializeManager.rearmInitTimeoutForRetry { makeInitTimeout(id: $0) }?.cancel()
-            }
-            if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) {
-                startProcessRouteActivation(for: route)
-            } else {
-                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
-            }
-            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-            return
-        }
-        let hasHealthySecondary = handlesPrimaryInitialize
-            && hasUsableInitializedSecondaryUpstreams(excluding: upstreamIndex)
-        if processControlPlane.canonicalSourceUpstream() == upstreamIndex,
-           !hasHealthySecondary {
-            invalidateToolsCatalog(
-                reason: "initialized_notification_overload_\(upstreamIndex)"
-            )
-        }
-        if handlesPrimaryInitialize {
-            // A retry that still owns unresolved pending initializes gets a
-            // fresh full timeout window, replacing the still-armed previous
-            // timeout (never disarm first) so the pending promises stay
-            // timeout-guarded at every instant. A retry with no waiters
-            // drops the armed timeout instead of re-arming it.
-            initializeManager.rearmInitTimeoutForRetry { makeInitTimeout(id: $0) }?.cancel()
-            if hasHealthySecondary {
-                initializeManager.setWarmInitRecoveryIntent(.retryPrimaryWhenNoCachedInitialize)
-                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
-            } else {
-                resetSecondaryUpstreamsForPrimaryRetry(excluding: upstreamIndex)
-                startPrimaryEagerRetry(failedPrimaryUpstreamIndex: upstreamIndex)
-            }
-        } else {
-            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
-        }
-        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
     }
 
     func makeInitTimeout(id: UUID) -> RuntimeScheduledTimeout? {
@@ -1294,66 +1212,24 @@ extension RuntimeCoordinator {
 
     func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) {
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        if processRoutingEnabled {
-            for upstreamIndex in defaultBackendUpstreamIndices where upstreamIndex != resolvedPrimaryUpstreamIndex {
-                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
-            }
-            for route in xcodeProcessRoutes {
-                if processControlPlane.catalog(forProcessID: route.target.processID) == nil {
-                    startProcessRouteActivation(for: route)
-                }
-            }
-            retryPendingProcessRouteReadiness(reason: "canonical_initialize_succeeded")
-            return
-        }
-        for upstreamIndex in secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex) {
+        for upstreamIndex in defaultBackendUpstreamIndices where upstreamIndex != resolvedPrimaryUpstreamIndex {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
+        for route in xcodeProcessRoutes {
+            if processControlPlane.catalog(forProcessID: route.target.processID) == nil {
+                startProcessRouteActivation(for: route)
+            }
+        }
+        retryPendingProcessRouteReadiness(reason: "canonical_initialize_succeeded")
     }
 
-    func resetSecondaryUpstreamsForPrimaryRetry(excluding primaryUpstreamIndex: Int? = nil) {
-        let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        for upstreamIndex in secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex) {
-            guard let proof = upstreamTopology.operationLease(
-                for: UpstreamSlotID(rawValue: upstreamIndex)
-            )?.proof else { continue }
-            clearUpstreamState(proof: proof)
-        }
-    }
-
-    func startPrimaryEagerRetry(failedPrimaryUpstreamIndex: Int? = nil) {
-        if processRoutingEnabled {
-            // Process routes own their exact failed proof. The caller has
-            // already detached that channel; a global retry must not clear a
-            // sibling route that may have started publishing concurrently.
-            startEagerInitializePrimary(applyBackoff: true)
-            return
-        }
-        let upstreamIndex = failedPrimaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        if let proof = upstreamTopology.operationLease(
-            for: UpstreamSlotID(rawValue: upstreamIndex)
-        )?.proof {
-            clearUpstreamState(proof: proof)
-        }
-        initializeManager.resetWarmSecondaryForRetry()
+    func startPrimaryEagerRetry() {
+        // Process routes own their exact failed proof. The caller has
+        // already detached that channel; a global retry must not clear a
+        // sibling route that may have started publishing concurrently.
         startEagerInitializePrimary(applyBackoff: true)
     }
 
-    func hasUsableInitializedSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) -> Bool {
-        let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        return secondaryUpstreamIndices(excluding: resolvedPrimaryUpstreamIndex).contains { upstreamIndex in
-            guard let upstream = upstreamHealthManager.state(
-                for: UpstreamSlotID(rawValue: upstreamIndex)
-            ) else { return false }
-            guard upstream.initPhase.isUsableInitialized else { return false }
-            switch upstream.healthState {
-            case .healthy, .degraded:
-                return true
-            case .quarantined:
-                return false
-            }
-        }
-    }
     func makeInternalInitializeRequest(id: Int64) -> [String: Any] {
         JSONRPC.Wire.requestObject(
             id: id,

@@ -6,7 +6,6 @@ import XcodeMCPCore
 enum RuntimeDocumentationProviderRouteResolution {
     case ready(DocumentationProviderRoute)
     case pending
-    case unmanaged
 }
 
 final class RuntimeDocumentationProviderTransport: DocumentationProviderRouting {
@@ -44,8 +43,6 @@ final class RuntimeDocumentationProviderTransport: DocumentationProviderRouting 
                 return route
             case .pending:
                 throw UpstreamSlotScheduler.AcquisitionError.unavailable
-            case .unmanaged:
-                break
             }
         }
         return try await fallback.openRoute(
@@ -273,9 +270,6 @@ extension RuntimeCoordinator {
     func resolveDocumentationProviderRoute(
         for target: XcodeProcessTarget
     ) -> RuntimeDocumentationProviderRouteResolution {
-        guard processRoutingEnabled else {
-            return .unmanaged
-        }
         guard xcodeProcessRoutes.contains(where: {
             $0.target.processID == target.processID
         }) else {

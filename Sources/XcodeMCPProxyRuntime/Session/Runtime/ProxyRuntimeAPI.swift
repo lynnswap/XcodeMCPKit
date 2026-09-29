@@ -148,11 +148,6 @@ final class ProxyRuntimeRequestOperation: ProxyRuntimeRequestOperating, Sendable
 }
 
 package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
-    package static func supportsProcessBoundRouting(configuration: ProxyRuntimeConfiguration) -> Bool {
-        configuration.xcodeMode.includesGUIProcesses
-            && XcrunArguments.isDefaultMCPBridgeInvocation(config: configuration)
-    }
-
     package static func documentationSearchIsConfigured(configuration: ProxyRuntimeConfiguration) -> Bool {
         RuntimeCoordinator.documentationProviderServiceIsConfigured(config: configuration)
     }
@@ -223,19 +218,11 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let eventLoop = group.next()
         let eventSource = ProxyRuntimeEventSource()
-        let processEventMonitor: XcodeProcessEventMonitor? =
-            config.xcodeMode != .headless || config.usesPermissionDialogAutomation
-            ? XcodeProcessEventMonitor() : nil
+        let processEventMonitor = XcodeProcessEventMonitor()
         let coordinator = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreamReadinessGate: processEventMonitor.map {
-                .liveDefault(
-                    config: config,
-                    clock: .liveValue,
-                    processEventMonitor: $0
-                )
-            } ?? .alwaysReady(),
+            upstreamReadinessGate: .liveDefault(config: config, clock: .liveValue, processEventMonitor: processEventMonitor),
             xcodeTargetDiscovery: processEventMonitor,
             xcodeProcessEventMonitor: processEventMonitor,
             notificationSink: { sessionID, data in

@@ -67,7 +67,6 @@ extension XcodeMCPProxyServer {
         do {
             proxyConfig = try command.resolveConfiguration(environment: environment)
             try proxyConfig.validateModernProtocolConfiguration()
-            try proxyConfig.validateXcodeModeConfiguration()
         } catch let error as CLICommandError {
             throw error
         } catch {
@@ -112,32 +111,13 @@ extension XcodeMCPProxyServer {
 private extension ProxyServerCommand {
     func resolveConfiguration(environment: [String: String]) throws -> ProxyConfig {
         let listenAddress = try resolvedListenAddress(environment: environment)
-        let bridge = MCPBridgeInvocation.defaultMCPBridge
-        var resolvedUpstreamArguments = bridge.arguments
-        if let upstreamArgs {
-            resolvedUpstreamArguments =
-                upstreamArgs
-                .split(separator: ",")
-                .map(String.init)
-                .filter { $0.isEmpty == false }
-        }
-        resolvedUpstreamArguments.append(contentsOf: upstreamArg)
-
         let refreshCodeIssuesMode = try resolvedRefreshCodeIssuesMode(
             environment: environment
         )
-        let usesCustomUpstream = upstreamCommand != nil
-            || upstreamArgs != nil
-            || upstreamArg.isEmpty == false
         return ProxyConfig(
             listenHost: listenAddress.host,
             listenPort: listenAddress.port,
-            upstreamCommand: upstreamCommand ?? bridge.command,
-            upstreamArgs: resolvedUpstreamArguments,
             upstreamProcessCount: upstreamProcesses ?? 1,
-            upstreamSessionID: sessionID ?? nonEmpty(environment["MCP_XCODE_SESSION_ID"]),
-            upstreamKind: usesCustomUpstream ? .custom : .stockMCPBridge,
-            xcodeMode: xcodeMode,
             maxBodyBytes: maxBodyBytes ?? 1_048_576,
             requestTimeout: requestTimeout?.seconds ?? 300,
             configPath: config ?? nonEmpty(environment["MCP_XCODE_CONFIG"]),
@@ -218,23 +198,8 @@ private extension ProxyServerCommand {
         if let requestTimeout {
             arguments += ["--request-timeout", requestTimeout.description]
         }
-        if let upstreamCommand {
-            arguments += ["--upstream-command", upstreamCommand]
-        }
-        if let upstreamArgs {
-            arguments += ["--upstream-args", upstreamArgs]
-        }
-        for argument in upstreamArg {
-            arguments += ["--upstream-arg", argument]
-        }
         if let upstreamProcesses {
             arguments += ["--upstream-processes", String(upstreamProcesses)]
-        }
-        if let sessionID = configuration.upstream.sessionID {
-            arguments += ["--session-id", sessionID]
-        }
-        if configuration.xcodeMode != .automatic {
-            arguments += ["--xcode-mode", configuration.xcodeMode.rawValue]
         }
         if let refreshCodeIssuesMode {
             arguments += [

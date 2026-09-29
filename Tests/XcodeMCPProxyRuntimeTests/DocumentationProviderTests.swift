@@ -344,7 +344,7 @@ struct DocumentationProviderTests {
         await shutdownTask.value
     }
 
-    @Test func defaultDocumentationProviderIsEnabledOnlyForDefaultMCPBridgeInvocation() {
+    @Test func localDocumentationProviderIsUsedWhenServiceIsAbsent() {
         var config = makeConfig(requestTimeout: 5)
         let transport = UnavailableDocumentationProviderTransport()
         #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
@@ -361,19 +361,9 @@ struct DocumentationProviderTests {
         ) == nil)
 
         config.disabledToolNames = []
-        config.upstreamArgs = ["--sdk", "macosx", "swift"]
+        config.includesXcodeService = true
         #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
-            config: config,
-            discovery: StubXcodeTargetDiscovery(targets: []),
-            transport: transport
-        ) == nil)
-
-        config.upstreamCommand = "/bin/echo"
-        config.upstreamArgs = ["xcrun", "mcpbridge"]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
-            config: config,
-            discovery: StubXcodeTargetDiscovery(targets: []),
-            transport: transport
+            config: config, discovery: StubXcodeTargetDiscovery(targets: []), transport: transport
         ) == nil)
     }
 
@@ -1014,10 +1004,10 @@ struct DocumentationProviderTests {
     @Test func automaticUpstreamPlanKeepsServiceAlongsideGUI() throws {
         let target = xcodeProcessTarget(processID: 731, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .automatic
+        config.includesXcodeService = true
         config.upstreamProcessCount = 2
         let plan = MCPBridgeRuntime.makeUpstreamPlan(
-            config: makeBridgeRuntimeConfig(config), xcodeTargets: [target], processBoundRoutingEnabled: true
+            config: makeBridgeRuntimeConfig(config), xcodeTargets: [target]
         )
         #expect(plan.upstreams.count == 4)
         #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [2, 3])
@@ -1051,15 +1041,12 @@ struct DocumentationProviderTests {
     @Test func defaultUpstreamPlanBindsEachSlotToSingleXcodeProcess() throws {
         let target = xcodeProcessTarget(processID: 710, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
-        config.upstreamSessionID = "shared-docs-session"
         config.upstreamProcessCount = 2
 
-        let plan = try withEnvironmentVariables(["MCP_XCODE_PID": ""]) {
-            MCPBridgeRuntime.makeUpstreamPlan(
-                config: makeBridgeRuntimeConfig(config),
-                xcodeTargets: [target]
-            )
-        }
+        let plan = MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(config), xcodeTargets: [target],
+            baseEnvironment: ["MCP_XCODE_PID": "inherited", "MCP_XCODE_SESSION_ID": "parent-session"]
+        )
 
         #expect(plan.upstreams.count == 2)
         #expect(plan.xcodeProcessRoutes.count == 1)
@@ -1084,7 +1071,7 @@ struct DocumentationProviderTests {
             #expect(try upstreamArgs(from: upstream).isEmpty)
             #expect(environment["MCP_XCODE_PID"] == "\(target.processID)")
             #expect(environment["DEVELOPER_DIR"] == target.developerDir)
-            #expect(environment["MCP_XCODE_SESSION_ID"] == "shared-docs-session")
+            #expect(environment["MCP_XCODE_SESSION_ID"] == nil)
         }
     }
 
@@ -1092,7 +1079,6 @@ struct DocumentationProviderTests {
         let target = xcodeProcessTarget(processID: 715, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
         config.maxMessageBytes = 2_000_000
-        config.upstreamSessionID = "shared-docs-session"
 
         let factory = MCPBridgeRuntime.makeProcessBoundSessionFactory(
             config: makeBridgeRuntimeConfig(config),
@@ -1112,7 +1098,7 @@ struct DocumentationProviderTests {
         #expect(environment["XCODE_PID"] == nil)
         #expect(environment["MCP_XCODE_PID"] == "\(target.processID)")
         #expect(environment["DEVELOPER_DIR"] == target.developerDir)
-        #expect(environment["MCP_XCODE_SESSION_ID"] == "shared-docs-session")
+        #expect(environment["MCP_XCODE_SESSION_ID"] == nil)
         #expect(try upstreamMaxQueuedWriteBytes(from: factory) == 8_000_000)
     }
 
@@ -1143,12 +1129,9 @@ struct DocumentationProviderTests {
         let newer = xcodeProcessTarget(processID: 721, xcodeVersion: "27.0")
         let config = makeConfig(requestTimeout: 5)
 
-        let plan = try withEnvironmentVariables(["MCP_XCODE_PID": ""]) {
-            MCPBridgeRuntime.makeUpstreamPlan(
-                config: makeBridgeRuntimeConfig(config),
-                xcodeTargets: [older, newer]
-            )
-        }
+        let plan = MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(config), xcodeTargets: [older, newer], baseEnvironment: [:]
+        )
 
         #expect(plan.upstreams.count == 2)
         #expect(plan.xcodeProcessRoutes.map(\.target.processID) == [
@@ -1175,12 +1158,10 @@ struct DocumentationProviderTests {
         var config = makeConfig(requestTimeout: 5)
         config.upstreamProcessCount = 2
 
-        let plan = try withEnvironmentVariables(["MCP_XCODE_PID": "\(pinned.processID)"]) {
-            MCPBridgeRuntime.makeUpstreamPlan(
-                config: makeBridgeRuntimeConfig(config),
-                xcodeTargets: [newer, pinned]
-            )
-        }
+        let plan = MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(config), xcodeTargets: [newer, pinned],
+            baseEnvironment: ["MCP_XCODE_PID": "\(pinned.processID)"]
+        )
 
         #expect(plan.upstreams.count == 4)
         #expect(plan.xcodeProcessRoutes.map(\.target.processID) == [
@@ -1199,14 +1180,13 @@ struct DocumentationProviderTests {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .gui
+        config.includesXcodeService = false
         config.disabledToolNames = [DocumentationProvider.ToolCatalog.toolName]
         let manager = RuntimeCoordinator(
             config: config, eventLoop: group.next(),
             xcodeTargetDiscovery: CountingXcodeTargetDiscovery(targets: []), startImmediately: false
         )
         defer { manager.shutdownAndWait() }
-        #expect(manager.processRoutingEnabled)
         #expect(manager.upstreamSlotIDs.isEmpty)
         #expect(manager.defaultBackendUpstreamIndices.isEmpty)
     }
@@ -1236,22 +1216,6 @@ struct DocumentationProviderTests {
             #expect(manager.xcodeProcessRoutes.map(\.target.processID) == [target.processID])
         }
 
-        do {
-            var config = makeConfig(requestTimeout: 5)
-            config.upstreamArgs = ["--sdk", "macosx", "swift"]
-            let discovery = CountingXcodeTargetDiscovery(targets: [target])
-            let manager = RuntimeCoordinator(
-                config: config,
-                eventLoop: eventLoop,
-                xcodeTargetDiscovery: discovery,
-                startImmediately: false
-            )
-            defer { manager.shutdownAndWait() }
-
-            #expect(discovery.callCount() == 0)
-            #expect(manager.hasDocumentationSearchService() == false)
-            #expect(manager.xcodeProcessRoutes.isEmpty)
-        }
     }
 
     @Test func runtimeDocumentationTransportReusesPrewarmedUpstreamRouteForSearch()
@@ -2592,6 +2556,7 @@ struct DocumentationProviderTests {
         )
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
             documentationProviderManager: documentationProvider,
             startImmediately: false
         )
@@ -2644,6 +2609,7 @@ struct DocumentationProviderTests {
         )
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
             documentationProviderManager: documentationProvider,
             startImmediately: false
         )
@@ -2934,10 +2900,13 @@ struct DocumentationProviderTests {
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
             upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
             documentationProviderManager: documentationProvider,
             prewarmDocumentationProviderOnStartup: true
         )
         defer { fixture.shutdownAndWait() }
+
+        try await fixture.completeInitialize(on: upstream)
 
         try await waitWithTimeout("waiting for documentation provider startup prewarm") {
             try await documentationProvider.waitForPrewarmCount(1)
@@ -2986,11 +2955,13 @@ struct DocumentationProviderTests {
             config: makeConfig(requestTimeout: 300),
             upstreams: [upstream],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
             documentationProviderManager: documentationProvider,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
 
+        fixture.manager.markUpstreamInitialized(upstreamIndex: 0)
         fixture.manager.prewarmDocumentationProvider()
         try await waitWithTimeout("waiting for documentation provider retry") {
             while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
@@ -3029,11 +3000,13 @@ struct DocumentationProviderTests {
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
             documentationProviderManager: documentationProvider,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
 
+        fixture.manager.markUpstreamInitialized(upstreamIndex: 0)
         fixture.manager.prewarmDocumentationProvider()
         try await waitWithTimeout("waiting for stale documentation provider retry") {
             while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
@@ -3071,10 +3044,12 @@ struct DocumentationProviderTests {
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [upstream],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
+            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
             documentationProviderManager: documentationProvider,
             startImmediately: false
         )
 
+        fixture.manager.markUpstreamInitialized(upstreamIndex: 0)
         fixture.manager.prewarmDocumentationProvider()
         try await waitWithTimeout("waiting for documentation provider retry before shutdown") {
             while fixture.manager.documentationProviderDiscoveryState.withLockedValue({ state in
@@ -3107,7 +3082,6 @@ struct DocumentationProviderTests {
             eventLoop: group.next(),
             upstreams: [upstream],
             xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
-            processRoutingEnabled: true,
             xcodeProcessEventMonitor: processEventMonitor,
             documentationProviderManager: documentationProvider,
             prewarmDocumentationProviderOnStartup: true
@@ -3147,10 +3121,13 @@ struct DocumentationProviderTests {
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
             upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
             documentationProviderManager: documentationProvider,
             prewarmDocumentationProviderOnStartup: true
         )
         defer { fixture.shutdownAndWait() }
+
+        try await fixture.completeInitialize(on: upstream)
 
         try await waitWithTimeout("waiting for initial documentation provider prewarm") {
             try await documentationProvider.waitForPrewarmCount(1)
@@ -3184,9 +3161,14 @@ struct DocumentationProviderTests {
             config: makeConfig(requestTimeout: 300),
             eventLoop: eventLoop,
             upstreams: [upstream],
+            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
             documentationProviderManager: documentationProvider,
             prewarmDocumentationProviderOnStartup: true
         )
+
+        let initializeRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        let initializeID = try extractUpstreamID(from: initializeRequest)
+        await yieldMessage(try makeInitializeResponse(id: initializeID), to: upstream)
 
         try await prewarmStarted.wait(description: "waiting for startup prewarm to begin")
         await manager.shutdown()

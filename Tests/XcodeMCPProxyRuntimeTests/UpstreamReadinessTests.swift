@@ -10,33 +10,9 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct UpstreamReadinessTests {
-    @Test func defaultReadinessGateRecognizesFlaggedXcrunMCPBridgeInvocation() {
+    @Test func availableServiceDoesNotWaitForGUIReadiness() async {
         var config = makeConfig(requestTimeout: 5)
-        config.upstreamArgs = ["--sdk", "macosx", "mcpbridge"]
-        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config))
-
-        config.upstreamCommand = "/usr/bin/xcrun"
-        config.upstreamArgs = ["--sdk=macosx", "--toolchain", "default", "mcpbridge"]
-        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config))
-    }
-
-    @Test func defaultReadinessGateIgnoresNonMCPBridgeAndCustomWrapperInvocations() {
-        var config = makeConfig(requestTimeout: 5)
-        config.upstreamArgs = ["--sdk", "macosx", "swift"]
-        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config) == false)
-
-        config.upstreamCommand = "/bin/echo"
-        config.upstreamArgs = ["xcrun", "mcpbridge"]
-        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config) == false)
-
-        config.upstreamCommand = "xcrun"
-        config.upstreamArgs = ["--sdk", "mcpbridge"]
-        #expect(XcrunArguments.isDefaultMCPBridgeInvocation(config: config) == false)
-    }
-
-    @Test func headlessStockBridgeUsesAlwaysReadyGate() async {
-        var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .headless
+        config.includesXcodeService = true
 
         let gate = UpstreamReadinessGate.liveDefault(
             config: config,

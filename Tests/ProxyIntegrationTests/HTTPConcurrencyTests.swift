@@ -47,7 +47,7 @@ struct HTTPConcurrencyTests {
             mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
         )
         let server = try TestHTTPServer.start(
-            upstream: service, xcodeMode: .automatic, additionalUpstreams: [gui],
+            upstream: service, includesXcodeService: true, additionalUpstreams: [gui],
             xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])]
         )
         do {
@@ -106,7 +106,7 @@ struct HTTPConcurrencyTests {
         let hasSecondGUI = ambiguous || scenario == "partial-owner" || scenario == "partial-list-owner" || scenario == "known-owner-unrelated-failure"
         let guiOnly = scenario == "gui-only-path"
         let server = try TestHTTPServer.start(
-            upstream: guiOnly ? gui : service, xcodeMode: .automatic,
+            upstream: guiOnly ? gui : service, includesXcodeService: true,
             additionalUpstreams: guiOnly ? [] : (hasSecondGUI ? [gui, secondGUI] : [gui]),
             xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [guiOnly ? 0 : 1])]
                 + (hasSecondGUI ? [XcodeProcessRoute(target: otherTarget, upstreamIndices: [2])] : [])
@@ -182,53 +182,10 @@ struct HTTPConcurrencyTests {
         #expect(!(await service.recordedCalls()).contains("XcodeCloseWorkspace"))
     }
 
-    @Test func customUpstreamKeepsNativeWorkspacePaths() async throws {
-        let path = "/Custom/Workspace"
-        let upstream = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: path)
-        await upstream.failInventory()
-        let server = try TestHTTPServer.start(upstream: upstream, xcodeMode: .custom)
-        do {
-            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
-            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
-            let (_, reply) = try await postJSON(url: server.url, sessionID: sessionID,
-                payload: toolCallPayload(id: 2, name: "BuildProject", arguments: ["workspaceIdentifier": path]))
-            let result = try #require(reply["result"] as? [String: Any])
-            #expect(result["isError"] as? Bool == false)
-            #expect(await upstream.recordedCalls() == ["BuildProject"])
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
-
-    @Test func customUpstreamKeepsItsNativeTabSchema() async throws {
-        let upstream = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "native-tab")
-        let server = try TestHTTPServer.start(upstream: upstream, xcodeMode: .custom)
-        do {
-            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
-            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
-            let (_, catalog) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 2))
-            let result = try #require(catalog["result"] as? [String: Any])
-            let tools = try #require(result["tools"] as? [[String: Any]])
-            let build = try #require(tools.first { $0["name"] as? String == "BuildProject" })
-            let schema = try #require(build["inputSchema"] as? [String: Any])
-            let properties = try #require(schema["properties"] as? [String: Any])
-            #expect(Set(properties.keys) == ["tabIdentifier"])
-            let (_, reply) = try await postJSON(url: server.url, sessionID: sessionID,
-                payload: toolCallPayload(id: 3, name: "BuildProject", arguments: ["tabIdentifier": "native-tab"]))
-            #expect((reply["result"] as? [String: Any])?["isError"] as? Bool == false)
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
-
     @Test func workspaceLookupUsesHealthyServiceSibling() async throws {
         let first = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
         let second = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
-        let server = try TestHTTPServer.start(upstream: first, xcodeMode: .automatic, additionalUpstreams: [second])
+        let server = try TestHTTPServer.start(upstream: first, includesXcodeService: true, additionalUpstreams: [second])
         do {
             let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
             let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
@@ -256,7 +213,7 @@ struct HTTPConcurrencyTests {
         let second = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
         let siblingInitialized = TestSignal()
         let lookupQueued = TestSignal()
-        let server = try TestHTTPServer.start(upstream: first, xcodeMode: .automatic, additionalUpstreams: [second],
+        let server = try TestHTTPServer.start(upstream: first, includesXcodeService: true, additionalUpstreams: [second],
             testHooks: .init(upstreamInitialized: { index in
                 if index == 1 { siblingInitialized.signal() }
             }, upstreamRequestQueued: { _, descriptor, _ in
@@ -324,7 +281,7 @@ struct HTTPConcurrencyTests {
             developerDir: "/Applications/Xcode.app/Contents/Developer",
             mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
         )
-        let server = try TestHTTPServer.start(upstream: service, xcodeMode: .automatic,
+        let server = try TestHTTPServer.start(upstream: service, includesXcodeService: true,
             additionalUpstreams: [gui], xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])])
         do {
             let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
@@ -381,7 +338,7 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
-    @Test(arguments: ["ExecuteSnippet", "XcodeListWindows"])
+    @Test(arguments: ["ExecuteSnippet", "XcodeListWorkspaces"])
     func httpCancellationDoesNotWaitBehindTheRequest(toolName: String) async throws {
         let upstream = ControlledUpstreamClient()
         let server = try TestHTTPServer.start(upstream: upstream, requestTimeout: 60)
@@ -475,7 +432,7 @@ struct HTTPConcurrencyTests {
             }
         }
         let operation = try cancellationOperation(
-            executeSnippetPayload(id: 991, tabIdentifier: "windowtab-cancel"), service: service, loop: loop
+            executeSnippetPayload(id: 991, workspaceIdentifier: "windowtab-cancel"), service: service, loop: loop
         )
         await loop.run()
         await manager.drainRuntimeTasksForTesting()
@@ -492,7 +449,7 @@ struct HTTPConcurrencyTests {
         let (manager, service, loop, upstreams) = try cancellationFixture(upstreamCount: 2)
         defer { manager.shutdownAndWait() }
         let operation = try cancellationOperation(
-            executeSnippetPayload(id: 991, tabIdentifier: "windowtab-cancel"),
+            executeSnippetPayload(id: 991, workspaceIdentifier: "windowtab-cancel"),
             service: service, loop: loop
         )
         await loop.run()
@@ -532,12 +489,12 @@ struct HTTPConcurrencyTests {
         defer { manager.shutdownAndWait() }
         let upstream = upstreams[0]
         let active = try cancellationOperation(
-            executeSnippetPayload(id: 1, tabIdentifier: "windowtab-active"), service: service, loop: loop
+            executeSnippetPayload(id: 1, workspaceIdentifier: "windowtab-active"), service: service, loop: loop
         )
         await loop.run()
         await manager.drainRuntimeTasksForTesting()
         _ = try await waitForUpstreamRequestCount(upstream, count: 1)
-        var queuedBody = executeSnippetPayload(id: 2, tabIdentifier: "windowtab-queued")
+        var queuedBody = executeSnippetPayload(id: 2, workspaceIdentifier: "windowtab-queued")
         queuedBody["id"] = "1"
         let queued = try cancellationOperation(queuedBody, service: service, loop: loop)
         await loop.run()
@@ -780,14 +737,14 @@ struct HTTPConcurrencyTests {
         defer { manager.shutdownAndWait() }
         let upstream = upstreams[0]
         let first = try cancellationOperation(
-            executeSnippetPayload(id: 300, tabIdentifier: "windowtab-first"),
+            executeSnippetPayload(id: 300, workspaceIdentifier: "windowtab-first"),
             service: service, loop: loop, requestTimeoutOverride: .seconds(10)
         )
         await loop.run()
         await manager.drainRuntimeTasksForTesting()
         _ = try await waitForUpstreamRequestCount(upstream, count: 1)
         let second = try cancellationOperation(
-            executeSnippetPayload(id: 301, tabIdentifier: "windowtab-queued"), service: service, loop: loop,
+            executeSnippetPayload(id: 301, workspaceIdentifier: "windowtab-queued"), service: service, loop: loop,
             requestTimeoutOverride: .milliseconds(150)
         )
         await loop.run()
@@ -828,7 +785,7 @@ struct HTTPConcurrencyTests {
         }
         let nextMessageCount = upstream.recordedMessages().count + 1
         let third = try cancellationOperation(
-            executeSnippetPayload(id: 302, tabIdentifier: "windowtab-after-timeout"), service: service, loop: loop
+            executeSnippetPayload(id: 302, workspaceIdentifier: "windowtab-after-timeout"), service: service, loop: loop
         )
         await loop.run()
         await manager.drainRuntimeTasksForTesting()
@@ -896,7 +853,7 @@ struct HTTPConcurrencyTests {
         upstream.clearRecordedRequests()
 
         try await postAsyncJSON(
-            executeSnippetPayload(id: 700, tabIdentifier: "windowtab-timeout"),
+            executeSnippetPayload(id: 700, workspaceIdentifier: "windowtab-timeout"),
             sessionID: sessionID,
             to: firstChannel
         )
@@ -906,7 +863,7 @@ struct HTTPConcurrencyTests {
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
         try await postAsyncJSON(
-            executeSnippetPayload(id: 701, tabIdentifier: "windowtab-timeout-2"),
+            executeSnippetPayload(id: 701, workspaceIdentifier: "windowtab-timeout-2"),
             sessionID: sessionID,
             to: secondChannel
         )
@@ -954,12 +911,12 @@ struct HTTPConcurrencyTests {
         )
     }
 
-    private func executeSnippetPayload(id: Int, tabIdentifier: String) -> [String: Any] {
+    private func executeSnippetPayload(id: Int, workspaceIdentifier: String) -> [String: Any] {
         toolCallPayload(
             id: id,
             name: "ExecuteSnippet",
             arguments: [
-                "tabIdentifier": tabIdentifier,
+                "workspaceIdentifier": workspaceIdentifier,
                 "sourceFilePath": "App.swift",
                 "codeSnippet": "print(\"\(id)\")",
                 "timeout": 20,
@@ -1097,7 +1054,14 @@ struct HTTPConcurrencyTests {
 
     @Test func httpConcurrentRefreshCodeIssuesRequestsDoNotSurfaceErrorFiveOrDeadlockInternalCalls() async throws {
         let upstream = RefreshSensitiveUpstreamClient()
-        let server = try TestHTTPServer.start(upstream: upstream)
+        let target = XcodeProcessTarget(
+            processID: 27071, appPath: "/Applications/Xcode.app",
+            developerDir: "/Applications/Xcode.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
+        )
+        let server = try TestHTTPServer.start(upstream: upstream, xcodeProcessRoutes: [
+            XcodeProcessRoute(target: target, upstreamIndices: [0])
+        ])
         let url = server.url
 
         do {
@@ -1144,7 +1108,14 @@ struct HTTPConcurrencyTests {
 
     @Test func httpConcurrentRefreshCodeIssuesRequestsRespectSingleFlightPerUpstream() async throws {
         let upstream = SingleFlightRefreshUpstreamClient()
-        let server = try TestHTTPServer.start(upstream: upstream)
+        let target = XcodeProcessTarget(
+            processID: 27071, appPath: "/Applications/Xcode.app",
+            developerDir: "/Applications/Xcode.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
+        )
+        let server = try TestHTTPServer.start(upstream: upstream, xcodeProcessRoutes: [
+            XcodeProcessRoute(target: target, upstreamIndices: [0])
+        ])
         let url = server.url
 
         do {
@@ -1220,7 +1191,7 @@ struct HTTPConcurrencyTests {
                 payload: toolCallNotificationPayload(
                     name: "XcodeRefreshCodeIssuesInFile",
                     arguments: [
-                        "tabIdentifier": "windowtab-refresh-notification",
+                        "workspaceIdentifier": "service-refresh-notification",
                         "filePath": "App.swift",
                     ]
                 )
@@ -1359,7 +1330,7 @@ private struct TestHTTPServer {
     static func start(
         upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
         requestTimeout: TimeInterval = 5,
-        xcodeMode: ProxyRuntimeConfiguration.XcodeMode = .gui,
+        includesXcodeService: Bool = false,
         additionalUpstreams: [any UpstreamSlotControlling] = [],
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks()
@@ -1369,10 +1340,8 @@ private struct TestHTTPServer {
         let childChannelTracker = HTTPTestServerChannelTracker()
         let config: ProxyRuntimeConfiguration = {
             var config = ProxyRuntimeConfiguration(
-                xcodeMode: xcodeMode,
-                upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-                upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
-                upstreamSessionID: nil,
+                includesXcodeService: includesXcodeService,
+
                 maxMessageBytes: 1_048_576,
                 requestTimeout: requestTimeout
             )
@@ -2081,6 +2050,17 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
             continuation.yield(.message(makeInitializeResponse(id: id)))
             return
         }
+        if method == "tools/call",
+           let params = object["params"] as? [String: Any],
+           params["name"] as? String == "XcodeListWindows" {
+            continuation.yield(.message(try! JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0", "id": id,
+                "result": ["structuredContent": ["message": [
+                    "windowtab-refresh", "windowtab-refresh-0", "windowtab-refresh-1", "windowtab-refresh-2"
+                ].map { "* tabIdentifier: \($0), workspacePath: /Work/Refresh.xcodeproj" }.joined(separator: "\n")]]
+            ])))
+            return
+        }
 
         guard
             method == "tools/call",
@@ -2155,7 +2135,7 @@ private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
             "jsonrpc": "2.0",
             "id": id,
             "result": [
-                "tools": [[
+                "tools": [["name": "XcodeListWindows", "inputSchema": ["type": "object", "properties": [:]]], [
                     "name": "XcodeRefreshCodeIssuesInFile",
                     "description": "Refresh issues",
                     "inputSchema": [
@@ -2256,6 +2236,17 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
             continuation.yield(.message(makeInitializeResponse(id: id)))
             return
         }
+        if method == "tools/call",
+           let params = object["params"] as? [String: Any],
+           params["name"] as? String == "XcodeListWindows" {
+            continuation.yield(.message(try! JSONSerialization.data(withJSONObject: [
+                "jsonrpc": "2.0", "id": id,
+                "result": ["structuredContent": ["message": [
+                    "windowtab-refresh", "windowtab-refresh-0", "windowtab-refresh-1", "windowtab-refresh-2"
+                ].map { "* tabIdentifier: \($0), workspacePath: /Work/Refresh.xcodeproj" }.joined(separator: "\n")]]
+            ])))
+            return
+        }
 
         guard
             method == "tools/call",
@@ -2325,7 +2316,7 @@ private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
             "jsonrpc": "2.0",
             "id": id,
             "result": [
-                "tools": [[
+                "tools": [["name": "XcodeListWindows", "inputSchema": ["type": "object", "properties": [:]]], [
                     "name": "XcodeRefreshCodeIssuesInFile",
                     "description": "Refresh issues",
                     "inputSchema": [
@@ -2551,9 +2542,6 @@ private func postStatusOnly(
 
 private func makeEmbeddedConfig(requestTimeout: TimeInterval) -> ProxyRuntimeConfiguration {
     var config = ProxyRuntimeConfiguration(
-        upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-        upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
-        upstreamSessionID: nil,
         maxMessageBytes: 1_048_576,
         requestTimeout: requestTimeout
     )

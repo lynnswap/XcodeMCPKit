@@ -9,7 +9,6 @@ import XcodeMCPPermissionAutomation
 @testable import XcodeMCPProxyRuntime
 @testable import XcodeMCPProxyKit
 
-
 @Suite(.serialized, .enabled(if: LiveMCPBridgeTestEnvironment.isEnabled))
 struct LiveMCPBridgeTests {
     @Test(.enabled(if: DirectMCPBridgeTestEnvironment.isEnabled))
@@ -143,8 +142,7 @@ struct LiveMCPBridgeTests {
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: 0,
-            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
+
             maxBodyBytes: 1_048_576,
             requestTimeout: 20,
             discoveryFileURL: discoveryFile,

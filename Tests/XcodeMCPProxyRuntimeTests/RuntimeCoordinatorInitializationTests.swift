@@ -10,20 +10,19 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorInitializationTests {
-    @Test(arguments: [ProxyRuntimeConfiguration.XcodeMode.headless, .automatic], [false, true])
-    func serviceWarmInitializationRecoversWithAnotherBackendAvailable(mode: ProxyRuntimeConfiguration.XcodeMode, timesOut: Bool) async throws {
+    @Test(arguments: [false, true], [false, true])
+    func serviceWarmInitializationRecoversWithAnotherBackendAvailable(hasGUI: Bool, timesOut: Bool) async throws {
         let available = TestUpstreamClient()
         let service = TestUpstreamClient()
         let replacement = TestUpstreamClient()
         let scheduler = RecordingRuntimeTimeoutScheduler()
         let target = xcodeProcessTarget(processID: 801, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = mode
+        config.includesXcodeService = true
         let fixture = RuntimeCoordinatorFixture(
             config: config, upstreams: [available, service],
             scheduleRuntimeTimeout: scheduler.scheduler(),
-            xcodeProcessRoutes: mode == .automatic ? [XcodeProcessRoute(target: target, upstreamIndices: [0])] : [],
-            processRoutingEnabled: mode == .automatic,
+            xcodeProcessRoutes: hasGUI ? [XcodeProcessRoute(target: target, upstreamIndices: [0])] : [],
             unboundUpstreamFactory: { replacement }, startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -67,7 +66,6 @@ struct RuntimeCoordinatorInitializationTests {
                 XcodeProcessRoute(target: cachedTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: activeTarget, upstreamIndices: [1]),
             ],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -143,7 +141,6 @@ struct RuntimeCoordinatorInitializationTests {
                 XcodeProcessRoute(target: cachedTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: activeTarget, upstreamIndices: [1]),
             ],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -229,7 +226,6 @@ struct RuntimeCoordinatorInitializationTests {
                 XcodeProcessRoute(target: retiringTarget, upstreamIndices: [1]),
                 XcodeProcessRoute(target: alternateTarget, upstreamIndices: [2]),
             ],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -300,7 +296,6 @@ struct RuntimeCoordinatorInitializationTests {
                 XcodeProcessRoute(target: retiredTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: activeTarget, upstreamIndices: [1]),
             ],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -2480,13 +2475,15 @@ struct RuntimeCoordinatorInitializationTests {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
+        let upstream = ToggleableOverloadUpstreamClient()
+        let replacement = TestUpstreamClient()
         let upstreamEvents = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
+            unboundUpstreamFactory: { replacement },
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamEventHandled: { upstreamEvents.append($0) }
             ),
@@ -2506,18 +2503,10 @@ struct RuntimeCoordinatorInitializationTests {
         let initialSent = await upstream.sent()
         let initialID = try extractUpstreamID(from: initialSent[0])
 
-        #expect(manager.initializeManager.releasePrimaryInitialize(
-            upstreamIndex: 0,
-            upstreamID: initialID
-        ))
-        manager.handleInitializedNotificationSendOverload(
-            upstreamIndex: 0,
-            expectedUpstreamID: initialID,
-            treatsAsPrimary: true
-        )
-        try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
-        let retrySent = await upstream.sent()
-        let retryID = try extractUpstreamID(from: retrySent[1])
+        await upstream.overloadNextInitializedNotificationSend()
+        await upstream.yield(.message(try makeInitializeResponse(id: initialID)))
+        let retry = try await sentValue(from: replacement, at: 0, timeout: .seconds(2))
+        let retryID = try extractUpstreamID(from: retry)
 
         manager.removeSession(id: sessionID)
         await #expect(throws: CancellationError.self) {
@@ -2525,7 +2514,7 @@ struct RuntimeCoordinatorInitializationTests {
         }
 
         let responseEventIndex = upstreamEvents.count()
-        await upstream.yield(.message(try makeInitializeResponse(id: retryID)))
+        await replacement.yield(.message(try makeInitializeResponse(id: retryID)))
         _ = try await nextRecordedValue(upstreamEvents, at: responseEventIndex)
 
         let snapshot = manager.testStateSnapshot()

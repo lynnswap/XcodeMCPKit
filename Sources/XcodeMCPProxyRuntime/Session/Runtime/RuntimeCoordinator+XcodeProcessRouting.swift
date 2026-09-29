@@ -236,9 +236,6 @@ extension RuntimeCoordinator {
     }
 
     func documentationCandidateProcessIDs() -> Set<pid_t>? {
-        guard processRoutingEnabled else {
-            return nil
-        }
         let unavailable = unavailableXcodeProcessIDs()
         return Set(xcodeProcessRoutes.compactMap { route in
             unavailable.contains(route.target.processID) == false
@@ -477,8 +474,7 @@ extension RuntimeCoordinator {
     }
 
     func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
-        guard processRoutingEnabled,
-              let object = requestJSON as? [String: Any] else {
+        guard let object = requestJSON as? [String: Any] else {
             return nil
         }
         return preferredUpstreamIndex(in: object)
@@ -496,7 +492,6 @@ extension RuntimeCoordinator {
             for: object,
             request: request
         ) {
-            guard config.xcodeMode != .custom else { return affinityDecision }
             if case .forwardAdmitted(_, let admission) = affinityDecision,
                admission.route == nil,
                let path = request.workspacePath,
@@ -510,7 +505,6 @@ extension RuntimeCoordinator {
             }
             return affinityDecision
         }
-        guard config.xcodeMode != .custom else { return .forward(preferredUpstreamIndex: nil) }
         if ["XcodeOpenWorkspace", "XcodeCloseWorkspace", "XcodeListWorkspaces"].contains(request.toolName) {
             guard request.tabIdentifier == nil,
                   request.toolName != "XcodeCloseWorkspace" || request.workspacePath == nil else {
@@ -535,9 +529,7 @@ extension RuntimeCoordinator {
                 requestTimeoutOverride: requestTimeoutOverride
             )
         }
-        guard processRoutingEnabled else {
-            return .forward(preferredUpstreamIndex: nil)
-        }
+
         if request.id != nil, request.toolName == "XcodeListWindows" {
             return .localXcodeListWindows
         }
@@ -698,7 +690,7 @@ extension RuntimeCoordinator {
                 return
             }
             let routeID: ProcessRouteID?
-            if processRoutingEnabled && !defaultBackendUpstreamIndices.contains(operationLease.upstreamIndex) {
+            if !defaultBackendUpstreamIndices.contains(operationLease.upstreamIndex) {
                 guard let route = xcodeProcessRoute(
                     forUpstreamIndex: operationLease.upstreamIndex
                 ),
@@ -739,8 +731,7 @@ extension RuntimeCoordinator {
             return nil
         }
         guard let affinity = deviceInteractionAffinityAuthority.affinity(for: key) else {
-            if processRoutingEnabled == false,
-                upstreamTopology.snapshot().entries.count == 1
+            if upstreamTopology.snapshot().entries.count == 1
             {
                 return nil
             }
@@ -777,8 +768,7 @@ extension RuntimeCoordinator {
                 )
             )
         }
-        guard processRoutingEnabled,
-              let routeProof = processControlPlane.routeProof(routeID: affinityRouteID),
+        guard let routeProof = processControlPlane.routeProof(routeID: affinityRouteID),
               let routeAdmission = processControlPlane.admit(routeProof) else {
             deviceInteractionAffinityAuthority.remove(key: key)
             return .reject(
@@ -1288,21 +1278,14 @@ extension RuntimeCoordinator {
     }
 
     func isActiveProcessBoundUpstream(_ upstreamIndex: Int) -> Bool {
-        guard processRoutingEnabled else { return true }
         return defaultBackendUpstreamIndices.contains(upstreamIndex) || xcodeProcessRoute(forUpstreamIndex: upstreamIndex) != nil
     }
 
     func activeProcessBoundUpstreamIndices() -> Set<Int> {
-        guard processRoutingEnabled else {
-            return Set(upstreamSlotIDs.map(\.rawValue))
-        }
         return defaultBackendUpstreamIndices.union(xcodeProcessRoutes.flatMap(\.upstreamIndices))
     }
 
     func routableProcessBoundUpstreamIndices() -> Set<Int> {
-        guard processRoutingEnabled else {
-            return Set(upstreamSlotIDs.map(\.rawValue))
-        }
         let unavailable = unavailableXcodeProcessIDs()
         return defaultBackendUpstreamIndices.union(
             xcodeProcessRoutes
@@ -1312,7 +1295,6 @@ extension RuntimeCoordinator {
     }
 
     func inactiveProcessBoundUpstreamIndices() -> Set<Int> {
-        guard processRoutingEnabled else { return [] }
         return Set(upstreamSlotIDs.map(\.rawValue)).subtracting(
             routableProcessBoundUpstreamIndices()
         )
@@ -1324,9 +1306,6 @@ extension RuntimeCoordinator {
     }
 
     func activeInitializedHealthyishCount() -> Int {
-        guard processRoutingEnabled else {
-            return upstreamHealthManager.initializedHealthyishCount()
-        }
         return routableProcessBoundUpstreamIndices().reduce(into: 0) { count, upstreamIndex in
             guard let upstream = upstreamHealthManager.state(
                 for: UpstreamSlotID(rawValue: upstreamIndex)
@@ -1342,9 +1321,6 @@ extension RuntimeCoordinator {
     }
 
     func anyActiveInitializedUpstream() -> Bool {
-        guard processRoutingEnabled else {
-            return upstreamHealthManager.anyInitialized()
-        }
         return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
             upstreamHealthManager.state(
                 for: UpstreamSlotID(rawValue: upstreamIndex)
@@ -1353,9 +1329,6 @@ extension RuntimeCoordinator {
     }
 
     func anyActiveRecoveryInFlight() -> Bool {
-        guard processRoutingEnabled else {
-            return upstreamHealthManager.anyRecoveryInFlight()
-        }
         return routableProcessBoundUpstreamIndices().contains { upstreamIndex in
             guard let upstream = upstreamHealthManager.state(
                 for: UpstreamSlotID(rawValue: upstreamIndex)
@@ -1515,9 +1488,6 @@ extension RuntimeCoordinator {
     private func isKnownOwnerBoundTool(_ toolName: String) -> Bool {
         if processControlPlane.isOwnerBoundTool(toolName) {
             return true
-        }
-        guard processRoutingEnabled == false else {
-            return false
         }
         return cachedOwnerBoundToolNames().contains(toolName)
     }

@@ -20,7 +20,7 @@ extension XcodeMCPProxyServer {
             let runtime: any ProxyRuntimeServing
             let autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
             let endpoint: Endpoint
-            let xcodeMode: ProxyRuntimeConfiguration.XcodeMode
+            let includesXcodeService: Bool
 
             init(
                 config: ProxyConfig,
@@ -28,14 +28,14 @@ extension XcodeMCPProxyServer {
                 runtime: any ProxyRuntimeServing,
                 autoApprover: (any ProxyServerPermissionDialogAutoApprover)?,
                 endpoint: Endpoint,
-                xcodeMode: ProxyRuntimeConfiguration.XcodeMode
+                includesXcodeService: Bool
             ) {
                 self.config = config
                 self.httpGateway = httpGateway
                 self.runtime = runtime
                 self.autoApprover = autoApprover
                 self.endpoint = endpoint
-                self.xcodeMode = xcodeMode
+                self.includesXcodeService = includesXcodeService
             }
 
             func signalCancellation() {
@@ -91,7 +91,7 @@ extension XcodeMCPProxyServer {
                     )
                 }
                 try config.validateModernProtocolConfiguration()
-                try config.validateXcodeModeConfiguration()
+
             } catch {
                 phase = .stopped
                 throw error
@@ -272,7 +272,7 @@ extension XcodeMCPProxyServer {
                 displayHost: displayHost,
                 port: resources.endpoint.port,
                 config: resources.config,
-                xcodeMode: resources.xcodeMode,
+                includesXcodeService: resources.includesXcodeService,
                 upstreamProcessCount: resources.runtime.snapshot().upstreams.count,
                 xcodeTargets: resources.runtime.inventorySnapshot().xcodeTargets
             )
@@ -291,14 +291,20 @@ extension XcodeMCPProxyServer {
             dependencies: Dependencies,
             logger: Logger
         ) async throws -> Resources {
-            let modeResolution = try await XcodeConnectionModeResolver.resolve(
-                config: config,
-                availability: dependencies.headlessMCPAvailability
-            )
-            logModeDiagnostic(modeResolution.diagnostic, logger: logger)
-            let runtimeConfiguration = config.runtimeConfiguration(
-                xcodeMode: modeResolution.xcodeMode
-            )
+            let includesXcodeService: Bool
+            do {
+                let availability = try await dependencies.xcodeServiceAvailability()
+                includesXcodeService = availability == .enabled
+                if availability == .disabled {
+                    logger.notice("Xcode Service MCP access is disabled. To enable it, run: sudo xcrun mcp-server enable. GUI Xcode connections remain available.")
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                includesXcodeService = false
+                logger.warning("Unable to determine Xcode Service MCP status: \(error). GUI Xcode connections remain available.")
+            }
+            let runtimeConfiguration = config.runtimeConfiguration(includesXcodeService: includesXcodeService)
             let runtime = dependencies.makeRuntime(runtimeConfiguration)
             let autoApprover = runtimeConfiguration.usesPermissionDialogAutomation
                 ? dependencies.makeAutoApprover(config, runtime)
@@ -334,7 +340,7 @@ extension XcodeMCPProxyServer {
                     runtime: runtime,
                     autoApprover: autoApprover,
                     endpoint: boundEndpoint,
-                    xcodeMode: modeResolution.xcodeMode
+                    includesXcodeService: includesXcodeService
                 )
             } catch {
                 let operationError = error
@@ -354,20 +360,6 @@ extension XcodeMCPProxyServer {
                     )
                 }
                 throw operationError
-            }
-        }
-
-        private static func logModeDiagnostic(
-            _ diagnostic: XcodeConnectionModeResolver.Diagnostic?,
-            logger: Logger
-        ) {
-            switch diagnostic {
-            case .notice(let message):
-                logger.notice("\(message)")
-            case .warning(let message):
-                logger.warning("\(message)")
-            case nil:
-                break
             }
         }
 

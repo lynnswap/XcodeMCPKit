@@ -46,29 +46,8 @@ package struct ProxyServerCommand: ParsableCommand {
     )
     var requestTimeout: CLIRequestTimeout?
 
-    @Option(help: ArgumentHelp("Upstream executable.", valueName: "command"))
-    var upstreamCommand: String?
-
-    @Option(
-        parsing: .unconditional,
-        help: "Comma-separated replacement for the default upstream arguments."
-    )
-    var upstreamArgs: String?
-
-    @Option(
-        parsing: .unconditionalSingleValue,
-        help: "Append one argument to the upstream invocation. May be repeated."
-    )
-    var upstreamArg: [String] = []
-
-    @Option(help: "Upstream mcpbridge processes per running Xcode process, in 1...10.")
+    @Option(help: "Bridge connections per GUI Xcode and for Xcode Service, in 1...10.")
     var upstreamProcesses: Int?
-
-    @Option(help: "Explicit upstream Xcode MCP session identifier.")
-    var sessionID: String?
-
-    @Option(help: "Xcode connection mode: automatic, gui, or headless.")
-    var xcodeMode: ProxyConfig.XcodeMode = .automatic
 
     @Option(help: "Code issue refresh owner: proxy or upstream.")
     var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode?
@@ -98,12 +77,7 @@ package struct ProxyServerCommand: ParsableCommand {
         if let upstreamProcesses, (1...10).contains(upstreamProcesses) == false {
             throw ValidationError("--upstream-processes must be an integer in 1...10")
         }
-        if let upstreamCommand, upstreamCommand.isEmpty {
-            throw ValidationError("--upstream-command must not be empty")
-        }
-        if let sessionID, sessionID.isEmpty {
-            throw ValidationError("--session-id must not be empty")
-        }
+
     }
 }
 
@@ -137,4 +111,3 @@ package struct CLIListenAddress: Equatable, Sendable, CustomStringConvertible,
 }
 
 extension ProxyConfig.RefreshCodeIssuesMode: ExpressibleByArgument {}
-extension ProxyConfig.XcodeMode: ExpressibleByArgument {}

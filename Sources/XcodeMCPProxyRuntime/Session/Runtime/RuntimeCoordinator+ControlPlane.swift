@@ -135,12 +135,12 @@ extension RuntimeCoordinator {
         let startedAt = nowUptimeNanoseconds()
         let timeout = requestTimeout ?? MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
         let deadline = deadlineUptimeNanoseconds(for: timeout)
-        if processRoutingEnabled && defaultBackendUpstreamIndices.isEmpty {
+        if defaultBackendUpstreamIndices.isEmpty {
             return try await loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
                 requestTimeout: timeout, deadlineUptimeNs: deadline, startedAt: startedAt
             )
         }
-        guard processRoutingEnabled, !xcodeProcessRoutes.isEmpty else {
+        guard !xcodeProcessRoutes.isEmpty else {
             return try await loadUnboundToolsCatalog(requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
         }
 
@@ -541,9 +541,7 @@ extension RuntimeCoordinator {
         refreshCached: Bool = false
     ) {
         guard initializeManager.snapshot().isShuttingDown == false else { return }
-        guard processRoutingEnabled else {
-            return
-        }
+
         let exposure = processRouteExposure(policy: .toolsCatalog)
         // Exposure evaluation is also the health-probe trigger for expired
         // quarantines. Run it before requiring an exposed handshake so a
@@ -583,8 +581,7 @@ extension RuntimeCoordinator {
         upstreamProof: UpstreamTopologyProof,
         reason: String
     ) {
-        guard processRoutingEnabled,
-              isInitialized(),
+        guard isInitialized(),
               processControlPlane.catalog(forProcessID: route.target.processID) == nil,
               let (lease, transition) = beginProcessCatalogAttemptIfRunning(
                   routeID: route.id,
@@ -752,7 +749,6 @@ extension RuntimeCoordinator {
         let timeout = scheduleRuntimeTimeout(delay) { [weak self] in
             guard let self else { return }
             guard self.processControlPlane.handleRetryFired(lease),
-                  self.processRoutingEnabled,
                   self.xcodeProcessRoutes.contains(where: {
                       $0.id == lease.routeIdentity
                   }),
@@ -1688,8 +1684,7 @@ extension RuntimeCoordinator {
         if case .processBridgeRecovery = initializeClaim.owner {
             return
         }
-        guard processRoutingEnabled,
-              let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
+        guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) else {
             return
         }
         abandonProcessRouteActivation(

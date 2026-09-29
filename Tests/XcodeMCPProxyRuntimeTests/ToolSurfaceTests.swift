@@ -5,7 +5,6 @@ import NIO
 import Testing
 @testable import XcodeMCPProxyRuntime
 
-
 @Suite(.serialized)
 struct ToolSurfaceTests {
     @Test func toolSurfaceNormalizesStructuredContentFromTextJSON() throws {
@@ -369,8 +368,6 @@ struct ToolSurfaceTests {
 
 private func makeToolSurfaceConfig() -> ProxyRuntimeConfiguration {
     ProxyRuntimeConfiguration(
-        upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-        upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
         maxMessageBytes: 1_048_576,
         requestTimeout: 300
     )
@@ -415,7 +412,6 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
     ) async throws -> JSONValue {
         fatalError("unused in ToolSurfaceTests")
     }
-
 
     func liveXcodeListWindowsResult(
         route: ControlPlane.Route,

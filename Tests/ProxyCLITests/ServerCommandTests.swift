@@ -11,26 +11,18 @@ struct ServerCommandTests {
 
         #expect(config.listenHost == "localhost")
         #expect(config.listenPort == 8765)
-        #expect(config.upstreamCommand == MCPBridgeInvocation.defaultMCPBridge.command)
-        #expect(config.upstreamArgs == MCPBridgeInvocation.defaultMCPBridge.arguments)
         #expect(config.upstreamProcessCount == 1)
         #expect(config.maxBodyBytes == 1_048_576)
         #expect(config.requestTimeout == 300)
         #expect(config.autoApproveXcodeDialog == false)
         #expect(config.refreshCodeIssuesMode == .proxy)
-        #expect(config.xcodeMode == .automatic)
-        #expect(config.upstreamKind == .stockMCPBridge)
     }
 
     @Test func serverCommandMapsTypedOptionsToConfiguration() throws {
         let config = try resolvedProxyConfig(
             arguments: [
                 "--listen", "0.0.0.0:9999",
-                "--upstream-command", "/tmp/custom-bridge",
-                "--upstream-args", "serve,--verbose",
-                "--upstream-arg", "--trace",
                 "--upstream-processes", "10",
-                "--session-id", "session-123",
                 "--max-body-bytes", "2048",
                 "--request-timeout", "12.5",
                 "--auto-approve",
@@ -40,15 +32,11 @@ struct ServerCommandTests {
 
         #expect(config.listenHost == "0.0.0.0")
         #expect(config.listenPort == 9999)
-        #expect(config.upstreamCommand == "/tmp/custom-bridge")
-        #expect(config.upstreamArgs == ["serve", "--verbose", "--trace"])
         #expect(config.upstreamProcessCount == 10)
-        #expect(config.upstreamSessionID == "session-123")
         #expect(config.maxBodyBytes == 2048)
         #expect(config.requestTimeout == 12.5)
         #expect(config.autoApproveXcodeDialog)
         #expect(config.refreshCodeIssuesMode == .upstream)
-        #expect(config.upstreamKind == .custom)
     }
 
     @Test func serverCommandAllowsPortZeroAndZeroTimeout() throws {
@@ -63,14 +51,6 @@ struct ServerCommandTests {
         #expect(config.listenHost == "localhost")
         #expect(config.listenPort == 0)
         #expect(config.requestTimeout == 0)
-    }
-
-    @Test func serverCommandAcceptsDashPrefixedUpstreamArgumentList() throws {
-        let config = try resolvedProxyConfig(
-            arguments: ["--upstream-args", "--verbose,--trace"]
-        )
-
-        #expect(config.upstreamArgs == ["--verbose", "--trace"])
     }
 
     @Test func serverCommandRejectsInvalidValues() {
@@ -97,27 +77,23 @@ struct ServerCommandTests {
         }
     }
 
-    @Test func serverCommandResolvesExplicitXcodeModesForStockUpstream() throws {
-        for mode in ProxyConfig.XcodeMode.allCasesForTesting {
-            let config = try resolvedProxyConfig(
-                arguments: ["--xcode-mode", mode.rawValue]
-            )
-            #expect(config.xcodeMode == mode)
-            #expect(config.upstreamKind == .stockMCPBridge)
+    @Test(arguments: ["--xcode-mode", "--session-id", "--upstream-command", "--upstream-args", "--upstream-arg"])
+    func serverCommandRejectsRemovedRoutingOptions(option: String) {
+        #expect(throws: CLICommandError.self) {
+            _ = try resolvedProxyConfig(arguments: [option, "value"])
         }
+        #expect(!XcodeMCPProxyServer.serverUsage.contains(option + " "))
     }
 
-    @Test func serverCommandRejectsExplicitXcodeModeWithCustomUpstream() {
-        for mode in [ProxyConfig.XcodeMode.gui, .headless] {
-            #expect(throws: CLICommandError.self) {
-                _ = try resolvedProxyConfig(
-                    arguments: [
-                        "--upstream-command", "/tmp/custom-bridge",
-                        "--xcode-mode", mode.rawValue,
-                    ]
-                )
-            }
-        }
+    @Test func inheritedNativeRoutingValuesAreNotRenderedInTheServerCommand() throws {
+        let action = try XcodeMCPProxyServer.resolveLaunchAction(
+            arguments: ["xcode-mcp-proxy-server", "--dry-run"],
+            environment: ["MCP_XCODE_PID": "987654321", "MCP_XCODE_SESSION_ID": "inherited-session"]
+        )
+        guard case .dryRun(let command) = action else { Issue.record("expected dry run"); return }
+        #expect(!command.contains("987654321"))
+        #expect(!command.contains("inherited-session"))
+        #expect(!command.contains("--session-id"))
     }
 
     @Test func serverCommandRejectsConflictingAddressOptions() {
@@ -149,7 +125,6 @@ struct ServerCommandTests {
         #expect(config.listenHost == "127.0.0.1")
         #expect(config.listenPort == 9001)
         #expect(config.configPath == configURL.path)
-        #expect(config.upstreamSessionID == "session-env")
         #expect(config.refreshCodeIssuesMode == .upstream)
         #expect(config.autoApproveXcodeDialog == false)
     }
@@ -166,7 +141,6 @@ struct ServerCommandTests {
             arguments: [
                 "--listen", "127.0.0.1:9002",
                 "--config", explicitConfigURL.path,
-                "--session-id", "session-cli",
                 "--refresh-code-issues-mode", "proxy",
             ],
             environment: [
@@ -180,7 +154,6 @@ struct ServerCommandTests {
         #expect(config.listenHost == "127.0.0.1")
         #expect(config.listenPort == 9002)
         #expect(config.configPath == explicitConfigURL.path)
-        #expect(config.upstreamSessionID == "session-cli")
         #expect(config.refreshCodeIssuesMode == .proxy)
     }
 
@@ -268,7 +241,3 @@ private func makeTempConfigFile(_ contents: String) throws -> URL {
 }
 
 private struct UnexpectedServerCommandAction: Error {}
-
-private extension ProxyConfig.XcodeMode {
-    static let allCasesForTesting: [Self] = [.automatic, .gui, .headless]
-}

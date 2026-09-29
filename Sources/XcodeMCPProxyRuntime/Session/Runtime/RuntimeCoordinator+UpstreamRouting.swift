@@ -1394,8 +1394,7 @@ extension RuntimeCoordinator {
             )
             return
         }
-        if processRoutingEnabled,
-           let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) {
+        if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) {
             startProcessRouteActivation(for: route)
         }
         if violatedActivePrimaryInitialize {
@@ -1409,7 +1408,7 @@ extension RuntimeCoordinator {
             failInitPending(error: ControlPlane.Error.invalidResponse("upstream stdout protocol violation"))
         }
 
-        if processRoutingEnabled && !defaultBackendUpstreamIndices.contains(upstreamIndex) {
+        if !defaultBackendUpstreamIndices.contains(upstreamIndex) {
             return
         }
         let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex ?? 0

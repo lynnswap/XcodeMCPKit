@@ -30,7 +30,7 @@ struct ConfigurationRuntimeTests {
                 configurationFileURL: URL(fileURLWithPath: configPath),
                 featurePolicy: .init(prewarmToolsList: false)
             )
-        ).runtimeConfiguration(xcodeMode: .gui)
+        ).runtimeConfiguration(includesXcodeService: false)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -75,7 +75,7 @@ struct ConfigurationRuntimeTests {
             featurePolicy: .init(prewarmToolsList: false)
         )
         let config = try ProxyConfig.resolving(publicConfiguration).runtimeConfiguration(
-            xcodeMode: .gui
+            includesXcodeService: false
         )
 
         let group = borrowSharedTestEventLoopGroup()
@@ -118,7 +118,7 @@ struct ConfigurationRuntimeTests {
                 configurationFileURL: URL(fileURLWithPath: configPath),
                 featurePolicy: .init(prewarmToolsList: false)
             )
-        ).runtimeConfiguration(xcodeMode: .gui)
+        ).runtimeConfiguration(includesXcodeService: false)
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
@@ -170,7 +170,7 @@ struct ConfigurationRuntimeTests {
                 configurationFileURL: URL(fileURLWithPath: configPath),
                 featurePolicy: .init(prewarmToolsList: false)
             )
-        ).runtimeConfiguration(xcodeMode: .gui)
+        ).runtimeConfiguration(includesXcodeService: false)
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,

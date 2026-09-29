@@ -22,7 +22,6 @@ private struct VerifierOptions {
     var upstreamProcesses = 2
     var requestTimeoutSeconds = 600
     var outputDirectory = URL(fileURLWithPath: "ProxyToolVerifierOutput", isDirectory: true)
-    var xcodeMode: VerifierXcodeMode = .gui
     var keepServer = false
     var noOpenXcode = false
     var verbose = false
@@ -45,12 +44,6 @@ private struct VerifierOptions {
                     ?? Self.fail("--request-timeout requires an integer")
             case "--output":
                 outputDirectory = URL(fileURLWithPath: try Self.value(after: argument, in: arguments, index: &index), isDirectory: true)
-            case "--xcode-mode":
-                let value = try Self.value(after: argument, in: arguments, index: &index)
-                guard let mode = VerifierXcodeMode(rawValue: value) else {
-                    throw VerifierFailure("--xcode-mode must be gui or headless")
-                }
-                xcodeMode = mode
             case "--keep-server":
                 keepServer = true
             case "--no-open-xcode":
@@ -81,7 +74,6 @@ private struct VerifierOptions {
       --upstream-processes n      Upstream mcpbridge process count. Default: 2
       --request-timeout seconds   XcodeMCP request timeout. Default: 600
       --output path               Git-ignored verifier output directory. Default: ProxyToolVerifierOutput
-      --xcode-mode gui|headless   Xcode runtime to verify. Default: gui
       --keep-server               Leave the debug proxy server running.
       --no-open-xcode             Do not open the fixture workspace in GUI Xcode.
       -v, --verbose               Print tool arguments and response summaries.
@@ -101,11 +93,6 @@ private struct VerifierOptions {
     }
 }
 
-private enum VerifierXcodeMode: String, Codable {
-    case gui
-    case headless
-}
-
 private struct ProxyToolVerifier {
     let options: VerifierOptions
     let fileManager = FileManager.default
@@ -122,7 +109,7 @@ private struct ProxyToolVerifier {
             try? fixtureSnapshot.restore()
         }
 
-        if options.xcodeMode == .gui, options.noOpenXcode == false {
+        if options.noOpenXcode == false {
             try openFixtureInXcode(fixture.rootWorkspaceURL)
         }
 
@@ -154,39 +141,52 @@ private struct ProxyToolVerifier {
         fixture: FixtureLayout,
         outputRoot: URL
     ) async throws -> Bool {
-        let tools = try await client.listTools()
-        let workspaceSurface = try WorkspaceToolSurface.detect(in: tools)
-        guard workspaceSurface.matches(options.xcodeMode) else {
-            throw VerifierFailure(
-                "proxy started in \(options.xcodeMode.rawValue) mode but tools/list exposed "
-                    + "\(workspaceSurface.catalogToolName)"
-            )
+        var tools = try await client.listTools()
+        let names = Set(tools.map(\.name))
+        var records: [ToolVerificationRecord] = []
+        var fixtureTab: String?
+        if names.contains("XcodeListWindows") {
+            let inventory = await call("XcodeListWindows", arguments: [:], client: client)
+            records.append(inventory)
+            guard inventory.status == .passed, let result = inventory.rawResult else {
+                throw VerifierFailure("Cannot determine GUI fixture ownership: \(inventory.detail)")
+            }
+            fixtureTab = parseWindowTab(from: result, fixturePaths: [fixture.rootWorkspaceURL.path])
+        }
+        let workspaceSurface: WorkspaceToolSurface = fixtureTab == nil ? .service : .gui
+        var serviceInventory: MCPJSONValue?
+        if workspaceSurface == .service {
+            let inventory = await call("XcodeListWorkspaces", arguments: [:], client: client)
+            records.append(inventory)
+            guard inventory.status == .passed, let result = inventory.rawResult else {
+                throw VerifierFailure("Cannot determine Service fixture ownership: \(inventory.detail)")
+            }
+            serviceInventory = result
+            // Inventory waits for a usable Service connection. Refresh the catalog
+            // because the first list may have contained only the ready GUI tools.
+            tools = try await client.listTools()
+            let missing = workspaceLifecycleToolNames.subtracting(Set(tools.map(\.name)))
+            guard missing.isEmpty else {
+                throw VerifierFailure("Fixture is not open in GUI Xcode and Service tools are unavailable: "
+                    + missing.sorted().joined(separator: ", "))
+            }
         }
         var state = VerificationState(
             fixture: fixture,
             tools: tools,
             workspaceSurface: workspaceSurface
         )
-        var records: [ToolVerificationRecord] = []
+        state.tabIdentifier = fixtureTab
         let reportURL = outputRoot.appendingPathComponent("report.json")
 
-        if workspaceSurface == .headless {
-            let catalogURL = outputRoot.appendingPathComponent("headless-tool-catalog.json")
-            try writeToolCatalog(
-                ToolCatalogArtifact(
-                    mode: options.xcodeMode,
-                    catalogTool: workspaceSurface.catalogToolName,
-                    toolCount: tools.count,
-                    tools: tools.map(\.raw)
-                ),
-                to: catalogURL
-            )
-        }
+        try writeToolCatalog(
+            ToolCatalogArtifact(toolCount: tools.count, tools: tools.map(\.raw)),
+            to: outputRoot.appendingPathComponent("tool-catalog.json")
+        )
 
         func currentReport() -> VerificationReport {
             VerificationReport(
                 endpoint: options.endpoint.absoluteString,
-                xcodeMode: options.xcodeMode,
                 fixturePath: fixture.xcodeProjectURL.path,
                 workspacePath: fixture.rootWorkspaceURL.path,
                 workspace: state.workspaceRecord,
@@ -198,19 +198,19 @@ private struct ProxyToolVerifier {
         }
 
         do {
-            if workspaceSurface == .headless {
-                let openArguments: [String: MCPJSONValue] = [
-                    "path": .string(fixture.rootWorkspaceURL.path),
-                ]
-                print("-> XcodeOpenWorkspace")
-                let openRecord = await call(
-                    "XcodeOpenWorkspace",
-                    arguments: openArguments,
-                    client: client
-                )
-                print("<- [\(openRecord.status.rawValue)] XcodeOpenWorkspace (\(formatSeconds(openRecord.elapsedSeconds)))")
-                records.append(openRecord)
-                try state.observe(toolName: "XcodeOpenWorkspace", record: openRecord)
+            if let serviceInventory {
+                if let identifier = try parseServiceWorkspace(from: serviceInventory, path: fixture.rootWorkspaceURL.path) {
+                    state.workspaceIdentifier = identifier
+                    state.workspaceReportedPath = fixture.rootWorkspaceURL.path
+                } else {
+                    let openRecord = await call(
+                        "XcodeOpenWorkspace",
+                        arguments: ["path": .string(fixture.rootWorkspaceURL.path)],
+                        client: client
+                    )
+                    records.append(openRecord)
+                    try state.observe(toolName: "XcodeOpenWorkspace", record: openRecord)
+                }
                 try writeReport(currentReport(), to: reportURL, announce: false)
             }
 
@@ -513,18 +513,13 @@ private struct ProxyToolVerifier {
         let logHandle = try FileHandle(forWritingTo: logURL)
         let process = Process()
         process.executableURL = binary
-        var arguments = [
+        let arguments = [
             "--listen", "\(options.host):\(options.port)",
             "--request-timeout", "\(options.requestTimeoutSeconds)",
-            "--xcode-mode", options.xcodeMode.rawValue,
             "--upstream-processes", "\(options.upstreamProcesses)",
+            "--auto-approve",
+            "--refresh-code-issues-mode", "proxy",
         ]
-        if options.xcodeMode == .gui {
-            arguments += [
-                "--auto-approve",
-                "--refresh-code-issues-mode", "proxy",
-            ]
-        }
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment["XCODE_MCP_PROXY_CACHE_ROOT"] = outputRoot.appendingPathComponent("cache").path
@@ -629,55 +624,7 @@ private struct ProxyToolVerifier {
 
 private enum WorkspaceToolSurface: String, Codable {
     case gui
-    case headless
-
-    var catalogToolName: String {
-        switch self {
-        case .gui:
-            return "XcodeListWindows"
-        case .headless:
-            return "XcodeListWorkspaces"
-        }
-    }
-
-    func matches(_ mode: VerifierXcodeMode) -> Bool {
-        switch (self, mode) {
-        case (.gui, .gui), (.headless, .headless):
-            return true
-        default:
-            return false
-        }
-    }
-
-    static func detect(in tools: [MCPTool]) throws -> WorkspaceToolSurface {
-        let names = Set(tools.map(\.name))
-        let hasWindows = names.contains("XcodeListWindows")
-        let hasWorkspaces = names.contains("XcodeListWorkspaces")
-        switch (hasWindows, hasWorkspaces) {
-        case (true, false):
-            return .gui
-        case (false, true):
-            let missingLifecycleTools = workspaceLifecycleToolNames
-                .subtracting(names)
-                .sorted()
-            guard missingLifecycleTools.isEmpty else {
-                throw VerifierFailure(
-                    "headless tools/list is missing workspace lifecycle tools: "
-                        + missingLifecycleTools.joined(separator: ", ")
-                )
-            }
-            return .headless
-        case (true, true):
-            throw VerifierFailure(
-                "tools/list exposed both XcodeListWindows and XcodeListWorkspaces; "
-                    + "workspace ownership is ambiguous"
-            )
-        case (false, false):
-            throw VerifierFailure(
-                "tools/list exposed neither XcodeListWindows nor XcodeListWorkspaces"
-            )
-        }
-    }
+    case service
 }
 
 private enum ToolExecutionDecision {
@@ -768,10 +715,13 @@ private struct VerificationState {
     }
 
     func executionDecision(for toolName: String) throws -> ToolExecutionDecision {
-        if workspaceSurface == .headless,
+        if workspaceSurface == .service, toolName == "XcodeListWindows" {
+            return .skip("fixture is owned by Xcode Service")
+        }
+        if workspaceSurface == .service,
            toolName == "DeviceInteractionStartSession",
            availableTools.contains("DeviceInteractionStartWorkspaceSession") {
-            return .skip("headless verification uses DeviceInteractionStartWorkspaceSession")
+            return .skip("Service verification uses DeviceInteractionStartWorkspaceSession")
         }
         let arguments: [String: MCPJSONValue]
         do {
@@ -1026,31 +976,24 @@ private struct VerificationState {
         }
         var result = arguments
         switch workspaceSurface {
-        case .headless:
+        case .service:
             guard schema.properties.contains("workspaceIdentifier") else {
                 throw ToolPlanUnavailable(
-                    reason: "headless schema has no workspaceIdentifier argument"
+                    reason: "Service schema has no workspaceIdentifier argument"
                 )
             }
             guard let workspaceIdentifier else {
                 throw VerifierFailure(
-                    "headless workspace has not been opened; refusing to call \(toolName)"
+                    "Service workspace has not been opened; refusing to call \(toolName)"
                 )
             }
             result["workspaceIdentifier"] = .string(workspaceIdentifier)
             return result
         case .gui:
-            guard schema.properties.contains("tabIdentifier") else {
-                throw ToolPlanUnavailable(
-                    reason: "GUI schema has no tabIdentifier argument"
-                )
+            guard schema.properties.contains("workspaceIdentifier") else {
+                throw ToolPlanUnavailable(reason: "GUI schema has no workspaceIdentifier argument")
             }
-            guard let tabIdentifier else {
-                throw VerifierFailure(
-                    "fixture Xcode tab has not been resolved; refusing to call \(toolName)"
-                )
-            }
-            result["tabIdentifier"] = .string(tabIdentifier)
+            result["workspaceIdentifier"] = .string(fixture.rootWorkspaceURL.path)
             return result
         }
     }
@@ -1245,7 +1188,6 @@ private final class RunningProcess {
 
 private struct VerificationReport: Codable {
     let endpoint: String
-    let xcodeMode: VerifierXcodeMode
     let fixturePath: String
     let workspacePath: String
     let workspace: WorkspaceVerificationRecord
@@ -1260,8 +1202,6 @@ private struct VerificationReport: Codable {
 }
 
 private struct ToolCatalogArtifact: Codable {
-    let mode: VerifierXcodeMode
-    let catalogTool: String
     let toolCount: Int
     let tools: [MCPJSONValue]
 }
@@ -1577,6 +1517,40 @@ private func parseWindowTab(
         }
     }
     return nil
+}
+
+private func parseServiceWorkspace(from value: MCPJSONValue, path: String) throws -> String? {
+    var identifiers = Set<String>()
+    func visit(_ value: Any) {
+        if let object = value as? [String: Any] {
+            if let identifier = object["workspaceIdentifier"] as? String,
+               let workspacePath = (object["workspacePath"] ?? object["path"]) as? String,
+               normalizePath(workspacePath) == normalizePath(path) {
+                identifiers.insert(identifier)
+            }
+            object.values.forEach(visit)
+        } else if let array = value as? [Any] {
+            array.forEach(visit)
+        } else if let text = value as? String,
+                  let json = try? JSONSerialization.jsonObject(with: Data(text.utf8)) {
+            visit(json)
+        }
+    }
+    visit(value.jsonObject)
+    for text in allStrings(from: value) {
+        for line in text.split(whereSeparator: \.isNewline) {
+            let row = String(line)
+            if let identifier = extractValue(after: "workspaceIdentifier:", before: ", workspacePath: ", in: row),
+               let workspacePath = extractValue(after: "workspacePath:", before: nil, in: row),
+               normalizePath(workspacePath) == normalizePath(path) {
+                identifiers.insert(identifier)
+            }
+        }
+    }
+    guard identifiers.count <= 1 else {
+        throw VerifierFailure("Multiple Service workspaces match the fixture path")
+    }
+    return identifiers.first
 }
 
 private func parseFirstString(named key: String, from value: MCPJSONValue) -> String? {

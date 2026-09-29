@@ -17,7 +17,7 @@ func testTopologyProof(_ upstreamIndex: Int, generation: UInt64 = 1) -> Upstream
 func testOperationLease(_ upstreamIndex: Int, generation: UInt64 = 1) -> UpstreamOperationLease {
     UpstreamOperationLease(
         proof: testTopologyProof(upstreamIndex, generation: generation),
-        backend: .custom,
+        backend: .xcodeService,
         slot: TestUpstreamClient()
     )
 }
@@ -2184,7 +2184,6 @@ struct ControlPlaneAuthorityTests {
             config: makeConfig(requestTimeout: 1),
             eventLoop: group.next(),
             upstreams: [],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }

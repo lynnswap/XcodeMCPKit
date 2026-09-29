@@ -542,12 +542,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             RuntimeScheduledTimeout
     let controlPlaneCoordinator: ControlPlaneCoordinator
     let documentationProviderManager: (any DocumentationProviderManaging)?
-    let processRoutingEnabled: Bool
     var defaultBackendUpstreamIndices: Set<Int> {
         let topology = upstreamTopology.snapshot()
         return Set(topology.entries.compactMap {
             switch $0.backend {
-            case .xcodeService, .custom: $0.id.rawValue
+            case .xcodeService: $0.id.rawValue
             case .xcodeProcess: nil
             }
         })
@@ -582,22 +581,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         startImmediately: Bool = true
     ) {
         let bridgeRuntimeConfig = config.mcpBridgeRuntimeConfiguration
-        let xcodeProcessRoutingSupported = MCPBridgeRuntime.supportsProcessBoundRouting(
-            config: bridgeRuntimeConfig
-        )
-        let xcodeProcessRoutingEnabled = xcodeProcessRoutingSupported && xcodeTargetDiscovery != nil
         let documentationServiceEnabled = Self.documentationProviderServiceIsConfigured(
             config: config
         )
-        let xcodeTargets =
-            xcodeProcessRoutingEnabled
-            ? xcodeTargetDiscovery?.runningXcodeTargets() ?? []
-            : []
-        let upstreamPlan = MCPBridgeRuntime.makeUpstreamPlan(
-            config: bridgeRuntimeConfig,
-            xcodeTargets: xcodeTargets,
-            processBoundRoutingEnabled: xcodeProcessRoutingEnabled
-        )
+        let xcodeTargets = xcodeTargetDiscovery?.runningXcodeTargets() ?? []
+        let upstreamPlan = MCPBridgeRuntime.makeUpstreamPlan(config: bridgeRuntimeConfig, xcodeTargets: xcodeTargets)
         let clock = ClockClient.liveValue
         let runtimeBox = WeakRuntimeCoordinatorBox()
         let documentationTransport = RuntimeDocumentationProviderTransport(
@@ -625,7 +613,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
             : nil
         let unboundUpstreamFactory: UnboundUpstreamFactory?
-        if xcodeProcessRoutingEnabled && !config.xcodeMode.includesHeadlessService {
+        if !config.includesXcodeService {
             unboundUpstreamFactory = nil
         } else {
             unboundUpstreamFactory = {
@@ -639,7 +627,6 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             clock: clock,
             upstreamReadinessGate: upstreamReadinessGate,
             xcodeProcessRoutes: upstreamPlan.xcodeProcessRoutes,
-            processRoutingEnabled: xcodeProcessRoutingEnabled,
             xcodeTargetDiscovery: xcodeTargetDiscovery,
             xcodeProcessEventMonitor: xcodeProcessEventMonitor,
             dynamicUpstreamFactory: { target in
@@ -682,10 +669,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         config: ProxyRuntimeConfiguration
     ) -> Bool {
         config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
-            && config.xcodeMode == .gui
-            && MCPBridgeRuntime.supportsProcessBoundRouting(
-                config: config.mcpBridgeRuntimeConfiguration
-            )
+            && !config.includesXcodeService
     }
 
     init(
@@ -700,7 +684,6 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 RuntimeScheduledTimeout
         )? = nil,
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
-        processRoutingEnabled: Bool? = nil,
         xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
         xcodeProcessEventMonitor: (any XcodeProcessEventMonitoring)? = nil,
         dynamicUpstreamFactory: XcodeProcessUpstreamFactory? = nil,
@@ -713,12 +696,6 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         startImmediately: Bool = true,
         runtimeBox providedRuntimeBox: WeakRuntimeCoordinatorBox? = nil
     ) {
-        let resolvedProcessRoutingEnabled =
-            processRoutingEnabled ?? (xcodeProcessRoutes.isEmpty == false)
-        precondition(
-            !upstreams.isEmpty || resolvedProcessRoutingEnabled,
-            "upstreams must not be empty outside process-bound routing mode"
-        )
         let runtimeBox = providedRuntimeBox ?? WeakRuntimeCoordinatorBox()
         let uptimeProvider = nowUptimeNanoseconds ?? clock.uptimeNanoseconds
         let runtimeClock = ClockClient(
@@ -741,7 +718,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let backendByIndex = Dictionary(uniqueKeysWithValues: xcodeProcessRoutes.flatMap { route in
             route.upstreamIndices.map { ($0, UpstreamBackend.xcodeProcess(XcodeProcessID(route.target))) }
         })
-        let defaultBackend: UpstreamBackend = config.xcodeMode == .custom ? .custom : .xcodeService
+        let defaultBackend: UpstreamBackend = .xcodeService
         let upstreamTopology = UpstreamTopologyAuthority(
             upstreams, backend: { backendByIndex[$0] ?? defaultBackend }
         )
@@ -770,7 +747,6 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         self.nowUptimeNanoseconds = uptimeProvider
         self.scheduleRuntimeTimeout = timeoutScheduler
         self.documentationProviderManager = documentationProviderManager
-        self.processRoutingEnabled = resolvedProcessRoutingEnabled
         let processControlPlane = ProcessControlPlaneAuthority(
             initialRoutes: xcodeProcessRoutes,
             nowUptimeNs: uptimeProvider(),
@@ -792,14 +768,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             logger: ProxyLogging.make("upstream.readiness")
         )
         let routableProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = { [runtimeBox] in
-            guard resolvedProcessRoutingEnabled else { return [] }
+
             guard let runtime = runtimeBox.value else {
                 return Set(upstreamTopology.snapshot().slotIDs.map(\.rawValue))
             }
             return runtime.routableProcessBoundUpstreamIndices()
         }
         let inactiveProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = {
-            guard resolvedProcessRoutingEnabled else { return [] }
             let active = routableProcessBoundUpstreamIndices()
             return Set(upstreamTopology.snapshot().slotIDs.map(\.rawValue)).subtracting(active)
         }
@@ -811,8 +786,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 guard let upstreamHealthManager else {
                     return UpstreamHealthManager.UseEvaluation(proof: nil, effects: [])
                 }
-                if resolvedProcessRoutingEnabled,
-                    routableProcessBoundUpstreamIndices().contains(upstreamIndex) == false
+                if routableProcessBoundUpstreamIndices().contains(upstreamIndex) == false
                 {
                     return UpstreamHealthManager.UseEvaluation(proof: nil, effects: [])
                 }
@@ -925,47 +899,44 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             return true
         }
         guard shouldStart else { return }
-        if processRoutingEnabled {
-            let preexistingRouteIDs = xcodeProcessRoutes.map(\.id)
-            if let xcodeProcessEventMonitor {
-                let startupReconcileState = NIOLockedValueBox(
-                    XcodeProcessStartupReconcileState()
+        let preexistingRouteIDs = xcodeProcessRoutes.map(\.id)
+        if let xcodeProcessEventMonitor {
+            let startupReconcileState = NIOLockedValueBox(
+                XcodeProcessStartupReconcileState()
+            )
+            xcodeProcessEventMonitor.setChangeHandler { [weak self] reason in
+                guard let self else { return }
+                let shouldSchedule = startupReconcileState.withLockedValue { state in
+                    if state.isReconciling {
+                        state.didObserveChange = true
+                        return false
+                    }
+                    return true
+                }
+                guard shouldSchedule else { return }
+                self.handleXcodeProcessInventoryChange(reason: reason)
+            }
+            if let xcodeTargetDiscovery {
+                reconcileStartupXcodeProcessSnapshotUntilCurrent(
+                    discovery: xcodeTargetDiscovery,
+                    state: startupReconcileState
                 )
-                xcodeProcessEventMonitor.setChangeHandler { [weak self] reason in
-                    guard let self else { return }
-                    let shouldSchedule = startupReconcileState.withLockedValue { state in
-                        if state.isReconciling {
-                            state.didObserveChange = true
-                            return false
-                        }
-                        return true
-                    }
-                    guard shouldSchedule else { return }
-                    self.handleXcodeProcessInventoryChange(reason: reason)
-                }
-                if let xcodeTargetDiscovery {
-                    reconcileStartupXcodeProcessSnapshotUntilCurrent(
-                        discovery: xcodeTargetDiscovery,
-                        state: startupReconcileState
-                    )
-                } else {
-                    startupReconcileState.withLockedValue { state in
-                        state.isReconciling = false
-                    }
-                }
             } else {
-                triggerXcodeProcessReconcile(reason: "startup")
+                startupReconcileState.withLockedValue { state in
+                    state.isReconciling = false
+                }
             }
-            let preexistingRoutes = xcodeProcessRoutes.filter {
-                preexistingRouteIDs.contains($0.id)
-            }
-            startProcessRouteAttachments(preexistingRoutes)
-            for route in preexistingRoutes {
-                startProcessRouteActivation(for: route)
-            }
-        } else if config.usesPermissionDialogAutomation {
-            xcodeProcessEventMonitor?.start()
+        } else {
+            triggerXcodeProcessReconcile(reason: "startup")
         }
+        let preexistingRoutes = xcodeProcessRoutes.filter {
+            preexistingRouteIDs.contains($0.id)
+        }
+        startProcessRouteAttachments(preexistingRoutes)
+        for route in preexistingRoutes {
+            startProcessRouteActivation(for: route)
+        }
+
         startEagerInitializePrimary()
         if prewarmDocumentationProviderOnStartup {
             prewarmDocumentationProvider()
@@ -1030,18 +1001,16 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                         upstreamIndex: upstreamIndex,
                         proof: operationLease.proof
                     )
-                    if self.processRoutingEnabled {
-                        self.triggerXcodeProcessReconcile(reason: "upstream_stdout_closed")
-                    }
+                    self.triggerXcodeProcessReconcile(reason: "upstream_stdout_closed")
+
                 case .exit(let status):
                     self.handleUpstreamExit(
                         status,
                         upstreamIndex: upstreamIndex,
                         proof: operationLease.proof
                     )
-                    if self.processRoutingEnabled {
-                        self.triggerXcodeProcessReconcile(reason: "upstream_exit_\(status)")
-                    }
+                    self.triggerXcodeProcessReconcile(reason: "upstream_exit_\(status)")
+
                 }
                 self.testHooks.upstreamEventHandled?(upstreamIndex)
             }
@@ -1354,8 +1323,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
         )
         guard
-            processRoutingEnabled == false
-                || xcodeProcessRoutes.contains(where: {
+            xcodeProcessRoutes.contains(where: {
                     $0.upstreamIndices.contains(where: initializedUpstreamIndices.contains)
                 })
         else {
@@ -1645,17 +1613,6 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         } else {
             primaryUpstreamIndex = candidatePrimaryUpstreamIndex
         }
-        let canRecoverQuarantinedInitialize =
-            upstreamHealthManager.earliestInitializedQuarantineRecovery() != nil
-        guard
-            primaryUpstreamIndex != nil
-                || initializeManager.isInitialized()
-                || processRoutingEnabled
-                || canRecoverQuarantinedInitialize
-        else {
-            return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
-        }
-
         let decision = initializeManager.registerInitialize(
             sessionID: sessionID,
             sessionGeneration: sessionGeneration,
@@ -1771,7 +1728,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             )
         let deadline = timeoutDeadline(for: timeout)
         switch route {
-        case .anyHealthy where processRoutingEnabled:
+        case .anyHealthy:
             return try await liveXcodeListWindowsAcrossProcessRoutes(
                 deadlineUptimeNs: deadline,
                 routeScope: .catalogSurface
@@ -1785,12 +1742,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
             if case .pinnedUpstream(let upstreamIndex) = route {
                 recordXcodeWindowOwners(from: result, upstreamIndex: upstreamIndex)
-                if processRoutingEnabled {
-                    return rewriteXcodeListWindowsResultForClients(
-                        result,
-                        upstreamIndex: upstreamIndex
-                    )
-                }
+                return rewriteXcodeListWindowsResultForClients(
+                    result,
+                    upstreamIndex: upstreamIndex
+                )
+
             }
             return result
         }
@@ -1834,7 +1790,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     private func logUnboundToolCatalogSummaryIfNeeded(_ result: JSONValue) {
-        guard processRoutingEnabled == false else { return }
+        guard xcodeProcessRoutes.isEmpty else { return }
         let shouldLog = unboundToolCatalogSummaryLoggedBox.withLockedValue { logged in
             if logged {
                 return false
