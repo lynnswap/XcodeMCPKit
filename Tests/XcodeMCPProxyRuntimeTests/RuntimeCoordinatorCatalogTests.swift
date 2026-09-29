@@ -54,7 +54,7 @@ struct RuntimeCoordinatorCatalogTests {
         #expect(toolNames(in: try await second.value) == ["DocumentationSearch"])
     }
 
-    @Test(arguments: ["malformed", "both", "missing-code", "unavailable", "overloaded"])
+    @Test(arguments: ["malformed", "both", "missing-code", "invalid-method", "missing-payload", "unavailable", "overloaded"])
     func catalogInvalidAndProxyFailureRepliesStillInvalidateConnection(kind: String) async throws {
         let upstream = TestUpstreamClient()
         let fixture = RuntimeCoordinatorFixture(upstreams: [upstream], startImmediately: false)
@@ -73,6 +73,8 @@ struct RuntimeCoordinatorCatalogTests {
             object["result"] = ["tools": []]
             object["error"] = ["code": -32603, "message": "invalid envelope"]
         case "missing-code": object["error"] = ["message": "missing code"]
+        case "invalid-method": object["method"] = 1
+        case "missing-payload": break
         case "unavailable": object["error"] = ["code": -32001, "message": "upstream unavailable"]
         default: object["error"] = ["code": -32002, "message": "upstream overloaded"]
         }
