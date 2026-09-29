@@ -990,6 +990,10 @@ private struct VerificationState {
             result["workspaceIdentifier"] = .string(workspaceIdentifier)
             return result
         case .gui:
+            // The mixed catalog exposes a tab selector only for GUI-capable tools.
+            guard schema.properties.contains("tabIdentifier") else {
+                throw ToolPlanUnavailable(reason: "tool has no GUI tab selector")
+            }
             guard schema.properties.contains("workspaceIdentifier") else {
                 throw ToolPlanUnavailable(reason: "GUI schema has no workspaceIdentifier argument")
             }
