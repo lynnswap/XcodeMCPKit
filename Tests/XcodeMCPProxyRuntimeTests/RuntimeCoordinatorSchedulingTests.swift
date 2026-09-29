@@ -10,6 +10,51 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorSchedulingTests {
+    @Test func unavailableServiceRequestDoesNotBlockReadyGUIRequest() async throws {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let eventLoop = group.next()
+        let target = xcodeProcessTarget(processID: 759, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        let manager = RuntimeCoordinator(
+            config: config, eventLoop: eventLoop,
+            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            startImmediately: false
+        )
+        defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        let descriptor = SessionRequestPipeline.Descriptor(
+            sessionID: "queue-backends", label: "tools/list", expectsResponse: true, isTopLevelClientRequest: false
+        )
+        let serviceLease = manager.createRequestLease(descriptor: descriptor)
+        let serviceStarted = NIOLockedValueBox<Int?>(nil)
+        let serviceFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: serviceLease, descriptor: descriptor, on: eventLoop
+        ) { lease in
+            serviceStarted.withLockedValue { $0 = lease.upstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+        serviceFuture.whenFailure { _ in }
+        let guiLease = manager.createRequestLease(descriptor: descriptor)
+        let guiStarted = NIOLockedValueBox<Int?>(nil)
+        let guiFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
+            leaseID: guiLease, descriptor: descriptor, on: eventLoop, preferredUpstreamIndex: 1
+        ) { lease in
+            guiStarted.withLockedValue { $0 = lease.upstreamIndex }
+            return eventLoop.makeSucceededFuture(())
+        }
+        guiFuture.whenFailure { _ in }
+        try await eventLoop.submit {}.get()
+        #expect(guiStarted.withLockedValue { $0 } == 1)
+        #expect(serviceStarted.withLockedValue { $0 } == nil)
+        manager.completeRequestLease(guiLease)
+        manager.abandonRequestLease(serviceLease, sessionID: descriptor.sessionID, requestIDKeys: [], operationLease: nil)
+        await #expect(throws: CancellationError.self) { try await serviceFuture.get() }
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
+    }
+
     @Test func sessionManagerQueuedPreferredRequestDoesNotBlockLaterGenericDispatch()
         async throws
     {

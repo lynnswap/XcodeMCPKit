@@ -387,7 +387,7 @@ final class UpstreamSlotScheduler: Sendable {
                     healthEffects.append(contentsOf: selection.effects)
                     guard let proof = selection.proof,
                           let selectedLease = operationLease(proof) else {
-                        break
+                        continue
                     }
                     let selectedUpstreamIndex = selectedLease.upstreamIndex
                     guard state.activeLeaseIDsByUpstream[selectedUpstreamIndex] == nil else {

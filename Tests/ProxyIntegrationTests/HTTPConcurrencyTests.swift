@@ -86,6 +86,36 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
+    @Test func unavailableServiceDoesNotBlockGUICatalogOverHTTP() async throws {
+        let service = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service")
+        let gui = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "gui")
+        let target = XcodeProcessTarget(
+            processID: 759, appPath: "/Applications/Xcode.app",
+            developerDir: "/Applications/Xcode.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
+        )
+        let server = try TestHTTPServer.start(upstream: service, xcodeMode: .automatic,
+            additionalUpstreams: [gui], xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])])
+        do {
+            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
+            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
+            await server.sessionManager.drainRuntimeTasksForTesting()
+            _ = server.sessionManager.upstreamHealthManager.quarantineIncompatibleUpstream(
+                server.sessionManager.operationLeaseForTest(upstreamIndex: 0).proof,
+                nowUptimeNs: server.sessionManager.nowUptimeNanoseconds()
+            )
+            let (_, reply) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 2))
+            let result = try #require(reply["result"] as? [String: Any], "catalog response: \(reply)")
+            let tools = try #require(result["tools"] as? [[String: Any]])
+            #expect(tools.contains { $0["name"] as? String == "XcodeListWindows" })
+            #expect(ProcessToolCatalogCodec.toolsByName(in: server.sessionManager.processControlPlane.unboundToolsCatalogRaw())["XcodeListWindows"] == nil)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpAndSwiftClientExposeCompletePaginatedCatalog() async throws {
         let upstream = PaginatedCatalogUpstream()
         let server = try TestHTTPServer.start(upstream: upstream)
