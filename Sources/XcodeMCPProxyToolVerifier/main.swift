@@ -142,16 +142,30 @@ private struct ProxyToolVerifier {
         outputRoot: URL
     ) async throws -> Bool {
         var tools = try await client.listTools()
-        let names = Set(tools.map(\.name))
         var records: [ToolVerificationRecord] = []
         var fixtureTab: String?
-        if names.contains("XcodeListWindows") {
-            let inventory = await call("XcodeListWindows", arguments: [:], client: client)
-            records.append(inventory)
-            guard inventory.status == .passed, let result = inventory.rawResult else {
-                throw VerifierFailure("Cannot determine GUI fixture ownership: \(inventory.detail)")
+        let discoveryDeadline = ContinuousClock.now.advanced(
+            by: .seconds(options.requestTimeoutSeconds)
+        )
+        while true {
+            if tools.contains(where: { $0.name == "XcodeListWindows" }) {
+                let inventory = await call("XcodeListWindows", arguments: [:], client: client)
+                records.append(inventory)
+                guard inventory.status == .passed, let result = inventory.rawResult else {
+                    throw VerifierFailure("Cannot determine GUI fixture ownership: \(inventory.detail)")
+                }
+                fixtureTab = parseWindowTab(from: result, fixturePaths: [fixture.rootWorkspaceURL.path])
             }
-            fixtureTab = parseWindowTab(from: result, fixturePaths: [fixture.rootWorkspaceURL.path])
+            if fixtureTab != nil || options.noOpenXcode {
+                break
+            }
+            // xed/open and GUI catalog activation finish asynchronously. A run
+            // that opened a GUI fixture must wait for it, not switch to Service.
+            guard ContinuousClock.now < discoveryDeadline else {
+                throw VerifierFailure("GUI Xcode did not report the opened fixture before the request timeout")
+            }
+            try await Task.sleep(for: .milliseconds(250))
+            tools = try await client.listTools()
         }
         let workspaceSurface: WorkspaceToolSurface = fixtureTab == nil ? .service : .gui
         var serviceInventory: MCPJSONValue?

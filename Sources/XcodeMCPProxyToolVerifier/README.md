@@ -9,7 +9,7 @@ swift run xcode-mcp-proxy-tool-verifier
 ```
 
 To leave GUI windows unchanged and use Xcode Service when the fixture is not
-already open in GUI Xcode:
+already available through GUI Xcode:
 
 ```sh
 swift run xcode-mcp-proxy-tool-verifier --no-open-xcode --upstream-processes 2
@@ -26,7 +26,8 @@ The verifier:
 - builds the local debug `xcode-mcp-proxy-server`
 - starts it on a verifier-only port
 - opens `XcodeMCPKit.xcworkspace` in Xcode unless `--no-open-xcode` is supplied
-- finds the fixture in GUI and Service inventories; a mixed catalog is supported
+- waits for the GUI fixture it opened to appear, even when Service becomes ready first
+- with `--no-open-xcode`, reuses an available GUI fixture or prepares a Service fixture
 - reuses a matching Service workspace or calls `XcodeOpenWorkspace` when absent
 - uses the standard `workspaceIdentifier` argument with the GUI workspace path
   or the Service's returned identifier
