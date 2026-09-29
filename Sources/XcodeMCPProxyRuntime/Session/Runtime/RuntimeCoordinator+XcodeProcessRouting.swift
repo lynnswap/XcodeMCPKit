@@ -496,6 +496,7 @@ extension RuntimeCoordinator {
             for: object,
             request: request
         ) {
+            guard config.xcodeMode != .custom else { return affinityDecision }
             if case .forwardAdmitted(_, let admission) = affinityDecision,
                admission.route == nil,
                let path = request.workspacePath,
@@ -509,6 +510,7 @@ extension RuntimeCoordinator {
             }
             return affinityDecision
         }
+        guard config.xcodeMode != .custom else { return .forward(preferredUpstreamIndex: nil) }
         if ["XcodeOpenWorkspace", "XcodeCloseWorkspace", "XcodeListWorkspaces"].contains(request.toolName) {
             guard request.tabIdentifier == nil,
                   request.toolName != "XcodeCloseWorkspace" || request.workspacePath == nil else {
@@ -605,7 +607,13 @@ extension RuntimeCoordinator {
                 return .reject(errors: toolRoutingErrors(for: request, message: "Unable to resolve the selected Xcode tab"))
             }
         }
-        guard let upstreamIndex = defaultBackendUpstreamIndices.sorted().first else {
+        let serviceIndices = defaultBackendUpstreamIndices
+        let excludedIndices = Set(upstreamTopology.snapshot().slotIDs.map(\.rawValue)).subtracting(serviceIndices)
+        let selection = upstreamHealthManager.chooseBestInitializedUpstream(
+            nowUptimeNs: nowUptimeNanoseconds(), occupiedUpstreams: excludedIndices
+        )
+        applyHealthEffects(selection.effects)
+        guard let upstreamIndex = selection.proof?.slotID.rawValue ?? serviceIndices.sorted().first else {
             return .reject(errors: toolRoutingErrors(for: request, message: "No GUI owns the workspace and Xcode Service is not available"))
         }
         return await serviceWorkspacePathRoutingDecision(

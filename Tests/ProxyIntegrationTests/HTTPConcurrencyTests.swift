@@ -167,6 +167,51 @@ struct HTTPConcurrencyTests {
         #expect(!(await service.recordedCalls()).contains("XcodeCloseWorkspace"))
     }
 
+    @Test func customUpstreamKeepsNativeWorkspacePaths() async throws {
+        let path = "/Custom/Workspace"
+        let upstream = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: path)
+        await upstream.failInventory()
+        let server = try TestHTTPServer.start(upstream: upstream, xcodeMode: .custom)
+        do {
+            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
+            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
+            let (_, reply) = try await postJSON(url: server.url, sessionID: sessionID,
+                payload: toolCallPayload(id: 2, name: "BuildProject", arguments: ["workspaceIdentifier": path]))
+            let result = try #require(reply["result"] as? [String: Any])
+            #expect(result["isError"] as? Bool == false)
+            #expect(await upstream.recordedCalls() == ["BuildProject"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
+    @Test func workspaceLookupUsesHealthyServiceSibling() async throws {
+        let first = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
+        let second = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
+        let server = try TestHTTPServer.start(upstream: first, xcodeMode: .automatic, additionalUpstreams: [second])
+        do {
+            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
+            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
+            await server.sessionManager.drainRuntimeTasksForTesting()
+            _ = server.sessionManager.upstreamHealthManager.quarantineIncompatibleUpstream(
+                server.sessionManager.operationLeaseForTest(upstreamIndex: 0).proof,
+                nowUptimeNs: server.sessionManager.nowUptimeNanoseconds()
+            )
+            let (_, reply) = try await postJSON(url: server.url, sessionID: sessionID,
+                payload: toolCallPayload(id: 2, name: "BuildProject", arguments: ["workspaceIdentifier": "/Work/App.xcodeproj"]))
+            let result = try #require(reply["result"] as? [String: Any])
+            #expect(result["isError"] as? Bool == false)
+            #expect(await first.recordedCalls() == [])
+            #expect(await second.recordedCalls() == ["XcodeListWorkspaces", "BuildProject"])
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpAndSwiftClientExposeCompletePaginatedCatalog() async throws {
         let upstream = PaginatedCatalogUpstream()
         let server = try TestHTTPServer.start(upstream: upstream)
