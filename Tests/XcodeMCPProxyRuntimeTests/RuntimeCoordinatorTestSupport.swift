@@ -38,9 +38,6 @@ func makeTestUpstreamSlotScheduler(upstreamCount: Int) -> UpstreamSlotScheduler 
 
 func makeConfig(requestTimeout: TimeInterval) -> ProxyRuntimeConfiguration {
     ProxyRuntimeConfiguration(
-        upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-        upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
-        upstreamSessionID: nil,
         maxMessageBytes: 1024,
         requestTimeout: requestTimeout,
         prewarmToolsList: false
@@ -1403,50 +1400,6 @@ actor StubDocumentationProviderManager: DocumentationProviderManaging {
     }
 }
 
-func defaultUpstreamEnvironment(sharedSessionID: String?) throws -> [String: String] {
-    var config = makeConfig(requestTimeout: 5)
-    config.upstreamSessionID = sharedSessionID
-    let bridgeConfig = MCPBridgeRuntime.Configuration(
-        upstreamCommand: config.upstreamCommand,
-        upstreamArgs: config.upstreamArgs,
-        upstreamProcessCount: config.upstreamProcessCount,
-        sharedSessionID: config.upstreamSessionID,
-        maxBodyBytes: config.maxMessageBytes,
-        processBoundRoutingSupported: false
-    )
-    let upstreams = MCPBridgeRuntime.makeUpstreamPlan(
-        config: bridgeConfig,
-        xcodeTargets: []
-    ).upstreams
-    let upstream = try #require(upstreams.first)
-    return try upstreamEnvironment(from: upstream)
-}
-
-func withEnvironmentVariables<T>(
-    _ values: [String: String],
-    body: () throws -> T
-) throws -> T {
-    let originalValues = values.keys.reduce(into: [String: String?]()) { result, key in
-        result[key] = ProcessInfo.processInfo.environment[key]
-    }
-
-    for (key, value) in values {
-        _ = unsafe setenv(key, value, 1)
-    }
-
-    defer {
-        for (key, value) in originalValues {
-            if let value {
-                _ = unsafe setenv(key, value, 1)
-            } else {
-                _ = unsafe unsetenv(key)
-            }
-        }
-    }
-
-    return try body()
-}
-
 actor AlwaysOverloadedUpstreamClient: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
@@ -1840,7 +1793,6 @@ func makeInitializeRequest(id: Int) -> [String: Any] {
     ]
 }
 
-
 func makeInitializeErrorResponse(id: Int64, message: String = "initialize failed") throws -> Data {
     let response: [String: Any] = [
         "jsonrpc": "2.0",
@@ -1868,7 +1820,7 @@ struct RuntimeCoordinatorFixture {
                 RuntimeScheduledTimeout
         )? = nil,
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
-        processRoutingEnabled: Bool? = nil,
+
         xcodeTargetDiscovery: (any XcodeTargetDiscovering)? = nil,
         dynamicUpstreamFactory: XcodeProcessUpstreamFactory? = nil,
         unboundUpstreamFactory: UnboundUpstreamFactory? = nil,
@@ -1891,7 +1843,6 @@ struct RuntimeCoordinatorFixture {
             nowUptimeNanoseconds: nowUptimeNanoseconds,
             scheduleRuntimeTimeout: scheduleRuntimeTimeout,
             xcodeProcessRoutes: xcodeProcessRoutes,
-            processRoutingEnabled: processRoutingEnabled,
             xcodeTargetDiscovery: xcodeTargetDiscovery,
             dynamicUpstreamFactory: dynamicUpstreamFactory,
             unboundUpstreamFactory: unboundUpstreamFactory,

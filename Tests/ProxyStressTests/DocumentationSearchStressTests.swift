@@ -8,7 +8,6 @@ import XcodeMCPKit
 import Testing
 import XcodeMCPProxyTestSupport
 
-
 @Suite(.serialized, .enabled(if: StressTestEnvironment.isEnabled))
 struct DocumentationSearchStressTests {
     @Test func documentationSearchHandlesFourSessionsWithOneThousandParallelRequestsEach() async throws {
@@ -151,9 +150,6 @@ private struct StressHTTPServer {
         let listenPort = 0
         let maxBodyBytes = 1_048_576
         let config = ProxyRuntimeConfiguration(
-                upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-                upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
-                upstreamSessionID: nil,
                 maxMessageBytes: maxBodyBytes,
                 requestTimeout: 60,
                 prewarmToolsList: false

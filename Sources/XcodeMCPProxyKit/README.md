@@ -20,11 +20,10 @@ import XcodeMCPProxyKit
 let server = XcodeMCPProxyServer(
     configuration: .init(
         bindAddress: .localhost(port: 0),
-        upstream: .defaultMCPBridge(processesPerXcode: 1),
+        upstreamProcessCount: 1,
         requestTimeout: .seconds(300),
         discovery: .defaultLocation,
-        approvalPolicy: .manual,
-        xcodeMode: .automatic
+        approvalPolicy: .manual
     )
 )
 
@@ -56,9 +55,8 @@ may be incomplete, even though the server lifecycle has stopped.
 `XcodeMCPProxyServerConfiguration` exposes the supported embedding choices:
 
 - `bindAddress`: host and port; port `0` requests an ephemeral port.
-- `upstream`: the default `xcrun mcpbridge` invocation or an explicit command.
-  Its `processesPerXcode` value is per GUI Xcode process and also determines the
-  Service pool size. Automatic mode maintains both; custom routing uses one pool.
+- `upstreamProcessCount`: bridge connections per GUI Xcode process and for the
+  enabled Service pool. The default is `1`; the supported range is `1...10`.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
 - `configurationFileURL`: optional TOML file. An explicit unreadable or invalid
@@ -68,25 +66,24 @@ may be incomplete, even though the server lifecycle has stopped.
 - `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
 - `approvalPolicy`: manual or automatic Xcode permission handling.
 - `featurePolicy`: tools-list prewarming and refresh-code-issues routing.
-- `xcodeMode`: `.automatic` (the default), `.gui`, or `.headless` for the stock
-  `mcpbridge` upstream. Automatic mode keeps the enabled Xcode 27 headless
-  service available alongside GUI routing.
 
-Headless mode does not require a workspace to be open in the Xcode app. It
-forwards workspace lifecycle and DocumentationSearch tools to Xcode Service
-and never enables, approves, or stops the shared service. If headless access is
-disabled, enable it separately with
-`sudo xcrun mcp-server enable`; explicit `.headless` fails startup instead of
-silently falling back. Xcode Service can request manual agent and folder
-approval on the first `XcodeOpenWorkspace` call. `approvalPolicy: .automatic`
-handles recognized Xcode MCP connection dialogs for all agents in either routing
-mode, including clients that connect directly through `mcpbridge`. Existing
-configured-agent matching is preserved; the English connection heading with an
-`Allow` button also accepts other agents. It does not grant headless agent or
-folder permissions.
+The proxy discovers GUI Xcode processes and uses the selected Xcode's Service
+when available and enabled. A request's workspace selector determines its owner.
+Service availability is checked at startup; unavailable or disabled Service
+access leaves GUI routing available. Service workspace and DocumentationSearch
+tools use the native Service connection. The proxy never enables or stops the
+shared service. Enable access separately with `sudo xcrun mcp-server enable`.
 
-Custom upstream commands keep their existing unbound behavior and require
-`xcodeMode: .automatic`.
+Xcode Service can request agent and folder approval on the first
+`XcodeOpenWorkspace` call. `approvalPolicy: .automatic` handles recognized Xcode
+MCP connection dialogs for all agents, including direct `mcpbridge` clients.
+It does not grant Service agent or folder permissions.
+
+The proxy owns bridge launch arguments and environment. Inherited
+`MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` cannot select a proxy backend.
+For a general MCP client with an explicit executable, use
+`XcodeMCP.Configuration.Transport.localBridge(.custom(...))` from `XcodeMCPKit`.
+See [automatic routing migration](../../Docs/automatic-routing-migration.md).
 
 ```swift
 import Foundation

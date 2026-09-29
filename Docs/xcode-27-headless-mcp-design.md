@@ -1,85 +1,27 @@
 # Xcode 27 Headless MCP Design
 
-## Status
+## Current contract
 
-- Design owner: `codex/xcode-27-headless-mcp`
-- Baseline: `b251cecfa059ce7b5f0a9c9a8b7f9480e390edb3`
-- Verified Xcode: 27.0 build `27A5252f`
-- Verified Xcode MCP server: `xcode-tools` version `25295.11`
-- Implementation: complete; automated validation complete
-- Live workspace validation: pending manual Xcode Service approval
-
-This document is the design contract and progress ledger for Xcode 27 headless
-MCP support. Update it before changing a public API or owner boundary.
-
-## Consumer stories
-
-### Default CLI
+The proxy keeps GUI routes and the enabled native Xcode Service pool available
+at the same time. Workspace selection happens for each request. The server has
+no GUI/headless mode, configured PID, Apple session ID, or custom upstream.
+See [automatic routing migration](automatic-routing-migration.md) for removed
+configuration and [the embedded API](../Sources/XcodeMCPProxyKit/README.md).
 
 ```sh
-xcode-mcp-proxy-server --auto-approve
+xcode-mcp-proxy-server --auto-approve --upstream-processes 2
 ```
-
-The server uses Xcode 27's headless MCP service when the selected Xcode ships
-`mcp-server` and headless access is enabled. Otherwise it preserves GUI Xcode
-routing. When headless access is available but disabled, startup emits one
-actionable notice and continues with GUI routing.
-
-### Explicit selection
-
-```sh
-xcode-mcp-proxy-server --xcode-mode gui
-xcode-mcp-proxy-server --xcode-mode headless
-```
-
-Explicit GUI mode never consults or launches the headless service. Explicit
-headless mode fails startup when the selected Xcode does not ship `mcp-server`
-or headless access is disabled. It never silently falls back to GUI routing.
-
-### Embedded server
 
 ```swift
-let server = XcodeMCPProxyServer(
-    configuration: .init(xcodeMode: .automatic)
-)
+let server = XcodeMCPProxyServer(configuration: .init(upstreamProcessCount: 2))
 let endpoint = try await server.start()
-defer { Task { try? await server.shutdown() } }
+// Use endpoint.url.
+try await server.shutdown()
 ```
 
-`xcodeMode` is a connection-selection policy. The existing `Upstream` value
-continues to own the bridge command, arguments, pool size, and optional MCP
-session identifier.
-
-## Public interface sketch
-
-```swift
-public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
-    public enum XcodeMode: String, Equatable, Sendable {
-        case automatic
-        case gui
-        case headless
-    }
-
-    public var xcodeMode: XcodeMode
-
-    public init(
-        bindAddress: BindAddress = .localhost(),
-        upstream: Upstream = .defaultMCPBridge(),
-        maxBodyBytes: Int = 1_048_576,
-        requestTimeout: Duration? = .seconds(300),
-        configurationFileURL: URL? = nil,
-        toolPolicy: ToolPolicy? = nil,
-        initializeHandshake: InitializeHandshake? = nil,
-        discovery: Discovery = .defaultLocation,
-        approvalPolicy: ApprovalPolicy = .manual,
-        featurePolicy: FeaturePolicy = .default,
-        xcodeMode: XcodeMode = .automatic
-    )
-}
-```
-
-Adding `xcodeMode` with a default preserves existing source call sites. The new
-enum is a closed consumer choice and is therefore intentionally exhaustive.
+The observations below were collected with Xcode 27.0 build `27A5252f` and
+`xcode-tools` version `25295.11`. They record native behavior at that version;
+they are not requirements for other Xcode versions.
 
 ## Verified upstream contract
 
@@ -118,34 +60,16 @@ The preview CLI may return valid status JSON together with a nonzero status or
 warning when its live service query times out. A valid JSON payload is the
 status fact; stderr and exit status remain diagnostics.
 
-## Mode resolution
+## Service availability
 
-Mode resolution happens once during server start, before the runtime and HTTP
-gateway acquire resources.
+The server checks Service availability once during startup. An installed,
+enabled Service adds its native bridge pool alongside discovered GUI processes.
+A missing or disabled Service leaves GUI routing available. A malformed status
+response or execution failure emits a warning and also leaves GUI routing
+available. Cancellation propagates through startup cleanup.
 
-| Requested mode | Stock `mcpbridge` | `mcp-server` state | Effective mode |
-| --- | --- | --- | --- |
-| automatic | yes | installed and enabled | headless |
-| automatic | yes | installed and disabled | GUI + notice |
-| automatic | yes | not installed | GUI |
-| automatic | yes | status unavailable or malformed | GUI + warning |
-| gui | yes | any | GUI; status is not queried |
-| headless | yes | installed and enabled | headless |
-| headless | yes | disabled, unavailable, or malformed | startup error |
-| automatic | custom upstream | not applicable | existing custom unbound mode |
-| gui/headless | custom upstream | not applicable | configuration error |
-
-The disabled notice is one multiline log event:
-
-```text
-Xcode 27 headless MCP is available but disabled.
-
-To enable it, run:
-
-    sudo xcrun mcp-server enable
-
-XcodeMCPKit will continue using GUI Xcode routing.
-```
+Disabled access emits one notice with the `sudo xcrun mcp-server enable`
+command and states that GUI routing remains available.
 
 XcodeMCPKit never executes `enable`, `approve`, `allow-folder`, `deny`,
 `clear-permissions`, or an unsafe permission command.
@@ -154,36 +78,34 @@ XcodeMCPKit never executes `enable`, `approve`, `allow-folder`, `deny`,
 
 | Responsibility | Owner |
 | --- | --- |
-| Requested GUI/headless/automatic policy | `XcodeMCPProxyServerConfiguration` / `ProxyConfig` |
-| `mcp-server` discovery, status execution, and narrow JSON decoding | new internal status client in `XcodeMCPProxyKit` |
-| Effective mode selection and user-facing notice/error | server lifecycle acquisition |
+| `mcp-server` discovery, status execution, and narrow JSON decoding | internal status client in `XcodeMCPProxyKit` |
+| Service availability and startup diagnostics | server lifecycle acquisition |
 | GUI Xcode process inventory | existing `XcodeProcessEventMonitor` |
 | GUI process-bound bridge membership and catalogs | existing `ProcessControlPlaneAuthority` |
 | Headless bridge process and catalog | existing unbound `MCPBridgeRuntime` path |
 | Headless workspace membership and identifiers | upstream Xcode Service tools |
 | GUI window/tab identity | existing `WindowOwnershipAuthority` |
-| Device interaction token affinity | new runtime affinity authority |
+| Device interaction token affinity | runtime affinity authority |
 | Downstream HTTP session and progress-token ownership | existing session and lease authorities |
 
 No new package, product, or target is required. The new external-I/O adapter is
 an internal `XcodeMCPProxyKit` responsibility; the runtime receives only the
-resolved mode.
+observed Service availability.
 
 ## Runtime and lifecycle contract
 
-- GUI mode preserves process-bound discovery, `MCP_XCODE_PID`, per-Xcode pools,
-  AX permission automation, and the proxy DocumentationSearch provider.
-- Headless mode launches the configured stock bridge without
-  `MCP_XCODE_PID`. It does not wait for a GUI Xcode process. When automatic
-  approval is requested, the existing process monitor supplies dialog owners
-  to AX permission automation without enabling GUI process routing.
-- Headless mode forwards the upstream DocumentationSearch and workspace tools;
-  it does not create a second workspace or documentation source of truth.
+- GUI process discovery is always active. Each GUI child receives its discovered
+  owner's `MCP_XCODE_PID` and developer directory.
+- Every bridge launch removes inherited `MCP_XCODE_PID`, `MCP_XCODE_SESSION_ID`,
+  and the legacy `XCODE_PID`. Service bridges use the native default connection.
+- Enabled Service forwards native DocumentationSearch and workspace tools.
+  Without Service, the existing GUI documentation provider remains available.
+- Automatic permission handling operates independently of workspace ownership.
 - Proxy shutdown closes and awaits its bridge/runtime/HTTP resources. It does
   not call `mcp-server stop`.
 - Status resolution is part of startup acquisition. Cancellation of startup
   cancels and awaits the status process through `ProcessRunner`.
-- A disabled headless service is a normal automatic-mode candidate result. A
+- A disabled Service is a normal availability result. A
   malformed response or execution failure is diagnostic, not silently
   equivalent to disabled.
 
@@ -192,11 +114,9 @@ resolved mode.
 The Xcode tool catalog remains dynamic. Do not add one Swift method per Xcode
 tool. Headless-specific tools and future catalog fields pass through unchanged.
 
-The proxy-owned `XcodeRefreshCodeIssuesInFile` workflow must be checked against
-the headless schema before it is enabled in headless mode. If the headless tool
-uses `workspaceIdentifier` rather than the GUI tab contract, the effective
-headless configuration forwards this tool upstream instead of guessing a GUI
-owner.
+The proxy-owned `XcodeRefreshCodeIssuesInFile` workflow resolves the workspace
+owner first. GUI requests can use the configured proxy diagnostics workflow;
+Service requests use the native workspace contract.
 
 ## Device interaction affinity
 
@@ -214,8 +134,8 @@ record the stable process-route identity needed for window admission and
 identifier rewriting. Follow-up requests are admitted only to the recorded
 upstream proof. Route replacement, retirement, session end, and runtime shutdown
 evict the corresponding affinity. An unknown key follows the upstream's ordinary
-error path only when a single unbound upstream exists; it is never guessed across
-multiple process-routed or unbound upstreams.
+error path only when exactly one bridge connection exists, whether GUI or Service. It is
+never guessed across multiple connections.
 
 The affinity authority owns token membership. Request routing consumes an
 immutable snapshot/proof and revalidates it before send. It does not mirror
@@ -227,9 +147,9 @@ device state or own the device-session lifecycle itself.
   single source of truth.
 - The live verifier records progress notifications for build/test operations
   and preserves their raw fields in its report.
-- The verifier gains a headless path that calls `XcodeOpenWorkspace`, uses the
-  returned `workspaceIdentifier`, and always calls `XcodeCloseWorkspace` for a
-  workspace it opened.
+- The verifier supports mixed catalogs. GUI calls keep the resolved tab selector.
+  Service runs create a dedicated workspace and call Open before inventory,
+  preserving first-use approval and existing shared workspaces.
 - Live verification remains opt-in and never enables or broadly approves
   headless access.
 

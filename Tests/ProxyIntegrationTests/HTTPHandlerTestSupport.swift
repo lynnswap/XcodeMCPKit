@@ -12,7 +12,6 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyRuntime
 import XcodeMCPProxyTestSupport
 
-
 enum HTTPTestError: Error {
     case missingResponseHead
     case missingPendingResponse
@@ -447,7 +446,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         return result
     }
 
-
     func liveXcodeListWindowsResult(
         route _: ControlPlane.Route,
         requestTimeoutOverride: TimeAmount?
@@ -488,7 +486,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     func hasDocumentationSearchService() -> Bool {
         documentationSearchResponder != nil
     }
-
 
     func chooseUpstreamOperationLease() -> UpstreamOperationLease? {
         let upstreamIndex = state.withLockedValue { state in
@@ -1062,7 +1059,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         state.withLockedValue { $0.toolRoutingDecision = value }
     }
 
-
     func setToolRoutingGate(started: TestSignal?, gate: AsyncGate?) {
         state.withLockedValue {
             $0.toolRoutingStarted = started
@@ -1159,9 +1155,6 @@ func makeHTTPConfig(
 ) -> HTTPTestConfiguration {
     HTTPTestConfiguration(
         runtime: ProxyRuntimeConfiguration(
-            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
-            upstreamSessionID: nil,
             maxMessageBytes: maxBodyBytes,
             requestTimeout: requestTimeout
         ),

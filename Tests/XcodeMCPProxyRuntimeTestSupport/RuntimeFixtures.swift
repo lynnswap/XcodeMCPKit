@@ -178,21 +178,6 @@ extension RuntimeCoordinator {
         )
     }
 
-    func handleInitializedNotificationSendOverload(
-        upstreamIndex: Int,
-        expectedUpstreamID: Int64,
-        treatsAsPrimary: Bool = false
-    ) {
-        guard clearUpstreamState(
-            upstreamIndex: upstreamIndex,
-            expectedUpstreamID: expectedUpstreamID
-        ) else { return }
-        recoverFromInitializedNotificationFailure(
-            upstreamIndex: upstreamIndex,
-            treatsAsPrimary: treatsAsPrimary
-        )
-    }
-
     func markUpstreamInitialized(upstreamIndex: Int) {
         guard let proof = upstreamTopology.operationLease(
             for: UpstreamSlotID(rawValue: upstreamIndex)

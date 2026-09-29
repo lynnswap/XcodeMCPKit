@@ -934,7 +934,7 @@ struct RuntimeCoordinatorRecoveryTests {
 
         let firstTask = Task {
             try await manager.liveXcodeListWindowsResult(
-                route: .anyHealthy,
+                route: .pinnedUpstream(0),
                 requestTimeoutOverride: .seconds(5)
             )
         }
@@ -947,7 +947,7 @@ struct RuntimeCoordinatorRecoveryTests {
             }
         }
         #expect(
-            await manager.controlPlaneCoordinator.timeoutWindowWaiterForTesting(route: .anyHealthy)
+            await manager.controlPlaneCoordinator.timeoutWindowWaiterForTesting(route: .pinnedUpstream(0))
         )
         await #expect(throws: TimeoutError.self) {
             _ = try await firstTask.value
@@ -974,7 +974,7 @@ struct RuntimeCoordinatorRecoveryTests {
 
         let secondTask = Task {
             try await manager.liveXcodeListWindowsResult(
-                route: .anyHealthy,
+                route: .pinnedUpstream(0),
                 requestTimeoutOverride: .seconds(5)
             )
         }
@@ -987,7 +987,7 @@ struct RuntimeCoordinatorRecoveryTests {
             }
         }
         #expect(
-            await manager.controlPlaneCoordinator.timeoutWindowWaiterForTesting(route: .anyHealthy)
+            await manager.controlPlaneCoordinator.timeoutWindowWaiterForTesting(route: .pinnedUpstream(0))
         )
         await #expect(throws: TimeoutError.self) {
             _ = try await secondTask.value
@@ -3323,7 +3323,6 @@ struct RuntimeCoordinatorRecoveryTests {
             upstreams: [upstream],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
             xcodeProcessRoutes: [route],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         let manager = fixture.manager
@@ -3380,7 +3379,6 @@ struct RuntimeCoordinatorRecoveryTests {
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 5),
             upstreams: [upstream],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 factoryCallCount.withLockedValue { $0 += 1 }
                 return [lateUpstream]
@@ -3415,7 +3413,6 @@ struct RuntimeCoordinatorRecoveryTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             testHooks: RuntimeCoordinatorTestHooks(
                 processRouteRetirementWillDetach: {
                     retirementReachedDetach.signal()

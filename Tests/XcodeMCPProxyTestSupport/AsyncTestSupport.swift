@@ -80,17 +80,20 @@ package final class LockedRecordedValues<Value: Sendable>: @unchecked Sendable {
         let waiterID = UUID()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let existing = state.withLockedValue { state -> Value? in
+                let immediate = state.withLockedValue { state -> Result<Value, Error>? in
                     if state.values.indices.contains(index) {
-                        return state.values[index]
+                        return .success(state.values[index])
+                    }
+                    if Task.isCancelled {
+                        return .failure(CancellationError())
                     }
                     state.waiters.append(
                         Waiter(id: waiterID, index: index, continuation: continuation)
                     )
                     return nil
                 }
-                if let existing {
-                    continuation.resume(returning: existing)
+                if let immediate {
+                    continuation.resume(with: immediate)
                 }
             }
         } onCancel: {
@@ -474,26 +477,8 @@ package final class TestSignal: @unchecked Sendable {
         if state.withLockedValue({ $0.signaled }) {
             return
         }
-
-        let waiterID = UUID()
         try await waitWithTimeout(description, timeout: timeout) {
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation {
-                    (continuation: CheckedContinuation<Void, Error>) in
-                    let shouldResume = self.state.withLockedValue { state in
-                        if state.signaled {
-                            return true
-                        }
-                        state.waiters.append(Waiter(id: waiterID, continuation: continuation))
-                        return false
-                    }
-                    if shouldResume {
-                        continuation.resume(returning: ())
-                    }
-                }
-            } onCancel: {
-                self.cancelWaiter(id: waiterID)
-            }
+            try await self.waitUntilSignaled()
         }
     }
 
@@ -505,15 +490,19 @@ package final class TestSignal: @unchecked Sendable {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation {
                 (continuation: CheckedContinuation<Void, Error>) in
-                let shouldResume = self.state.withLockedValue { state in
+                let immediate = self.state.withLockedValue { state -> Result<Void, Error>? in
                     if state.signaled {
-                        return true
+                        return .success(())
+                    }
+                    // The cancellation handler can run before registration.
+                    if Task.isCancelled {
+                        return .failure(CancellationError())
                     }
                     state.waiters.append(Waiter(id: waiterID, continuation: continuation))
-                    return false
+                    return nil
                 }
-                if shouldResume {
-                    continuation.resume(returning: ())
+                if let immediate {
+                    continuation.resume(with: immediate)
                 }
             }
         } onCancel: {

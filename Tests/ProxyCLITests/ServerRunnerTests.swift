@@ -421,14 +421,10 @@ struct ServerRunnerTests {
         #expect(line.contains("--auto-approve"))
     }
 
-    @Test func serverRunnerDryRunPrintsExplicitXcodeMode() async throws {
-        let result = await runServer(
-            arguments: ["xcode-mcp-proxy-server", "--xcode-mode", "headless", "--dry-run"]
-        )
-
-        #expect(result.exitCode == 0)
-        #expect(result.stderr.isEmpty)
-        #expect(result.stdout.first?.contains("--xcode-mode headless") == true)
+    @Test func serverRunnerRejectsRemovedXcodeMode() async {
+        let result = await runServer(arguments: ["xcode-mcp-proxy-server", "--xcode-mode", "headless", "--dry-run"])
+        #expect(result.exitCode != 0)
+        #expect(result.stderr.joined().contains("xcode-mode"))
     }
 
     @Test func serverRunnerDryRunPreservesExplicitProxyRefreshMode() async throws {
@@ -459,22 +455,6 @@ struct ServerRunnerTests {
                 continue
             }
         }
-    }
-
-    @Test func serverRunnerTreatsHelpOnlyAsTopLevelFlag() async throws {
-        let result = await runServer(
-            arguments: [
-                "xcode-mcp-proxy-server",
-                "--upstream-arg", "--help",
-                "--dry-run",
-            ]
-        )
-
-        #expect(result.exitCode == 0)
-        #expect(result.stderr.isEmpty)
-        let line = try #require(result.stdout.first)
-        #expect(line.contains("--upstream-arg --help"))
-        #expect(line.contains("USAGE:") == false)
     }
 
     @Test func serverRunnerPreservesExplicitHelpBeforeLaterParseErrors() async throws {

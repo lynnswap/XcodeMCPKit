@@ -258,7 +258,7 @@ package enum TestResourceGate {
 
 }
 
-private final class AsyncResourceGate: @unchecked Sendable {
+final class AsyncResourceGate: @unchecked Sendable {
     private struct Waiter {
         let id: UUID
         let continuation: CheckedContinuation<Void, Error>
@@ -284,16 +284,19 @@ private final class AsyncResourceGate: @unchecked Sendable {
         let waiterID = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let shouldResume = state.withLockedValue { state -> Bool in
+                let immediate = state.withLockedValue { state -> Result<Void, Error>? in
                     if state.isAvailable {
                         state.isAvailable = false
-                        return true
+                        return .success(())
+                    }
+                    if Task.isCancelled {
+                        return .failure(CancellationError())
                     }
                     state.waiters.append(Waiter(id: waiterID, continuation: continuation))
-                    return false
+                    return nil
                 }
-                if shouldResume {
-                    continuation.resume(returning: ())
+                if let immediate {
+                    continuation.resume(with: immediate)
                 }
             }
         } onCancel: {

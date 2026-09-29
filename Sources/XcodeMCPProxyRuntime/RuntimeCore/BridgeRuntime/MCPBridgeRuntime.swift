@@ -3,32 +3,13 @@ import Foundation
 
 enum MCPBridgeRuntime {
     struct Configuration: Sendable {
-        let upstreamCommand: String
-        let upstreamArgs: [String]
         let upstreamProcessCount: Int
-        let sharedSessionID: String?
         let maxBodyBytes: Int
-        let processBoundRoutingSupported: Bool
-        let removesInheritedXcodeProcessBinding: Bool
         let includesServiceBackend: Bool
 
-        init(
-            upstreamCommand: String,
-            upstreamArgs: [String],
-            upstreamProcessCount: Int,
-            sharedSessionID: String?,
-            maxBodyBytes: Int,
-            processBoundRoutingSupported: Bool,
-            removesInheritedXcodeProcessBinding: Bool = false,
-            includesServiceBackend: Bool = false
-        ) {
-            self.upstreamCommand = upstreamCommand
-            self.upstreamArgs = upstreamArgs
+        init(upstreamProcessCount: Int, maxBodyBytes: Int, includesServiceBackend: Bool = false) {
             self.upstreamProcessCount = max(1, upstreamProcessCount)
-            self.sharedSessionID = sharedSessionID
             self.maxBodyBytes = maxBodyBytes
-            self.processBoundRoutingSupported = processBoundRoutingSupported
-            self.removesInheritedXcodeProcessBinding = removesInheritedXcodeProcessBinding
             self.includesServiceBackend = includesServiceBackend
         }
     }
@@ -36,45 +17,41 @@ enum MCPBridgeRuntime {
     static func makeUpstreamPlan(
         config: Configuration,
         xcodeTargets: [XcodeProcessTarget],
-        processBoundRoutingEnabled: Bool? = nil
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> MCPBridgeUpstreamPlan {
         let orderedXcodeTargets = orderedXcodeTargets(xcodeTargets)
-        let canUseProcessBoundXcodeUpstreams =
-            processBoundRoutingEnabled
-            ?? (supportsProcessBoundRouting(config: config) && orderedXcodeTargets.isEmpty == false)
         var upstreams: [ManagedUpstreamSlot] = []
         var xcodeProcessBindings: [XcodeProcessBinding] = []
         let upstreamCount = config.upstreamProcessCount
 
-        if config.includesServiceBackend || !canUseProcessBoundXcodeUpstreams {
+        if config.includesServiceBackend {
             for _ in 0..<upstreamCount {
-                upstreams.append(makeUnboundUpstreamSlot(config: config))
+                upstreams.append(makeUnboundUpstreamSlot(config: config, baseEnvironment: baseEnvironment))
             }
         }
 
-        if canUseProcessBoundXcodeUpstreams {
-            upstreams.reserveCapacity(orderedXcodeTargets.count * upstreamCount)
-            xcodeProcessBindings.reserveCapacity(orderedXcodeTargets.count)
+        upstreams.reserveCapacity(orderedXcodeTargets.count * upstreamCount)
+        xcodeProcessBindings.reserveCapacity(orderedXcodeTargets.count)
 
-            for target in orderedXcodeTargets {
-                var slotIDs: [UpstreamSlotID] = []
-                slotIDs.reserveCapacity(upstreamCount)
-                for _ in 0..<upstreamCount {
-                    let upstreamIndex = upstreams.count
-                    let upstreamConfig = makeDefaultUpstreamConfig(
-                        config: config,
-                        xcodeTarget: target
-                    )
-                    upstreams.append(
-                        ManagedUpstreamSlot(factory: UpstreamProcess(configuration: upstreamConfig))
-                    )
-                    slotIDs.append(UpstreamSlotID(rawValue: upstreamIndex))
-                }
-
-                xcodeProcessBindings.append(
-                    XcodeProcessBinding(target: target, slotIDs: slotIDs)
+        for target in orderedXcodeTargets {
+            var slotIDs: [UpstreamSlotID] = []
+            slotIDs.reserveCapacity(upstreamCount)
+            for _ in 0..<upstreamCount {
+                let upstreamIndex = upstreams.count
+                let upstreamConfig = makeDefaultUpstreamConfig(
+                    config: config,
+                    xcodeTarget: target,
+                    baseEnvironment: baseEnvironment
                 )
+                upstreams.append(
+                    ManagedUpstreamSlot(factory: UpstreamProcess(configuration: upstreamConfig))
+                )
+                slotIDs.append(UpstreamSlotID(rawValue: upstreamIndex))
             }
+
+            xcodeProcessBindings.append(
+                XcodeProcessBinding(target: target, slotIDs: slotIDs)
+            )
         }
 
         let topology = UpstreamTopologySnapshot(
@@ -90,14 +67,16 @@ enum MCPBridgeRuntime {
 
     static func makeProcessBoundUpstreamSlots(
         config: Configuration,
-        xcodeTarget: XcodeProcessTarget
+        xcodeTarget: XcodeProcessTarget,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> [ManagedUpstreamSlot] {
         (0..<config.upstreamProcessCount).map { _ in
             ManagedUpstreamSlot(
                 factory: UpstreamProcess(
                     configuration: makeDefaultUpstreamConfig(
                         config: config,
-                        xcodeTarget: xcodeTarget
+                        xcodeTarget: xcodeTarget,
+                        baseEnvironment: baseEnvironment
                     )
                 )
             )
@@ -105,20 +84,18 @@ enum MCPBridgeRuntime {
     }
 
     static func makeUnboundUpstreamSlot(
-        config: Configuration
+        config: Configuration,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> ManagedUpstreamSlot {
         ManagedUpstreamSlot(
             factory: UpstreamProcess(
                 configuration: makeDefaultUpstreamConfig(
                     config: config,
-                    xcodeTarget: nil
+                    xcodeTarget: nil,
+                    baseEnvironment: baseEnvironment
                 )
             )
         )
-    }
-
-    static func supportsProcessBoundRouting(config: Configuration) -> Bool {
-        config.processBoundRoutingSupported
     }
 
     static func makeProcessBoundSessionFactory(
@@ -145,22 +122,15 @@ enum MCPBridgeRuntime {
         ).startSession()
     }
 
-    private static func makeDefaultUpstreamConfig(
+    static func makeDefaultUpstreamConfig(
         config: Configuration,
         xcodeTarget: XcodeProcessTarget?,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> UpstreamProcess.Config {
         var environment = baseEnvironment
         environment.removeValue(forKey: "XCODE_PID")
-        if config.removesInheritedXcodeProcessBinding {
-            environment.removeValue(forKey: "MCP_XCODE_PID")
-        }
-        let sharedSessionID = config.sharedSessionID
-        if let sharedSessionID, !sharedSessionID.isEmpty {
-            environment["MCP_XCODE_SESSION_ID"] = sharedSessionID
-        } else {
-            environment.removeValue(forKey: "MCP_XCODE_SESSION_ID")
-        }
+        environment.removeValue(forKey: "MCP_XCODE_PID")
+        environment.removeValue(forKey: "MCP_XCODE_SESSION_ID")
         let command: String
         let args: [String]
         if let xcodeTarget {
@@ -169,8 +139,8 @@ enum MCPBridgeRuntime {
             command = xcodeTarget.mcpbridgePath
             args = []
         } else {
-            command = config.upstreamCommand
-            args = config.upstreamArgs
+            command = MCPBridgeInvocation.defaultMCPBridge.command
+            args = MCPBridgeInvocation.defaultMCPBridge.arguments
         }
         return UpstreamProcess.Config(
             command: command,

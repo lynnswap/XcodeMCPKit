@@ -14,7 +14,7 @@ struct RuntimeCoordinatorCatalogTests {
     func catalogRPCErrorPreservesConnectionForAnotherRequest(gui: Bool) async throws {
         let upstream = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = gui ? .gui : .headless
+        config.includesXcodeService = !gui
         let target = xcodeProcessTarget(processID: 781, xcodeVersion: "27.0")
         let fixture = RuntimeCoordinatorFixture(
             config: config, upstreams: [upstream],
@@ -126,7 +126,7 @@ struct RuntimeCoordinatorCatalogTests {
         let service = TestUpstreamClient()
         let gui = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .automatic
+        config.includesXcodeService = true
         config.prewarmToolsList = false
         let target = xcodeProcessTarget(processID: 7017, xcodeVersion: "27.0")
         let fixture = RuntimeCoordinatorFixture(
@@ -181,7 +181,7 @@ struct RuntimeCoordinatorCatalogTests {
         let service = TestUpstreamClient()
         let gui = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .automatic
+        config.includesXcodeService = true
         let target = xcodeProcessTarget(processID: 771, xcodeVersion: "27.0")
         let fixture = RuntimeCoordinatorFixture(
             config: config, upstreams: [service, gui],
@@ -226,7 +226,7 @@ struct RuntimeCoordinatorCatalogTests {
 
     @Test func unchangedCatalogDoesNotNotifyWhenItsSourceBridgeChanges() throws {
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .headless
+        config.includesXcodeService = true
         let fixture = RuntimeCoordinatorFixture(
             config: config, upstreams: [TestUpstreamClient(), TestUpstreamClient()], startImmediately: false
         )

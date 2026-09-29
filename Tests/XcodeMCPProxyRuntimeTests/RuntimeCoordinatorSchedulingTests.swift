@@ -60,7 +60,7 @@ struct RuntimeCoordinatorSchedulingTests {
         let eventLoop = group.next()
         let target = xcodeProcessTarget(processID: 759, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .automatic
+        config.includesXcodeService = true
         let manager = RuntimeCoordinator(
             config: config, eventLoop: eventLoop,
             upstreams: [TestUpstreamClient(), TestUpstreamClient()],
@@ -915,7 +915,6 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(manager.testStateSnapshot().upstream(id: 0)?.isInitialized == nil)
         #expect(manager.cachedToolsListResult() == nil)
         #expect(manager.canonicalHandshakeState.initializeResult() == nil)
-        #expect(manager.hasUsableInitializedSecondaryUpstreams(excluding: 0) == false)
     }
 
     @Test func sessionManagerIgnoresStaleSecondaryInitializedNotificationAfterReset()
@@ -1531,7 +1530,6 @@ struct RuntimeCoordinatorSchedulingTests {
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
             upstreams: [initial],
-            processRoutingEnabled: false,
             unboundUpstreamFactory: {
                 let replacement = TestUpstreamClient()
                 replacements.withLockedValue { $0.append(replacement) }
@@ -1696,7 +1694,6 @@ struct RuntimeCoordinatorSchedulingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let replacement = TestUpstreamClient()
                 replacements.withLockedValue { $0.append(replacement) }
@@ -1850,7 +1847,7 @@ struct RuntimeCoordinatorSchedulingTests {
         let request = Task {
             let result = await forwardingService.callInternalTool(
                 name: "XcodeListNavigatorIssues",
-                arguments: ["tabIdentifier": "windowtab-send-barrier"],
+                arguments: ["workspaceIdentifier": "service-send-barrier"],
                 sessionID: sessionID,
                 eventLoop: fixture.eventLoop,
                 cancellationHandle: parentCancellationHandle,
@@ -1942,7 +1939,7 @@ struct RuntimeCoordinatorSchedulingTests {
         let request = Task {
             let result = await forwardingService.callInternalTool(
                 name: "XcodeListNavigatorIssues",
-                arguments: ["tabIdentifier": "windowtab-unsent-cancellation"],
+                arguments: ["workspaceIdentifier": "service-unsent-cancellation"],
                 sessionID: sessionID,
                 eventLoop: fixture.eventLoop,
                 cancellationHandle: parentCancellationHandle,

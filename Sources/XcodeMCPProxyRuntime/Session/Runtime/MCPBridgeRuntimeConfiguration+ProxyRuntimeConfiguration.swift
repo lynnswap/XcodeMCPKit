@@ -9,15 +9,9 @@ extension ProxyRuntimeConfiguration {
 extension MCPBridgeRuntime.Configuration {
     init(proxyConfig config: ProxyRuntimeConfiguration) {
         self.init(
-            upstreamCommand: config.upstreamCommand,
-            upstreamArgs: config.upstreamArgs,
             upstreamProcessCount: max(1, min(config.upstreamProcessCount, 10)),
-            sharedSessionID: config.upstreamSessionID,
             maxBodyBytes: config.maxMessageBytes,
-            processBoundRoutingSupported: config.xcodeMode.includesGUIProcesses
-                && XcrunArguments.isDefaultMCPBridgeInvocation(config: config),
-            removesInheritedXcodeProcessBinding: config.xcodeMode.includesHeadlessService,
-            includesServiceBackend: config.xcodeMode.includesHeadlessService
+            includesServiceBackend: config.includesXcodeService
         )
     }
 }

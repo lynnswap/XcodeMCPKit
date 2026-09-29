@@ -36,56 +36,9 @@ struct XcodeMCPProxyServerTests {
     }
 
     @Test func additionalPermissionDialogExecutableCandidatesKeepXcrunPathWhenToolResolutionFails() {
-        let config = ProxyConfig(
-            listenHost: "localhost",
-            listenPort: 0,
-            upstreamCommand: "/usr/bin/xcrun",
-            upstreamArgs: ["--foo"],
-            maxBodyBytes: 1_048_576,
-            requestTimeout: 300
-        )
-
-        let candidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
+        let candidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates()
 
         #expect(candidates.contains("/usr/bin/xcrun"))
-    }
-
-    @Test func additionalPermissionDialogExecutableCandidatesUseConfiguredXcrunCommand() throws {
-        let fixture = try makeXcrunFixture()
-        defer { fixture.cleanup() }
-
-        let config = ProxyConfig(
-            listenHost: "localhost",
-            listenPort: 0,
-            upstreamCommand: fixture.wrapperPath,
-            upstreamArgs: ["--sdk", "macosx", "mcpbridge"],
-            maxBodyBytes: 1_048_576,
-            requestTimeout: 300
-        )
-
-        let candidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
-
-        #expect(candidates.contains(fixture.wrapperPath))
-        #expect(candidates.contains(fixture.toolPath))
-    }
-
-    @Test func additionalPermissionDialogExecutableCandidatesUseConfiguredXcrunFromUpstreamArgs() throws {
-        let fixture = try makeXcrunFixture()
-        defer { fixture.cleanup() }
-
-        let config = ProxyConfig(
-            listenHost: "localhost",
-            listenPort: 0,
-            upstreamCommand: "/bin/echo",
-            upstreamArgs: [fixture.wrapperPath, "--log", "mcpbridge"],
-            maxBodyBytes: 1_048_576,
-            requestTimeout: 300
-        )
-
-        let candidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(config: config)
-
-        #expect(candidates.contains(fixture.wrapperPath))
-        #expect(candidates.contains(fixture.toolPath))
     }
 
     @Test func executableLookupClientResolvesPathAndXcrunToolThroughInjectedClients() {
@@ -134,10 +87,9 @@ struct XcodeMCPProxyServerTests {
         let proxyConfig = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: 9876,
-            upstreamCommand: "/usr/bin/xcrun",
-            upstreamArgs: ["--sdk", "macosx", "mcpbridge"],
+
             upstreamProcessCount: 3,
-            upstreamSessionID: "session-1",
+
             maxBodyBytes: 2048,
             requestTimeout: 12,
             configPath: configURL.path,
@@ -151,10 +103,7 @@ struct XcodeMCPProxyServerTests {
 
         #expect(config.listenHost == "127.0.0.1")
         #expect(config.listenPort == 9876)
-        #expect(config.upstreamCommand == "/usr/bin/xcrun")
-        #expect(config.upstreamArguments == ["--sdk", "macosx", "mcpbridge"])
         #expect(config.upstreamProcessCount == 3)
-        #expect(config.upstreamSessionID == "session-1")
         #expect(config.maxBodyBytes == 2048)
         #expect(config.requestTimeout == .seconds(12))
         #expect(config.configPath == configURL.path)
@@ -260,8 +209,7 @@ struct XcodeMCPProxyServerTests {
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: blockedPort,
-            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
+
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             autoApproveXcodeDialog: true
@@ -327,7 +275,7 @@ struct XcodeMCPProxyServerTests {
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
-                headlessMCPAvailability: {
+                xcodeServiceAvailability: {
                     availabilityQueries.withLockedValue { $0 += 1 }
                     return .enabled
                 },
@@ -345,10 +293,9 @@ struct XcodeMCPProxyServerTests {
         _ = try await server.start()
         let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
         #expect(availabilityQueries.withLockedValue { $0 } == 1)
-        #expect(captured.xcodeMode == .automatic)
+        #expect(captured.includesXcodeService)
         #expect(captured.usesPermissionDialogAutomation == autoApprove)
-        #expect(captured.refreshCodeIssuesMode == .upstream)
-        #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: captured))
+        #expect(captured.refreshCodeIssuesMode == .proxy)
         #expect(ProxyRuntime.documentationSearchIsConfigured(configuration: captured) == false)
         #expect(autoApproverCreations.withLockedValue { $0 } == (autoApprove ? 1 : 0))
         #expect(autoApprover.startCount == (autoApprove ? 1 : 0))
@@ -356,116 +303,27 @@ struct XcodeMCPProxyServerTests {
         #expect(autoApprover.cancelCount == (autoApprove ? 1 : 0))
     }
 
-    @Test func explicitGUIPreservesLegacyRoutingWithoutStatusQuery() async throws {
-        let availabilityQueries = NIOLockedValueBox(0)
-        let runtimeConfiguration = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
-        let runtime = StartupInventoryRuntime()
-        let server = XcodeMCPProxyServer(
-            configuration: .init(
-                bindAddress: .init(host: "127.0.0.1", port: 0),
-                discovery: .disabled,
-                xcodeMode: .gui
-            ),
-            dependencies: .init(
-                discoveryClient: .testValue,
-                headlessMCPAvailability: {
-                    availabilityQueries.withLockedValue { $0 += 1 }
-                    return .enabled
-                },
+    @Test(arguments: [XcodeMCPServerAvailability.disabled, .unavailable])
+    func absentServiceRetainsGUIConnectionDiscovery(availability: XcodeMCPServerAvailability) async throws {
+        let captured = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
+        let server = XcodeMCPProxyServer(configuration: .init(bindAddress: .localhost(port: 0), discovery: .disabled),
+            dependencies: .init(discoveryClient: .testValue, xcodeServiceAvailability: { availability },
                 makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { config in
-                    runtimeConfiguration.withLockedValue { $0 = config }
-                    return runtime
-                }
-            )
-        )
-
+                makeRuntime: { config in captured.withLockedValue { $0 = config }; return StartupInventoryRuntime() }))
         _ = try await server.start()
-        let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
-        #expect(availabilityQueries.withLockedValue { $0 } == 0)
-        #expect(captured.xcodeMode == .gui)
-        #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: captured))
+        #expect(try #require(captured.withLockedValue { $0 }).includesXcodeService == false)
         try await server.shutdown()
     }
 
-    @Test func customAutomaticUpstreamPreservesUnboundModeWithoutStatusQuery() async throws {
-        let availabilityQueries = NIOLockedValueBox(0)
-        let runtimeConfiguration = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
-        let runtime = StartupInventoryRuntime()
-        let server = XcodeMCPProxyServer(
-            configuration: .init(
-                bindAddress: .init(host: "127.0.0.1", port: 0),
-                upstream: .custom(command: "/bin/echo", arguments: []),
-                discovery: .disabled
-            ),
-            dependencies: .init(
-                discoveryClient: .testValue,
-                headlessMCPAvailability: {
-                    availabilityQueries.withLockedValue { $0 += 1 }
-                    return .enabled
-                },
+    @Test func failedServiceDiscoveryDoesNotBlockServerStartup() async throws {
+        let captured = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
+        let server = XcodeMCPProxyServer(configuration: .init(bindAddress: .localhost(port: 0), discovery: .disabled),
+            dependencies: .init(discoveryClient: .testValue, xcodeServiceAvailability: { throw DiscoveryWriteFailure.expected },
                 makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { config in
-                    runtimeConfiguration.withLockedValue { $0 = config }
-                    return runtime
-                }
-            )
-        )
-
+                makeRuntime: { config in captured.withLockedValue { $0 = config }; return StartupInventoryRuntime() }))
         _ = try await server.start()
-        let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
-        #expect(availabilityQueries.withLockedValue { $0 } == 0)
-        #expect(captured.xcodeMode == .custom)
-        #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: captured) == false)
+        #expect(try #require(captured.withLockedValue { $0 }).includesXcodeService == false)
         try await server.shutdown()
-    }
-
-    @Test func explicitHeadlessDisabledFailsBeforeRuntimeAcquisition() async {
-        let runtimeCreations = NIOLockedValueBox(0)
-        let server = XcodeMCPProxyServer(
-            configuration: .init(
-                discovery: .disabled,
-                xcodeMode: .headless
-            ),
-            dependencies: .init(
-                discoveryClient: .testValue,
-                headlessMCPAvailability: { .disabled },
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { _ in
-                    runtimeCreations.withLockedValue { $0 += 1 }
-                    return StartupInventoryRuntime()
-                }
-            )
-        )
-
-        await #expect(throws: XcodeMCPProxyServer.LifecycleError.self) {
-            _ = try await server.start()
-        }
-        #expect(runtimeCreations.withLockedValue { $0 } == 0)
-    }
-
-    @Test func explicitModeRejectsCustomUpstreamBeforeRuntimeAcquisition() async {
-        let runtimeCreations = NIOLockedValueBox(0)
-        let server = XcodeMCPProxyServer(
-            configuration: .init(
-                upstream: .custom(command: "/bin/echo", arguments: []),
-                discovery: .disabled,
-                xcodeMode: .gui
-            ),
-            dependencies: .init(
-                discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { _ in
-                    runtimeCreations.withLockedValue { $0 += 1 }
-                    return StartupInventoryRuntime()
-                }
-            )
-        )
-
-        await #expect(throws: XcodeMCPProxyServer.LifecycleError.self) {
-            _ = try await server.start()
-        }
-        #expect(runtimeCreations.withLockedValue { $0 } == 0)
     }
 
     @Test func cancellingStartCancelsAndAwaitsHeadlessStatusResolution() async throws {
@@ -475,7 +333,7 @@ struct XcodeMCPProxyServerTests {
             configuration: .init(discovery: .disabled),
             dependencies: .init(
                 discoveryClient: .testValue,
-                headlessMCPAvailability: {
+                xcodeServiceAvailability: {
                     try await availability.resolve()
                 },
                 makeAutoApprover: { _, _ in RecordingAutoApprover() },
@@ -510,7 +368,7 @@ struct XcodeMCPProxyServerTests {
             configuration: .init(discovery: .disabled),
             dependencies: .init(
                 discoveryClient: .testValue,
-                headlessMCPAvailability: {
+                xcodeServiceAvailability: {
                     try await availability.resolve()
                 },
                 makeAutoApprover: { _, _ in RecordingAutoApprover() },
@@ -544,8 +402,7 @@ struct XcodeMCPProxyServerTests {
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: 0,
-            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
+
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             autoApproveXcodeDialog: true
@@ -585,8 +442,7 @@ struct XcodeMCPProxyServerTests {
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: 0,
-            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
+
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             autoApproveXcodeDialog: true
@@ -970,8 +826,7 @@ struct XcodeMCPProxyServerTests {
         let config = ProxyConfig(
             listenHost: "127.0.0.1",
             listenPort: 0,
-            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
+
             maxBodyBytes: 1_048_576,
             requestTimeout: 300
         )
@@ -1476,49 +1331,4 @@ private final class RestartProcessFixture: Sendable {
             }
         )
     }
-}
-
-private struct XcrunFixture {
-    let wrapperPath: String
-    let toolPath: String
-    let directoryURL: URL
-
-    func cleanup() {
-        try? FileManager.default.removeItem(at: directoryURL)
-    }
-}
-
-private func makeXcrunFixture() throws -> XcrunFixture {
-    let fileManager = FileManager.default
-    let directoryURL = fileManager.temporaryDirectory
-        .appendingPathComponent("xcode-mcp-proxy-xcrun-\(UUID().uuidString)", isDirectory: true)
-    try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-
-    let toolPath = directoryURL.appendingPathComponent("fake-mcpbridge").path
-    let wrapperPath = directoryURL.appendingPathComponent("xcrun").path
-    let script = """
-        #!/bin/sh
-        if [ "$1" = "--sdk" ]; then
-          shift 2
-        fi
-        if [ "$1" = "--log" ]; then
-          shift
-        fi
-        if [ "$1" = "--find" ] && [ "$2" = "mcpbridge" ]; then
-          echo "\(toolPath)"
-          exit 0
-        fi
-        exit 1
-        """
-    try script.write(to: URL(fileURLWithPath: wrapperPath), atomically: true, encoding: .utf8)
-    try fileManager.setAttributes(
-        [.posixPermissions: NSNumber(value: Int16(0o755))],
-        ofItemAtPath: wrapperPath
-    )
-
-    return XcrunFixture(
-        wrapperPath: wrapperPath,
-        toolPath: toolPath,
-        directoryURL: directoryURL
-    )
 }

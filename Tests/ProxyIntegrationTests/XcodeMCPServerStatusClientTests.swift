@@ -170,112 +170,6 @@ struct XcodeMCPServerStatusClientTests {
     }
 }
 
-@Suite
-struct XcodeConnectionModeResolverTests {
-    @Test func automaticCombinesGUIAndHeadlessWhenEnabled() async throws {
-        let enabled = try await resolve(mode: .automatic, availability: .enabled)
-        #expect(enabled.xcodeMode == .automatic)
-        #expect(enabled.diagnostic == nil)
-
-        let unavailable = try await resolve(mode: .automatic, availability: .unavailable)
-        #expect(unavailable.xcodeMode == .gui)
-        #expect(unavailable.diagnostic == nil)
-    }
-
-    @Test func automaticDisabledUsesExactApprovedNoticeAndGUI() async throws {
-        let resolution = try await resolve(mode: .automatic, availability: .disabled)
-
-        #expect(resolution.xcodeMode == .gui)
-        #expect(
-            resolution.diagnostic
-                == .notice(XcodeConnectionModeResolver.disabledNotice)
-        )
-        #expect(
-            XcodeConnectionModeResolver.disabledNotice == """
-                Xcode 27 headless MCP is available but disabled.
-
-                To enable it, run:
-
-                    sudo xcrun mcp-server enable
-
-                XcodeMCPKit will continue using GUI Xcode routing.
-                """)
-    }
-
-    @Test func automaticFailureWarnsAndUsesGUI() async throws {
-        let config = makeProxyConfig(xcodeMode: .automatic)
-        let resolution = try await XcodeConnectionModeResolver.resolve(config: config) {
-            throw ProbeFailure.expected
-        }
-
-        #expect(resolution.xcodeMode == .gui)
-        guard case .warning(let message) = resolution.diagnostic else {
-            Issue.record("expected a warning diagnostic")
-            return
-        }
-        #expect(message.contains("Unable to determine Xcode headless MCP status"))
-        #expect(message.contains("continue using GUI Xcode routing"))
-    }
-
-    @Test func explicitGUIAndCustomAutomaticNeverQueryStatus() async throws {
-        let queryCount = StatusLockedBox(0)
-        let query: @Sendable () async throws -> XcodeMCPServerAvailability = {
-            queryCount.withLockedValue { $0 += 1 }
-            return .enabled
-        }
-
-        let gui = try await XcodeConnectionModeResolver.resolve(
-            config: makeProxyConfig(xcodeMode: .gui),
-            availability: query
-        )
-        let custom = try await XcodeConnectionModeResolver.resolve(
-            config: makeProxyConfig(
-                xcodeMode: .automatic,
-                upstreamKind: .custom
-            ),
-            availability: query
-        )
-
-        #expect(gui.xcodeMode == .gui)
-        #expect(custom.xcodeMode == .custom)
-        #expect(queryCount.withLockedValue { $0 } == 0)
-    }
-
-    @Test func explicitHeadlessDoesNotFallback() async {
-        let disabled = makeProxyConfig(xcodeMode: .headless)
-        await #expect(throws: XcodeMCPProxyServer.LifecycleError.self) {
-            _ = try await XcodeConnectionModeResolver.resolve(config: disabled) {
-                .disabled
-            }
-        }
-
-        let unavailable = makeProxyConfig(xcodeMode: .headless)
-        await #expect(throws: XcodeMCPProxyServer.LifecycleError.self) {
-            _ = try await XcodeConnectionModeResolver.resolve(config: unavailable) {
-                .unavailable
-            }
-        }
-
-        let failed = makeProxyConfig(xcodeMode: .headless)
-        await #expect(throws: XcodeMCPProxyServer.LifecycleError.self) {
-            _ = try await XcodeConnectionModeResolver.resolve(config: failed) {
-                throw ProbeFailure.expected
-            }
-        }
-    }
-
-    private func resolve(
-        mode: ProxyConfig.XcodeMode,
-        availability: XcodeMCPServerAvailability
-    ) async throws -> XcodeConnectionModeResolver.Resolution {
-        try await XcodeConnectionModeResolver.resolve(
-            config: makeProxyConfig(xcodeMode: mode)
-        ) {
-            availability
-        }
-    }
-}
-
 private struct StubProcessRunner: ProcessRunning {
     let runOperation: @Sendable (ProcessRequest) async throws -> ProcessOutput
 
@@ -309,22 +203,6 @@ private func enabledStatusOutput() -> ProcessOutput {
         terminationStatus: 0,
         stdout: #"{"permission":{"enabled":true}}"#,
         stderr: ""
-    )
-}
-
-private func makeProxyConfig(
-    xcodeMode: ProxyConfig.XcodeMode,
-    upstreamKind: ProxyConfig.UpstreamKind = .stockMCPBridge
-) -> ProxyConfig {
-    ProxyConfig(
-        listenHost: "localhost",
-        listenPort: 0,
-        upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-        upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
-        upstreamKind: upstreamKind,
-        xcodeMode: xcodeMode,
-        maxBodyBytes: 1_048_576,
-        requestTimeout: 300
     )
 }
 

@@ -9,7 +9,7 @@ extension RuntimeCoordinator {
     }
 
     func triggerXcodeProcessReconcile(reason: String) {
-        guard processRoutingEnabled, let xcodeTargetDiscovery else {
+        guard let xcodeTargetDiscovery else {
             return
         }
         xcodeProcessReconcileScheduleState.withLockedValue { state in
@@ -87,7 +87,6 @@ extension RuntimeCoordinator {
         _ targets: [XcodeProcessTarget],
         reason: String
     ) {
-        guard processRoutingEnabled else { return }
         defer { testHooks.xcodeProcessReconcileCompleted?(reason) }
         var commit: ProcessRouteReconcileCommit?
         guard initializeManager.performIfRunning({
@@ -254,7 +253,7 @@ extension RuntimeCoordinator {
     }
 
     private func restartPrimaryInitializeAfterRetiringCachedProcessRoute() {
-        guard processRoutingEnabled, isInitialized() == false else {
+        guard isInitialized() == false else {
             return
         }
         guard initializeManager.snapshot().initInFlight == false else {

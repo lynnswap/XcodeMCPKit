@@ -12,7 +12,6 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyRuntime
 import XcodeMCPProxyTestSupport
 
-
 extension HTTPHandlerTests {
     @Test func httpDisabledToolPolicyFromPublicConfigurationOverridesConfigFile()
         async throws
@@ -35,7 +34,7 @@ extension HTTPHandlerTests {
         )
         let resolved = try ProxyConfig.resolving(publicConfiguration)
         let config = HTTPTestConfiguration(
-            runtime: resolved.runtimeConfiguration(xcodeMode: .gui),
+            runtime: resolved.runtimeConfiguration(includesXcodeService: false),
             listenHost: resolved.listenHost,
             listenPort: resolved.listenPort,
             maxBodyBytes: resolved.maxBodyBytes

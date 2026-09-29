@@ -1088,10 +1088,7 @@ import XcodeMCPProxyKit
 func compileOnlyProxyConfigurationSurface() {
     let config = XcodeMCPProxyServerConfiguration(
         bindAddress: .init(host: "127.0.0.1", port: 0),
-        upstream: .defaultMCPBridge(
-            processesPerXcode: 1,
-            sessionID: "session-1"
-        ),
+        upstreamProcessCount: 1,
         maxBodyBytes: 1_048_576,
         requestTimeout: .seconds(120),
         configurationFileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-config.toml"),
@@ -1117,24 +1114,13 @@ func compileOnlyProxyConfigurationSurface() {
         featurePolicy: .init(
             prewarmToolsList: false,
             refreshCodeIssuesMode: .proxy
-        ),
-        xcodeMode: .headless
-    )
-    let customUpstreamConfig = XcodeMCPProxyServerConfiguration(
-        upstream: .custom(
-            command: "/usr/bin/env",
-            arguments: ["printf"],
-            processesPerXcode: 1,
-            sessionID: "session-1"
         )
     )
-
     let typedToolPolicy = config.toolPolicy
     let typedHandshake = config.initializeHandshake
     let typedCapabilities: [String: MCPJSONValue]? = typedHandshake?.capabilities
     let metadataIsNull = typedCapabilities?["experimental"]?.objectValue?["metadata"]?.isNull
     let upstreamMode = XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode.upstream
-    let xcodeMode = XcodeMCPProxyServerConfiguration.XcodeMode.automatic
     let server = XcodeMCPProxyServer(configuration: config)
     let adapterConfig = XcodeMCPProxyStdioAdapterConfiguration(
         endpoint: .url(URL(string: "http://localhost:8765/mcp")!),
@@ -1144,13 +1130,11 @@ func compileOnlyProxyConfigurationSurface() {
 
     _ = (
         config,
-        customUpstreamConfig,
         typedToolPolicy,
         typedHandshake,
         typedCapabilities,
         metadataIsNull,
         upstreamMode,
-        xcodeMode,
         server,
         adapterConfig,
         adapter

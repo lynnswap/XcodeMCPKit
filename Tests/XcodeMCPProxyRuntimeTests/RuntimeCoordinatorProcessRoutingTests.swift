@@ -19,7 +19,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [existing], scheduleRuntimeTimeout: scheduler.scheduler(),
             xcodeProcessRoutes: [XcodeProcessRoute(target: existingTarget, upstreamIndices: [0])],
-            processRoutingEnabled: true, dynamicUpstreamFactory: { _ in [added] }, startImmediately: false
+            dynamicUpstreamFactory: { _ in [added] }, startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
@@ -55,10 +55,9 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let gui = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 761, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .automatic
+        config.includesXcodeService = true
         let fixture = RuntimeCoordinatorFixture(
-            config: config, upstreams: [service], processRoutingEnabled: true,
-            dynamicUpstreamFactory: { _ in [gui] }, startImmediately: false
+            config: config, upstreams: [service], dynamicUpstreamFactory: { _ in [gui] }, startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
@@ -86,7 +85,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let gui = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 7014, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .automatic
+        config.includesXcodeService = true
         config.prewarmToolsList = false
         let scheduler = RecordingRuntimeTimeoutScheduler()
         let fixture = RuntimeCoordinatorFixture(
@@ -121,11 +120,10 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let gui = TestUpstreamClient()
         let target = xcodeProcessTarget(processID: 7012, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .automatic
+        config.includesXcodeService = true
         config.prewarmToolsList = false
         let fixture = RuntimeCoordinatorFixture(
-            config: config, upstreams: [headless], processRoutingEnabled: true,
-            dynamicUpstreamFactory: { _ in [gui] }, startImmediately: false
+            config: config, upstreams: [headless], dynamicUpstreamFactory: { _ in [gui] }, startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
@@ -157,52 +155,14 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(await headless.stopCount() == 0)
     }
 
-    @Test func defaultUpstreamsDoNotInjectXcodePIDEnvironment() async throws {
-        let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
-
-        #expect(environment["MCP_XCODE_PID"] == nil)
-    }
-
-    @Test func upstreamPlanDefaultsToStaticFallbackWhenNoTargetsAreProvided() {
+    @Test func upstreamPlanWaitsForGUIOrEnabledService() {
         let plan = MCPBridgeRuntime.makeUpstreamPlan(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 0)),
             xcodeTargets: []
         )
 
-        #expect(plan.upstreams.count == 1)
-        #expect(plan.xcodeProcessRoutes.isEmpty)
-    }
-
-    @Test func upstreamPlanExplicitProcessRoutingCanStartWithoutInitialTargets() {
-        let plan = MCPBridgeRuntime.makeUpstreamPlan(
-            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 0)),
-            xcodeTargets: [],
-            processBoundRoutingEnabled: true
-        )
-
         #expect(plan.upstreams.isEmpty)
         #expect(plan.xcodeProcessRoutes.isEmpty)
-    }
-
-    @Test func headlessStockBridgeBuildsOnlyUnboundUpstreamsDespiteGUITargets() throws {
-        try withEnvironmentVariables(["MCP_XCODE_PID": "5678"]) {
-            let developerDirectory = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
-            var config = makeConfig(requestTimeout: 0)
-            config.xcodeMode = .headless
-
-            let plan = MCPBridgeRuntime.makeUpstreamPlan(
-                config: makeBridgeRuntimeConfig(config),
-                xcodeTargets: [xcodeProcessTarget(processID: 101)]
-            )
-
-            #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: config) == false)
-            #expect(plan.upstreams.count == 1)
-            #expect(plan.xcodeProcessRoutes.isEmpty)
-            let upstream = try #require(plan.upstreams.first)
-            let environment = try upstreamEnvironment(from: upstream)
-            #expect(environment["MCP_XCODE_PID"] == nil)
-            #expect(environment["DEVELOPER_DIR"] == developerDirectory)
-        }
     }
 
     @Test func processRoutingWithoutInitialTargetsRunsReadinessAutoLaunch() async throws {
@@ -215,7 +175,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 readiness: readiness,
                 launchRecorder: launchRecorder
             ),
-            processRoutingEnabled: true,
             xcodeTargetDiscovery: discovery
         )
         defer { fixture.shutdownAndWait() }
@@ -230,7 +189,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(fixture.manager.debugSnapshot().processRoutes.isEmpty)
     }
 
-    @Test func defaultCoordinatorWithoutDiscoveryUsesStaticFallbackUpstream() async throws {
+    @Test func defaultCoordinatorWithoutKnownBackendsHasNoFallbackProcess() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let manager = RuntimeCoordinator(
@@ -240,66 +199,35 @@ struct RuntimeCoordinatorProcessRoutingTests {
         )
         defer { manager.shutdownAndWait() }
 
-        #expect(manager.processRoutingEnabled == false)
-        #expect(manager.debugSnapshot().upstreams.count == 1)
+        #expect(manager.debugSnapshot().upstreams.isEmpty)
         #expect(manager.debugSnapshot().processRoutes.isEmpty)
     }
 
-    @Test(arguments: [
-        ProxyRuntimeConfiguration.XcodeMode.gui,
-        .headless,
-        .custom,
-    ])
-    func autoApprovalStartsProcessInventoryOutsideProcessRouting(
-        xcodeMode: ProxyRuntimeConfiguration.XcodeMode
-    ) async {
-        var config = makeConfig(requestTimeout: 0)
-        config.xcodeMode = xcodeMode
-        config.usesPermissionDialogAutomation = true
+    @Test func automaticRoutingAlwaysObservesGUIProcesses() async {
         let monitor = StartRecordingXcodeProcessMonitor()
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: MultiThreadedEventLoopGroup.singleton.next(),
-            upstreams: [TestUpstreamClient()],
-            processRoutingEnabled: false,
-            xcodeProcessEventMonitor: monitor,
-            startImmediately: false
-        )
+        let manager = RuntimeCoordinator(config: makeConfig(requestTimeout: 0),
+            eventLoop: MultiThreadedEventLoopGroup.singleton.next(), upstreams: [TestUpstreamClient()],
+            xcodeProcessEventMonitor: monitor, startImmediately: false)
         manager.start()
-
         #expect(monitor.startCount() == 1)
-        #expect(monitor.changeHandlerCount() == 0)
-        #expect(manager.processRoutingEnabled == false)
-        #expect(manager.debugSnapshot().processRoutes.isEmpty)
-
+        #expect(monitor.changeHandlerCount() == 1)
         await manager.shutdown()
         #expect(monitor.stopCount() == 1)
     }
 
-    @Test func defaultUpstreamsPassThroughInheritedMCPXcodePIDEnvironment() async throws {
-        let environment = try withEnvironmentVariables(
-            [
-                "XCODE_PID": "1234",
-                "MCP_XCODE_PID": "5678",
-            ]
-        ) {
-            try defaultUpstreamEnvironment(sharedSessionID: nil)
-        }
-
-        #expect(environment["XCODE_PID"] == nil)
-        #expect(environment["MCP_XCODE_PID"] == "5678")
-    }
-
-    @Test func defaultUpstreamsDoNotInjectSessionIDWhenConfigDoesNotSpecifyOne() async throws {
-        let environment = try defaultUpstreamEnvironment(sharedSessionID: nil)
-
-        #expect(environment["MCP_XCODE_SESSION_ID"] == nil)
-    }
-
-    @Test func defaultUpstreamsInjectExplicitSessionIDWhenConfigured() async throws {
-        let environment = try defaultUpstreamEnvironment(sharedSessionID: "session-explicit")
-
-        #expect(environment["MCP_XCODE_SESSION_ID"] == "session-explicit")
+    @Test(arguments: [false, true])
+    func nativeBridgeLaunchIgnoresInheritedRoutingConfiguration(gui: Bool) {
+        let target = xcodeProcessTarget(processID: 4321, xcodeVersion: "27.0")
+        let configuration = MCPBridgeRuntime.makeDefaultUpstreamConfig(
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)),
+            xcodeTarget: gui ? target : nil,
+            baseEnvironment: ["MCP_XCODE_PID": "9876", "MCP_XCODE_SESSION_ID": "parent-session",
+                "XCODE_PID": "legacy", "DEVELOPER_DIR": "/Parent/Developer", "PATH": "/usr/bin"])
+        #expect(configuration.environment["MCP_XCODE_PID"] == (gui ? "4321" : nil))
+        #expect(configuration.environment["MCP_XCODE_SESSION_ID"] == nil)
+        #expect(configuration.environment["XCODE_PID"] == nil)
+        #expect(configuration.environment["DEVELOPER_DIR"] == (gui ? target.developerDir : "/Parent/Developer"))
+        #expect(configuration.environment["PATH"] == "/usr/bin")
     }
 
     @Test func upstreamStderrClassifierTreatsNoXcodeFatalAsAvailabilityWait() {
@@ -456,7 +384,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -495,7 +422,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let reconcileCompletions = LockedRecordedValues<String>()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
-            processRoutingEnabled: true,
             xcodeTargetDiscovery: discovery,
             dynamicUpstreamFactory: { target in
                 routeCreations.append(target.processID)
@@ -560,7 +486,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             config: makeConfig(requestTimeout: 5),
             eventLoop: MultiThreadedEventLoopGroup.singleton.next(),
             upstreams: [],
-            processRoutingEnabled: true,
             xcodeTargetDiscovery: monitor,
             xcodeProcessEventMonitor: monitor,
             dynamicUpstreamFactory: { target in
@@ -595,7 +520,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let reconcileCompletions = LockedRecordedValues<String>()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
-            processRoutingEnabled: true,
             xcodeTargetDiscovery: discovery,
             dynamicUpstreamFactory: { target in
                 routeCreations.append(target.processID)
@@ -646,7 +570,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -681,7 +604,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -732,7 +654,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             config: config,
             upstreams: [],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -760,7 +681,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             config: config,
             upstreams: [],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -815,7 +735,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -985,7 +904,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let replacement = TestUpstreamClient()
                 replacements.withLockedValue { $0.append(replacement) }
@@ -1126,7 +1044,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let replacement = TestUpstreamClient()
                 replacements.withLockedValue { $0.append(replacement) }
@@ -1246,7 +1163,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0, 1])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let shouldBlock = shouldBlockReplacementFactory.withLockedValue {
                     shouldBlock in
@@ -1387,7 +1303,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0, 1])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let replacement = TestUpstreamClient()
                 replacements.withLockedValue { $0.append(replacement) }
@@ -1530,7 +1445,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: existingTarget, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let pool = [TestUpstreamClient(), TestUpstreamClient()]
                 createdPools.withLockedValue { $0.append(pool) }
@@ -1800,7 +1714,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -1970,7 +1883,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             upstreams: [upstream],
             nowUptimeNanoseconds: uptimeClock.now,
             xcodeProcessRoutes: [route],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -2013,7 +1925,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamInitialized: { initializedUpstreams.append($0) },
                 processRouteCatalogCommitted: { catalogCommits.append(($0, $1)) }
@@ -2149,7 +2060,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -2204,7 +2114,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let replacement = TestUpstreamClient()
                 let unused = TestUpstreamClient()
@@ -2244,7 +2153,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: target, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let call = factoryCallCount.withLockedValue { count in
                     count += 1
@@ -2328,7 +2236,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             upstreams: [],
             upstreamReadinessGate: makeTestReadinessGate(readiness: readiness),
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -2393,7 +2300,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let toolsListRefreshes = LockedRecordedValues<(Int, Bool)>()
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { target in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0[target.processID] = upstream }
@@ -2594,7 +2500,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 XcodeProcessRoute(target: firstTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: secondTarget, upstreamIndices: [1]),
             ],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -2700,7 +2605,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 XcodeProcessRoute(target: compatibleTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: incompatibleTarget, upstreamIndices: [1]),
             ],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -2791,7 +2695,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 XcodeProcessRoute(target: errorTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: publisherTarget, upstreamIndices: [1]),
             ],
-            processRoutingEnabled: true,
             testHooks: RuntimeCoordinatorTestHooks(
                 upstreamEventHandled: { upstreamEvents.append($0) }
             ),
@@ -2894,7 +2797,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 XcodeProcessRoute(target: firstTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: secondTarget, upstreamIndices: [1]),
             ],
-            processRoutingEnabled: true,
             xcodeTargetDiscovery: StubXcodeTargetDiscovery(
                 targets: [firstTarget, secondTarget]
             ),
@@ -2933,7 +2835,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: existingTarget, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let primary = TestUpstreamClient()
                 let secondary = TestUpstreamClient()
@@ -3105,7 +3006,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: existingTarget, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let primary = TestUpstreamClient()
                 let secondary = TestUpstreamClient()
@@ -3168,7 +3068,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -3202,7 +3101,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let discovery = RecordingXcodeTargetDiscovery(targets: [])
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
-            processRoutingEnabled: true,
             xcodeTargetDiscovery: discovery,
             startImmediately: false
         )
@@ -3234,7 +3132,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -3326,7 +3223,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -3432,7 +3328,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let fixture = RuntimeCoordinatorFixture(
             upstreams: [],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -3767,7 +3662,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: oldTarget, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -3838,7 +3732,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: oldTarget, upstreamIndices: [0, 1])
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let pool = [TestUpstreamClient(), TestUpstreamClient()]
                 createdPools.withLockedValue { $0.append(pool) }
@@ -3881,7 +3774,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 XcodeProcessRoute(target: oldNewerTarget, upstreamIndices: [1]),
                 XcodeProcessRoute(target: olderTarget, upstreamIndices: [0]),
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -4037,7 +3929,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 XcodeProcessRoute(target: old26Target, upstreamIndices: [0]),
                 XcodeProcessRoute(target: xcode27Target, upstreamIndices: [1]),
             ],
-            processRoutingEnabled: true,
             dynamicUpstreamFactory: { _ in
                 let upstream = TestUpstreamClient()
                 createdUpstreams.withLockedValue { $0.append(upstream) }
@@ -4209,7 +4100,6 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 XcodeProcessRoute(target: oldTarget, upstreamIndices: [0]),
                 XcodeProcessRoute(target: activeTarget, upstreamIndices: [1]),
             ],
-            processRoutingEnabled: true,
             startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
@@ -4244,8 +4134,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: oldTarget, upstreamIndices: [0])
             ],
-            processRoutingEnabled: true
-        )
+            )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
 

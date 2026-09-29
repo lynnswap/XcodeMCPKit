@@ -5,15 +5,13 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyKit
 import XcodeMCPProxyRuntime
 
-
 @Suite
 struct XcodeMCPProxyServerBuildInfoTests {
     @Test func proxyServerStartupSummaryUsesReadableSections() throws {
         let config = ProxyConfig(
             listenHost: "localhost",
             listenPort: 8765,
-            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
+
             upstreamProcessCount: 2,
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
@@ -31,7 +29,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
             displayHost: "localhost",
             port: 8765,
             config: config,
-            xcodeMode: .gui,
+            includesXcodeService: false,
             upstreamProcessCount: 2,
             xcodeTargets: [
                 ProxyRuntimeInventorySnapshot.XcodeTarget(
@@ -62,8 +60,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
         let config = ProxyConfig(
             listenHost: "localhost",
             listenPort: 8765,
-            upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
-            upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
+
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             autoApproveXcodeDialog: true
@@ -73,7 +70,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
             displayHost: "localhost",
             port: 8765,
             config: config,
-            xcodeMode: .headless,
+            includesXcodeService: true,
             upstreamProcessCount: 1,
             xcodeTargets: []
         )
@@ -87,8 +84,8 @@ struct XcodeMCPProxyServerBuildInfoTests {
           Auto approve: enabled
 
         Xcode
-          Mode: headless
-          Status: Xcode Service
+          Service: Xcode Service
+          GUI: not detected
           DocumentationSearch: upstream
         """)
     }

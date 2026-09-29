@@ -128,11 +128,12 @@ struct DeviceInteractionRoutingTests {
             ),
             requestTimeoutOverride: nil
         )
-        guard case .reject(let errors) = decision else {
-            Issue.record("ended session should no longer have affinity")
+        guard case .forwardAdmitted(let indices, _) = decision else {
+            Issue.record("an ended session delegates native validation when only one connection exists: \(decision)")
             return
         }
-        #expect(errors.map(\.message) == ["unknown device interaction session"])
+        #expect(indices == [0])
+        #expect(fixture.manager.deviceInteractionAffinityAuthority.affinity(for: "device-key") == nil)
     }
 
     @Test func upstreamReplacementInvalidatesAffinity() async throws {
@@ -159,17 +160,15 @@ struct DeviceInteractionRoutingTests {
         #expect(fixture.manager.deviceInteractionAffinityAuthority.count() == 0)
     }
 
-    @Test(arguments: [ProxyRuntimeConfiguration.XcodeMode.headless, .automatic])
-    func servicePoolRoutesToExactCreatingUpstreamAndEvictsOnReplacement(mode: ProxyRuntimeConfiguration.XcodeMode) async throws {
+    @Test func servicePoolRoutesToExactCreatingUpstreamAndEvictsOnReplacement() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = mode
+        config.includesXcodeService = true
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: group.next(),
             upstreams: [TestUpstreamClient(), TestUpstreamClient()],
-            processRoutingEnabled: mode == .automatic,
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
@@ -237,9 +236,9 @@ struct DeviceInteractionRoutingTests {
         let first = TestUpstreamClient()
         let owner = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .automatic
+        config.includesXcodeService = true
         let fixture = RuntimeCoordinatorFixture(
-            config: config, upstreams: [first, owner], processRoutingEnabled: true, startImmediately: false
+            config: config, upstreams: [first, owner], startImmediately: false
         )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager
@@ -275,12 +274,11 @@ struct DeviceInteractionRoutingTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .headless
+        config.includesXcodeService = true
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: group.next(),
             upstreams: [TestUpstreamClient(), TestUpstreamClient()],
-            processRoutingEnabled: false,
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
@@ -300,19 +298,27 @@ struct DeviceInteractionRoutingTests {
         #expect(errors.map(\.message) == ["unknown device interaction session"])
     }
 
-    @Test func unboundRuntimeLeavesUnknownSessionHandlingToItsOnlyUpstream() async throws {
+    @Test(arguments: [false, true])
+    func onlyConnectionDelegatesUnknownSessionValidation(gui: Bool) async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.xcodeMode = .headless
+        config.includesXcodeService = true
+        let target = xcodeProcessTarget(processID: 705, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: group.next(),
             upstreams: [TestUpstreamClient()],
-            processRoutingEnabled: false,
+            xcodeProcessRoutes: gui ? [XcodeProcessRoute(target: target, upstreamIndices: [0])] : [],
             startImmediately: false
         )
         defer { manager.shutdownAndWait() }
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        if gui {
+            try seedProcessToolCatalogs(on: manager, entries: [
+                (target, 0, [toolDescriptor(name: "DeviceInteractionSynthesize")])
+            ])
+        }
 
         let decision = await manager.toolRoutingDecision(
             for: toolsCallObject(
@@ -322,11 +328,7 @@ struct DeviceInteractionRoutingTests {
             ),
             requestTimeoutOverride: nil
         )
-        guard case .forward(let preferred) = decision else {
-            Issue.record("unbound runtime should preserve upstream handling")
-            return
-        }
-        #expect(preferred == nil)
+        #expect(decision.preferredUpstreamIndices == [0])
     }
 
     private struct Fixture {
@@ -353,6 +355,9 @@ struct DeviceInteractionRoutingTests {
             startImmediately: false
         )
         manager.markUpstreamInitialized(upstreamIndex: 0)
+        try seedProcessToolCatalogs(on: manager, entries: [
+            (target, 0, [toolDescriptor(name: "DeviceInteractionEndSession")])
+        ])
         return Fixture(
             group: group,
             manager: manager,

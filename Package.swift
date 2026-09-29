@@ -41,7 +41,7 @@ let package = Package(
         ),
         .executable(
             name: "xcode-mcp-proxy-tool-verifier",
-            targets: ["XcodeMCPProxyToolVerifier"]
+            targets: ["XcodeMCPProxyToolVerifierCLI"]
         ),
         .executable(
             name: "xcode-mcp-permission-approver",
@@ -180,6 +180,11 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
+            name: "XcodeMCPProxyToolVerifierCLI",
+            dependencies: ["XcodeMCPProxyToolVerifier"],
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "XcodeMCPProxyToolVerifier",
             dependencies: ["XcodeMCPKit"],
             exclude: ["README.md"],
@@ -327,6 +332,11 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
+            name: "ProxyToolVerifierTests",
+            dependencies: ["XcodeMCPProxyToolVerifier", "XcodeMCPKitTesting"],
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
             name: "ProxyCLITests",
             dependencies: [
                 "XcodeMCPCore",
@@ -343,6 +353,7 @@ let package = Package(
         .testTarget(
             name: "ProxyIntegrationTests",
             dependencies: [
+                "XcodeMCPCoreTestSupport",
                 "XcodeMCPProxyRuntimeTestSupport",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",

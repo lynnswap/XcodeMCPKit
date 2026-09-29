@@ -2,16 +2,6 @@ import Foundation
 import XcodeMCPCore
 
 package struct ProxyRuntimeConfiguration: Sendable {
-    package enum XcodeMode: String, Sendable {
-        case automatic
-        case gui
-        case headless
-        case custom
-
-        package var includesHeadlessService: Bool { self == .automatic || self == .headless }
-        package var includesGUIProcesses: Bool { self == .automatic || self == .gui }
-    }
-
     package enum RefreshCodeIssuesMode: String, Sendable {
         case proxy
         case upstream
@@ -70,11 +60,8 @@ package struct ProxyRuntimeConfiguration: Sendable {
         }
     }
 
-    package var xcodeMode: XcodeMode
-    package var upstreamCommand: String
-    package var upstreamArgs: [String]
+    package var includesXcodeService: Bool
     package var upstreamProcessCount: Int
-    package var upstreamSessionID: String?
     package var maxMessageBytes: Int
     package var requestTimeout: TimeInterval
     package var prewarmToolsList: Bool
@@ -84,11 +71,8 @@ package struct ProxyRuntimeConfiguration: Sendable {
     package var initializeParamsOverride: InitializeHandshakeOverride?
 
     package init(
-        xcodeMode: XcodeMode = .gui,
-        upstreamCommand: String,
-        upstreamArgs: [String],
+        includesXcodeService: Bool = false,
         upstreamProcessCount: Int = 1,
-        upstreamSessionID: String? = nil,
         maxMessageBytes: Int,
         requestTimeout: TimeInterval,
         prewarmToolsList: Bool = true,
@@ -97,11 +81,8 @@ package struct ProxyRuntimeConfiguration: Sendable {
         disabledToolNames: Set<String> = [],
         initializeParamsOverride: InitializeHandshakeOverride? = nil
     ) {
-        self.xcodeMode = xcodeMode
-        self.upstreamCommand = upstreamCommand
-        self.upstreamArgs = upstreamArgs
+        self.includesXcodeService = includesXcodeService
         self.upstreamProcessCount = upstreamProcessCount
-        self.upstreamSessionID = upstreamSessionID
         self.maxMessageBytes = maxMessageBytes
         self.requestTimeout = requestTimeout
         self.prewarmToolsList = prewarmToolsList
