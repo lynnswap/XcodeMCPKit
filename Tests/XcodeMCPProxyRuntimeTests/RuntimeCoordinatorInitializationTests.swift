@@ -2469,7 +2469,7 @@ struct RuntimeCoordinatorInitializationTests {
         #expect(snapshot.upstream(id: 0)?.isInitialized == false)
     }
 
-    @Test func sessionManagerCancelsWaiterOwnedPrimaryRetryWhenSessionIsRemoved()
+    @Test func removingInitializeWaiterPreservesSharedBridgeRecovery()
         async throws
     {
         let group = borrowSharedTestEventLoopGroup()
@@ -2477,7 +2477,7 @@ struct RuntimeCoordinatorInitializationTests {
         let eventLoop = group.next()
         let upstream = ToggleableOverloadUpstreamClient()
         let replacement = TestUpstreamClient()
-        let upstreamEvents = LockedRecordedValues<Int>()
+        let initializedUpstreams = LockedRecordedValues<Int>()
         let config = makeConfig(requestTimeout: 5)
         let manager = RuntimeCoordinator(
             config: config,
@@ -2485,7 +2485,7 @@ struct RuntimeCoordinatorInitializationTests {
             upstreams: [upstream],
             unboundUpstreamFactory: { replacement },
             testHooks: RuntimeCoordinatorTestHooks(
-                upstreamEventHandled: { upstreamEvents.append($0) }
+                upstreamInitialized: { initializedUpstreams.append($0) }
             ),
             startImmediately: false
         )
@@ -2513,14 +2513,14 @@ struct RuntimeCoordinatorInitializationTests {
             try await future.get()
         }
 
-        let responseEventIndex = upstreamEvents.count()
         await replacement.yield(.message(try makeInitializeResponse(id: retryID)))
-        _ = try await nextRecordedValue(upstreamEvents, at: responseEventIndex)
+        try await waitForInitializedUpstreams(initializedUpstreams, expected: [0])
 
         let snapshot = manager.testStateSnapshot()
-        #expect(snapshot.hasInitResult == false)
+        #expect(snapshot.hasInitResult)
         #expect(snapshot.initInFlight == false)
-        #expect(snapshot.upstream(id: 0)?.isInitialized == false)
+        #expect(snapshot.upstream(id: 0)?.isInitialized == true)
+        #expect(manager.hasSession(id: sessionID) == false)
     }
 
     @Test func sessionManagerCancelsOnlyRemovedInitializeReadinessWaiter() async throws {

@@ -485,7 +485,11 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func queuedCancellationPreservesOtherSessionsAndIDScalarTypes() async throws {
-        let (manager, service, loop, upstreams) = try cancellationFixture(upstreamCount: 1)
+        let queuedRequests = LockedRecordedValues<LeaseManager.ID>()
+        let (manager, service, loop, upstreams) = try cancellationFixture(
+            upstreamCount: 1,
+            testHooks: .init(upstreamRequestQueued: { leaseID, _, _ in queuedRequests.append(leaseID) })
+        )
         defer { manager.shutdownAndWait() }
         let upstream = upstreams[0]
         let active = try cancellationOperation(
@@ -498,6 +502,9 @@ struct HTTPConcurrencyTests {
         queuedBody["id"] = "1"
         let queued = try cancellationOperation(queuedBody, service: service, loop: loop)
         await loop.run()
+        _ = try await waitWithTimeout("second request entered the upstream queue") {
+            try await queuedRequests.nextValue(at: 1)
+        }
         #expect(manager.debugSnapshot().queuedRequestCount == 1)
 
         _ = try cancellationOperation(cancellationPayload(id: 1), service: service, loop: loop, sessionID: "other-session")
@@ -731,8 +738,11 @@ struct HTTPConcurrencyTests {
     @Test(arguments: [0.10, 0.20])
     func queuedRequestsUseTheirOriginalDeadline(waitSeconds: Double) async throws {
         let clock = ManualDateClock()
+        let queuedRequests = LockedRecordedValues<LeaseManager.ID>()
         let (manager, service, loop, upstreams) = try cancellationFixture(
-            upstreamCount: 1, requestTimeout: 10, deadlineClock: clock.client
+            upstreamCount: 1,
+            testHooks: .init(upstreamRequestQueued: { leaseID, _, _ in queuedRequests.append(leaseID) }),
+            requestTimeout: 10, deadlineClock: clock.client
         )
         defer { manager.shutdownAndWait() }
         let upstream = upstreams[0]
@@ -748,6 +758,9 @@ struct HTTPConcurrencyTests {
             requestTimeoutOverride: .milliseconds(150)
         )
         await loop.run()
+        _ = try await waitWithTimeout("second request entered the upstream queue") {
+            try await queuedRequests.nextValue(at: 1)
+        }
         #expect(manager.debugSnapshot().queuedRequestCount == 1)
         clock.advance(by: waitSeconds)
         await loop.advanceTime(by: .milliseconds(Int64(waitSeconds * 1_000)))

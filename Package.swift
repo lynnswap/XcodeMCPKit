@@ -353,6 +353,7 @@ let package = Package(
         .testTarget(
             name: "ProxyIntegrationTests",
             dependencies: [
+                "XcodeMCPCoreTestSupport",
                 "XcodeMCPProxyRuntimeTestSupport",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
