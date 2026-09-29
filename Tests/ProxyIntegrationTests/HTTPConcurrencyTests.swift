@@ -38,6 +38,54 @@ private func seedCanonicalInitializeForTesting(
 
 @Suite(.serialized, .asyncTestCleanup)
 struct HTTPConcurrencyTests {
+    @Test func mixedCatalogAllowsGUIAndServiceCallsUsingAdvertisedSelectors() async throws {
+        let service = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "workspace-service")
+        let gui = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "gui-tab")
+        let target = XcodeProcessTarget(
+            processID: 751, appPath: "/Applications/Xcode.app",
+            developerDir: "/Applications/Xcode.app/Contents/Developer",
+            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
+        )
+        let server = try TestHTTPServer.start(
+            upstream: service, xcodeMode: .automatic, additionalUpstreams: [gui],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])]
+        )
+        do {
+            let (initialized, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
+            let sessionID = try #require(initialized.value(forHTTPHeaderField: "Mcp-Session-Id"))
+            await server.sessionManager.drainRuntimeTasksForTesting()
+            let (_, catalog) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 2))
+            let result = try #require(catalog["result"] as? [String: Any])
+            let tools = try #require(result["tools"] as? [[String: Any]])
+            let descriptor = try #require(tools.first { $0["name"] as? String == "BuildProject" })
+            let schema = try #require(descriptor["inputSchema"] as? [String: Any])
+            let properties = try #require(schema["properties"] as? [String: Any])
+            #expect(Set(properties.keys) == Set(["workspaceIdentifier", "tabIdentifier"]))
+            let (_, windows) = try await postJSON(
+                url: server.url, sessionID: sessionID, payload: toolCallPayload(id: 3, name: "XcodeListWindows", arguments: [:])
+            )
+            let windowResult = try #require(windows["result"] as? [String: Any])
+            let content = try #require(windowResult["structuredContent"] as? [String: Any])
+            let message = try #require(content["message"] as? String)
+            let range = try #require(message.range(of: "tabIdentifier: "))
+            let tab = try #require(message[range.upperBound...].split(separator: ",").first).description
+            for (index, selector, identifier) in [(4, "workspaceIdentifier", "workspace-service"), (5, "tabIdentifier", tab)] {
+                let (_, reply) = try await postJSON(
+                    url: server.url, sessionID: sessionID,
+                    payload: toolCallPayload(id: index, name: "BuildProject", arguments: [selector: identifier])
+                )
+                let result = try #require(reply["result"] as? [String: Any])
+                #expect(result["isError"] as? Bool == false)
+                let content = try #require(result["structuredContent"] as? [String: Any])
+                #expect(content["selector"] as? String == selector)
+            }
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func httpAndSwiftClientExposeCompletePaginatedCatalog() async throws {
         let upstream = PaginatedCatalogUpstream()
         let server = try TestHTTPServer.start(upstream: upstream)
@@ -1026,6 +1074,9 @@ private struct TestHTTPServer {
     static func start(
         upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
         requestTimeout: TimeInterval = 5,
+        xcodeMode: ProxyRuntimeConfiguration.XcodeMode = .gui,
+        additionalUpstreams: [any UpstreamSlotControlling] = [],
+        xcodeProcessRoutes: [XcodeProcessRoute] = [],
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks()
     ) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
@@ -1033,6 +1084,7 @@ private struct TestHTTPServer {
         let childChannelTracker = HTTPTestServerChannelTracker()
         let config: ProxyRuntimeConfiguration = {
             var config = ProxyRuntimeConfiguration(
+                xcodeMode: xcodeMode,
                 upstreamCommand: MCPBridgeInvocation.defaultMCPBridge.command,
                 upstreamArgs: MCPBridgeInvocation.defaultMCPBridge.arguments,
                 upstreamSessionID: nil,
@@ -1048,7 +1100,8 @@ private struct TestHTTPServer {
         let sessionManager = RuntimeCoordinator(
             config: config,
             eventLoop: runtimeEventLoop,
-            upstreams: [upstream],
+            upstreams: [upstream] + additionalUpstreams,
+            xcodeProcessRoutes: xcodeProcessRoutes,
             notificationSink: { sessionID, data in
                 runtimeEventSource.emit(
                     .notification(
@@ -1117,6 +1170,55 @@ private struct TestHTTPServer {
                 await sessionManager.shutdown()
             }
         )
+    }
+}
+
+private actor BackendCatalogUpstream: UpstreamSlotControlling {
+    nonisolated let events: AsyncStream<Upstream.Event>
+    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    private let selector: String
+    private let identifier: String
+
+    init(selector: String, identifier: String) {
+        self.selector = selector
+        self.identifier = identifier
+        (events, continuation) = AsyncStream.makeStream()
+    }
+
+    func start() async {}
+    func stop() async { continuation.finish() }
+
+    func send(_ data: Data) async -> Upstream.SendResult {
+        do {
+            let object = try JSONRPC.Wire.object(fromData: data)
+            guard let id = JSONRPC.Message.Inspector.requestID(from: object) else { return .accepted }
+            let result: [String: Any]
+            switch object["method"] as? String {
+            case "initialize":
+                result = ["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]
+            case "tools/list":
+                var tools: [[String: Any]] = [["name": "BuildProject", "inputSchema": [
+                    "type": "object", "properties": [selector: ["type": "string"]], "required": [selector]
+                ]]]
+                if selector == "tabIdentifier" {
+                    tools.append(["name": "XcodeListWindows", "inputSchema": ["type": "object", "properties": [:]]])
+                }
+                result = ["tools": tools]
+            default:
+                let params = object["params"] as? [String: Any] ?? [:]
+                if params["name"] as? String == "XcodeListWindows" {
+                    result = ["structuredContent": ["message": "* tabIdentifier: gui-tab, workspacePath: /Work/App.xcodeproj"]]
+                } else {
+                    let arguments = params["arguments"] as? [String: Any] ?? [:]
+                    result = ["isError": arguments[selector] as? String != identifier,
+                              "structuredContent": ["selector": selector], "content": []]
+                }
+            }
+            continuation.yield(.message(try JSONRPC.Wire.resultResponseData(id: id, result: JSONValue(any: result)!)))
+        } catch {
+            Issue.record(error)
+        }
+        return .accepted
     }
 }
 

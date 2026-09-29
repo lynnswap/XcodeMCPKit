@@ -11,6 +11,34 @@ import XcodeMCPProxyTestSupport
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorCatalogTests {
     @Test(arguments: [false, true])
+    func mixedCatalogPreservesNativeSelectorsAndRequiredness(selectorsRequired: Bool) throws {
+        func descriptor(selector: String) -> [String: Any] {
+            ["name": "XcodeRead", "inputSchema": [
+                "type": "object",
+                "properties": [selector: ["type": "string"], "filePath": ["type": "string"]],
+                "required": selectorsRequired ? [selector, "filePath"] : ["filePath"],
+                "additionalProperties": false
+            ]]
+        }
+        let service = try jsonValue(["tools": [descriptor(selector: "workspaceIdentifier")]])
+        let gui = try jsonValue(["tools": [descriptor(selector: "tabIdentifier")]])
+        let combined = ProcessToolCatalogCodec.merging(preferred: service, additional: gui)
+        let descriptor = try #require(ProcessToolCatalogCodec.toolsByName(in: combined)["XcodeRead"])
+        let tool = try #require(descriptor.foundationObject as? [String: Any])
+        let schema = try #require(tool["inputSchema"] as? [String: Any])
+        let properties = try #require(schema["properties"] as? [String: Any])
+        #expect(Set(properties.keys) == Set(["workspaceIdentifier", "tabIdentifier", "filePath"]))
+        #expect(schema["required"] as? [String] == ["filePath"])
+        let alternatives = try #require(schema["anyOf"] as? [[String: Any]])
+        #expect(alternatives.count == 2)
+        #expect(alternatives[0]["required"] as? [String] ==
+            (selectorsRequired ? ["workspaceIdentifier", "filePath"] : ["filePath"]))
+        #expect(alternatives[1]["required"] as? [String] ==
+            (selectorsRequired ? ["tabIdentifier", "filePath"] : ["filePath"]))
+        #expect(alternatives.allSatisfy { $0["additionalProperties"] as? Bool == false })
+    }
+
+    @Test(arguments: [false, true])
     func automaticCatalogDoesNotWaitForGUICatalogRefresh(cachedGUI: Bool) async throws {
         let headless = TestUpstreamClient()
         let gui = TestUpstreamClient()

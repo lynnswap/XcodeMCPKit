@@ -3090,9 +3090,41 @@ enum ProcessToolCatalogCodec {
     static func merging(preferred: JSONValue, additional: JSONValue?) -> JSONValue {
         guard let additional, case .object(var result) = preferred else { return preferred }
         var tools = toolsByName(in: additional)
-        tools.merge(toolsByName(in: preferred)) { _, preferred in preferred }
+        tools.merge(toolsByName(in: preferred)) { additional, preferred in
+            mergingTool(preferred: preferred, additional: additional)
+        }
         result["tools"] = .array(tools.keys.sorted().compactMap { tools[$0] })
         return .object(result)
+    }
+
+    private static func mergingTool(preferred: JSONValue, additional: JSONValue) -> JSONValue {
+        guard case .object(var tool) = preferred,
+              case .object(let otherTool) = additional,
+              case .object(let schema)? = tool["inputSchema"],
+              case .object(let otherSchema)? = otherTool["inputSchema"],
+              schema != otherSchema else { return preferred }
+        let schemas = [schema, otherSchema]
+        var properties: [String: JSONValue] = [:]
+        for variant in schemas {
+            guard case .object(let fields)? = variant["properties"] else { continue }
+            properties.merge(fields) { first, second in
+                first == second ? first : .object(["anyOf": .array([first, second])])
+            }
+        }
+        let requiredSets = schemas.map { variant -> Set<String> in
+            guard case .array(let fields)? = variant["required"] else { return [] }
+            return Set(fields.compactMap {
+                if case .string(let name) = $0 { return name }
+                return nil
+            })
+        }
+        tool["inputSchema"] = .object([
+            "type": .string("object"),
+            "properties": .object(properties),
+            "required": .array(requiredSets[0].intersection(requiredSets[1]).sorted().map(JSONValue.string)),
+            "anyOf": .array(schemas.map(JSONValue.object))
+        ])
+        return .object(tool)
     }
 
     static func toolsByName(in result: JSONValue?) -> [String: JSONValue] {
