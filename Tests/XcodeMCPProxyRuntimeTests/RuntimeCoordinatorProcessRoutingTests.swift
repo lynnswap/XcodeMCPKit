@@ -2770,7 +2770,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
     }
 
     @Test
-    func processRouteActivationBootstrapsCatalogAndHandshakeFromVerifiedSecondaryAfterPrimaryFailure()
+    func processRouteActivationBootstrapsCatalogAndHandshakeFromVerifiedSecondaryAfterPrimaryProtocolFailure()
         async throws
     {
         let existingUpstream = TestUpstreamClient()
@@ -2846,10 +2846,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 try JSONSerialization.data(withJSONObject: [
                     "jsonrpc": "2.0",
                     "id": NSNumber(value: try extractUpstreamID(from: primaryToolsList)),
-                    "error": [
-                        "code": -32000,
-                        "message": "primary catalog failed",
-                    ],
+                    "result": ["tools": "invalid"],
                 ])
             )
         )

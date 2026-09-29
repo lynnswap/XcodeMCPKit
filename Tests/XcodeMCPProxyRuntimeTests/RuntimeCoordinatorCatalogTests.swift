@@ -10,6 +10,46 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorCatalogTests {
+    @Test(arguments: [false, true])
+    func catalogRPCErrorPreservesConnectionForAnotherRequest(gui: Bool) async throws {
+        let upstream = TestUpstreamClient()
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = gui ? .gui : .headless
+        let target = xcodeProcessTarget(processID: 781, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [upstream],
+            xcodeProcessRoutes: gui ? [XcodeProcessRoute(target: target, upstreamIndices: [0])] : [],
+            startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCoordinatorSuiteInitialize(
+            on: manager, result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 0
+        )
+        let first = Task { try await manager.sharedToolsList(sessionID: "catalog-rpc-error", requestTimeoutOverride: .seconds(2)) }
+        let failedRequest = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
+        await upstream.yield(.message(try JSONRPC.Wire.errorResponseData(
+            id: JSONRPC.ID(any: extractUpstreamID(from: failedRequest)), code: -32603, message: "catalog is warming"
+        )))
+        do {
+            _ = try await first.value
+            Issue.record("catalog error must reach the caller")
+        } catch {
+            let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+            #expect(mapped.code == -32603)
+            #expect(mapped.message == "catalog is warming")
+        }
+        #expect(manager.isInitialized())
+        let offset = await upstream.sentCount()
+        let second = Task { try await manager.sharedToolsList(sessionID: "catalog-rpc-error", requestTimeoutOverride: .seconds(2)) }
+        let retry = try await sentValue(from: upstream, at: offset, timeout: .seconds(1))
+        #expect(methodName(from: retry) == "tools/list")
+        await upstream.yield(.message(try paginatedToolsResponse(request: retry, names: ["DocumentationSearch"])))
+        #expect(toolNames(in: try await second.value) == ["DocumentationSearch"])
+    }
+
     @Test func unchangedCatalogDoesNotNotifyWhenItsSourceBridgeChanges() throws {
         var config = makeConfig(requestTimeout: 5)
         config.xcodeMode = .headless

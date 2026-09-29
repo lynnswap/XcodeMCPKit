@@ -971,11 +971,16 @@ extension RuntimeCoordinator {
                 throw error.underlying
             }
             if let proof = error.operationLease?.proof {
-                markToolsListRefreshFailed(
-                    proof,
-                    nowUptimeNs: nowUptimeNs,
-                    reason: controlPlaneFailureReason(for: error.underlying)
-                )
+                if case ControlPlane.Error.upstreamRPC = error.underlying {
+                    // A valid RPC error reports an operation failure, not a broken connection.
+                    testHooks.toolsListRefreshCompleted?(proof.slotID.rawValue, false)
+                } else {
+                    markToolsListRefreshFailed(
+                        proof,
+                        nowUptimeNs: nowUptimeNs,
+                        reason: controlPlaneFailureReason(for: error.underlying)
+                    )
+                }
             }
             logProcessToolsCatalogFailureIfNeeded(
                 error: error.underlying,
