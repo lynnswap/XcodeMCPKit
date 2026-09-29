@@ -222,21 +222,7 @@ extension RuntimeCoordinator {
         }
 
         let exposedProcessIDs = exposure.processIDs
-        let currentSurface = processControlPlane.availableToolCatalogSurface(
-            processIDs: exposedProcessIDs
-        )
-        let cachedProcessIDs = currentSurface?.processIDs ?? []
-        let uncachedProcessIDs = exposedProcessIDs.subtracting(cachedProcessIDs)
-        if cachedProcessIDs.isEmpty == false {
-            refreshProcessToolsCatalogsIfNeeded(
-                reason: "foreground_partial_catalog",
-                processIDs: uncachedProcessIDs
-            )
-        }
-        let requestedExposures = exposure.routes.filter {
-            cachedProcessIDs.isEmpty || cachedProcessIDs.contains($0.route.target.processID)
-        }
-        let routes = requestedExposures.compactMap { exposure -> AvailableToolsCatalogRoute? in
+        let routes = exposure.routes.compactMap { exposure -> AvailableToolsCatalogRoute? in
             guard let preferred = exposure.usableUpstreamIDs.first,
                   let preferredProof = upstreamTopology.operationLease(for: preferred)?.proof,
                   let (lease, transition) = beginProcessCatalogAttemptIfRunning(
@@ -269,10 +255,6 @@ extension RuntimeCoordinator {
             startedAt: startedAt,
             exposedProcessIDs: exposedProcessIDs,
             returnAfterFirstSuccess: true
-        )
-        refreshProcessToolsCatalogsIfNeeded(
-            reason: "foreground_first_catalog",
-            processIDs: uncachedProcessIDs
         )
         return result
     }

@@ -29,7 +29,8 @@ struct RuntimeCoordinatorCatalogTests {
         #expect(session.router.drainBufferedNotifications().isEmpty)
     }
 
-    @Test func refreshingCachedCatalogsReturnsBeforeAStalledProcess() async throws {
+    @Test(arguments: [false, true])
+    func refreshingCatalogsReturnsBeforeAStalledProcess(healthyHasCachedCatalog: Bool) async throws {
         let healthy = TestUpstreamClient()
         let stalled = TestUpstreamClient()
         let first = xcodeProcessTarget(processID: 7011, xcodeVersion: "27.0")
@@ -50,9 +51,13 @@ struct RuntimeCoordinatorCatalogTests {
             sourceUpstream: 0
         )
         try seedProcessToolCatalogs(on: manager, entries: [
-            (first, 0, [toolDescriptor(name: "OldHealthy")]),
             (second, 1, [toolDescriptor(name: "OldStalled")])
         ])
+        if healthyHasCachedCatalog {
+            try seedProcessToolCatalogs(on: manager, entries: [
+                (first, 0, [toolDescriptor(name: "OldHealthy")])
+            ])
+        }
         let refresh = Task {
             try await manager.sharedToolsList(sessionID: "cached-refresh", requestTimeoutOverride: .seconds(3))
         }
