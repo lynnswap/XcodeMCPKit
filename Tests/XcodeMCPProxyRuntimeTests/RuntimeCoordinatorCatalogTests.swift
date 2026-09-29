@@ -77,6 +77,12 @@ struct RuntimeCoordinatorCatalogTests {
             try await refresh.value
         }
         #expect(toolNames(in: result).contains(fastName))
+        if serviceStalls {
+            let route = manager.immediateToolRoutingDecision(for: toolsCallObject(
+                id: 71, name: "UpdatedGUI", arguments: [:]
+            ))
+            #expect(route?.preferredUpstreamIndices == [1])
+        }
         let backgroundRequest = try await slow.nextSent(startingAt: 1, matching: { methodName(from: $0) == "tools/list" })
         await slow.yield(.message(try makeDocumentationToolsListResponse(
             id: extractUpstreamID(from: backgroundRequest),

@@ -8,6 +8,7 @@ struct UpstreamTopologyProof: Sendable, Hashable {
 
 struct UpstreamOperationLease: Sendable {
     let proof: UpstreamTopologyProof
+    let backend: UpstreamBackend
     let slot: any UpstreamSlotControlling
     let predecessorStopCompletion: AsyncTerminalSignal?
 
@@ -16,10 +17,12 @@ struct UpstreamOperationLease: Sendable {
 
     init(
         proof: UpstreamTopologyProof,
+        backend: UpstreamBackend,
         slot: any UpstreamSlotControlling,
         predecessorStopCompletion: AsyncTerminalSignal? = nil
     ) {
         self.proof = proof
+        self.backend = backend
         self.slot = slot
         self.predecessorStopCompletion = predecessorStopCompletion
     }
@@ -56,6 +59,7 @@ final class UpstreamTopologyAuthority: Sendable {
         var operationLease: UpstreamOperationLease {
             UpstreamOperationLease(
                 proof: UpstreamTopologyProof(slotID: id, slotGeneration: generation),
+                backend: backend,
                 slot: slot,
                 predecessorStopCompletion: predecessorStopCompletion
             )
@@ -247,25 +251,14 @@ final class UpstreamTopologyAuthority: Sendable {
         state.withLockedValue { state in
             guard let entry = state.entriesByID[proof.slotID],
                   entry.generation == proof.slotGeneration else { return nil }
-            return UpstreamOperationLease(
-                proof: proof,
-                slot: entry.slot,
-                predecessorStopCompletion: entry.predecessorStopCompletion
-            )
+            return entry.operationLease
         }
     }
 
     func operationLease(for id: UpstreamSlotID) -> UpstreamOperationLease? {
         state.withLockedValue { state in
             guard let entry = state.entriesByID[id] else { return nil }
-            return UpstreamOperationLease(
-                proof: UpstreamTopologyProof(
-                    slotID: id,
-                    slotGeneration: entry.generation
-                ),
-                slot: entry.slot,
-                predecessorStopCompletion: entry.predecessorStopCompletion
-            )
+            return entry.operationLease
         }
     }
 

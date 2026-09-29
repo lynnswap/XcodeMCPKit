@@ -19,6 +19,7 @@ extension RuntimeCoordinator {
         let toolName: String
         let tabIdentifier: String?
         let workspacePath: String?
+        let workspaceIdentifier: String?
     }
 
     private struct XcodeListWindowsRoute: Sendable {
@@ -505,7 +506,9 @@ extension RuntimeCoordinator {
         }
         if !hasOwnerHint(request), !defaultBackendUpstreamIndices.isEmpty {
             let catalog = processControlPlane.unboundToolsCatalogRaw()
-            if catalog == nil || ProcessToolCatalogCodec.toolsByName(in: catalog)[request.toolName] != nil {
+            let hasServiceTool = ProcessToolCatalogCodec.toolsByName(in: catalog)[request.toolName] != nil
+            let hasGUIProvider = !processControlPlane.processIDsHavingTool(request.toolName).isEmpty
+            if request.workspaceIdentifier != nil || hasServiceTool || (catalog == nil && !hasGUIProvider) {
                 return .forwardAny(preferredUpstreamIndices: defaultBackendUpstreamIndices.sorted())
             }
         }
@@ -1401,7 +1404,8 @@ extension RuntimeCoordinator {
             id: JSONRPC.Message.Inspector.requestID(from: object),
             toolName: toolName,
             tabIdentifier: arguments["tabIdentifier"] as? String,
-            workspacePath: arguments["workspacePath"] as? String
+            workspacePath: arguments["workspacePath"] as? String,
+            workspaceIdentifier: arguments["workspaceIdentifier"] as? String
         )
     }
 

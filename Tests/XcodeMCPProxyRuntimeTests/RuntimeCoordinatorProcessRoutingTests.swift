@@ -10,6 +10,37 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorProcessRoutingTests {
+    @Test func serviceCatalogLoadSurvivesFirstGUILaunch() async throws {
+        let service = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 761, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = .automatic
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [service], processRoutingEnabled: true,
+            dynamicUpstreamFactory: { _ in [gui] }, startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCoordinatorSuiteInitialize(
+            on: manager, result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 0
+        )
+        let load = Task { try await manager.sharedToolsList(sessionID: "service-in-flight", requestTimeoutOverride: .seconds(3)) }
+        let request = try await sentValue(from: service, at: 0, timeout: .seconds(2))
+        manager.reconcileXcodeProcessTargets([target], reason: "gui_launched_during_service_discovery")
+        await service.yield(.message(try makeDocumentationToolsListResponse(
+            id: extractUpstreamID(from: request), tools: [toolDescriptor(name: "DocumentationSearch")]
+        )))
+        let result = try await waitWithTimeout("Service discovery survives GUI launch", timeout: .seconds(1)) {
+            try await load.value
+        }
+        #expect(toolNames(in: result).contains("DocumentationSearch"))
+        #expect(await service.sentCount() == 1)
+        #expect(manager.defaultBackendUpstreamIndices == [0])
+    }
+
     @Test func automaticGUIReconnectUsesRouteCooldownWhileHeadlessStaysAvailable() async throws {
         let headless = TestUpstreamClient()
         let gui = TestUpstreamClient()

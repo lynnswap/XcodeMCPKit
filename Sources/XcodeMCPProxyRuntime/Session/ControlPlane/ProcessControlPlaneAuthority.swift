@@ -58,9 +58,7 @@ struct ActivationLease: Sendable, Hashable {
 
 enum CatalogInvalidationReason: Sendable {
     case reset
-    case toolsChanged(UpstreamTopologyProof)
-    case routeMembershipChanged
-    case exposureChanged
+    case toolsChanged(UpstreamTopologyProof, backend: UpstreamBackend)
 }
 
 enum CatalogOutcome: Sendable {
@@ -936,7 +934,6 @@ final class ProcessControlPlaneAuthority: Sendable {
         })
         return state.withLockedValue { state in
             state.nowUptimeNs = max(state.nowUptimeNs, nowUptimeNs)
-            let hadActiveRoutes = Self.activeRecords(in: state).isEmpty == false
             let didChangeRouteUsability = Self.updateAdmissionRevisions(
                 from: state.usability,
                 to: usability,
@@ -1039,12 +1036,6 @@ final class ProcessControlPlaneAuthority: Sendable {
             }
 
             Self.reorderActiveKeys(orderedKeys, in: &state)
-            if hadActiveRoutes == false,
-               Self.activeRecords(in: state).isEmpty == false,
-               let unboundAttempt = state.unboundAttempt {
-                effects.append(contentsOf: unboundAttempt.detachedEffects())
-                state.unboundAttempt = nil
-            }
             let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
             return ProcessControlPlaneTransition(
                 addedRoutes: added,
@@ -1890,14 +1881,9 @@ final class ProcessControlPlaneAuthority: Sendable {
         state.withLockedValue { state in
             var effects: [ProcessControlPlaneEffect] = []
             switch reason {
-            case .toolsChanged:
-                break
-            case .reset, .routeMembershipChanged, .exposureChanged:
+            case .reset:
                 state.catalogEpoch = CatalogEpoch(rawValue: state.catalogEpoch.rawValue &+ 1)
                 effects = Self.invalidateAttempts(in: &state)
-            }
-            switch reason {
-            case .reset:
                 state.catalogsByProcessID.removeAll()
                 state.processIDByUpstreamID.removeAll()
                 state.unboundCatalogRaw = nil
@@ -1912,11 +1898,12 @@ final class ProcessControlPlaneAuthority: Sendable {
                     ))
                     state.recordsByKey[key] = record
                 }
-            case .toolsChanged(let proof):
-                if let key = state.order.first(where: {
-                    guard let record = state.recordsByKey[$0], record.state == .active else { return false }
-                    return record.route.upstreamIndices.contains(proof.slotID.rawValue)
-                }), var record = state.recordsByKey[key] {
+            case .toolsChanged(let proof, let backend):
+                if case .xcodeProcess = backend {
+                    guard let key = state.order.first(where: {
+                        guard let record = state.recordsByKey[$0], record.state == .active else { return false }
+                        return record.route.upstreamIndices.contains(proof.slotID.rawValue)
+                    }), var record = state.recordsByKey[key] else { return .none }
                     effects.append(contentsOf: record.attempt?.detachedEffects() ?? [])
                     record.attempt = nil
                     state.recordsByKey[key] = record
@@ -1927,8 +1914,6 @@ final class ProcessControlPlaneAuthority: Sendable {
                     state.unboundCatalogRaw = nil
                     state.unboundCatalogSource = nil
                 }
-            case .routeMembershipChanged, .exposureChanged:
-                break
             }
             let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
             return ProcessControlPlaneTransition(
