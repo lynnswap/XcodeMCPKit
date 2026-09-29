@@ -741,6 +741,7 @@ public final class XcodeMCPProxyServer: Sendable {
         port: Int,
         config: ProxyConfig,
         xcodeMode: ProxyRuntimeConfiguration.XcodeMode,
+        upstreamProcessCount: Int,
         xcodeTargets: [ProxyRuntimeInventorySnapshot.XcodeTarget]
     ) -> String {
         let runtimeConfiguration = config.runtimeConfiguration(xcodeMode: xcodeMode)
@@ -750,10 +751,6 @@ public final class XcodeMCPProxyServer: Sendable {
             && ProxyRuntime.supportsProcessBoundRouting(
                 configuration: runtimeConfiguration
             )
-        let upstreamProcessCount =
-            processRoutingActive
-            ? upstreamsPerXcode * xcodeTargets.count
-            : upstreamsPerXcode
         var lines = [
             "\(productMetadata.name) \(productMetadata.version)",
             "",
@@ -775,6 +772,10 @@ public final class XcodeMCPProxyServer: Sendable {
             lines.append("  Mode: headless")
             lines.append("  Status: Xcode Service")
         } else {
+            if xcodeMode == .automatic {
+                lines.append("  Mode: automatic")
+                lines.append("  Service: Xcode Service")
+            }
             appendGUIXcodeStatus(xcodeTargets, to: &lines)
         }
 
@@ -809,7 +810,7 @@ public final class XcodeMCPProxyServer: Sendable {
     private static func documentationSearchStartupStatus(
         config: ProxyRuntimeConfiguration
     ) -> String {
-        if config.xcodeMode == .headless {
+        if config.xcodeMode.includesHeadlessService {
             return "upstream"
         }
         if ProxyRuntime.documentationSearchIsConfigured(

@@ -10,6 +10,50 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct RuntimeCoordinatorInitializationTests {
+    @Test(arguments: [ProxyRuntimeConfiguration.XcodeMode.headless, .automatic], [false, true])
+    func serviceWarmInitializationRecoversWithAnotherBackendAvailable(mode: ProxyRuntimeConfiguration.XcodeMode, timesOut: Bool) async throws {
+        let available = TestUpstreamClient()
+        let service = TestUpstreamClient()
+        let replacement = TestUpstreamClient()
+        let scheduler = RecordingRuntimeTimeoutScheduler()
+        let target = xcodeProcessTarget(processID: 801, xcodeVersion: "27.0")
+        var config = makeConfig(requestTimeout: 5)
+        config.xcodeMode = mode
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [available, service],
+            scheduleRuntimeTimeout: scheduler.scheduler(),
+            xcodeProcessRoutes: mode == .automatic ? [XcodeProcessRoute(target: target, upstreamIndices: [0])] : [],
+            processRoutingEnabled: mode == .automatic,
+            unboundUpstreamFactory: { replacement }, startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        seedCoordinatorSuiteInitialize(
+            on: manager, result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]), sourceUpstream: 0
+        )
+        await service.blockNextSend(method: "notifications/initialized")
+        let timerEvent = scheduler.scheduledEventCount()
+        manager.startUpstreamWarmInitialize(upstreamIndex: 1)
+        let initialize = try await sentValue(from: service, at: 0, timeout: .seconds(2))
+        await service.yield(.message(try makeInitializeResponse(id: extractUpstreamID(from: initialize))))
+        try await service.waitForBlockedSend()
+        if timesOut {
+            let timeout = try await scheduler.nextScheduled(at: timerEvent)
+            #expect(scheduler.fire(at: timeout))
+        } else {
+            await service.releaseBlockedSend(.backpressure)
+        }
+        let retry = try await sentValue(from: replacement, at: 0, timeout: .seconds(2))
+        #expect(methodName(from: retry) == "initialize")
+        await replacement.yield(.message(try makeInitializeResponse(id: extractUpstreamID(from: retry))))
+        _ = try await replacement.nextSent(matching: { methodName(from: $0) == "notifications/initialized" })
+        await manager.drainRuntimeTasksForTesting()
+        #expect(manager.isInitialized())
+        #expect(manager.upstreamHealthManager.state(for: UpstreamSlotID(rawValue: 1))?.initPhase.isUsableInitialized == true)
+        #expect(manager.upstreamTopology.snapshot().entries.first(where: { $0.id.rawValue == 1 })?.backend == .xcodeService)
+    }
+
     @Test func processRoutingRetiringCachedInitializeSourceRestartsPrimaryOnIdleActiveRoute()
         async throws
     {

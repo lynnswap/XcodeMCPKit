@@ -149,7 +149,7 @@ final class ProxyRuntimeRequestOperation: ProxyRuntimeRequestOperating, Sendable
 
 package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
     package static func supportsProcessBoundRouting(configuration: ProxyRuntimeConfiguration) -> Bool {
-        configuration.xcodeMode == .gui
+        configuration.xcodeMode.includesGUIProcesses
             && XcrunArguments.isDefaultMCPBridgeInvocation(config: configuration)
     }
 

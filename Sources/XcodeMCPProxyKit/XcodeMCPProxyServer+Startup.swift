@@ -273,6 +273,7 @@ extension XcodeMCPProxyServer {
                 port: resources.endpoint.port,
                 config: resources.config,
                 xcodeMode: resources.xcodeMode,
+                upstreamProcessCount: resources.runtime.snapshot().upstreams.count,
                 xcodeTargets: resources.runtime.inventorySnapshot().xcodeTargets
             )
             logger.info("\(summary)")

@@ -202,10 +202,10 @@ func seedUnboundToolCatalog(
     let proof = try #require(manager.upstreamTopology.operationLease(
         for: UpstreamSlotID(rawValue: upstreamIndex)
     )?.proof)
-    let (lease, transition) = manager.processControlPlane.beginUnboundCatalogAttempt(
+    let (lease, transition) = try #require(manager.processControlPlane.beginUnboundCatalogAttempt(
         preferredUpstreamProof: proof,
         nowUptimeNanoseconds: manager.nowUptimeNanoseconds()
-    )
+    ))
     manager.applyProcessControlPlaneTransition(transition)
     manager.applyCatalogCommit(manager.processControlPlane.completeCatalog(
         .usable(try jsonValue(["tools": tools]), source: proof),

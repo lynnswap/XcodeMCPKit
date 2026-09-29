@@ -492,7 +492,7 @@ extension RuntimeCoordinator {
         logger.debug(
             "route_activation_timeout",
             metadata: [
-                "pid": .string("\(lease.processID)"),
+                "pid": .string("\(route.target.processID)"),
                 "upstream": .string("\(lease.upstreamIndex)"),
                 "attempt": .string("\(lease.attempt)"),
                 "phase": .string("catalog"),
@@ -507,14 +507,14 @@ extension RuntimeCoordinator {
         if processControlPlane.consumeToolsUnavailableWarningIfNeeded() {
             XcodeMCPToolsAvailabilityDiagnostic.logTimeout(
                 logger: logger,
-                processID: lease.processID,
+                processID: route.target.processID,
                 upstreamIndex: lease.upstreamIndex,
                 retryDelayMilliseconds: retry.delayMilliseconds
             )
         }
 
         scheduleMissingProcessToolsCatalogRetry(
-            processID: lease.processID,
+            processID: route.target.processID,
             lease: retryLease,
             retry: retry,
             after: cancellationDeliveries,
@@ -661,7 +661,7 @@ extension RuntimeCoordinator {
         let replacements: [any UpstreamSlotControlling]
         if let route {
             replacements = dynamicUpstreamFactory?(route.target) ?? []
-        } else if processRoutingEnabled == false, let unboundUpstreamFactory {
+        } else if defaultBackendUpstreamIndices.contains(upstreamIndex), let unboundUpstreamFactory {
             replacements = [unboundUpstreamFactory()]
         } else {
             replacements = []
@@ -706,7 +706,7 @@ extension RuntimeCoordinator {
                                 )
                             }) else { return }
                             self.applyProcessControlPlaneTransition(transition)
-                        } else if self.processRoutingEnabled == false {
+                        } else {
                             self.startUpstreamWarmInitialize(
                                 upstreamIndex: replacementLease.upstreamIndex,
                                 applyBackoff: true

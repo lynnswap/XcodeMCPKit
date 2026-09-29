@@ -10,6 +10,7 @@ enum MCPBridgeRuntime {
         let maxBodyBytes: Int
         let processBoundRoutingSupported: Bool
         let removesInheritedXcodeProcessBinding: Bool
+        let includesServiceBackend: Bool
 
         init(
             upstreamCommand: String,
@@ -18,7 +19,8 @@ enum MCPBridgeRuntime {
             sharedSessionID: String?,
             maxBodyBytes: Int,
             processBoundRoutingSupported: Bool,
-            removesInheritedXcodeProcessBinding: Bool = false
+            removesInheritedXcodeProcessBinding: Bool = false,
+            includesServiceBackend: Bool = false
         ) {
             self.upstreamCommand = upstreamCommand
             self.upstreamArgs = upstreamArgs
@@ -27,6 +29,7 @@ enum MCPBridgeRuntime {
             self.maxBodyBytes = maxBodyBytes
             self.processBoundRoutingSupported = processBoundRoutingSupported
             self.removesInheritedXcodeProcessBinding = removesInheritedXcodeProcessBinding
+            self.includesServiceBackend = includesServiceBackend
         }
     }
 
@@ -42,6 +45,12 @@ enum MCPBridgeRuntime {
         var upstreams: [ManagedUpstreamSlot] = []
         var xcodeProcessBindings: [XcodeProcessBinding] = []
         let upstreamCount = config.upstreamProcessCount
+
+        if config.includesServiceBackend || !canUseProcessBoundXcodeUpstreams {
+            for _ in 0..<upstreamCount {
+                upstreams.append(makeUnboundUpstreamSlot(config: config))
+            }
+        }
 
         if canUseProcessBoundXcodeUpstreams {
             upstreams.reserveCapacity(orderedXcodeTargets.count * upstreamCount)
@@ -65,11 +74,6 @@ enum MCPBridgeRuntime {
                 xcodeProcessBindings.append(
                     XcodeProcessBinding(target: target, slotIDs: slotIDs)
                 )
-            }
-        } else {
-            upstreams.reserveCapacity(upstreamCount)
-            for _ in 0..<upstreamCount {
-                upstreams.append(makeUnboundUpstreamSlot(config: config))
             }
         }
 

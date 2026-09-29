@@ -100,7 +100,7 @@ extension RuntimeCoordinator {
             guard upstreamTopology.validate(proof) else { return }
             if case .notification("notifications/tools/list_changed") =
                 JSONRPC.Message.Inspector.kind(of: object) {
-                let transition = processControlPlane.invalidateCatalog(.toolsChanged(proof))
+                let transition = processControlPlane.invalidateCatalog(.toolsChanged(proof, backend: operationLease.backend))
                 // Forward the upstream notification after invalidation without synthesizing a duplicate.
                 applyProcessControlPlaneTransition(ProcessControlPlaneTransition(
                     addedRoutes: transition.addedRoutes,
@@ -1409,7 +1409,7 @@ extension RuntimeCoordinator {
             failInitPending(error: ControlPlane.Error.invalidResponse("upstream stdout protocol violation"))
         }
 
-        if processRoutingEnabled {
+        if processRoutingEnabled && !defaultBackendUpstreamIndices.contains(upstreamIndex) {
             return
         }
         let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex ?? 0

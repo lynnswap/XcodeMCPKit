@@ -8,6 +8,7 @@ struct UpstreamTopologyProof: Sendable, Hashable {
 
 struct UpstreamOperationLease: Sendable {
     let proof: UpstreamTopologyProof
+    let backend: UpstreamBackend
     let slot: any UpstreamSlotControlling
     let predecessorStopCompletion: AsyncTerminalSignal?
 
@@ -16,30 +17,41 @@ struct UpstreamOperationLease: Sendable {
 
     init(
         proof: UpstreamTopologyProof,
+        backend: UpstreamBackend,
         slot: any UpstreamSlotControlling,
         predecessorStopCompletion: AsyncTerminalSignal? = nil
     ) {
         self.proof = proof
+        self.backend = backend
         self.slot = slot
         self.predecessorStopCompletion = predecessorStopCompletion
     }
+}
+
+enum UpstreamBackend: Sendable, Hashable {
+    case xcodeProcess(XcodeProcessID)
+    case xcodeService
+    case custom
 }
 
 final class UpstreamTopologyAuthority: Sendable {
     struct Entry: Sendable {
         let id: UpstreamSlotID
         let generation: UInt64
+        let backend: UpstreamBackend
         let slot: any UpstreamSlotControlling
         let predecessorStopCompletion: AsyncTerminalSignal?
 
         init(
             id: UpstreamSlotID,
             generation: UInt64,
+            backend: UpstreamBackend = .custom,
             slot: any UpstreamSlotControlling,
             predecessorStopCompletion: AsyncTerminalSignal? = nil
         ) {
             self.id = id
             self.generation = generation
+            self.backend = backend
             self.slot = slot
             self.predecessorStopCompletion = predecessorStopCompletion
         }
@@ -47,6 +59,7 @@ final class UpstreamTopologyAuthority: Sendable {
         var operationLease: UpstreamOperationLease {
             UpstreamOperationLease(
                 proof: UpstreamTopologyProof(slotID: id, slotGeneration: generation),
+                backend: backend,
                 slot: slot,
                 predecessorStopCompletion: predecessorStopCompletion
             )
@@ -59,6 +72,10 @@ final class UpstreamTopologyAuthority: Sendable {
 
         var slotIDs: [UpstreamSlotID] { entries.map(\.id) }
         var slots: [any UpstreamSlotControlling] { entries.map(\.slot) }
+
+        func slotIDs(for backend: UpstreamBackend) -> [UpstreamSlotID] {
+            entries.compactMap { $0.backend == backend ? $0.id : nil }
+        }
 
         func slot(_ id: UpstreamSlotID) -> (any UpstreamSlotControlling)? {
             entries.first { $0.id == id }?.slot
@@ -95,25 +112,25 @@ final class UpstreamTopologyAuthority: Sendable {
 
     private let state: NIOLockedValueBox<State>
 
-    init(_ slots: [any UpstreamSlotControlling]) {
+    init(_ slots: [any UpstreamSlotControlling], backend: (Int) -> UpstreamBackend = { _ in .custom }) {
         var initial = State()
-        for slot in slots {
+        for (index, slot) in slots.enumerated() {
             let id = UpstreamSlotID(rawValue: initial.nextRawID)
             initial.nextRawID &+= 1
-            initial.entriesByID[id] = Entry(id: id, generation: 1, slot: slot)
+            initial.entriesByID[id] = Entry(id: id, generation: 1, backend: backend(index), slot: slot)
             initial.order.append(id)
         }
         if slots.isEmpty == false { initial.topologyEpoch = 1 }
         state = NIOLockedValueBox(initial)
     }
 
-    func append(_ slots: [any UpstreamSlotControlling]) -> Transition {
+    func append(_ slots: [any UpstreamSlotControlling], backend: UpstreamBackend = .custom) -> Transition {
         state.withLockedValue { state in
             var added: [UpstreamSlotID] = []
             for slot in slots {
                 let id = UpstreamSlotID(rawValue: state.nextRawID)
                 state.nextRawID &+= 1
-                state.entriesByID[id] = Entry(id: id, generation: 1, slot: slot)
+                state.entriesByID[id] = Entry(id: id, generation: 1, backend: backend, slot: slot)
                 state.order.append(id)
                 added.append(id)
             }
@@ -138,6 +155,7 @@ final class UpstreamTopologyAuthority: Sendable {
             state.entriesByID[proof.slotID] = Entry(
                 id: proof.slotID,
                 generation: previous.generation &+ 1,
+                backend: previous.backend,
                 slot: slot,
                 predecessorStopCompletion: predecessorStopCompletion
             )
@@ -162,6 +180,7 @@ final class UpstreamTopologyAuthority: Sendable {
             state.entriesByID[proof.slotID] = Entry(
                 id: current.id,
                 generation: current.generation,
+                backend: current.backend,
                 slot: current.slot
             )
         }
@@ -232,25 +251,14 @@ final class UpstreamTopologyAuthority: Sendable {
         state.withLockedValue { state in
             guard let entry = state.entriesByID[proof.slotID],
                   entry.generation == proof.slotGeneration else { return nil }
-            return UpstreamOperationLease(
-                proof: proof,
-                slot: entry.slot,
-                predecessorStopCompletion: entry.predecessorStopCompletion
-            )
+            return entry.operationLease
         }
     }
 
     func operationLease(for id: UpstreamSlotID) -> UpstreamOperationLease? {
         state.withLockedValue { state in
             guard let entry = state.entriesByID[id] else { return nil }
-            return UpstreamOperationLease(
-                proof: UpstreamTopologyProof(
-                    slotID: id,
-                    slotGeneration: entry.generation
-                ),
-                slot: entry.slot,
-                predecessorStopCompletion: entry.predecessorStopCompletion
-            )
+            return entry.operationLease
         }
     }
 

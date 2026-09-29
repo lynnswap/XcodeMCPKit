@@ -310,7 +310,7 @@ struct XcodeMCPProxyServerTests {
     }
 
     @Test(arguments: [false, true])
-    func automaticEnabledHeadlessHonorsApprovalPolicyAndUsesUnboundFeatures(
+    func automaticEnabledHeadlessHonorsApprovalPolicyAndPreservesGUIRouting(
         autoApprove: Bool
     ) async throws {
         let availabilityQueries = NIOLockedValueBox(0)
@@ -345,10 +345,10 @@ struct XcodeMCPProxyServerTests {
         _ = try await server.start()
         let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
         #expect(availabilityQueries.withLockedValue { $0 } == 1)
-        #expect(captured.xcodeMode == .headless)
+        #expect(captured.xcodeMode == .automatic)
         #expect(captured.usesPermissionDialogAutomation == autoApprove)
         #expect(captured.refreshCodeIssuesMode == .upstream)
-        #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: captured) == false)
+        #expect(ProxyRuntime.supportsProcessBoundRouting(configuration: captured))
         #expect(ProxyRuntime.documentationSearchIsConfigured(configuration: captured) == false)
         #expect(autoApproverCreations.withLockedValue { $0 } == (autoApprove ? 1 : 0))
         #expect(autoApprover.startCount == (autoApprove ? 1 : 0))

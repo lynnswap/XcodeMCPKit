@@ -101,6 +101,8 @@ struct WindowTransition: Sendable {
     let didChange: Bool
 }
 
+/// Bridge failures do not close GUI workspaces. Replace ownership after a successful
+/// window query or remove it when the Xcode process leaves inventory.
 final class WindowOwnershipAuthority: Sendable {
     private struct State: Sendable {
         var epoch = WindowEpoch(rawValue: 0)

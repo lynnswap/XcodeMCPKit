@@ -32,6 +32,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
             port: 8765,
             config: config,
             xcodeMode: .gui,
+            upstreamProcessCount: 2,
             xcodeTargets: [
                 ProxyRuntimeInventorySnapshot.XcodeTarget(
                     processID: target.processID,
@@ -73,6 +74,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
             port: 8765,
             config: config,
             xcodeMode: .headless,
+            upstreamProcessCount: 1,
             xcodeTargets: []
         )
 

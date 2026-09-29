@@ -162,7 +162,7 @@ package struct ProxyConfig: Sendable {
         xcodeMode: ProxyRuntimeConfiguration.XcodeMode
     ) -> ProxyRuntimeConfiguration {
         let effectiveRefreshCodeIssuesMode: ProxyRuntimeConfiguration.RefreshCodeIssuesMode
-        if xcodeMode == .headless {
+        if xcodeMode.includesHeadlessService {
             // The proxy workflow resolves GUI tab identity and navigator state.
             // Headless workspace identity belongs to Xcode Service, so preserve
             // the upstream tool contract instead of manufacturing a GUI owner.

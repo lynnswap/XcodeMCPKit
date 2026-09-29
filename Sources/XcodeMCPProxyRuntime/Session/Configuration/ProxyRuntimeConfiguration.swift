@@ -3,9 +3,13 @@ import XcodeMCPCore
 
 package struct ProxyRuntimeConfiguration: Sendable {
     package enum XcodeMode: String, Sendable {
+        case automatic
         case gui
         case headless
         case custom
+
+        package var includesHeadlessService: Bool { self == .automatic || self == .headless }
+        package var includesGUIProcesses: Bool { self == .automatic || self == .gui }
     }
 
     package enum RefreshCodeIssuesMode: String, Sendable {

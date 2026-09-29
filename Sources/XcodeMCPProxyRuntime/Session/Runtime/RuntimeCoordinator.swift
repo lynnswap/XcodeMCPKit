@@ -548,6 +548,15 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     let controlPlaneCoordinator: ControlPlaneCoordinator
     let documentationProviderManager: (any DocumentationProviderManaging)?
     let processRoutingEnabled: Bool
+    var defaultBackendUpstreamIndices: Set<Int> {
+        let topology = upstreamTopology.snapshot()
+        return Set(topology.entries.compactMap {
+            switch $0.backend {
+            case .xcodeService, .custom: $0.id.rawValue
+            case .xcodeProcess: nil
+            }
+        })
+    }
     let xcodeProcessReconcileScheduleState =
         NIOLockedValueBox(XcodeProcessReconcileScheduleState())
     let xcodeProcessEventMonitor: (any XcodeProcessEventMonitoring)?
@@ -621,7 +630,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
             : nil
         let unboundUpstreamFactory: UnboundUpstreamFactory?
-        if xcodeProcessRoutingEnabled {
+        if xcodeProcessRoutingEnabled && !config.xcodeMode.includesHeadlessService {
             unboundUpstreamFactory = nil
         } else {
             unboundUpstreamFactory = {
@@ -734,7 +743,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             }
         self.config = config
         self.eventLoop = eventLoop
-        let upstreamTopology = UpstreamTopologyAuthority(upstreams)
+        let backendByIndex = Dictionary(uniqueKeysWithValues: xcodeProcessRoutes.flatMap { route in
+            route.upstreamIndices.map { ($0, UpstreamBackend.xcodeProcess(XcodeProcessID(route.target))) }
+        })
+        let defaultBackend: UpstreamBackend = config.xcodeMode == .custom ? .custom : .xcodeService
+        let upstreamTopology = UpstreamTopologyAuthority(
+            upstreams, backend: { backendByIndex[$0] ?? defaultBackend }
+        )
         self.upstreamTopology = upstreamTopology
         self.clock = runtimeClock
         let handshakeState = CanonicalHandshakeState()
@@ -784,7 +799,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let routableProcessBoundUpstreamIndices: @Sendable () -> Set<Int> = { [runtimeBox] in
             guard resolvedProcessRoutingEnabled else { return [] }
             guard let runtime = runtimeBox.value else {
-                return Set(processControlPlane.activeRoutes().flatMap(\.upstreamIndices))
+                return Set(upstreamTopology.snapshot().slotIDs.map(\.rawValue))
             }
             return runtime.routableProcessBoundUpstreamIndices()
         }
@@ -813,9 +828,17 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             },
             selectUpstream: { [weak upstreamHealthManager] occupied in
                 let nowUptimeNs = uptimeProvider()
+                let topology = upstreamTopology.snapshot()
+                let defaultIDs = Set(topology.entries.compactMap { entry -> Int? in
+                    if case .xcodeProcess = entry.backend { return nil }
+                    return entry.id.rawValue
+                })
+                let excluded = defaultIDs.isEmpty
+                    ? inactiveProcessBoundUpstreamIndices()
+                    : Set(topology.slotIDs.map(\.rawValue)).subtracting(defaultIDs)
                 return upstreamHealthManager?.chooseBestInitializedUpstream(
                     nowUptimeNs: nowUptimeNs,
-                    occupiedUpstreams: occupied.union(inactiveProcessBoundUpstreamIndices())
+                    occupiedUpstreams: occupied.union(excluded)
                 ) ?? UpstreamHealthManager.SelectionResult(proof: nil, effects: [])
             },
             operationLease: { [upstreamTopology] proof in

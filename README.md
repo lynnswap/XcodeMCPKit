@@ -134,10 +134,10 @@ xcode-mcp-proxy --help
 |--------|-------------|
 | `--listen host:port` | Listen address. Defaults to `localhost:8765`. |
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. |
-| `--upstream-processes n` | Upstream `mcpbridge` count: per running Xcode in GUI mode, or total unbound pool size in headless/custom mode. Default: `1`, max: `10`. |
+| `--upstream-processes n` | Bridge count per GUI Xcode and the size of the Service/custom pool. Automatic mode maintains both GUI and enabled Service pools. Default: `1`, max: `10`. |
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialize still has a bounded handshake timeout. |
 | `--config path` | TOML config path. |
-| `--xcode-mode automatic|gui|headless` | Select Xcode routing. `automatic` (default) uses enabled headless MCP when available and otherwise uses GUI routing. `headless` fails instead of falling back. |
+| `--xcode-mode automatic|gui|headless` | Select Xcode routing. `automatic` (default) keeps enabled Xcode Service available alongside GUI Xcode processes. `headless` fails instead of falling back. |
 | `--auto-approve` | Automatically approve Xcode MCP connection dialogs for all agents, including direct connections outside the proxy. Requires Accessibility permission. |
 | `--refresh-code-issues-mode proxy|upstream` | Serve `XcodeRefreshCodeIssuesInFile` through proxy diagnostics (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`). |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port and start a new one. |
@@ -148,7 +148,7 @@ xcode-mcp-proxy --help
 |----------|-------------|
 | `LISTEN` | Listen address, for example `127.0.0.1:8765`. |
 | `HOST` / `PORT` | Listen host and port when `LISTEN` is unset. |
-| `MCP_XCODE_PID` | Set by the proxy on GUI process-bound upstream `mcpbridge` children. Headless routing removes inherited values to leave the stock bridge unbound. Custom and GUI fallback upstreams pass inherited values through. |
+| `MCP_XCODE_PID` | Set by the proxy on GUI process-bound upstream `mcpbridge` children. Automatic and headless routing remove inherited values from Service bridge children. Custom and GUI fallback upstreams pass inherited values through. |
 | `MCP_XCODE_SESSION_ID` | Optional explicit upstream Xcode MCP session ID. |
 | `MCP_XCODE_CONFIG` | TOML config path. `--config` takes precedence. |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream`. |

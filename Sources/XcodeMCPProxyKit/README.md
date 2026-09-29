@@ -57,8 +57,8 @@ may be incomplete, even though the server lifecycle has stopped.
 
 - `bindAddress`: host and port; port `0` requests an ephemeral port.
 - `upstream`: the default `xcrun mcpbridge` invocation or an explicit command.
-  Its `processesPerXcode` value is per GUI Xcode process; headless and custom
-  unbound routing use it as the total bridge-pool size.
+  Its `processesPerXcode` value is per GUI Xcode process and also determines the
+  Service pool size. Automatic mode maintains both; custom routing uses one pool.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
 - `configurationFileURL`: optional TOML file. An explicit unreadable or invalid
@@ -69,8 +69,8 @@ may be incomplete, even though the server lifecycle has stopped.
 - `approvalPolicy`: manual or automatic Xcode permission handling.
 - `featurePolicy`: tools-list prewarming and refresh-code-issues routing.
 - `xcodeMode`: `.automatic` (the default), `.gui`, or `.headless` for the stock
-  `mcpbridge` upstream. Automatic mode selects the enabled Xcode 27 headless
-  service and otherwise preserves GUI routing.
+  `mcpbridge` upstream. Automatic mode keeps the enabled Xcode 27 headless
+  service available alongside GUI routing.
 
 Headless mode does not require a workspace to be open in the Xcode app. It
 forwards workspace lifecycle and DocumentationSearch tools to Xcode Service

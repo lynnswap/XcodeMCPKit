@@ -17,12 +17,34 @@ func testTopologyProof(_ upstreamIndex: Int, generation: UInt64 = 1) -> Upstream
 func testOperationLease(_ upstreamIndex: Int, generation: UInt64 = 1) -> UpstreamOperationLease {
     UpstreamOperationLease(
         proof: testTopologyProof(upstreamIndex, generation: generation),
+        backend: .custom,
         slot: TestUpstreamClient()
     )
 }
 
 @Suite(.serialized, .asyncTestCleanup)
 struct ControlPlaneAuthorityTests {
+    @Test func retiredGUINotificationDoesNotInvalidateServiceCatalogLoad() throws {
+        let target = xcodeProcessTarget(processID: 762, xcodeVersion: "27.0")
+        let authority = makeAuthority([(target, [1])])
+        let (lease, _) = try #require(authority.beginUnboundCatalogAttempt(
+            preferredUpstreamProof: testTopologyProof(0), nowUptimeNanoseconds: 1
+        ))
+        _ = authority.reconcileRoutes([], reason: "gui_exit", nowUptimeNs: 2, usability: .empty)
+        let change = authority.invalidateCatalog(.toolsChanged(
+            testTopologyProof(1), backend: .xcodeProcess(XcodeProcessID(target))
+        ))
+        #expect(change.effects.isEmpty)
+        #expect(authority.validateCatalogLoad(lease))
+        guard case .accepted = authority.completeCatalog(
+            .usable(catalog("ServiceTool"), source: testTopologyProof(0)), lease: lease, nowUptimeNanoseconds: 3
+        ) else {
+            Issue.record("Service catalog must survive an unrelated GUI notification")
+            return
+        }
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["ServiceTool"])
+    }
+
     @Test func catalogCommitPublishesProcessAndCanonicalStateAtomically() throws {
         let target = xcodeProcessTarget(processID: 41001, xcodeVersion: "27.0")
         let authority = makeAuthority([(target, [0])])
@@ -1484,7 +1506,7 @@ struct ControlPlaneAuthorityTests {
         let secondRPC = ControlPlane.RPCHandle()
         _ = authority.attach(.rpc(firstRPC), to: firstLease)
         _ = authority.attach(.rpc(secondRPC), to: secondLease)
-        let change = authority.invalidateCatalog(.toolsChanged(testTopologyProof(0)))
+        let change = authority.invalidateCatalog(.toolsChanged(testTopologyProof(0), backend: .xcodeProcess(XcodeProcessID(first))))
         for effect in change.effects {
             if case .cancelRPC(let rpc) = effect { rpc.cancel() }
         }

@@ -634,9 +634,6 @@ extension RuntimeCoordinator {
         }
         guard let eligibility, let mutationResult, let processEligibility else { return nil }
         applyProcessControlPlaneTransition(processEligibility.transition)
-        for ineligibleProof in eligibility.update.newlyIneligibleProofs {
-            removeXcodeWindowOwners(forUpstreamIndex: ineligibleProof.slotID.rawValue)
-        }
         applySupportEligibilityCompletion(eligibility)
         return mutationResult
     }
@@ -664,6 +661,12 @@ extension RuntimeCoordinator {
     ) {
         guard initializeManager.snapshot().isShuttingDown == false else { return }
         guard isActiveProcessBoundUpstream(upstreamIndex) else { return }
+        if case .regular = mode,
+           let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
+           route.primaryUpstreamIndex == upstreamIndex {
+            startProcessRouteActivation(for: route)
+            return
+        }
         runWhenUpstreamReady(
             reason: "warm_initialize_\(upstreamIndex)",
             applyBackoff: applyBackoff,
