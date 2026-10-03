@@ -1689,7 +1689,7 @@ struct RuntimeCoordinatorSchedulingTests {
         let request = Task {
             let result = await forwardingService.callInternalTool(
                 name: "XcodeListNavigatorIssues",
-                arguments: ["workspaceIdentifier": "service-send-barrier"],
+                arguments: ["workspaceIdentifier": "/Work/SendBarrier.xcodeproj"],
                 sessionID: sessionID,
                 eventLoop: fixture.eventLoop,
                 cancellationHandle: parentCancellationHandle,
@@ -1781,7 +1781,7 @@ struct RuntimeCoordinatorSchedulingTests {
         let request = Task {
             let result = await forwardingService.callInternalTool(
                 name: "XcodeListNavigatorIssues",
-                arguments: ["workspaceIdentifier": "service-unsent-cancellation"],
+                arguments: ["workspaceIdentifier": "/Work/UnsentCancellation.xcodeproj"],
                 sessionID: sessionID,
                 eventLoop: fixture.eventLoop,
                 cancellationHandle: parentCancellationHandle,

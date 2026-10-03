@@ -311,7 +311,7 @@ struct HTTPConcurrencyTests {
             }
         }
         let operation = try cancellationOperation(
-            executeSnippetPayload(id: 991, workspaceIdentifier: "windowtab-cancel"), service: service, loop: loop
+            executeSnippetPayload(id: 991, workspaceIdentifier: "/Work/Cancel.xcodeproj"), service: service, loop: loop
         )
         await loop.run()
         await manager.drainRuntimeTasksForTesting()
@@ -328,7 +328,7 @@ struct HTTPConcurrencyTests {
         let (manager, service, loop, upstreams) = try cancellationFixture(upstreamCount: 2)
         defer { manager.shutdownAndWait() }
         let operation = try cancellationOperation(
-            executeSnippetPayload(id: 991, workspaceIdentifier: "windowtab-cancel"),
+            executeSnippetPayload(id: 991, workspaceIdentifier: "/Work/Cancel.xcodeproj"),
             service: service, loop: loop
         )
         await loop.run()
@@ -372,12 +372,12 @@ struct HTTPConcurrencyTests {
         defer { manager.shutdownAndWait() }
         let upstream = upstreams[0]
         let active = try cancellationOperation(
-            executeSnippetPayload(id: 1, workspaceIdentifier: "windowtab-active"), service: service, loop: loop
+            executeSnippetPayload(id: 1, workspaceIdentifier: "/Work/Active.xcodeproj"), service: service, loop: loop
         )
         await loop.run()
         await manager.drainRuntimeTasksForTesting()
         _ = try await waitForUpstreamRequestCount(upstream, count: 1)
-        var queuedBody = executeSnippetPayload(id: 2, workspaceIdentifier: "windowtab-queued")
+        var queuedBody = executeSnippetPayload(id: 2, workspaceIdentifier: "/Work/Queued.xcodeproj")
         queuedBody["id"] = "1"
         let queued = try cancellationOperation(queuedBody, service: service, loop: loop)
         await loop.run()
@@ -669,7 +669,7 @@ struct HTTPConcurrencyTests {
         upstream.clearRecordedRequests()
 
         try await postAsyncJSON(
-            executeSnippetPayload(id: 700, workspaceIdentifier: "windowtab-timeout"),
+            executeSnippetPayload(id: 700, workspaceIdentifier: "/Work/Timeout.xcodeproj"),
             sessionID: sessionID,
             to: firstChannel
         )
@@ -679,7 +679,7 @@ struct HTTPConcurrencyTests {
         #expect(firstRequestLabels == ["tools/call:ExecuteSnippet"])
 
         try await postAsyncJSON(
-            executeSnippetPayload(id: 701, workspaceIdentifier: "windowtab-timeout-2"),
+            executeSnippetPayload(id: 701, workspaceIdentifier: "/Work/Other.xcodeproj"),
             sessionID: sessionID,
             to: secondChannel
         )
@@ -1008,7 +1008,7 @@ struct HTTPConcurrencyTests {
                 payload: toolCallNotificationPayload(
                     name: "XcodeRefreshCodeIssuesInFile",
                     arguments: [
-                        "workspaceIdentifier": "service-refresh-notification",
+                        "workspaceIdentifier": "/Work/Refresh.xcodeproj",
                         "filePath": "App.swift",
                     ]
                 )
