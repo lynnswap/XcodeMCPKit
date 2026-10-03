@@ -23,6 +23,10 @@ extension RuntimeCoordinator {
         var workspacePath: String? {
             workspaceIdentifier.flatMap { $0.hasPrefix("/") ? $0 : nil }
         }
+
+        var ownerIdentifier: String? {
+            tabIdentifier ?? (workspacePath == nil ? workspaceIdentifier : nil)
+        }
     }
 
     private struct XcodeListWindowsRoute: Sendable {
@@ -494,14 +498,18 @@ extension RuntimeCoordinator {
         ) {
             if case .forwardAdmitted(_, let admission) = affinityDecision,
                admission.route == nil,
-               let path = request.workspacePath,
                let proof = admission.upstreamProofs.first {
-                return await existingNativeWorkspacePathRoutingDecision(
-                    for: request, path: path, route: .pinnedUpstream(proof.slotID.rawValue),
-                    expectedUpstreamProof: proof,
-                    deadline: timeoutDeadline(for: requestTimeoutOverride
-                        ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: config.requestTimeout))
-                )
+                guard request.tabIdentifier == nil else {
+                    return .reject(errors: toolRoutingErrors(for: request,
+                        message: "device interaction session does not own the selected Xcode window"))
+                }
+                if let selector = request.workspaceIdentifier, !selector.isEmpty {
+                    return await existingNativeWorkspaceRoutingDecision(
+                        for: request, selector: selector, route: .pinnedUpstream(proof.slotID.rawValue),
+                        expectedUpstreamProof: proof,
+                        deadline: timeoutDeadline(for: requestTimeoutOverride
+                            ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: config.requestTimeout)))
+                }
             }
             return affinityDecision
         }
@@ -575,6 +583,26 @@ extension RuntimeCoordinator {
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision {
         var resolution = cachedOwnerResolution(tabIdentifier: identifier, workspacePath: nil)
+        var nativeInventoryFailure: String?
+        let knownGUIIdentifier = windowOwnershipAuthority.snapshot().identities.contains {
+            $0.proxyTabIdentifier == identifier || $0.rawTabIdentifier == identifier
+        }
+        if !knownGUIIdentifier {
+            do {
+                let inventory = try await nativeWorkspaceInventory(
+                    route: .nativeHost,
+                    deadline: timeoutDeadline(for: requestTimeoutOverride
+                        ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: config.requestTimeout)))
+                if inventory.entries.contains(where: { $0.tabIdentifier == identifier }) {
+                    return .forwardAdmitted(
+                        preferredUpstreamIndices: [inventory.sourceProof.slotID.rawValue],
+                        admission: RouteForwardingAdmission(
+                            upstreamProofs: [inventory.sourceProof], workspaceIdentifier: identifier))
+                }
+            } catch {
+                nativeInventoryFailure = ControlPlane.ErrorMapper.jsonRPCError(for: error).message
+            }
+        }
         let candidates = xcodeWindowOwnerCandidateProcessIDs()
         let hasUnqueriedOwners = !candidates.isSubset(of: windowOwnershipAuthority.snapshot().inventoriedProcessIDs)
         let unresolved = if case .unresolved = resolution { true } else { false }
@@ -591,7 +619,10 @@ extension RuntimeCoordinator {
         }
         switch resolution {
         case .unresolved:
-            return nativeHostToolRoutingDecision(for: request)
+            return .reject(errors: toolRoutingErrors(
+                for: request,
+                message: nativeInventoryFailure.map { "Unable to determine native workspace ownership: \($0)" }
+                    ?? "Unknown workspaceIdentifier '\(identifier)'; select an identifier from the workspace inventory"))
         case .resolved, .conflict:
             var object = object
             var params = object["params"] as? [String: Any] ?? [:]
@@ -603,6 +634,36 @@ extension RuntimeCoordinator {
             return await ownerBoundToolRoutingDecision(
                 for: object, requestTimeoutOverride: requestTimeoutOverride)
         }
+    }
+
+    private struct NativeWorkspaceInventory {
+        let sourceProof: UpstreamTopologyProof
+        let entries: [XcodeListWindowsEntry]
+    }
+
+    private func nativeWorkspaceInventory(
+        route: ControlPlane.Route, expectedUpstreamProof: UpstreamTopologyProof? = nil,
+        deadline: UInt64?
+    ) async throws -> NativeWorkspaceInventory {
+        try Task.checkCancellation()
+        if let deadline, nowUptimeNanoseconds() >= deadline { throw TimeoutError() }
+        let response = try await performControlPlaneRPC(
+            route: route, purpose: "workspaces", label: "tools/call:XcodeListWorkspaces",
+            requestObject: JSONRPC.Wire.requestObject(
+                id: "__control-plane-workspaces-\(UUID().uuidString)", method: "tools/call",
+                params: .object(["name": .string("XcodeListWorkspaces"), "arguments": .object([:])])),
+            requestTimeout: timeAmount(until: deadline), expectedUpstreamProof: expectedUpstreamProof)
+        guard upstreamTopology.validate(response.operationLease) else {
+            throw UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        let result = try extractJSONRPCResult(from: response.responseData)
+        guard !Self.xcodeListWindowsIsErrorResult(result),
+              let message = Self.xcodeListWindowsMessage(in: result) else {
+            throw ControlPlane.Error.proxyFailure(code: -32001,
+                message: Self.xcodeListWindowsMessage(in: result) ?? "Unable to list native workspaces")
+        }
+        return NativeWorkspaceInventory(sourceProof: response.operationLease.proof,
+            entries: XcodeListWindowsMessageParser.parse(message, identifierKey: "workspaceIdentifier"))
     }
 
     private func workspacePathRoutingDecision(
@@ -655,56 +716,30 @@ extension RuntimeCoordinator {
         })
     }
 
-    private func existingNativeWorkspacePathRoutingDecision(
+    private func existingNativeWorkspaceRoutingDecision(
         for request: ToolRoutingRequest,
-        path: String,
+        selector: String,
         route: ControlPlane.Route,
         expectedUpstreamProof: UpstreamTopologyProof? = nil,
         deadline: UInt64?
     ) async -> ToolRoutingDecision {
         do {
-            try Task.checkCancellation()
-            if let deadline, nowUptimeNanoseconds() >= deadline { throw TimeoutError() }
-            let response = try await performControlPlaneRPC(
-                route: route, purpose: "workspaces",
-                label: "tools/call:XcodeListWorkspaces",
-                requestObject: JSONRPC.Wire.requestObject(
-                    id: "__control-plane-workspaces-\(UUID().uuidString)", method: "tools/call",
-                    params: .object(["name": .string("XcodeListWorkspaces"), "arguments": .object([:])])
-                ),
-                requestTimeout: timeAmount(until: deadline),
-                expectedUpstreamProof: expectedUpstreamProof
-            )
-            let result = try extractJSONRPCResult(from: response.responseData)
-            guard !Self.xcodeListWindowsIsErrorResult(result),
-                  let message = Self.xcodeListWindowsMessage(in: result) else {
-                return .reject(errors: toolRoutingErrors(
-                    for: request, message: Self.xcodeListWindowsMessage(in: result) ?? "Unable to list native workspaces"
-                ))
-            }
-            let identifiers = Set(XcodeListWindowsMessageParser.parse(message, identifierKey: "workspaceIdentifier")
-                .filter { $0.workspacePath == path }.map(\.tabIdentifier))
+            let inventory = try await nativeWorkspaceInventory(route: route,
+                expectedUpstreamProof: expectedUpstreamProof, deadline: deadline)
+            let identifiers = Set(inventory.entries.filter {
+                selector.hasPrefix("/") ? workspacePathsMatch($0.workspacePath, selector) : $0.tabIdentifier == selector
+            }.map(\.tabIdentifier))
             guard identifiers.count == 1, let identifier = identifiers.first else {
                 return .reject(errors: toolRoutingErrors(
                     for: request,
                     message: identifiers.isEmpty
-                        ? "Workspace '\(path)' is no longer open in its native owner."
-                        : "Multiple native workspaces match '\(path)'; select a workspaceIdentifier from XcodeListWorkspaces"
+                        ? "Workspace '\(selector)' is no longer open in its native owner."
+                        : "Multiple native workspaces match '\(selector)'; select a workspaceIdentifier from XcodeListWorkspaces"
                 ))
             }
-            let proofs: [UpstreamTopologyProof]
-            if let expectedUpstreamProof {
-                proofs = [expectedUpstreamProof]
-            } else {
-                let topology = upstreamTopology.snapshot()
-                proofs = topology.entries.compactMap { entry in
-                    entry.backend == .nativeHost ? topology.proof(entry.id) : nil
-                }
-            }
-            guard !proofs.isEmpty else { throw UpstreamSlotScheduler.AcquisitionError.unavailable }
             return .forwardAdmitted(
-                preferredUpstreamIndices: proofs.map { $0.slotID.rawValue },
-                admission: RouteForwardingAdmission(upstreamProofs: proofs, workspaceIdentifier: identifier)
+                preferredUpstreamIndices: [inventory.sourceProof.slotID.rawValue],
+                admission: RouteForwardingAdmission(upstreamProofs: [inventory.sourceProof], workspaceIdentifier: identifier)
             )
         } catch {
             return .reject(errors: toolRoutingErrors(
@@ -1031,7 +1066,7 @@ extension RuntimeCoordinator {
     ) -> OwnerBoundRequestRewritePlan {
         let identities = owners.identities.filter { $0.processID == processID }
         let identity: WindowOwnershipIdentity?
-        if let identifier = request.tabIdentifier, !identifier.isEmpty {
+        if let identifier = request.ownerIdentifier, !identifier.isEmpty {
             identity = identities.first { $0.proxyTabIdentifier == identifier || $0.rawTabIdentifier == identifier }
         } else if let path = request.workspacePath {
             identity = identities.first { workspacePathsMatch($0.workspacePath, path) }
@@ -1039,8 +1074,8 @@ extension RuntimeCoordinator {
             identity = nil
         }
         return OwnerBoundRequestRewritePlan(
-            tabIdentifier: identity?.rawTabIdentifier ?? request.tabIdentifier,
-            clientTabIdentifier: identity?.proxyTabIdentifier ?? request.tabIdentifier
+            tabIdentifier: identity?.rawTabIdentifier ?? request.ownerIdentifier,
+            clientTabIdentifier: identity?.proxyTabIdentifier ?? request.ownerIdentifier
         )
     }
 
@@ -1094,7 +1129,7 @@ extension RuntimeCoordinator {
 
     private func hasOwnerHint(_ request: ToolRoutingRequest) -> Bool {
         hasOwnerHint(
-            tabIdentifier: request.tabIdentifier,
+            tabIdentifier: request.ownerIdentifier,
             workspacePath: request.workspacePath
         )
     }
@@ -1482,7 +1517,7 @@ extension RuntimeCoordinator {
 
     private func cachedOwnerResolution(for request: ToolRoutingRequest) -> CachedOwnerResolution {
         cachedOwnerResolution(
-            tabIdentifier: request.tabIdentifier,
+            tabIdentifier: request.ownerIdentifier,
             workspacePath: request.workspacePath
         )
     }
