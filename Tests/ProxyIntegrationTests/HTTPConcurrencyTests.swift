@@ -919,15 +919,19 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
-    @Test func httpConcurrentRefreshCodeIssuesRequestsRespectSingleFlightPerUpstream() async throws {
+    @Test func httpConcurrentRefreshCodeIssuesRequestsSerializeForTheSameTab() async throws {
         let upstream = SingleFlightRefreshUpstreamClient()
+        let queuedKeys = LockedRecordedValues<String>()
+        let coordinator = RefreshCodeIssues.Coordinator(testHooks: .init(waiterQueued: { key, _ in
+            queuedKeys.append(key)
+        }))
         let target = XcodeProcessTarget(
             processID: 27071, appPath: "/Applications/Xcode.app",
             developerDir: "/Applications/Xcode.app/Contents/Developer", xcodeVersion: "27.0"
         )
         let server = try TestHTTPServer.start(upstream: upstream, xcodeProcessRoutes: [
             XcodeProcessRoute(target: target, upstreamIndices: [0])
-        ])
+        ], refreshCoordinator: coordinator)
         let url = server.url
 
         do {
@@ -950,7 +954,7 @@ struct HTTPConcurrencyTests {
                             id: index + 300,
                             name: "XcodeRefreshCodeIssuesInFile",
                             arguments: [
-                                "tabIdentifier": "windowtab-refresh-\(index)",
+                                "tabIdentifier": "windowtab-refresh",
                                 "filePath": "App\(index).swift",
                             ]
                         )
@@ -963,9 +967,10 @@ struct HTTPConcurrencyTests {
                 "waiting for concurrent refresh requests to enter the debug queue",
                 timeout: .seconds(2)
             ) {
-                try await server.refreshDebugState.waitForActiveRequestCount(3)
+                try await queuedKeys.nextValue(at: 1)
             }
-            #expect(server.refreshDebugState.snapshot().queue.activeRequestCount == 3)
+            #expect(queuedKeys.count() == 2)
+            #expect(server.refreshDebugState.snapshot().queue.activeRequestCount == 1)
             #expect(await upstream.didEmitConcurrentRefreshError() == false)
             await upstream.releaseRefreshResponses()
             for task in tasks {
@@ -1144,7 +1149,8 @@ private struct TestHTTPServer {
         requestTimeout: TimeInterval = 5,
         additionalUpstreams: [any UpstreamSlotControlling] = [],
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
-        testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks()
+        testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
+        refreshCoordinator: RefreshCodeIssues.Coordinator = .makeDefault()
     ) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
@@ -1184,6 +1190,7 @@ private struct TestHTTPServer {
             coordinator: sessionManager,
             eventLoop: runtimeEventLoop,
             eventSource: runtimeEventSource,
+            refreshCoordinator: refreshCoordinator,
             refreshDebugState: refreshDebugState
         )
         let controlService = HTTPControlService(runtime: runtime)
