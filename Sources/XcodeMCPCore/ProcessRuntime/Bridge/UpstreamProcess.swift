@@ -317,10 +317,16 @@ private final class UpstreamProcessCancellation: @unchecked Sendable {
     private struct State {
         var driver: (any UpstreamProcessDriving)?
         var isCancelled = false
+        var stdinClosed = false
+        var outputStopped = false
     }
 
     private let lock = NSLock()
     private var state = State()
+
+    var isCancelled: Bool {
+        lock.withLock { state.isCancelled }
+    }
 
     func install(_ driver: any UpstreamProcessDriving) {
         let shouldCancel = lock.withLock { () -> Bool in
@@ -328,7 +334,32 @@ private final class UpstreamProcessCancellation: @unchecked Sendable {
             state.driver = driver
             return state.isCancelled
         }
-        if shouldCancel { cancelDriver(driver) }
+        if shouldCancel {
+            closeStdin()
+            cancelDriver(driver)
+        }
+    }
+
+    func closeStdin() {
+        let driver = lock.withLock { () -> (any UpstreamProcessDriving)? in
+            guard !state.stdinClosed, let driver = state.driver else { return nil }
+            state.stdinClosed = true
+            return driver
+        }
+        driver?.closeStdin()
+    }
+
+    func stopOutput() {
+        let driver = lock.withLock { () -> (any UpstreamProcessDriving)? in
+            guard !state.outputStopped, let driver = state.driver else { return nil }
+            state.outputStopped = true
+            return driver
+        }
+        driver?.stopOutput()
+    }
+
+    func finish() {
+        lock.withLock { state.driver = nil }
     }
 
     func cancel() {
@@ -338,13 +369,13 @@ private final class UpstreamProcessCancellation: @unchecked Sendable {
             return state.driver
         }
         guard let driver else { return }
+        closeStdin()
         cancelDriver(driver)
     }
 
     private func cancelDriver(_ driver: any UpstreamProcessDriving) {
-        driver.closeStdin()
         _ = driver.terminate()
-        driver.stopOutput()
+        stopOutput()
     }
 }
 
@@ -572,7 +603,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     }
 
     package func stop() async {
-        let task = beginStop(suppressExitEvent: true)
+        let task = beginStop(suppressExitEvent: true, gracefully: true)
         await task.value
     }
 
@@ -736,13 +767,15 @@ private extension ProcessBackedUpstreamSession {
         for race in races { race.complete(true) }
         if !suppressExitEvent {
             pendingExitStatus = status
-            scheduleTerminationDrainTimeoutIfNeeded()
         }
+        scheduleTerminationDrainTimeoutIfNeeded()
         // Let pipe readers drain any bytes the kernel still holds after process exit.
         finishEventsIfNeeded()
     }
 
-    func beginStop(suppressExitEvent: Bool) -> Task<Void, Never> {
+    func beginStop(suppressExitEvent: Bool, gracefully: Bool = false) -> Task<Void, Never> {
+        let waitsForEOF = gracefully && !cancellation.isCancelled
+        if !waitsForEOF { cancellation.cancel() }
         if let stopTask { return stopTask }
         if stopCompleted { return Task {} }
 
@@ -753,26 +786,32 @@ private extension ProcessBackedUpstreamSession {
         }
         terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = nil
-        cancellation.cancel()
+        if waitsForEOF { cancellation.closeStdin() }
 
         let task = Task<Void, Never> { [weak self] in
             guard let self else { return }
-            await self.performStop()
+            await self.performStop(gracefully: waitsForEOF)
         }
         stopTask = task
         return task
     }
 
-    func performStop() async {
+    func performStop(gracefully: Bool) async {
         let currentDriver = driver
+        if gracefully, !terminationObserved {
+            // MCP stdin EOF lets the application complete its own shutdown before signals.
+            let exited = await waitForTerminationWithinGrace()
+            if !exited { cancellation.cancel() }
+        }
         if terminationObserved == false {
-            let exited = await waitForTerminationWithinSignalGrace()
+            let exited = await waitForTerminationWithinGrace()
             if exited == false {
                 _ = currentDriver?.forceTerminate()
                 await waitUntilTerminationObserved()
             }
         }
 
+        scheduleTerminationDrainTimeoutIfNeeded()
         await currentDriver?.waitForStdinClosed()
         await currentDriver?.waitForOutputStopped()
         let stdoutTask = stdoutTask
@@ -782,10 +821,11 @@ private extension ProcessBackedUpstreamSession {
         finishEventsIfNeeded(force: true)
 
         driver = nil
+        cancellation.finish()
         stopCompleted = true
     }
 
-    func waitForTerminationWithinSignalGrace() async -> Bool {
+    func waitForTerminationWithinGrace() async -> Bool {
         if terminationObserved { return true }
         let grace = config.terminationSignalGrace
         guard grace > .zero else { return false }
@@ -833,9 +873,10 @@ private extension ProcessBackedUpstreamSession {
     }
 
     func scheduleTerminationDrainTimeoutIfNeeded() {
-        guard pendingExitStatus != nil, !stdoutDrained || !stderrDrained else {
+        guard terminationObserved, !didFinishEvents, !stdoutDrained || !stderrDrained else {
             return
         }
+        guard terminationDrainTimeoutTask == nil else { return }
 
         let grace = config.terminationDrainGrace
         if grace <= .zero {
@@ -844,7 +885,6 @@ private extension ProcessBackedUpstreamSession {
         }
 
         let clock = config.clock
-        terminationDrainTimeoutTask?.cancel()
         terminationDrainTimeoutTask = Task { [weak self] in
             await clock.sleep(grace)
             guard !Task.isCancelled else {
@@ -855,14 +895,14 @@ private extension ProcessBackedUpstreamSession {
     }
 
     func forceTerminateDrainIfNeeded() {
-        guard terminationObserved, !didFinishEvents, pendingExitStatus != nil else {
+        guard terminationObserved, !didFinishEvents else {
             return
         }
         guard !stdoutDrained || !stderrDrained else {
             return
         }
 
-        cancellation.cancel()
+        cancellation.stopOutput()
         finishEventsIfNeeded()
     }
 

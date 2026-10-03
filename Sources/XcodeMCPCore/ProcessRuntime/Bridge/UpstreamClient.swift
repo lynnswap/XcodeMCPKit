@@ -35,6 +35,8 @@ package protocol UpstreamSession: AnyObject, Sendable {
     /// Completion remains the responsibility of ``stop()``.
     nonisolated func cancel()
     func send(_ data: Data) async -> Upstream.SendResult
+    /// Closes MCP input and waits for process exit and output drain. Unresponsive
+    /// processes are terminated after the configured shutdown grace.
     func stop() async
 }
 

@@ -248,12 +248,13 @@ struct UpstreamProcessTests {
             await session.stop()
             await completedStops.append(1)
         }
-        _ = try await fakeDriver.nextStopOutput()
+        try await fakeDriver.nextStdinClose()
         let second = Task {
             await session.stop()
             await completedStops.append(2)
         }
 
+        fakeDriver.emitTermination(status: 0)
         await Task.yield()
         #expect(await completedStops.count() == 0)
         fakeDriver.finishStdout()
@@ -277,15 +278,22 @@ struct UpstreamProcessTests {
             await completedStops.append(())
         }
 
-        let delay = try await scheduler.nextScheduledDelay()
-        #expect(fakeDriver.snapshot().terminateCount == 1)
+        let eofDelay = try await scheduler.nextScheduledDelay()
+        #expect(fakeDriver.snapshot().terminateCount == 0)
         #expect(fakeDriver.snapshot().forceTerminateCount == 0)
         #expect(await completedStops.count() == 0)
+        eofDelay.fire()
+        let delay = try await scheduler.nextScheduledDelay(at: 1)
+        #expect(fakeDriver.snapshot().terminateCount == 1)
 
         fakeDriver.emitTermination(status: 0)
+        fakeDriver.finishStdout()
+        fakeDriver.finishStderr()
         await stop.value
 
         #expect(delay.isCancelled())
+        delay.fire()
+        #expect(fakeDriver.snapshot().terminateCount == 1)
         #expect(fakeDriver.snapshot().forceTerminateCount == 0)
         #expect(await completedStops.count() == 1)
     }
@@ -305,14 +313,19 @@ struct UpstreamProcessTests {
             await completedStops.append(())
         }
 
-        let delay = try await scheduler.nextScheduledDelay()
+        let eofDelay = try await scheduler.nextScheduledDelay()
         var snapshot = fakeDriver.snapshot()
         #expect(snapshot.queuedStdinBytes > 0)
         #expect(snapshot.stdinWriteCompletionCount == 0)
         #expect(snapshot.forceTerminateCount == 0)
         #expect(await completedStops.count() == 0)
 
-        delay.fire()
+        #expect(snapshot.terminateCount == 0)
+        eofDelay.fire()
+        let signalDelay = try await scheduler.nextScheduledDelay(at: 1)
+        #expect(fakeDriver.snapshot().terminateCount == 1)
+        #expect(fakeDriver.snapshot().forceTerminateCount == 0)
+        signalDelay.fire()
         await stop.value
 
         snapshot = fakeDriver.snapshot()
@@ -320,16 +333,140 @@ struct UpstreamProcessTests {
         #expect(snapshot.forceTerminateCount == 1)
         #expect(snapshot.queuedStdinBytes == 0)
         #expect(snapshot.stdinWriteCompletionCount == 1)
+        #expect(snapshot.closeStdinCount == 1)
         #expect(await completedStops.count() == 1)
         for _ in 0..<100 { await Task.yield() }
         #expect(fakeDriver.snapshot().stdinWriteCompletionCount == 1)
     }
 
+    @Test func normalStopPreservesFinalOutputWithoutSendingTerminationSignals() async throws {
+        let scheduler = ControlledTerminationDelayScheduler()
+        let fakeDriver = FakeUpstreamProcessDriver()
+        let session = try await makeFakeUpstreamSession(fakeDriver, terminationDelayScheduler: scheduler)
+        let events = UpstreamEventRecorder(session.events)
+        let stopped = RecordedValues<Void>()
+        let stop = Task {
+            await session.stop()
+            await stopped.append(())
+        }
+        let eofDelay = try await scheduler.nextScheduledDelay()
+        #expect(fakeDriver.snapshot().closeStdinCount == 1)
+        #expect(fakeDriver.snapshot().terminateCount == 0)
+        #expect(fakeDriver.snapshot().stopOutputCount == 0)
+        #expect(await session.send(Data()) == .unavailable(.shuttingDown))
+
+        fakeDriver.emitTermination(status: 0)
+        let response = try makeJSONRPCResponse(id: 42, text: "shutdown cleanup")
+        fakeDriver.emitStdout(Data(response.utf8))
+        fakeDriver.emitStderr(Data("cleanup finished".utf8))
+        fakeDriver.finishStdout()
+        #expect(await stopped.count() == 0)
+        fakeDriver.finishStderr()
+        await stop.value
+        await session.stop()
+        let allEvents = await events.finishedEvents()
+        #expect(allEvents.contains { if case .message = $0 { return true }; return false })
+        #expect(allEvents.contains { if case .stderr("cleanup finished") = $0 { return true }; return false })
+        #expect(!allEvents.contains(where: isExitEvent))
+        #expect(eofDelay.isCancelled())
+        eofDelay.fire()
+        session.cancel()
+        let snapshot = fakeDriver.snapshot()
+        #expect(snapshot.closeStdinCount == 1)
+        #expect(snapshot.terminateCount == 0)
+        #expect(snapshot.forceTerminateCount == 0)
+        #expect(snapshot.stopOutputCount == 0)
+    }
+
+    @Test func normalStopBoundsOutputDrainAfterNaturalExit() async throws {
+        let clock = TestClock()
+        let fakeDriver = FakeUpstreamProcessDriver()
+        let session = try await makeFakeUpstreamSession(
+            fakeDriver, terminationDrainGrace: .seconds(10), clock: makeTestClockClient(clock)
+        )
+        let stop = Task { await session.stop() }
+        try await fakeDriver.nextStdinClose()
+        fakeDriver.emitTermination(status: 0)
+        try await waitForSuspendedSleepers(on: clock)
+        #expect(fakeDriver.snapshot().stopOutputCount == 0)
+        clock.advance(by: .seconds(10))
+        await stop.value
+        #expect(fakeDriver.snapshot().stopOutputCount == 1)
+        #expect(fakeDriver.snapshot().terminateCount == 0)
+        #expect(fakeDriver.snapshot().forceTerminateCount == 0)
+    }
+
+    @Test func synchronousCancelKeepsImmediateSignalCleanup() async throws {
+        let fakeDriver = FakeUpstreamProcessDriver()
+        let session = try await makeFakeUpstreamSession(fakeDriver)
+        session.cancel()
+        #expect(fakeDriver.snapshot().terminateCount == 1)
+        #expect(fakeDriver.snapshot().stopOutputCount == 1)
+        await session.stop()
+        #expect(fakeDriver.snapshot().closeStdinCount == 1)
+        #expect(fakeDriver.snapshot().terminateCount == 1)
+        #expect(fakeDriver.snapshot().forceTerminateCount == 0)
+    }
 
 }
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
 struct LiveUpstreamProcessSmokeTests {
+    @Test(arguments: [true, false])
+    func stopLetsEOFChildCompleteOrEscalatesAnUnresponsiveChild(respondsToEOF: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent("cleanup-marker")
+        let pidFile = directory.appendingPathComponent("child-pid")
+        let statuses = DeterministicRecorder<Int32>()
+        let script = """
+            if [ "$1" = natural ]; then
+                trap 'printf signaled > "$2"; exit 99' TERM
+            else
+                trap '' TERM
+            fi
+            printf '%s' "$$" > "$3"
+            printf '{"jsonrpc":"2.0","id":1,"result":{"ready":true}}\\n'
+            cat >/dev/null
+            if [ "$1" = natural ]; then
+                sleep 0.075
+                printf cleanup-complete > "$2"
+                printf '{"jsonrpc":"2.0","id":2,"result":{"cleanup":true}}\\n'
+                printf 'cleanup-complete\\n' >&2
+                exit 0
+            fi
+            while :; do :; done
+            """
+        let config = UpstreamProcess.Config(
+            command: "/bin/sh",
+            args: ["-c", script, "eof-child", respondsToEOF ? "natural" : "unresponsive", marker.path, pidFile.path],
+            environment: ProcessInfo.processInfo.environment,
+            maxQueuedWriteBytes: 1024,
+            terminationSignalGrace: respondsToEOF ? .seconds(1) : .milliseconds(75),
+            driverFactory: TerminationRecordingDriverFactory(statuses: statuses)
+        )
+        try await withLiveUpstreamSession(config: config) { session in
+            let events = UpstreamEventRecorder(session.events)
+            _ = try await events.nextMessage()
+            try await waitWithTimeout("EOF child stop", timeout: .seconds(5)) {
+                await session.stop()
+            }
+            let status = try await statuses.nextValue(at: 0)
+            #expect(status == (respondsToEOF ? 0 : 9))
+            if respondsToEOF {
+                #expect(try String(contentsOf: marker, encoding: .utf8) == "cleanup-complete")
+                let output = await events.finishedEvents()
+                #expect(output.filter { if case .message = $0 { return true }; return false }.count == 2)
+                #expect(output.contains { if case .stderr("cleanup-complete") = $0 { return true }; return false })
+            } else {
+                #expect(!FileManager.default.fileExists(atPath: marker.path))
+            }
+            let pid = try #require(Int(String(contentsOf: pidFile, encoding: .utf8)))
+            #expect(!ProcessControlClient.liveValue.isProcessAlive(pid))
+        }
+    }
+
     @Test func upstreamProcessLiveSmokeStopsChildAfterStdoutEOF() async throws {
         let config = UpstreamProcess.Config(
             command: "/bin/sh",
@@ -403,6 +540,42 @@ struct LiveUpstreamProcessSmokeTests {
             })
         }
     }
+}
+
+private struct TerminationRecordingDriverFactory: UpstreamProcessDriverMaking {
+    let statuses: DeterministicRecorder<Int32>
+
+    func makeDriver() -> any UpstreamProcessDriving {
+        TerminationRecordingDriver(driver: LiveUpstreamProcessDriverFactory().makeDriver(), statuses: statuses)
+    }
+}
+
+private final class TerminationRecordingDriver: UpstreamProcessDriving {
+    let driver: any UpstreamProcessDriving
+    let statuses: DeterministicRecorder<Int32>
+
+    init(driver: any UpstreamProcessDriving, statuses: DeterministicRecorder<Int32>) {
+        self.driver = driver
+        self.statuses = statuses
+    }
+
+    func start(command: String, args: [String], environment: [String: String], maxQueuedWriteBytes: Int,
+               onTermination: @escaping @Sendable (Int32) -> Void) throws -> UpstreamProcessStartedIO {
+        let statuses = statuses
+        return try driver.start(command: command, args: args, environment: environment,
+                                maxQueuedWriteBytes: maxQueuedWriteBytes) { status in
+            statuses.record(status)
+            onTermination(status)
+        }
+    }
+
+    func sendStdin(_ payload: Data) -> Upstream.SendResult { driver.sendStdin(payload) }
+    func closeStdin() { driver.closeStdin() }
+    func terminate() -> Bool { driver.terminate() }
+    func forceTerminate() -> Bool { driver.forceTerminate() }
+    func stopOutput() { driver.stopOutput() }
+    func waitForStdinClosed() async { await driver.waitForStdinClosed() }
+    func waitForOutputStopped() async { await driver.waitForOutputStopped() }
 }
 
 private func makeFakeUpstreamSession(
