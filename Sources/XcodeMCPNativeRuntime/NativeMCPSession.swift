@@ -29,12 +29,17 @@ package final class NativeMCPSession {
             try sendError(id: nil, code: -32600, message: "JSON-RPC messages must be objects")
             return
         }
+        let id = requestID(object["id"])
+        guard object["jsonrpc"] as? String == "2.0", object["id"] == nil || id != nil else {
+            try sendError(id: id, code: -32600, message: "Invalid JSON-RPC envelope")
+            return
+        }
         let kind = JSONRPC.Message.Inspector.kind(of: object)
         switch kind {
         case .notification(let method):
             if method == "notifications/cancelled",
                let parameters = object["params"] as? [String: Any],
-               let value = parameters["requestId"], let id = JSONRPC.ID(any: value) {
+               let id = requestID(parameters["requestId"]) {
                 requests[id.key]?.cancel()
             }
         case .request(let method, let id):
@@ -70,8 +75,18 @@ package final class NativeMCPSession {
             }
         case .malformed(let id):
             try sendError(id: id, code: -32600, message: "Invalid JSON-RPC request")
-        case .response, .other:
+        case .other:
+            try sendError(id: nil, code: -32600, message: "Invalid JSON-RPC request")
+        case .response:
             break
+        }
+    }
+
+    private func requestID(_ raw: Any?) -> JSONRPC.ID? {
+        guard let raw, let value = JSONValue(any: raw) else { return nil }
+        switch value {
+        case .string, .number: return JSONRPC.ID(any: raw)
+        case .object, .array, .bool, .null: return nil
         }
     }
 

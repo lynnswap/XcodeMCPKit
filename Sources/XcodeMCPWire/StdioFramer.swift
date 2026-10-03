@@ -1,6 +1,11 @@
 import Foundation
 
 package final class StdioFramer {
+    package enum Mode {
+        case jsonValues
+        case delimitedMessages
+    }
+
     package struct ProtocolViolation: Sendable {
         package enum Reason: String, Codable, Sendable {
             case unexpectedLeadingByte
@@ -68,8 +73,11 @@ package final class StdioFramer {
 
     private var buffer = Data()
     private var rawJSONScanner: JSONBoundaryScanner?
+    private let mode: Mode
 
-    package init() {}
+    package init(mode: Mode = .jsonValues) {
+        self.mode = mode
+    }
 
     package func append(_ data: Data) -> StdioFramer.AppendResult {
         if !data.isEmpty {
@@ -87,7 +95,11 @@ package final class StdioFramer {
                 messages.append(message)
                 continue
             }
-            if let message = nextJSONValueMessage() {
+            if mode == .delimitedMessages, let message = nextLineMessage() {
+                messages.append(message)
+                continue
+            }
+            if mode == .jsonValues, let message = nextJSONValueMessage() {
                 messages.append(message)
                 continue
             }
@@ -155,11 +167,26 @@ package final class StdioFramer {
         }
 
         let bodyRange = headerEndIndex..<(headerEndIndex + length)
-        guard let message = validatedJSONObjectOrArray(in: bodyRange) else {
-            return nil
+        let message: Data
+        if mode == .jsonValues {
+            guard let valid = validatedJSONObjectOrArray(in: bodyRange) else { return nil }
+            message = valid
+        } else {
+            message = buffer.subdata(in: bodyRange)
         }
 
         buffer.removeSubrange(0..<bodyRange.upperBound)
+        rawJSONScanner = nil
+        return message
+    }
+
+    private func nextLineMessage() -> Data? {
+        guard let first = firstNonWhitespaceIndex(from: buffer.startIndex),
+              !isPotentialContentLengthHeaderPrefix(at: first),
+              let end = buffer[first...].firstIndex(of: 0x0A) else { return nil }
+        let message = buffer.subdata(in: first..<end)
+        buffer.removeSubrange(buffer.startIndex...end)
+        rawJSONScanner = nil
         return message
     }
 
@@ -205,6 +232,9 @@ package final class StdioFramer {
             return nil
         }
 
+        // A server can report malformed JSON once a line or Content-Length
+        // boundary is known. Until then it must retain the incomplete frame.
+        if mode == .delimitedMessages { return nil }
         let rootByte = buffer[firstIndex]
         guard rootByte == 0x7B || rootByte == 0x5B else {
             return makeProtocolViolation(reason: .unexpectedLeadingByte)

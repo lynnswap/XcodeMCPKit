@@ -66,7 +66,7 @@ private enum NativeHostMain {
                     let session = NativeMCPSession(backend: backend, artifactsRoot: artifacts) { data in
                         try output.write(contentsOf: data + Data([0x0A]))
                     }
-                    let framer = StdioFramer()
+                    let framer = StdioFramer(mode: .delimitedMessages)
                     do {
                         for try await chunk in standardInput() {
                             let result = framer.append(chunk)
