@@ -18,6 +18,26 @@ struct NativeMCPSessionTests {
     }
 
     @Test(arguments: [
+        #"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"Mutation",}}"#,
+        #"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"Mutation"},}"#,
+        #"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"Mutation","arguments":{"values":[1,]}}}"#,
+        #"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"Mutation","arguments":{"value":01}}}"#,
+        #"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"Mutation"}} /* comment */"#,
+    ])
+    func invalidJSONNeverDispatchesAndTheNextRequestStillSucceeds(raw: String) async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            try harness.session.receive(Data(raw.utf8))
+            let error = try await harness.nextMessage()
+            #expect(try nativeTestField(error, "error", "code") == .number(.int(-32700)))
+            #expect(harness.backend.executions.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
+            try harness.request("ping", id: "after-invalid-json")
+            #expect(try nativeTestField(await harness.nextMessage(), "result") == .object([:]))
+        }
+    }
+
+    @Test(arguments: [
         "missing", "true", "[]", "null", "{}",
         #"{"capabilities":{},"clientInfo":{"name":"Test","version":"1"}}"#,
         #"{"protocolVersion":42,"capabilities":{},"clientInfo":{"name":"Test","version":"1"}}"#,
