@@ -341,10 +341,19 @@ struct NativeGUIBackendTests {
             ])))
             let cancelled = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
             #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
-            try windows.respond(.object(["content": .array([]), "isError": .bool(false)]))
-            try await session.shutdown()
+            try windows.respond(.object([
+                "content": .array([]), "isError": .bool(false),
+                "structuredContent": .object(["message": .string(
+                    "* tabIdentifier: ready-tab, workspacePath: /tmp/Project.xcodeproj")]),
+            ]))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while fixture.backend.pendingInvocationCount > 0, ContinuousClock.now < deadline {
+                await Task.yield()
+            }
+            #expect(fixture.backend.pendingInvocationCount == 0)
             #expect(fixture.transport.requestMessages.count == 2)
             #expect(fixture.transport.oneWayMessages.count == 1)
+            try await session.shutdown()
         }
     }
 

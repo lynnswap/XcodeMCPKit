@@ -29,6 +29,8 @@ package final class NativeGUIBackend: NativeToolBackend {
     private var tools: [String: NativeTool] = [:]
     private var shutdownTask: Task<Void, any Error>?
 
+    package var pendingInvocationCount: Int { invocations.count }
+
     package init(processIdentifier: Int32, installation: NativeXcodeInstallation,
                  connector: @escaping Connector = { processIdentifier, message, installation in
                      try await NativeGUIConnection.connect(to: processIdentifier,
@@ -148,7 +150,7 @@ package final class NativeGUIBackend: NativeToolBackend {
             }
         }
         continuation.onTermination = { termination in
-            if case .cancelled = termination, supportsCancellation { producer.cancel() }
+            if case .cancelled = termination { producer.cancel() }
         }
         invocations[token] = Invocation(producer: producer, continuation: continuation)
         return stream
