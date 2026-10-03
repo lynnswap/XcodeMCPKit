@@ -18,7 +18,6 @@ package enum ProxyToolVerifierCommand {
 struct VerifierOptions {
     var host = "127.0.0.1"
     var port = 18_765
-    var upstreamProcesses = 2
     var requestTimeoutSeconds = 600
     var outputDirectory = URL(fileURLWithPath: "ProxyToolVerifierOutput", isDirectory: true)
     var keepServer = false
@@ -35,9 +34,6 @@ struct VerifierOptions {
             case "--port":
                 port = try Int(Self.value(after: argument, in: arguments, index: &index))
                     ?? Self.fail("--port requires an integer")
-            case "--upstream-processes":
-                upstreamProcesses = try Int(Self.value(after: argument, in: arguments, index: &index))
-                    ?? Self.fail("--upstream-processes requires an integer")
             case "--request-timeout":
                 requestTimeoutSeconds = try Int(Self.value(after: argument, in: arguments, index: &index))
                     ?? Self.fail("--request-timeout requires an integer")
@@ -70,7 +66,6 @@ struct VerifierOptions {
     Options:
       --host host                 Listen host for the debug proxy server. Default: 127.0.0.1
       --port port                 Dedicated verifier port. Default: 18765
-      --upstream-processes n      Upstream mcpbridge process count. Default: 2
       --request-timeout seconds   XcodeMCP request timeout. Default: 600
       --output path               Git-ignored verifier output directory. Default: ProxyToolVerifierOutput
       --keep-server               Leave the debug proxy server running.
@@ -113,6 +108,7 @@ struct ProxyToolVerifier {
         }
 
         try buildDebugProxyServer(in: repoRoot)
+        try runProcess(executable: "/bin/bash", arguments: ["scripts/build-native-host.sh", "--output", ".build/debug/XcodeMCPNativeHost.app"], currentDirectory: repoRoot)
         let server = try startDebugProxyServer(repoRoot: repoRoot, outputRoot: outputRoot)
         defer {
             if options.keepServer == false {
@@ -160,16 +156,16 @@ struct ProxyToolVerifier {
                 break
             }
             // xed/open and GUI catalog activation finish asynchronously. A run
-            // that opened a GUI fixture must wait for it, not switch to Service.
+            // that opened a GUI fixture must wait for that actual owner.
             guard ContinuousClock.now < discoveryDeadline else {
                 throw VerifierFailure("GUI Xcode did not report the opened fixture before the request timeout")
             }
             try await Task.sleep(for: .milliseconds(250))
             tools = try await client.listTools()
         }
-        let workspaceSurface: WorkspaceToolSurface = fixtureTab == nil ? .service : .gui
-        if workspaceSurface == .service {
-            fixture = try makeServiceFixture(from: fixture)
+        let workspaceSurface: WorkspaceToolSurface = fixtureTab == nil ? .headless : .gui
+        if workspaceSurface == .headless {
+            fixture = try makeHeadlessFixture(from: fixture)
         }
         var state = VerificationState(
             fixture: fixture,
@@ -193,7 +189,7 @@ struct ProxyToolVerifier {
         }
 
         do {
-            if workspaceSurface == .service {
+            if workspaceSurface == .headless {
                 let openRecord = await call(
                     "XcodeOpenWorkspace",
                     arguments: ["path": .string(fixture.rootWorkspaceURL.path)],
@@ -201,8 +197,7 @@ struct ProxyToolVerifier {
                 )
                 records.append(openRecord)
                 try state.observe(toolName: "XcodeOpenWorkspace", record: openRecord)
-                // Open is also the first-use approval bootstrap. Once it succeeds,
-                // the Service catalog can join an initially GUI-only catalog.
+                // Explicit preload exercises the native Open contract for this owned fixture.
                 tools = try await client.listTools()
                 state.updateTools(tools)
                 try writeReport(currentReport(), to: reportURL, announce: false)
@@ -293,11 +288,10 @@ struct ProxyToolVerifier {
         }
     }
 
-    private func makeServiceFixture(from fixture: FixtureLayout) throws -> FixtureLayout {
-        // Service Open is not reference-counted. A fresh workspace gives this run
-        // close authority without querying shared workspaces before approval.
+    private func makeHeadlessFixture(from fixture: FixtureLayout) throws -> FixtureLayout {
+        // A fresh workspace isolates this verification run from already-loaded models.
         let workspace = fixture.outputRoot.appendingPathComponent(
-            "ServiceFixture-\(UUID().uuidString).xcworkspace", isDirectory: true
+            "HeadlessFixture-\(UUID().uuidString).xcworkspace", isDirectory: true
         )
         try fileManager.createDirectory(at: workspace, withIntermediateDirectories: false)
         let root = XMLElement(name: "Workspace")
@@ -535,7 +529,6 @@ struct ProxyToolVerifier {
         let arguments = [
             "--listen", "\(options.host):\(options.port)",
             "--request-timeout", "\(options.requestTimeoutSeconds)",
-            "--upstream-processes", "\(options.upstreamProcesses)",
             "--auto-approve",
             "--refresh-code-issues-mode", "proxy",
         ]
@@ -643,7 +636,7 @@ struct ProxyToolVerifier {
 
 private enum WorkspaceToolSurface: String, Codable {
     case gui
-    case service
+    case headless
 }
 
 private enum ToolExecutionDecision {
@@ -741,16 +734,16 @@ private struct VerificationState {
     func executionDecision(for toolName: String) throws -> ToolExecutionDecision {
         if workspaceSurface == .gui,
            ["XcodeListWorkspaces", "DeviceInteractionStartWorkspaceSession"].contains(toolName) {
-            return .skip("tool requires an approved Service workspace")
+            return .skip("tool requires an owned headless workspace")
         }
-        if workspaceSurface == .service,
+        if workspaceSurface == .headless,
            ["XcodeListWindows", "XcodeGetCurrentFile", "XcodeListNavigatorIssues"].contains(toolName) {
             return .skip("tool requires GUI window, editor, or navigator state")
         }
-        if workspaceSurface == .service,
+        if workspaceSurface == .headless,
            toolName == "DeviceInteractionStartSession",
            availableTools.contains("DeviceInteractionStartWorkspaceSession") {
-            return .skip("Service verification uses DeviceInteractionStartWorkspaceSession")
+            return .skip("Headless verification uses DeviceInteractionStartWorkspaceSession")
         }
         let arguments: [String: MCPJSONValue]
         do {
@@ -1005,28 +998,27 @@ private struct VerificationState {
         }
         var result = arguments
         switch workspaceSurface {
-        case .service:
+        case .headless:
             guard schema.properties.contains("workspaceIdentifier") else {
                 throw ToolPlanUnavailable(
-                    reason: "Service schema has no workspaceIdentifier argument"
+                    reason: "Native schema has no workspaceIdentifier argument"
                 )
             }
             guard let workspaceIdentifier else {
                 throw VerifierFailure(
-                    "Service workspace has not been opened; refusing to call \(toolName)"
+                    "The verifier's headless workspace has not been opened for \(toolName)"
                 )
             }
             result["workspaceIdentifier"] = .string(workspaceIdentifier)
             return result
         case .gui:
-            // The mixed catalog exposes a tab selector only for GUI-capable tools.
-            guard schema.properties.contains("tabIdentifier") else {
-                throw ToolPlanUnavailable(reason: "tool has no GUI tab selector")
+            guard schema.properties.contains("workspaceIdentifier") else {
+                throw ToolPlanUnavailable(reason: "tool has no workspace selector")
             }
             guard let tabIdentifier else {
                 throw VerifierFailure("fixture GUI tab has not been resolved")
             }
-            result["tabIdentifier"] = .string(tabIdentifier)
+            result["workspaceIdentifier"] = .string(tabIdentifier)
             return result
         }
     }

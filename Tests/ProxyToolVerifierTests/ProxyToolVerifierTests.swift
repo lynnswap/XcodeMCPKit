@@ -5,10 +5,10 @@ import XcodeMCPKitTesting
 @testable import XcodeMCPProxyToolVerifier
 
 struct ProxyToolVerifierTests {
-    @Test func serviceFirstCatalogWaitsForGUIAndPreservesSelectedTab() async throws {
+    @Test func nativeCatalogWaitsForGUIAndPreservesSelectedTab() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.outputRoot) }
-        let runtime = XcodeMCPTestRuntime(tools: serviceTools)
+        let runtime = XcodeMCPTestRuntime(tools: nativeTools)
         let path = fixture.rootWorkspaceURL.path
         await runtime.setToolHandler { call in
             switch call.name {
@@ -20,8 +20,8 @@ struct ProxyToolVerifierTests {
             case "XcodeListWorkspaces":
                 return MCPToolResult(content: [], structuredContent: ["message": "Call XcodeOpenWorkspace for approval"], isError: true)
             case "XcodeListSchemes", "XcodeGetCurrentFile", "XcodeListNavigatorIssues":
-                #expect(call.arguments["tabIdentifier"] == "first-tab")
-                #expect(call.arguments["workspaceIdentifier"] == nil)
+                #expect(call.arguments["workspaceIdentifier"] == "first-tab")
+                #expect(call.arguments["tabIdentifier"] == nil)
                 return result(["message": "ProxyToolVerifierFixture"])
             default:
                 Issue.record("unexpected GUI fixture call: \(call.name)")
@@ -45,11 +45,11 @@ struct ProxyToolVerifierTests {
     }
 
     @Test(arguments: [false, true])
-    func serviceOpensDedicatedWorkspaceBeforeApprovalAndClosesOnlyThatHandle(toolFails: Bool) async throws {
+    func nativeHostOpensDedicatedWorkspaceAndClosesOnlyThatHandle(toolFails: Bool) async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.outputRoot) }
         let runtime = XcodeMCPTestRuntime(tools: mixedTools)
-        let ownership = ServiceFixtureState()
+        let ownership = HeadlessFixtureState()
         await runtime.setToolHandler { call in
             switch call.name {
             case "XcodeListWindows":
@@ -57,29 +57,29 @@ struct ProxyToolVerifierTests {
             case "XcodeOpenWorkspace":
                 let path = try #require(call.arguments["path"]?.stringValue)
                 #expect(path != fixture.rootWorkspaceURL.path)
-                #expect(path.hasPrefix(fixture.outputRoot.path + "/ServiceFixture-"))
+                #expect(path.hasPrefix(fixture.outputRoot.path + "/HeadlessFixture-"))
                 let document = try XMLDocument(contentsOf: URL(fileURLWithPath: path)
                     .appendingPathComponent("contents.xcworkspacedata"))
                 let locations = try document.nodes(forXPath: "/Workspace/FileRef/@location")
                     .compactMap(\.stringValue)
                 #expect(locations == ["absolute:" + fixture.xcodeProjectURL.path])
                 await ownership.open(path)
-                return result(["workspaceIdentifier": "owned-service-id", "workspacePath": .string(path)])
+                return result(["workspaceIdentifier": "owned-native-id", "workspacePath": .string(path)])
             case "XcodeListWorkspaces":
                 guard await ownership.path != nil else {
                     return MCPToolResult(content: [.text("Call XcodeOpenWorkspace for approval", raw: ["type": "text", "text": "Call XcodeOpenWorkspace for approval"])], isError: true)
                 }
                 return result(["message": .string("* workspaceIdentifier: existing-shared-id, workspacePath: \(fixture.rootWorkspaceURL.path)")])
             case "XcodeCloseWorkspace":
-                #expect(call.arguments["workspaceIdentifier"] == "owned-service-id")
+                #expect(call.arguments["workspaceIdentifier"] == "owned-native-id")
                 await ownership.close()
                 return result(["message": "closed"])
             case "XcodeListSchemes", "DeviceInteractionStartWorkspaceSession":
-                #expect(call.arguments["workspaceIdentifier"] == "owned-service-id")
+                #expect(call.arguments["workspaceIdentifier"] == "owned-native-id")
                 #expect(call.arguments["tabIdentifier"] == nil)
                 return MCPToolResult(content: [], structuredContent: ["message": "ProxyToolVerifierFixture"], isError: toolFails)
             default:
-                Issue.record("GUI-only tool reached Service: \(call.name)")
+                Issue.record("GUI-only tool reached Headless host: \(call.name)")
                 return MCPToolResult(content: [], isError: true)
             }
         }
@@ -113,7 +113,7 @@ struct ProxyToolVerifierTests {
     }
 }
 
-private actor ServiceFixtureState {
+private actor HeadlessFixtureState {
     var path: String?
     var closeCount = 0
     func open(_ path: String) { self.path = path }
@@ -131,16 +131,16 @@ private func tool(_ name: String, properties: [String]) -> MCPTool {
     return MCPTool(name: name, inputSchema: schema, raw: ["name": .string(name), "inputSchema": schema])
 }
 
-private let serviceTools = [
+private let nativeTools = [
     tool("XcodeOpenWorkspace", properties: ["path"]),
     tool("XcodeListWorkspaces", properties: []),
     tool("XcodeCloseWorkspace", properties: ["workspaceIdentifier"]),
     tool("DeviceInteractionStartWorkspaceSession", properties: ["workspaceIdentifier", "sessionIdentifier"]),
 ]
 
-private let mixedTools = serviceTools + [
+private let mixedTools = nativeTools + [
     tool("XcodeListWindows", properties: []),
-    tool("XcodeListSchemes", properties: ["tabIdentifier", "workspaceIdentifier"]),
-    tool("XcodeGetCurrentFile", properties: ["tabIdentifier", "workspaceIdentifier", "includeContent", "includeSelection"]),
-    tool("XcodeListNavigatorIssues", properties: ["tabIdentifier", "workspaceIdentifier", "severity"]),
+    tool("XcodeListSchemes", properties: ["workspaceIdentifier"]),
+    tool("XcodeGetCurrentFile", properties: ["workspaceIdentifier", "includeContent", "includeSelection"]),
+    tool("XcodeListNavigatorIssues", properties: ["workspaceIdentifier", "severity"]),
 ]
