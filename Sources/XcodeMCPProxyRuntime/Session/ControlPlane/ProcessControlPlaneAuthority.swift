@@ -1729,6 +1729,19 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
     }
 
+    func catalogLoadWasSatisfied(_ lease: CatalogLease) -> Bool {
+        state.withLockedValue { state in
+            guard lease.catalogEpoch == state.catalogEpoch else { return false }
+            let attempt: Attempt?
+            if let routeID = lease.routeID {
+                attempt = Self.record(routeID: routeID, in: state)?.attempt
+            } else {
+                attempt = state.unboundAttempt
+            }
+            return attempt?.id == lease.attemptID && attempt?.phase == .cataloged
+        }
+    }
+
     func completeCatalog(
         _ outcome: CatalogOutcome,
         lease: CatalogLease,

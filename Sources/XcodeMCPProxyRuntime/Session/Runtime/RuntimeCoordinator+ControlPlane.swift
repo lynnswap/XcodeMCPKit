@@ -249,7 +249,8 @@ extension RuntimeCoordinator {
                 )
             case .discarded(_, let transition):
                 applyProcessControlPlaneTransition(transition)
-                guard let rawResult = processControlPlane.canonicalToolsCatalogRaw() else {
+                guard processControlPlane.catalogLoadWasSatisfied(lease),
+                      let rawResult = processControlPlane.canonicalToolsCatalogRaw() else {
                     throw UpstreamSlotScheduler.AcquisitionError.unavailable
                 }
                 return CanonicalToolsCatalogLoadResult(
@@ -267,7 +268,7 @@ extension RuntimeCoordinator {
                 lease: lease,
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
             ))
-            if isCurrentLoad == false,
+            if isCurrentLoad == false, processControlPlane.catalogLoadWasSatisfied(lease),
                let rawResult = processControlPlane.canonicalToolsCatalogRaw() {
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: rawResult,
@@ -321,7 +322,8 @@ extension RuntimeCoordinator {
                         )
                     } catch is CancellationError {
                         if self.processControlPlane.validateCatalogLoad(route.lease) == false {
-                            if let current = self.currentCatalogResult(
+                            if self.processControlPlane.catalogLoadWasSatisfied(route.lease),
+                               let current = self.currentCatalogResult(
                                 startedAt: startedAt,
                                 exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
                             ) {
@@ -337,7 +339,8 @@ extension RuntimeCoordinator {
                         throw CancellationError()
                     } catch is TimeoutError {
                         if self.processControlPlane.validateCatalogLoad(route.lease) == false {
-                            if let current = self.currentCatalogResult(
+                            if self.processControlPlane.catalogLoadWasSatisfied(route.lease),
+                               let current = self.currentCatalogResult(
                                 startedAt: startedAt,
                                 exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
                             ) {
@@ -381,20 +384,6 @@ extension RuntimeCoordinator {
                             self.scheduleMissingProcessToolsCatalogRetry(
                                 processID: route.target.processID, lease: route.lease,
                                 after: deliveries, reason: "activation_catalog_rpc_error"
-                            )
-                        }
-                        if let surface = self.processControlPlane.availableToolCatalogSurface(
-                            processIDs: exposedProcessIDs
-                        ), let surfaceSourceProof = surface.sourceProof {
-                            return .success(
-                                route: route,
-                                result: CanonicalToolsCatalogLoadResult(
-                                    rawResult: surface.rawResult,
-                                    sourceProof: surfaceSourceProof,
-                                    durationMilliseconds: self.elapsedMilliseconds(
-                                        sinceUptimeNanoseconds: startedAt
-                                    )
-                                )
                             )
                         }
                         return .failure(
@@ -723,10 +712,7 @@ extension RuntimeCoordinator {
                     nowUptimeNanoseconds: nowUptimeNanoseconds()
                 )
             )
-            return currentCatalogResult(
-                startedAt: startedAt,
-                exposedProcessIDs: exposedProcessIDs
-            )
+            return nil
         }
         let sourceUpstream = sourceProof.slotID.rawValue
 
@@ -753,10 +739,7 @@ extension RuntimeCoordinator {
                 after: cancellationDeliveries,
                 reason: "empty_process_catalog"
             )
-            return currentCatalogResult(
-                startedAt: startedAt,
-                exposedProcessIDs: exposedProcessIDs
-            )
+            return nil
         }
 
         let commit = commitProcessCatalog(
@@ -820,6 +803,7 @@ extension RuntimeCoordinator {
                     "reason": .string(String(describing: reason)),
                 ]
             )
+            guard processControlPlane.catalogLoadWasSatisfied(route.lease) else { return nil }
             return currentCatalogResult(
                 startedAt: startedAt,
                 exposedProcessIDs: processToolCatalogExposedProcessIDs()

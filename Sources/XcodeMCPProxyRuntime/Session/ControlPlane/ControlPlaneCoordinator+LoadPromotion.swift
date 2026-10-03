@@ -5,26 +5,30 @@ import XcodeMCPCore
 extension ControlPlaneCoordinator {
     func replaceToolsCatalogRequestLoad(
         _ current: ToolsCatalogLoadState,
-        requestTimeout: TimeAmount?
+        requestTimeout: TimeAmount?,
+        responseDeadlineUptimeNs: UInt64?
     ) -> UUID {
         var previous = current
         toolsCatalogLoad = nil
         let migratedWaiters = removeForegroundToolsCatalogWaiters(from: &previous)
         cancelToolsCatalogLoad(previous, error: CancellationError())
-        let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout)
+        let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout,
+            responseDeadlineUptimeNs: responseDeadlineUptimeNs)
         attachToolsCatalogWaiters(loadID: newLoadID, waiters: migratedWaiters)
         return newLoadID
     }
 
     func promotePrewarmToolsCatalogLoad(
         _ current: ToolsCatalogLoadState,
-        requestTimeout: TimeAmount?
+        requestTimeout: TimeAmount?,
+        responseDeadlineUptimeNs: UInt64?
     ) -> UUID {
         var previous = current
         prewarmToolsCatalogLoad = nil
         let migratedWaiters = removeForegroundToolsCatalogWaiters(from: &previous)
         cancelToolsCatalogLoad(previous, error: CancellationError())
-        let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout)
+        let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout,
+            responseDeadlineUptimeNs: responseDeadlineUptimeNs)
         attachToolsCatalogWaiters(loadID: newLoadID, waiters: migratedWaiters)
         return newLoadID
     }

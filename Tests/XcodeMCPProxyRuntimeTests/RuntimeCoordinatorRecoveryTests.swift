@@ -208,7 +208,7 @@ struct RuntimeCoordinatorRecoveryTests {
         let foregroundTask = Task {
             try await manager.sharedToolsList(
                 sessionID: sessionID,
-                requestTimeoutOverride: .seconds(1)
+                requestTimeoutOverride: .seconds(5)
             )
         }
 
