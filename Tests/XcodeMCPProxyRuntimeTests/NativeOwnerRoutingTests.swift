@@ -11,10 +11,10 @@ import XcodeMCPProxyTestSupport
 @Suite(.serialized, .asyncTestCleanup)
 struct NativeOwnerRoutingTests {
     @Test(arguments: [false, true])
-    func canonicalCatalogComesFromTheOwnedHostAndItsFailuresAreExposed(fails: Bool) async throws {
+    func availableGUIProviderSurvivesSelectedNativeCatalogFailure(fails: Bool) async throws {
         let native = TestUpstreamClient()
         let gui = TestUpstreamClient()
-        let target = xcodeProcessTarget(processID: 992, xcodeVersion: "27.0")
+        let target = xcodeProcessTarget(processID: 992, xcodeVersion: "26.6")
         let fixture = RuntimeCoordinatorFixture(upstreams: [native, gui],
             xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])], startImmediately: false)
         defer { fixture.shutdownAndWait() }
@@ -22,27 +22,25 @@ struct NativeOwnerRoutingTests {
         manager.markUpstreamInitialized(upstreamIndex: 0)
         manager.markUpstreamInitialized(upstreamIndex: 1)
         seedCoordinatorSuiteInitialize(on: manager,
-            result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]), sourceUpstream: 0)
+            result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]), sourceUpstream: 1)
+        try seedProcessToolCatalogs(on: manager, entries: [(target, 1, [toolDescriptor(name: "GUIAvailableTool")])])
         let load = Task {
             try await manager.sharedToolsList(sessionID: "native-catalog", requestTimeoutOverride: .seconds(2))
         }
+        let guiRequest = try await gui.nextSent { methodName(from: $0) == "tools/list" }
+        await gui.yield(.message(try makeDocumentationToolsListResponse(
+            id: extractUpstreamID(from: guiRequest), tools: [toolDescriptor(name: "GUIAvailableTool")])))
         let request = try await native.nextSent { methodName(from: $0) == "tools/list" }
         let id = try extractUpstreamID(from: request)
-        #expect(await gui.sentCount() == 0)
         if fails {
             await native.yield(.message(try JSONRPC.Wire.errorResponseData(
                 id: JSONRPC.ID(any: id), code: -32603, message: "Native catalog unavailable")))
-            do {
-                _ = try await load.value
-                Issue.record("An unavailable owned catalog must reach the caller")
-            } catch {
-                #expect(ControlPlane.ErrorMapper.jsonRPCError(for: error).message == "Native catalog unavailable")
-            }
-            #expect(await gui.sentCount() == 0)
+            #expect(toolNames(in: try await load.value) == ["GUIAvailableTool"])
+            #expect(manager.processControlPlane.unboundToolsCatalogRaw() == nil)
         } else {
             await native.yield(.message(try makeDocumentationToolsListResponse(
                 id: id, tools: [toolDescriptor(name: "FutureNativeTool")])) )
-            #expect(toolNames(in: try await load.value) == ["FutureNativeTool"])
+            #expect(toolNames(in: try await load.value) == ["FutureNativeTool", "GUIAvailableTool"])
         }
     }
 
@@ -72,16 +70,25 @@ struct NativeOwnerRoutingTests {
         defer { fixture.shutdownAndWait() }
         fixture.manager.markUpstreamInitialized(upstreamIndex: 0)
         let selector = close ? "/Work/Absent.xcodeproj" : "native-workspace-id"
-        let decision = await fixture.manager.toolRoutingDecision(for: toolsCallObject(
-            id: 101, name: close ? "XcodeCloseWorkspace" : "FutureWorkspaceTool",
-            arguments: ["workspaceIdentifier": selector]), requestTimeoutOverride: .seconds(1))
+        let routing = Task {
+            await fixture.manager.toolRoutingDecision(for: toolsCallObject(
+                id: 101, name: close ? "XcodeCloseWorkspace" : "FutureWorkspaceTool",
+                arguments: ["workspaceIdentifier": selector]), requestTimeoutOverride: .seconds(1))
+        }
+        if !close {
+            let inventory = try await upstream.nextSent { toolCallName(from: $0) == "XcodeListWorkspaces" }
+            await upstream.yield(.message(try makeXcodeListWindowsResponse(
+                id: extractUpstreamID(from: inventory),
+                message: "* workspaceIdentifier: native-workspace-id, workspacePath: /Work/Owned.xcodeproj")))
+        }
+        let decision = await routing.value
         guard case .forwardAdmitted(let indices, let admission) = decision else {
             Issue.record("Owned native workspace identity must stay with its host")
             return
         }
         #expect(indices == [0])
         #expect(admission.route == nil)
-        #expect(await upstream.sentCount() == 0)
+        #expect(await upstream.sentCount() == (close ? 0 : 1))
     }
 
     @Test(arguments: ["path", "identifier", "symlink", "failure"])
@@ -109,6 +116,11 @@ struct NativeOwnerRoutingTests {
             await manager.toolRoutingDecision(for: toolsCallObject(id: 102, name: "FutureWorkspaceTool",
                 arguments: ["workspaceIdentifier": selector]), requestTimeoutOverride: .seconds(2))
         }
+        if kind == "identifier" {
+            let inventory = try await native.nextSent { toolCallName(from: $0) == "XcodeListWorkspaces" }
+            await native.yield(.message(try makeXcodeListWindowsResponse(
+                id: extractUpstreamID(from: inventory), message: "No workspaces are open.")))
+        }
         let request = try await gui.nextSent {
             methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
         }
@@ -135,7 +147,7 @@ struct NativeOwnerRoutingTests {
             #expect(indices == [1])
             #expect(admission.window?.rewritePlan.tabIdentifier == "gui-tab")
         }
-        #expect(await native.sentCount() == 0)
+        #expect(await native.sentCount() == (kind == "identifier" ? 1 : 0))
     }
 
     @Test func requestsShareOneNativeConnectionAndCancellingOneDoesNotBlockTheOthers() {

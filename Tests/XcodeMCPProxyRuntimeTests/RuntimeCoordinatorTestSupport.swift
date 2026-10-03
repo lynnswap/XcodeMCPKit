@@ -46,10 +46,10 @@ func makeConfig(requestTimeout: TimeInterval) -> ProxyRuntimeConfiguration {
 
 func makeBridgeRuntimeConfig(
     _ config: ProxyRuntimeConfiguration
-) throws -> MCPBridgeRuntime.Configuration {
+) throws -> NativeHostRuntime.Configuration {
     var config = config
     config.nativeHostBundleURL = try nativeHostBundleURLForTests()
-    return config.mcpBridgeRuntimeConfiguration
+    return config.nativeHostRuntimeConfiguration
 }
 
 private let nativeHostBundleFixture = NIOLockedValueBox<URL?>(nil)

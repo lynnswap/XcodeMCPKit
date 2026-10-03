@@ -25,8 +25,7 @@ struct ToolSurfaceTests {
             sourceUpstream: 0
         )
         let surface = ToolSurface(
-            config: makeToolSurfaceConfig(),
-            sessionManager: sessionManager
+            config: makeToolSurfaceConfig()
         )
 
         let upstreamData = try JSONSerialization.data(
@@ -77,8 +76,7 @@ struct ToolSurfaceTests {
             sourceUpstream: 0
         )
         let surface = ToolSurface(
-            config: makeToolSurfaceConfig(),
-            sessionManager: sessionManager
+            config: makeToolSurfaceConfig()
         )
 
         let upstreamData = try JSONSerialization.data(
@@ -128,8 +126,7 @@ struct ToolSurfaceTests {
             sourceUpstream: 0
         )
         let surface = ToolSurface(
-            config: makeToolSurfaceConfig(),
-            sessionManager: sessionManager
+            config: makeToolSurfaceConfig()
         )
 
         let upstreamData = try JSONSerialization.data(
@@ -173,7 +170,7 @@ struct ToolSurfaceTests {
         var config = makeToolSurfaceConfig()
         config.disabledToolNames = ["RunAllTests"]
         let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: config)
-        let surface = ToolSurface(config: config, sessionManager: sessionManager)
+        let surface = ToolSurface(config: config)
 
         let upstreamData = try JSONSerialization.data(
             withJSONObject: [
@@ -217,7 +214,7 @@ struct ToolSurfaceTests {
         config.refreshCodeIssuesMode = .upstream
         config.disabledToolNames = ["RunAllTests"]
         let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: config)
-        let surface = ToolSurface(config: config, sessionManager: sessionManager)
+        let surface = ToolSurface(config: config)
 
         let upstreamData = try JSONSerialization.data(
             withJSONObject: [
@@ -280,8 +277,7 @@ struct ToolSurfaceTests {
             upstreamIndex: 1
         )
         let surface = ToolSurface(
-            config: makeToolSurfaceConfig(),
-            sessionManager: sessionManager
+            config: makeToolSurfaceConfig()
         )
 
         let upstreamData = try JSONSerialization.data(
@@ -317,7 +313,7 @@ struct ToolSurfaceTests {
             method: "tools/call",
             toolName: "NewStructuredTool",
             originalID: JSONRPC.ID(any: NSNumber(value: 1))!,
-            upstreamIndex: 1,
+            toolDefinition: sessionManager.toolDefinition(named: "NewStructuredTool", sourceProof: .init(slotID: .init(rawValue: 1), slotGeneration: 0)),
             upstreamData: upstreamData
         )
         let withSourcePayload = try #require(
@@ -334,8 +330,7 @@ struct ToolSurfaceTests {
     @Test func toolSurfaceTreatsOnlySyntheticOverloadErrorAsBackpressure() throws {
         let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
         let surface = ToolSurface(
-            config: makeToolSurfaceConfig(),
-            sessionManager: sessionManager
+            config: makeToolSurfaceConfig()
         )
 
         let exactOverload = try JSONSerialization.data(

@@ -153,7 +153,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
     }
 
     @Test func upstreamPlanIncludesNativeHostWithoutGUI() throws {
-        let plan = try MCPBridgeRuntime.makeUpstreamPlan(
+        let plan = try NativeHostRuntime.makeUpstreamPlan(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 0)),
             xcodeTargets: []
         )
@@ -215,7 +215,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
     @Test(arguments: [false, true])
     func nativeBridgeLaunchIgnoresInheritedRoutingConfiguration(gui: Bool) throws {
         let target = xcodeProcessTarget(processID: 4321, xcodeVersion: "27.0")
-        let configuration = try MCPBridgeRuntime.makeDefaultUpstreamConfig(
+        let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)),
             xcodeTarget: gui ? target : nil,
             baseEnvironment: ["MCP_XCODE_PID": "9876", "MCP_XCODE_SESSION_ID": "parent-session",
@@ -858,8 +858,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
             "waiting for retry process catalog completion",
             timeout: .seconds(2)
         ) {
-            try await manager.controlPlaneDebugMirror.waitForSnapshot {
-                $0.canonicalToolsSourceUpstream == 1
+            try await manager.controlPlaneDebugMirror.waitForSnapshot { _ in
+                manager.processControlPlane.catalog(forProcessID: newerTarget.processID)?.toolNames.contains("Only27") == true
             }
         }
 
@@ -1611,8 +1611,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
             "waiting for retry process catalog completion",
             timeout: .seconds(2)
         ) {
-            try await manager.controlPlaneDebugMirror.waitForSnapshot {
-                $0.canonicalToolsSourceUpstream == 1
+            try await manager.controlPlaneDebugMirror.waitForSnapshot { _ in
+                manager.processControlPlane.catalog(forProcessID: newerTarget.processID)?.toolNames.contains("Only27Recovered") == true
             }
         }
 
@@ -2768,8 +2768,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 )
             )
         )
-        _ = try await manager.controlPlaneDebugMirror.waitForSnapshot {
-            $0.canonicalToolsSourceUpstream == 1
+        _ = try await manager.controlPlaneDebugMirror.waitForSnapshot { _ in
+            manager.processControlPlane.catalog(forProcessID: newerTarget.processID)?.toolNames.contains("Only27") == true
         }
 
         let snapshot = manager.debugSnapshot()
@@ -2777,8 +2777,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
         #expect(snapshot.processRoutes.map(\.toolsCatalogState) == ["available", "available"])
         #expect(
             snapshot.processRoutes.map(\.processID) == [
-                newerTarget.processID,
                 olderTarget.processID,
+                newerTarget.processID,
             ])
         #expect(
             manager.documentationCandidateProcessIDs()
@@ -2847,8 +2847,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
         let pendingSnapshot = manager.debugSnapshot()
         #expect(
             pendingSnapshot.processRoutes.map(\.toolsCatalogState) == [
-                "pending",
                 "available",
+                "pending",
             ])
 
         let replacementUpstream = try #require(createdUpstreams.withLockedValue { $0.dropFirst().first })
@@ -2887,8 +2887,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 )
             )
         )
-        _ = try await manager.controlPlaneDebugMirror.waitForSnapshot {
-            $0.canonicalToolsSourceUpstream == 1
+        _ = try await manager.controlPlaneDebugMirror.waitForSnapshot { _ in
+            manager.processControlPlane.catalog(forProcessID: newerTarget.processID)?.toolNames.contains("Only27") == true
         }
 
         let snapshot = manager.debugSnapshot()
@@ -3453,8 +3453,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
                 )
             )
         )
-        _ = try await manager.controlPlaneDebugMirror.waitForSnapshot {
-            $0.canonicalToolsSourceUpstream == 2
+        _ = try await manager.controlPlaneDebugMirror.waitForSnapshot { _ in
+            manager.processControlPlane.catalog(forProcessID: relaunchedTarget.processID)?.toolNames.contains("Only27Relaunched") == true
         }
 
         let snapshot = manager.debugSnapshot()

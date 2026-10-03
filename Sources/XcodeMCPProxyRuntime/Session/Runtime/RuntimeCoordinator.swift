@@ -189,6 +189,7 @@ protocol RuntimeSessionRegistryPort: Sendable {
 protocol RuntimeToolsCatalogPort: Sendable {
     func cachedToolsListResult() -> JSONValue?
     func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue?
+    func toolDefinition(named name: String, sourceProof: UpstreamTopologyProof) -> ToolDefinitionSnapshot?
 }
 
 protocol RuntimeInitializeToolsPort: Sendable {
@@ -387,7 +388,12 @@ extension RuntimeSessionRegistryPort {
 
 extension RuntimeToolsCatalogPort {
     func cachedToolsListResult(forUpstreamIndex _: Int) -> JSONValue? {
-        cachedToolsListResult()
+        nil
+    }
+
+    func toolDefinition(named name: String, sourceProof: UpstreamTopologyProof) -> ToolDefinitionSnapshot? {
+        ProcessToolCatalogCodec.toolsByName(in: cachedToolsListResult(forUpstreamIndex: sourceProof.slotID.rawValue))[name]
+            .map { ToolDefinitionSnapshot(sourceProof: sourceProof, descriptor: $0) }
     }
 }
 
@@ -580,11 +586,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         sessionClosedSink: (@Sendable (_ sessionID: String) -> Void)? = nil,
         startImmediately: Bool = true
     ) {
-        let bridgeRuntimeConfig = config.mcpBridgeRuntimeConfiguration
+        let bridgeRuntimeConfig = config.nativeHostRuntimeConfiguration
         let xcodeTargets = xcodeTargetDiscovery?.runningXcodeTargets() ?? []
-        let upstreamPlan = MCPBridgeRuntime.makeUpstreamPlan(config: bridgeRuntimeConfig, xcodeTargets: xcodeTargets)
+        let upstreamPlan = NativeHostRuntime.makeUpstreamPlan(config: bridgeRuntimeConfig, xcodeTargets: xcodeTargets)
         let unboundUpstreamFactory: UnboundUpstreamFactory = {
-            MCPBridgeRuntime.makeUnboundUpstreamSlot(config: bridgeRuntimeConfig)
+            NativeHostRuntime.makeUnboundUpstreamSlot(config: bridgeRuntimeConfig)
         }
         self.init(
             config: config,
@@ -595,7 +601,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             xcodeTargetDiscovery: xcodeTargetDiscovery,
             xcodeProcessEventMonitor: xcodeProcessEventMonitor,
             dynamicUpstreamFactory: { target in
-                MCPBridgeRuntime.makeProcessBoundUpstreamSlots(
+                NativeHostRuntime.makeProcessBoundUpstreamSlots(
                     config: bridgeRuntimeConfig,
                     xcodeTarget: target
                 )
@@ -737,7 +743,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                     if case .xcodeProcess = entry.backend { return nil }
                     return entry.id.rawValue
                 })
-                let excluded = defaultIDs.isEmpty
+                let hasUsableDefault = defaultIDs.contains { index in
+                    upstreamHealthManager?.state(for: UpstreamSlotID(rawValue: index))?
+                        .initPhase.isUsableInitialized == true
+                }
+                let excluded = !hasUsableDefault
                     ? inactiveProcessBoundUpstreamIndices()
                     : Set(topology.slotIDs.map(\.rawValue)).subtracting(defaultIDs)
                 return upstreamHealthManager?.chooseBestInitializedUpstream(
@@ -1150,8 +1160,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func cachedToolsListResult(forUpstreamIndex upstreamIndex: Int) -> JSONValue? {
-        processControlPlane.catalog(forUpstreamIndex: upstreamIndex)?.rawResult
-            ?? processControlPlane.canonicalToolsCatalogRaw()
+        processControlPlane.providerCatalog(forUpstreamIndex: upstreamIndex)?.rawResult
+    }
+
+    func toolDefinition(named name: String, sourceProof: UpstreamTopologyProof) -> ToolDefinitionSnapshot? {
+        processControlPlane.providerCatalog(for: sourceProof)?.definition(named: name)
     }
 
     @discardableResult

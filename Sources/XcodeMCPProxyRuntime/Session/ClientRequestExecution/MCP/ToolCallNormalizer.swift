@@ -6,17 +6,10 @@ struct ToolCallNormalizer: Sendable {
         "DocumentationSearch"
     ]
 
-    private let sessionManager: any RuntimeToolsCatalogPort
-
-    init(sessionManager: any RuntimeToolsCatalogPort) {
-        self.sessionManager = sessionManager
-    }
-
     func normalizeResponseDataIfNeeded(
         method: String? = nil,
         toolName: String? = nil,
         toolsCatalogOverride: JSONValue? = nil,
-        upstreamIndex: Int? = nil,
         upstreamData: Data
     ) -> Data {
         guard let object = try? JSONRPC.Wire.object(fromData: upstreamData) else {
@@ -27,7 +20,6 @@ struct ToolCallNormalizer: Sendable {
             method: method,
             toolName: toolName,
             toolsCatalogOverride: toolsCatalogOverride
-                ?? upstreamIndex.flatMap(sessionManager.cachedToolsListResult(forUpstreamIndex:))
         ),
             let rewrittenData = try? JSONRPC.Wire.data(from: rewritten)
         else {
@@ -93,7 +85,7 @@ struct ToolCallNormalizer: Sendable {
     }
 
     private func toolOutputSchema(for toolName: String, toolsCatalogOverride: JSONValue? = nil) -> JSONValue? {
-        guard let toolsResult = toolsCatalogOverride ?? sessionManager.cachedToolsListResult(),
+        guard let toolsResult = toolsCatalogOverride,
             case .object(let resultObject) = toolsResult,
             case .array(let tools) = resultObject["tools"]
         else {

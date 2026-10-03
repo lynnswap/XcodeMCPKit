@@ -974,7 +974,7 @@ struct DocumentationProviderTests {
 
     @Test func automaticUpstreamPlanKeepsOneNativeHostAlongsideOneGUIConnection() throws {
         let target = xcodeProcessTarget(processID: 731, xcodeVersion: "27.0")
-        let plan = try MCPBridgeRuntime.makeUpstreamPlan(
+        let plan = try NativeHostRuntime.makeUpstreamPlan(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)), xcodeTargets: [target])
         #expect(plan.upstreams.count == 2)
         #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [1])
@@ -1007,7 +1007,7 @@ struct DocumentationProviderTests {
 
     @Test func defaultUpstreamPlanBindsGUIConnectionToItsOwner() throws {
         let target = xcodeProcessTarget(processID: 710, xcodeVersion: "27.0")
-        let plan = try MCPBridgeRuntime.makeUpstreamPlan(
+        let plan = try NativeHostRuntime.makeUpstreamPlan(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)), xcodeTargets: [target],
             baseEnvironment: ["MCP_XCODE_PID": "inherited", "MCP_XCODE_SESSION_ID": "parent-session"])
         #expect(plan.upstreams.count == 2)
@@ -1029,7 +1029,7 @@ struct DocumentationProviderTests {
         let target = xcodeProcessTarget(processID: 715, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
         config.maxMessageBytes = 2_000_000
-        let factory = try MCPBridgeRuntime.makeProcessBoundSessionFactory(
+        let factory = try NativeHostRuntime.makeProcessBoundSessionFactory(
             config: makeBridgeRuntimeConfig(config), xcodeTarget: target,
             baseEnvironment: ["KEEP": "value", "XCODE_PID": "legacy", "MCP_XCODE_PID": "inherited-pid", "MCP_XCODE_SESSION_ID": "inherited-session"])
         let environment = try upstreamEnvironment(from: factory)
@@ -1048,7 +1048,7 @@ struct DocumentationProviderTests {
         let target = xcodeProcessTarget(processID: 716, xcodeVersion: "27.0")
         let config = makeConfig(requestTimeout: 5)
 
-        let factory = try MCPBridgeRuntime.makeProcessBoundSessionFactory(
+        let factory = try NativeHostRuntime.makeProcessBoundSessionFactory(
             config: makeBridgeRuntimeConfig(config),
             xcodeTarget: target,
             baseEnvironment: [
@@ -1065,12 +1065,12 @@ struct DocumentationProviderTests {
     @Test func defaultUpstreamPlanCreatesOneConnectionPerGUIOwner() throws {
         let older = xcodeProcessTarget(processID: 720, xcodeVersion: "26.6")
         let newer = xcodeProcessTarget(processID: 721, xcodeVersion: "27.0")
-        let plan = try MCPBridgeRuntime.makeUpstreamPlan(
+        let plan = try NativeHostRuntime.makeUpstreamPlan(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)), xcodeTargets: [older, newer], baseEnvironment: [:])
         #expect(plan.upstreams.count == 3)
-        #expect(plan.xcodeProcessRoutes.map(\.target.processID) == [newer.processID, older.processID])
+        #expect(plan.xcodeProcessRoutes.map(\.target.processID) == [older.processID, newer.processID])
         #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[1], [2]])
-        for (target, upstream) in zip([newer, older], plan.upstreams.dropFirst()) {
+        for (target, upstream) in zip([older, newer], plan.upstreams.dropFirst()) {
             let environment = try upstreamEnvironment(from: upstream)
             #expect(environment["MCP_XCODE_PID"] == nil)
             #expect(environment["DEVELOPER_DIR"] == target.developerDir)
@@ -1080,7 +1080,7 @@ struct DocumentationProviderTests {
     @Test func defaultUpstreamPlanIgnoresInheritedMCPXcodePIDForProcessRouting() throws {
         let first = xcodeProcessTarget(processID: 730, xcodeVersion: "26.6")
         let second = xcodeProcessTarget(processID: 731, xcodeVersion: "27.0")
-        let plan = try MCPBridgeRuntime.makeUpstreamPlan(
+        let plan = try NativeHostRuntime.makeUpstreamPlan(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)), xcodeTargets: [second, first],
             baseEnvironment: ["MCP_XCODE_PID": "730"])
         #expect(plan.upstreams.count == 3)

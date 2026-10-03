@@ -205,12 +205,13 @@ final class ProcessControlPlaneAuthority: Sendable {
     struct Catalog: Sendable {
         let routeID: ProcessRouteID
         let target: XcodeProcessTarget
-        let upstreamProof: UpstreamTopologyProof
-        let rawResult: JSONValue
-        let toolsByName: [String: JSONValue]
+        let provider: ToolCatalogProvider
         let fingerprintsByName: [String: String]
         let ownerBoundToolNames: Set<String>
 
+        var upstreamProof: UpstreamTopologyProof { provider.sourceProof }
+        var rawResult: JSONValue { provider.rawResult }
+        var toolsByName: [String: JSONValue] { provider.toolsByName }
         var upstreamID: UpstreamSlotID { upstreamProof.slotID }
         var upstreamIndex: Int { upstreamID.rawValue }
         var toolNames: Set<String> { Set(toolsByName.keys) }
@@ -611,8 +612,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         var nextUnboundAttemptID: Int = 0
         var nextCatalogTimeoutGeneration: UInt64 = 0
         var unboundAttempt: Attempt?
-        var unboundCatalogRaw: JSONValue?
-        var unboundCatalogSource: UpstreamTopologyProof?
+        var nativeCatalog: ToolCatalogProvider?
         var nowUptimeNs: UInt64 = 0
     }
 
@@ -879,10 +879,9 @@ final class ProcessControlPlaneAuthority: Sendable {
                 for processID in invalidCatalogProcessIDs {
                     Self.removeCatalog(processID: processID, from: &state)
                 }
-                if let unboundSource = state.unboundCatalogSource,
+                if let unboundSource = state.nativeCatalog?.sourceProof,
                    newlyIneligibleProofs.contains(unboundSource) {
-                    state.unboundCatalogRaw = nil
-                    state.unboundCatalogSource = nil
+                    state.nativeCatalog = nil
                 }
             }
             let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
@@ -903,7 +902,7 @@ final class ProcessControlPlaneAuthority: Sendable {
         nowUptimeNs: UInt64,
         usability: UpstreamUsabilitySnapshot
     ) -> ProcessControlPlaneTransition {
-        let ordered = MCPBridgeRuntime.orderedXcodeTargets(observed.map(\.target))
+        let ordered = NativeHostRuntime.orderedXcodeTargets(observed.map(\.target))
         let observedByKey = Dictionary(uniqueKeysWithValues: observed.map {
             (InstanceKey(target: $0.target), $0)
         })
@@ -1856,8 +1855,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 effects = Self.invalidateAttempts(in: &state)
                 state.catalogsByProcessID.removeAll()
                 state.processIDByUpstreamID.removeAll()
-                state.unboundCatalogRaw = nil
-                state.unboundCatalogSource = nil
+                state.nativeCatalog = nil
                 Self.resetToolsUnavailableWarningIncident(in: &state)
                 for key in state.order {
                     guard var record = state.recordsByKey[key] else { continue }
@@ -1877,8 +1875,7 @@ final class ProcessControlPlaneAuthority: Sendable {
                 } else {
                     effects.append(contentsOf: state.unboundAttempt?.detachedEffects() ?? [])
                     state.unboundAttempt = nil
-                    state.unboundCatalogRaw = nil
-                    state.unboundCatalogSource = nil
+                    state.nativeCatalog = nil
                 }
             }
             let projectionChanged = Self.recomputeCanonicalProjection(in: &state)
@@ -1899,8 +1896,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             state.canonicalToolsCatalogRaw = nil
             state.canonicalSourceProof = nil
             Self.resetToolsUnavailableWarningIncident(in: &state)
-            state.unboundCatalogRaw = nil
-            state.unboundCatalogSource = nil
+            state.nativeCatalog = nil
             state.usability = .empty
             for key in state.order {
                 guard var record = state.recordsByKey[key] else { continue }
@@ -1983,7 +1979,21 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     func unboundToolsCatalogRaw() -> JSONValue? {
-        state.withLockedValue(\.unboundCatalogRaw)
+        state.withLockedValue { $0.nativeCatalog?.rawResult }
+    }
+
+    func providerCatalog(for proof: UpstreamTopologyProof) -> ToolCatalogProvider? {
+        state.withLockedValue { state in
+            if let native = state.nativeCatalog, native.sourceProof == proof { return native }
+            return state.catalogsByProcessID.values.first { $0.upstreamProof == proof }?.provider
+        }
+    }
+
+    func providerCatalog(forUpstreamIndex index: Int) -> ToolCatalogProvider? {
+        state.withLockedValue { state in
+            if let native = state.nativeCatalog, native.sourceProof.slotID.rawValue == index { return native }
+            return state.catalogsByProcessID.values.first { $0.upstreamIndex == index }?.provider
+        }
     }
 
     func canonicalSourceUpstream() -> Int? {
@@ -2637,7 +2647,7 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     private static func hasAvailableToolsCatalog(in state: State) -> Bool {
-        state.unboundCatalogRaw != nil
+        state.nativeCatalog?.rawResult != nil
             || availableToolCatalogSurface(in: state, processIDs: nil) != nil
     }
 
@@ -2787,9 +2797,8 @@ final class ProcessControlPlaneAuthority: Sendable {
         Catalog(
             routeID: route.id,
             target: route.target,
-            upstreamProof: upstreamProof,
-            rawResult: rawResult,
-            toolsByName: ProcessToolCatalogCodec.toolsByName(in: rawResult),
+            provider: ToolCatalogProvider(sourceProof: upstreamProof, routeID: route.id,
+                                          target: route.target, rawResult: rawResult),
             fingerprintsByName: ProcessToolCatalogCodec.toolFingerprintsByName(in: rawResult),
             ownerBoundToolNames: ProcessToolCatalogCodec.ownerBoundToolNames(in: rawResult)
         )
@@ -2842,19 +2851,20 @@ final class ProcessControlPlaneAuthority: Sendable {
         }
         let previousRaw = state.canonicalToolsCatalogRaw
         let requiredProcessIDs = catalogRequiredProcessIDs(in: state)
-        if let raw = state.unboundCatalogRaw,
-           let source = state.unboundCatalogSource {
-            state.canonicalToolsCatalogRaw = ProcessToolCatalogCodec.merging(
-                preferred: raw,
-                additional: availableToolCatalogSurface(in: state, processIDs: requiredProcessIDs)?.rawResult
+        if let native = state.nativeCatalog {
+            let gui = state.catalogsByProcessID.values
+                .filter { requiredProcessIDs.contains($0.target.processID) }
+                .sorted(by: ProcessToolCatalogCodec.catalogSort)
+                .map(\.provider)
+            state.canonicalToolsCatalogRaw = ProcessToolCatalogCodec.toolsListResult(
+                from: [native] + gui,
+                base: native.rawResult
             )
-            state.canonicalSourceProof = source
-        } else if requiredProcessIDs.isEmpty == false,
-           let surface = availableToolCatalogSurface(
+            state.canonicalSourceProof = native.sourceProof
+        } else if let surface = availableToolCatalogSurface(
                in: state,
                processIDs: requiredProcessIDs
            ),
-           surface.processIDs == requiredProcessIDs,
            let source = surface.sourceProof {
             state.canonicalToolsCatalogRaw = surface.rawResult
             state.canonicalSourceProof = source
@@ -2948,15 +2958,13 @@ final class ProcessControlPlaneAuthority: Sendable {
             attempt.retryTimeout = nil
             attempt.retryKind = nil
             attempt.loads.removeAll()
-            state.unboundCatalogRaw = raw
-            state.unboundCatalogSource = source
+            state.nativeCatalog = ToolCatalogProvider(sourceProof: source, rawResult: raw)
             attempt.phase = .cataloged
         case .unusable:
             effects = attempt.loads.removeValue(forKey: lease.loadID)?
                 .detachedEffects() ?? []
             if attempt.loads.isEmpty {
-                state.unboundCatalogRaw = nil
-                state.unboundCatalogSource = nil
+                state.nativeCatalog = nil
                 attempt.phase = .pending
             } else {
                 attempt.phase = .loadingCatalog
@@ -2965,7 +2973,7 @@ final class ProcessControlPlaneAuthority: Sendable {
             effects = attempt.loads.removeValue(forKey: lease.loadID)?
                 .detachedEffects() ?? []
             if attempt.loads.isEmpty {
-                attempt.phase = state.unboundCatalogRaw == nil ? .pending : .cataloged
+                attempt.phase = state.nativeCatalog?.rawResult == nil ? .pending : .cataloged
                 removesAttempt = true
             } else {
                 attempt.phase = .loadingCatalog
@@ -3120,16 +3128,81 @@ enum ProcessToolCatalogCodec {
         from catalogs: [ProcessControlPlaneAuthority.Catalog]
     ) -> JSONValue? {
         guard catalogs.isEmpty == false else { return nil }
-        var selected: [String: JSONValue] = [:]
-        for catalog in catalogs.sorted(by: catalogSort) {
-            for (name, tool) in catalog.toolsByName where selected[name] == nil {
-                selected[name] = tool
-            }
-        }
-        let tools = selected.keys.sorted {
+        return toolsListResult(from: catalogs.sorted(by: catalogSort).map(\.provider))
+    }
+
+    static func toolsListResult(from providers: [ToolCatalogProvider], base: JSONValue? = nil) -> JSONValue? {
+        guard !providers.isEmpty else { return nil }
+        var result: [String: JSONValue] = [:]
+        if case .object(let fields)? = base ?? providers.first?.rawResult { result = fields }
+        let names = Set(providers.flatMap { $0.toolsByName.keys }).sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
-        }.compactMap { selected[$0] }
-        return .object(["tools": .array(tools.map(exposingWorkspacePathSelector))])
+        }
+        result["tools"] = .array(names.compactMap { name in
+            let entries = providers.compactMap { provider -> (ToolCatalogProvider, JSONValue)? in
+                provider.toolsByName[name].map { (provider, $0) }
+            }
+            guard case .object(var tool)? = entries.first?.1 else { return nil }
+            let descriptors = entries.map { exposingWorkspacePathSelector($0.1) }
+            let inputs = descriptors.compactMap { value -> JSONValue? in
+                guard case .object(let fields) = value else { return nil }
+                return fields["inputSchema"]
+            }
+            if let input = mergedSchema(inputs) { tool["inputSchema"] = input }
+            let outputs = descriptors.compactMap { value -> JSONValue? in
+                guard case .object(let fields) = value else { return nil }
+                return fields["outputSchema"]
+            }
+            if outputs.count == descriptors.count, let output = mergedSchema(outputs) {
+                tool["outputSchema"] = output
+            } else {
+                tool.removeValue(forKey: "outputSchema")
+            }
+            if entries.contains(where: { entry in
+                guard case .object(let fields) = entry.1 else { return true }
+                return fields["annotations"] != tool["annotations"]
+            }) { tool.removeValue(forKey: "annotations") }
+            var metadata: [String: JSONValue] = [:]
+            if case .object(let original)? = tool["_meta"] { metadata = original }
+            metadata[ToolCatalogProvider.providersMetadataKey] = .array(entries.map { provider, descriptor in
+                var origin: [String: JSONValue] = [:]
+                if case .object(let fields) = provider.origin { origin = fields }
+                origin["descriptor"] = descriptor
+                return .object(origin)
+            })
+            tool["_meta"] = .object(metadata)
+            return .object(tool)
+        })
+        return .object(result)
+    }
+
+    private static func mergedSchema(_ schemas: [JSONValue]) -> JSONValue? {
+        var unique: [JSONValue] = []
+        for schema in schemas where !unique.contains(schema) { unique.append(schema) }
+        guard let first = unique.first else { return nil }
+        guard unique.count > 1 else { return first }
+        var properties: [String: JSONValue] = [:]
+        var required: Set<String>?
+        for schema in unique {
+            guard case .object(let fields) = schema else { continue }
+            if case .object(let variantProperties)? = fields["properties"] {
+                for (name, property) in variantProperties {
+                    if let previous = properties[name], previous != property {
+                        properties[name] = .object(["anyOf": .array([previous, property])])
+                    } else { properties[name] = property }
+                }
+            }
+            let keys: Set<String>
+            if case .array(let values)? = fields["required"] {
+                keys = Set(values.compactMap { if case .string(let name) = $0 { return name }; return nil })
+            } else { keys = [] }
+            required = required.map { $0.intersection(keys) } ?? keys
+        }
+        return .object([
+            "type": .string("object"), "properties": .object(properties),
+            "required": .array((required ?? []).sorted().map(JSONValue.string)),
+            "anyOf": .array(unique)
+        ])
     }
 
     static func schemaConflicts(
@@ -3148,8 +3221,6 @@ enum ProcessToolCatalogCodec {
         _ lhs: ProcessControlPlaneAuthority.Catalog,
         _ rhs: ProcessControlPlaneAuthority.Catalog
     ) -> Bool {
-        let comparison = lhs.target.xcodeVersion.compare(rhs.target.xcodeVersion, options: [.numeric])
-        if comparison != .orderedSame { return comparison == .orderedDescending }
         if lhs.target.appPath != rhs.target.appPath { return lhs.target.appPath < rhs.target.appPath }
         return lhs.target.processID < rhs.target.processID
     }

@@ -130,7 +130,7 @@ extension ClientMCPRequestExecutor {
                         requestTimeoutOverride: remainingRequestTimeout(until: deadline)
                     ) {
                     case .handled(let data):
-                        responseData = ToolCallNormalizer(sessionManager: sessionManager)
+                        responseData = ToolCallNormalizer()
                             .normalizeResponseDataIfNeeded(
                                 method: "tools/call",
                                 toolName: DocumentationProvider.ToolCatalog.toolName,

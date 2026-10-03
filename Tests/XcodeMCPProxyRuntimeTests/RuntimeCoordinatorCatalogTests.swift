@@ -153,7 +153,7 @@ struct RuntimeCoordinatorCatalogTests {
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
     }
 
-    @Test func unchangedCatalogDoesNotNotifyWhenItsSourceBridgeChanges() throws {
+    @Test func changedCatalogOriginNotifiesEvenWhenSchemasStayTheSame() throws {
         var config = makeConfig(requestTimeout: 5)
         let fixture = RuntimeCoordinatorFixture(
             config: config, upstreams: [TestUpstreamClient(), TestUpstreamClient()], startImmediately: false
@@ -168,7 +168,7 @@ struct RuntimeCoordinatorCatalogTests {
         _ = session.router.drainBufferedNotifications()
         try seedUnboundToolCatalog(on: manager, upstreamIndex: 1, tools: tools)
         #expect(manager.processControlPlane.canonicalSourceUpstream() == 1)
-        #expect(session.router.drainBufferedNotifications().isEmpty)
+        #expect(session.router.drainBufferedNotifications().count == 1)
     }
 
     @Test func explicitCatalogRequestDiscoversToolsWithoutChangeNotification() async throws {
@@ -364,7 +364,7 @@ struct RuntimeCoordinatorCatalogTests {
                 (remainingTarget, 1, [toolDescriptor(name: "RemainingOnlyTool")])
             ]
         )
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["RemainingOnlyTool"])
 
         manager.reconcileXcodeProcessTargets(
             [remainingTarget],

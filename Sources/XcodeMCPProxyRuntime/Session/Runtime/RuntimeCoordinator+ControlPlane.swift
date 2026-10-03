@@ -129,11 +129,46 @@ extension RuntimeCoordinator {
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let startedAt = nowUptimeNanoseconds()
         let timeout = requestTimeout ?? MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
-        let result = try await loadUnboundToolsCatalog(
-            requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
-        try Task.checkCancellation()
         refreshProcessToolsCatalogsIfNeeded(reason: "client_tools_list", refreshCached: true)
-        return result
+        let topology = upstreamTopology.snapshot()
+        let nativeIsInitialized = topology.entries.contains { entry in
+            entry.backend == .nativeHost
+                && upstreamHealthManager.state(for: entry.id)?.initPhase.isUsableInitialized == true
+        }
+        var nativeFailure: (any Error)?
+        if nativeIsInitialized {
+            do {
+                _ = try await loadUnboundToolsCatalog(
+                    requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
+            } catch {
+                if error is CancellationError { throw error }
+                nativeFailure = error
+            }
+        }
+        try Task.checkCancellation()
+        if let current = currentCatalogResult(startedAt: startedAt,
+                                              exposedProcessIDs: processToolCatalogExposedProcessIDs()) {
+            return current
+        }
+        let exposure = processRouteExposure(policy: .toolsCatalog)
+        let routes = exposure.routes.compactMap { exposed -> AvailableToolsCatalogRoute? in
+            guard let id = exposed.usableUpstreamIDs.first,
+                  let proof = topology.proof(id),
+                  let (lease, transition) = beginProcessCatalogAttemptIfRunning(
+                      routeID: exposed.route.id, preferredUpstreamProof: proof
+                  ) else { return nil }
+            applyProcessControlPlaneTransition(transition)
+            return AvailableToolsCatalogRoute(route: exposed.route, target: exposed.route.target,
+                upstreamIndices: exposed.usableUpstreamIndices, lease: lease)
+        }
+        guard !routes.isEmpty else {
+            throw nativeFailure ?? UpstreamSlotScheduler.AcquisitionError.unavailable
+        }
+        return try await loadAvailableToolsCatalogsInBatch(
+            routes, requestTimeout: timeout,
+            deadlineUptimeNs: deadlineUptimeNanoseconds(for: timeout), startedAt: startedAt,
+            exposedProcessIDs: exposure.processIDs, returnAfterFirstSuccess: false
+        )
     }
 
     private func beginDefaultBackendCatalogLoad(allowsConcurrentLoad: Bool) -> CatalogLease? {

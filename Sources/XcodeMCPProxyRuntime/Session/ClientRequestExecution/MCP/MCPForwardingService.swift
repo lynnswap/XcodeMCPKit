@@ -23,7 +23,7 @@ struct MCPForwardingService: Sendable {
         self.config = configuration
         self.sessionManager = sessionManager
         self.upstreamRuntime = ProxyUpstreamRequestRuntime(port: sessionManager)
-        self.toolSurface = ToolSurface(config: configuration, sessionManager: sessionManager)
+        self.toolSurface = ToolSurface(config: configuration)
     }
 
     func prepareRequest(
@@ -34,7 +34,7 @@ struct MCPForwardingService: Sendable {
         admission: RouteForwardingAdmission? = nil,
         cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil
     ) throws -> PreparedRequest? {
-        guard let prepared = try upstreamRuntime.prepareRequest(
+        guard let candidate = try upstreamRuntime.prepareRequest(
             bodyData: bodyData,
             parsedRequestJSON: parsedRequestJSON,
             sessionID: sessionID,
@@ -43,6 +43,15 @@ struct MCPForwardingService: Sendable {
         ) else {
             return nil
         }
+        let prepared = PreparedRequest(
+            transform: candidate.transform,
+            sessionID: candidate.sessionID,
+            operationLease: candidate.operationLease,
+            admission: candidate.admission,
+            toolDefinition: candidate.admission?.toolDefinition ?? candidate.transform.toolName.flatMap {
+                sessionManager.toolDefinition(named: $0, sourceProof: candidate.operationLease.proof)
+            }
+        )
         guard let cancellationHandle else {
             return prepared
         }
@@ -116,7 +125,7 @@ struct MCPForwardingService: Sendable {
                 toolName: started.transform.toolName,
                 originalID: started.transform.originalID,
                 cachesToolsListResult: started.transform.isCacheableToolsListRequest,
-                upstreamIndex: started.upstreamIndex,
+                toolDefinition: started.toolDefinition,
                 upstreamData: data
             )
             let responseData = rewritten.responseData

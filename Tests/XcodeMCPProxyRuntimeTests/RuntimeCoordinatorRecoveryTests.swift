@@ -1366,7 +1366,7 @@ struct RuntimeCoordinatorRecoveryTests {
         )
         await manager.drainRuntimeTasksForTesting()
 
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(manager.cachedToolsListResult() != nil)
         #expect(
             manager.debugSnapshot().processToolCatalogs.map(\.processID)
                 == [existingTarget.processID]
@@ -1929,7 +1929,7 @@ struct RuntimeCoordinatorRecoveryTests {
             on: manager,
             entries: [(catalogedTarget, 0, [toolDescriptor(name: "RemainingSurfaceTool")])]
         )
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["RemainingSurfaceTool"])
 
         manager.markXcodeProcessRouteUnavailableAfterCatalogFailure(
             upstreamIndex: 1,
