@@ -38,6 +38,7 @@ extension XcodeMCPProxyServer {
         }
 
         let configuration = try command.resolveConfiguration(environment: environment)
+        _ = try configuration.runtimeConfiguration()
         if command.dryRun || isTruthy(environment["DRY_RUN"]) {
             return .dryRun(command.renderResolvedCommand(configuration: configuration))
         }

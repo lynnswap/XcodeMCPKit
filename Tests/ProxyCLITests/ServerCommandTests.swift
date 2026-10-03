@@ -113,6 +113,13 @@ struct ServerCommandTests {
         #expect(explicit.bindAddress == .init(host: "127.0.0.1", port: 9002))
     }
 
+    @Test func blankAddressEnvironmentValuesUseCanonicalDefaults() throws {
+        let config = try resolvedConfiguration(environment: [
+            "HOST": " \t\n", "PORT": "", "LISTEN": " ",
+        ])
+        #expect(config.bindAddress == .localhost())
+    }
+
     @Test(arguments: [["LISTEN": "localhost"], ["PORT": "65536"]])
     func serverCommandRejectsInvalidAddressEnvironment(environment: [String: String]) {
         #expect(throws: CLICommandError.self) {

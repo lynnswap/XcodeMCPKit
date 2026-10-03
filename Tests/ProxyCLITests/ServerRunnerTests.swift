@@ -192,6 +192,48 @@ struct ServerRunnerTests {
         #expect(fakeServer.waitCount() == 1)
     }
 
+    @Test(arguments: [
+        (["--host", " "], [String: String]()),
+        (["--host", "\t\n"], [String: String]()),
+        (["--listen", " :8765"], [String: String]()),
+        (["--port", "65536"], [String: String]()),
+        ([String](), ["PORT": "65536"]),
+        ([String](), ["LISTEN": "localhost:65536"]),
+    ])
+    func invalidStartupConfigurationPreventsRestartSideEffects(
+        input: (arguments: [String], environment: [String: String])
+    ) async throws {
+        let effects = CapturedLines()
+        let errors = CapturedLines()
+        let fakeServer = RecordingProxyServer()
+        let launcher = makeServerLauncher(
+            forceRestartExistingServer: { _, _, _ in effects.append("terminate"); return true },
+            makeServer: { _ in effects.append("makeServer"); return fakeServer },
+            detectExistingServerProcessIDs: { _, _ in effects.append("lookup"); return [123] }
+        )
+        let exitCode = await launcher.run(
+            arguments: ["xcode-mcp-proxy-server"] + input.arguments + ["--force-restart"],
+            environment: input.environment,
+            stdout: { _ in }, stderr: { errors.append($0) }
+        )
+        #expect(exitCode != 0)
+        #expect(errors.snapshot().count == 1)
+        #expect(effects.snapshot().isEmpty)
+        #expect(fakeServer.startCount() == 0)
+        #expect(fakeServer.waitCount() == 0)
+    }
+
+    @Test(arguments: [
+        ["--host", " "], ["--listen", " :8765"], ["--port", "65536"],
+    ])
+    func publicDryRunRejectsInvalidStartupConfiguration(arguments: [String]) async throws {
+        let result = await runServer(arguments:
+            ["xcode-mcp-proxy-server"] + arguments + ["--force-restart", "--dry-run"])
+        #expect(result.exitCode != 0)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr.count == 1)
+    }
+
     @Test func serverLauncherEmitsForceRestartWarnings() async throws {
         let restarted = CapturedLines()
         let warnings = CapturedLines()
