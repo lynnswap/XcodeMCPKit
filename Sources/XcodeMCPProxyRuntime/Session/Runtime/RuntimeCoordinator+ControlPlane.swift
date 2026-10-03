@@ -312,6 +312,11 @@ extension RuntimeCoordinator {
         ) { group in
             for route in routes {
                 group.addTask {
+                    defer {
+                        self.applyCatalogCommit(self.commitProcessCatalog(
+                            .failed, lease: route.lease,
+                            nowUptimeNanoseconds: self.nowUptimeNanoseconds()))
+                    }
                     do {
                         try Task.checkCancellation()
                         let result = try await self.loadToolsCatalogFromAvailableProcessRoute(
@@ -345,9 +350,6 @@ extension RuntimeCoordinator {
                         let underlying = ControlPlane.ErrorMapper.underlyingError(error)
                         if underlying is CancellationError {
                             guard self.processControlPlane.validateCatalogLoad(route.lease) else { return .stale }
-                            self.applyCatalogCommit(self.commitProcessCatalog(
-                                .failed, lease: route.lease,
-                                nowUptimeNanoseconds: self.nowUptimeNanoseconds()))
                             throw CancellationError()
                         }
                         if underlying is TimeoutError {
