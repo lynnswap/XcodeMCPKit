@@ -577,6 +577,39 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test(arguments: [false, true])
+    func shutdownReleasesANativeCallbackBeforeDrainingRequests(failsCleanup: Bool) async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            let callback = NativeSessionSuspendedCallback()
+            harness.backend.beforeExecute = { await callback.waitForReply() }
+            harness.backend.onShutdown = { callback.release(fromShutdown: true) }
+            if failsCleanup { harness.backend.shutdownError = .invocation("Owned native cleanup failed") }
+            try harness.call("AwaitNativeReply", id: "pending-native-callback")
+            await callback.waitUntilEntered()
+            let watchdog = Task { @MainActor in
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { return }
+                Issue.record("Backend shutdown did not release the pending native callback")
+                callback.release(fromShutdown: false)
+            }
+            defer { watchdog.cancel() }
+            do {
+                try await harness.session.shutdown()
+                #expect(!failsCleanup)
+            } catch let error as NativeRuntimeError {
+                #expect(failsCleanup)
+                #expect(error.description == "Owned native cleanup failed")
+            }
+            #expect(callback.wasReleasedByShutdown)
+            #expect(harness.backend.shutdownCalls == 1)
+            let execution = try await harness.backend.nextExecution()
+            #expect(await execution.wasCancelled())
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32800)))
+            harness.backend.shutdownError = nil
+        }
+    }
+
     @Test func malformedRequestObjectsReceiveAnInvalidRequestResponse() async throws {
         try await withNativeSession { harness in
             try harness.session.receive(Data(#"{"jsonrpc":"2.0","id":"bad","method":42}"#.utf8))
@@ -805,6 +838,8 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     var listError: NativeRuntimeError?
     var executeError: (any Error)?
     var shutdownError: NativeRuntimeError?
+    var beforeExecute: (@MainActor () async -> Void)?
+    var onShutdown: (@MainActor () -> Void)?
     private(set) var executions: [NativeSessionExecution] = []
     private(set) var observations: [Observation] = []
     private(set) var initializationContexts: [NativeSessionContext] = []
@@ -827,6 +862,7 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     }
 
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data> {
+        if let beforeExecute { await beforeExecute() }
         if let executeError { throw executeError }
         context.didDispatch()
         let stream = AsyncStream<Data>.makeStream()
@@ -852,6 +888,7 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
 
     func shutdown() async throws {
         shutdownCalls += 1
+        onShutdown?()
         if let shutdownError { throw shutdownError }
     }
 
@@ -860,6 +897,32 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
         let next = await iterator.next(isolation: MainActor.shared)
         executionIterator = iterator
         return try #require(next)
+    }
+}
+
+@MainActor
+private final class NativeSessionSuspendedCallback {
+    private var reply: CheckedContinuation<Void, Never>?
+    private let entered = AsyncStream<Void>.makeStream()
+    private(set) var wasReleasedByShutdown = false
+
+    func waitForReply() async {
+        await withCheckedContinuation { continuation in
+            reply = continuation
+            entered.continuation.yield(())
+        }
+    }
+
+    func waitUntilEntered() async {
+        var iterator = entered.stream.makeAsyncIterator()
+        _ = await iterator.next(isolation: MainActor.shared)
+    }
+
+    func release(fromShutdown: Bool) {
+        guard let reply else { return }
+        self.reply = nil
+        wasReleasedByShutdown = fromShutdown
+        reply.resume()
     }
 }
 

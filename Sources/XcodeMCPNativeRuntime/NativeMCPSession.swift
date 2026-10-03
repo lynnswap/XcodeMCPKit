@@ -253,7 +253,10 @@ package final class NativeMCPSession {
         stopping = true
         let pending = requests.values.compactMap(\.task)
         for request in pending { request.cancel() }
+        var cleanupError: (any Error)?
+        do { try await backend.shutdown() }
+        catch { cleanupError = error }
         for request in pending { await request.value }
-        try await backend.shutdown()
+        if let cleanupError { throw cleanupError }
     }
 }
