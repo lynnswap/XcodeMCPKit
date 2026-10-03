@@ -441,6 +441,34 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test func initializeAndCatalogExposeTheSameBackendOriginWithoutGuessingFakeVersions() async throws {
+        try await withNativeSession { harness in
+            harness.backend.origin = ["kind": .string("gui"), "processID": .number(.int(42)), "toolCancellation": .string("waitForNativeCompletion")]
+            let initialized = try await harness.initialize()
+            let origin = try nativeTestField(initialized, "result", "_meta", "com.lynnswap.xcode-mcpkit/origin")
+            #expect(origin == .object(try #require(harness.backend.origin)))
+            try harness.request("tools/list", id: "origin-catalog")
+            #expect(try nativeTestField(await harness.nextMessage(), "result", "_meta", "com.lynnswap.xcode-mcpkit/origin") == origin)
+            #expect(try nativeTestObject(origin)["xcodeVersion"] == nil)
+        }
+    }
+
+    @Test func advisoryCancellationReturnsTheOriginalCompletionWhenNativeCancellationIsUnsupported() async throws {
+        try await withNativeSession { harness in
+            harness.backend.supportsToolCancellation = false
+            _ = try await harness.initialize()
+            try harness.call("Uncancellable", id: "wait-for-native")
+            let execution = try await harness.backend.nextExecution()
+            try harness.notification("notifications/cancelled", params: .object(["requestId": .string("wait-for-native")]))
+            await Task.yield()
+            try execution.complete(.string("Native completed"))
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "id") == .string("wait-for-native"))
+            #expect(try nativeTestField(response, "result", "isError") == .bool(false))
+            #expect(!(await execution.wasCancelled()))
+        }
+    }
+
     @Test func cancellationBeforeDispatchDoesNotStartTheToolOrCreateArtifacts() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
@@ -767,6 +795,8 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
         let event: JSONValue
     }
 
+    var origin: [String: JSONValue]?
+    var supportsToolCancellation = true
     var tools: [NativeTool] = []
     var resultFormat = NativeToolResultFormat.actionValue
     var initializeError: NativeRuntimeError?

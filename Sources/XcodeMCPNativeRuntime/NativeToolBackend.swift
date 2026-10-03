@@ -29,6 +29,8 @@ package struct NativeToolContext: Sendable {
 @MainActor
 package protocol NativeToolBackend: AnyObject {
     var resultFormat: NativeToolResultFormat { get }
+    var origin: [String: JSONValue]? { get }
+    var supportsToolCancellation: Bool { get }
     func initialize(context: NativeSessionContext) async throws
     func listTools() async throws -> [NativeTool]
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data>
@@ -38,6 +40,8 @@ package protocol NativeToolBackend: AnyObject {
 
 extension NativeToolBackend {
     package var resultFormat: NativeToolResultFormat { .actionValue }
+    package var origin: [String: JSONValue]? { nil }
+    package var supportsToolCancellation: Bool { true }
     package func initialize(context: NativeSessionContext) async throws {}
     package func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue) {}
 }
@@ -45,6 +49,7 @@ extension NativeToolBackend {
 @safe
 @MainActor
 package final class NativeXcodeBackend: NativeToolBackend {
+    private let installation: NativeXcodeInstallation
     private let bridge: NativeActionBridge
     private let selection: NativeToolSelection
     private let scope: NativeWorkspaceScope
@@ -54,11 +59,16 @@ package final class NativeXcodeBackend: NativeToolBackend {
     private var tools: [String: NativeTool] = [:]
 
     package init(installation: NativeXcodeInstallation) async throws {
+        self.installation = installation
         bridge = NativeActionBridge(installation: installation)
         selection = try await NativeToolSelection(installation: installation)
         scope = try await NativeWorkspaceScope(installation: installation)
         workspaces = try await NativeWorkspaceRegistry(installation: installation)
         crashCorrection = NativeCrashToolCorrection(installation: installation)
+    }
+
+    package var origin: [String: JSONValue]? {
+        installation.origin(kind: "nativeHost", processID: getpid(), toolCancellation: "task")
     }
 
     package func listTools() async throws -> [NativeTool] {

@@ -17,12 +17,23 @@ package enum NativeGUIConnectionError: Error, CustomStringConvertible, Sendable 
 
 @MainActor
 package protocol NativeGUIConnectionTransport: AnyObject {
+    var supportsToolCancellation: Bool { get }
     func activate(connected: @escaping @MainActor @Sendable () -> Void,
                   receive: @escaping @MainActor @Sendable (Data) -> Void,
                   invalidated: @escaping @MainActor @Sendable ((any Error)?) -> Void) throws
     func send(_ message: Data, reply: @escaping @MainActor @Sendable (Result<Data, any Error>) -> Void) throws
     func sendOneWay(_ message: Data) throws
     func invalidate() throws
+}
+
+extension NativeGUIConnectionTransport {
+    package var supportsToolCancellation: Bool { true }
+}
+
+package enum NativeGUIRequestCancellation: Sendable {
+    case localWait
+    case nativeMessage(Data)
+    case waitForNativeCompletion
 }
 
 /// Owns one native GUI connection and one MCP client's session context. Native
@@ -35,6 +46,7 @@ package final class NativeGUIConnection {
     package let messages: AsyncStream<Data>
     package var isConnected: Bool { if case .active = phase { true } else { false } }
     package var terminationError: (any Error)? { if case .closed(let error) = phase { error } else { nil } }
+    package var supportsToolCancellation: Bool { transport.supportsToolCancellation }
 
     private let transport: any NativeGUIConnectionTransport
     private let messageContinuation: AsyncStream<Data>.Continuation
@@ -54,7 +66,8 @@ package final class NativeGUIConnection {
                                 timeout: Duration = .seconds(30)) async throws -> NativeGUIConnection {
         let transport = try await BoardServicesGUITransport(
             processIdentifier: processIdentifier,
-            messagingBinary: installation.framework("IDEIntelligenceMessaging", in: "PlugIns"))
+            messagingBinary: installation.framework("IDEIntelligenceMessaging", in: "PlugIns"),
+            initializingWith: message)
         let connection = NativeGUIConnection(processIdentifier: processIdentifier, transport: transport)
         try await connection.start(initializingWith: message, timeout: timeout)
         return connection
@@ -104,10 +117,12 @@ package final class NativeGUIConnection {
         }
     }
 
-    /// For action requests, supply the matching native cancelToolCall message.
-    /// Cancellation retains the request until Xcode acknowledges it or the
-    /// connection ends, so a cancelled caller cannot abandon an active mutation.
-    package func request(_ message: Data, cancellationMessage: Data? = nil) async throws -> Data {
+    /// Action cancellation retains its native reply until acknowledgement or
+    /// disconnect. Peers without a cancel message return their actual completion;
+    /// localWait is reserved for requests that do not own native operations.
+    package func request(_ message: Data, cancellation: NativeGUIRequestCancellation = .localWait,
+                         didSend: (@MainActor @Sendable () -> Void)? = nil,
+                         didReceiveReply: (@MainActor @Sendable () -> Void)? = nil) async throws -> Data {
         try Task.checkCancellation()
         guard case .active = phase else { throw disconnectionError }
         let id = UUID()
@@ -116,15 +131,19 @@ package final class NativeGUIConnection {
                 pendingReplies[id] = continuation
                 do {
                     try transport.send(message) { [weak self] result in
-                        self?.pendingReplies.removeValue(forKey: id)?.resume(with: result)
+                        guard let continuation = self?.pendingReplies.removeValue(forKey: id) else { return }
+                        didReceiveReply?()
+                        continuation.resume(with: result)
                     }
+                    if pendingReplies[id] != nil { didSend?() }
                 } catch {
                     pendingReplies.removeValue(forKey: id)?.resume(throwing: error)
                 }
             }
         } onCancel: {
-            Task { @MainActor [weak self] in self?.cancelRequest(id, message: cancellationMessage) }
+            Task { @MainActor [weak self] in self?.cancelRequest(id, cancellation: cancellation) }
         }
+        if case .waitForNativeCompletion = cancellation { return result }
         try Task.checkCancellation()
         return result
     }
@@ -143,13 +162,16 @@ package final class NativeGUIConnection {
         .disconnected(processIdentifier: processIdentifier)
     }
 
-    private func cancelRequest(_ id: UUID, message: Data?) {
+    private func cancelRequest(_ id: UUID, cancellation: NativeGUIRequestCancellation) {
         guard pendingReplies[id] != nil else { return }
-        if let message {
+        switch cancellation {
+        case .nativeMessage(let message):
             do { try transport.sendOneWay(message) }
             catch { close(with: error) }
-        } else {
+        case .localWait:
             pendingReplies.removeValue(forKey: id)?.resume(throwing: CancellationError())
+        case .waitForNativeCompletion:
+            break
         }
     }
 
@@ -178,6 +200,8 @@ package final class NativeGUIConnection {
 
 @MainActor
 private final class BoardServicesGUITransport: NativeGUIConnectionTransport {
+    private let messageCapabilities: NativeGUIMessageCapabilities
+    var supportsToolCancellation: Bool { messageCapabilities.supportsToolCancellation }
     private let processIdentifier: Int32
     private let interface: AnyObject
     private let interfaceImage: ResolvedSymbol
@@ -194,12 +218,13 @@ private final class BoardServicesGUITransport: NativeGUIConnectionTransport {
     private var didInvalidate: (@MainActor @Sendable ((any Error)?) -> Void)?
     private var invalidated = false
 
-    init(processIdentifier: Int32, messagingBinary: URL) async throws {
+    init(processIdentifier: Int32, messagingBinary: URL, initializingWith message: Data) async throws {
         self.processIdentifier = processIdentifier
         let function = try unsafe await ABIRuntime.shared.cFunction(
             named: "MCPBridgeConnectionInterface",
             as: ((UnsafeRawPointer) -> UnsafeMutableRawPointer).self,
             in: .path(messagingBinary), loading: .loadedOnly)
+        messageCapabilities = try await NativeGUIMessageCapabilities.loaded(from: messagingBinary, initializingWith: message)
         let service: NSString = "com.apple.dt.mcpbridge.tool-service"
         let pointer = try unsafe function.unsafeInvoke(UnsafeRawPointer(Unmanaged.passUnretained(service).toOpaque()))
         interface = unsafe Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()

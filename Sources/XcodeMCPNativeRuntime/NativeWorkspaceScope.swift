@@ -2,12 +2,6 @@ import ABIBridge
 import ABIBridgeCore
 import Foundation
 
-@unsafe
-private struct InputMetadataResponse {
-    var metadata: UnsafeRawPointer?
-    var state: UInt64
-}
-
 @safe
 @MainActor
 final class NativeWorkspaceScope {
@@ -33,7 +27,7 @@ final class NativeWorkspaceScope {
         protocols = descriptors
         let pointer = try unsafe abi.scalar(Int32(ABIValuePointer))
         let word = try unsafe abi.scalar(Int32(ABIValueUInt64))
-        let response = try unsafe abi.storage(for: InputMetadataResponse.self, components: [pointer, word])
+        let response = try unsafe abi.storage(for: NativeMetadataResponse.self, components: [pointer, word])
         unsafe (interface = try abi.callInterface(result: response, parameters: [word, pointer, pointer, pointer, pointer]))
     }
 
@@ -41,7 +35,7 @@ final class NativeWorkspaceScope {
         var request: UInt64 = 0
         var witness = unsafe action.conformance
         var metadata = unsafe action.metadata
-        let result: InputMetadataResponse = try unsafe base.withUnsafeAddress { baseAddress in
+        let result: NativeMetadataResponse = try unsafe base.withUnsafeAddress { baseAddress in
             try unsafe associated.withUnsafeAddress { associatedAddress in
                 var baseAddress = unsafe baseAddress
                 var associatedAddress = unsafe associatedAddress
@@ -52,7 +46,7 @@ final class NativeWorkspaceScope {
                                 try withUnsafeMutablePointer(to: &associatedAddress) { associated in
                                     try unsafe abi.invoke(symbol: entry, interface: interface,
                                                    arguments: [UnsafeMutableRawPointer(request), UnsafeMutableRawPointer(witness), UnsafeMutableRawPointer(metadata), UnsafeMutableRawPointer(base), UnsafeMutableRawPointer(associated)],
-                                                   returning: InputMetadataResponse.self)
+                                                   returning: NativeMetadataResponse.self)
                                 }
                             }
                         }

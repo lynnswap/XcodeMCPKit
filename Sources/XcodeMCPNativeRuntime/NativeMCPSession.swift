@@ -44,7 +44,7 @@ package final class NativeMCPSession {
             if method == "notifications/cancelled",
                let parameters = object["params"] as? [String: Any],
                let id = requestID(parameters["requestId"]) {
-                requests[id.key]?.cancel()
+                if backend.supportsToolCancellation { requests[id.key]?.cancel() }
             }
         case .request(let method, let id):
             guard !stopping else {
@@ -105,7 +105,7 @@ package final class NativeMCPSession {
             }
             try await backend.initialize(context: NativeSessionContext(conversationID: conversationID, clientInfo: clientInfo))
             initialized = true
-            return .object([
+            return withOrigin([
                 "protocolVersion": .string(MCPProtocolVersion.current),
                 "capabilities": .object(["tools": .object([:])]),
                 "serverInfo": .object(["name": .string("XcodeMCPKit Native Host"), "version": .string("1")]),
@@ -116,7 +116,7 @@ package final class NativeMCPSession {
         switch method {
         case "tools/list":
             let tools = try await backend.listTools()
-            return .object(["tools": .array(tools.map(\.descriptor))])
+            return withOrigin(["tools": .array(tools.map(\.descriptor))])
         case "tools/call":
             guard case .object(let fields) = params, case .string(let name) = fields["name"] else {
                 throw NativeRuntimeError.invalidRequest("tools/call requires a tool name")
@@ -174,6 +174,14 @@ package final class NativeMCPSession {
         default:
             throw NativeRuntimeError.methodNotFound("Unsupported MCP method '\(method)'")
         }
+    }
+
+    private func withOrigin(_ fields: [String: JSONValue]) -> JSONValue {
+        var result = fields
+        if let origin = backend.origin {
+            result["_meta"] = .object(["com.lynnswap.xcode-mcpkit/origin": .object(origin)])
+        }
+        return .object(result)
     }
 
     private func fieldsForMetadata(_ params: JSONValue?) -> JSONValue? {

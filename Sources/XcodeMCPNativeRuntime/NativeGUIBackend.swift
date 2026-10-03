@@ -7,10 +7,16 @@ package final class NativeGUIBackend: NativeToolBackend {
         (Int32, Data, NativeXcodeInstallation) async throws -> NativeGUIConnection
 
     package var resultFormat: NativeToolResultFormat { .mcpResult }
+    package var supportsToolCancellation: Bool { connection?.supportsToolCancellation ?? true }
+    package var origin: [String: JSONValue]? {
+        installation.origin(kind: "gui", processID: processIdentifier,
+                            toolCancellation: supportsToolCancellation ? "nativeMessage" : "waitForNativeCompletion")
+    }
 
     private struct Invocation {
         let producer: Task<Void, Never>
         let continuation: AsyncStream<Data>.Continuation
+        var wasDispatched = false
     }
 
     private let processIdentifier: Int32
@@ -109,6 +115,7 @@ package final class NativeGUIBackend: NativeToolBackend {
         try Task.checkCancellation()
         let token = UUID()
         let processIdentifier = self.processIdentifier
+        let supportsCancellation = connected.supportsToolCancellation
         let (stream, continuation) = AsyncStream<Data>.makeStream()
         let producer = Task { @MainActor [weak self] in
             defer {
@@ -120,8 +127,11 @@ package final class NativeGUIBackend: NativeToolBackend {
                                                                processIdentifier: processIdentifier)
                 try Task.checkCancellation()
                 let request = try NativeGUICodec.call(name, arguments: arguments, token: token)
-                let cancellation = try NativeGUICodec.cancel(name, token: token)
-                let reply = try await connected.request(request, cancellationMessage: cancellation)
+                let cancellation: NativeGUIRequestCancellation = supportsCancellation
+                    ? .nativeMessage(try NativeGUICodec.cancel(name, token: token)) : .waitForNativeCompletion
+                let reply = try await connected.request(request, cancellation: cancellation,
+                    didSend: { [weak self] in self?.invocations[token]?.wasDispatched = true },
+                    didReceiveReply: { [weak self] in self?.invocations[token]?.wasDispatched = false })
                 continuation.yield(try NativeGUICodec.event("completed", data: NativeGUICodec.decode(reply)))
             } catch {
                 if !Task.isCancelled {
@@ -134,7 +144,7 @@ package final class NativeGUIBackend: NativeToolBackend {
             }
         }
         continuation.onTermination = { termination in
-            if case .cancelled = termination { producer.cancel() }
+            if case .cancelled = termination, supportsCancellation { producer.cancel() }
         }
         invocations[token] = Invocation(producer: producer, continuation: continuation)
         return stream
@@ -163,9 +173,10 @@ package final class NativeGUIBackend: NativeToolBackend {
         }
         if selector.hasPrefix("/") {
             let token = UUID()
+            let cancellation: NativeGUIRequestCancellation = connection.supportsToolCancellation
+                ? .nativeMessage(try NativeGUICodec.cancel("XcodeListWindows", token: token)) : .waitForNativeCompletion
             let reply = try await connection.request(
-                NativeGUICodec.call("XcodeListWindows", arguments: [:], token: token),
-                cancellationMessage: NativeGUICodec.cancel("XcodeListWindows", token: token))
+                NativeGUICodec.call("XcodeListWindows", arguments: [:], token: token), cancellation: cancellation)
             let result = try NativeGUICodec.decode(reply)
             if case .object(let fields) = result, case .bool(true) = fields["isError"] {
                 throw NativeRuntimeError.invocation(String(decoding: reply, as: UTF8.self))
@@ -211,12 +222,16 @@ package final class NativeGUIBackend: NativeToolBackend {
         let pending = Array(invocations.values)
         let connecting = initialization
         let listener = progressListener
+        let unconfirmed = supportsToolCancellation ? 0 : pending.filter(\.wasDispatched).count
         connecting?.cancel()
         listener?.cancel()
         for invocation in pending { invocation.producer.cancel() }
         var errors: [any Error] = []
         if let connection {
             do { try connection.invalidate() } catch { errors.append(error) }
+        }
+        if unconfirmed > 0 {
+            FileHandle.standardError.write(Data(("Native GUI shutdown disconnected from Xcode process \(processIdentifier) with \(unconfirmed) uncancellable tool call(s) still awaiting replies; native operations may continue.\n").utf8))
         }
         if let connecting {
             do { try await connecting.value.invalidate() }

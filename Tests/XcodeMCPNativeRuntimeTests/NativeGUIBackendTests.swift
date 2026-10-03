@@ -23,6 +23,40 @@ struct NativeGUIBackendTests {
         }
     }
 
+    @Test func detachedConsumersDoNotAbandonUncancellableNativeOperations() async throws {
+        try await withGUIBackend { fixture in
+            fixture.transport.supportsToolCancellation = false
+            _ = try await fixture.listTools([Self.unscopedTool])
+            #expect(!fixture.backend.supportsToolCancellation)
+            #expect(fixture.backend.origin?["toolCancellation"] == .string("waitForNativeCompletion"))
+            let stream = try await fixture.backend.execute("NativeSearch", arguments: [:], context: fixture.toolContext)
+            let request = try await fixture.transport.nextRequest()
+            let consumer = Task { @MainActor in for await _ in stream {} }
+            consumer.cancel()
+            await consumer.value
+            #expect(fixture.transport.oneWayMessages.count == 1)
+            #expect(fixture.transport.invalidationCount == 0)
+            try request.respond(.object(["content": .array([]), "isError": .bool(false)]))
+            await Task.yield()
+            try await fixture.backend.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+        }
+    }
+
+    @Test func shutdownReleasesUncancellableCallsWithoutSendingAnUnsupportedMessage() async throws {
+        try await withGUIBackend { fixture in
+            fixture.transport.supportsToolCancellation = false
+            _ = try await fixture.listTools([Self.unscopedTool])
+            let stream = try await fixture.backend.execute("NativeSearch", arguments: [:], context: fixture.toolContext)
+            _ = try await fixture.transport.nextRequest()
+            try await fixture.backend.shutdown()
+            #expect(fixture.transport.oneWayMessages.count == 1)
+            #expect(fixture.transport.invalidationCount == 1)
+            var iterator = stream.makeAsyncIterator()
+            #expect(await iterator.next(isolation: MainActor.shared) == nil)
+        }
+    }
+
     @Test func refreshesTheNativeCatalogAndPreservesSelectorOptionality() async throws {
         try await withGUIBackend { fixture in
             let first = try await fixture.listTools([
@@ -399,6 +433,7 @@ private final class GUIBackendRequest {
 
 @MainActor
 private final class GUIBackendTransport: NativeGUIConnectionTransport {
+    var supportsToolCancellation = true
     var connectsImmediately = true
     var oneWayError: GUIBackendTestError?
     var cleanupError: GUIBackendTestError?

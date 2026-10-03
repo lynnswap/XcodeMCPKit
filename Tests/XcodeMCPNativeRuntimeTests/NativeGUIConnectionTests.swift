@@ -63,7 +63,7 @@ struct NativeGUIConnectionTests {
     @Test func aRequestCancelledBeforeDeliverySendsNeitherActionNorCancellation() async throws {
         try await withGUIConnection { fixture in
             let request = Task { @MainActor in
-                try await fixture.connection.request(Data("must not be delivered".utf8), cancellationMessage: Data("must not cancel".utf8))
+                try await fixture.connection.request(Data("must not be delivered".utf8), cancellation: .nativeMessage(Data("must not cancel".utf8)))
             }
             request.cancel()
             await #expect(throws: CancellationError.self) { try await request.value }
@@ -79,7 +79,7 @@ struct NativeGUIConnectionTests {
             var completed = false
             let action = Task { @MainActor in
                 defer { completed = true }
-                return try await fixture.connection.request(Data("action".utf8), cancellationMessage: cancellation)
+                return try await fixture.connection.request(Data("action".utf8), cancellation: .nativeMessage(cancellation))
             }
             defer { action.cancel() }
             let actionSent = try await fixture.transport.nextRequest()
@@ -100,6 +100,44 @@ struct NativeGUIConnectionTests {
             #expect(fixture.connection.isConnected)
             #expect(fixture.transport.invalidationCount == 0)
             #expect(fixture.transport.oneWayMessages == [fixture.initialization, cancellation])
+        }
+    }
+
+    @Test func unsupportedActionCancellationRetainsTheNativeReplyAndReturnsItsActualResult() async throws {
+        try await withGUIConnection { fixture in
+            var completed = false
+            let request = Task { @MainActor in
+                defer { completed = true }
+                return try await fixture.connection.request(Data("uncancellable action".utf8), cancellation: .waitForNativeCompletion)
+            }
+            let sent = try await fixture.transport.nextRequest()
+            request.cancel()
+            await Task.yield()
+            #expect(!completed)
+            #expect(fixture.transport.oneWayMessages == [fixture.initialization])
+            sent.respond(.success(Data("native action completed".utf8)))
+            #expect(try await request.value == Data("native action completed".utf8))
+            #expect(completed)
+            #expect(fixture.connection.isConnected)
+        }
+    }
+
+    @Test func dispatchIsReportedOnlyAfterTheTransportAcceptsTheRequest() async throws {
+        try await withGUIConnection { fixture in
+            fixture.transport.sendError = .send
+            var dispatched = false
+            await #expect(throws: GUITransportTestError.send) {
+                try await fixture.connection.request(Data("not sent".utf8), didSend: { dispatched = true })
+            }
+            #expect(!dispatched)
+            fixture.transport.sendError = nil
+            let request = Task { @MainActor in
+                try await fixture.connection.request(Data("sent".utf8), didSend: { dispatched = true })
+            }
+            let sent = try await fixture.transport.nextRequest()
+            #expect(dispatched)
+            sent.respond(.success(Data("reply".utf8)))
+            _ = try await request.value
         }
     }
 
@@ -125,7 +163,7 @@ struct NativeGUIConnectionTests {
         try await withGUIConnection { fixture in
             let cancellation = Data("cancel retained action".utf8)
             let request = Task { @MainActor in
-                try await fixture.connection.request(Data("active mutation".utf8), cancellationMessage: cancellation)
+                try await fixture.connection.request(Data("active mutation".utf8), cancellation: .nativeMessage(cancellation))
             }
             defer { request.cancel() }
             _ = try await fixture.transport.nextRequest()
@@ -198,7 +236,7 @@ struct NativeGUIConnectionTests {
     @Test func cancellationDeliveryFailureEndsAllPendingRequestsWithoutLosingItsCause() async throws {
         try await withGUIConnection { fixture in
             let request = Task { @MainActor in
-                try await fixture.connection.request(Data("action".utf8), cancellationMessage: Data("cancel".utf8))
+                try await fixture.connection.request(Data("action".utf8), cancellation: .nativeMessage(Data("cancel".utf8)))
             }
             defer { request.cancel() }
             _ = try await fixture.transport.nextRequest()
@@ -233,7 +271,7 @@ struct NativeGUIConnectionTests {
     @Test func failedCancellationCleanupRemainsObservableAtShutdown() async throws {
         try await withGUIConnection { fixture in
             let action = Task { @MainActor in
-                try await fixture.connection.request(Data("action".utf8), cancellationMessage: Data("cancel".utf8))
+                try await fixture.connection.request(Data("action".utf8), cancellation: .nativeMessage(Data("cancel".utf8)))
             }
             defer { action.cancel() }
             let actionSent = try await fixture.transport.nextRequest()
