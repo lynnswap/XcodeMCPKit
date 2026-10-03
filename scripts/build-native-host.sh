@@ -21,6 +21,9 @@ if [[ "$configuration" != debug && "$configuration" != release ]]; then
 fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -z "$developer_dir" ]]; then developer_dir="$(/usr/bin/xcode-select -p)"; fi
+if [[ "$developer_dir" == *.app || "$developer_dir" == *.app/ ]]; then
+  developer_dir="${developer_dir%/}/Contents/Developer"
+fi
 contents_dir="$(cd "$developer_dir/.." && pwd)"
 service_app="$contents_dir/Developer/Library/Xcode/Agents/Xcode Service.app"
 bridge_binary="$contents_dir/Developer/usr/bin/mcpbridge"
