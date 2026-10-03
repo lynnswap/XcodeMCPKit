@@ -17,6 +17,39 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test(arguments: [
+        "missing", "true", "[]", "null", "{}",
+        #"{"capabilities":{},"clientInfo":{"name":"Test","version":"1"}}"#,
+        #"{"protocolVersion":42,"capabilities":{},"clientInfo":{"name":"Test","version":"1"}}"#,
+        #"{"protocolVersion":"2025-06-18","clientInfo":{"name":"Test","version":"1"}}"#,
+        #"{"protocolVersion":"2025-06-18","capabilities":true,"clientInfo":{"name":"Test","version":"1"}}"#,
+        #"{"protocolVersion":"2025-06-18","capabilities":{}}"#,
+        #"{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":[]}"#,
+        #"{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"version":"1"}}"#,
+        #"{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":true,"version":"1"}}"#,
+        #"{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Test"}}"#,
+        #"{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Test","version":1}}"#,
+    ])
+    func invalidInitializeParametersDoNotInitializeTheSession(raw: String) async throws {
+        try await withNativeSession { harness in
+            let parameters = raw == "missing" ? nil : try nativeTestJSON(Data(raw.utf8))
+            try harness.request("initialize", id: "invalid-initialize", params: parameters)
+            let invalid = try await harness.nextMessage()
+            #expect(try nativeTestField(invalid, "id") == .string("invalid-initialize"))
+            #expect(try nativeTestField(invalid, "error", "code") == .number(.int(-32602)))
+            try harness.request("tools/list", id: "uninitialized")
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
+            #expect(harness.backend.listCalls == 0)
+            #expect(harness.backend.executions.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
+
+            _ = try await harness.initialize()
+            try harness.request("tools/list", id: "valid-initialize")
+            #expect(try nativeTestField(await harness.nextMessage(), "result", "tools") == .array([]))
+            #expect(harness.backend.listCalls == 1)
+        }
+    }
+
     @Test func catalogReflectsTheBackendAtEachRequest() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
@@ -503,7 +536,7 @@ struct NativeMCPSessionTests {
         }
     }
 
-    @Test(arguments: [false, true], ["{malformed", "[]", "true", "null", "42", #""scalar""#])
+    @Test(arguments: [false, true], ["{malformed", "C", "Content-", "Content-Lengt", "[]", "true", "null", "42", #""scalar""#])
     func invalidFramesAndAValidRequestInTheSameChunkAreHandledSeparately(contentLength: Bool, raw: String) async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
@@ -514,7 +547,7 @@ struct NativeMCPSessionTests {
             #expect(framing.bufferedByteCount == 0)
             let error = try await harness.nextMessage()
             #expect(try nativeTestField(error, "id") == .null)
-            #expect(try nativeTestField(error, "error", "code") == .number(.int(raw == "{malformed" ? -32700 : -32600)))
+            #expect(try nativeTestField(error, "error", "code") == .number(.int(["{malformed", "C", "Content-", "Content-Lengt"].contains(raw) ? -32700 : -32600)))
             let validResponse = try await harness.nextMessage()
             #expect(try nativeTestField(validResponse, "id") == .string("after-frame-error"))
             #expect(try nativeTestField(validResponse, "result") == .object([:]))
