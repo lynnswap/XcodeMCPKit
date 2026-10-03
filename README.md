@@ -1,12 +1,21 @@
 # XcodeMCPKit
 
-XcodeMCPKit is a local proxy for Xcode MCP. It gives your MCP clients one stable
-endpoint and automates the `mcpbridge` approval flow.
+XcodeMCPKit serves native Xcode tools through one local MCP endpoint. Pass an
+absolute workspace path to use its open GUI owner, or let the native host load
+the workspace model when no GUI owns it.
 
 ## Requirements
 
 - macOS 15.4+
-- Swift 6.3+
+- Swift 6.3+ for building from source
+- An Xcode installation that provides the native tool contracts used by the host
+
+Native packaging and live behavior have been verified with Xcode 27 and Swift
+6.4. Missing framework or API contracts produce diagnostics; this verification
+record does not restrict other Xcode versions by version number.
+
+The release installer uses Python 3 and `codesign` to stage and verify the native
+application before replacing it.
 
 ## Install
 
@@ -25,15 +34,15 @@ Custom install directory:
 curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh -s -- --bindir "$HOME/bin"
 ```
 
-Install a specific version:
+Install a specific release by replacing `<tag>` with its release tag:
 
 ```bash
-curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/download/v0.11.0/install.sh | sh
+curl -fsSL 'https://github.com/lynnswap/XcodeMCPKit/releases/download/<tag>/install.sh' | sh
 ```
 
 ### From Source
 
-Installs both the proxy server and the STDIO adapter:
+Installs the proxy server, STDIO adapter, and signed native helper application:
 
 ```bash
 swift run -c release xcode-mcp-proxy-install
@@ -57,28 +66,19 @@ source ~/.zshrc
 
 ## Set Up Your MCP Client
 
-### 1. Enable Xcode MCP Access
+### 1. Start the proxy server
 
-Open your project in Xcode, choose
-**Xcode > Settings > Intelligence**, and turn on
-**Allow external agents to use Xcode tools** under **Model Context Protocol**.
-See [Giving external agents access to Xcode][apple-xcode-mcp-access].
-
-This global Xcode setting is separate from the per-connection **Allow** dialog.
-`--auto-approve` handles Xcode connection dialogs, including those that appear
-while using headless routing; it does not enable headless MCP access.
-
-Xcode 27 also supports [optional headless MCP access](#optional-headless-mcp-access-xcode-27).
-
-### 2. Start the Proxy Server
+The installed `XcodeMCPNativeHost.app` must stay beside the proxy executables.
+The server starts its own headless native host and discovers GUI Xcode owners.
+You can start it with no GUI workspace open. No Xcode Service enable command,
+`mcpbridge` launch, or process-count setting is required.
 
 ```bash
 xcode-mcp-proxy-server --auto-approve
 ```
 
 `--auto-approve` clicks **Allow** on recognized Xcode MCP connection dialogs for
-all agents, including Python scripts and other clients that launch `mcpbridge`
-directly. Existing approval based on the proxy's agent name, PID, and executable
+all agents, including clients connecting outside this proxy. Existing approval based on the proxy's agent name, PID, and executable
 path is preserved. Additionally, the English heading `Allow “…” to access Xcode?`
 with an `Allow` button is approved for any agent. It applies in both GUI and
 headless modes while the proxy is running. In
@@ -91,9 +91,9 @@ Without Accessibility permission, omit `--auto-approve` and click **Allow** your
 xcode-mcp-proxy-server
 ```
 
-### 3. Register the Client
+### 2. Register the client
 
-Replace `xcrun mcpbridge` with the proxy endpoint.
+Register the running proxy endpoint with your MCP client.
 
 #### Codex
 
@@ -134,7 +134,8 @@ xcode-mcp-proxy --help
 |--------|-------------|
 | `--listen host:port` | Listen address. Defaults to `localhost:8765`. |
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. |
-| `--upstream-processes n` | Bridge count per GUI Xcode and the size of the enabled Xcode Service pool. Default: `1`, max: `10`. |
+| `--native-host-bundle path` | Native helper app bundle. Defaults to automatic helper lookup. |
+| `--developer-dir path` | Selected Xcode app or developer directory. Defaults to the selected Xcode installation. |
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialize still has a bounded handshake timeout. |
 | `--config path` | TOML config path. |
 | `--auto-approve` | Automatically approve Xcode MCP connection dialogs for all agents, including direct connections outside the proxy. Requires Accessibility permission. |
@@ -147,6 +148,8 @@ xcode-mcp-proxy --help
 |----------|-------------|
 | `LISTEN` | Listen address, for example `127.0.0.1:8765`. |
 | `HOST` / `PORT` | Listen host and port when `LISTEN` is unset. |
+| `XCODE_MCP_NATIVE_HOST_BUNDLE` | Native helper bundle override; `--native-host-bundle` takes precedence. |
+| `DEVELOPER_DIR` | Xcode selection; `--developer-dir` takes precedence. |
 | `MCP_XCODE_CONFIG` | TOML config path. `--config` takes precedence. |
 | `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream`. |
 | `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, or `critical`. Defaults to `info`; `debug` includes HTTP access and route-recovery telemetry. |
@@ -154,15 +157,13 @@ xcode-mcp-proxy --help
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
 | `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root used to derive the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
 
-The proxy discovers GUI Xcode processes and includes Xcode Service when the
-selected Xcode provides it and access is enabled. Workspace arguments select the
-owner for each request; no server-wide mode, PID, Apple session ID, or custom
-bridge command is required. Inherited `MCP_XCODE_PID` and
-`MCP_XCODE_SESSION_ID` are removed before launching bridge children; the proxy
-sets a GUI child's PID from its discovered owner.
+The proxy owns one headless native connection and one native connection for each
+GUI Xcode owner. Each connection supports concurrent requests. Workspace
+arguments choose the owner for each operation. Inherited `MCP_XCODE_PID` and
+`MCP_XCODE_SESSION_ID` do not select the backend.
 
 See [automatic routing migration](Docs/automatic-routing-migration.md) for
-removed CLI flags and embedding symbols.
+removed CLI flags, configuration properties, and the Swift client transport change.
 
 ### TOML Configuration
 
@@ -186,36 +187,35 @@ disabled = ["RunAllTests", "RunSomeTests"]
 - Disabled tools: removed from `tools/list` and rejected on direct `tools/call`.
 - Config changes require restarting `xcode-mcp-proxy-server`.
 
-## Tool Discovery
+## Tool discovery
 
-Each explicit `tools/list` request refreshes upstream catalogs. Concurrent requests
-share an in-flight refresh, so discovery observes additions and removals even when
-Xcode does not send a catalog-change notification. Switching the bridge that serves
-an unchanged catalog does not trigger another catalog-change notification.
+The native host supplies the canonical tool catalog. Each explicit `tools/list`
+refreshes it, and concurrent callers share an in-flight load. GUI catalogs load
+in the background for owner routing. A GUI response cannot hide a failed native
+catalog load. Catalog notifications depend on changes in the exposed tool
+surface, not on which connection supplied it.
 
-## Select a Workspace
+## Select a workspace
 
-Pass an absolute project or workspace path in the standard `workspaceIdentifier`
-argument to a workspace-scoped tool. The proxy selects the GUI Xcode that owns
-that path and translates it to its native `tabIdentifier`. If no GUI owns the
-path, the proxy looks it up with `XcodeListWorkspaces` and forwards the native
-Service identifier. The workspace must already be open.
+Pass an absolute project or workspace path as the standard `workspaceIdentifier`
+argument. An open GUI owner takes priority. If no GUI owns the path, the native
+host loads its workspace model lazily for the requested operation. You do not
+need to open a GUI window or call `XcodeOpenWorkspace` first.
 
-You can also use a `tabIdentifier` from `XcodeListWindows` or an opaque Service
-`workspaceIdentifier` from Open/List directly. Selector arguments retain their
-native optionality. When multiple GUI tabs own a path, select one of the
-`tabIdentifier` candidates returned in the error. An unavailable known owner
-produces an error instead of redirecting the operation to another workspace.
+Use `XcodeListWindows` to inspect GUI tabs. When several tabs own the same path,
+select a `tabIdentifier` from the reported candidates. A lost known GUI owner
+produces an error rather than replaying the operation in another workspace.
+Native `workspaceIdentifier` values from `XcodeOpenWorkspace` or
+`XcodeListWorkspaces` are also accepted. Close a headless workspace explicitly
+when you no longer need it; the host closes only resources it owns during shutdown.
 
-`XcodeListWindows` lists GUI windows; `XcodeListWorkspaces` lists Service
-workspaces. Open a Service workspace explicitly with `XcodeOpenWorkspace(path:)`
-and close it explicitly with `XcodeCloseWorkspace(workspaceIdentifier:)`, using
-the identifier returned by Open/List. Workspaces are shared: repeated Open calls
-do not give a client exclusive ownership. Neither client disconnect nor proxy
-shutdown closes them. `DocumentationSearch` needs no workspace selector.
+GUI operations use Xcode's workspace context. GUI builds save pending editor
+changes and use the active scheme. Native file-reading tools return disk-backed
+content; they do not promise an unsaved editor buffer. Tools without workspace
+scope, such as `DocumentationSearch`, use the native host.
 
-The former proxy-only `workspacePath` input argument is no longer supported.
-Native list results still include `workspacePath` as output.
+The former proxy-only `workspacePath` input is unsupported. Native list results
+can still include `workspacePath` as output.
 
 ## Migration
 
@@ -241,26 +241,6 @@ Only the following cases need changes:
   `Accept: application/json, text/event-stream` on `POST /mcp`, and do not send
   JSON-RPC batch requests.
 
-## Optional: Headless MCP Access (Xcode 27)
-
-Xcode 27 can serve MCP requests without a project or workspace open in the
-Xcode app. This is optional for XcodeMCPKit.
-
-Enable headless access:
-
-```bash
-sudo xcrun mcp-server enable
-```
-
-On first workspace access, approve the agent and containing folder in Xcode
-Service when prompted.
-
-Or enable it with all agents always allowed:
-
-```bash
-sudo xcrun mcp-server enable --unsafe-always-allow-all-agents
-```
-
 ## Troubleshooting
 
 - [Troubleshooting](Docs/troubleshooting.md)
@@ -276,7 +256,7 @@ XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapte
 scripts/check.sh
 ```
 
-To diagnose Xcode permission dialogs without launching `mcpbridge`, run the
+To diagnose permission dialogs without launching a native connection, run the
 package-only maintainer tool with explicit existing process identities:
 
 ```bash

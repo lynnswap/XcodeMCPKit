@@ -1,58 +1,69 @@
-# Automatic Xcode routing migration
+# Native routing migration
 
-The proxy now discovers GUI Xcode and enabled Xcode Service automatically.
-A request's standard `workspaceIdentifier` selects a workspace by absolute path
-or by an opaque identifier returned by Service. `tabIdentifier` remains available
-for selecting a specific GUI tab, including when multiple windows own the same
-path. See [Select a Workspace](../README.md#select-a-workspace).
+The proxy starts an owned native host and discovers GUI Xcode owners. Pass an
+absolute `workspaceIdentifier`; an open GUI owner takes priority, and the native
+host loads the model when no GUI owns the path. See
+[Select a workspace](../README.md#select-a-workspace).
 
-## CLI
+## Server and CLI
 
-Remove these server options from launch scripts and service definitions:
+Remove `--upstream-processes` and `upstreamProcessCount`. The runtime owns one
+headless host and one connection per GUI owner, with concurrent requests on each
+connection. There is no process-count replacement option.
 
-- `--xcode-mode`
-- `--session-id`
-- `--upstream-command`
-- `--upstream-args`
-- `--upstream-arg`
+The previously removed `--xcode-mode`, `--session-id`, `--upstream-command`,
+`--upstream-args`, and `--upstream-arg` remain unsupported. Remove Xcode Service
+status/enable steps and explicit `mcpbridge` launches from proxy startup scripts.
+Endpoint, deadline, tool visibility, and permission automation settings remain.
 
-These options are rejected rather than aliased. Use `--upstream-processes n`
-to set the connection count per GUI process and for the Service pool (`1...10`,
-default `1`). Endpoint, timeout, tool visibility, and permission controls remain
-available. Service must already be enabled in the selected Xcode installation;
-the proxy does not change that permission.
-
-Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` are stripped from bridge
-launch environments. The proxy supplies a GUI PID from process discovery;
-Service bridges use the native default connection.
-
-## Embedded server
-
-Replace `upstream: .defaultMCPBridge(processesPerXcode: n)` with
-`upstreamProcessCount: n` in `XcodeMCPProxyServerConfiguration`. Remove `xcodeMode`
-and Apple session-ID configuration. The nested `XcodeMode` and `Upstream` types,
-including `Upstream.custom`, have been removed.
+`XcodeMCPProxyServerConfiguration` adds optional `nativeHostBundleURL` and
+`developerDirectoryURL`. Leave them `nil` for helper and Xcode discovery, or
+provide a signed app bundle and selected installation explicitly:
 
 ```swift
-let server = XcodeMCPProxyServer(
-    configuration: .init(upstreamProcessCount: 2)
-)
+import Foundation
+import XcodeMCPProxyKit
+
+let server = XcodeMCPProxyServer(configuration: .init(
+    nativeHostBundleURL: URL(fileURLWithPath: "/opt/xcode-mcp/XcodeMCPNativeHost.app"),
+    developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer")
+))
 let endpoint = try await server.start()
-// Use endpoint.url.
 try await server.shutdown()
 ```
 
-The general `XcodeMCPKit` client still supports
-`.localBridge(.custom(command:arguments:environment:))`. Tests and general MCP
-clients can use that transport directly. The HTTP `MCP-Session-Id` header and
-STDIO adapter session recovery are unchanged; they are independent of Apple's
-bridge environment variable.
+CLI equivalents are `--native-host-bundle` and `--developer-dir`.
+`XCODE_MCP_NATIVE_HOST_BUNDLE` and `DEVELOPER_DIR` are their environment defaults.
+The source and release installers now install `XcodeMCPNativeHost.app` beside
+the proxy binaries. Keep that bundle with the executables when relocating them.
 
-## Live verifier
+## Swift client transport
 
-Remove `--xcode-mode`. Use `--no-open-xcode` to skip opening a GUI fixture window.
-The verifier waits for the GUI fixture it opens, or prepares a dedicated Service
-workspace when no GUI fixture is available with `--no-open-xcode`. Service Open
-performs first-use approval; cleanup closes only that dedicated workspace. The
-report records the selected backend. Catalog artifacts are now named
-`tool-catalog.json`.
+`XcodeMCPConfiguration` now defaults to `.streamableHTTPProxyDiscovery()`.
+Start `xcode-mcp-proxy-server` before constructing a default client. This path
+provides automatic GUI ownership and headless fallback.
+
+The `.defaultMCPBridge` bridge case has been removed. For a standalone headless
+session, select the native host explicitly:
+
+```swift
+import XcodeMCPKit
+
+let client = try await XcodeMCP(configuration: .init(
+    transport: .localBridge(.nativeHost())
+))
+let tools = try await client.listTools()
+await client.close()
+```
+
+`.localBridge(.custom(command:arguments:environment:))` remains available for
+generic MCP processes and tests. The HTTP `MCP-Session-Id` and adapter recovery
+contract are unchanged. Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` do not
+select the proxy's backend.
+
+## Workspace behavior
+
+Explicit Open is optional for ordinary absolute-path operations. GUI builds use
+Xcode's active scheme and save pending editor changes. Native read/current-file
+results remain disk-backed. Catalog availability requires the native host;
+GUI success no longer substitutes for a missing native catalog.

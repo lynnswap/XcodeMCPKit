@@ -1,85 +1,65 @@
-# XcodeMCPProxy Architecture
+# XcodeMCPProxy architecture
 
-## Summary
-- `xcode-mcp-proxy-server` runs as the proxy server (Streamable HTTP; spawns `xcrun mcpbridge`).
-- HTTP-capable MCP clients connect directly to the proxy server (default: `http://localhost:8765/mcp`).
-- `xcode-mcp-proxy` remains as a supported STDIO compatibility adapter, forwarding to the proxy server as a modern Streamable HTTP client.
-- The proxy targets MCP protocol version `2025-06-18`, matching current Xcode `mcpbridge` negotiation.
-- Each HTTP request carries exactly one JSON-RPC object. JSON-RPC batch arrays are rejected at the HTTP boundary without downstream side effects.
+`xcode-mcp-proxy-server` serves MCP over Streamable HTTP and starts the packaged
+native helper. The helper loads Xcode frameworks through ABIBridge method
+handles. One headless host provides the canonical native catalog and workspace
+models; each GUI Xcode owner gets one native connection. Requests multiplex on
+those connections instead of requiring a configurable process pool.
 
-## Diagrams
+## Request routing
 
-### Proxy Server (Streamable HTTP)
 ```mermaid
 flowchart LR
-  subgraph Clients["MCP clients (multiple)"]
-    direction TB
-    clientA(["Client A"])
-    clientB(["Client B"])
-    clientN(["Client N"])
-  end
-  proxy["xcode-mcp-proxy-server<br/>Streamable HTTP"]
-  subgraph Upstreams["Upstream (mcpbridge pool)"]
-    direction TB
-    upstream1(["xcrun mcpbridge #1<br/>stdio JSON-RPC"])
-    upstream2(["xcrun mcpbridge #2<br/>stdio JSON-RPC"])
-    upstreamN(["xcrun mcpbridge #N<br/>stdio JSON-RPC"])
-  end
-  xcode["Xcode MCP server"]
-
-  clientA -->|POST/GET/DELETE /mcp| proxy
-  clientB -->|POST/GET/DELETE /mcp| proxy
-  clientN -->|POST/GET/DELETE /mcp| proxy
-  proxy -->|stdio JSON-RPC| upstream1
-  proxy -->|stdio JSON-RPC| upstream2
-  proxy -->|stdio JSON-RPC| upstreamN
-  upstream1 <--> |MCP bridge| xcode
-  upstream2 <--> |MCP bridge| xcode
-  upstreamN <--> |MCP bridge| xcode
+  client["MCP client"] -->|"Streamable HTTP"| proxy["Proxy server"]
+  stdio["STDIO client"] --> adapter["xcode-mcp-proxy"]
+  adapter -->|"Streamable HTTP"| proxy
+  proxy -->|"absolute workspace path without GUI owner"| host["Owned native host"]
+  proxy -->|"GUI workspace or tab owner"| gui["Native GUI connection"]
+  host --> model["Xcode workspace model"]
+  gui --> app["Existing GUI Xcode"]
 ```
 
-### STDIO Adapter (Optional)
-```mermaid
-flowchart LR
-  subgraph A["Client Process A"]
-    clientA(["Codex / Claude Code A"])
-    adapterA["xcode-mcp-proxy A<br/>STDIO adapter"]
-    clientA -->|NDJSON over STDIO| adapterA
-  end
+The runtime discovers GUI ownership through its cached Xcode inventory and
+window identifiers. An absolute `workspaceIdentifier` selects its GUI owner
+when one exists. Otherwise, the host loads the workspace model for the operation.
+Opaque native workspace identifiers stay on the native host. Opaque GUI tab
+identifiers select their known GUI owner. Symlinks are resolved when matching
+workspace paths. Ambiguous GUI ownership requires an explicit tab selection;
+a failed known owner is not replaced by another owner.
 
-  subgraph B["Client Process B"]
-    clientB(["Codex / Claude Code B"])
-    adapterB["xcode-mcp-proxy B<br/>STDIO adapter"]
-    clientB -->|NDJSON over STDIO| adapterB
-  end
+GUI builds use the active workspace scheme and save pending editor changes.
+Native read/current-file results keep their disk-backed semantics. The runtime
+does not promise that every tool exposes an unsaved GUI buffer.
 
-  proxy["xcode-mcp-proxy-server<br/>Streamable HTTP"]
-  subgraph Upstreams["Upstream (mcpbridge pool)"]
-    direction TB
-    upstream1(["xcrun mcpbridge #1<br/>stdio JSON-RPC"])
-    upstream2(["xcrun mcpbridge #2<br/>stdio JSON-RPC"])
-    upstreamN(["xcrun mcpbridge #N<br/>stdio JSON-RPC"])
-  end
-  xcode["Xcode MCP server"]
+## Catalog ownership
 
-  adapterA -->|POST/GET/DELETE /mcp| proxy
-  adapterB -->|POST/GET/DELETE /mcp| proxy
-  proxy -->|stdio JSON-RPC| upstream1
-  proxy -->|stdio JSON-RPC| upstream2
-  proxy -->|stdio JSON-RPC| upstreamN
-  upstream1 <--> |MCP bridge| xcode
-  upstream2 <--> |MCP bridge| xcode
-  upstreamN <--> |MCP bridge| xcode
-```
+The owned native host must complete `tools/list` before the proxy exposes a
+canonical catalog. A successful GUI catalog does not substitute for native host
+failure. Concurrent client refreshes share their load and deadline ownership.
+GUI catalog refreshes run in the background and provide routing metadata.
+Catalog change notifications reflect a changed exposed tool surface.
 
-## Ports and Addressing
-- `xcode-mcp-proxy-server` binds to `localhost:8765` by default (override via `--listen` / `--host` / `--port`, or env `LISTEN` / `HOST` / `PORT`).
-- The proxy server writes the resolved endpoint to `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
-- `xcode-mcp-proxy` (STDIO adapter) resolves the upstream in this order:
-  - explicit URL/config, such as CLI `--url`
-  - `XCODE_MCP_PROXY_ENDPOINT`
-  - discovery file (`~/Library/Caches/XcodeMCPProxy/endpoint.json`)
-  - fallback default (`http://localhost:8765/mcp`)
+The runtime owns request correlation, cancellation, and connection recovery.
+Multiplexing preserves independent request IDs and progress lanes on each
+connection. Cancellation ends only the matching request. A GUI action remains
+tracked until its native reply or connection termination; shutdown cancels and
+awaits producers and invalidates owned connections.
+
+## Ports and discovery
+
+The server binds `localhost:8765` by default. `--listen`, `--host`, `--port`, and
+`LISTEN` / `HOST` / `PORT` select another address. Endpoint discovery uses
+`~/Library/Caches/XcodeMCPProxy/endpoint.json` unless overridden.
+
+The STDIO adapter resolves explicit `--url`, `XCODE_MCP_PROXY_ENDPOINT`, the
+discovery file, then `http://localhost:8765/mcp`. The Swift client's default
+`.streamableHTTPProxyDiscovery()` reads the proxy discovery record and requires
+a running server. Explicit standalone `.localBridge(.nativeHost(...))` starts
+an owned headless host.
+
+A discovery record is a URL hint. Only a connection and standard MCP initialize
+handshake establish reachability. Discovery publication is part of server
+startup; write failure unwinds acquired resources.
 
 ## Streamable HTTP Contract
 - Every request is checked by one Origin policy before route resolution, session creation, debug reset, or upstream I/O. This includes `/health`, `/debug/*`, MCP routes, and unknown routes.
@@ -96,24 +76,25 @@ flowchart LR
 - Upstream `notifications/progress` is delivered only to the session that owns the active operation lease. It is dropped when no owner exists; globally scoped server notifications continue to fan out to initialized sessions.
 - HTTP owns each session's bounded SSE notification buffer. On overflow it drops the oldest notification and emits at most one warning per 30 seconds per session. `dropped_notifications` is cumulative for that session, while the warning also reports the dropped delta and sanitized methods of the notifications actually evicted; notification payloads are never logged. Unhandled server notifications remain debug-level events.
 
-## Discovery Contract
 
-- The discovery record is a URL hint, not proof that a server is reachable. PID liveness is not used as a second source of truth.
-- Reachability is established only by connecting to the endpoint and completing the standard initialize handshake.
-- When discovery is enabled, writing the record is part of server startup. A write failure unwinds listener/runtime resources and makes startup fail.
+## Native helper and process observation
 
-## Xcode Process Observation Contract
+`NativeHostInvocation.resolve` locates `XcodeMCPNativeHost.app` beside the proxy
+binary, through `XCODE_MCP_NATIVE_HOST_BUNDLE`, or through installation paths.
+Explicit bundle and developer-directory URLs support embedding. Missing helper
+or required native contracts return diagnostics. Xcode Service enable/status
+and GUI launch/readiness are not common startup prerequisites.
 
-- The proxy observes `NSWorkspace.runningApplications` with KVO using an initial callback. Every callback reads the current atomic property once instead of treating the KVO change payload as a full snapshot. This is the only live process-inventory owner.
-- Process-bound routing, upstream readiness, DocumentationSearch discovery, startup summaries, and permission-dialog automation read the same cached snapshot. Permission automation covers the known helper applications exposed by `NSWorkspace`; it does not claim an inventory of every OS process.
-- The runtime does not run `pgrep`, enumerate all PIDs, or periodically rescan Xcode membership. Inventory membership changes only from the initial/KVO snapshots. Recovery may re-run route reconciliation against the monitor's cached snapshot, but it never re-reads OS process inventory.
-- Every compatible Xcode PID in the cached inventory owns an independent route. As soon as membership is established, the runtime starts the route's primary bridge and sends that route's protocol `initialize` without waiting for another Xcode's response, permission decision, initialized notification, or catalog. `CanonicalHandshakeState` accepts concurrent proof-bound participants; the first participant to complete its initialized-notification and health commit publishes the canonical semantic result, and results that differ only in `serverInfo` join it. Each joined route loads its own catalog, after which workspace and tab ownership select the matching PID. A meaningful result mismatch terminates the current activation attempt for that route; the route may retry after its cooldown and must pass compatibility again.
-- Client-facing `tools/list` availability does not wait for every route catalog to converge. It may return the union of the currently committed route catalogs as an available, non-canonical surface while missing routes continue under their activation and background-refresh owners. The canonical catalog is published only when every currently required route catalog is present; later route commits publish `notifications/tools/list_changed` when the client-visible surface changes.
-- Route activation attempts, bridge-pool recovery, retry scheduling, and readiness backoff are debug telemetry. The proxy emits the user-visible **Xcode tools are unavailable** warning at most once during a continuous incident where no usable catalog exists. A partial catalog suppresses that warning without consuming the next incident, and a successful catalog commit rearms it.
-- Canonical initialize support is bound to the exact upstream topology proof, including slot generation. Raw compatible initialize evidence is retained separately from current health eligibility. When the publishing proof is quarantined or exits, the exposed source and raw result rebind to an eligible compatible survivor. If every raw supporter is quarantined, the initialize result is hidden from clients while the retained semantic baseline still rejects incompatible offers. Only a validated health probe or validated `tools/list` response restores eligibility; ordinary request success does not. Detaching the last raw supporter clears the semantic baseline, and a delayed clear from an old slot generation cannot remove its replacement.
-- Quarantine, detach, and slot replacement evict the catalog and abandon catalog-attempt resources owned by the affected exact proof. A recovered proof can re-expose its retained initialize result after validation, but it is not routable for tools until a fresh `tools/list` load commits a new catalog.
-- If a downstream `initialize` is pending while only quarantined raw supporters remain, the initialize owner arms one generation-fenced timer for the earliest exact proof and quarantine deadline. The callback validates the topology proof, health-probe generation, deadline, and pending waiter before probing; failure re-arms from the current health state, while publication, removal of the last waiter, debug reset, and shutdown cancel the timer. This recovery reads existing topology and never rescans Xcode processes.
-- Auto-approve still polls AX windows while enabled because AppKit has no permission-dialog appearance event. It reconciles cached process IDs and gives each Xcode/helper PID an independent AX polling task, so one process's AX response time cannot delay another process's displayed dialog. The proxy preserves configured-agent identity matching and also approves the English connection heading with an Allow button for other agents. The maintainer diagnostic uses only configured-agent matching. Child-process lookup remains deferred until a structurally eligible dialog needs matching.
-- A route cooldown uses a `ProcessControlPlaneAuthority`-owned one-shot timer fenced by route identity, scope, monotonic generation, and deadline. Replacement, availability, expiry, retirement, reset, and shutdown detach the exact owned handle; stale attachment and callback races cannot mutate a newer cooldown. Expiry retries the existing route without querying the OS process list.
-- An unavailable DocumentationProvider attempt schedules exactly one generation-fenced retry after two seconds. The retry uses the cached Xcode snapshot and never queries the OS process inventory; success, replacement, reset, and shutdown cancel the pending work.
-- Apple delivers `runningApplications` KVO changes while the main run loop runs in a common mode. The shipped Darwin async-main executable and normal AppKit hosts satisfy this; embedding hosts must use the public async lifecycle rather than block the main thread.
+`XcodeProcessEventMonitor` owns the `NSWorkspace.runningApplications` KVO
+subscription and cached GUI/permission-dialog inventory. Routing and permission
+automation consume that snapshot; they do not independently poll process
+membership. Route recovery uses owned, generation-fenced work.
+
+Auto-approve polls AX windows because AppKit provides no dialog appearance event.
+Each eligible dialog-owner PID has an independent scanner. Configured agent
+identity matching uses the native helper executable and descendant process IDs;
+the proxy also accepts the recognized English Allow heading for all agents.
+The maintainer diagnostic retains configured-agent matching only.
+
+Embedding applications must keep the main run loop available for AppKit process
+observation and use the public asynchronous server lifecycle.

@@ -17,12 +17,19 @@
     helper preparation/invocation, and asset repair operations.
   - Takes immutable installation/query values and returns typed documents.
     It does not own Xcode process inventory, MCP sessions, or provider routing.
+- `XcodeMCPNativeRuntime` and `XcodeMCPNativeHost`
+  - Load selected Xcode frameworks and invoke native tool contracts through
+    ABIBridge 0.7 method handles.
+  - Own workspace-model resources, native action streams, GUI connections,
+    and helper STDIO framing/initialization.
+  - Missing native contracts return diagnostics; tool failures and transport
+    failures retain their separate MCP meanings.
 - `XcodeMCPProxyRuntimeContract`
   - Package request/reply/session/snapshot values and serving protocols shared
     by Runtime, HTTP, and facade composition. No execution state or I/O owner.
 - `XcodeMCPProxyRuntime`
-  - Proxy control plane, request/session ownership, Xcode routing, upstream
-    topology, documentation providers, and feature workflows.
+  - Proxy control plane, request/session ownership, native/GUI routing,
+    connection topology, canonical native catalogs, and feature workflows.
 - `XcodeMCPProxyHTTP`
   - HTTP listener lifecycle, transport validation, response encoding, and SSE delivery.
   - Depends on the runtime contract and Core without linking the concrete Runtime.
@@ -44,7 +51,7 @@
 - `XcodeMCPPermissionApproverTool`
   - Maintainer executable that validates explicit existing PIDs and runs the
     shared permission automation until interrupted. It never launches
-    `mcpbridge` and is not installed by the release installer.
+    a native connection and is not installed by the release installer.
 
 ## Ownership Boundaries
 
@@ -71,14 +78,10 @@
   - Owns the KVO subscription and cached snapshots derived from
     `NSWorkspace.runningApplications`. Each callback reads the current atomic
     property; it does not treat the KVO change payload as a full snapshot.
-    Process routing, readiness,
-    DocumentationSearch, and auto-approve consume this cache; they must not add
+    GUI routing and auto-approve consume this cache; they must not add
     independent `pgrep`, libproc, or periodic membership scans.
   - Readiness changes are generation-fenced. Route cooldown recovery is a
     route-identity-fenced one-shot timer, not a process rescan.
-  - DocumentationProvider discovery schedules one generation-fenced retry per
-    unavailable attempt. It consumes the same cached snapshot and is cancelled
-    by success, replacement, reset, or shutdown; it never rescans OS processes.
 - `XcodeMCPProxyHTTP` gateway
   - `HTTPRequestSecurityPolicy` validates Origin for every route before any
     side effect. The gateway enforces session headers and negotiated protocol
@@ -105,9 +108,9 @@
   session authority, progress, and transport wrappers. Core wire values are
   converted at this SDK boundary and do not become public aliases.
 - Runtime and HTTP depend on Core rather than the public SDK. Runtime owns
-  execution policy and request lifetimes; HTTP owns network delivery. Runtime
-  adapts typed documentation backend results to the MCP protocol and chooses
-  providers; the backend depends only on Core and NIOCore. The
+  execution policy and request lifetimes; HTTP owns network delivery. The native
+  host owns ordinary DocumentationSearch execution. Optional documentation
+  backend components retain their Core/NIOCore boundary. The
   runtime serving protocol in `XcodeMCPProxyRuntimeContract` connects these
   two owners. The contract retains the NIOCore timeout value without exposing
   channels or event loops.
@@ -199,7 +202,8 @@ for, then verify each identifier is selected by exactly one CI shard.
   - `swift test --filter XcodeMCPPermissionAutomationTests -Xswiftc -strict-concurrency=minimal`
   - `swift test --filter XcodeMCPPermissionApproverToolTests -Xswiftc -strict-concurrency=minimal`
 
-These are used by the default CI workflow and release workflow, and intentionally avoid requiring real `mcpbridge`.
+These checks use lower process/transport fixtures and do not require GUI Xcode
+or a live native helper unless explicitly selected.
 
 ## Release Flow
 
@@ -240,8 +244,25 @@ are preserved. If publication succeeded but confirmation failed, rerunning the
 publish job verifies the public release's assets and tag without modifying it.
 
 GitHub Releases contain `install.sh`, `xcode-mcp-proxy-darwin-arm64.tar.gz`, and
-`SHA256SUMS.txt`. The checksum file covers both the archive and installer.
+`SHA256SUMS.txt`. The archive contains both proxy executables and the signed
+`bin/XcodeMCPNativeHost.app`. The checksum file covers both the archive and installer.
 x86_64 and universal archives are not produced.
+
+`scripts/build-native-host.sh` is the sole owner of native app Info.plist,
+selected-Xcode entitlement extraction, and signing. Source installation and
+release assembly invoke it rather than duplicate that configuration. Native
+packaging has been verified with Xcode 27 / Swift 6.4. The release build job
+must select an installation containing the required native service/GUI
+contracts; missing contracts fail with diagnostics instead of a version allowlist.
+
+Installers stage on the destination filesystem and verify the app signature
+before replacement. Darwin atomic directory swap moves an existing app into
+staging; cleanup failure reports the completed install and remaining staging
+path. Binary rename and executable permissions retain their install contract.
+Archive verification permits only the expected proxy files and signed native
+app subtree, including CodeResources. It rejects bundled Apple frameworks and
+links. Darwin verifies the app signature; publication also checks the trusted
+archive digest on the downloaded artifact.
 
 Release orchestration tests run in CI and locally with:
 
@@ -254,7 +275,7 @@ python3 -m unittest discover -s scripts/tests -v
 - In-process entry point:
   - `XCODE_MCP_RUN_STRESS_TESTS=1 swift test --no-parallel --filter ProxyStressTests -Xswiftc -strict-concurrency=minimal`
 - Purpose:
-  - Validate high-volume HTTP/session multiplexing without a live `mcpbridge`.
+  - Validate high-volume HTTP/session multiplexing without a live native helper.
 - Isolation rules:
   - Opt-in only; excluded from default `swift test`, `scripts/check.sh`, and CI.
   - Uses an in-process HTTP server and fake upstream.
@@ -274,18 +295,18 @@ python3 -m unittest discover -s scripts/tests -v
   - Each agent sends 100 `DocumentationSearch` requests in a closed loop, then reports throughput and per-request latency percentiles.
   - Deletes benchmark MCP sessions before exit.
 
-## Live `mcpbridge` Suite
+## Native live verification
 
-- Entry point:
-  - `XCODE_MCP_RUN_LIVE_MCPBRIDGE_TESTS=1 swift test --no-parallel --filter ProxyLiveMCPBridgeTests -Xswiftc -strict-concurrency=minimal`
-- Purpose:
-  - Validate the real `mcpbridge` path, `tools/list`, `XcodeListWindows`, `XcodeRefreshCodeIssuesInFile`, and proxy auto-approve behavior in a local-only environment.
-- Isolation rules:
-  - Uses the currently running Xcode session and requires exactly one Xcode process.
-  - Uses `127.0.0.1:0`.
-  - Uses a temp discovery file so the default discovery path is untouched.
-  - Avoids `--force-restart`.
-  - Reads the active workspace from `XcodeListWindows` and refreshes an existing Swift file without opening a new project.
+The legacy `ProxyLiveMCPBridgeTests` suite name remains a CI/test identifier.
+Its owned-host cases launch the signed native app, verify initialization and the
+catalog, and close their helper on EOF. They do not require an existing GUI
+process. Use the opt-in environment and explicit test scheme documented by the
+suite before starting a live run.
+
+For GUI behavior, use an existing Xcode owner and inspect its native windows,
+active scheme, and file results. Do not infer unsaved-buffer behavior from a
+headless read. Isolate disposable workspaces under a temporary root and close
+only resources created by the run.
 
 ## Cleanup Expectations
 
