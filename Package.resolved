@@ -1,13 +1,13 @@
 {
-  "originHash" : "89309630ae87c6a7653e3718436585b4ed47b5c9e010ff670254763cade29854",
+  "originHash" : "dc68a70ad3b8668d4905fe8a303cdef644c8f36942a6c4eb61c1ad5712ece193",
   "pins" : [
     {
       "identity" : "abibridge",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/lynnswap/ABIBridge.git",
       "state" : {
-        "revision" : "07110d6410ee0bb89e903d587a485a9ca30284b1",
-        "version" : "0.5.0"
+        "revision" : "e497e6e6ea88fb0e46cba7725a68db87491d414d",
+        "version" : "0.7.0"
       }
     },
     {
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/p-x9/MachOKit.git",
       "state" : {
-        "revision" : "ff82e37c37b17e3508e150f8a03adae8a6cc4a3e",
-        "version" : "0.53.0"
+        "revision" : "659d8d5adfba8f11b4a0e05c3b3c8aa59f017492",
+        "version" : "0.54.1"
       }
     },
     {

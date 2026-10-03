@@ -17,6 +17,69 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test func backendInitializationReceivesClientInfoAndTheToolConversation() async throws {
+        try await withNativeSession { harness in
+            let clientInfo: [String: JSONValue] = [
+                "name": .string("Actual MCP Client"), "version": .string("2.3"),
+                "extension": .object(["features": .array([.string("images"), .string("progress")])]),
+            ]
+            _ = try await harness.initialize(clientInfo: clientInfo)
+            let context = try #require(harness.backend.initializationContexts.first)
+            #expect(harness.backend.initializationContexts.count == 1)
+            #expect(context.clientInfo == clientInfo)
+            #expect(!context.conversationID.isEmpty)
+            try harness.call("Action", id: "same-conversation")
+            let execution = try await harness.backend.nextExecution()
+            #expect(execution.context.conversationID == context.conversationID)
+            try execution.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("same-conversation"))
+        }
+    }
+
+    @Test func failedBackendInitializationLeavesToolRequestsUnavailable() async throws {
+        try await withNativeSession { harness in
+            harness.backend.initializeError = .unavailable("GUI connection initialization failed")
+            let failure = try await harness.initialize()
+            #expect(try nativeTestField(failure, "error", "code") == .number(.int(-32603)))
+            #expect(try nativeTestField(failure, "error", "message") == .string("GUI connection initialization failed"))
+            #expect(try nativeTestObject(failure)["result"] == nil)
+            #expect(harness.backend.initializationContexts.count == 1)
+            try harness.request("tools/list", id: "catalog-after-failed-init")
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
+            try harness.call("Action", id: "call-after-failed-init")
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
+            #expect(harness.backend.listCalls == 0)
+            #expect(harness.backend.executions.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func nativeMCPResultsPreserveContentStructuredOutputAndErrorStatus(isError: Bool) async throws {
+        try await withNativeSession { harness in
+            harness.backend.resultFormat = .mcpResult
+            _ = try await harness.initialize()
+            try harness.call("GUIAction", id: "native-mcp-result")
+            let execution = try await harness.backend.nextExecution()
+            let nativeResult: JSONValue = .object([
+                "content": .array([
+                    .object(["type": .string("text"), "text": .string("Native output \n値")]),
+                    .object([
+                        "type": .string("image"), "mimeType": .string("image/png"), "data": .string("AAH/"),
+                        "annotations": .object(["audience": .array([.string("user")])]),
+                    ]),
+                ]),
+                "structuredContent": .object(["windows": .array([.object(["tabIdentifier": .string("window-4")])])]),
+                "isError": .bool(isError),
+                "_meta": .object(["native": .bool(true)]),
+            ])
+            try execution.complete(nativeResult)
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "id") == .string("native-mcp-result"))
+            #expect(try nativeTestField(response, "result") == nativeResult)
+        }
+    }
+
     @Test(arguments: [
         #"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"Mutation",}}"#,
         #"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"Mutation"},}"#,
@@ -61,9 +124,11 @@ struct NativeMCPSessionTests {
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
             #expect(harness.backend.listCalls == 0)
             #expect(harness.backend.executions.isEmpty)
+            #expect(harness.backend.initializationContexts.isEmpty)
             #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
 
             _ = try await harness.initialize()
+            #expect(harness.backend.initializationContexts.count == 1)
             try harness.request("tools/list", id: "valid-initialize")
             #expect(try nativeTestField(await harness.nextMessage(), "result", "tools") == .array([]))
             #expect(harness.backend.listCalls == 1)
@@ -648,10 +713,10 @@ private final class NativeSessionHarness {
         }
     }
 
-    func initialize() async throws -> JSONValue {
+    func initialize(clientInfo: [String: JSONValue] = ["name": .string("Native Runtime Tests"), "version": .string("1")]) async throws -> JSONValue {
         try request("initialize", id: "initialize", params: .object([
             "protocolVersion": .string(MCPProtocolVersion.current),
-            "capabilities": .object([:]), "clientInfo": .object(["name": .string("Native Runtime Tests"), "version": .string("1")]),
+            "capabilities": .object([:]), "clientInfo": .object(clientInfo),
         ]))
         return try await nextMessage()
     }
@@ -703,17 +768,25 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     }
 
     var tools: [NativeTool] = []
+    var resultFormat = NativeToolResultFormat.actionValue
+    var initializeError: NativeRuntimeError?
     var listError: NativeRuntimeError?
     var executeError: (any Error)?
     var shutdownError: NativeRuntimeError?
     private(set) var executions: [NativeSessionExecution] = []
     private(set) var observations: [Observation] = []
+    private(set) var initializationContexts: [NativeSessionContext] = []
     private(set) var listCalls = 0
     private(set) var shutdownCalls = 0
     private let executionEvents = AsyncStream<NativeSessionExecution>.makeStream()
     private var executionIterator: AsyncStream<NativeSessionExecution>.Iterator
 
     init() { executionIterator = executionEvents.stream.makeAsyncIterator() }
+
+    func initialize(context: NativeSessionContext) async throws {
+        initializationContexts.append(context)
+        if let initializeError { throw initializeError }
+    }
 
     func listTools() async throws -> [NativeTool] {
         listCalls += 1

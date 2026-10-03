@@ -1,6 +1,21 @@
 import Foundation
 import XcodeMCPWire
 
+package struct NativeSessionContext: Sendable {
+    package let conversationID: String
+    package let clientInfo: [String: JSONValue]
+
+    package init(conversationID: String, clientInfo: [String: JSONValue]) {
+        self.conversationID = conversationID
+        self.clientInfo = clientInfo
+    }
+}
+
+package enum NativeToolResultFormat {
+    case actionValue
+    case mcpResult
+}
+
 package struct NativeToolContext: Sendable {
     package let artifactsDirectory: URL
     package let conversationID: String
@@ -13,6 +28,8 @@ package struct NativeToolContext: Sendable {
 
 @MainActor
 package protocol NativeToolBackend: AnyObject {
+    var resultFormat: NativeToolResultFormat { get }
+    func initialize(context: NativeSessionContext) async throws
     func listTools() async throws -> [NativeTool]
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data>
     func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue)
@@ -20,6 +37,8 @@ package protocol NativeToolBackend: AnyObject {
 }
 
 extension NativeToolBackend {
+    package var resultFormat: NativeToolResultFormat { .actionValue }
+    package func initialize(context: NativeSessionContext) async throws {}
     package func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue) {}
 }
 
