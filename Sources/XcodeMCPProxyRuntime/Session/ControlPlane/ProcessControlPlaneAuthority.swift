@@ -2010,6 +2010,12 @@ final class ProcessControlPlaneAuthority: Sendable {
         state.withLockedValue(\.nativeCatalog)
     }
 
+    func defaultToolProvider(named name: String) -> ToolCatalogProvider? {
+        state.withLockedValue { state in
+            Self.availableToolProviders(in: state).first { $0.toolsByName[name] != nil }
+        }
+    }
+
     func providerCatalog(for proof: UpstreamTopologyProof) -> ToolCatalogProvider? {
         state.withLockedValue { state in
             if let native = state.nativeCatalog, native.sourceProof == proof { return native }
@@ -2872,30 +2878,28 @@ final class ProcessControlPlaneAuthority: Sendable {
         })
     }
 
+    private static func availableToolProviders(in state: State) -> [ToolCatalogProvider] {
+        let requiredProcessIDs = catalogRequiredProcessIDs(in: state)
+        var providers = state.catalogsByProcessID.values
+            .filter { requiredProcessIDs.contains($0.target.processID) }
+            .map(\.provider)
+        if let native = state.nativeCatalog { providers.append(native) }
+        return providers.sorted(by: ToolCatalogProvider.precedes)
+    }
+
     @discardableResult
     private static func recomputeCanonicalProjection(in state: inout State) -> Bool {
         if hasAvailableToolsCatalog(in: state) {
             resetToolsUnavailableWarningIncident(in: &state)
         }
         let previousRaw = state.canonicalToolsCatalogRaw
-        let requiredProcessIDs = catalogRequiredProcessIDs(in: state)
-        if let native = state.nativeCatalog {
-            let gui = state.catalogsByProcessID.values
-                .filter { requiredProcessIDs.contains($0.target.processID) }
-                .sorted(by: ProcessToolCatalogCodec.catalogSort)
-                .map(\.provider)
+        let providers = availableToolProviders(in: state)
+        if let first = providers.first {
             state.canonicalToolsCatalogRaw = ProcessToolCatalogCodec.toolsListResult(
-                from: [native] + gui,
-                base: native.rawResult
+                from: providers,
+                base: first.rawResult
             )
-            state.canonicalSourceProof = native.sourceProof
-        } else if let surface = availableToolCatalogSurface(
-               in: state,
-               processIDs: requiredProcessIDs
-           ),
-           let source = surface.sourceProof {
-            state.canonicalToolsCatalogRaw = surface.rawResult
-            state.canonicalSourceProof = source
+            state.canonicalSourceProof = first.sourceProof
         } else {
             state.canonicalToolsCatalogRaw = nil
             state.canonicalSourceProof = nil
@@ -3080,25 +3084,6 @@ enum ProcessToolCatalogCodec {
         return .object(tool)
     }
 
-    static func exposingWorkspacePathSelector(_ value: JSONValue) -> JSONValue {
-        guard case .object(var tool) = value,
-              case .object(var schema)? = tool["inputSchema"],
-              case .object(var properties)? = schema["properties"],
-              properties["tabIdentifier"] != nil,
-              properties["workspaceIdentifier"] == nil else { return value }
-        properties.removeValue(forKey: "tabIdentifier")
-        properties["workspaceIdentifier"] = .object([
-            "type": .string("string"),
-            "description": .string("Absolute workspace path. The proxy selects its owning GUI Xcode or loads a windowless native model.")
-        ])
-        schema["properties"] = .object(properties)
-        if case .array(let required)? = schema["required"] {
-            schema["required"] = .array(required.map { $0 == .string("tabIdentifier") ? .string("workspaceIdentifier") : $0 })
-        }
-        tool["inputSchema"] = .object(schema)
-        return mergingTool(preferred: value, additional: .object(tool))
-    }
-
     static func toolsByName(in result: JSONValue?) -> [String: JSONValue] {
         guard let result,
               case .object(let object) = result,
@@ -3117,6 +3102,18 @@ enum ProcessToolCatalogCodec {
     }
 
     static func isOwnerBoundTool(_ tool: JSONValue) -> Bool {
+        if case .object(let object) = tool,
+           case .object(let metadata)? = object["_meta"],
+           case .array(let providers)? = metadata[ToolCatalogProvider.providersMetadataKey] {
+            return providers.contains { provider in
+                guard case .object(let fields) = provider, let descriptor = fields["descriptor"] else { return false }
+                return declaresOwnerSelector(descriptor)
+            }
+        }
+        return declaresOwnerSelector(tool)
+    }
+
+    private static func declaresOwnerSelector(_ tool: JSONValue) -> Bool {
         guard case .object(let object) = tool,
               case .object(let schema)? = object["inputSchema"] else { return false }
         if case .object(let properties)? = schema["properties"],
@@ -3161,6 +3158,7 @@ enum ProcessToolCatalogCodec {
 
     static func toolsListResult(from providers: [ToolCatalogProvider], base: JSONValue? = nil) -> JSONValue? {
         guard !providers.isEmpty else { return nil }
+        let providers = providers.sorted(by: ToolCatalogProvider.precedes)
         var result: [String: JSONValue] = [:]
         if case .object(let fields)? = base ?? providers.first?.rawResult { result = fields }
         let names = Set(providers.flatMap { $0.toolsByName.keys }).sorted {
@@ -3171,17 +3169,12 @@ enum ProcessToolCatalogCodec {
                 provider.toolsByName[name].map { (provider, $0) }
             }
             guard case .object(var tool)? = entries.first?.1 else { return nil }
-            let descriptors = entries.map { exposingWorkspacePathSelector($0.1) }
-            let inputs = descriptors.compactMap { value -> JSONValue? in
-                guard case .object(let fields) = value else { return nil }
-                return fields["inputSchema"]
-            }
-            if let input = mergedSchema(inputs) { tool["inputSchema"] = input }
-            let outputs = descriptors.compactMap { value -> JSONValue? in
+            if let input = routedInputSchema(name: name, entries: entries) { tool["inputSchema"] = input }
+            let outputs = entries.compactMap { _, value -> JSONValue? in
                 guard case .object(let fields) = value else { return nil }
                 return fields["outputSchema"]
             }
-            if outputs.count == descriptors.count, let output = mergedSchema(outputs) {
+            if outputs.count == entries.count, let output = mergedSchema(outputs) {
                 tool["outputSchema"] = output
             } else {
                 tool.removeValue(forKey: "outputSchema")
@@ -3202,6 +3195,88 @@ enum ProcessToolCatalogCodec {
             return .object(tool)
         })
         return .object(result)
+    }
+
+    private static let ownerSelectors = ["workspaceIdentifier", "tabIdentifier"]
+
+    private static var ownerSelectorCondition: JSONValue {
+        .object(["anyOf": .array(ownerSelectors.map(nonemptyStringCondition))])
+    }
+
+    private static func nonemptyStringCondition(_ name: String) -> JSONValue {
+        .object([
+            "required": .array([.string(name)]),
+            "properties": .object([name: .object(["type": .string("string"), "minLength": .number(.int(1))])])
+        ])
+    }
+
+    private static func routedInputSchema(
+        name: String, entries: [(ToolCatalogProvider, JSONValue)]
+    ) -> JSONValue? {
+        let schemas = entries.compactMap { _, descriptor -> JSONValue? in
+            guard case .object(let fields) = descriptor else { return nil }
+            return fields["inputSchema"]
+        }
+        guard let first = schemas.first, let preferred = entries.first else { return nil }
+        let ownerBound = entries.contains { isOwnerBoundTool($0.1) }
+        let hasDefault = preferred.0.target == nil || !ownerBound || entries.count == 1
+        let affinitySelector = DeviceInteractionToolCall.continuationSelector(for: name)?.argumentName
+        let requiresOwner = entries.contains { entry in
+            ownerSelectors.contains { tool(entry.1, requiresArgument: $0) }
+        }
+        if hasDefault, !requiresOwner, schemas.allSatisfy({ $0 == first }) {
+            return addingProxySelectors(to: first, replacesRequiredSelectors: false)
+        }
+        var branches: [JSONValue] = []
+        let noOwner = JSONValue.object(["not": ownerSelectorCondition])
+        if hasDefault, affinitySelector == nil {
+            branches.append(.object(["allOf": .array([
+                addingProxySelectors(to: first, replacesRequiredSelectors: false), noOwner
+            ])]))
+        }
+        for schema in schemas {
+            branches.append(.object(["allOf": .array([
+                addingProxySelectors(to: schema, replacesRequiredSelectors: true), ownerSelectorCondition
+            ])]))
+            if let affinitySelector {
+                branches.append(.object(["allOf": .array([
+                    addingProxySelectors(to: schema, replacesRequiredSelectors: false),
+                    noOwner, nonemptyStringCondition(affinitySelector)
+                ])]))
+            }
+        }
+        var uniqueBranches: [JSONValue] = []
+        for branch in branches where !uniqueBranches.contains(branch) { uniqueBranches.append(branch) }
+        var result: [String: JSONValue] = ["type": .string("object"), "anyOf": .array(uniqueBranches)]
+        if case .object(let combined)? = mergedSchema(schemas.map {
+            addingProxySelectors(to: $0, replacesRequiredSelectors: true)
+        }) {
+            result["properties"] = combined["properties"]
+            result["required"] = combined["required"]
+        }
+        return .object(result)
+    }
+
+    private static func addingProxySelectors(to schema: JSONValue, replacesRequiredSelectors: Bool) -> JSONValue {
+        guard case .object(var fields) = schema else { return schema }
+        var properties: [String: JSONValue] = [:]
+        if case .object(let original)? = fields["properties"] { properties = original }
+        for name in ownerSelectors where properties[name] == nil {
+            properties[name] = .object([
+                "type": .string("string"),
+                "description": .string(name == "workspaceIdentifier"
+                    ? "Select the provider that owns this workspace identifier or absolute project path. Use that provider's descriptor in _meta."
+                    : "Select the GUI provider that owns this tab identifier. Use that provider's descriptor in _meta.")
+            ])
+        }
+        fields["properties"] = .object(properties)
+        if replacesRequiredSelectors, case .array(let required)? = fields["required"] {
+            fields["required"] = .array(required.filter {
+                guard case .string(let name) = $0 else { return true }
+                return !ownerSelectors.contains(name)
+            })
+        }
+        return .object(fields)
     }
 
     private static func mergedSchema(_ schemas: [JSONValue]) -> JSONValue? {
@@ -3249,8 +3324,7 @@ enum ProcessToolCatalogCodec {
         _ lhs: ProcessControlPlaneAuthority.Catalog,
         _ rhs: ProcessControlPlaneAuthority.Catalog
     ) -> Bool {
-        if lhs.target.appPath != rhs.target.appPath { return lhs.target.appPath < rhs.target.appPath }
-        return lhs.target.processID < rhs.target.processID
+        ToolCatalogProvider.precedes(lhs.provider, rhs.provider)
     }
 
     private static func fingerprint(_ value: JSONValue) -> String {

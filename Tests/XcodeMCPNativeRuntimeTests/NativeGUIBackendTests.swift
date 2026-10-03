@@ -57,6 +57,41 @@ struct NativeGUIBackendTests {
         }
     }
 
+    @Test func sessionShutdownDrainsAnUncancellableDispatchedCallWithoutItsNativeReply() async throws {
+        try await withGUIBackend(initialize: false) { fixture in
+            fixture.transport.supportsToolCancellation = false
+            let output = AsyncStream<Data>.makeStream()
+            var responses = output.stream.makeAsyncIterator()
+            let session = NativeMCPSession(backend: fixture.backend,
+                artifactsRoot: fixture.directory.appendingPathComponent("artifacts"),
+                output: { output.continuation.yield($0) })
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("initialize"), "method": .string("initialize"),
+                "params": .object(["protocolVersion": .string("2025-06-18"), "capabilities": .object([:]),
+                    "clientInfo": .object(fixture.sessionContext.clientInfo)]),
+            ])))
+            _ = try #require(await responses.next(isolation: MainActor.shared))
+            _ = try await fixture.listTools([Self.unscopedTool])
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("pending-native-call"), "method": .string("tools/call"),
+                "params": .object(["name": .string("NativeSearch"), "arguments": .object(["query": .string("read")])]),
+            ])))
+            let call = try await fixture.transport.nextRequest()
+            #expect(try nativeTestField(nativeTestJSON(call.message), "callTool", "name") == .string("NativeSearch"))
+            #expect(fixture.backend.pendingInvocationCount == 1)
+            try await session.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+            #expect(fixture.transport.oneWayMessages.count == 1)
+            #expect(fixture.backend.pendingInvocationCount == 0)
+            #expect(!fixture.connection.isConnected)
+            let cancelled = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
+            #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
+            try call.respond(.object(["content": .array([]), "isError": .bool(false)]))
+            try await session.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+        }
+    }
+
     @Test func refreshesTheNativeCatalogAndPreservesSelectorOptionality() async throws {
         try await withGUIBackend { fixture in
             let first = try await fixture.listTools([

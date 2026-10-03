@@ -55,6 +55,18 @@ struct ToolCatalogProvider: Sendable {
     func definition(named name: String) -> ToolDefinitionSnapshot? {
         toolsByName[name].map { ToolDefinitionSnapshot(sourceProof: sourceProof, descriptor: $0) }
     }
+
+    static func precedes(_ lhs: Self, _ rhs: Self) -> Bool {
+        switch (lhs.target, rhs.target) {
+        case (nil, .some): return true
+        case (.some, nil): return false
+        case (let left?, let right?):
+            if left.appPath != right.appPath { return left.appPath < right.appPath }
+            return left.processID < right.processID
+        case (nil, nil):
+            return lhs.sourceProof.slotID.rawValue < rhs.sourceProof.slotID.rawValue
+        }
+    }
 }
 
 struct ToolDefinitionSnapshot: Sendable {
@@ -63,5 +75,13 @@ struct ToolDefinitionSnapshot: Sendable {
 
     var catalogResult: JSONValue {
         .object(["tools": .array([descriptor])])
+    }
+
+    func declaresArgument(_ name: String) -> Bool {
+        guard case .object(let fields) = descriptor,
+              case .object(let schema)? = fields["inputSchema"] else { return false }
+        if case .object(let properties)? = schema["properties"], properties[name] != nil { return true }
+        if case .array(let required)? = schema["required"] { return required.contains(.string(name)) }
+        return false
     }
 }
