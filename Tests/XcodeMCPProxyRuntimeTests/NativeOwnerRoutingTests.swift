@@ -99,9 +99,7 @@ struct NativeOwnerRoutingTests {
         let sessionID = "selected-schema"
         _ = manager.session(id: sessionID)
         manager.sessionRegistry.markInitialized(id: sessionID, negotiatedProtocolVersion: MCP.ProtocolVersion.current)
-        let executor = ClientMCPRequestExecutor(config: config, sessionManager: manager,
-            refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout))
+        let executor = ClientMCPRequestExecutor(config: config, sessionManager: manager)
         let operation = executor.handle(bodyData: try JSONRPC.Wire.data(from: request),
             headerSessionID: sessionID, headerSessionExists: true, prefersEventStream: false, eventLoop: fixture.eventLoop)
         if selection == "native-opaque" {
