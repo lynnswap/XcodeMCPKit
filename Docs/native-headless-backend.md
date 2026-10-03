@@ -132,11 +132,18 @@ to Xcode, where the live objects reside. It does not turn another process's
 workspace pointers into local objects. Merely opening the same path in the owned
 host would not preserve GUI unsaved edits or operation state.
 
-The native connection and its permission/session behavior require an end-to-end
-prototype before being treated as implemented. Existing `mcpbridge` success is
-evidence that Xcode's tool service can perform the operations, not validation of
-the replacement connection. Keep connection handling inside the native process
-boundary rather than loading Xcode frameworks into the NIO server.
+The owned GUI connection uses a BoardServices listener and a RunningBoard
+endpoint injection assertion. Xcode connects back to that listener. The host
+initializes the native session with the MCP client's name and version, then
+forwards native tool messages and progress. Connection handling stays inside
+the native process; the NIO server does not load Xcode frameworks.
+
+Xcode retains its native agent approval behavior. A disconnected owner ends
+outstanding requests, and a mutation is not replayed in another process.
+GUI builds use Xcode's selected scheme and save its edited documents before
+building. Apple's `XcodeRead` and `XcodeGetCurrentFile` implementations read the
+document's file URL from disk, including when the editor has an unsaved buffer;
+the connection preserves those native reading semantics.
 
 ## Dynamic tool contracts and maintenance
 
@@ -278,7 +285,8 @@ The native host can be built and used over STDIO independently of the proxy:
 ```
 
 The script assembles and signs the application with the selected Xcode Service's
-complete entitlement dictionary. Launch the packaged executable; a bare SwiftPM
+complete entitlement dictionary and the native GUI bridge's process entitlements.
+Shared array values are combined. Launch the packaged executable; a bare SwiftPM
 binary does not provide the required application bundle identity. Framework
 diagnostics go to stderr and JSON-RPC responses go to stdout.
 
@@ -289,10 +297,22 @@ gets a separate artifacts directory in one conversation. Cancellation targets
 the matching request and propagates through the native action stream. EOF
 cancels outstanding requests and closes models owned by this host.
 
-The standalone host describes its own state. Its window list is empty, and
-current-editor operations return a native error when no editor exists. Direct
-GUI ownership and integration into the existing proxy are the remaining phases
-of [the backend migration](https://github.com/lynnswap/XcodeMCPKit/issues/251).
+By default, the standalone host describes its own windowless state. Its window
+list is empty, and current-editor operations return a native error when no editor
+exists. To use the actual state of an existing Xcode process, start the helper
+with `--gui-pid <PID>` and that Xcode application's `--developer-dir`:
+
+```sh
+.build/native/XcodeMCPNativeHost.app/Contents/MacOS/xcode-mcp-native-host \
+  --gui-pid <PID> --developer-dir /Applications/Xcode.app/Contents/Developer
+```
+
+The GUI connection exposes that Xcode's public catalog. Scoped calls accept an
+absolute path to a workspace already open in that process or its native tab ID.
+The helper resolves the tab internally and forwards native MCP results, including
+images and structured content. It does not load a second workspace model.
+Integration into the existing proxy is the remaining phase of
+[the backend migration](https://github.com/lynnswap/XcodeMCPKit/issues/251).
 
 ## Verification and migration
 

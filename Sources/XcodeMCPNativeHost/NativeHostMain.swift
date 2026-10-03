@@ -7,6 +7,7 @@ import XcodeMCPWire
 
 private struct HostArguments {
     var developerDirectory: String?
+    var guiProcessIdentifier: Int32?
     var artifactsDirectory: String?
     var maxMessageBytes = 32 * 1024 * 1024
     var help = false
@@ -22,6 +23,11 @@ private struct HostArguments {
             index += 1
             switch argument {
             case "--developer-dir": developerDirectory = value
+            case "--gui-pid":
+                guard let identifier = Int32(value), identifier > 0 else {
+                    throw NativeRuntimeError.invalidRequest("GUI process identifier must be a positive PID")
+                }
+                guiProcessIdentifier = identifier
             case "--artifacts-root": artifactsDirectory = value
             case "--max-message-bytes":
                 guard let bytes = Int(value), bytes > 0 else { throw NativeRuntimeError.invalidRequest("Message size must be a positive integer") }
@@ -38,7 +44,7 @@ private enum NativeHostMain {
         do {
             let arguments = try HostArguments(Array(CommandLine.arguments.dropFirst()))
             if arguments.help {
-                print("Usage: xcode-mcp-native-host [--developer-dir path] [--artifacts-root path] [--max-message-bytes bytes]\nRun from the packaged native host application to provide Xcode MCP over STDIO.")
+                print("Usage: xcode-mcp-native-host [--developer-dir path] [--gui-pid pid] [--artifacts-root path] [--max-message-bytes bytes]\nRun from the packaged native host application to provide Xcode MCP over STDIO.")
                 return
             }
             let developerDirectory = try selectedDeveloperDirectory(arguments)
@@ -56,13 +62,20 @@ private enum NativeHostMain {
             signal(SIGPIPE, SIG_IGN)
             let output = FileHandle(fileDescriptor: outputDescriptor, closeOnDealloc: true)
             let bootstrap = NativeApplicationBootstrap()
-            let application = try bootstrap.application(for: installation)
+            let application = try arguments.guiProcessIdentifier != nil
+                ? bootstrap.guiApplication(for: installation)
+                : bootstrap.application(for: installation)
             let artifacts = arguments.artifactsDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? FileManager.default.temporaryDirectory.appendingPathComponent("XcodeMCPNativeHost", isDirectory: true)
             Task { @MainActor in
                 do {
-                    try await bootstrap.initialize(installation: installation)
-                    let backend = try await NativeXcodeBackend(installation: installation)
+                    let backend: any NativeToolBackend
+                    if let identifier = arguments.guiProcessIdentifier {
+                        backend = NativeGUIBackend(processIdentifier: identifier, installation: installation)
+                    } else {
+                        try await bootstrap.initialize(installation: installation)
+                        backend = try await NativeXcodeBackend(installation: installation)
+                    }
                     let session = NativeMCPSession(backend: backend, artifactsRoot: artifacts) { data in
                         try output.write(contentsOf: data + Data([0x0A]))
                     }

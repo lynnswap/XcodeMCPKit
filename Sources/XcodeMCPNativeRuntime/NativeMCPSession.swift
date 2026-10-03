@@ -77,6 +77,11 @@ package final class NativeMCPSession {
 
     private func perform(_ method: String, params: JSONValue?) async throws -> JSONValue {
         if method == "initialize" {
+            var clientInfo: [String: JSONValue] = [:]
+            if case .object(let fields) = params, case .object(let info) = fields["clientInfo"] {
+                clientInfo = info
+            }
+            try await backend.initialize(context: NativeSessionContext(conversationID: conversationID, clientInfo: clientInfo))
             initialized = true
             return .object([
                 "protocolVersion": .string(MCPProtocolVersion.current),
@@ -148,6 +153,12 @@ package final class NativeMCPSession {
     }
 
     private func toolResult(_ data: JSONValue, isError: Bool) throws -> JSONValue {
+        if !isError, backend.resultFormat == .mcpResult {
+            guard case .object(let fields) = data, case .array = fields["content"] else {
+                throw NativeRuntimeError.unsupportedContract("Native GUI tool reply has no MCP content array")
+            }
+            return data
+        }
         let text: String
         if case .string(let message) = data {
             text = message
