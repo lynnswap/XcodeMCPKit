@@ -6,13 +6,12 @@ Keep `XcodeMCPNativeHost.app` beside `xcode-mcp-proxy-server`. Both source and
 release installers copy this bundle. Reinstall a complete package if it is
 missing; copying only the proxy executable is insufficient.
 
-For a custom layout, supply `--native-host-bundle /path/XcodeMCPNativeHost.app`
-or `XCODE_MCP_NATIVE_HOST_BUNDLE`. Embedding code can set
+For a custom layout, use `XCODE_MCP_NATIVE_HOST_BUNDLE`. Embedding code can set
 `nativeHostBundleURL`. The server reports a missing executable before binding
 its endpoint.
 
-Check the selected installation with `xcode-select -p`. `--developer-dir`,
-`DEVELOPER_DIR`, and the embedding `developerDirectoryURL` can select another
+Check the selected installation with `xcode-select -p`. `DEVELOPER_DIR` and
+the embedding `developerDirectoryURL` can select another
 Xcode app or developer directory. The host normalizes that selection and
 reports missing required frameworks or native API contracts. Xcode 27 / Swift
 6.4 is the verified packaging environment; other versions are not rejected by
@@ -21,10 +20,9 @@ a manufactured-version allowlist.
 ## Native catalog or tool request timed out
 
 Confirm that the proxy is running and inspect its error before increasing a
-client deadline. The native host supplies the canonical catalog. A stalled or
-failed host catalog cannot be replaced with a successful GUI catalog. GUI
-catalog refreshes are background routing work and do not block a successful
-native host response.
+client deadline. Available native and GUI origins supply their own catalogs. A missing headless
+contract leaves GUI tools usable, while requests for a headless model retain
+that error. Check the selected owner and its reported native capabilities.
 
 Set `MCP_LOG_LEVEL=debug` to inspect native connection startup, catalog loads,
 request cancellation, and recovery. Approve pending connection dialogs when
@@ -95,15 +93,11 @@ it usually means the MCP server process (`xcode-mcp-proxy`) was terminated while
   - `pkill -f xcode-mcp-proxy`
   - Restart the proxy through its normal launcher so it can stop its owned native helpers.
 
-## `XcodeRefreshCodeIssuesInFile` intermittently returns `error 5`
-When the proxy runs in `--refresh-code-issues-mode upstream`, Xcode's live diagnostics service is prone to transient failures when `XcodeRefreshCodeIssuesInFile` is fired in bursts for the same `tabIdentifier`.
+## Native code diagnostics
 
-- The default mode is `proxy`, which serves `XcodeRefreshCodeIssuesInFile` through `XcodeListNavigatorIssues`-style diagnostics to avoid switching Spaces.
-- In `upstream` mode, `xcode-mcp-proxy-server` serializes `XcodeRefreshCodeIssuesInFile` per `tabIdentifier` and retries the specific `SourceEditorCallableDiagnosticError error 5` response a small number of times.
-- This reduces cold-start contention, but it can increase latency when many refresh requests target the same tab at once.
-- Queued refreshes are no longer rejected because of a fixed queue cap, but they still consume the request's end-to-end timeout budget while waiting for their turn.
-- If the request deadline is reached before a queued refresh starts running, the proxy returns the same timeout response it would use for an in-flight timeout.
-- If you need Xcode's native live diagnostics behavior, start the proxy with `--refresh-code-issues-mode upstream` (or `MCP_XCODE_REFRESH_CODE_ISSUES_MODE=upstream`).
+`XcodeRefreshCodeIssuesInFile` executes in its owning native Xcode context.
+The proxy forwards native diagnostics, progress and errors. It does not replace
+the response with navigator issues or retry a failed diagnostic operation.
 
 ## `session not found`
 Ensure the client is using the server-issued `MCP-Session-Id`. Initialize requests must not rely on a caller-provided session id. `DELETE /mcp` permanently terminates the session, and the proxy also expires a session after it has had no in-flight request, open SSE stream, or other client activity for five minutes. A client that receives `404` for a session-bound request must initialize a new session; the bundled SDK and STDIO adapter perform that recovery automatically.

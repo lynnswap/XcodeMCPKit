@@ -57,7 +57,6 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
-        .package(url: "https://github.com/dduan/TOMLDecoder.git", from: "0.4.3"),
     ],
     targets: [
         .target(name: "XcodeMCPWire", swiftSettings: strictSwiftSettings),
@@ -157,7 +156,6 @@ let package = Package(
                 "XcodeMCPProxyHTTP",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
-                .product(name: "TOMLDecoder", package: "TOMLDecoder"),
             ],
             exclude: ["README.md"],
             swiftSettings: strictSwiftSettings,

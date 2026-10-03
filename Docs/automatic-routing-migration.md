@@ -14,7 +14,7 @@ connection. There is no process-count replacement option.
 The previously removed `--xcode-mode`, `--session-id`, `--upstream-command`,
 `--upstream-args`, and `--upstream-arg` remain unsupported. Remove Xcode Service
 status/enable steps and explicit `mcpbridge` launches from proxy startup scripts.
-Endpoint, deadline, tool visibility, and permission automation settings remain.
+Endpoint and deadline settings remain. Tool visibility is controlled by the MCP client.
 
 `XcodeMCPProxyServerConfiguration` adds optional `nativeHostBundleURL` and
 `developerDirectoryURL`. Leave them `nil` for helper and Xcode discovery, or
@@ -32,8 +32,9 @@ let endpoint = try await server.start()
 try await server.shutdown()
 ```
 
-CLI equivalents are `--native-host-bundle` and `--developer-dir`.
-`XCODE_MCP_NATIVE_HOST_BUNDLE` and `DEVELOPER_DIR` are their environment defaults.
+The server CLI discovers the installed helper and owning Xcode processes.
+The standard `DEVELOPER_DIR` environment can select the headless installation.
+Explicit bundle and developer-directory URLs remain available for SDK embedding.
 The source and release installers now install `XcodeMCPNativeHost.app` beside
 the proxy binaries. Keep that bundle with the executables when relocating them.
 
@@ -65,5 +66,20 @@ select the proxy's backend.
 
 Explicit Open is optional for ordinary absolute-path operations. GUI builds use
 Xcode's active scheme and save pending editor changes. Native read/current-file
-results remain disk-backed. Catalog availability requires the native host;
-GUI success no longer substitutes for a missing native catalog.
+results remain disk-backed. Usable GUI catalogs remain available when the
+selected installation lacks headless contracts; requests for a headless model
+retain that failure.
+
+## Removed configuration
+
+Remove `--config`, `MCP_XCODE_CONFIG` and TOML files. `configurationFileURL` and
+`ToolPolicy` are removed from the public server API, along with per-tool disabled
+name lists. The server exposes Xcode's available tools; the MCP client decides
+which tools may be called.
+
+Remove `--refresh-code-issues-mode`, its environment setting and the corresponding
+feature-policy property. `XcodeRefreshCodeIssuesInFile` now uses its native
+provider through the normal request route, with native progress and errors.
+
+The server CLI also removes `--native-host-bundle` and `--developer-dir`. Keep
+`XcodeMCPNativeHost.app` beside the installed executables for automatic lookup.
