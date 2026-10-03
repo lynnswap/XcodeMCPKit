@@ -96,6 +96,10 @@ final class NativeCrashToolCorrection {
         return result.stream
     }
 
+    func cancelPendingOperations() {
+        for operation in Array(operations.values) { operation.cancel() }
+    }
+
     func shutdown() async {
         let pending = Array(operations.values)
         for operation in pending { operation.cancel() }

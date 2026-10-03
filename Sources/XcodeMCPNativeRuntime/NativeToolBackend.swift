@@ -40,6 +40,8 @@ package protocol NativeToolBackend: AnyObject {
     func listTools() async throws -> [NativeTool]
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data>
     func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue)
+    /// Prepares pending requests to drain before shutdown performs final cleanup.
+    func beginShutdown()
     func shutdown() async throws
 }
 
@@ -49,6 +51,7 @@ extension NativeToolBackend {
     package var supportsToolCancellation: Bool { true }
     package func initialize(context: NativeSessionContext) async throws {}
     package func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue) {}
+    package func beginShutdown() {}
 }
 
 @safe
@@ -110,6 +113,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
                 try await workspaces.prepareDebugger(for: identifier)
             }
         }
+        try Task.checkCancellation()
         arguments["temporaryArtifactsPath"] = .string(context.artifactsDirectory.path)
         arguments["conversationID"] = .string(context.conversationID)
         let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
@@ -120,6 +124,10 @@ package final class NativeXcodeBackend: NativeToolBackend {
         // Preserve native stream cancellation: the caller consumes this stream
         // directly rather than creating an unowned forwarding producer Task.
         return stream
+    }
+
+    package func beginShutdown() {
+        crashCorrection.cancelPendingOperations()
     }
 
     package func shutdown() async throws {

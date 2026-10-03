@@ -1766,7 +1766,7 @@ actor XcodeLaunchRecorder {
 
 func makeTestReadinessGate(
     readiness: ReadinessFlag,
-    sleepRecorder: ControlledReadinessSleep? = nil,
+    sleepRecorder: ControlledReadinessSleep = ControlledReadinessSleep(),
     launchRecorder: XcodeLaunchRecorder? = nil
 ) -> UpstreamReadinessGate {
     let launchIfUnavailable: (@Sendable () async -> Bool)?
@@ -1784,9 +1784,6 @@ func makeTestReadinessGate(
         initialRetryBackoffNanoseconds: 1_000_000_000,
         maxRetryBackoffNanoseconds: 8_000_000_000,
         sleepNanoseconds: { nanoseconds in
-            guard let sleepRecorder else {
-                preconditionFailure("Readiness backoff tests must control sleep explicitly")
-            }
             await sleepRecorder.sleep(nanoseconds: nanoseconds)
         },
         launchIfUnavailable: launchIfUnavailable,
