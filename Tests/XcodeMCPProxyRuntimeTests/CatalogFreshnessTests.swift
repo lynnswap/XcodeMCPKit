@@ -150,4 +150,3 @@ struct CatalogFreshnessTests {
         #expect(properties["argument1"] == nil)
     }
 }
-
