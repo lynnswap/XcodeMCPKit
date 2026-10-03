@@ -194,7 +194,11 @@ disabled = ["RunAllTests", "RunSomeTests"]
 
 The proxy exposes tools from the catalogs that native and GUI connections
 actually supply. Each explicit `tools/list` refreshes discovery, and concurrent
-callers share an in-flight load. If the selected SDK cannot initialize the
+callers share an in-flight load while keeping independent deadlines. When some
+providers have refreshed and another is still pending, a caller can receive the
+fresh providers. The remaining reads continue and publish `tools/list_changed`
+when they update the catalog. A refresh fails if no provider supplies a fresh
+result. If the selected SDK cannot initialize the
 headless host, a usable GUI catalog remains available for that GUI's operations.
 The headless failure still applies to requests that require a headless model.
 
