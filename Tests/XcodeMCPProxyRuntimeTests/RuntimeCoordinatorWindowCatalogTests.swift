@@ -859,7 +859,7 @@ struct RuntimeCoordinatorWindowCatalogTests {
         #expect(preferredUpstreamIndices == [1])
     }
 
-    @Test func ownerBoundToolRoutesToUsableSlotInOwningProcess() async throws {
+    @Test func ownerBoundToolKeepsItsCatalogConnectionWhenAnotherSlotIsInitialized() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
@@ -901,8 +901,15 @@ struct RuntimeCoordinatorWindowCatalogTests {
             requestTimeoutOverride: .seconds(2)
         )
 
-        let preferredUpstreamIndices = try #require(decision.preferredUpstreamIndices)
-        #expect(preferredUpstreamIndices == [1])
+        guard case .forwardAdmitted(let indices, let admission) = decision else {
+            Issue.record("Expected the catalog producer to remain the admitted connection")
+            return
+        }
+        let producerProof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        #expect(indices == [0])
+        #expect(admission.upstreamProofs == [producerProof])
+        #expect(admission.toolDefinition?.sourceProof == producerProof)
+        #expect(admission.toolDefinition?.descriptor == (try jsonValue(ownerBoundToolDescriptor(name: "BuildProject"))))
     }
 
 
