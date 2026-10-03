@@ -49,4 +49,52 @@ struct NativeStdioFramingTests {
         #expect(suffix.protocolViolation == nil)
         #expect(suffix.bufferedByteCount == 0)
     }
+
+    @Test func fragmentedLargeLineKeepsTheFollowingPartialLine() {
+        let framer = StdioFramer(mode: .delimitedMessages)
+        let message = Data((#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"text":""#
+            + String(repeating: "a", count: 2 * 1024 * 1024)
+            + #""}}"#).utf8)
+        let following = Data(#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#.utf8)
+        let third = Data(#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#.utf8)
+
+        for offset in stride(from: 0, to: message.count, by: 64 * 1024) {
+            let end = min(offset + 64 * 1024, message.count)
+            let result = framer.append(message.subdata(in: offset..<end))
+            #expect(result.messages.isEmpty)
+            #expect(result.protocolViolation == nil)
+            #expect(result.bufferedByteCount == end)
+        }
+
+        let split = following.count / 2
+        let first = framer.append(Data([0x0A]) + following.prefix(split))
+        #expect(first.messages == [message])
+        #expect(first.protocolViolation == nil)
+        #expect(first.bufferedByteCount == split)
+
+        let rest = framer.append(following.suffix(from: split) + Data([0x0A]) + third + Data([0x0A]))
+        #expect(rest.messages == [following, third])
+        #expect(rest.protocolViolation == nil)
+        #expect(rest.bufferedByteCount == 0)
+    }
+
+    @Test func fragmentedNativeLinesCanBeFollowedByLengthDelimitedFrames() {
+        let framer = StdioFramer(mode: .delimitedMessages)
+        let line = Data(#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.utf8)
+        let body = Data(#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#.utf8)
+        let following = Data(#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#.utf8)
+        let prefix = framer.append(Data(line.dropLast()))
+        #expect(prefix.messages.isEmpty)
+        #expect(prefix.protocolViolation == nil)
+
+        let boundary = framer.append(Data(line.suffix(1)) + Data("\nContent-".utf8))
+        #expect(boundary.messages == [line])
+        #expect(boundary.protocolViolation == nil)
+        #expect(boundary.bufferedByteCount == "Content-".utf8.count)
+
+        let rest = framer.append(Data("Length: \(body.count)\r\n\r\n".utf8) + body + following + Data([0x0A]))
+        #expect(rest.messages == [body, following])
+        #expect(rest.protocolViolation == nil)
+        #expect(rest.bufferedByteCount == 0)
+    }
 }

@@ -73,6 +73,7 @@ package final class StdioFramer {
 
     private var buffer = Data()
     private var rawJSONScanner: JSONBoundaryScanner?
+    private var lineSearchIndex = 0
     private let mode: Mode
 
     package convenience init() {
@@ -94,6 +95,7 @@ package final class StdioFramer {
                let first = firstNonWhitespaceIndex(from: buffer.startIndex),
                first > buffer.startIndex {
                 buffer.removeSubrange(buffer.startIndex..<first)
+                lineSearchIndex = 0
             }
             if let message = nextContentLengthMessage() {
                 messages.append(message)
@@ -113,6 +115,7 @@ package final class StdioFramer {
         if firstNonWhitespaceIndex(from: buffer.startIndex) == nil {
             buffer.removeAll(keepingCapacity: false)
             rawJSONScanner = nil
+            lineSearchIndex = 0
         }
 
         let protocolViolation = protocolViolationIfNeeded()
@@ -181,16 +184,21 @@ package final class StdioFramer {
 
         buffer.removeSubrange(0..<bodyRange.upperBound)
         rawJSONScanner = nil
+        lineSearchIndex = 0
         return message
     }
 
     private func nextLineMessage() -> Data? {
         guard let first = firstNonWhitespaceIndex(from: buffer.startIndex),
-              !isPotentialContentLengthHeaderPrefix(at: first),
-              let end = buffer[first...].firstIndex(of: 0x0A) else { return nil }
+              !isPotentialContentLengthHeaderPrefix(at: first) else { return nil }
+        guard let end = buffer[max(first, lineSearchIndex)...].firstIndex(of: 0x0A) else {
+            lineSearchIndex = buffer.endIndex
+            return nil
+        }
         let message = buffer.subdata(in: first..<end)
         buffer.removeSubrange(buffer.startIndex...end)
         rawJSONScanner = nil
+        lineSearchIndex = 0
         return message
     }
 
