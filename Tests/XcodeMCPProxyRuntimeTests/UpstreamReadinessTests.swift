@@ -10,18 +10,43 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct UpstreamReadinessTests {
-    @Test func availableServiceDoesNotWaitForGUIReadiness() async {
-        var config = makeConfig(requestTimeout: 5)
-
-        let gate = UpstreamReadinessGate.liveDefault(
-            config: config,
-            clock: .liveValue,
-            processEventMonitor: NeverReadyXcodeProcessMonitor()
-        )
-
-        #expect(gate.isEnabled == false)
+    @Test func nativeHostStartsWithoutGUIReadiness() async {
+        let gate = UpstreamReadinessGate.liveDefault(clock: .liveValue)
+        #expect(gate.isEnabled)
         #expect(gate.launchIfUnavailable == nil)
         #expect((await gate.snapshot()).isReady)
+    }
+
+    @Test func nativeHostRetriesBackOffAndInitializationResetsTheDelay() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer { shutdownAndWait(group) }
+        let clock = TestClock()
+        let gate = UpstreamReadinessGate.liveDefault(clock: makeDeterministicClockClient(
+            timeoutClock: clock, uptimeClock: TestUptimeClock()))
+        let manager = RuntimeCoordinator(config: makeConfig(requestTimeout: 5), eventLoop: group.next(),
+                                         upstreams: [TestUpstreamClient()], upstreamReadinessGate: gate)
+        defer { manager.shutdownAndWait() }
+        let retries = LockedRecordedValues<Int>()
+
+        manager.runWhenUpstreamReady(reason: "first_failure", applyBackoff: true) { retries.append(1) }
+        try await waitForSuspendedSleepers(on: clock)
+        #expect(retries.count() == 0)
+        clock.advance(by: .seconds(1))
+        _ = try await retries.nextValue(at: 0)
+
+        manager.runWhenUpstreamReady(reason: "second_failure", applyBackoff: true) { retries.append(2) }
+        try await waitForSuspendedSleepers(on: clock)
+        clock.advance(by: .seconds(1))
+        #expect(retries.count() == 1)
+        clock.advance(by: .seconds(1))
+        _ = try await retries.nextValue(at: 1)
+
+        manager.noteUpstreamInitializationSucceeded()
+        manager.runWhenUpstreamReady(reason: "failure_after_success", applyBackoff: true) { retries.append(3) }
+        try await waitForSuspendedSleepers(on: clock)
+        clock.advance(by: .seconds(1))
+        _ = try await retries.nextValue(at: 2)
+        #expect(retries.count() == 3)
     }
 
     @Test func readinessChangeWaitDoesNotMissChangeBeforeRegistration() async throws {
@@ -365,19 +390,4 @@ struct UpstreamReadinessTests {
     }
 
 
-}
-
-private final class NeverReadyXcodeProcessMonitor:
-    XcodeProcessEventMonitoring,
-    @unchecked Sendable
-{
-    func start() {}
-    func setChangeHandler(_: @escaping @Sendable (String) -> Void) {}
-    func runningXcodeTargets() -> [XcodeProcessTarget] { [] }
-    func permissionDialogProcessIDs() -> [pid_t] { [] }
-    func readinessSnapshot() -> UpstreamReadinessSnapshot {
-        UpstreamReadinessSnapshot(isReady: false, generation: 0)
-    }
-    func waitForReadinessChange(after _: UInt64) async {}
-    func stop() {}
 }

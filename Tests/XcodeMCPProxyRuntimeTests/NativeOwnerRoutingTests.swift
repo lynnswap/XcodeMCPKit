@@ -91,7 +91,7 @@ struct NativeOwnerRoutingTests {
         #expect(await upstream.sentCount() == (close ? 0 : 1))
     }
 
-    @Test(arguments: ["path", "identifier", "symlink", "failure"])
+    @Test(arguments: ["path", "symlink", "failure"])
     func GUIInventorySelectsTheOwnerAndFailuresAreNotHiddenByTheNativeHost(kind: String) async throws {
         let native = TestUpstreamClient()
         let gui = TestUpstreamClient()
@@ -148,6 +148,85 @@ struct NativeOwnerRoutingTests {
             #expect(admission.window?.rewritePlan.tabIdentifier == "gui-tab")
         }
         #expect(await native.sentCount() == (kind == "identifier" ? 1 : 0))
+    }
+
+    @Test func ownedNativeIdentifierDoesNotQueryAnUnrelatedColdGUI() async throws {
+        let native = TestUpstreamClient()
+        let coldGUI = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 993, xcodeVersion: "26.6")
+        let fixture = RuntimeCoordinatorFixture(upstreams: [native, coldGUI],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])], startImmediately: false)
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        let proof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        let task = Task { await manager.toolRoutingDecision(for: toolsCallObject(id: 103, name: "FutureWorkspaceTool",
+            arguments: ["workspaceIdentifier": "opaque-owned-token"]), requestTimeoutOverride: .seconds(1)) }
+        let inventory = try await native.nextSent { toolCallName(from: $0) == "XcodeListWorkspaces" }
+        await native.yield(.message(try makeJSONRPCResponse(id: extractUpstreamID(from: inventory),
+            result: ["structuredContent": ["message": "* workspaceIdentifier: opaque-owned-token, workspacePath: /Work/App.xcodeproj"]])))
+        guard case .forwardAdmitted(let indices, let admission) = await task.value else {
+            Issue.record("Native ownership proof must not require unrelated GUI discovery")
+            return
+        }
+        #expect(indices == [0])
+        #expect(admission.upstreamProofs == [proof])
+        #expect(admission.workspaceIdentifier == "opaque-owned-token")
+        #expect(await coldGUI.sentCount() == 0)
+    }
+
+    @Test(arguments: [false, true])
+    func cachedGUIIdentifiersTakePriorityOverNativeLookup(proxyIdentifier: Bool) async throws {
+        let native = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 994, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(upstreams: [native, gui],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])], startImmediately: false)
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(on: manager, entries: [(target, 1, [
+            toolDescriptor(name: "XcodeListWindows"), ownerBoundToolDescriptor(name: "FutureWorkspaceTool")])])
+        #expect(manager.recordXcodeWindowOwners(from: try jsonValue(["structuredContent": [
+            "message": "* tabIdentifier: shared-opaque-token, workspacePath: /Work/App.xcodeproj"]]), upstreamIndex: 1))
+        let proxyID = try #require(manager.windowOwnershipAuthority.snapshot().identities.first?.proxyTabIdentifier)
+        let decision = await manager.toolRoutingDecision(for: toolsCallObject(id: 104, name: "FutureWorkspaceTool",
+            arguments: ["workspaceIdentifier": proxyIdentifier ? proxyID : "shared-opaque-token"]), requestTimeoutOverride: .seconds(1))
+        guard case .forwardAdmitted(let indices, let admission) = decision else {
+            Issue.record("A cached GUI identity must select that GUI")
+            return
+        }
+        #expect(indices == [1])
+        #expect(admission.window?.rewritePlan.tabIdentifier == "shared-opaque-token")
+        #expect(await native.sentCount() == 0)
+    }
+
+    @Test func unknownOpaqueIdentifierCannotBypassFailedGUIInventory() async throws {
+        let native = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 995, xcodeVersion: "26.6")
+        let fixture = RuntimeCoordinatorFixture(upstreams: [native, gui],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])], startImmediately: false)
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        try seedProcessToolCatalogs(on: manager, entries: [(target, 1, [toolDescriptor(name: "XcodeListWindows")])])
+        let task = Task { await manager.toolRoutingDecision(for: toolsCallObject(id: 106, name: "FutureWorkspaceTool",
+            arguments: ["workspaceIdentifier": "unknown-opaque-token"]), requestTimeoutOverride: .seconds(1)) }
+        let inventory = try await native.nextSent { toolCallName(from: $0) == "XcodeListWorkspaces" }
+        await native.yield(.message(try makeJSONRPCResponse(id: extractUpstreamID(from: inventory),
+            result: ["structuredContent": ["message": "No native workspace is open."]])))
+        let guiInventory = try await gui.nextSent { toolCallName(from: $0) == "XcodeListWindows" }
+        await gui.yield(.message(try JSONRPC.Wire.errorResponseData(id: JSONRPC.ID(any: extractUpstreamID(from: guiInventory)),
+            code: -32603, message: "GUI inventory unavailable")))
+        guard case .reject(let errors) = await task.value else {
+            Issue.record("An unknown identity requires complete ownership discovery")
+            return
+        }
+        #expect(errors.first?.message.contains("Unable to determine GUI workspace ownership") == true)
+        #expect(await native.sentCount() == 1)
     }
 
     @Test func requestsShareOneNativeConnectionAndCancellingOneDoesNotBlockTheOthers() {

@@ -61,6 +61,10 @@ final class NativeCrashToolCorrection {
                 case .selectionRequired(let identifiers):
                     result.continuation.yield(try event("completed", data: bundleSelection(kind, input: parameters, identifiers: identifiers)))
                     return
+                case .platformSelectionRequired(let bundleIdentifier, let platforms):
+                    result.continuation.yield(try event("completed", data: platformSelection(kind, input: parameters,
+                        bundleIdentifier: bundleIdentifier, platforms: platforms)))
+                    return
                 }
                 try Task.checkCancellation()
                 result.continuation.yield(try event("update", data: .object([
@@ -194,6 +198,16 @@ final class NativeCrashToolCorrection {
                       let sdk = try object(destination, selector: "targetSDK"),
                       let value = try object(sdk, selector: "platform"),
                       let family = try object(value, selector: "family") else {
+                    if choices.count > 1 {
+                        let names = try choices.map { choice -> String in
+                            guard let family = try object(choice, selector: "family") else {
+                                throw NativeRuntimeError.unsupportedContract("Native analytics platform has no family")
+                            }
+                            let getter = try runtime.object(family).method(selector: "displayName", as: (() -> String).self)
+                            return try unsafe getter.unsafeInvoke()
+                        }
+                        return .platformSelectionRequired(bundleIdentifier: bundle, platforms: Array(Set(names)).sorted())
+                    }
                     throw NativeRuntimeError.invalidRequest("Could not resolve the platform from the active run destination")
                 }
                 let description = try runtime.object(family).method(selector: "displayName", as: (() -> String).self)
@@ -273,8 +287,8 @@ final class NativeCrashToolCorrection {
             guard try unsafe bundle.unsafeInvoke() == bundleIdentifier,
                   let category = try object(identifier, selector: "productCategory"),
                   let platform = try object(category, selector: "platform") else { continue }
-            let key = try runtime.object(platform).method(selector: "identifier", as: (() -> String).self)
-            platforms[try unsafe key.unsafeInvoke()] = platform
+            let key = try NativeAnalyticsProductManager.platformFamilyIdentifier(platform)
+            if platforms[key] == nil { platforms[key] = platform }
         }
         return Array(platforms.values)
     }
@@ -342,6 +356,20 @@ final class NativeCrashToolCorrection {
         return .object(result)
     }
 
+    private func platformSelection(_ kind: Kind, input: NativeCrashInput,
+                                   bundleIdentifier: String, platforms: [String]) -> JSONValue {
+        var result: [String: JSONValue] = [
+            "success": .bool(false), "bundleId": .string(bundleIdentifier),
+            "data": .string("Multiple platforms are available for \(bundleIdentifier):\n\n"
+                + platforms.map { "  - " + $0 }.joined(separator: "\n")
+                + "\n\nPlease ask which platform they want data for, then call this tool again with the 'platform' parameter."),
+            "message": .string("PLATFORM SELECTION REQUIRED: Multiple platforms are available. Please present the list above and ask which platform to analyze."),
+        ]
+        if let version = input.appVersion { result["appVersion"] = .string(version) }
+        if kind == .logs { result["signatureName"] = .string(input.signatureName) }
+        return .object(result)
+    }
+
     private func event(_ type: String, data: JSONValue) throws -> Data {
         try JSONRPC.Wire.data(from: ["type": type, "data": data.foundationObject])
     }
@@ -375,4 +403,5 @@ private struct NativeCrashContext {
 private enum NativeCrashResolution {
     case resolved(NativeCrashContext)
     case selectionRequired([String])
+    case platformSelectionRequired(bundleIdentifier: String, platforms: [String])
 }

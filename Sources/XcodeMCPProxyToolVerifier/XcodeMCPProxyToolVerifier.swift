@@ -840,9 +840,11 @@ private struct VerificationState {
                 "organizationIdentifier": .string("dev.xcodemcp"),
                 "options": .object(["languageChoice": "Swift", "testingSystem": "None", "hasDocumentation": "false"])])
         case "XcodeNewProject":
+            let destination = fixture.outputRoot.appendingPathComponent("GeneratedProjects-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
             return ["templateIdentifier": .string("com.apple.dt.unit.commandLineTool"),
                 "productName": .string("ProxyVerifierGeneratedCLI"),
-                "destinationPath": .string(fixture.outputRoot.path),
+                "destinationPath": .string(destination.path),
                 "organizationIdentifier": .string("dev.xcodemcp"),
                 "options": .object(["languageChoice": "Swift"])]
         case "BuildProject":
