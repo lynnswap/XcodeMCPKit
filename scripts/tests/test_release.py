@@ -29,6 +29,12 @@ class ReleaseTests(unittest.TestCase):
         binaries.mkdir()
         for name in ("xcode-mcp-proxy", "xcode-mcp-proxy-server"):
             (binaries / name).write_bytes(b"release binary fixture")
+        native = binaries / "XcodeMCPNativeHost.app" / "Contents"
+        (native / "MacOS").mkdir(parents=True)
+        (native / "_CodeSignature").mkdir()
+        (native / "Info.plist").write_bytes(b"native app fixture")
+        (native / "MacOS" / "xcode-mcp-native-host").write_bytes(b"native executable fixture")
+        (native / "_CodeSignature" / "CodeResources").write_bytes(b"signature fixture")
         with tarfile.open(self.assets / release.ASSET_NAMES[0], "w:gz") as archive:
             archive.add(binaries, arcname="bin")
         subprocess.run([
@@ -63,9 +69,100 @@ class ReleaseTests(unittest.TestCase):
         }
         context = ExitStack()
         self.addCleanup(context.close)
+        commands = self.directory / "commands"
+        commands.mkdir()
+        signer = commands / "codesign"
+        signer.write_text("#!/bin/sh\n[ \"$1\" = --verify ] && [ \"$2\" = --strict ] && [ -f \"$3/Contents/_CodeSignature/CodeResources\" ]\n")
+        signer.chmod(0o755)
+        env["PATH"] = str(commands) + os.pathsep + os.environ.get("PATH", "")
         context.enter_context(patch.dict(os.environ, env))
         self.api_mock = context.enter_context(patch.object(release, "api", side_effect=self.fake_api))
         context.enter_context(patch.object(release, "run", side_effect=self.fake_run))
+
+    def rewrite_archive(self, *, missing=None, extra=None, symlink=False):
+        archive_path = self.assets / release.ASSET_NAMES[0]
+        source = self.directory / "bin"
+        if missing:
+            (source / missing).unlink()
+        if extra:
+            target = source / extra
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if symlink:
+                target.symlink_to("/etc/passwd")
+            else:
+                target.write_bytes(b"unexpected")
+        with tarfile.open(archive_path, "w:gz") as archive:
+            archive.add(source, arcname="bin")
+        for name in (release.ASSET_NAMES[0], "install.sh"):
+            self.checksums[name] = hashlib.sha256((self.assets / name).read_bytes()).hexdigest()
+        (self.assets / "SHA256SUMS.txt").write_text(
+            "".join(f"{self.checksums[name]}  {name}\n" for name in (release.ASSET_NAMES[0], "install.sh"))
+        )
+
+    def verifier(self):
+        return subprocess.run([
+            str(Path(release.__file__).with_name("verify-release-assets.sh")),
+            "--version", self.version, "--repo", self.repository, "--release-dir", str(self.assets),
+        ], capture_output=True, text=True)
+
+    def test_signed_native_bundle_subtree_is_required(self):
+        self.rewrite_archive(missing="XcodeMCPNativeHost.app/Contents/_CodeSignature/CodeResources")
+        result = self.verifier()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing required entries", result.stderr)
+        self.assert_no_publication()
+
+    def test_archive_rejects_bundled_apple_frameworks(self):
+        self.rewrite_archive(extra="XcodeMCPNativeHost.app/Contents/Frameworks/IDEFoundation.framework/IDEFoundation")
+        result = self.verifier()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unexpected entry", result.stderr)
+        self.assert_no_publication()
+
+    def test_archive_rejects_links_inside_the_native_bundle(self):
+        self.rewrite_archive(extra="XcodeMCPNativeHost.app/Contents/MacOS/linked-file", symlink=True)
+        self.assertNotEqual(self.verifier().returncode, 0)
+        self.assert_no_publication()
+
+    def run_downloaded_installer(self, destination):
+        commands = self.directory / "commands"
+        curl = commands / "curl"
+        curl.write_text("#!/bin/sh\nset -eu\n[ \"$1\" = -fsSL ]\n[ \"$2\" = -o ]\nname=${4##*/}\ncp \"$TEST_RELEASE_ASSETS/$name\" \"$3\"\n")
+        curl.chmod(0o755)
+        uname = commands / "uname"
+        uname.write_text("#!/bin/sh\ncase \"$1\" in -s) echo Darwin;; -m) echo arm64;; esac\n")
+        uname.chmod(0o755)
+        env = dict(os.environ, TEST_RELEASE_ASSETS=str(self.assets))
+        return subprocess.run(["sh", str(self.assets / "install.sh"), "--bindir", str(destination)],
+                              env=env, capture_output=True, text=True)
+
+    @unittest.skipUnless(sys.platform == "darwin", "atomic native bundle swap uses Darwin renamex_np")
+    def test_downloaded_installer_replaces_an_existing_native_bundle_atomically(self):
+        destination = self.directory / "installed"
+        old_native = destination / "XcodeMCPNativeHost.app" / "Contents" / "MacOS"
+        old_native.mkdir(parents=True)
+        (old_native / "xcode-mcp-native-host").write_bytes(b"old helper")
+        (old_native.parent / "obsolete").write_bytes(b"old bundle member")
+        for name in ("xcode-mcp-proxy", "xcode-mcp-proxy-server"):
+            (destination / name).write_bytes(b"old executable")
+        result = self.run_downloaded_installer(destination)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((old_native / "xcode-mcp-native-host").read_bytes(), b"native executable fixture")
+        self.assertFalse((old_native.parent / "obsolete").exists())
+        self.assertFalse(list(destination.glob(".xcode-mcp-install.*")))
+        self.assertEqual((destination / "xcode-mcp-proxy").stat().st_mode & 0o777, 0o755)
+        self.assert_no_publication()
+
+    def test_downloaded_installer_rejects_missing_native_signature_before_replacement(self):
+        destination = self.directory / "installed"
+        destination.mkdir()
+        executable = destination / "xcode-mcp-proxy"
+        executable.write_bytes(b"old executable")
+        self.rewrite_archive(missing="XcodeMCPNativeHost.app/Contents/_CodeSignature/CodeResources")
+        result = self.run_downloaded_installer(destination)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(executable.read_bytes(), b"old executable")
+        self.assert_no_publication()
 
     def fake_api(self, endpoint, *, fields=None, paginate=False, method=None):
         self.api_calls.append((endpoint, copy.deepcopy(fields)))

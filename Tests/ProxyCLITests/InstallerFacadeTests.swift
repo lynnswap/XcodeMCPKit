@@ -82,13 +82,17 @@ struct InstallerFacadeTests {
 
         let executableURL = tempDir.appendingPathComponent("xcode-mcp-proxy-install")
 
+        let bundle = tempDir.appendingPathComponent(XcodeMCPProxyInstaller.nativeHostBundleName)
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+
         #expect(throws: XcodeMCPProxyInstaller.Error.self) {
             try XcodeMCPProxyInstaller(
                 configuration: .init(prefix: nil, binaryDirectory: tempDir.path, dryRun: false)
             ).install(
                 executableURL: executableURL,
                 fileManager: .default,
-                buildProducts: { _, _ in },
+                buildProducts: { _, _, _ in },
+                verifyNativeHostBundle: { _ in },
                 stdout: { _ in }
             )
         }
@@ -129,6 +133,8 @@ struct InstallerFacadeTests {
 
         #expect(plan.binDirectory.path == "/tmp/bin")
         #expect(plan.dryRun)
+        #expect(plan.nativeHostBundle.sourceURL.path == "/tmp/repo/.build/release/XcodeMCPNativeHost.app")
+        #expect(plan.nativeHostBundle.destinationURL.path == "/tmp/bin/XcodeMCPNativeHost.app")
         #expect(plan.binaries.map(\.name) == XcodeMCPProxyInstaller.binaryNames)
         #expect(
             plan.binaries.map(\.destinationURL.lastPathComponent) == [
