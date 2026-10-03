@@ -108,12 +108,10 @@ package struct ProxyRuntimeInventorySnapshot: Sendable {
     package struct XcodeTarget: Sendable {
         package let processID: pid_t
         package let appPath: String
-        package let mcpBridgePath: String
 
-        package init(processID: pid_t, appPath: String, mcpBridgePath: String) {
+        package init(processID: pid_t, appPath: String) {
             self.processID = processID
             self.appPath = appPath
-            self.mcpBridgePath = mcpBridgePath
         }
     }
 

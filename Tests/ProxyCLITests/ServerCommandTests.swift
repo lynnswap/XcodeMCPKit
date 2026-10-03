@@ -11,7 +11,8 @@ struct ServerCommandTests {
 
         #expect(config.listenHost == "localhost")
         #expect(config.listenPort == 8765)
-        #expect(config.upstreamProcessCount == 1)
+        #expect(config.nativeHostBundleURL == nil)
+        #expect(config.developerDirectoryURL == nil)
         #expect(config.maxBodyBytes == 1_048_576)
         #expect(config.requestTimeout == 300)
         #expect(config.autoApproveXcodeDialog == false)
@@ -22,7 +23,8 @@ struct ServerCommandTests {
         let config = try resolvedProxyConfig(
             arguments: [
                 "--listen", "0.0.0.0:9999",
-                "--upstream-processes", "10",
+                "--native-host-bundle", "/tmp/Native Host.app",
+                "--developer-dir", "/Applications/Xcode.app/Contents/Developer",
                 "--max-body-bytes", "2048",
                 "--request-timeout", "12.5",
                 "--auto-approve",
@@ -32,7 +34,8 @@ struct ServerCommandTests {
 
         #expect(config.listenHost == "0.0.0.0")
         #expect(config.listenPort == 9999)
-        #expect(config.upstreamProcessCount == 10)
+        #expect(config.nativeHostBundleURL?.path == "/tmp/Native Host.app")
+        #expect(config.developerDirectoryURL?.path == "/Applications/Xcode.app/Contents/Developer")
         #expect(config.maxBodyBytes == 2048)
         #expect(config.requestTimeout == 12.5)
         #expect(config.autoApproveXcodeDialog)
@@ -64,9 +67,6 @@ struct ServerCommandTests {
             ["--request-timeout", "-1"],
             ["--request-timeout", "nan"],
             ["--request-timeout", "inf"],
-            ["--upstream-processes", "0"],
-            ["--upstream-processes", "11"],
-            ["--upstream-processes", "abc"],
             ["--xcode-mode", "invalid"],
         ]
 
@@ -77,12 +77,46 @@ struct ServerCommandTests {
         }
     }
 
-    @Test(arguments: ["--xcode-mode", "--session-id", "--upstream-command", "--upstream-args", "--upstream-arg"])
+    @Test(arguments: ["--upstream-processes", "--xcode-mode", "--session-id", "--upstream-command", "--upstream-args", "--upstream-arg"])
     func serverCommandRejectsRemovedRoutingOptions(option: String) {
         #expect(throws: CLICommandError.self) {
             _ = try resolvedProxyConfig(arguments: [option, "value"])
         }
         #expect(!XcodeMCPProxyServer.serverUsage.contains(option + " "))
+    }
+
+    @Test func developerDirectoryCLIOverridesTheStandardEnvironmentSelection() throws {
+        let fromEnvironment = try resolvedProxyConfig(environment: ["DEVELOPER_DIR": "/Applications/Selected Xcode.app"])
+        #expect(fromEnvironment.developerDirectoryURL?.path == "/Applications/Selected Xcode.app")
+        let explicit = try resolvedProxyConfig(
+            arguments: ["--developer-dir", "/Applications/Explicit Xcode.app"],
+            environment: ["DEVELOPER_DIR": "/Applications/Selected Xcode.app"]
+        )
+        #expect(explicit.developerDirectoryURL?.path == "/Applications/Explicit Xcode.app")
+    }
+
+    @Test func nativeHelperCLIOverridesTheEnvironmentBundle() throws {
+        let fromEnvironment = try resolvedProxyConfig(environment: [
+            "XCODE_MCP_NATIVE_HOST_BUNDLE": "/tmp/Environment Native Host.app",
+        ])
+        #expect(fromEnvironment.nativeHostBundleURL?.path == "/tmp/Environment Native Host.app")
+        let explicit = try resolvedProxyConfig(
+            arguments: ["--native-host-bundle", "/tmp/Explicit Native Host.app"],
+            environment: ["XCODE_MCP_NATIVE_HOST_BUNDLE": "/tmp/Environment Native Host.app"]
+        )
+        #expect(explicit.nativeHostBundleURL?.path == "/tmp/Explicit Native Host.app")
+    }
+
+    @Test func dryRunPreservesNativeHelperAndDeveloperDirectoryArguments() throws {
+        let action = try XcodeMCPProxyServer.resolveLaunchAction(arguments: [
+            "xcode-mcp-proxy-server", "--dry-run",
+            "--native-host-bundle", "/tmp/Native Host.app",
+            "--developer-dir", "/Applications/Selected Xcode.app",
+        ], environment: [:])
+        guard case .dryRun(let command) = action else { Issue.record("expected dry run"); return }
+        #expect(command.contains("--native-host-bundle '/tmp/Native Host.app'"))
+        #expect(command.contains("--developer-dir '/Applications/Selected Xcode.app'"))
+        #expect(!command.contains("--upstream-processes"))
     }
 
     @Test func inheritedNativeRoutingValuesAreNotRenderedInTheServerCommand() throws {

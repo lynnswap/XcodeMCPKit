@@ -26,45 +26,25 @@ struct XcodeMCPProxyServerTests {
         #expect(endpoint.url.absoluteString == "http://127.0.0.1:8765/mcp")
     }
 
-    @Test func firstXcrunToolSelectionTreatsLogAsFlagWithoutValue() {
-        let selection = XcrunArguments.firstToolSelection(
-            from: ["--sdk", "macosx", "--log", "mcpbridge", "--some-flag"]
-        )
-
-        #expect(selection?.toolName == "mcpbridge")
-        #expect(selection?.preToolArguments == ["--sdk", "macosx", "--log"])
-    }
-
-    @Test func additionalPermissionDialogExecutableCandidatesKeepXcrunPathWhenToolResolutionFails() {
-        let candidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates()
-
-        #expect(candidates.contains("/usr/bin/xcrun"))
-    }
-
-    @Test func executableLookupClientResolvesPathAndXcrunToolThroughInjectedClients() {
+    @Test func permissionDialogCandidatesUseTheConfiguredNativeHelper() {
+        let bundleURL = URL(fileURLWithPath: "/fixtures/XcodeMCPNativeHost.app")
+        let executable = bundleURL.appendingPathComponent("Contents/MacOS/xcode-mcp-native-host").path
         let fileSystem = testDependency(of: FileSystemClient.self) {
-            $0.isExecutableFile = { path in
-                path == "/custom/bin/xcrun"
-            }
+            $0.isExecutableFile = { $0 == executable }
         }
-        let client = ExecutableLookupClient.live(
-            environment: { ["PATH": "/usr/bin:/custom/bin"] },
-            fileSystem: fileSystem,
-            runCommand: { executablePath, arguments in
-                #expect(executablePath == "/custom/bin/xcrun")
-                #expect(arguments == ["--sdk", "macosx", "--find", "mcpbridge"])
-                return "/custom/toolchain/mcpbridge\n"
-            }
-        )
+        #expect(PermissionDialogExecutableResolver.executableCandidates(
+            bundleURL: bundleURL, developerDirectoryURL: nil, fileSystem: fileSystem
+        ) == [executable])
+    }
 
-        #expect(client.resolveExecutablePath("xcrun") == "/custom/bin/xcrun")
-        #expect(
-            client.resolveXcrunToolPath(
-                "xcrun",
-                "mcpbridge",
-                ["--sdk", "macosx"]
-            ) == "/custom/toolchain/mcpbridge"
-        )
+    @Test func optionalPermissionDialogCandidatesDoNotSubstituteAnotherExecutable() {
+        let fileSystem = testDependency(of: FileSystemClient.self) {
+            $0.isExecutableFile = { _ in false }
+        }
+        #expect(PermissionDialogExecutableResolver.executableCandidates(
+            bundleURL: URL(fileURLWithPath: "/missing/NativeHost.app"),
+            developerDirectoryURL: nil, fileSystem: fileSystem
+        ).isEmpty)
     }
 
     @Test func configurationMirrorsHTTPProxyConfigForCLIBoundary() throws {
@@ -88,7 +68,8 @@ struct XcodeMCPProxyServerTests {
             listenHost: "127.0.0.1",
             listenPort: 9876,
 
-            upstreamProcessCount: 3,
+            nativeHostBundleURL: directoryURL.appendingPathComponent("NativeHost.app"),
+            developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer"),
 
             maxBodyBytes: 2048,
             requestTimeout: 12,
@@ -103,7 +84,8 @@ struct XcodeMCPProxyServerTests {
 
         #expect(config.listenHost == "127.0.0.1")
         #expect(config.listenPort == 9876)
-        #expect(config.upstreamProcessCount == 3)
+        #expect(config.nativeHostBundleURL == proxyConfig.nativeHostBundleURL)
+        #expect(config.developerDirectoryURL == proxyConfig.developerDirectoryURL)
         #expect(config.maxBodyBytes == 2048)
         #expect(config.requestTimeout == .seconds(12))
         #expect(config.configPath == configURL.path)
@@ -258,27 +240,23 @@ struct XcodeMCPProxyServerTests {
     }
 
     @Test(arguments: [false, true])
-    func automaticEnabledHeadlessHonorsApprovalPolicyAndPreservesGUIRouting(
-        autoApprove: Bool
-    ) async throws {
-        let availabilityQueries = NIOLockedValueBox(0)
+    func nativeStartupWithoutGUIInventoryHonorsApprovalPolicy(autoApprove: Bool) async throws {
         let autoApproverCreations = NIOLockedValueBox(0)
         let autoApprover = RecordingAutoApprover()
         let runtimeConfiguration = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
         let runtime = StartupInventoryRuntime()
+        let bundleURL = URL(fileURLWithPath: "/fixtures/XcodeMCPNativeHost.app")
+        let developerURL = URL(fileURLWithPath: "/fixtures/Xcode.app/Contents/Developer")
         let server = XcodeMCPProxyServer(
             configuration: .init(
                 bindAddress: .init(host: "127.0.0.1", port: 0),
+                nativeHostBundleURL: bundleURL,
+                developerDirectoryURL: developerURL,
                 discovery: .disabled,
-                approvalPolicy: autoApprove ? .automatic : .manual,
-                featurePolicy: .init(refreshCodeIssuesMode: .proxy)
+                approvalPolicy: autoApprove ? .automatic : .manual
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
-                xcodeServiceAvailability: {
-                    availabilityQueries.withLockedValue { $0 += 1 }
-                    return .enabled
-                },
                 makeAutoApprover: { _, _ in
                     autoApproverCreations.withLockedValue { $0 += 1 }
                     return autoApprover
@@ -289,111 +267,30 @@ struct XcodeMCPProxyServerTests {
                 }
             )
         )
-
         _ = try await server.start()
         let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
-        #expect(availabilityQueries.withLockedValue { $0 } == 1)
-        #expect(captured.includesXcodeService)
+        #expect(captured.nativeHostBundleURL == bundleURL)
+        #expect(captured.developerDirectoryURL == developerURL)
         #expect(captured.usesPermissionDialogAutomation == autoApprove)
-        #expect(captured.refreshCodeIssuesMode == .proxy)
-        #expect(ProxyRuntime.documentationSearchIsConfigured(configuration: captured) == false)
+        #expect(runtime.inventorySnapshot().xcodeTargets.isEmpty)
         #expect(autoApproverCreations.withLockedValue { $0 } == (autoApprove ? 1 : 0))
         #expect(autoApprover.startCount == (autoApprove ? 1 : 0))
         try await server.shutdown()
         #expect(autoApprover.cancelCount == (autoApprove ? 1 : 0))
     }
 
-    @Test(arguments: [XcodeMCPServerAvailability.disabled, .unavailable])
-    func absentServiceRetainsGUIConnectionDiscovery(availability: XcodeMCPServerAvailability) async throws {
-        let captured = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
-        let server = XcodeMCPProxyServer(configuration: .init(bindAddress: .localhost(port: 0), discovery: .disabled),
-            dependencies: .init(discoveryClient: .testValue, xcodeServiceAvailability: { availability },
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { config in captured.withLockedValue { $0 = config }; return StartupInventoryRuntime() }))
-        _ = try await server.start()
-        #expect(try #require(captured.withLockedValue { $0 }).includesXcodeService == false)
+    @Test func unavailableNativeHelperFailsStartupBeforeBindingTheEndpoint() async throws {
+        let missingBundle = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-native-host-\(UUID().uuidString).app")
+        let server = XcodeMCPProxyServer(configuration: .init(
+            bindAddress: .localhost(port: 0), nativeHostBundleURL: missingBundle, discovery: .disabled
+        ))
+        await #expect(throws: MCPBridgeRuntimeError.self) { _ = try await server.start() }
+        let snapshot = await server.snapshot()
+        #expect(snapshot.phase == .stopped)
+        #expect(snapshot.endpoint == nil)
+        #expect(snapshot.upstreams.isEmpty)
         try await server.shutdown()
-    }
-
-    @Test func failedServiceDiscoveryDoesNotBlockServerStartup() async throws {
-        let captured = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
-        let server = XcodeMCPProxyServer(configuration: .init(bindAddress: .localhost(port: 0), discovery: .disabled),
-            dependencies: .init(discoveryClient: .testValue, xcodeServiceAvailability: { throw DiscoveryWriteFailure.expected },
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { config in captured.withLockedValue { $0 = config }; return StartupInventoryRuntime() }))
-        _ = try await server.start()
-        #expect(try #require(captured.withLockedValue { $0 }).includesXcodeService == false)
-        try await server.shutdown()
-    }
-
-    @Test func cancellingStartCancelsAndAwaitsHeadlessStatusResolution() async throws {
-        let availability = CancellationControlledHeadlessAvailability()
-        let runtimeCreations = NIOLockedValueBox(0)
-        let server = XcodeMCPProxyServer(
-            configuration: .init(discovery: .disabled),
-            dependencies: .init(
-                discoveryClient: .testValue,
-                xcodeServiceAvailability: {
-                    try await availability.resolve()
-                },
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { _ in
-                    runtimeCreations.withLockedValue { $0 += 1 }
-                    return StartupInventoryRuntime()
-                }
-            )
-        )
-        let startTask = Task {
-            try await server.start()
-        }
-
-        try await availability.started.wait(description: "waiting for headless status resolution")
-        startTask.cancel()
-
-        await #expect(throws: CancellationError.self) {
-            _ = try await startTask.value
-        }
-        try await availability.completed.wait(
-            description: "waiting for cancelled headless status unwind"
-        )
-        #expect(availability.wasCancelled)
-        #expect(runtimeCreations.withLockedValue { $0 } == 0)
-        #expect((await server.snapshot()).phase == .stopped)
-    }
-
-    @Test func shutdownWhileStartingCancelsAndAwaitsHeadlessStatusResolution() async throws {
-        let availability = CancellationControlledHeadlessAvailability()
-        let runtimeCreations = NIOLockedValueBox(0)
-        let server = XcodeMCPProxyServer(
-            configuration: .init(discovery: .disabled),
-            dependencies: .init(
-                discoveryClient: .testValue,
-                xcodeServiceAvailability: {
-                    try await availability.resolve()
-                },
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { _ in
-                    runtimeCreations.withLockedValue { $0 += 1 }
-                    return StartupInventoryRuntime()
-                }
-            )
-        )
-        let startTask = Task {
-            try await server.start()
-        }
-
-        try await availability.started.wait(description: "waiting for headless status resolution")
-        try await server.shutdown()
-
-        await #expect(throws: CancellationError.self) {
-            _ = try await startTask.value
-        }
-        try await availability.completed.wait(
-            description: "waiting for shutdown status unwind"
-        )
-        #expect(availability.wasCancelled)
-        #expect(runtimeCreations.withLockedValue { $0 } == 0)
-        #expect((await server.snapshot()).phase == .stopped)
     }
 
     @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {
@@ -1036,30 +933,6 @@ private final class BlockingAutoApprover: @unchecked Sendable,
     }
 }
 
-private final class CancellationControlledHeadlessAvailability: @unchecked Sendable {
-    let started = TestSignal()
-    let completed = TestSignal()
-
-    private let release = TestSignal()
-    private let cancelled = NIOLockedValueBox(false)
-
-    var wasCancelled: Bool {
-        cancelled.withLockedValue { $0 }
-    }
-
-    func resolve() async throws -> XcodeMCPServerAvailability {
-        started.signal()
-        defer { completed.signal() }
-        do {
-            try await release.waitUntilSignaled()
-            return .enabled
-        } catch is CancellationError {
-            cancelled.withLockedValue { $0 = true }
-            throw CancellationError()
-        }
-    }
-}
-
 private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeServing {
     private struct State {
         var started = false
@@ -1131,13 +1004,7 @@ private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeSe
             state.readInventoryBeforeStart = state.readInventoryBeforeStart || state.started == false
         }
         return ProxyRuntimeInventorySnapshot(
-            xcodeTargets: [
-                ProxyRuntimeInventorySnapshot.XcodeTarget(
-                    processID: 42,
-                    appPath: "/Applications/Xcode.app",
-                    mcpBridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge"
-                )
-            ],
+            xcodeTargets: [],
             permissionDialogProcessIDs: [42]
         )
     }

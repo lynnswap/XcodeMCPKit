@@ -1,13 +1,17 @@
+import Foundation
 import XcodeMCPCore
 
-/// Executables used by native Service bridges; GUI bridge paths come from process inventory.
 enum PermissionDialogExecutableResolver {
-    static func additionalExecutableCandidates(
-        executableLookupClient: ExecutableLookupClient = .liveValue
+    static func executableCandidates(
+        bundleURL: URL?,
+        developerDirectoryURL: URL?,
+        fileSystem: FileSystemClient = .liveValue
     ) -> [String] {
-        let invocation = MCPBridgeInvocation.defaultMCPBridge
-        let command = executableLookupClient.resolveExecutablePath(invocation.command) ?? invocation.command
-        let bridge = executableLookupClient.resolveXcrunToolPath(command, MCPBridgeInvocation.mcpBridgeToolName, [])
-        return [command] + (bridge.map { [$0] } ?? [])
+        guard let invocation = try? NativeHostInvocation.resolve(
+            bundleURL: bundleURL,
+            developerDirectoryURL: developerDirectoryURL,
+            fileSystem: fileSystem
+        ) else { return [] }
+        return [invocation.command]
     }
 }

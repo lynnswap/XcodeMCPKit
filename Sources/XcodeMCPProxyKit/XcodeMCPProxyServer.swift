@@ -66,8 +66,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         /// Serve refresh-code-issues requests through proxy diagnostics.
         case proxy
 
-        /// Forward refresh-code-issues requests to the upstream Xcode MCP
-        /// bridge.
+        /// Forward refresh-code-issues requests to native Xcode tools.
         case upstream
     }
 
@@ -110,8 +109,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         public static let `default` = Self()
     }
 
-    /// Initialize handshake overrides sent from the proxy to upstream
-    /// `mcpbridge` processes.
+    /// Initialize handshake overrides sent from the proxy to native helpers.
     ///
     /// Non-`nil` properties override the matching values loaded from
     /// ``configurationFileURL``. Properties left as `nil` keep the file value
@@ -119,10 +117,10 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     public struct InitializeHandshake: Equatable, Sendable {
         /// Upstream client information for the initialize handshake.
         public struct ClientInfo: Equatable, Sendable {
-            /// Client name to advertise to the upstream MCP bridge.
+            /// Client name to advertise to the native helper.
             public var name: String?
 
-            /// Client version to advertise to the upstream MCP bridge.
+            /// Client version to advertise to the native helper.
             public var version: String?
 
             /// Creates upstream client information.
@@ -156,10 +154,11 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// HTTP bind address.
     public var bindAddress: BindAddress
 
-    /// Number of bridge connections for each GUI Xcode process and for enabled Xcode Service.
-    ///
-    /// The default is `1`. Starting the server requires a value in `1...10`.
-    public var upstreamProcessCount: Int
+    /// Native helper application bundle. `nil` uses the installed helper.
+    public var nativeHostBundleURL: URL?
+
+    /// Xcode developer directory. `nil` uses the selected Xcode installation.
+    public var developerDirectoryURL: URL?
 
     /// Maximum accepted HTTP request body size in bytes.
     public var maxBodyBytes: Int
@@ -197,7 +196,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///
     /// - Parameters:
     ///   - bindAddress: HTTP bind address.
-    ///   - upstreamProcessCount: Bridge connections per GUI Xcode and Xcode Service, in `1...10`.
+    ///   - nativeHostBundleURL: Native helper application bundle, or `nil` to use the installed helper.
+    ///   - developerDirectoryURL: Xcode developer directory, or `nil` to use the selected installation.
     ///   - maxBodyBytes: Maximum accepted HTTP request body size.
     ///   - requestTimeout: Request timeout, or `nil` to disable it.
     ///   - configurationFileURL: Optional TOML configuration file URL.
@@ -208,7 +208,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///   - initializeHandshake: Explicit upstream initialize handshake override.
     public init(
         bindAddress: BindAddress = .localhost(),
-        upstreamProcessCount: Int = 1,
+        nativeHostBundleURL: URL? = nil,
+        developerDirectoryURL: URL? = nil,
         maxBodyBytes: Int = 1_048_576,
         requestTimeout: Duration? = .seconds(300),
         configurationFileURL: URL? = nil,
@@ -219,7 +220,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         featurePolicy: FeaturePolicy = .default
     ) {
         self.bindAddress = bindAddress
-        self.upstreamProcessCount = upstreamProcessCount
+        self.nativeHostBundleURL = nativeHostBundleURL
+        self.developerDirectoryURL = developerDirectoryURL
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
         self.configurationFileURL = configurationFileURL
@@ -236,7 +238,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
                 host: proxyConfig.listenHost,
                 port: proxyConfig.listenPort
             ),
-            upstreamProcessCount: proxyConfig.upstreamProcessCount,
+            nativeHostBundleURL: proxyConfig.nativeHostBundleURL,
+            developerDirectoryURL: proxyConfig.developerDirectoryURL,
             maxBodyBytes: proxyConfig.maxBodyBytes,
             requestTimeout: proxyConfig.requestTimeout > 0
                 ? .seconds(proxyConfig.requestTimeout)
@@ -446,15 +449,12 @@ public final class XcodeMCPProxyServer: Sendable {
 
     struct Dependencies: Sendable {
         var discoveryClient: DiscoveryClient
-        var executableLookupClient: ExecutableLookupClient
         var processID: @Sendable () -> Int
         var loadFileConfiguration:
             @Sendable (URL) throws -> ProxyConfig.File.LoadedConfiguration
-        var xcodeServiceAvailability:
-            @Sendable () async throws -> XcodeMCPServerAvailability
         var makeAutoApprover:
             @Sendable (ProxyConfig, any ProxyRuntimeServing) -> any ProxyServerPermissionDialogAutoApprover
-        var makeRuntime: @Sendable (ProxyRuntimeConfiguration) -> any ProxyRuntimeServing
+        var makeRuntime: @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing
         var makeHTTPGateway:
             @Sendable (
                 ProxyHTTPConfiguration,
@@ -464,7 +464,6 @@ public final class XcodeMCPProxyServer: Sendable {
 
         init(
             discoveryClient: DiscoveryClient = .liveValue,
-            executableLookupClient: ExecutableLookupClient = .liveValue,
             processID: @escaping @Sendable () -> Int = {
                 Int(ProcessInfo.processInfo.processIdentifier)
             },
@@ -472,15 +471,11 @@ public final class XcodeMCPProxyServer: Sendable {
                 ProxyConfig.File.LoadedConfiguration = {
                     try ProxyConfig.File.Loader.loadStrict(configURL: $0)
                 },
-            xcodeServiceAvailability: @escaping @Sendable () async throws ->
-                XcodeMCPServerAvailability = {
-                    .unavailable
-                },
             makeAutoApprover: @escaping @Sendable (
                 ProxyConfig,
                 any ProxyRuntimeServing
             ) -> any ProxyServerPermissionDialogAutoApprover,
-            makeRuntime: @escaping @Sendable (ProxyRuntimeConfiguration) -> any ProxyRuntimeServing,
+            makeRuntime: @escaping @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing,
             makeHTTPGateway: @escaping @Sendable (
                 ProxyHTTPConfiguration,
                 any ProxyRuntimeServing,
@@ -494,26 +489,19 @@ public final class XcodeMCPProxyServer: Sendable {
             }
         ) {
             self.discoveryClient = discoveryClient
-            self.executableLookupClient = executableLookupClient
             self.processID = processID
             self.loadFileConfiguration = loadFileConfiguration
-            self.xcodeServiceAvailability = xcodeServiceAvailability
             self.makeAutoApprover = makeAutoApprover
             self.makeRuntime = makeRuntime
             self.makeHTTPGateway = makeHTTPGateway
         }
 
         static var live: Self {
-            let executableLookupClient = ExecutableLookupClient.liveValue
-            let statusClient = XcodeMCPServerStatusClient()
             return Self(
-                executableLookupClient: executableLookupClient,
-                xcodeServiceAvailability: {
-                    try await statusClient.availability()
-                },
                 makeAutoApprover: { config, runtime in
-                    let additionalCandidates = XcodeMCPProxyServer.additionalPermissionDialogExecutableCandidates(
-                        executableLookupClient: executableLookupClient
+                    let additionalCandidates = PermissionDialogExecutableResolver.executableCandidates(
+                        bundleURL: config.nativeHostBundleURL,
+                        developerDirectoryURL: config.developerDirectoryURL
                     )
                     return XcodePermissionDialogAutomation.AutoApprover(
                         configuration: .init(
@@ -521,13 +509,8 @@ public final class XcodeMCPProxyServer: Sendable {
                                 runtime.inventorySnapshot().permissionDialogProcessIDs
                             },
                             agentPathCandidates: {
-                                let processBoundCandidates = runtime.inventorySnapshot()
-                                    .xcodeTargets.map(\.mcpBridgePath)
-                                return XcodePermissionDialogAutomation.AutoApprover
-                                    .executablePathCandidates(
-                                    additional:
-                                        additionalCandidates + processBoundCandidates
-                                )
+                                XcodePermissionDialogAutomation.AutoApprover
+                                    .executablePathCandidates(additional: additionalCandidates)
                             },
                             assistantNameCandidates: {
                                 Set(XcodeMCPProxyServer.permissionDialogAssistantNameCandidates(config: config))
@@ -542,7 +525,14 @@ public final class XcodeMCPProxyServer: Sendable {
                     )
                 },
                 makeRuntime: { config in
-                    ProxyRuntime(configuration: config)
+                    let invocation = try NativeHostInvocation.resolve(
+                        bundleURL: config.nativeHostBundleURL,
+                        developerDirectoryURL: config.developerDirectoryURL
+                    )
+                    var resolved = config
+                    resolved.nativeHostBundleURL = URL(fileURLWithPath: invocation.command)
+                        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                    return ProxyRuntime(configuration: resolved)
                 }
             )
         }
@@ -559,7 +549,7 @@ public final class XcodeMCPProxyServer: Sendable {
 
     /// Creates a proxy server with live runtime dependencies.
     ///
-    /// - Parameter configuration: Public HTTP, upstream bridge, discovery, and
+    /// - Parameter configuration: Public HTTP, native helper, discovery, and
     ///   lifecycle settings.
     public init(
         configuration: XcodeMCPProxyServerConfiguration =
@@ -650,38 +640,19 @@ public final class XcodeMCPProxyServer: Sendable {
         displayHost: String,
         port: Int,
         config: ProxyConfig,
-        includesXcodeService: Bool,
-        upstreamProcessCount: Int,
         xcodeTargets: [ProxyRuntimeInventorySnapshot.XcodeTarget]
     ) -> String {
-        let runtimeConfiguration = config.runtimeConfiguration(includesXcodeService: includesXcodeService)
-        let upstreamsPerXcode = max(1, min(config.upstreamProcessCount, 10))
-        let processRoutingActive = !xcodeTargets.isEmpty
         var lines = [
             "\(productMetadata.name) \(productMetadata.version)",
             "",
             "Server",
             "  URL: http://\(displayHost):\(port)/mcp",
-            "  Upstream processes: \(upstreamProcessCount)",
-            "  Auto approve: \(runtimeConfiguration.usesPermissionDialogAutomation ? "enabled" : "disabled")",
+            "  Auto approve: \(config.autoApproveXcodeDialog ? "enabled" : "disabled")",
             "",
             "Xcode",
         ]
-        if processRoutingActive {
-            lines.insert(
-                "  Upstream processes per Xcode: \(upstreamsPerXcode)",
-                at: 5
-            )
-        }
-
-        if includesXcodeService {
-            lines.append("  Service: Xcode Service")
-        }
         appendGUIXcodeStatus(xcodeTargets, to: &lines)
 
-        lines.append(
-            "  DocumentationSearch: \(documentationSearchStartupStatus(config: runtimeConfiguration))"
-        )
         return lines.joined(separator: "\n")
     }
 
@@ -705,28 +676,6 @@ public final class XcodeMCPProxyServer: Sendable {
             }
         }
 
-    }
-
-    private static func documentationSearchStartupStatus(
-        config: ProxyRuntimeConfiguration
-    ) -> String {
-        if config.includesXcodeService {
-            return "upstream"
-        }
-        if ProxyRuntime.documentationSearchIsConfigured(
-            configuration: config
-        ) {
-            return "pending"
-        }
-        return "disabled"
-    }
-
-    static func additionalPermissionDialogExecutableCandidates(
-        executableLookupClient: ExecutableLookupClient = .liveValue
-    ) -> [String] {
-        PermissionDialogExecutableResolver.additionalExecutableCandidates(
-            executableLookupClient: executableLookupClient
-        )
     }
 
     private static func permissionDialogAssistantNameCandidates(config: ProxyConfig) -> [String] {
@@ -754,11 +703,6 @@ extension ProxyConfig {
         guard (0...65_535).contains(config.listenPort) else {
             throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration(
                 "bindAddress.port must be in 0...65535"
-            )
-        }
-        guard (1...10).contains(config.upstreamProcessCount) else {
-            throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration(
-                "upstreamProcessCount must be in 1...10"
             )
         }
         guard config.maxBodyBytes > 0 else {
@@ -791,7 +735,8 @@ extension ProxyConfig {
         var resolved = Self(
             listenHost: config.listenHost,
             listenPort: config.listenPort,
-            upstreamProcessCount: config.upstreamProcessCount,
+            nativeHostBundleURL: config.nativeHostBundleURL,
+            developerDirectoryURL: config.developerDirectoryURL,
             maxBodyBytes: config.maxBodyBytes,
             requestTimeout: requestTimeout,
             configPath: config.configPath,

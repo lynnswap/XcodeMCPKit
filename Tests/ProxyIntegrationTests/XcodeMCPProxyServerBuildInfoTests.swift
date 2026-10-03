@@ -12,32 +12,19 @@ struct XcodeMCPProxyServerBuildInfoTests {
             listenHost: "localhost",
             listenPort: 8765,
 
-            upstreamProcessCount: 2,
             maxBodyBytes: 1_048_576,
             requestTimeout: 300,
             autoApproveXcodeDialog: true
         )
-        let target = XcodeProcessTarget(
-            processID: 9004,
-            appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge",
-            xcodeVersion: "26.0"
+        let target = ProxyRuntimeInventorySnapshot.XcodeTarget(
+            processID: 9004, appPath: "/Applications/Xcode.app"
         )
 
         let summary = XcodeMCPProxyServer.startupSummary(
             displayHost: "localhost",
             port: 8765,
             config: config,
-            includesXcodeService: false,
-            upstreamProcessCount: 2,
-            xcodeTargets: [
-                ProxyRuntimeInventorySnapshot.XcodeTarget(
-                    processID: target.processID,
-                    appPath: target.appPath,
-                    mcpBridgePath: target.mcpbridgePath
-                )
-            ]
+            xcodeTargets: [target]
         )
 
         #expect(summary == """
@@ -45,18 +32,15 @@ struct XcodeMCPProxyServerBuildInfoTests {
 
         Server
           URL: http://localhost:8765/mcp
-          Upstream processes: 2
-          Upstream processes per Xcode: 2
           Auto approve: enabled
 
         Xcode
           App: /Applications/Xcode.app
           PID: 9004
-          DocumentationSearch: pending
         """)
     }
 
-    @Test func headlessStartupSummaryNamesTheServiceAndUpstreamDocumentationOwner() {
+    @Test func startupSummaryRemainsAvailableWithoutGUIXcode() {
         let config = ProxyConfig(
             listenHost: "localhost",
             listenPort: 8765,
@@ -70,8 +54,6 @@ struct XcodeMCPProxyServerBuildInfoTests {
             displayHost: "localhost",
             port: 8765,
             config: config,
-            includesXcodeService: true,
-            upstreamProcessCount: 1,
             xcodeTargets: []
         )
 
@@ -80,13 +62,10 @@ struct XcodeMCPProxyServerBuildInfoTests {
 
         Server
           URL: http://localhost:8765/mcp
-          Upstream processes: 1
           Auto approve: enabled
 
         Xcode
-          Service: Xcode Service
           GUI: not detected
-          DocumentationSearch: upstream
         """)
     }
 }

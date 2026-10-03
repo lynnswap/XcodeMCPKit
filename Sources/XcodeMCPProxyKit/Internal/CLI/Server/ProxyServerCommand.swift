@@ -9,7 +9,7 @@ package struct ProxyServerCommand: ParsableCommand {
             commandName: "xcode-mcp-proxy-server",
             abstract: "Start the Streamable HTTP proxy server for Xcode MCP.",
             discussion: """
-                The server manages xcrun mcpbridge upstream processes. HTTP-capable clients
+                The server connects directly to Xcode through its native helper. HTTP-capable clients
                 should connect directly; use xcode-mcp-proxy only for STDIO compatibility.
                 """,
             version: XcodeMCPProxyServer.productMetadata.version
@@ -46,8 +46,11 @@ package struct ProxyServerCommand: ParsableCommand {
     )
     var requestTimeout: CLIRequestTimeout?
 
-    @Option(help: "Bridge connections per GUI Xcode and for Xcode Service, in 1...10.")
-    var upstreamProcesses: Int?
+    @Option(name: .customLong("native-host-bundle"), help: ArgumentHelp("Native helper application bundle. Defaults to the installed helper.", valueName: "path"))
+    var nativeHostBundlePath: String?
+
+    @Option(name: .customLong("developer-dir"), help: ArgumentHelp("Xcode developer directory. Defaults to the selected Xcode installation.", valueName: "path"))
+    var developerDirectoryPath: String?
 
     @Option(help: "Code issue refresh owner: proxy or upstream.")
     var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode?
@@ -73,9 +76,6 @@ package struct ProxyServerCommand: ParsableCommand {
         }
         if let maxBodyBytes, maxBodyBytes <= 0 {
             throw ValidationError("--max-body-bytes must be a positive integer")
-        }
-        if let upstreamProcesses, (1...10).contains(upstreamProcesses) == false {
-            throw ValidationError("--upstream-processes must be an integer in 1...10")
         }
 
     }

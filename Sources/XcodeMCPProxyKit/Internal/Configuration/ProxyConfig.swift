@@ -26,7 +26,8 @@ package struct ProxyConfig: Sendable {
 
     package var listenHost: String
     package var listenPort: Int
-    package var upstreamProcessCount: Int
+    package var nativeHostBundleURL: URL?
+    package var developerDirectoryURL: URL?
     package var maxBodyBytes: Int
     package var requestTimeout: TimeInterval
     package var configPath: String?
@@ -40,7 +41,8 @@ package struct ProxyConfig: Sendable {
     package init(
         listenHost: String,
         listenPort: Int,
-        upstreamProcessCount: Int = 1,
+        nativeHostBundleURL: URL? = nil,
+        developerDirectoryURL: URL? = nil,
         maxBodyBytes: Int,
         requestTimeout: TimeInterval,
         configPath: String? = nil,
@@ -53,7 +55,8 @@ package struct ProxyConfig: Sendable {
     ) {
         self.listenHost = listenHost
         self.listenPort = listenPort
-        self.upstreamProcessCount = upstreamProcessCount
+        self.nativeHostBundleURL = nativeHostBundleURL
+        self.developerDirectoryURL = developerDirectoryURL
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
         self.configPath = configPath
@@ -110,10 +113,10 @@ package struct ProxyConfig: Sendable {
         return normalized
     }
 
-    package func runtimeConfiguration(includesXcodeService: Bool) -> ProxyRuntimeConfiguration {
+    package func runtimeConfiguration() -> ProxyRuntimeConfiguration {
         return ProxyRuntimeConfiguration(
-            includesXcodeService: includesXcodeService,
-            upstreamProcessCount: upstreamProcessCount,
+            nativeHostBundleURL: nativeHostBundleURL,
+            developerDirectoryURL: developerDirectoryURL,
             maxMessageBytes: maxBodyBytes,
             requestTimeout: requestTimeout,
             prewarmToolsList: prewarmToolsList,
