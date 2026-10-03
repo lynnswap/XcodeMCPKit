@@ -1730,15 +1730,26 @@ final class ProcessControlPlaneAuthority: Sendable {
     }
 
     func catalogLoadWasSatisfied(_ lease: CatalogLease) -> Bool {
+        satisfiedCatalogProvider(for: lease) != nil
+    }
+
+    func satisfiedCatalogProvider(for lease: CatalogLease) -> ToolCatalogProvider? {
         state.withLockedValue { state in
-            guard lease.catalogEpoch == state.catalogEpoch else { return false }
+            guard lease.catalogEpoch == state.catalogEpoch else { return nil }
             let attempt: Attempt?
-            if let routeID = lease.routeID {
-                attempt = Self.record(routeID: routeID, in: state)?.attempt
-            } else {
+            let provider: ToolCatalogProvider?
+            if let routeID = lease.routeID,
+               let record = Self.record(routeID: routeID, in: state) {
+                attempt = record.attempt
+                provider = state.catalogsByProcessID[record.route.target.processID]?.provider
+            } else if lease.routeID == nil {
                 attempt = state.unboundAttempt
+                provider = state.nativeCatalog
+            } else {
+                return nil
             }
-            return attempt?.id == lease.attemptID && attempt?.phase == .cataloged
+            guard attempt?.id == lease.attemptID, attempt?.phase == .cataloged else { return nil }
+            return provider
         }
     }
 

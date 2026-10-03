@@ -256,10 +256,11 @@ extension RuntimeCoordinator {
                 )
             case .discarded(_, let transition):
                 applyProcessControlPlaneTransition(transition)
-                guard processControlPlane.catalogLoadWasSatisfied(lease),
+                guard let provider = processControlPlane.satisfiedCatalogProvider(for: lease),
                       let rawResult = processControlPlane.canonicalToolsCatalogRaw() else {
                     throw UpstreamSlotScheduler.AcquisitionError.unavailable
                 }
+                await onFreshProvider(provider.sourceProof)
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: rawResult,
                     sourceProof: processControlPlane.canonicalSourceProof(),
@@ -275,8 +276,11 @@ extension RuntimeCoordinator {
                 lease: lease,
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
             ))
-            if isCurrentLoad == false, processControlPlane.catalogLoadWasSatisfied(lease),
+            if isCurrentLoad == false,
+               let provider = processControlPlane.satisfiedCatalogProvider(for: lease),
                let rawResult = processControlPlane.canonicalToolsCatalogRaw() {
+                try Task.checkCancellation()
+                await onFreshProvider(provider.sourceProof)
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: rawResult,
                     sourceProof: processControlPlane.canonicalSourceProof(),
@@ -329,53 +333,37 @@ extension RuntimeCoordinator {
                             route: route,
                             result: recordedResult
                         )
-                    } catch is CancellationError {
-                        if self.processControlPlane.validateCatalogLoad(route.lease) == false {
-                            if self.processControlPlane.catalogLoadWasSatisfied(route.lease),
-                               let current = self.currentCatalogResult(
-                                startedAt: startedAt,
-                                exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
-                            ) {
-                                return .success(route: route, result: current)
-                            }
-                            return .stale
-                        }
-                        self.applyCatalogCommit(self.commitProcessCatalog(
-                            .failed,
-                            lease: route.lease,
-                            nowUptimeNanoseconds: self.nowUptimeNanoseconds()
-                        ))
-                        throw CancellationError()
-                    } catch is TimeoutError {
-                        if self.processControlPlane.validateCatalogLoad(route.lease) == false {
-                            if self.processControlPlane.catalogLoadWasSatisfied(route.lease),
-                               let current = self.currentCatalogResult(
-                                startedAt: startedAt,
-                                exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
-                            ) {
-                                return .success(route: route, result: current)
-                            }
-                            return .stale
-                        }
-                        let cancellationDeliveries = self.applyCatalogCommit(
-                            self.commitProcessCatalog(
-                                .unusable,
-                                lease: route.lease,
-                                nowUptimeNanoseconds: self.nowUptimeNanoseconds()
-                            )
-                        )
-                        self.scheduleMissingProcessToolsCatalogRetry(
-                            processID: route.target.processID,
-                            lease: route.lease,
-                            after: cancellationDeliveries,
-                            reason: "process_catalog_timeout"
-                        )
-                        return .failure(route: route,
-                            upstreamIndex: route.upstreamIndices.last ?? -1,
-                            error: TimeoutError())
                     } catch {
+                        try Task.checkCancellation()
+                        if let provider = self.processControlPlane.satisfiedCatalogProvider(for: route.lease),
+                           let current = self.currentCatalogResult(
+                            startedAt: startedAt,
+                            exposedProcessIDs: self.processToolCatalogExposedProcessIDs()) {
+                            await onFreshProvider(provider.sourceProof)
+                            return .success(route: route, result: current)
+                        }
+                        let underlying = ControlPlane.ErrorMapper.underlyingError(error)
+                        if underlying is CancellationError {
+                            guard self.processControlPlane.validateCatalogLoad(route.lease) else { return .stale }
+                            self.applyCatalogCommit(self.commitProcessCatalog(
+                                .failed, lease: route.lease,
+                                nowUptimeNanoseconds: self.nowUptimeNanoseconds()))
+                            throw CancellationError()
+                        }
+                        if underlying is TimeoutError {
+                            guard self.processControlPlane.validateCatalogLoad(route.lease) else { return .stale }
+                            let deliveries = self.applyCatalogCommit(self.commitProcessCatalog(
+                                .unusable, lease: route.lease,
+                                nowUptimeNanoseconds: self.nowUptimeNanoseconds()))
+                            self.scheduleMissingProcessToolsCatalogRetry(
+                                processID: route.target.processID, lease: route.lease,
+                                after: deliveries, reason: "process_catalog_timeout")
+                            return .failure(route: route,
+                                upstreamIndex: route.upstreamIndices.last ?? -1,
+                                error: underlying)
+                        }
                         let retriesActivation: Bool
-                        if case ControlPlane.Error.upstreamRPC = ControlPlane.ErrorMapper.underlyingError(error),
+                        if case ControlPlane.Error.upstreamRPC = underlying,
                            let claim = self.upstreamHealthManager.currentCatalogActivationClaim(
                                upstreamIndex: route.lease.upstreamIndex
                            ), claim.topologyProof == route.lease.topologyProof {
@@ -395,11 +383,9 @@ extension RuntimeCoordinator {
                                 after: deliveries, reason: "activation_catalog_rpc_error"
                             )
                         }
-                        return .failure(
-                            route: route,
+                        return .failure(route: route,
                             upstreamIndex: route.upstreamIndices.last ?? -1,
-                            error: error
-                        )
+                            error: underlying)
                     }
                 }
             }
