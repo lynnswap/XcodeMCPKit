@@ -469,8 +469,10 @@ struct NativeMCPSessionTests {
         }
     }
 
-    @Test func cancellationBeforeDispatchDoesNotStartTheToolOrCreateArtifacts() async throws {
+    @Test(arguments: [false, true])
+    func cancellationBeforeDispatchDoesNotStartTheToolOrCreateArtifacts(supportsCancellation: Bool) async throws {
         try await withNativeSession { harness in
+            harness.backend.supportsToolCancellation = supportsCancellation
             _ = try await harness.initialize()
             // STDIO may deliver both messages in one chunk before the request Task runs.
             try harness.call("QueuedAction", id: "cancel-before-dispatch")
@@ -826,6 +828,7 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
 
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data> {
         if let executeError { throw executeError }
+        context.didDispatch()
         let stream = AsyncStream<Data>.makeStream()
         let termination = AsyncStream<Bool>.makeStream()
         stream.continuation.onTermination = { reason in

@@ -130,8 +130,12 @@ package final class NativeGUIBackend: NativeToolBackend {
                 let cancellation: NativeGUIRequestCancellation = supportsCancellation
                     ? .nativeMessage(try NativeGUICodec.cancel(name, token: token)) : .waitForNativeCompletion
                 let reply = try await connected.request(request, cancellation: cancellation,
-                    didSend: { [weak self] in self?.invocations[token]?.wasDispatched = true },
+                    didSend: { [weak self] in
+                        context.didDispatch()
+                        self?.invocations[token]?.wasDispatched = true
+                    },
                     didReceiveReply: { [weak self] in self?.invocations[token]?.wasDispatched = false })
+                context.didDispatch()
                 continuation.yield(try NativeGUICodec.event("completed", data: NativeGUICodec.decode(reply)))
             } catch {
                 if !Task.isCancelled {

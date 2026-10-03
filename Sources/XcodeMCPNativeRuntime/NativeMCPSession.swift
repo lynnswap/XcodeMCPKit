@@ -11,7 +11,11 @@ package final class NativeMCPSession {
     private var initialized = false
     private var stopping = false
     private var outputFailed = false
-    private var requests: [String: Task<Void, Never>] = [:]
+    @MainActor private final class Request {
+        var task: Task<Void, Never>?
+        var wasDispatched = false
+    }
+    private var requests: [String: Request] = [:]
 
     package init(backend: any NativeToolBackend, artifactsRoot: URL,
                  output: @escaping @MainActor (Data) throws -> Void) {
@@ -44,7 +48,9 @@ package final class NativeMCPSession {
             if method == "notifications/cancelled",
                let parameters = object["params"] as? [String: Any],
                let id = requestID(parameters["requestId"]) {
-                if backend.supportsToolCancellation { requests[id.key]?.cancel() }
+                if let request = requests[id.key], backend.supportsToolCancellation || !request.wasDispatched {
+                    request.task?.cancel()
+                }
             }
         case .request(let method, let id):
             guard !stopping else {
@@ -56,11 +62,13 @@ package final class NativeMCPSession {
                 return
             }
             let params = object["params"].flatMap(JSONValue.init(any:))
-            requests[id.key] = Task { @MainActor in
+            let request = Request()
+            requests[id.key] = request
+            request.task = Task { @MainActor in
                 defer { requests[id.key] = nil }
                 do {
                     try Task.checkCancellation()
-                    let result = try await perform(method, params: params)
+                    let result = try await perform(method, params: params, request: request)
                     try Task.checkCancellation()
                     try sendResult(id: id, result: result)
                 } catch is CancellationError {
@@ -94,7 +102,7 @@ package final class NativeMCPSession {
         }
     }
 
-    private func perform(_ method: String, params: JSONValue?) async throws -> JSONValue {
+    private func perform(_ method: String, params: JSONValue?, request: Request) async throws -> JSONValue {
         if method == "initialize" {
             guard case .object(let fields) = params,
                   case .string = fields["protocolVersion"],
@@ -130,7 +138,8 @@ package final class NativeMCPSession {
             }
             let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID)
+            let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID,
+                                           onDispatch: { request.wasDispatched = true })
             let updates: AsyncStream<Data>
             do {
                 updates = try await backend.execute(name, arguments: arguments, context: context)
@@ -242,7 +251,7 @@ package final class NativeMCPSession {
 
     package func shutdown() async throws {
         stopping = true
-        let pending = Array(requests.values)
+        let pending = requests.values.compactMap(\.task)
         for request in pending { request.cancel() }
         for request in pending { await request.value }
         try await backend.shutdown()
