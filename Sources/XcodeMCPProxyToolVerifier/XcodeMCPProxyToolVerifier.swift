@@ -18,11 +18,12 @@ package enum ProxyToolVerifierCommand {
 struct VerifierOptions {
     var host = "127.0.0.1"
     var port = 18_765
-    var upstreamProcesses = 2
     var requestTimeoutSeconds = 600
     var outputDirectory = URL(fileURLWithPath: "ProxyToolVerifierOutput", isDirectory: true)
     var keepServer = false
     var noOpenXcode = false
+    var runDestination: String?
+    var deviceIdentifier: String?
     var verbose = false
 
     init(arguments: [String]) throws {
@@ -35,9 +36,6 @@ struct VerifierOptions {
             case "--port":
                 port = try Int(Self.value(after: argument, in: arguments, index: &index))
                     ?? Self.fail("--port requires an integer")
-            case "--upstream-processes":
-                upstreamProcesses = try Int(Self.value(after: argument, in: arguments, index: &index))
-                    ?? Self.fail("--upstream-processes requires an integer")
             case "--request-timeout":
                 requestTimeoutSeconds = try Int(Self.value(after: argument, in: arguments, index: &index))
                     ?? Self.fail("--request-timeout requires an integer")
@@ -47,6 +45,10 @@ struct VerifierOptions {
                 keepServer = true
             case "--no-open-xcode":
                 noOpenXcode = true
+            case "--run-destination":
+                runDestination = try Self.value(after: argument, in: arguments, index: &index)
+            case "--device-identifier":
+                deviceIdentifier = try Self.value(after: argument, in: arguments, index: &index)
             case "-v", "--verbose":
                 verbose = true
             case "-h", "--help":
@@ -70,11 +72,12 @@ struct VerifierOptions {
     Options:
       --host host                 Listen host for the debug proxy server. Default: 127.0.0.1
       --port port                 Dedicated verifier port. Default: 18765
-      --upstream-processes n      Upstream mcpbridge process count. Default: 2
       --request-timeout seconds   XcodeMCP request timeout. Default: 600
       --output path               Git-ignored verifier output directory. Default: ProxyToolVerifierOutput
       --keep-server               Leave the debug proxy server running.
       --no-open-xcode             Do not open the fixture workspace in GUI Xcode.
+      --run-destination name      Use this native destination display title for fixture operations.
+      --device-identifier UUID    Use this owned device for device-interaction verification.
       -v, --verbose               Print tool arguments and response summaries.
     """
 
@@ -113,6 +116,7 @@ struct ProxyToolVerifier {
         }
 
         try buildDebugProxyServer(in: repoRoot)
+        try runProcess(executable: "/bin/bash", arguments: ["scripts/build-native-host.sh", "--output", ".build/debug/XcodeMCPNativeHost.app"], currentDirectory: repoRoot)
         let server = try startDebugProxyServer(repoRoot: repoRoot, outputRoot: outputRoot)
         defer {
             if options.keepServer == false {
@@ -160,21 +164,23 @@ struct ProxyToolVerifier {
                 break
             }
             // xed/open and GUI catalog activation finish asynchronously. A run
-            // that opened a GUI fixture must wait for it, not switch to Service.
+            // that opened a GUI fixture must wait for that actual owner.
             guard ContinuousClock.now < discoveryDeadline else {
                 throw VerifierFailure("GUI Xcode did not report the opened fixture before the request timeout")
             }
             try await Task.sleep(for: .milliseconds(250))
             tools = try await client.listTools()
         }
-        let workspaceSurface: WorkspaceToolSurface = fixtureTab == nil ? .service : .gui
-        if workspaceSurface == .service {
-            fixture = try makeServiceFixture(from: fixture)
+        let workspaceSurface: WorkspaceToolSurface = fixtureTab == nil ? .headless : .gui
+        if workspaceSurface == .headless {
+            fixture = try makeHeadlessFixture(from: fixture)
         }
         var state = VerificationState(
             fixture: fixture,
             tools: tools,
-            workspaceSurface: workspaceSurface
+            workspaceSurface: workspaceSurface,
+            runDestination: options.runDestination,
+            deviceIdentifier: options.deviceIdentifier
         )
         state.tabIdentifier = fixtureTab
         let reportURL = outputRoot.appendingPathComponent("report.json")
@@ -193,7 +199,7 @@ struct ProxyToolVerifier {
         }
 
         do {
-            if workspaceSurface == .service {
+            if workspaceSurface == .headless {
                 let openRecord = await call(
                     "XcodeOpenWorkspace",
                     arguments: ["path": .string(fixture.rootWorkspaceURL.path)],
@@ -201,8 +207,7 @@ struct ProxyToolVerifier {
                 )
                 records.append(openRecord)
                 try state.observe(toolName: "XcodeOpenWorkspace", record: openRecord)
-                // Open is also the first-use approval bootstrap. Once it succeeds,
-                // the Service catalog can join an initially GUI-only catalog.
+                // Explicit preload exercises the native Open contract for this owned fixture.
                 tools = try await client.listTools()
                 state.updateTools(tools)
                 try writeReport(currentReport(), to: reportURL, announce: false)
@@ -232,6 +237,12 @@ struct ProxyToolVerifier {
                     print("<- [\(record.status.rawValue)] \(toolName) (\(formatSeconds(record.elapsedSeconds)))")
                     records.append(record)
                     try state.observe(toolName: toolName, record: record)
+                    if toolName == "DeviceInteractionStartSession",
+                       let key = state.openedInteractionSessionKeyForCleanup {
+                        let end = await endDeviceInteractionSession(interactionSessionKey: key, client: client)
+                        records.append(end)
+                        state.observeDeviceInteractionEnd(record: end)
+                    }
                 case .skip(let reason):
                     print("-- [not-planned] \(toolName) - \(reason)")
                     records.append(
@@ -293,25 +304,30 @@ struct ProxyToolVerifier {
         }
     }
 
-    private func makeServiceFixture(from fixture: FixtureLayout) throws -> FixtureLayout {
-        // Service Open is not reference-counted. A fresh workspace gives this run
-        // close authority without querying shared workspaces before approval.
+    private func makeHeadlessFixture(from fixture: FixtureLayout) throws -> FixtureLayout {
+        let identity = UUID().uuidString
+        let projectRoot = fixture.outputRoot.appendingPathComponent("Fixture-\(identity)", isDirectory: true)
+        try fileManager.copyItem(at: fixture.projectRootURL, to: projectRoot)
+        let ownedFixture = FixtureLayout(repoRoot: fixture.repoRoot, outputRoot: fixture.outputRoot,
+            projectRootURL: projectRoot)
+        // A fresh workspace isolates this verification run from already-loaded models.
         let workspace = fixture.outputRoot.appendingPathComponent(
-            "ServiceFixture-\(UUID().uuidString).xcworkspace", isDirectory: true
+            "HeadlessFixture-\(identity).xcworkspace", isDirectory: true
         )
         try fileManager.createDirectory(at: workspace, withIntermediateDirectories: false)
         let root = XMLElement(name: "Workspace")
         root.addAttribute(XMLNode.attribute(withName: "version", stringValue: "1.0") as! XMLNode)
         let reference = XMLElement(name: "FileRef")
         reference.addAttribute(XMLNode.attribute(
-            withName: "location", stringValue: "absolute:" + fixture.xcodeProjectURL.path
+            withName: "location", stringValue: "absolute:" + ownedFixture.xcodeProjectURL.path
         ) as! XMLNode)
         root.addChild(reference)
         let document = XMLDocument(rootElement: root)
         try document.xmlData(options: .nodePrettyPrint).write(
             to: workspace.appendingPathComponent("contents.xcworkspacedata")
         )
-        return FixtureLayout(repoRoot: fixture.repoRoot, outputRoot: fixture.outputRoot, workspaceURL: workspace)
+        return FixtureLayout(repoRoot: fixture.repoRoot, outputRoot: fixture.outputRoot,
+            workspaceURL: workspace, projectRootURL: projectRoot)
     }
 
     private func call(
@@ -535,7 +551,6 @@ struct ProxyToolVerifier {
         let arguments = [
             "--listen", "\(options.host):\(options.port)",
             "--request-timeout", "\(options.requestTimeoutSeconds)",
-            "--upstream-processes", "\(options.upstreamProcesses)",
             "--auto-approve",
             "--refresh-code-issues-mode", "proxy",
         ]
@@ -643,7 +658,7 @@ struct ProxyToolVerifier {
 
 private enum WorkspaceToolSurface: String, Codable {
     case gui
-    case service
+    case headless
 }
 
 private enum ToolExecutionDecision {
@@ -669,6 +684,8 @@ private struct VerificationState {
     let fixture: FixtureLayout
     private(set) var toolsByName: [String: MCPTool]
     let workspaceSurface: WorkspaceToolSurface
+    let requestedRunDestination: String?
+    let deviceIdentifier: String?
     private(set) var availableTools: Set<String>
     var tabIdentifier: String?
     var workspaceIdentifier: String?
@@ -680,21 +697,28 @@ private struct VerificationState {
     var runDestination = "iPhone 17 (27.0)"
     var testTargetName = "ProxyToolVerifierFixtureTests"
     var testIdentifier = "ProxyToolVerifierFixtureTests/testMessage()"
+    var testPlanName: String?
+    var createdScratchPath: String?
     var interactionSessionIdentifier = "Proxy Tool Verifier \(UUID().uuidString)"
-    var interactionSessionKey = "invalid-verifier-session-key"
+    var interactionSessionKey: String?
     var interactionSessionOpenedByVerifier = false
     var interactionSessionEndAttempted = false
 
     init(
         fixture: FixtureLayout,
         tools: [MCPTool],
-        workspaceSurface: WorkspaceToolSurface
+        workspaceSurface: WorkspaceToolSurface,
+        runDestination: String? = nil,
+        deviceIdentifier: String? = nil
     ) {
         self.fixture = fixture
         self.toolsByName = tools.reduce(into: [:]) { result, tool in
             result[tool.name] = tool
         }
         self.workspaceSurface = workspaceSurface
+        self.requestedRunDestination = runDestination
+        self.deviceIdentifier = deviceIdentifier
+        if let runDestination { self.runDestination = runDestination }
         self.availableTools = Set(tools.map(\.name))
     }
 
@@ -738,19 +762,18 @@ private struct VerificationState {
         "\(navigatorRoot)/\(path)"
     }
 
+    func scratchPath(_ filename: String) -> String {
+        (createdScratchPath ?? navPath("VerifierScratch")) + "/" + filename
+    }
+
     func executionDecision(for toolName: String) throws -> ToolExecutionDecision {
         if workspaceSurface == .gui,
            ["XcodeListWorkspaces", "DeviceInteractionStartWorkspaceSession"].contains(toolName) {
-            return .skip("tool requires an approved Service workspace")
+            return .skip("tool requires an owned headless workspace")
         }
-        if workspaceSurface == .service,
+        if workspaceSurface == .headless,
            ["XcodeListWindows", "XcodeGetCurrentFile", "XcodeListNavigatorIssues"].contains(toolName) {
             return .skip("tool requires GUI window, editor, or navigator state")
-        }
-        if workspaceSurface == .service,
-           toolName == "DeviceInteractionStartSession",
-           availableTools.contains("DeviceInteractionStartWorkspaceSession") {
-            return .skip("Service verification uses DeviceInteractionStartWorkspaceSession")
         }
         let arguments: [String: MCPJSONValue]
         do {
@@ -788,23 +811,72 @@ private struct VerificationState {
 
     private func plannedArguments(for toolName: String) throws -> [String: MCPJSONValue]? {
         switch toolName {
+        case "AddEntitlement":
+            guard workspaceSurface == .headless else {
+                throw ToolPlanUnavailable(reason: "entitlement mutation requires the disposable headless fixture")
+            }
+            return try withWorkspaceScope(toolName, ["targetName": .string("ProxyToolVerifierFixture"),
+                "entitlementKey": .string("com.apple.developer.networking.wifi-info"), "entitlementValueType": .string("bool"),
+                "entitlementValue": .string("true")])
+        case "AddInfoPlist":
+            return try withWorkspaceScope(toolName, ["targetName": .string("ProxyToolVerifierFixture"),
+                "infoPlistKey": .string("CFBundleDisplayName"), "infoPlistValueType": .string("string"),
+                "infoPlistValue": .string("Proxy Tool Verifier")])
+        case "UpdateTargetBuildSetting":
+            return try withWorkspaceScope(toolName, ["targetName": .string("ProxyToolVerifierFixture"),
+                "buildSettingName": .string("SWIFT_VERSION"),
+                "buildSettingValue": .string("6.0"), "appendValue": .bool(false)])
+        case "XcodeSwitchTestPlan":
+            guard let testPlanName else {
+                throw ToolPlanUnavailable(reason: "the selected fixture scheme did not report a test plan")
+            }
+            return try withWorkspaceScope(toolName, ["testPlanName": .string(testPlanName)])
+        case "XcodeNewTarget":
+            guard workspaceSurface == .headless else {
+                throw ToolPlanUnavailable(reason: "target creation requires the disposable headless fixture")
+            }
+            return try withWorkspaceScope(toolName, ["templateIdentifier": .string("com.apple.dt.unit.iosFramework"),
+                "productName": .string("ProxyVerifierExtraFramework"),
+                "organizationIdentifier": .string("dev.xcodemcp"),
+                "options": .object(["languageChoice": "Swift", "testingSystem": "None", "hasDocumentation": "false"])])
+        case "XcodeNewProject":
+            let destination = fixture.outputRoot.appendingPathComponent("GeneratedProjects-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+            return ["templateIdentifier": .string("com.apple.dt.unit.commandLineTool"),
+                "productName": .string("ProxyVerifierGeneratedCLI"),
+                "destinationPath": .string(destination.path),
+                "organizationIdentifier": .string("dev.xcodemcp"),
+                "options": .object(["languageChoice": "Swift"])]
         case "BuildProject":
             return try withWorkspaceScope(toolName, ["buildForTesting": .bool(true)])
         case "DeviceInteractionEndSession":
+            guard let interactionSessionKey else {
+                throw ToolPlanUnavailable(reason: "no active owned device interaction session")
+            }
             return ["interactionSessionKey": .string(interactionSessionKey)]
         case "DeviceInteractionInstallAndRun":
+            guard let interactionSessionKey else {
+                throw ToolPlanUnavailable(reason: "the workspace device session did not start")
+            }
             return try withWorkspaceScope(toolName, [
                 "interactionSessionKey": .string(interactionSessionKey),
             ])
         case "DeviceInteractionStartSession":
-            return try withWorkspaceScope(toolName, [
-                "sessionIdentifier": .string(interactionSessionIdentifier),
-            ])
+            guard let deviceIdentifier else {
+                throw ToolPlanUnavailable(reason: "standalone device interaction requires an explicitly owned device identifier")
+            }
+            return [
+                "sessionIdentifier": .string(interactionSessionIdentifier + " Standalone"),
+                "deviceIdentifier": .string(deviceIdentifier),
+            ]
         case "DeviceInteractionStartWorkspaceSession":
-            return try withWorkspaceScope(toolName, [
-                "sessionIdentifier": .string(interactionSessionIdentifier),
-            ])
+            var arguments: [String: MCPJSONValue] = ["sessionIdentifier": .string(interactionSessionIdentifier + " Workspace")]
+            if let deviceIdentifier { arguments["deviceIdentifier"] = .string(deviceIdentifier) }
+            return try withWorkspaceScope(toolName, arguments)
         case "DeviceInteractionSynthesize":
+            guard let interactionSessionKey else {
+                throw ToolPlanUnavailable(reason: "the workspace device session did not start")
+            }
             return [
                 // Xcode returns interactionSessionKey from StartSession, but
                 // Synthesize's input schema names the argument interactSessionKey.
@@ -823,7 +895,7 @@ private struct VerificationState {
             return try withWorkspaceScope(toolName, [
                 "signature_name": .string("ProxyVerifierCrashSignature"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
-                "platform": .string("macOS"),
+                "platform": .string("iOS"),
                 "app_version": .string("1.0"),
             ])
         case "GetFieldPerformanceIssueLogs":
@@ -832,7 +904,7 @@ private struct VerificationState {
                 "signature_name": .string("ProxyVerifierPerformanceSignature"),
                 "diagnostic_type": .string("hangs"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
-                "platform": .string("macOS"),
+                "platform": .string("iOS"),
             ])
         case "GetFileCompilerFlags":
             return try withWorkspaceScope(toolName, [
@@ -849,17 +921,17 @@ private struct VerificationState {
             return try withWorkspaceScope(toolName, [
                 "count": .integer(1),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
-                "platform": .string("macOS"),
+                "platform": .string("iOS"),
             ])
         case "GetTopFieldPerformanceIssues":
             return try withWorkspaceScope(toolName, [
                 "diagnostic_type": .string("hangs"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
-                "platform": .string("macOS"),
+                "platform": .string("iOS"),
             ])
         case "InvokeDebuggerCommand":
             return try withWorkspaceScope(toolName, [
-                "command": .string("thread list"),
+                "command": .string("process status"),
                 "timeout": .integer(20),
             ])
         case "LocalizationPlanner":
@@ -942,7 +1014,9 @@ private struct VerificationState {
             return try withWorkspaceScope(toolName)
         case "XcodeListTargets", "XcodeListTestPlans":
             return try withWorkspaceScope(toolName)
-        case "XcodeListTemplates", "XcodeListWindows", "XcodeListWorkspaces":
+        case "XcodeListTemplates":
+            return ["templateIdentifier": .string("com.apple.dt.unit.iosFramework")]
+        case "XcodeListWindows", "XcodeListWorkspaces":
             return [:]
         case "XcodeLS":
             return try withWorkspaceScope(toolName, [
@@ -955,8 +1029,8 @@ private struct VerificationState {
             ])
         case "XcodeMV":
             return try withWorkspaceScope(toolName, [
-                "sourcePath": .string(navPath("VerifierScratch/probe.txt")),
-                "destinationPath": .string(navPath("VerifierScratch/probe-moved.txt")),
+                "sourcePath": .string(scratchPath("probe.txt")),
+                "destinationPath": .string(scratchPath("probe-moved.txt")),
                 "operation": .object(["rawValue": .string("move")]),
                 "overwriteExisting": .bool(true),
             ])
@@ -971,7 +1045,7 @@ private struct VerificationState {
             ])
         case "XcodeRM":
             return try withWorkspaceScope(toolName, [
-                "path": .string(navPath("VerifierScratch/probe-moved.txt")),
+                "path": .string(scratchPath("probe-moved.txt")),
                 "recursive": .bool(false),
                 "deleteFiles": .bool(true),
             ])
@@ -981,14 +1055,14 @@ private struct VerificationState {
             return try withWorkspaceScope(toolName, ["schemeName": .string(schemeName)])
         case "XcodeUpdate":
             return try withWorkspaceScope(toolName, [
-                "filePath": .string(navPath("VerifierScratch/probe.txt")),
+                "filePath": .string(scratchPath("probe.txt")),
                 "oldString": .string("initial"),
                 "newString": .string("updated"),
                 "replaceAll": .bool(false),
             ])
         case "XcodeWrite":
             return try withWorkspaceScope(toolName, [
-                "filePath": .string(navPath("VerifierScratch/probe.txt")),
+                "filePath": .string(scratchPath("probe.txt")),
                 "content": .string("proxy verifier initial content\n"),
             ])
         default:
@@ -1005,33 +1079,36 @@ private struct VerificationState {
         }
         var result = arguments
         switch workspaceSurface {
-        case .service:
+        case .headless:
             guard schema.properties.contains("workspaceIdentifier") else {
                 throw ToolPlanUnavailable(
-                    reason: "Service schema has no workspaceIdentifier argument"
+                    reason: "Native schema has no workspaceIdentifier argument"
                 )
             }
             guard let workspaceIdentifier else {
                 throw VerifierFailure(
-                    "Service workspace has not been opened; refusing to call \(toolName)"
+                    "The verifier's headless workspace has not been opened for \(toolName)"
                 )
             }
             result["workspaceIdentifier"] = .string(workspaceIdentifier)
             return result
         case .gui:
-            // The mixed catalog exposes a tab selector only for GUI-capable tools.
-            guard schema.properties.contains("tabIdentifier") else {
-                throw ToolPlanUnavailable(reason: "tool has no GUI tab selector")
+            guard schema.properties.contains("workspaceIdentifier") else {
+                throw ToolPlanUnavailable(reason: "tool has no workspace selector")
             }
             guard let tabIdentifier else {
                 throw VerifierFailure("fixture GUI tab has not been resolved")
             }
-            result["tabIdentifier"] = .string(tabIdentifier)
+            result["workspaceIdentifier"] = .string(tabIdentifier)
             return result
         }
     }
 
     mutating func observe(toolName: String, record: ToolVerificationRecord) throws {
+        if ["XcodeSwitchScheme", "XcodeSwitchRunDestination", "XcodeSwitchTestPlan"].contains(toolName),
+           record.status != .passed {
+            throw VerifierFailure("Cannot continue fixture operations after \(toolName): \(record.detail)")
+        }
         if toolName == "XcodeOpenWorkspace" {
             guard record.status == .passed else {
                 throw VerifierFailure(
@@ -1081,7 +1158,8 @@ private struct VerificationState {
                 schemeName = parsed
             }
         case "XcodeListRunDestinations":
-            if let parsed = parsePreferredRunDestination(from: rawResult)
+            if requestedRunDestination == nil,
+               let parsed = parsePreferredRunDestination(from: rawResult)
                 ?? parseFirstString(named: "activeDestinationDisplayTitle", from: rawResult)
                 ?? parseFirstString(named: "displayTitle", from: rawResult) {
                 runDestination = parsed
@@ -1091,12 +1169,18 @@ private struct VerificationState {
                 testTargetName = test.targetName
                 testIdentifier = test.identifier
             }
+        case "XcodeListTestPlans":
+            testPlanName = parseFirstString(named: "activeTestPlanName", from: rawResult)
+                ?? parseFirstString(named: "name", from: rawResult)
+        case "XcodeMakeDir":
+            createdScratchPath = parseFirstString(named: "createdPath", from: rawResult)
         case "DeviceInteractionStartSession", "DeviceInteractionStartWorkspaceSession":
             if let key = parseFirstString(named: "interactionSessionKey", from: rawResult)
                 ?? parseFirstString(named: "interactSessionKey", from: rawResult)
                 ?? parseFirstString(named: "sessionKey", from: rawResult) {
                 interactionSessionKey = key
                 interactionSessionOpenedByVerifier = true
+                interactionSessionEndAttempted = false
             }
         default:
             break
@@ -1108,8 +1192,9 @@ private struct VerificationState {
         workspaceClosedByVerifier = record.status == .passed
     }
 
-    mutating func observeDeviceInteractionEnd(record _: ToolVerificationRecord) {
+    mutating func observeDeviceInteractionEnd(record: ToolVerificationRecord) {
         interactionSessionEndAttempted = true
+        if record.status == .passed { interactionSessionKey = nil }
     }
 }
 
@@ -1133,18 +1218,17 @@ private struct ToolInputSchema {
 struct FixtureLayout {
     let repoRoot: URL
     let outputRoot: URL
+    let projectRootURL: URL
 
     let rootWorkspaceURL: URL
 
-    init(repoRoot: URL, outputRoot: URL, workspaceURL: URL? = nil) {
+    init(repoRoot: URL, outputRoot: URL, workspaceURL: URL? = nil, projectRootURL: URL? = nil) {
         self.repoRoot = repoRoot
         self.outputRoot = outputRoot
+        self.projectRootURL = projectRootURL
+            ?? repoRoot.appendingPathComponent("Fixtures/ProxyToolVerifierFixture", isDirectory: true)
         self.rootWorkspaceURL = workspaceURL
             ?? repoRoot.appendingPathComponent("XcodeMCPKit.xcworkspace", isDirectory: true)
-    }
-
-    var projectRootURL: URL {
-        repoRoot.appendingPathComponent("Fixtures/ProxyToolVerifierFixture", isDirectory: true)
     }
 
     var xcodeProjectURL: URL {
@@ -1314,6 +1398,15 @@ private func verificationStatus(
     if result.isError {
         return .toolError
     }
+    let object = result.structuredContent?.objectValue
+        ?? result.content.compactMap { content -> [String: MCPJSONValue]? in
+            guard case .text(let text, _) = content else { return nil }
+            return try? JSONDecoder().decode(MCPJSONValue.self, from: Data(text.utf8)).objectValue
+        }.first
+    if object?["success"]?.boolValue == false
+        || (object?["result"]?.boolValue == false && object?["errorDescription"] != nil) {
+        return .toolError
+    }
     if detail.hasPrefix("Failed ") || detail.contains(#""type":"error""#) {
         return .toolError
     }
@@ -1385,6 +1478,7 @@ private func orderedKnownToolNames() -> [String] {
             + runtimeToolNames()
             + fieldReportToolNames()
             + deviceInteractionToolNames()
+            + ["XcodeNewProject", "XcodeNewTarget"]
     )
 }
 
@@ -1419,8 +1513,6 @@ private func projectConfigurationToolNames() -> [String] {
         "AddEntitlement",
         "AddInfoPlist",
         "UpdateTargetBuildSetting",
-        "XcodeNewProject",
-        "XcodeNewTarget",
     ]
 }
 

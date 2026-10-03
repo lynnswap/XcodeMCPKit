@@ -5,8 +5,9 @@ Swift client API for calling Xcode MCP from an app or tool.
 ## Overview
 
 Use `XcodeMCPKit` when Swift code needs to discover and call Xcode MCP tools.
-The default transport launches `xcrun mcpbridge`; clients can also connect to a
-running `xcode-mcp-proxy-server` Streamable HTTP endpoint.
+The default transport discovers a running `xcode-mcp-proxy-server` endpoint.
+The proxy chooses an open GUI workspace owner or lazily loads its native model.
+Start the proxy before constructing a default client.
 
 The public API is intentionally small:
 
@@ -25,13 +26,15 @@ to call them, and `request(_:params:)` for dynamic MCP methods outside
 
 Use `XcodeMCPKitTesting` when tests need deterministic tool catalogs, progress
 notifications, and tool results through the same `XcodeMCP` API without
-launching `mcpbridge`.
+launching Xcode or the native helper.
 
 ## Quickstart
 
-Add the `XcodeMCPKit` product to your target, then construct a client:
+Add the `XcodeMCPKit` product to your target and start `xcode-mcp-proxy-server`,
+then construct a client:
 
 ```swift
+import Foundation
 import XcodeMCPKit
 
 let config = XcodeMCPConfiguration(
@@ -62,7 +65,7 @@ if tools.contains(where: { $0.name == "DocumentationSearch" }) {
 await xcode.close()
 ```
 
-To use a running `xcode-mcp-proxy-server`, configure Streamable HTTP:
+To choose an explicit running proxy endpoint, configure Streamable HTTP:
 
 ```swift
 let config = XcodeMCPConfiguration(
@@ -95,7 +98,45 @@ let config = XcodeMCPConfiguration(
 )
 ```
 
-## Dynamic Tools And Raw Values
+### Workspace routing
+
+Use the proxy transport when a request should follow an existing GUI workspace:
+
+```swift
+let result = try await xcode.callTool("XcodeRead", arguments: [
+    "workspaceIdentifier": "/Users/me/Projects/App/App.xcworkspace",
+    "filePath": "App/Sources/App.swift"
+])
+```
+
+An absolute path selects its GUI owner first. With no GUI owner, the proxy's
+native host loads the model for the operation. You do not need to open a GUI
+window or call Open first. Native workspace IDs and explicit GUI tab IDs are
+also supported. Ambiguous or unavailable known GUI owners return errors.
+
+### Standalone native session
+
+A standalone client starts its own headless native host. It needs the signed
+`XcodeMCPNativeHost.app`, found from installation paths or supplied explicitly:
+
+```swift
+let config = XcodeMCPConfiguration(
+    transport: .localBridge(.nativeHost(
+        bundleURL: URL(fileURLWithPath: "/opt/xcode-mcp/XcodeMCPNativeHost.app"),
+        developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer")
+    ))
+)
+let standalone = try await XcodeMCP(configuration: config)
+let tools = try await standalone.listTools()
+await standalone.close()
+```
+
+This transport exposes the host's native tools and owns its process lifecycle.
+Automatic routing to existing GUI owners is provided by the proxy transport.
+The verified Xcode 27 headless catalog contains 57 tools; the catalog remains
+dynamic, so callers should discover capabilities with `listTools()`.
+
+## Dynamic tools and raw values
 
 The Xcode MCP server decides which tools are available at runtime. Call
 `listTools(options:)` to load every page of the catalog, then pass the selected
@@ -135,9 +176,12 @@ let symbols = try await xcode.request(
 
 - `transport` chooses `.localBridge(...)`, `.streamableHTTP(endpoint:)`,
   `.streamableHTTP(discoveryFile:)`, or `.streamableHTTPProxyDiscovery()`.
-- The default transport is Xcode's `/usr/bin/xcrun mcpbridge`.
-- Use `.localBridge(.custom(command:arguments:environment:))` only when
-  embedding a non-default bridge command.
+- The default transport is `.streamableHTTPProxyDiscovery()` and requires a
+  running proxy with a discovery record.
+- `.localBridge(.nativeHost(bundleURL:developerDirectoryURL:))` launches an owned
+  standalone headless host. `nil` URLs use helper and Xcode discovery.
+- `.localBridge(.custom(command:arguments:environment:))` supports an explicit
+  generic MCP process.
 - `clientName`, `clientVersion`, and `capabilities` are sent in `initialize`.
 - `requestTimeout: Duration?` is the default logical deadline. `nil` disables
   the default timeout; nonpositive durations are rejected.

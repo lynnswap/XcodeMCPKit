@@ -83,6 +83,7 @@ final class XcodeProcessEventMonitor: XcodeProcessEventMonitoring, @unchecked Se
 
     private static let permissionDialogBundleIdentifiers: Set<String> = [
         "com.apple.dt.Xcode",
+        "com.apple.dt.mcp-server",
         "com.apple.dt.ExternalViewService",
         "com.apple.dt.Xcode.DeveloperSystemPolicyService",
     ]

@@ -37,7 +37,7 @@ final class NativeWorkspaceScope {
         unsafe (interface = try abi.callInterface(result: response, parameters: [word, pointer, pointer, pointer, pointer]))
     }
 
-    func isWorkspaceScoped(_ action: NativeActionClass) async throws -> Bool {
+    func inputType(for action: NativeActionClass) throws -> Any.Type {
         var request: UInt64 = 0
         var witness = unsafe action.conformance
         var metadata = unsafe action.metadata
@@ -63,6 +63,11 @@ final class NativeWorkspaceScope {
         guard let input = unsafe result.metadata else {
             throw NativeRuntimeError.unsupportedContract("Native action input metadata is unavailable")
         }
+        return unsafe unsafeBitCast(input, to: Any.Type.self)
+    }
+
+    func isWorkspaceScoped(_ action: NativeActionClass) async throws -> Bool {
+        let input = unsafe unsafeBitCast(try inputType(for: action), to: UnsafeRawPointer.self)
         let conforms = try unsafe await runtime.cFunction(named: "swift_conformsToProtocol", as: ((UnsafeRawPointer, UnsafeRawPointer) -> UnsafeRawPointer?).self)
         for descriptor in protocols {
             if try unsafe descriptor.withUnsafeAddress({ try unsafe conforms.unsafeInvoke(input, $0) }) != nil {

@@ -99,7 +99,9 @@ jobs:
   build-release:
     name: Build Release
     needs: process-tests
-    runs-on: macos-26
+    # This official preview image supplies the Service entitlement source.
+    # https://github.com/actions/runner-images/issues/14404
+    runs-on: xcode-27
     timeout-minutes: 10
     permissions:
       contents: read
@@ -112,13 +114,10 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Select latest Xcode
+      - name: Select image-default Xcode
         run: |
           set -euo pipefail
-          xcode_path="$(
-            ruby -e 'candidates = Dir["/Applications/Xcode*.app"].filter_map { |path| version = File.basename(path)[/\AXcode[_-](\d+(?:\.\d+)*)\.app\z/, 1]; version ? [version.split(".").map(&:to_i), path] : nil }; abort "No versioned Xcode apps found" if candidates.empty?; puts candidates.max_by(&:first).last'
-          )"
-          sudo xcode-select -s "${xcode_path}/Contents/Developer"
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
           swift --version
 

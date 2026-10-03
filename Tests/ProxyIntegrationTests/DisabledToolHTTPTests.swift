@@ -34,7 +34,7 @@ extension HTTPHandlerTests {
         )
         let resolved = try ProxyConfig.resolving(publicConfiguration)
         let config = HTTPTestConfiguration(
-            runtime: resolved.runtimeConfiguration(includesXcodeService: false),
+            runtime: resolved.runtimeConfiguration(),
             listenHost: resolved.listenHost,
             listenPort: resolved.listenPort,
             maxBodyBytes: resolved.maxBodyBytes

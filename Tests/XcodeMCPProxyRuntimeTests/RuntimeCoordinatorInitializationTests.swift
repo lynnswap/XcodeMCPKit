@@ -18,7 +18,6 @@ struct RuntimeCoordinatorInitializationTests {
         let scheduler = RecordingRuntimeTimeoutScheduler()
         let target = xcodeProcessTarget(processID: 801, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
         let fixture = RuntimeCoordinatorFixture(
             config: config, upstreams: [available, service],
             scheduleRuntimeTimeout: scheduler.scheduler(),
@@ -50,7 +49,7 @@ struct RuntimeCoordinatorInitializationTests {
         await manager.drainRuntimeTasksForTesting()
         #expect(manager.isInitialized())
         #expect(manager.upstreamHealthManager.state(for: UpstreamSlotID(rawValue: 1))?.initPhase.isUsableInitialized == true)
-        #expect(manager.upstreamTopology.snapshot().entries.first(where: { $0.id.rawValue == 1 })?.backend == .xcodeService)
+        #expect(manager.upstreamTopology.snapshot().entries.first(where: { $0.id.rawValue == 1 })?.backend == .nativeHost)
     }
 
     @Test func processRoutingRetiringCachedInitializeSourceRestartsPrimaryOnIdleActiveRoute()

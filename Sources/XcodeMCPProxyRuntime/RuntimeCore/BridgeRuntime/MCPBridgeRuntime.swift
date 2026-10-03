@@ -3,14 +3,14 @@ import Foundation
 
 enum MCPBridgeRuntime {
     struct Configuration: Sendable {
-        let upstreamProcessCount: Int
+        let nativeHostBundleURL: URL?
+        let developerDirectoryURL: URL?
         let maxBodyBytes: Int
-        let includesServiceBackend: Bool
 
-        init(upstreamProcessCount: Int, maxBodyBytes: Int, includesServiceBackend: Bool = false) {
-            self.upstreamProcessCount = max(1, upstreamProcessCount)
+        init(nativeHostBundleURL: URL? = nil, developerDirectoryURL: URL? = nil, maxBodyBytes: Int) {
+            self.nativeHostBundleURL = nativeHostBundleURL
+            self.developerDirectoryURL = developerDirectoryURL
             self.maxBodyBytes = maxBodyBytes
-            self.includesServiceBackend = includesServiceBackend
         }
     }
 
@@ -19,50 +19,16 @@ enum MCPBridgeRuntime {
         xcodeTargets: [XcodeProcessTarget],
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> MCPBridgeUpstreamPlan {
-        let orderedXcodeTargets = orderedXcodeTargets(xcodeTargets)
-        var upstreams: [ManagedUpstreamSlot] = []
-        var xcodeProcessBindings: [XcodeProcessBinding] = []
-        let upstreamCount = config.upstreamProcessCount
-
-        if config.includesServiceBackend {
-            for _ in 0..<upstreamCount {
-                upstreams.append(makeUnboundUpstreamSlot(config: config, baseEnvironment: baseEnvironment))
-            }
+        var upstreams = [makeUnboundUpstreamSlot(config: config, baseEnvironment: baseEnvironment)]
+        var bindings: [XcodeProcessBinding] = []
+        for target in orderedXcodeTargets(xcodeTargets) {
+            let slotID = UpstreamSlotID(rawValue: upstreams.count)
+            upstreams.append(contentsOf: makeProcessBoundUpstreamSlots(
+                config: config, xcodeTarget: target, baseEnvironment: baseEnvironment))
+            bindings.append(XcodeProcessBinding(target: target, slotIDs: [slotID]))
         }
-
-        upstreams.reserveCapacity(orderedXcodeTargets.count * upstreamCount)
-        xcodeProcessBindings.reserveCapacity(orderedXcodeTargets.count)
-
-        for target in orderedXcodeTargets {
-            var slotIDs: [UpstreamSlotID] = []
-            slotIDs.reserveCapacity(upstreamCount)
-            for _ in 0..<upstreamCount {
-                let upstreamIndex = upstreams.count
-                let upstreamConfig = makeDefaultUpstreamConfig(
-                    config: config,
-                    xcodeTarget: target,
-                    baseEnvironment: baseEnvironment
-                )
-                upstreams.append(
-                    ManagedUpstreamSlot(factory: UpstreamProcess(configuration: upstreamConfig))
-                )
-                slotIDs.append(UpstreamSlotID(rawValue: upstreamIndex))
-            }
-
-            xcodeProcessBindings.append(
-                XcodeProcessBinding(target: target, slotIDs: slotIDs)
-            )
-        }
-
-        let topology = UpstreamTopologySnapshot(
-            slotCount: upstreams.count,
-            xcodeProcessBindings: xcodeProcessBindings
-        )
-        return MCPBridgeUpstreamPlan(
-            upstreams: upstreams,
-            xcodeProcessRoutes: topology.xcodeProcessRoutes(),
-            topology: topology
-        )
+        let topology = UpstreamTopologySnapshot(slotCount: upstreams.count, xcodeProcessBindings: bindings)
+        return MCPBridgeUpstreamPlan(upstreams: upstreams, xcodeProcessRoutes: topology.xcodeProcessRoutes(), topology: topology)
     }
 
     static func makeProcessBoundUpstreamSlots(
@@ -70,32 +36,16 @@ enum MCPBridgeRuntime {
         xcodeTarget: XcodeProcessTarget,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> [ManagedUpstreamSlot] {
-        (0..<config.upstreamProcessCount).map { _ in
-            ManagedUpstreamSlot(
-                factory: UpstreamProcess(
-                    configuration: makeDefaultUpstreamConfig(
-                        config: config,
-                        xcodeTarget: xcodeTarget,
-                        baseEnvironment: baseEnvironment
-                    )
-                )
-            )
-        }
+        [ManagedUpstreamSlot(factory: makeProcessBoundSessionFactory(
+            config: config, xcodeTarget: xcodeTarget, baseEnvironment: baseEnvironment))]
     }
 
     static func makeUnboundUpstreamSlot(
         config: Configuration,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> ManagedUpstreamSlot {
-        ManagedUpstreamSlot(
-            factory: UpstreamProcess(
-                configuration: makeDefaultUpstreamConfig(
-                    config: config,
-                    xcodeTarget: nil,
-                    baseEnvironment: baseEnvironment
-                )
-            )
-        )
+        ManagedUpstreamSlot(factory: NativeHostSessionFactory(
+            configuration: config, xcodeTarget: nil, environment: baseEnvironment))
     }
 
     static func makeProcessBoundSessionFactory(
@@ -103,11 +53,7 @@ enum MCPBridgeRuntime {
         xcodeTarget: XcodeProcessTarget,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> any UpstreamSessionFactory {
-        UpstreamProcess(configuration: makeDefaultUpstreamConfig(
-            config: config,
-            xcodeTarget: xcodeTarget,
-            baseEnvironment: baseEnvironment
-        ))
+        NativeHostSessionFactory(configuration: config, xcodeTarget: xcodeTarget, environment: baseEnvironment)
     }
 
     static func startProcessBoundSession(
@@ -116,38 +62,32 @@ enum MCPBridgeRuntime {
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws -> any UpstreamSession {
         try await makeProcessBoundSessionFactory(
-            config: config,
-            xcodeTarget: xcodeTarget,
-            baseEnvironment: baseEnvironment
-        ).startSession()
+            config: config, xcodeTarget: xcodeTarget, baseEnvironment: baseEnvironment).startSession()
     }
 
     static func makeDefaultUpstreamConfig(
         config: Configuration,
         xcodeTarget: XcodeProcessTarget?,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> UpstreamProcess.Config {
+    ) throws -> UpstreamProcess.Config {
         var environment = baseEnvironment
         environment.removeValue(forKey: "XCODE_PID")
         environment.removeValue(forKey: "MCP_XCODE_PID")
         environment.removeValue(forKey: "MCP_XCODE_SESSION_ID")
-        let command: String
-        let args: [String]
-        if let xcodeTarget {
-            environment["MCP_XCODE_PID"] = String(xcodeTarget.processID)
-            environment["DEVELOPER_DIR"] = xcodeTarget.developerDir
-            command = xcodeTarget.mcpbridgePath
-            args = []
-        } else {
-            command = MCPBridgeInvocation.defaultMCPBridge.command
-            args = MCPBridgeInvocation.defaultMCPBridge.arguments
-        }
+        let developerDirectoryURL = xcodeTarget.map { URL(fileURLWithPath: $0.developerDir) }
+            ?? config.developerDirectoryURL
+        let invocation = try NativeHostInvocation.resolve(
+            bundleURL: config.nativeHostBundleURL,
+            developerDirectoryURL: developerDirectoryURL,
+            guiPID: xcodeTarget?.processID,
+            environment: environment)
+        if let developerDirectoryURL { environment["DEVELOPER_DIR"] = developerDirectoryURL.path }
+        let messageLimit = maxQueuedWriteBytes(for: config)
         return UpstreamProcess.Config(
-            command: command,
-            args: args,
+            command: invocation.command,
+            args: invocation.arguments + ["--max-message-bytes", String(messageLimit)],
             environment: environment,
-            maxQueuedWriteBytes: maxQueuedWriteBytes(for: config)
-        )
+            maxQueuedWriteBytes: messageLimit)
     }
 
     private static func maxQueuedWriteBytes(for config: Configuration) -> Int {
@@ -230,5 +170,20 @@ struct MCPBridgeUpstreamPlan: Sendable {
         self.xcodeProcessRoutes = xcodeProcessRoutes.isEmpty
             ? self.topology.xcodeProcessRoutes()
             : xcodeProcessRoutes
+    }
+}
+
+struct NativeHostSessionFactory: UpstreamSessionFactory {
+    let configuration: MCPBridgeRuntime.Configuration
+    let xcodeTarget: XcodeProcessTarget?
+    let environment: [String: String]
+
+    func processConfiguration() throws -> UpstreamProcess.Config {
+        try MCPBridgeRuntime.makeDefaultUpstreamConfig(
+            config: configuration, xcodeTarget: xcodeTarget, baseEnvironment: environment)
+    }
+
+    func startSession() async throws -> any UpstreamSession {
+        try await UpstreamProcess(configuration: processConfiguration()).startSession()
     }
 }

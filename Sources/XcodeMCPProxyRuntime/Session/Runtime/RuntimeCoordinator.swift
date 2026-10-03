@@ -546,7 +546,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let topology = upstreamTopology.snapshot()
         return Set(topology.entries.compactMap {
             switch $0.backend {
-            case .xcodeService: $0.id.rawValue
+            case .nativeHost: $0.id.rawValue
             case .xcodeProcess: nil
             }
         })
@@ -581,50 +581,15 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         startImmediately: Bool = true
     ) {
         let bridgeRuntimeConfig = config.mcpBridgeRuntimeConfiguration
-        let documentationServiceEnabled = Self.documentationProviderServiceIsConfigured(
-            config: config
-        )
         let xcodeTargets = xcodeTargetDiscovery?.runningXcodeTargets() ?? []
         let upstreamPlan = MCPBridgeRuntime.makeUpstreamPlan(config: bridgeRuntimeConfig, xcodeTargets: xcodeTargets)
-        let clock = ClockClient.liveValue
-        let runtimeBox = WeakRuntimeCoordinatorBox()
-        let documentationTransport = RuntimeDocumentationProviderTransport(
-            runtimeBox: runtimeBox,
-            fallback: SessionBackedDocumentationProviderTransport(
-                sessionFactory: LiveDocumentationProviderSessionFactory(
-                    config: config,
-                    baseEnvironment: ProcessInfo.processInfo.environment
-                ),
-                clock: clock
-            ),
-            clock: clock
-        )
-        let documentationProviderManager =
-            documentationServiceEnabled
-            ? xcodeTargetDiscovery.flatMap { discovery in
-                Self.makeDefaultDocumentationProviderManager(
-                    config: config,
-                    discovery: RuntimeDocumentationTargetDiscovery(
-                        base: discovery,
-                        runtimeBox: runtimeBox
-                    ),
-                    transport: documentationTransport
-                )
-            }
-            : nil
-        let unboundUpstreamFactory: UnboundUpstreamFactory?
-        if !config.includesXcodeService {
-            unboundUpstreamFactory = nil
-        } else {
-            unboundUpstreamFactory = {
-                MCPBridgeRuntime.makeUnboundUpstreamSlot(config: bridgeRuntimeConfig)
-            }
+        let unboundUpstreamFactory: UnboundUpstreamFactory = {
+            MCPBridgeRuntime.makeUnboundUpstreamSlot(config: bridgeRuntimeConfig)
         }
         self.init(
             config: config,
             eventLoop: eventLoop,
             upstreams: upstreamPlan.upstreams,
-            clock: clock,
             upstreamReadinessGate: upstreamReadinessGate,
             xcodeProcessRoutes: upstreamPlan.xcodeProcessRoutes,
             xcodeTargetDiscovery: xcodeTargetDiscovery,
@@ -636,40 +601,10 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 )
             },
             unboundUpstreamFactory: unboundUpstreamFactory,
-            documentationProviderManager: documentationProviderManager,
-            prewarmDocumentationProviderOnStartup: documentationProviderManager != nil,
             notificationSink: notificationSink,
             sessionClosedSink: sessionClosedSink,
-            startImmediately: startImmediately,
-            runtimeBox: runtimeBox
+            startImmediately: startImmediately
         )
-    }
-
-    static func makeDefaultDocumentationProviderManager(
-        config: ProxyRuntimeConfiguration,
-        discovery: any XcodeTargetDiscovering,
-        transport: any DocumentationProviderRouting
-    ) -> (any DocumentationProviderManaging)? {
-        guard documentationProviderServiceIsConfigured(config: config) else {
-            return nil
-        }
-        return DocumentationProviderManager(
-            discovery: discovery,
-            transport: transport,
-            initializeParams: InitializeHandshakeJSON.resolved(
-                initializeParamsOverride: config.initializeParamsOverride
-            ),
-            serviceRepairer: LiveDocumentationSearchServiceRepairer(),
-            localSearchProvider: DocumentationSearchActionProvider(),
-            documentationSearchActionPolicy: .preferWhenMultipleRunningAndDefaultXcodeIsOlder
-        )
-    }
-
-    static func documentationProviderServiceIsConfigured(
-        config: ProxyRuntimeConfiguration
-    ) -> Bool {
-        config.disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
-            && !config.includesXcodeService
     }
 
     init(
@@ -718,7 +653,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         let backendByIndex = Dictionary(uniqueKeysWithValues: xcodeProcessRoutes.flatMap { route in
             route.upstreamIndices.map { ($0, UpstreamBackend.xcodeProcess(XcodeProcessID(route.target))) }
         })
-        let defaultBackend: UpstreamBackend = .xcodeService
+        let defaultBackend: UpstreamBackend = .nativeHost
         let upstreamTopology = UpstreamTopologyAuthority(
             upstreams, backend: { backendByIndex[$0] ?? defaultBackend }
         )
@@ -1237,8 +1172,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 }
             case .cancelReadinessWaiter(let token):
                 cancelUpstreamReadinessWaiter(token)
-            case .restoreBridgePool(let recovery):
-                restoreProcessBridgePool(recovery)
+            case .restoreConnection(let recovery):
+                restoreProcessConnection(recovery)
             }
         }
         if transition.publishesToolsListChanged {
@@ -1479,8 +1414,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     func chooseUpstreamOperationLease() -> UpstreamOperationLease? {
         let nowUptimeNs = nowUptimeNanoseconds()
-        let occupiedUpstreams = upstreamSlotScheduler.occupiedUpstreamIndices()
-            .union(inactiveProcessBoundUpstreamIndices())
+        let occupiedUpstreams = inactiveProcessBoundUpstreamIndices()
 
         let chooseResult = upstreamHealthManager.chooseBestInitializedUpstream(
             nowUptimeNs: nowUptimeNs,

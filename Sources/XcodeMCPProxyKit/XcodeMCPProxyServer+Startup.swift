@@ -20,22 +20,19 @@ extension XcodeMCPProxyServer {
             let runtime: any ProxyRuntimeServing
             let autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
             let endpoint: Endpoint
-            let includesXcodeService: Bool
 
             init(
                 config: ProxyConfig,
                 httpGateway: any ProxyHTTPGatewayServing,
                 runtime: any ProxyRuntimeServing,
                 autoApprover: (any ProxyServerPermissionDialogAutoApprover)?,
-                endpoint: Endpoint,
-                includesXcodeService: Bool
+                endpoint: Endpoint
             ) {
                 self.config = config
                 self.httpGateway = httpGateway
                 self.runtime = runtime
                 self.autoApprover = autoApprover
                 self.endpoint = endpoint
-                self.includesXcodeService = includesXcodeService
             }
 
             func signalCancellation() {
@@ -272,8 +269,6 @@ extension XcodeMCPProxyServer {
                 displayHost: displayHost,
                 port: resources.endpoint.port,
                 config: resources.config,
-                includesXcodeService: resources.includesXcodeService,
-                upstreamProcessCount: resources.runtime.snapshot().upstreams.count,
                 xcodeTargets: resources.runtime.inventorySnapshot().xcodeTargets
             )
             logger.info("\(summary)")
@@ -291,21 +286,8 @@ extension XcodeMCPProxyServer {
             dependencies: Dependencies,
             logger: Logger
         ) async throws -> Resources {
-            let includesXcodeService: Bool
-            do {
-                let availability = try await dependencies.xcodeServiceAvailability()
-                includesXcodeService = availability == .enabled
-                if availability == .disabled {
-                    logger.notice("Xcode Service MCP access is disabled. To enable it, run: sudo xcrun mcp-server enable. GUI Xcode connections remain available.")
-                }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                includesXcodeService = false
-                logger.warning("Unable to determine Xcode Service MCP status: \(error). GUI Xcode connections remain available.")
-            }
-            let runtimeConfiguration = config.runtimeConfiguration(includesXcodeService: includesXcodeService)
-            let runtime = dependencies.makeRuntime(runtimeConfiguration)
+            let runtimeConfiguration = config.runtimeConfiguration()
+            let runtime = try dependencies.makeRuntime(runtimeConfiguration)
             let autoApprover = runtimeConfiguration.usesPermissionDialogAutomation
                 ? dependencies.makeAutoApprover(config, runtime)
                 : nil
@@ -339,8 +321,7 @@ extension XcodeMCPProxyServer {
                     httpGateway: httpGateway,
                     runtime: runtime,
                     autoApprover: autoApprover,
-                    endpoint: boundEndpoint,
-                    includesXcodeService: includesXcodeService
+                    endpoint: boundEndpoint
                 )
             } catch {
                 let operationError = error

@@ -9,9 +9,9 @@ extension ProxyRuntimeConfiguration {
 extension MCPBridgeRuntime.Configuration {
     init(proxyConfig config: ProxyRuntimeConfiguration) {
         self.init(
-            upstreamProcessCount: max(1, min(config.upstreamProcessCount, 10)),
-            maxBodyBytes: config.maxMessageBytes,
-            includesServiceBackend: config.includesXcodeService
+            nativeHostBundleURL: config.nativeHostBundleURL,
+            developerDirectoryURL: config.developerDirectoryURL,
+            maxBodyBytes: config.maxMessageBytes
         )
     }
 }

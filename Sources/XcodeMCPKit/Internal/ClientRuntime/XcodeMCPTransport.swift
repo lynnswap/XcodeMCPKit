@@ -76,7 +76,7 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
                     stream.continuation.finish()
                     return
                 case .stdoutClosed:
-                    stream.continuation.yield(.closed("mcpbridge stdout closed"))
+                    stream.continuation.yield(.closed("MCP process stdout closed"))
                     stream.continuation.finish()
                     return
                 case .exit(let status):
@@ -109,9 +109,9 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
         case .accepted:
             return
         case .backpressure:
-            throw MCPBridgeRuntimeError.transportUnavailable("mcpbridge write queue is full")
+            throw MCPBridgeRuntimeError.transportUnavailable("MCP process write queue is full")
         case .unavailable(let reason):
-            throw MCPBridgeRuntimeError.transportUnavailable("mcpbridge is unavailable: \(reason)")
+            throw MCPBridgeRuntimeError.transportUnavailable("MCP process is unavailable: \(reason)")
         }
     }
 

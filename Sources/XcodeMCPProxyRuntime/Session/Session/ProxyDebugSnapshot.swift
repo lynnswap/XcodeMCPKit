@@ -122,7 +122,6 @@ extension ProxyDebug {
         let processID: pid_t
         let appPath: String
         let developerDir: String
-        let mcpbridgePath: String
         let xcodeVersion: String
         let upstreamIndices: [Int]
         let usableSlotCount: Int

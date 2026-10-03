@@ -73,8 +73,8 @@ final class ControlledTerminationDelayScheduler:
         return controlled.makeDelay()
     }
 
-    func nextScheduledDelay() async throws -> ControlledTerminationDelay {
-        try await scheduled.nextValue(at: 0)
+    func nextScheduledDelay(at index: Int = 0) async throws -> ControlledTerminationDelay {
+        try await scheduled.nextValue(at: index)
     }
 }
 
@@ -109,6 +109,7 @@ final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecked Sendab
     private let terminatesOnTerminate: Bool
     private let terminatesOnForceTerminate: Bool
     private let stopOutputRecorder = DeterministicRecorder<Void>()
+    private let stdinCloseRecorder = DeterministicRecorder<Void>()
     private let stdinRecorder = DeterministicRecorder<Data>()
     private let stdinTerminal = AsyncTerminalSignal()
     private let stdoutTerminal = AsyncTerminalSignal()
@@ -190,6 +191,7 @@ final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecked Sendab
             state.isStdinClosing = true
             return state.queuedStdinBytes == 0
         }
+        stdinCloseRecorder.record(())
         if shouldSignal { stdinTerminal.signal() }
     }
 
@@ -247,6 +249,10 @@ final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecked Sendab
 
     func nextStopOutput() async throws {
         _ = try await stopOutputRecorder.nextValue(at: 0)
+    }
+
+    func nextStdinClose() async throws {
+        _ = try await stdinCloseRecorder.nextValue(at: 0)
     }
 
     func emitStdout(_ data: Data) {

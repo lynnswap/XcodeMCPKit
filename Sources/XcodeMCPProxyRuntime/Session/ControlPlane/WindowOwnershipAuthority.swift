@@ -63,7 +63,7 @@ struct WindowOwnershipSnapshot: Sendable {
         processID: pid_t
     ) -> [WindowOwnershipIdentity] {
         identities.filter {
-            $0.workspacePath == workspacePath && $0.processID == processID
+            workspacePathsMatch($0.workspacePath, workspacePath) && $0.processID == processID
         }
     }
 
@@ -75,7 +75,7 @@ struct WindowOwnershipSnapshot: Sendable {
         identities.first {
             $0.processID == processID
                 && $0.rawTabIdentifier == rawTabIdentifier
-                && $0.workspacePath == workspacePath
+                && workspacePathsMatch($0.workspacePath, workspacePath)
         }?.proxyTabIdentifier
             ?? WindowOwnershipIdentity.makeProxyTabIdentifier(
                 processID: processID,
@@ -285,7 +285,7 @@ struct WindowRoutingResolver {
                     "stale or unknown XcodeMCPKit tabIdentifier '\(tabIdentifier)'"
                 )
             }
-            if let workspacePath, identity.workspacePath != workspacePath {
+            if let workspacePath, !workspacePathsMatch(identity.workspacePath, workspacePath) {
                 return .conflict(
                     "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath"
                         + " '\(workspacePath)'"
@@ -296,7 +296,7 @@ struct WindowRoutingResolver {
 
         if let workspacePath {
             let workspaceIdentities = owners.identities.filter {
-                $0.workspacePath == workspacePath
+                workspacePathsMatch($0.workspacePath, workspacePath)
             }
             if tabIdentifier == nil, workspaceIdentities.count > 1 {
                 let candidates = workspaceIdentities.map(\.proxyTabIdentifier).sorted().joined(separator: ", ")
@@ -322,7 +322,7 @@ struct WindowRoutingResolver {
                     )
                     if rawIdentities.isEmpty == false,
                        rawIdentities.contains(where: {
-                           $0.processID == processID && $0.workspacePath == workspacePath
+                           $0.processID == processID && workspacePathsMatch($0.workspacePath, workspacePath)
                        }) == false {
                         return .conflict(
                             "tabIdentifier '\(tabIdentifier)' does not belong to workspacePath"
@@ -366,4 +366,9 @@ struct WindowRoutingResolver {
             )
         }
     }
+}
+
+func workspacePathsMatch(_ lhs: String, _ rhs: String) -> Bool {
+    URL(fileURLWithPath: lhs).standardizedFileURL.resolvingSymlinksInPath().path
+        == URL(fileURLWithPath: rhs).standardizedFileURL.resolvingSymlinksInPath().path
 }

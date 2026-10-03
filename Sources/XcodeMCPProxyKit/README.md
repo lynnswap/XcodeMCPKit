@@ -7,7 +7,7 @@ Use the bundled executables when a library host is unnecessary:
 
 - `xcode-mcp-proxy-server` runs the HTTP proxy.
 - `xcode-mcp-proxy` adapts MCP STDIO to a running proxy.
-- `xcode-mcp-proxy-install` installs those executables. Installer internals are
+- `xcode-mcp-proxy-install` installs those executables and the signed native app. Installer internals are
   not a public library API.
 
 ## Server
@@ -20,7 +20,6 @@ import XcodeMCPProxyKit
 let server = XcodeMCPProxyServer(
     configuration: .init(
         bindAddress: .localhost(port: 0),
-        upstreamProcessCount: 1,
         requestTimeout: .seconds(300),
         discovery: .defaultLocation,
         approvalPolicy: .manual
@@ -36,8 +35,9 @@ print("Lifecycle: \(status.phase)")
 try await server.shutdown()
 ```
 
-`start()` returns only after the listener, runtime, and requested discovery
-record are ready. A discovery write failure unwinds acquired resources and
+`start()` binds the listener, starts the runtime, and publishes the requested
+discovery record. Native initialization and catalog availability are observed
+through `snapshot()` and MCP requests. A discovery write failure unwinds acquired resources and
 throws. Use `waitUntilShutdown()` when another task owns the shutdown signal.
 
 `shutdown()` is idempotent and is the graceful completion boundary. It returns
@@ -55,8 +55,8 @@ may be incomplete, even though the server lifecycle has stopped.
 `XcodeMCPProxyServerConfiguration` exposes the supported embedding choices:
 
 - `bindAddress`: host and port; port `0` requests an ephemeral port.
-- `upstreamProcessCount`: bridge connections per GUI Xcode process and for the
-  enabled Service pool. The default is `1`; the supported range is `1...10`.
+- `nativeHostBundleURL`: signed native helper app bundle, or `nil` for automatic lookup.
+- `developerDirectoryURL`: selected Xcode app/developer directory, or `nil` for the selected installation.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
 - `configurationFileURL`: optional TOML file. An explicit unreadable or invalid
@@ -67,23 +67,25 @@ may be incomplete, even though the server lifecycle has stopped.
 - `approvalPolicy`: manual or automatic Xcode permission handling.
 - `featurePolicy`: tools-list prewarming and refresh-code-issues routing.
 
-The proxy discovers GUI Xcode processes and uses the selected Xcode's Service
-when available and enabled. A request's workspace selector determines its owner.
-Service availability is checked at startup; unavailable or disabled Service
-access leaves GUI routing available. Service workspace and DocumentationSearch
-tools use the native Service connection. The proxy never enables or stops the
-shared service. Enable access separately with `sudo xcrun mcp-server enable`.
+The server starts one owned headless native host and one connection for each
+GUI Xcode owner. Concurrent requests multiplex on each connection. Pass an
+absolute `workspaceIdentifier` to prefer its open GUI owner; otherwise the host
+loads its model lazily. The native host provides the canonical catalog, and
+GUI catalogs load in the background for routing.
 
-Xcode Service can request agent and folder approval on the first
-`XcodeOpenWorkspace` call. `approvalPolicy: .automatic` handles recognized Xcode
-MCP connection dialogs for all agents, including direct `mcpbridge` clients.
-It does not grant Service agent or folder permissions.
+`start()` does not require an open GUI workspace or Xcode Service enable/status.
+Install `XcodeMCPNativeHost.app` beside the proxy executable, or supply its bundle
+URL. Missing helper or required native contracts return diagnostics. Embedded
+hosts must keep AppKit's main run loop available for GUI process observation.
 
-The proxy owns bridge launch arguments and environment. Inherited
-`MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` cannot select a proxy backend.
-For a general MCP client with an explicit executable, use
-`XcodeMCP.Configuration.Transport.localBridge(.custom(...))` from `XcodeMCPKit`.
-See [automatic routing migration](../../Docs/automatic-routing-migration.md).
+`approvalPolicy: .automatic` handles recognized connection dialogs for all
+agents. It requires Accessibility permission for the embedding host. Agent
+identity candidates include the native helper executable and child process IDs.
+
+Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` do not select a proxy backend.
+For a standalone headless or generic MCP process, use `XcodeMCPKit`'s explicit
+`.localBridge(.nativeHost(...))` or `.localBridge(.custom(...))` transport.
+See [native routing migration](../../Docs/automatic-routing-migration.md).
 
 ```swift
 import Foundation
@@ -166,12 +168,13 @@ The adapter CLI accepts `--url` as its only explicit endpoint flag.
 `--request-timeout 0` disables its timeout; negative, non-finite, or nonnumeric
 values are rejected. The removed `--stdio` spelling is not redirected.
 
-The installer remains command-only:
+The installer is command-only and stages the signed helper beside both binaries:
 
 ```bash
 xcode-mcp-proxy-install
 xcode-mcp-proxy-install --dry-run
 ```
 
-See [the breaking migration guide](../../Docs/migration-2026-07.md) for old to
-new symbol and CLI mappings.
+See [native routing migration](../../Docs/automatic-routing-migration.md) for
+the current transport and configuration changes. The earlier
+[breaking migration guide](../../Docs/migration-2026-07.md) records the v0.14.0 API changes.

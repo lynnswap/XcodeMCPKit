@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import XcodeMCPCore
 
 /// Destination and mode settings for a source install.
 package struct XcodeMCPProxyInstallerConfiguration: Equatable, Sendable {
@@ -51,6 +52,12 @@ package struct XcodeMCPProxyInstaller: Sendable {
         }
     }
 
+    /// Signed native helper application included in the install.
+    package struct ApplicationBundle: Equatable, Sendable {
+        package let sourceURL: URL
+        package let destinationURL: URL
+    }
+
     /// Fully resolved install plan.
     package struct InstallPlan: Equatable, Sendable {
         /// Directory where executables will be installed.
@@ -59,13 +66,17 @@ package struct XcodeMCPProxyInstaller: Sendable {
         /// Executables included in the install.
         package let binaries: [Binary]
 
+        /// Native helper application installed beside the executables.
+        package let nativeHostBundle: ApplicationBundle
+
         /// Whether the plan should be displayed without copying files.
         package let dryRun: Bool
 
         /// Creates an install plan.
-        package init(binDirectory: URL, binaries: [Binary], dryRun: Bool) {
+        package init(binDirectory: URL, binaries: [Binary], nativeHostBundle: ApplicationBundle, dryRun: Bool) {
             self.binDirectory = binDirectory
             self.binaries = binaries
+            self.nativeHostBundle = nativeHostBundle
             self.dryRun = dryRun
         }
 
@@ -73,6 +84,7 @@ package struct XcodeMCPProxyInstaller: Sendable {
         package var dryRunLines: [String] {
             var lines = ["Would create: \(binDirectory.path)"]
             lines.append(contentsOf: binaries.map { "Would install: \($0.destinationURL.path)" })
+            lines.append("Would install: \(nativeHostBundle.destinationURL.path)")
             return lines
         }
     }
@@ -96,6 +108,8 @@ package struct XcodeMCPProxyInstaller: Sendable {
         "xcode-mcp-proxy",
         "xcode-mcp-proxy-server",
     ]
+
+    package static let nativeHostBundleName = NativeHostInvocation.bundleName
 
     /// Installer configuration.
     package var configuration: XcodeMCPProxyInstallerConfiguration
@@ -151,6 +165,10 @@ package struct XcodeMCPProxyInstaller: Sendable {
         return InstallPlan(
             binDirectory: binDirectory,
             binaries: binaries,
+            nativeHostBundle: ApplicationBundle(
+                sourceURL: sourceDirectory.appendingPathComponent(Self.nativeHostBundleName),
+                destinationURL: binDirectory.appendingPathComponent(Self.nativeHostBundleName)
+            ),
             dryRun: configuration.dryRun
         )
     }
@@ -174,7 +192,9 @@ package struct XcodeMCPProxyInstaller: Sendable {
     package func install(
         executableURL: URL,
         fileManager: FileManager = .default,
-        buildProducts: ([String], URL) throws -> Void,
+        buildProducts: ([String], URL, URL) throws -> Void,
+        verifyNativeHostBundle: (URL) throws -> Void = Self.verifyNativeHostBundle,
+        replaceNativeHostBundle: (URL, URL) throws -> Void = Self.replaceNativeHostBundle,
         stdout: (String) -> Void
     ) throws {
         let plan = plan(executableURL: executableURL)
@@ -189,12 +209,6 @@ package struct XcodeMCPProxyInstaller: Sendable {
             at: plan.binDirectory,
             withIntermediateDirectories: true
         )
-        if let repoRoot = Self.repositoryRoot(from: executableURL),
-            fileManager.fileExists(atPath: repoRoot.appendingPathComponent("Package.swift").path)
-        {
-            try buildProducts(Self.binaryNames, repoRoot)
-        }
-
         // Staging on the destination filesystem lets rename replace each executable atomically.
         let stagingDirectory = plan.binDirectory.appendingPathComponent(
             ".xcode-mcp-install-\(UUID().uuidString)",
@@ -206,12 +220,21 @@ package struct XcodeMCPProxyInstaller: Sendable {
             attributes: [.posixPermissions: 0o700]
         )
 
-        var installed: [Binary] = []
-        var activeBinary: Binary?
+        var installedPaths: [String] = []
+        var activeName: String?
+        let stagedBundle = stagingDirectory.appendingPathComponent(Self.nativeHostBundleName)
         var failures: [String] = []
         do {
+            activeName = Self.nativeHostBundleName
+            if let repoRoot = Self.repositoryRoot(from: executableURL),
+               fileManager.fileExists(atPath: repoRoot.appendingPathComponent("Package.swift").path) {
+                try buildProducts(Self.binaryNames, repoRoot, stagedBundle)
+            } else {
+                try fileManager.copyItem(at: plan.nativeHostBundle.sourceURL.resolvingSymlinksInPath(), to: stagedBundle)
+            }
+            try verifyNativeHostBundle(stagedBundle)
             for binary in plan.binaries {
-                activeBinary = binary
+                activeName = binary.name
                 let stagedURL = stagingDirectory.appendingPathComponent(binary.name)
                 try fileManager.copyItem(
                     at: binary.sourceURL.resolvingSymlinksInPath(),
@@ -224,16 +247,21 @@ package struct XcodeMCPProxyInstaller: Sendable {
             }
 
             for binary in plan.binaries {
-                activeBinary = binary
+                activeName = binary.name
                 let stagedURL = stagingDirectory.appendingPathComponent(binary.name)
                 guard unsafe rename(stagedURL.path, binary.destinationURL.path) == 0 else {
                     throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
                 }
-                installed.append(binary)
+                installedPaths.append(binary.destinationURL.path)
                 stdout("Installed \(binary.name) to \(binary.destinationURL.path)")
             }
+            activeName = Self.nativeHostBundleName
+            let destination = plan.nativeHostBundle.destinationURL
+            try replaceNativeHostBundle(stagedBundle, destination)
+            installedPaths.append(destination.path)
+            stdout("Installed \(Self.nativeHostBundleName) to \(destination.path)")
         } catch {
-            failures.append("Failed to install \(activeBinary?.name ?? "executables"): \(error)")
+            failures.append("Failed to install \(activeName ?? "products"): \(error)")
         }
 
         do {
@@ -243,8 +271,8 @@ package struct XcodeMCPProxyInstaller: Sendable {
         }
 
         if !failures.isEmpty {
-            let installedPaths = installed.map(\.destinationURL.path)
-            let remainingPaths = plan.binaries.dropFirst(installed.count).map(\.destinationURL.path)
+            let paths = plan.binaries.map(\.destinationURL.path) + [plan.nativeHostBundle.destinationURL.path]
+            let remainingPaths = paths.filter { !installedPaths.contains($0) }
             failures.append("Installed: \(installedPaths.isEmpty ? "none" : installedPaths.joined(separator: ", "))")
             failures.append("Not installed: \(remainingPaths.isEmpty ? "none" : remainingPaths.joined(separator: ", "))")
             throw Error.message(failures.joined(separator: "\n"))
@@ -285,11 +313,31 @@ package struct XcodeMCPProxyInstaller: Sendable {
         return nil
     }
 
-    package static func buildProducts(_ products: [String], in directory: URL) throws {
+    package static func buildProducts(_ products: [String], in directory: URL, nativeHostBundleURL: URL) throws {
         do {
-            try ProxyProductBuilder.buildReleaseProducts(products, in: directory)
+            try ProxyProductBuilder.buildReleaseProducts(products, in: directory, nativeHostBundleURL: nativeHostBundleURL)
         } catch let error as ProxyProductBuilder.Error {
             throw Error.message(error.description)
+        }
+    }
+
+    private static func verifyNativeHostBundle(_ bundleURL: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["--verify", "--strict", bundleURL.path]
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw Error.message("Native helper signature verification failed for \(bundleURL.path) (status \(process.terminationStatus))")
+        }
+    }
+
+    private static func replaceNativeHostBundle(_ staged: URL, _ destination: URL) throws {
+        let flags = FileManager.default.fileExists(atPath: destination.path) ? UInt32(RENAME_SWAP) : UInt32(RENAME_EXCL)
+        guard unsafe renamex_np(staged.path, destination.path, flags) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
     }
 

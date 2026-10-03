@@ -7,7 +7,8 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct DeviceInteractionRoutingTests {
-    @Test func continuationRoutesToTheExactUpstreamThatCreatedTheSession() async throws {
+    @Test(arguments: ["tabIdentifier", "workspaceIdentifier"])
+    func continuationRoutesToTheExactUpstreamThatCreatedTheSession(selectorKey: String) async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         let target = xcodeProcessTarget(processID: 701, xcodeVersion: "27.0")
@@ -70,7 +71,7 @@ struct DeviceInteractionRoutingTests {
             name: "DeviceInteractionInstallAndRun",
             arguments: [
                 "interactionSessionKey": "device-key",
-                "tabIdentifier": proxyTabIdentifier,
+                selectorKey: proxyTabIdentifier,
             ]
         )
         let installDecision = await manager.toolRoutingDecision(for: installRequest, requestTimeoutOverride: nil)
@@ -95,6 +96,38 @@ struct DeviceInteractionRoutingTests {
             rewrittenParams["arguments"] as? [String: Any]
         )
         #expect(rewrittenArguments["tabIdentifier"] as? String == "raw-tab")
+        #expect(rewrittenArguments["workspaceIdentifier"] == nil)
+    }
+
+    @Test func GUIWorkspaceIdentifierCannotMoveADeviceSessionToAnotherOwner() async throws {
+        let first = TestUpstreamClient()
+        let second = TestUpstreamClient()
+        let owner = xcodeProcessTarget(processID: 711, xcodeVersion: "27.0")
+        let other = xcodeProcessTarget(processID: 712, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(upstreams: [first, second], xcodeProcessRoutes: [
+            XcodeProcessRoute(target: owner, upstreamIndices: [0]),
+            XcodeProcessRoute(target: other, upstreamIndices: [1])], startImmediately: false)
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        manager.markUpstreamInitialized(upstreamIndex: 0)
+        manager.markUpstreamInitialized(upstreamIndex: 1)
+        manager.recordDeviceInteractionAffinityIfNeeded(requestData: try requestData(
+            name: "DeviceInteractionStartSession", arguments: ["sessionIdentifier": "owned"]),
+            responseData: try successfulToolResponse(structuredContent: ["interactionSessionKey": "owned-key"]),
+            operationLease: manager.operationLeaseForTest(upstreamIndex: 0))
+        #expect(manager.recordXcodeWindowOwners(from: try jsonValue(["structuredContent": [
+            "message": "* tabIdentifier: other-tab, workspacePath: /Work/Other.xcodeproj"]]), upstreamIndex: 1))
+        let proxyID = try #require(manager.windowOwnershipAuthority.snapshot().identities.first?.proxyTabIdentifier)
+        let decision = await manager.toolRoutingDecision(for: toolsCallObject(id: 105,
+            name: "DeviceInteractionInstallAndRun", arguments: ["interactionSessionKey": "owned-key",
+                "workspaceIdentifier": proxyID]), requestTimeoutOverride: .seconds(1))
+        guard case .reject(let errors) = decision else {
+            Issue.record("A workspace identifier must not redirect an existing device session")
+            return
+        }
+        #expect(errors.first?.message == "device interaction session does not own the selected Xcode window")
+        #expect(await first.sentCount() == 0)
+        #expect(await second.sentCount() == 0)
     }
 
     @Test func successfulEndRemovesTheRecordedAffinity() async throws {
@@ -164,7 +197,6 @@ struct DeviceInteractionRoutingTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: group.next(),
@@ -236,7 +268,6 @@ struct DeviceInteractionRoutingTests {
         let first = TestUpstreamClient()
         let owner = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
         let fixture = RuntimeCoordinatorFixture(
             config: config, upstreams: [first, owner], startImmediately: false
         )
@@ -274,7 +305,6 @@ struct DeviceInteractionRoutingTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: group.next(),
@@ -303,7 +333,6 @@ struct DeviceInteractionRoutingTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
         let target = xcodeProcessTarget(processID: 705, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
             config: config,

@@ -94,6 +94,16 @@ for product in "${products[@]}"; do
   fi
 done
 
+XCODE_MCP_BUILD_VERSION="$version" "$repo_root/scripts/build-native-host.sh" \
+  --configuration release --output "$bin_out/XcodeMCPNativeHost.app"
+if command -v lipo >/dev/null 2>&1; then
+  native_archs="$(lipo -archs "$bin_out/XcodeMCPNativeHost.app/Contents/MacOS/xcode-mcp-native-host")"
+  if [[ "$native_archs" != "arm64" ]]; then
+    echo "Expected arm64 native helper, got: $native_archs" >&2
+    exit 1
+  fi
+fi
+
 popd >/dev/null
 
 echo "Staged release binaries at: $out_dir"

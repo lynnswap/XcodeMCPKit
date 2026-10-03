@@ -123,71 +123,17 @@ extension RuntimeCoordinator {
         case stale
     }
 
-    private enum CatalogBackendGroup: Hashable, Sendable {
-        case gui
-        case service
-    }
-
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlane.RPCHandle
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let startedAt = nowUptimeNanoseconds()
         let timeout = requestTimeout ?? MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
-        let deadline = deadlineUptimeNanoseconds(for: timeout)
-        if defaultBackendUpstreamIndices.isEmpty {
-            return try await loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
-                requestTimeout: timeout, deadlineUptimeNs: deadline, startedAt: startedAt
-            )
-        }
-        guard !xcodeProcessRoutes.isEmpty else {
-            return try await loadUnboundToolsCatalog(requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
-        }
-
-        var incomplete: Set<CatalogBackendGroup> = [.gui, .service]
-        let result = try await withThrowingTaskGroup(
-            of: (CatalogBackendGroup, Result<CanonicalToolsCatalogLoadResult, any Error>).self
-        ) { group in
-            group.addTask {
-                do {
-                    return (.service, .success(try await self.loadUnboundToolsCatalog(
-                        requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt
-                    )))
-                } catch { return (.service, .failure(error)) }
-            }
-            group.addTask {
-                do {
-                    return (.gui, .success(try await self.loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
-                        requestTimeout: timeout, deadlineUptimeNs: deadline, startedAt: startedAt
-                    )))
-                } catch { return (.gui, .failure(error)) }
-            }
-            var lastError: any Error = UpstreamSlotScheduler.AcquisitionError.unavailable
-            while let (backend, outcome) = try await group.next() {
-                switch outcome {
-                case .success(let result):
-                    incomplete.remove(backend)
-                    group.cancelAll()
-                    return result
-                case .failure(let error):
-                    lastError = error
-                }
-            }
-            throw lastError
-        }
+        let result = try await loadUnboundToolsCatalog(
+            requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
         try Task.checkCancellation()
-        // Continue incomplete refreshes under the runtime's lifetime after foreground cancellation drains.
-        if incomplete.contains(.gui) {
-            refreshProcessToolsCatalogsIfNeeded(reason: "client_tools_list", refreshCached: true)
-        }
-        if incomplete.contains(.service) {
-            refreshDefaultBackendToolsCatalogIfNeeded()
-        }
-        return CanonicalToolsCatalogLoadResult(
-            rawResult: processControlPlane.canonicalToolsCatalogRaw() ?? result.rawResult,
-            sourceProof: processControlPlane.canonicalSourceProof() ?? result.sourceProof,
-            durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
-        )
+        refreshProcessToolsCatalogsIfNeeded(reason: "client_tools_list", refreshCached: true)
+        return result
     }
 
     private func beginDefaultBackendCatalogLoad(allowsConcurrentLoad: Bool) -> CatalogLease? {
@@ -203,26 +149,6 @@ extension RuntimeCoordinator {
         }), let (lease, transition) = attempt else { return nil }
         applyProcessControlPlaneTransition(transition)
         return lease
-    }
-
-    private func refreshDefaultBackendToolsCatalogIfNeeded() {
-        guard let lease = beginDefaultBackendCatalogLoad(allowsConcurrentLoad: false) else { return }
-        let accepted = addRuntimeTask { [weak self] in
-            guard let self else { return }
-            do {
-                _ = try await self.loadUnboundToolsCatalog(
-                    lease: lease,
-                    requestTimeout: self.processRouteToolsCatalogRequestTimeoutAmount(),
-                    rpcHandle: .init(), startedAt: self.nowUptimeNanoseconds()
-                )
-            } catch is CancellationError {
-            } catch {
-                self.logger.debug("Service catalog refresh failed", metadata: ["error": .string(String(describing: error))])
-            }
-        }
-        if !accepted {
-            applyCatalogCommit(commitProcessCatalog(.failed, lease: lease, nowUptimeNanoseconds: nowUptimeNanoseconds()))
-        }
     }
 
     private func loadUnboundToolsCatalog(
@@ -247,7 +173,7 @@ extension RuntimeCoordinator {
         )
         do {
             let result = try await loadCanonicalToolsCatalogFromRoute(
-                .anyHealthy,
+                .nativeHost,
                 requestTimeout: requestTimeout,
                 rpcHandle: rpcHandle,
                 startedAt: startedAt,
@@ -312,54 +238,6 @@ extension RuntimeCoordinator {
             }
             throw error
         }
-    }
-
-    private func loadAvailableToolsCatalogSurfaceAcrossProcessRoutes(
-        requestTimeout: TimeAmount?,
-        deadlineUptimeNs: UInt64?,
-        startedAt: UInt64
-    ) async throws -> CanonicalToolsCatalogLoadResult {
-        let exposure = processRouteExposure(policy: .toolsCatalog)
-        guard exposure.routes.isEmpty == false else {
-            throw UpstreamSlotScheduler.AcquisitionError.unavailable
-        }
-
-        let exposedProcessIDs = exposure.processIDs
-        let routes = exposure.routes.compactMap { exposure -> AvailableToolsCatalogRoute? in
-            guard let preferred = exposure.usableUpstreamIDs.first,
-                  let preferredProof = upstreamTopology.operationLease(for: preferred)?.proof,
-                  let (lease, transition) = beginProcessCatalogAttemptIfRunning(
-                      routeID: exposure.route.id,
-                      preferredUpstreamProof: preferredProof
-                  ) else { return nil }
-            applyProcessControlPlaneTransition(transition)
-            return AvailableToolsCatalogRoute(
-                route: exposure.route,
-                target: exposure.route.target,
-                upstreamIndices: exposure.usableUpstreamIndices,
-                lease: lease
-            )
-        }
-        guard routes.isEmpty == false else {
-            if let current = processControlPlane.canonicalToolsCatalogRaw() {
-                return CanonicalToolsCatalogLoadResult(
-                    rawResult: current,
-                    sourceProof: processControlPlane.canonicalSourceProof(),
-                    durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt)
-                )
-            }
-            throw UpstreamSlotScheduler.AcquisitionError.unavailable
-        }
-
-        let result = try await loadAvailableToolsCatalogsInBatch(
-            routes,
-            requestTimeout: requestTimeout,
-            deadlineUptimeNs: deadlineUptimeNs,
-            startedAt: startedAt,
-            exposedProcessIDs: exposedProcessIDs,
-            returnAfterFirstSuccess: true
-        )
-        return result
     }
 
     private func loadAvailableToolsCatalogsInBatch(
@@ -1170,9 +1048,9 @@ extension RuntimeCoordinator {
             preferredUpstreamIndices = nil
         case .pinnedUpstream(let index):
             preferredUpstreamIndices = [index]
-        case .xcodeService:
+        case .nativeHost:
             let indices = upstreamTopology.snapshot().entries.compactMap { entry in
-                entry.backend == .xcodeService ? entry.id.rawValue : nil
+                entry.backend == .nativeHost ? entry.id.rawValue : nil
             }
             guard !indices.isEmpty else { throw UpstreamSlotScheduler.AcquisitionError.unavailable }
             preferredUpstreamIndices = indices
@@ -1517,7 +1395,7 @@ extension RuntimeCoordinator {
         switch route {
         case .none, .some(.anyHealthy):
             suffix = "any"
-        case .some(.xcodeService):
+        case .some(.nativeHost):
             suffix = "xcode-service"
         case .some(.pinnedUpstream(let upstreamIndex)):
             suffix = "pinned-\(upstreamIndex)"

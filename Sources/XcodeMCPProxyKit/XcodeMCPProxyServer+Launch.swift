@@ -117,7 +117,10 @@ private extension ProxyServerCommand {
         return ProxyConfig(
             listenHost: listenAddress.host,
             listenPort: listenAddress.port,
-            upstreamProcessCount: upstreamProcesses ?? 1,
+            nativeHostBundleURL: (nativeHostBundlePath ?? nonEmpty(environment["XCODE_MCP_NATIVE_HOST_BUNDLE"])).map {
+                URL(fileURLWithPath: $0, isDirectory: true)
+            },
+            developerDirectoryURL: (developerDirectoryPath ?? nonEmpty(environment["DEVELOPER_DIR"])).map { URL(fileURLWithPath: $0, isDirectory: true) },
             maxBodyBytes: maxBodyBytes ?? 1_048_576,
             requestTimeout: requestTimeout?.seconds ?? 300,
             configPath: config ?? nonEmpty(environment["MCP_XCODE_CONFIG"]),
@@ -198,8 +201,11 @@ private extension ProxyServerCommand {
         if let requestTimeout {
             arguments += ["--request-timeout", requestTimeout.description]
         }
-        if let upstreamProcesses {
-            arguments += ["--upstream-processes", String(upstreamProcesses)]
+        if let bundleURL = configuration.nativeHostBundleURL {
+            arguments += ["--native-host-bundle", bundleURL.path]
+        }
+        if let developerURL = configuration.developerDirectoryURL {
+            arguments += ["--developer-dir", developerURL.path]
         }
         if let refreshCodeIssuesMode {
             arguments += [

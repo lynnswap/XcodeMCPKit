@@ -146,14 +146,32 @@ if ! cmp -s "$tmp_dir/install.expected.sh" "$release_base/$installer_asset"; the
   exit 1
 fi
 
-expected_entries="$(printf '%s\n' \
-  "bin/" \
-  "bin/xcode-mcp-proxy" \
-  "bin/xcode-mcp-proxy-server")"
-actual_entries="$(tar -tzf "$release_base/$archive_asset" | sort)"
-if [[ "$actual_entries" != "$expected_entries" ]]; then
-  echo "Release archive contents are not expected." >&2
-  printf 'Expected:\n%s\n' "$expected_entries" >&2
-  printf 'Actual:\n%s\n' "$actual_entries" >&2
-  exit 1
+python3 - "$release_base/$archive_asset" <<'PYARCHIVE'
+import sys, tarfile
+files = {
+    "bin/xcode-mcp-proxy", "bin/xcode-mcp-proxy-server",
+    "bin/XcodeMCPNativeHost.app/Contents/Info.plist",
+    "bin/XcodeMCPNativeHost.app/Contents/MacOS/xcode-mcp-native-host",
+    "bin/XcodeMCPNativeHost.app/Contents/_CodeSignature/CodeResources",
+}
+directories = {
+    "bin", "bin/XcodeMCPNativeHost.app", "bin/XcodeMCPNativeHost.app/Contents",
+    "bin/XcodeMCPNativeHost.app/Contents/MacOS", "bin/XcodeMCPNativeHost.app/Contents/_CodeSignature",
+}
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    entries = {}
+    for member in archive.getmembers():
+        name = member.name.rstrip("/")
+        if name in entries or not ((name in files and member.isfile()) or (name in directories and member.isdir())):
+            raise SystemExit(f"Release archive contains an unexpected entry: {member.name}")
+        entries[name] = member
+    missing = (files | directories) - entries.keys()
+    if missing:
+        raise SystemExit(f"Release archive is missing required entries: {sorted(missing)}")
+PYARCHIVE
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  mkdir "$tmp_dir/extracted"
+  tar -xzf "$release_base/$archive_asset" -C "$tmp_dir/extracted"
+  codesign --verify --strict "$tmp_dir/extracted/bin/XcodeMCPNativeHost.app"
 fi

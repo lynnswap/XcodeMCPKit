@@ -15,7 +15,8 @@ struct CLIUsageContractTests {
             "--auto-approve",
             "--max-body-bytes <max-body-bytes>",
             "--request-timeout <request-timeout>",
-            "--upstream-processes <upstream-processes>",
+            "--native-host-bundle <path>",
+            "--developer-dir <path>",
             "--refresh-code-issues-mode <refresh-code-issues-mode>",
             "--force-restart",
             "--dry-run",
@@ -24,6 +25,7 @@ struct CLIUsageContractTests {
         ] {
             #expect(help.contains(option))
         }
+        #expect(help.contains("--upstream-processes") == false)
         #expect(help.contains("--lazy-init") == false)
         #expect(help.contains("--xcode-pid") == false)
     }

@@ -30,7 +30,7 @@ struct UpstreamOperationLease: Sendable {
 
 enum UpstreamBackend: Sendable, Hashable {
     case xcodeProcess(XcodeProcessID)
-    case xcodeService
+    case nativeHost
 }
 
 final class UpstreamTopologyAuthority: Sendable {
@@ -44,7 +44,7 @@ final class UpstreamTopologyAuthority: Sendable {
         init(
             id: UpstreamSlotID,
             generation: UInt64,
-            backend: UpstreamBackend = .xcodeService,
+            backend: UpstreamBackend = .nativeHost,
             slot: any UpstreamSlotControlling,
             predecessorStopCompletion: AsyncTerminalSignal? = nil
         ) {
@@ -111,7 +111,7 @@ final class UpstreamTopologyAuthority: Sendable {
 
     private let state: NIOLockedValueBox<State>
 
-    init(_ slots: [any UpstreamSlotControlling], backend: (Int) -> UpstreamBackend = { _ in .xcodeService }) {
+    init(_ slots: [any UpstreamSlotControlling], backend: (Int) -> UpstreamBackend = { _ in .nativeHost }) {
         var initial = State()
         for (index, slot) in slots.enumerated() {
             let id = UpstreamSlotID(rawValue: initial.nextRawID)
@@ -123,7 +123,7 @@ final class UpstreamTopologyAuthority: Sendable {
         state = NIOLockedValueBox(initial)
     }
 
-    func append(_ slots: [any UpstreamSlotControlling], backend: UpstreamBackend = .xcodeService) -> Transition {
+    func append(_ slots: [any UpstreamSlotControlling], backend: UpstreamBackend = .nativeHost) -> Transition {
         state.withLockedValue { state in
             var added: [UpstreamSlotID] = []
             for slot in slots {

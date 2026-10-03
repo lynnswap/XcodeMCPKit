@@ -320,7 +320,7 @@ extension RuntimeCoordinator {
         }
         let proof = probe.topologyProof
         var verification: (
-            recovery: ProcessBridgePoolRecovery,
+            recovery: ProcessConnectionRecovery,
             cleared: UpstreamHealthManager.ClearedUpstreamState?
         )?
         var bridgeCompletion: ProcessControlPlaneTransition?
@@ -414,7 +414,7 @@ extension RuntimeCoordinator {
         }
         let proof = probe.topologyProof
         var verification: (
-            recovery: ProcessBridgePoolRecovery,
+            recovery: ProcessConnectionRecovery,
             cleared: UpstreamHealthManager.ClearedUpstreamState?
         )?
         var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
@@ -967,7 +967,7 @@ extension RuntimeCoordinator {
               )
         else { return }
         logger.debug(
-            "bridge_pool_recovery_timeout",
+            "connection_recovery_timeout",
             metadata: [
                 "pid": .string("\(recovery.routeID.processID)"),
                 "upstream": .string("\(initializeClaim.upstreamIndex)"),

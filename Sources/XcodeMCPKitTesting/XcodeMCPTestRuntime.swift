@@ -3,7 +3,7 @@ import Foundation
 import XcodeMCPKit
 
 /// An in-memory MCP runtime for tests that need an ``XcodeMCP`` client without
-/// launching `mcpbridge`.
+/// launching a native host or connecting to a proxy.
 ///
 /// Use this target from app or SDK tests when the code under test should talk
 /// to the real ``XcodeMCP`` public API, while tool catalogs, tool responses,
@@ -156,14 +156,11 @@ public actor XcodeMCPTestRuntime {
     /// The returned client performs the normal MCP `initialize` and
     /// `notifications/initialized` handshake. Tests can inspect
     /// ``recordedMessages()`` to assert request shape.
+    /// This runtime supplies the transport; configuration still controls the
+    /// client's identity, capabilities and deadlines.
     public func makeClient(
         configuration: XcodeMCPConfiguration = XcodeMCPConfiguration()
     ) async throws -> XcodeMCP {
-        guard configuration.transport == .localBridge() else {
-            throw XcodeMCPError.invalidRequest(
-                "XcodeMCPTestRuntime requires the default localBridge transport configuration"
-            )
-        }
         let transport = XcodeMCPTestTransport(runtime: self)
         transportContinuations[transport.id] = transport.continuation
         return try await XcodeMCP(configuration: configuration, transport: transport)

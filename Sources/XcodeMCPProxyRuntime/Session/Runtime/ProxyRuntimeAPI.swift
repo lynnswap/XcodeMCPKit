@@ -148,10 +148,6 @@ final class ProxyRuntimeRequestOperation: ProxyRuntimeRequestOperating, Sendable
 }
 
 package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
-    package static func documentationSearchIsConfigured(configuration: ProxyRuntimeConfiguration) -> Bool {
-        RuntimeCoordinator.documentationProviderServiceIsConfigured(config: configuration)
-    }
-
     private struct DebugSnapshot: Codable, Sendable {
         let generatedAt: Date
         let proxyInitialized: Bool
@@ -222,7 +218,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         let coordinator = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreamReadinessGate: .liveDefault(config: config, clock: .liveValue, processEventMonitor: processEventMonitor),
+            upstreamReadinessGate: .liveDefault(clock: .liveValue),
             xcodeTargetDiscovery: processEventMonitor,
             xcodeProcessEventMonitor: processEventMonitor,
             notificationSink: { sessionID, data in
@@ -396,8 +392,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
             xcodeTargets: processEventMonitor?.runningXcodeTargets().map {
                 ProxyRuntimeInventorySnapshot.XcodeTarget(
                     processID: $0.processID,
-                    appPath: $0.appPath,
-                    mcpBridgePath: $0.mcpbridgePath
+                    appPath: $0.appPath
                 )
             } ?? [],
             permissionDialogProcessIDs: processEventMonitor?.permissionDialogProcessIDs() ?? []

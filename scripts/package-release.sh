@@ -120,7 +120,15 @@ for product in "${products[@]}"; do
   fi
 done
 
-tar -C "$tmp_dir" -czf "$archive" bin
+native_bundle="$arm_bin/XcodeMCPNativeHost.app"
+if [[ ! -d "$native_bundle" ]]; then
+  echo "Missing staged native helper: $native_bundle" >&2
+  exit 1
+fi
+codesign --verify --strict "$native_bundle"
+cp -R "$native_bundle" "$tmp_dir/bin/XcodeMCPNativeHost.app"
+codesign --verify --strict "$tmp_dir/bin/XcodeMCPNativeHost.app"
+COPYFILE_DISABLE=1 tar -C "$tmp_dir" -czf "$archive" bin
 
 "$repo_root/scripts/render-install-script.sh" \
   --version "$version" \

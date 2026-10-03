@@ -1,7 +1,7 @@
 import Foundation
 
 /// Session-owned defaults and Xcode chat client version lookup for the
-/// initialize params the proxy presents to mcpbridge. JSON shaping lives with
+/// initialize params the proxy presents to its native helper. JSON shaping lives with
 /// the session runtime, while protocol-version validation remains in
 /// the internal MCP runtime.
 enum InitializeHandshakeParams {

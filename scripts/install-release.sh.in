@@ -55,6 +55,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 need curl
+need python3
+need codesign
 need grep
 need install
 need mktemp
@@ -87,10 +89,23 @@ fi
 
 tmp_root="${TMPDIR:-/tmp}"
 tmp_dir="$(mktemp -d "${tmp_root%/}/xcode-mcpkit.XXXXXX")"
+stage_dir=""
 cleanup() {
-  rm -rf "$tmp_dir"
+  install_status=$?
+  trap - EXIT
+  if [ -n "$stage_dir" ] && ! rm -rf "$stage_dir"; then
+    echo "Failed to remove install staging directory $stage_dir; installed products may be complete and old bundle cleanup may remain." >&2
+    install_status=1
+  fi
+  if ! rm -rf "$tmp_dir"; then
+    echo "Failed to remove download directory $tmp_dir." >&2
+    install_status=1
+  fi
+  exit "$install_status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 curl -fsSL -o "$tmp_dir/$ARCHIVE" "$BASE_URL/$ARCHIVE"
 curl -fsSL -o "$tmp_dir/SHA256SUMS.txt" "$BASE_URL/SHA256SUMS.txt"
@@ -99,12 +114,60 @@ curl -fsSL -o "$tmp_dir/SHA256SUMS.txt" "$BASE_URL/SHA256SUMS.txt"
   cd "$tmp_dir"
   grep "  ${ARCHIVE}\$" SHA256SUMS.txt > SHA256SUMS.selected
   shasum -a 256 -c SHA256SUMS.selected
+  python3 - "$ARCHIVE" <<'PYARCHIVE'
+import sys, tarfile
+files = {"bin/xcode-mcp-proxy", "bin/xcode-mcp-proxy-server",
+         "bin/XcodeMCPNativeHost.app/Contents/Info.plist",
+         "bin/XcodeMCPNativeHost.app/Contents/MacOS/xcode-mcp-native-host",
+         "bin/XcodeMCPNativeHost.app/Contents/_CodeSignature/CodeResources"}
+directories = {"bin", "bin/XcodeMCPNativeHost.app", "bin/XcodeMCPNativeHost.app/Contents",
+               "bin/XcodeMCPNativeHost.app/Contents/MacOS", "bin/XcodeMCPNativeHost.app/Contents/_CodeSignature"}
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    entries = set()
+    for member in archive.getmembers():
+        name = member.name.rstrip("/")
+        if name in entries or not ((name in files and member.isfile()) or (name in directories and member.isdir())):
+            raise SystemExit(f"Unexpected release archive entry: {member.name}")
+        entries.add(name)
+    if entries != files | directories:
+        raise SystemExit("Release archive does not contain the required native helper and executables")
+PYARCHIVE
   tar -xzf "$ARCHIVE"
 )
 
 mkdir -p "$BINDIR"
-install -m 755 "$tmp_dir/bin/xcode-mcp-proxy" "$BINDIR/xcode-mcp-proxy"
-install -m 755 "$tmp_dir/bin/xcode-mcp-proxy-server" "$BINDIR/xcode-mcp-proxy-server"
+stage_dir="$(mktemp -d "$BINDIR/.xcode-mcp-install.XXXXXX")"
+install -m 755 "$tmp_dir/bin/xcode-mcp-proxy" "$stage_dir/xcode-mcp-proxy"
+install -m 755 "$tmp_dir/bin/xcode-mcp-proxy-server" "$stage_dir/xcode-mcp-proxy-server"
+cp -R "$tmp_dir/bin/XcodeMCPNativeHost.app" "$stage_dir/XcodeMCPNativeHost.app"
+codesign --verify --strict "$stage_dir/XcodeMCPNativeHost.app"
+python3 - "$stage_dir" "$BINDIR" <<'PYINSTALL'
+import ctypes, os, pathlib, sys
+stage, destination = map(pathlib.Path, sys.argv[1:])
+names = ["xcode-mcp-proxy", "xcode-mcp-proxy-server", "XcodeMCPNativeHost.app"]
+installed = []
+active = None
+try:
+    for name in names[:2]:
+        active = name
+        os.replace(stage / name, destination / name)
+        installed.append(name)
+    active = names[2]
+    replace = ctypes.CDLL(None, use_errno=True).renamex_np
+    replace.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    replace.restype = ctypes.c_int
+    RENAME_SWAP, RENAME_EXCL = 0x00000002, 0x00000004
+    flags = RENAME_SWAP if os.path.lexists(destination / active) else RENAME_EXCL
+    if replace(os.fsencode(stage / active), os.fsencode(destination / active), flags):
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), str(destination / active))
+    installed.append(active)
+except Exception as error:
+    print(f"Failed to install {active}: {error}", file=sys.stderr)
+    print("Installed: " + (", ".join(str(destination / name) for name in installed) or "none"), file=sys.stderr)
+    print("Not installed: " + (", ".join(str(destination / name) for name in names if name not in installed) or "none"), file=sys.stderr)
+    raise SystemExit(1)
+PYINSTALL
 
 echo "Installed XcodeMCPKit ${VERSION} to ${BINDIR}"
 case ":${PATH}:" in

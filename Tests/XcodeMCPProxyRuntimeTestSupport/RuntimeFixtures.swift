@@ -367,15 +367,14 @@ private func upstreamConfigMirror(from upstream: ManagedUpstreamSlot) throws -> 
         upstreamMirror.children.first(where: { $0.label == "factory" })?.value,
         "ManagedUpstreamSlot should expose a stored factory for tests"
     )
-    let factoryMirror = Mirror(reflecting: factory)
-    let config = try #require(
-        factoryMirror.children.first(where: { $0.label == "config" })?.value,
-        "UpstreamProcess factory should expose a stored config for tests"
-    )
-    return Mirror(reflecting: config)
+    let typedFactory = try #require(factory as? any UpstreamSessionFactory)
+    return try upstreamConfigMirror(from: typedFactory)
 }
 
 private func upstreamConfigMirror(from factory: any UpstreamSessionFactory) throws -> Mirror {
+    if let factory = factory as? NativeHostSessionFactory {
+        return Mirror(reflecting: try factory.processConfiguration())
+    }
     let factoryMirror = Mirror(reflecting: factory)
     let config = try #require(
         factoryMirror.children.first(where: { $0.label == "config" })?.value,
