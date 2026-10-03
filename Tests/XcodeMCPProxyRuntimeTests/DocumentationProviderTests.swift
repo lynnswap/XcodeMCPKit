@@ -1092,7 +1092,6 @@ struct DocumentationProviderTests {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.disabledToolNames = [DocumentationProvider.ToolCatalog.toolName]
         let manager = RuntimeCoordinator(
             config: config, eventLoop: group.next(),
             xcodeTargetDiscovery: CountingXcodeTargetDiscovery(targets: []), startImmediately: false
@@ -1112,7 +1111,6 @@ struct DocumentationProviderTests {
 
         do {
             var config = makeConfig(requestTimeout: 5)
-            config.disabledToolNames = [DocumentationProvider.ToolCatalog.toolName]
             let discovery = CountingXcodeTargetDiscovery(targets: [target])
             let manager = RuntimeCoordinator(
                 config: config,

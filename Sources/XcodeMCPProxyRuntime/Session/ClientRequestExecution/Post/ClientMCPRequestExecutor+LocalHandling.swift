@@ -5,9 +5,8 @@ import XcodeMCPCore
 
 extension ClientMCPRequestExecutor {
     enum ToolCallRouting {
-        case local(responseData: Data?)
         case localOperation(LocalToolOperation)
-        case forward(FilteredToolCallRequest)
+        case forward(ForwardedToolCallRequest)
     }
 
     struct LocalToolOperation {
@@ -80,22 +79,12 @@ extension ClientMCPRequestExecutor {
         admittedHandle: CancellationHandle? = nil,
         requestDeadline: Date?
     ) -> ToolCallRouting {
-        if let toolName = blockedToolName(from: object) {
-            return .local(
-                responseData: Self.makeBlockedToolResponseData(
-                    requestObject: object,
-                    toolName: toolName
-                )
-            )
-        }
-
         guard isDocumentationSearchRequest(object),
             let responseID = JSONRPC.Message.Inspector.requestID(from: object)
         else {
             return .forward(
-                FilteredToolCallRequest(
+                ForwardedToolCallRequest(
                     bodyData: bodyData,
-                    localResponseData: nil,
                     forwardedResponseID: JSONRPC.Message.Inspector.requestID(from: object)
                 )
             )
@@ -161,7 +150,7 @@ extension ClientMCPRequestExecutor {
                 }
             }
         }
-        cancellationHandle.bindRefreshTask(task)
+        cancellationHandle.bindLocalTask(task)
         return .localOperation(
             LocalToolOperation(
                 responseFuture: promise.futureResult,
@@ -170,29 +159,11 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    func blockedToolName(from requestObject: [String: Any]) -> String? {
-        guard let method = requestObject["method"] as? String,
-            method == "tools/call",
-            let params = requestObject["params"] as? [String: Any],
-            let toolName = params["name"] as? String,
-            disabledToolNames.contains(toolName)
-        else {
-            return nil
-        }
-        return toolName
-    }
-
-    func refreshCodeIssuesRequest(from requestJSON: Any) -> RefreshCodeIssues.Request? {
-        guard let object = requestJSON as? [String: Any] else { return nil }
-        return RefreshCodeIssues.Request(requestObject: object)
-    }
-
     private func isDocumentationSearchRequest(_ object: [String: Any]) -> Bool {
         guard sessionManager.hasDocumentationSearchService() else { return false }
         guard case .request("tools/call", _) = JSONRPC.Message.Inspector.kind(of: object),
             let params = object["params"] as? [String: Any],
-            params["name"] as? String == DocumentationProvider.ToolCatalog.toolName,
-            disabledToolNames.contains(DocumentationProvider.ToolCatalog.toolName) == false
+            params["name"] as? String == DocumentationProvider.ToolCatalog.toolName
         else {
             return false
         }

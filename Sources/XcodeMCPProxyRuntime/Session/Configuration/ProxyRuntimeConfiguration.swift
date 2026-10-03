@@ -2,11 +2,6 @@ import Foundation
 import XcodeMCPCore
 
 package struct ProxyRuntimeConfiguration: Sendable {
-    package enum RefreshCodeIssuesMode: String, Sendable {
-        case proxy
-        case upstream
-    }
-
     package enum ValidationError: Error, CustomStringConvertible {
         case unsupportedProtocolVersion(String)
 
@@ -14,7 +9,7 @@ package struct ProxyRuntimeConfiguration: Sendable {
             switch self {
             case .unsupportedProtocolVersion(let protocolVersion):
                 return
-                    "upstream_handshake.protocolVersion must be \(MCPProtocolVersion.current); "
+                    "initializeHandshake.protocolVersion must be \(MCPProtocolVersion.current); "
                     + "\(protocolVersion) is not supported"
             }
         }
@@ -66,8 +61,6 @@ package struct ProxyRuntimeConfiguration: Sendable {
     package var requestTimeout: TimeInterval
     package var prewarmToolsList: Bool
     package var usesPermissionDialogAutomation: Bool
-    package var refreshCodeIssuesMode: RefreshCodeIssuesMode
-    package var disabledToolNames: Set<String>
     package var initializeParamsOverride: InitializeHandshakeOverride?
 
     package init(
@@ -77,8 +70,6 @@ package struct ProxyRuntimeConfiguration: Sendable {
         requestTimeout: TimeInterval,
         prewarmToolsList: Bool = true,
         usesPermissionDialogAutomation: Bool = false,
-        refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy,
-        disabledToolNames: Set<String> = [],
         initializeParamsOverride: InitializeHandshakeOverride? = nil
     ) {
         self.nativeHostBundleURL = nativeHostBundleURL
@@ -87,8 +78,6 @@ package struct ProxyRuntimeConfiguration: Sendable {
         self.requestTimeout = requestTimeout
         self.prewarmToolsList = prewarmToolsList
         self.usesPermissionDialogAutomation = usesPermissionDialogAutomation
-        self.refreshCodeIssuesMode = refreshCodeIssuesMode
-        self.disabledToolNames = Self.normalizedToolNames(disabledToolNames)
         self.initializeParamsOverride = initializeParamsOverride
     }
 
@@ -99,18 +88,5 @@ package struct ProxyRuntimeConfiguration: Sendable {
         guard MCPProtocolVersion.isSupported(protocolVersion) else {
             throw ValidationError.unsupportedProtocolVersion(protocolVersion)
         }
-    }
-
-    static func normalizedToolNames<S: Sequence>(_ names: S) -> Set<String>
-    where
-        S.Element == String
-    {
-        var normalized = Set<String>()
-        for rawName in names {
-            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard name.isEmpty == false else { continue }
-            normalized.insert(name)
-        }
-        return normalized
     }
 }

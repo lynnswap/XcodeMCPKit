@@ -798,11 +798,7 @@ extension HTTPHandlerTests {
         do {
             let service = ClientMCPRequestExecutor(
                 config: config.runtime,
-                sessionManager: sessionManager,
-                refreshCodeIssuesCoordinator: .makeDefault(),
-                refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
-                    defaultRequestTimeoutSeconds: config.requestTimeout
-                )
+                sessionManager: sessionManager
             )
             let payload = toolsCallPayload(
                 id: 720,

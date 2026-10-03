@@ -111,7 +111,7 @@ extension ClientMCPRequestExecutor {
 
         private struct CancellationSnapshot: Sendable {
             let activeRequest: ActiveRequest?
-            let refreshTask: Task<Void, Never>?
+            let localTask: Task<Void, Never>?
             let childHandles: [ClientMCPRequestExecutor.CancellationHandle]
             let requestIDKeys: [String]
         }
@@ -121,7 +121,7 @@ extension ClientMCPRequestExecutor {
         private struct State: Sendable {
             var requestIDKeys: [String]
             var activeRequest: ActiveRequest?
-            var refreshTask: Task<Void, Never>?
+            var localTask: Task<Void, Never>?
             var childHandles: [ClientMCPRequestExecutor.CancellationHandle] = []
             var terminalReason: TerminalReason?
             var isTerminal: Bool { terminalReason != nil }
@@ -206,15 +206,15 @@ extension ClientMCPRequestExecutor {
         func markCompleted() {
             state.withLockedValue { state in
                 if state.terminalReason == nil { state.terminalReason = .completed }
-                state.refreshTask = nil
+                state.localTask = nil
                 state.childHandles.removeAll()
             }
         }
 
-        func bindRefreshTask(_ task: Task<Void, Never>) {
+        func bindLocalTask(_ task: Task<Void, Never>) {
             let shouldCancel = state.withLockedValue { state -> Bool in
                 guard !state.isTerminal else { return true }
-                state.refreshTask = task
+                state.localTask = task
                 return false
             }
             if shouldCancel {
@@ -263,16 +263,16 @@ extension ClientMCPRequestExecutor {
                 state.terminalReason = reason
                 let snapshot = CancellationSnapshot(
                     activeRequest: state.activeRequest,
-                    refreshTask: state.refreshTask,
+                    localTask: state.localTask,
                     childHandles: state.childHandles,
                     requestIDKeys: state.requestIDKeys
                 )
-                state.refreshTask = nil
+                state.localTask = nil
                 state.childHandles = []
                 return snapshot
             }
             guard let snapshot else { return false }
-            snapshot.refreshTask?.cancel()
+            snapshot.localTask?.cancel()
             for childHandle in snapshot.childHandles {
                 _ = childHandle.interrupt(using: runtime, reason: reason)
             }

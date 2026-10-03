@@ -1681,23 +1681,22 @@ struct RuntimeCoordinatorSchedulingTests {
                 requestIDKeys: []
             )
         }
-        let forwardingService = MCPForwardingService(
-            configuration: makeConfig(requestTimeout: 300),
-            sessionManager: manager
+        let executor = ClientMCPRequestExecutor(
+            config: makeConfig(requestTimeout: 300), sessionManager: manager
         )
         await upstream.blockNextSend(method: "tools/call")
         let request = Task {
-            let result = await forwardingService.callInternalTool(
-                name: "XcodeListNavigatorIssues",
-                arguments: ["workspaceIdentifier": "/Work/SendBarrier.xcodeproj"],
-                sessionID: sessionID,
-                eventLoop: fixture.eventLoop,
-                cancellationHandle: parentCancellationHandle,
-                upstreamIndexOverride: 0,
-                requestTimeoutOverride: trigger == .timeout ? .milliseconds(20) : .seconds(300)
+            let data = try JSONSerialization.data(withJSONObject: toolsCallObject(
+                id: 1, name: "XcodeListNavigatorIssues", arguments: ["workspaceIdentifier": "/Work/SendBarrier.xcodeproj"]))
+            let operation = executor.handle(
+                bodyData: data, headerSessionID: sessionID, headerSessionExists: true,
+                prefersEventStream: false, eventLoop: fixture.eventLoop,
+                requestTimeoutOverride: trigger == .timeout ? .milliseconds(20) : .seconds(300),
+                parentCancellationHandle: parentCancellationHandle
             )
+            let result = try await operation.future.get()
             switch (trigger, result) {
-            case (.timeout, .timeout), (.abandon, .cancelled):
+            case (.timeout, .mcpError(_, -32000, _, _, _)), (.abandon, .empty):
                 return true
             default:
                 return false
@@ -1706,7 +1705,7 @@ struct RuntimeCoordinatorSchedulingTests {
         try await upstream.waitForBlockedSend()
         parentCancellationHandle?.cancel(using: manager)
         #expect(try await waitWithTimeout("waiting for forwarded cancellation") {
-            await request.value
+            try await request.value
         })
 
         let beforeOriginalSendCompletion = await upstream.sent()
@@ -1773,25 +1772,24 @@ struct RuntimeCoordinatorSchedulingTests {
                 requestIDKeys: []
             )
         }
-        let forwardingService = MCPForwardingService(
-            configuration: makeConfig(requestTimeout: 300),
-            sessionManager: manager
+        let executor = ClientMCPRequestExecutor(
+            config: makeConfig(requestTimeout: 300), sessionManager: manager
         )
         await upstream.blockNextSend(method: "tools/call")
         let request = Task {
-            let result = await forwardingService.callInternalTool(
-                name: "XcodeListNavigatorIssues",
-                arguments: ["workspaceIdentifier": "/Work/UnsentCancellation.xcodeproj"],
-                sessionID: sessionID,
-                eventLoop: fixture.eventLoop,
-                cancellationHandle: parentCancellationHandle,
-                upstreamIndexOverride: 0,
+            let data = try JSONSerialization.data(withJSONObject: toolsCallObject(
+                id: 1, name: "XcodeListNavigatorIssues", arguments: ["workspaceIdentifier": "/Work/UnsentCancellation.xcodeproj"]))
+            let operation = executor.handle(
+                bodyData: data, headerSessionID: sessionID, headerSessionExists: true,
+                prefersEventStream: false, eventLoop: fixture.eventLoop,
                 requestTimeoutOverride: trigger == .timeout
                     ? .milliseconds(20)
-                    : .seconds(300)
+                    : .seconds(300),
+                parentCancellationHandle: parentCancellationHandle
             )
+            let result = try await operation.future.get()
             switch (trigger, result) {
-            case (.timeout, .timeout), (.abandon, .cancelled):
+            case (.timeout, .mcpError(_, -32000, _, _, _)), (.abandon, .empty):
                 return true
             default:
                 return false
@@ -1802,7 +1800,7 @@ struct RuntimeCoordinatorSchedulingTests {
         let matchedExpectedResult = try await waitWithTimeout(
             "waiting for unsent request cancellation"
         ) {
-            await request.value
+            try await request.value
         }
         #expect(matchedExpectedResult)
         await upstream.releaseBlockedSend(.backpressure)

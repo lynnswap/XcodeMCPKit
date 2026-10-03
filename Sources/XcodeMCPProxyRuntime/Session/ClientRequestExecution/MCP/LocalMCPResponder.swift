@@ -19,21 +19,15 @@ struct LocalMCPResponder {
     private typealias LocalResultOperation = @Sendable () async throws -> JSONValue
 
     private let sessionManager: any RuntimeClientLocalMCPResponderPort
-    private let refreshCodeIssuesMode: ProxyRuntimeConfiguration.RefreshCodeIssuesMode
-    private let disabledToolNames: Set<String>
     private let eventLoopCompletionExecutor: EventLoopCompletionExecutor
     private let logger: Logger
 
     init(
         sessionManager: any RuntimeClientLocalMCPResponderPort,
-        refreshCodeIssuesMode: ProxyRuntimeConfiguration.RefreshCodeIssuesMode,
-        disabledToolNames: Set<String>,
         eventLoopCompletionExecutor: EventLoopCompletionExecutor = .eventLoop,
         logger: Logger
     ) {
         self.sessionManager = sessionManager
-        self.refreshCodeIssuesMode = refreshCodeIssuesMode
-        self.disabledToolNames = disabledToolNames
         self.eventLoopCompletionExecutor = eventLoopCompletionExecutor
         self.logger = logger
     }
@@ -53,12 +47,7 @@ struct LocalMCPResponder {
             sessionID: sessionID,
             requestTimeoutOverride: requestTimeoutOverride
         )
-        let rewrittenResult = RefreshCodeIssues.ToolsListRewriter.rewriteResult(
-            result,
-            mode: refreshCodeIssuesMode,
-            hiddenToolNames: disabledToolNames
-        )
-        return try Self.encodeResultData(id: originalID, result: rewrittenResult)
+        return try Self.encodeResultData(id: originalID, result: result)
     }
 
     func handle(
@@ -144,21 +133,14 @@ struct LocalMCPResponder {
                 _ = sessionManager.session(id: headerSessionID)
             }
             let sessionManager = self.sessionManager
-            let refreshCodeIssuesMode = self.refreshCodeIssuesMode
-            let hiddenToolNames = disabledToolNames
             return handleLocalResult(
                 originalID: originalID,
                 sessionID: headerSessionID,
                 eventLoop: eventLoop
             ) {
-                let result = try await sessionManager.sharedToolsList(
+                try await sessionManager.sharedToolsList(
                     sessionID: headerSessionID,
                     requestTimeoutOverride: requestTimeoutOverride
-                )
-                return RefreshCodeIssues.ToolsListRewriter.rewriteResult(
-                    result,
-                    mode: refreshCodeIssuesMode,
-                    hiddenToolNames: hiddenToolNames
                 )
             }
         }
@@ -169,8 +151,7 @@ struct LocalMCPResponder {
             let originalID = JSONRPC.Message.Inspector.requestID(from: object),
             let params = object["params"] as? [String: Any],
             let toolName = params["name"] as? String,
-            toolName == "XcodeListWindows",
-            disabledToolNames.contains(toolName) == false
+            toolName == "XcodeListWindows"
         {
             if headerSessionExists == false {
                 _ = sessionManager.session(id: headerSessionID)

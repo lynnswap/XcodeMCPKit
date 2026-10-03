@@ -5,9 +5,8 @@ import NIOConcurrencyHelpers
 import XcodeMCPCore
 
 final class ClientMCPRequestExecutor: Sendable {
-    struct FilteredToolCallRequest: Sendable {
-        let bodyData: Data?
-        let localResponseData: Data?
+    struct ForwardedToolCallRequest: Sendable {
+        let bodyData: Data
         let forwardedResponseID: JSONRPC.ID?
     }
 
@@ -19,10 +18,8 @@ final class ClientMCPRequestExecutor: Sendable {
     private let activeCancellations = NIOLockedValueBox<[RequestKey: CancellationHandle]>([:])
 
     let sessionManager: any RuntimeClientMCPRequestPort
-    let disabledToolNames: Set<String>
     let localResponder: LocalMCPResponder
     let forwardingService: MCPForwardingService
-    let refreshWorkflow: RefreshCodeIssues.Workflow
     let eventLoopCompletionExecutor: EventLoopCompletionExecutor
     let requestTimeoutSeconds: TimeInterval
     let deadlineClock: ClockClient
@@ -31,10 +28,6 @@ final class ClientMCPRequestExecutor: Sendable {
     init(
         config: ProxyRuntimeConfiguration,
         sessionManager: any RuntimeClientMCPRequestPort,
-        refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
-        refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState,
-        refreshCodeIssuesClock: ClockClient = .liveValue,
         deadlineClock: ClockClient = .liveValue,
         eventLoopCompletionExecutor: EventLoopCompletionExecutor = .eventLoop,
         logger: Logger = ProxyLogging.make("http")
@@ -42,27 +35,15 @@ final class ClientMCPRequestExecutor: Sendable {
         self.requestTimeoutSeconds = config.requestTimeout
         self.deadlineClock = deadlineClock
         self.sessionManager = sessionManager
-        self.disabledToolNames = config.disabledToolNames
         self.eventLoopCompletionExecutor = eventLoopCompletionExecutor
         self.localResponder = LocalMCPResponder(
             sessionManager: sessionManager,
-            refreshCodeIssuesMode: config.refreshCodeIssuesMode,
-            disabledToolNames: config.disabledToolNames,
             eventLoopCompletionExecutor: eventLoopCompletionExecutor,
             logger: ProxyLogging.make("http.local")
         )
         self.forwardingService = MCPForwardingService(
             configuration: config,
             sessionManager: sessionManager
-        )
-        self.refreshWorkflow = RefreshCodeIssues.Workflow(
-            mode: config.refreshCodeIssuesMode,
-            requestTimeout: config.requestTimeout,
-            coordinator: refreshCodeIssuesCoordinator,
-            targetResolver: refreshCodeIssuesTargetResolver,
-            debugState: refreshCodeIssuesDebugState,
-            clock: refreshCodeIssuesClock,
-            logger: ProxyLogging.make("http.refresh")
         )
         self.logger = logger
     }
@@ -223,7 +204,7 @@ final class ClientMCPRequestExecutor: Sendable {
                     )),
                     sessionID: sessionID, requestIDKeys: [id.key]
                 )
-                localHandle.bindRefreshTask(task)
+                localHandle.bindLocalTask(task)
                 if let parentCancellationHandle,
                    !parentCancellationHandle.bindChildHandle(localHandle) {
                     localHandle.cancel(using: sessionManager)
@@ -303,17 +284,6 @@ final class ClientMCPRequestExecutor: Sendable {
             admittedHandle: admittedHandle,
             requestDeadline: requestDeadline
         ) {
-        case .local(let responseData):
-            return immediate(
-                Self.makeLocalResponseResolution(
-                    responseData: responseData,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream,
-                    emptyStatus: .accepted
-                ),
-                on: eventLoop
-            )
-
         case .localOperation(let operation):
             if let parentCancellationHandle,
                 parentCancellationHandle.bindChildHandle(operation.cancellationHandle) == false
@@ -338,7 +308,7 @@ final class ClientMCPRequestExecutor: Sendable {
 
         case .forward(let request):
             return makeForwardingOperation(
-                filteredRequest: request,
+                forwardedRequest: request,
                 sessionID: sessionID,
                 prefersEventStream: prefersEventStream,
                 eventLoop: eventLoop,
@@ -351,7 +321,7 @@ final class ClientMCPRequestExecutor: Sendable {
     }
 
     func makeForwardingOperation(
-        filteredRequest: FilteredToolCallRequest,
+        forwardedRequest: ForwardedToolCallRequest,
         sessionID: String,
         prefersEventStream: Bool,
         eventLoop: EventLoop,
@@ -360,17 +330,7 @@ final class ClientMCPRequestExecutor: Sendable {
         admittedHandle: CancellationHandle? = nil,
         requestDeadline: Date?
     ) -> ClientMCPRequestExecutor.Operation {
-        guard let forwardedBodyData = filteredRequest.bodyData else {
-            return immediate(
-                Self.makeLocalResponseResolution(
-                    responseData: filteredRequest.localResponseData,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream,
-                    emptyStatus: .accepted
-                ),
-                on: eventLoop
-            )
-        }
+        let forwardedBodyData = forwardedRequest.bodyData
         guard let forwardedRequestJSON = try? JSONRPC.Wire.object(fromData: forwardedBodyData) else {
             return immediate(
                 .mcpError(
@@ -387,12 +347,12 @@ final class ClientMCPRequestExecutor: Sendable {
         let descriptor = Self.topLevelRequestDescriptor(
             sessionID: sessionID,
             parsedRequestJSON: forwardedRequestJSON,
-            responseID: filteredRequest.forwardedResponseID
+            responseID: forwardedRequest.forwardedResponseID
         )
         let cancellationHandle = admittedHandle ?? ClientMCPRequestExecutor.CancellationHandle(
             leaseID: sessionManager.createRequestLease(descriptor: descriptor),
             sessionID: sessionID,
-            requestIDKeys: filteredRequest.forwardedResponseID.map { [$0.key] } ?? []
+            requestIDKeys: forwardedRequest.forwardedResponseID.map { [$0.key] } ?? []
         )
         let leaseID = cancellationHandle.leaseID
         if let parentCancellationHandle,
@@ -404,36 +364,6 @@ final class ClientMCPRequestExecutor: Sendable {
 
         let forwardingDeadline = requestDeadline
         let session = sessionManager.session(id: sessionID)
-
-        if refreshCodeIssuesRequest(from: forwardedRequestJSON) != nil,
-            filteredRequest.forwardedResponseID != nil
-        {
-            sessionManager.activateRequestLease(
-                leaseID,
-                requestIDKey: filteredRequest.forwardedResponseID?.key,
-                upstreamIndex: nil,
-                timeout: requestTimeoutOverride
-                    ?? Self.topLevelRequestTimeoutOverride(
-                        method: nil,
-                        defaultSeconds: requestTimeoutSeconds
-                    ),
-                progressTokenMapping: nil
-            )
-            return ClientMCPRequestExecutor.Operation(
-                future: makeTopLevelRequestFuture(
-                    filteredRequest: filteredRequest,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream,
-                    eventLoop: eventLoop,
-                    session: session,
-                    leaseID: leaseID,
-                    operationLease: nil,
-                    cancellationHandle: cancellationHandle,
-                    requestTimeoutOverride: requestTimeoutOverride
-                ),
-                cancellationHandle: cancellationHandle
-            )
-        }
 
         @Sendable func forwardingTimeout() -> TimeAmount? {
             remainingRequestTimeout(until: forwardingDeadline)
@@ -447,7 +377,7 @@ final class ClientMCPRequestExecutor: Sendable {
             )
             return eventLoop.makeSucceededFuture(
                 .mcpError(
-                    id: filteredRequest.forwardedResponseID,
+                    id: forwardedRequest.forwardedResponseID,
                     code: -32000,
                     message: "upstream timeout",
                     sessionID: sessionID,
@@ -490,7 +420,7 @@ final class ClientMCPRequestExecutor: Sendable {
                         progressTokenMapping: nil
                     )
                     return self.makeTopLevelRequestFuture(
-                        filteredRequest: filteredRequest,
+                        forwardedRequest: forwardedRequest,
                         sessionID: sessionID,
                         prefersEventStream: prefersEventStream,
                         eventLoop: eventLoop,
@@ -521,7 +451,7 @@ final class ClientMCPRequestExecutor: Sendable {
                     )
                     return eventLoop.makeSucceededFuture(
                         Self.makeUpstreamUnavailableResolution(
-                            responseID: filteredRequest.forwardedResponseID,
+                            responseID: forwardedRequest.forwardedResponseID,
                             sessionID: sessionID,
                             prefersEventStream: prefersEventStream
                         )
@@ -542,7 +472,7 @@ final class ClientMCPRequestExecutor: Sendable {
                     )
                 )
             case .localXcodeListWindows:
-                guard let responseID = filteredRequest.forwardedResponseID else {
+                guard let responseID = forwardedRequest.forwardedResponseID else {
                     cancellationHandle.markCompleted()
                     self.sessionManager.completeRequestLease(leaseID)
                     return eventLoop.makeSucceededFuture(
@@ -583,7 +513,7 @@ final class ClientMCPRequestExecutor: Sendable {
                         )
                     }
                 }
-                cancellationHandle.bindRefreshTask(task)
+                cancellationHandle.bindLocalTask(task)
                 return promise.futureResult
             case .forward(let preferredUpstreamIndex):
                 return forward(preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] })
@@ -616,7 +546,7 @@ final class ClientMCPRequestExecutor: Sendable {
                 route(decision).cascade(to: promise)
             }
         }
-        cancellationHandle.bindRefreshTask(task)
+        cancellationHandle.bindLocalTask(task)
         return ClientMCPRequestExecutor.Operation(
             future: promise.futureResult,
             cancellationHandle: cancellationHandle

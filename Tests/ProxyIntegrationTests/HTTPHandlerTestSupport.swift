@@ -33,15 +33,6 @@ struct HTTPTestConfiguration: Sendable {
         set { runtime.prewarmToolsList = newValue }
     }
 
-    var refreshCodeIssuesMode: ProxyRuntimeConfiguration.RefreshCodeIssuesMode {
-        get { runtime.refreshCodeIssuesMode }
-        set { runtime.refreshCodeIssuesMode = newValue }
-    }
-
-    var disabledToolNames: Set<String> {
-        get { runtime.disabledToolNames }
-        set { runtime.disabledToolNames = newValue }
-    }
 }
 
 private let httpTestSessionRegistry = NIOLockedValueBox<[String: any RuntimeCoordinating]>([:])
@@ -1198,9 +1189,6 @@ func addHTTPHandler(
     to channel: EmbeddedChannel,
     config: HTTPTestConfiguration,
     sessionManager: any RuntimeCoordinating,
-    refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
-    refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
-    refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState? = nil,
     scheduleResponseCompletion:
         (@Sendable (EventLoop, @escaping @Sendable () -> Void) -> Void)? = nil
 ) throws {
@@ -1212,9 +1200,6 @@ func addHTTPHandler(
         coordinator: sessionManager,
         eventLoop: channel.eventLoop,
         eventSource: runtimeEventSource,
-        refreshCoordinator: refreshCodeIssuesCoordinator ?? .makeDefault(),
-        refreshTargetResolver: refreshCodeIssuesTargetResolver,
-        refreshDebugState: refreshCodeIssuesDebugState,
         eventLoopCompletionExecutor: completionExecutor.executor
     )
     let handler = HTTPHandler(
@@ -1361,28 +1346,15 @@ struct TestHTTPHandlerServer {
     static func start(
         config: HTTPTestConfiguration,
         sessionManager: any RuntimeCoordinating,
-        refreshCodeIssuesCoordinator: RefreshCodeIssues.Coordinator? = nil,
-        refreshCodeIssuesTargetResolver: RefreshCodeIssues.TargetResolver = RefreshCodeIssues.TargetResolver(),
-        refreshCodeIssuesClock: ClockClient = .liveValue
-    ) throws -> TestHTTPHandlerServer {
+) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let childChannelTracker = HTTPTestServerChannelTracker()
-        let refreshCoordinator =
-            refreshCodeIssuesCoordinator
-            ?? RefreshCodeIssues.Coordinator.makeDefault()
-        let refreshDebugState = RefreshCodeIssues.DebugState(
-            defaultRequestTimeoutSeconds: config.requestTimeout
-        )
         let runtime = ProxyRuntime(
             config: config.runtime,
             coordinator: sessionManager,
             eventLoop: group.next(),
             eventSource: ProxyRuntimeEventSource(),
-            refreshCoordinator: refreshCoordinator,
-            refreshTargetResolver: refreshCodeIssuesTargetResolver,
-            refreshDebugState: refreshDebugState,
-            refreshClock: refreshCodeIssuesClock
-        )
+)
         let controlService = HTTPControlService(runtime: runtime)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)

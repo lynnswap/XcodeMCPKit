@@ -434,7 +434,7 @@ struct HTTPConcurrencyTests {
     ) throws -> (
         RuntimeCoordinator, ClientMCPRequestExecutor, NIOAsyncTestingEventLoop, [EmbeddedControlledUpstreamClient]
     ) {
-        var config = makeEmbeddedConfig(requestTimeout: requestTimeout)
+        let config = makeEmbeddedConfig(requestTimeout: requestTimeout)
         let loop = NIOAsyncTestingEventLoop()
         let upstreams = (0..<upstreamCount).map { _ in EmbeddedControlledUpstreamClient() }
         let manager = RuntimeCoordinator(
@@ -454,8 +454,6 @@ struct HTTPConcurrencyTests {
         manager.seedCanonicalToolsCatalog(executeSnippetToolsCatalog(), sourceUpstream: 0)
         let service = ClientMCPRequestExecutor(
             config: config, sessionManager: manager,
-            refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout),
             deadlineClock: deadlineClock
         )
         return (manager, service, loop, upstreams)
@@ -866,123 +864,6 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
-    @Test func httpConcurrentRefreshCodeIssuesRequestsDoNotSurfaceErrorFiveOrDeadlockInternalCalls() async throws {
-        let upstream = RefreshSensitiveUpstreamClient()
-        let target = XcodeProcessTarget(
-            processID: 27071, appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer", xcodeVersion: "27.0"
-        )
-        let server = try TestHTTPServer.start(upstream: upstream, xcodeProcessRoutes: [
-            XcodeProcessRoute(target: target, upstreamIndices: [0])
-        ])
-        let url = server.url
-
-        do {
-            let (initializeResponse, _) = try await postJSON(
-                url: url,
-                sessionID: nil,
-                payload: initializePayload(id: 1)
-            )
-            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
-            else {
-                throw ConcurrencyTestError.missingSessionID
-            }
-
-            let tasks = (0..<3).map { index in
-                Task {
-                    _ = try await postJSON(
-                        url: url,
-                        sessionID: sessionID,
-                        payload: toolCallPayload(
-                            id: index + 200,
-                            name: "XcodeRefreshCodeIssuesInFile",
-                            arguments: [
-                                "tabIdentifier": "windowtab-refresh",
-                                "filePath": "App\(index).swift",
-                            ]
-                        )
-                    )
-                }
-            }
-
-            try await upstream.waitForRefreshStartCount(1)
-            #expect(server.refreshDebugState.snapshot().queue.activeRequestCount >= 1)
-            #expect(await upstream.didEmitErrorFive() == false)
-            await upstream.releaseRefreshResponses()
-            for task in tasks {
-                _ = try await task.value
-            }
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
-
-    @Test func httpConcurrentRefreshCodeIssuesRequestsSerializeForTheSameTab() async throws {
-        let upstream = SingleFlightRefreshUpstreamClient()
-        let queuedKeys = LockedRecordedValues<String>()
-        let coordinator = RefreshCodeIssues.Coordinator(testHooks: .init(waiterQueued: { key, _ in
-            queuedKeys.append(key)
-        }))
-        let target = XcodeProcessTarget(
-            processID: 27071, appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer", xcodeVersion: "27.0"
-        )
-        let server = try TestHTTPServer.start(upstream: upstream, xcodeProcessRoutes: [
-            XcodeProcessRoute(target: target, upstreamIndices: [0])
-        ], refreshCoordinator: coordinator)
-        let url = server.url
-
-        do {
-            let (initializeResponse, _) = try await postJSON(
-                url: url,
-                sessionID: nil,
-                payload: initializePayload(id: 1)
-            )
-            guard let sessionID = initializeResponse.value(forHTTPHeaderField: "Mcp-Session-Id")
-            else {
-                throw ConcurrencyTestError.missingSessionID
-            }
-
-            let tasks = (0..<3).map { index in
-                Task {
-                    _ = try await postJSON(
-                        url: url,
-                        sessionID: sessionID,
-                        payload: toolCallPayload(
-                            id: index + 300,
-                            name: "XcodeRefreshCodeIssuesInFile",
-                            arguments: [
-                                "tabIdentifier": "windowtab-refresh",
-                                "filePath": "App\(index).swift",
-                            ]
-                        )
-                    )
-                }
-            }
-
-            try await upstream.waitForRefreshStartCount(1)
-            try await waitWithTimeout(
-                "waiting for concurrent refresh requests to enter the debug queue",
-                timeout: .seconds(2)
-            ) {
-                try await queuedKeys.nextValue(at: 1)
-            }
-            #expect(queuedKeys.count() == 2)
-            #expect(server.refreshDebugState.snapshot().queue.activeRequestCount == 1)
-            #expect(await upstream.didEmitConcurrentRefreshError() == false)
-            await upstream.releaseRefreshResponses()
-            for task in tasks {
-                _ = try await task.value
-            }
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
-
     @Test func httpRefreshCodeIssuesNotificationForwardsWithoutInvalidUpstreamOverride()
         async throws
     {
@@ -1141,7 +1022,6 @@ private struct TestHTTPServer {
     let sessionManager: RuntimeCoordinator
     let upstream: any UpstreamSlotControlling
     let childChannelTracker: HTTPTestServerChannelTracker
-    let refreshDebugState: RefreshCodeIssues.DebugState
     let controlService: HTTPControlService
 
     static func start(
@@ -1150,8 +1030,7 @@ private struct TestHTTPServer {
         additionalUpstreams: [any UpstreamSlotControlling] = [],
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
-        refreshCoordinator: RefreshCodeIssues.Coordinator = .makeDefault()
-    ) throws -> TestHTTPServer {
+) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         let childChannelTracker = HTTPTestServerChannelTracker()
@@ -1182,16 +1061,11 @@ private struct TestHTTPServer {
             },
             testHooks: testHooks
         )
-        let refreshDebugState = RefreshCodeIssues.DebugState(
-            defaultRequestTimeoutSeconds: config.requestTimeout
-        )
         let runtime = ProxyRuntime(
             config: config,
             coordinator: sessionManager,
             eventLoop: runtimeEventLoop,
-            eventSource: runtimeEventSource,
-            refreshCoordinator: refreshCoordinator,
-            refreshDebugState: refreshDebugState
+            eventSource: runtimeEventSource
         )
         let controlService = HTTPControlService(runtime: runtime)
 
@@ -1227,7 +1101,6 @@ private struct TestHTTPServer {
             sessionManager: sessionManager,
             upstream: upstream,
             childChannelTracker: childChannelTracker,
-            refreshDebugState: refreshDebugState,
             controlService: controlService
         )
     }
@@ -1805,372 +1678,6 @@ private actor ControlledUpstreamClient: UpstreamSlotControlling {
             return makeToolsListResponse(id: id)
         }
         return makeSuccessResponse(id: id)
-    }
-}
-
-private actor RefreshSensitiveUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<Upstream.Event>
-    private let continuation: AsyncStream<Upstream.Event>.Continuation
-    private let refreshStarts = RecordedValues<String>()
-    private let releaseResponses = AsyncGate()
-    private var activeTabs: Set<String> = []
-    private var emittedErrorFive = false
-
-    init() {
-        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
-        self.events = AsyncStream { continuation in
-            streamContinuation = continuation
-        }
-        self.continuation = streamContinuation
-    }
-
-    func start() async {}
-
-    func stop() async {
-        continuation.finish()
-    }
-
-    func didEmitErrorFive() -> Bool {
-        emittedErrorFive
-    }
-
-    func waitForRefreshStartCount(_ count: Int) async throws {
-        guard count > 0 else { return }
-        _ = try await refreshStarts.nextValue(at: count - 1)
-    }
-
-    func releaseRefreshResponses() async {
-        await releaseResponses.signal()
-    }
-
-    func send(_ data: Data) async -> Upstream.SendResult {
-        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return .accepted
-        }
-
-        if let object = json as? [String: Any] {
-            await handle(object)
-            return .accepted
-        }
-
-        if let array = json as? [Any] {
-            for item in array {
-                guard let object = item as? [String: Any] else { continue }
-                await handle(object)
-            }
-        }
-        return .accepted
-    }
-
-    private func handle(_ object: [String: Any]) async {
-        guard let id = object["id"] else { return }
-        let method = object["method"] as? String
-
-        if method == "initialize" {
-            continuation.yield(.message(makeInitializeResponse(id: id)))
-            return
-        }
-        if method == "tools/call",
-           let params = object["params"] as? [String: Any],
-           params["name"] as? String == "XcodeListWindows" {
-            continuation.yield(.message(try! JSONSerialization.data(withJSONObject: [
-                "jsonrpc": "2.0", "id": id,
-                "result": ["structuredContent": ["message": [
-                    "windowtab-refresh", "windowtab-refresh-0", "windowtab-refresh-1", "windowtab-refresh-2"
-                ].map { "* tabIdentifier: \($0), workspacePath: /Work/Refresh.xcodeproj" }.joined(separator: "\n")]]
-            ])))
-            return
-        }
-
-        guard
-            method == "tools/call",
-            let params = object["params"] as? [String: Any],
-            let name = params["name"] as? String,
-            name == "XcodeRefreshCodeIssuesInFile"
-        else {
-            continuation.yield(.message(makeDefaultResponse(id: id, method: method)))
-            return
-        }
-
-        let arguments = params["arguments"] as? [String: Any]
-        let tabIdentifier =
-            (arguments?["tabIdentifier"] as? String) ?? "__global__"
-        if activeTabs.contains(tabIdentifier) {
-            emittedErrorFive = true
-            continuation.yield(.message(makeErrorFiveResponse(id: id)))
-            return
-        }
-
-        activeTabs.insert(tabIdentifier)
-        await refreshStarts.append(tabIdentifier)
-        let responseData = makeDefaultResponse(id: id, method: method)
-        Task { [tabIdentifier, responseData] in
-            do {
-                try await releaseResponses.wait()
-            } catch {
-                return
-            }
-            completeRefresh(
-                tabIdentifier: tabIdentifier,
-                responseData: responseData
-            )
-        }
-    }
-
-    private func completeRefresh(tabIdentifier: String, responseData: Data) {
-        activeTabs.remove(tabIdentifier)
-        continuation.yield(.message(responseData))
-    }
-
-    private func makeInitializeResponse(id: Any) -> Data {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "protocolVersion": MCP.ProtocolVersion.current,
-                "capabilities": [String: Any]()
-            ],
-        ]
-        return try! JSONSerialization.data(withJSONObject: response, options: [])
-    }
-
-    private func makeSuccessResponse(id: Any) -> Data {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": "ok",
-                    ]
-                ]
-            ],
-        ]
-        return try! JSONSerialization.data(withJSONObject: response, options: [])
-    }
-
-    private func makeToolsListResponse(id: Any) -> Data {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "tools": [["name": "XcodeListWindows", "inputSchema": ["type": "object", "properties": [:]]], [
-                    "name": "XcodeRefreshCodeIssuesInFile",
-                    "description": "Refresh issues",
-                    "inputSchema": [
-                        "type": "object",
-                        "properties": [String: Any](),
-                    ],
-                ]]
-            ],
-        ]
-        return try! JSONSerialization.data(withJSONObject: response, options: [])
-    }
-
-    private func makeDefaultResponse(id: Any, method: String?) -> Data {
-        if method == "tools/list" {
-            return makeToolsListResponse(id: id)
-        }
-        return makeSuccessResponse(id: id)
-    }
-
-    private func makeErrorFiveResponse(id: Any) -> Data {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "content": [
-                    [
-                        "type": "text",
-                        "text":
-                            "Failed to retrieve diagnostics for 'App.swift': The operation couldn’t be completed. (SourceEditor.SourceEditorCallableDiagnosticError error 5.)",
-                    ]
-                ],
-                "isError": true,
-            ],
-        ]
-        return try! JSONSerialization.data(withJSONObject: response, options: [])
-    }
-}
-
-private actor SingleFlightRefreshUpstreamClient: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<Upstream.Event>
-    private let continuation: AsyncStream<Upstream.Event>.Continuation
-    private let refreshStarts = RecordedValues<Int>()
-    private let releaseResponses = AsyncGate()
-    private var hasActiveRefresh = false
-    private var emittedConcurrentRefreshError = false
-
-    init() {
-        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
-        self.events = AsyncStream { continuation in
-            streamContinuation = continuation
-        }
-        self.continuation = streamContinuation
-    }
-
-    func start() async {}
-
-    func stop() async {
-        continuation.finish()
-    }
-
-    func didEmitConcurrentRefreshError() -> Bool {
-        emittedConcurrentRefreshError
-    }
-
-    func waitForRefreshStartCount(_ count: Int) async throws {
-        guard count > 0 else { return }
-        _ = try await refreshStarts.nextValue(at: count - 1)
-    }
-
-    func releaseRefreshResponses() async {
-        await releaseResponses.signal()
-    }
-
-    func send(_ data: Data) async -> Upstream.SendResult {
-        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return .accepted
-        }
-
-        if let object = json as? [String: Any] {
-            await handle(object)
-            return .accepted
-        }
-
-        if let array = json as? [Any] {
-            for item in array {
-                guard let object = item as? [String: Any] else { continue }
-                await handle(object)
-            }
-        }
-        return .accepted
-    }
-
-    private func handle(_ object: [String: Any]) async {
-        guard let id = object["id"] else { return }
-        let method = object["method"] as? String
-
-        if method == "initialize" {
-            continuation.yield(.message(makeInitializeResponse(id: id)))
-            return
-        }
-        if method == "tools/call",
-           let params = object["params"] as? [String: Any],
-           params["name"] as? String == "XcodeListWindows" {
-            continuation.yield(.message(try! JSONSerialization.data(withJSONObject: [
-                "jsonrpc": "2.0", "id": id,
-                "result": ["structuredContent": ["message": [
-                    "windowtab-refresh", "windowtab-refresh-0", "windowtab-refresh-1", "windowtab-refresh-2"
-                ].map { "* tabIdentifier: \($0), workspacePath: /Work/Refresh.xcodeproj" }.joined(separator: "\n")]]
-            ])))
-            return
-        }
-
-        guard
-            method == "tools/call",
-            let params = object["params"] as? [String: Any],
-            let name = params["name"] as? String,
-            name == "XcodeRefreshCodeIssuesInFile"
-        else {
-            continuation.yield(.message(makeDefaultResponse(id: id, method: method)))
-            return
-        }
-
-        if hasActiveRefresh {
-            emittedConcurrentRefreshError = true
-            continuation.yield(.message(makeConcurrentRefreshErrorResponse(id: id)))
-            return
-        }
-
-        hasActiveRefresh = true
-        let startIndex = await refreshStarts.count()
-        await refreshStarts.append(startIndex + 1)
-        let responseData = makeDefaultResponse(id: id, method: method)
-        Task { [responseData] in
-            do {
-                try await releaseResponses.wait()
-            } catch {
-                return
-            }
-            completeRefresh(responseData: responseData)
-        }
-    }
-
-    private func completeRefresh(responseData: Data) {
-        hasActiveRefresh = false
-        continuation.yield(.message(responseData))
-    }
-
-    private func makeInitializeResponse(id: Any) -> Data {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "protocolVersion": MCP.ProtocolVersion.current,
-                "capabilities": [String: Any]()
-            ],
-        ]
-        return try! JSONSerialization.data(withJSONObject: response, options: [])
-    }
-
-    private func makeSuccessResponse(id: Any) -> Data {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": "ok",
-                    ]
-                ]
-            ],
-        ]
-        return try! JSONSerialization.data(withJSONObject: response, options: [])
-    }
-
-    private func makeToolsListResponse(id: Any) -> Data {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "tools": [["name": "XcodeListWindows", "inputSchema": ["type": "object", "properties": [:]]], [
-                    "name": "XcodeRefreshCodeIssuesInFile",
-                    "description": "Refresh issues",
-                    "inputSchema": [
-                        "type": "object",
-                        "properties": [String: Any](),
-                    ],
-                ]]
-            ],
-        ]
-        return try! JSONSerialization.data(withJSONObject: response, options: [])
-    }
-
-    private func makeDefaultResponse(id: Any, method: String?) -> Data {
-        if method == "tools/list" {
-            return makeToolsListResponse(id: id)
-        }
-        return makeSuccessResponse(id: id)
-    }
-
-    private func makeConcurrentRefreshErrorResponse(id: Any) -> Data {
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": "concurrent refresh not allowed",
-                    ]
-                ],
-                "isError": true,
-            ],
-        ]
-        return try! JSONSerialization.data(withJSONObject: response, options: [])
     }
 }
 
