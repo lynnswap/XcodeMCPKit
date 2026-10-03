@@ -82,11 +82,12 @@ enum MCPBridgeRuntime {
             guiPID: xcodeTarget?.processID,
             environment: environment)
         if let developerDirectoryURL { environment["DEVELOPER_DIR"] = developerDirectoryURL.path }
+        let messageLimit = maxQueuedWriteBytes(for: config)
         return UpstreamProcess.Config(
             command: invocation.command,
-            args: invocation.arguments,
+            args: invocation.arguments + ["--max-message-bytes", String(messageLimit)],
             environment: environment,
-            maxQueuedWriteBytes: maxQueuedWriteBytes(for: config))
+            maxQueuedWriteBytes: messageLimit)
     }
 
     private static func maxQueuedWriteBytes(for config: Configuration) -> Int {
