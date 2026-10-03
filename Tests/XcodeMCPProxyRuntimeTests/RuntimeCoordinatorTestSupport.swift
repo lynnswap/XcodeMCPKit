@@ -46,10 +46,10 @@ func makeConfig(requestTimeout: TimeInterval) -> ProxyRuntimeConfiguration {
 
 func makeBridgeRuntimeConfig(
     _ config: ProxyRuntimeConfiguration
-) throws -> MCPBridgeRuntime.Configuration {
+) throws -> NativeHostRuntime.Configuration {
     var config = config
     config.nativeHostBundleURL = try nativeHostBundleURLForTests()
-    return config.mcpBridgeRuntimeConfiguration
+    return config.nativeHostRuntimeConfiguration
 }
 
 private let nativeHostBundleFixture = NIOLockedValueBox<URL?>(nil)
@@ -1766,7 +1766,7 @@ actor XcodeLaunchRecorder {
 
 func makeTestReadinessGate(
     readiness: ReadinessFlag,
-    sleepRecorder: ControlledReadinessSleep? = nil,
+    sleepRecorder: ControlledReadinessSleep = ControlledReadinessSleep(),
     launchRecorder: XcodeLaunchRecorder? = nil
 ) -> UpstreamReadinessGate {
     let launchIfUnavailable: (@Sendable () async -> Bool)?
@@ -1784,9 +1784,6 @@ func makeTestReadinessGate(
         initialRetryBackoffNanoseconds: 1_000_000_000,
         maxRetryBackoffNanoseconds: 8_000_000_000,
         sleepNanoseconds: { nanoseconds in
-            guard let sleepRecorder else {
-                preconditionFailure("Readiness backoff tests must control sleep explicitly")
-            }
             await sleepRecorder.sleep(nanoseconds: nanoseconds)
         },
         launchIfUnavailable: launchIfUnavailable,

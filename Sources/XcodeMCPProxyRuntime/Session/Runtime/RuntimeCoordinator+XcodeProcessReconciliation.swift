@@ -91,7 +91,7 @@ extension RuntimeCoordinator {
         var commit: ProcessRouteReconcileCommit?
         guard initializeManager.performIfRunning({
             let existingRoutes = processControlPlane.activeRoutes()
-            let observedRoutes = MCPBridgeRuntime.orderedXcodeTargets(targets).map { target in
+            let observedRoutes = NativeHostRuntime.orderedXcodeTargets(targets).map { target in
                 existingRoutes.first(where: {
                     $0.target == target && $0.upstreamIndices.isEmpty == false
                 })

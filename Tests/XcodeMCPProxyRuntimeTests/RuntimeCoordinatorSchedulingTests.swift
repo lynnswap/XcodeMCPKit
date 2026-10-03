@@ -74,7 +74,7 @@ struct RuntimeCoordinatorSchedulingTests {
         let serviceLease = manager.createRequestLease(descriptor: descriptor)
         let serviceStarted = NIOLockedValueBox<Int?>(nil)
         let serviceFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
-            leaseID: serviceLease, descriptor: descriptor, on: eventLoop
+            leaseID: serviceLease, descriptor: descriptor, on: eventLoop, preferredUpstreamIndex: 0
         ) { lease in
             serviceStarted.withLockedValue { $0 = lease.upstreamIndex }
             return eventLoop.makeSucceededFuture(())
@@ -94,7 +94,7 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(serviceStarted.withLockedValue { $0 } == nil)
         manager.completeRequestLease(guiLease)
         manager.abandonRequestLease(serviceLease, sessionID: descriptor.sessionID, requestIDKeys: [], operationLease: nil)
-        await #expect(throws: CancellationError.self) { try await serviceFuture.get() }
+        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) { try await serviceFuture.get() }
         #expect(manager.debugSnapshot().queuedRequestCount == 0)
     }
 
@@ -1433,6 +1433,12 @@ struct RuntimeCoordinatorSchedulingTests {
             return fixture.eventLoop.makeSucceededFuture(())
         }
 
+        _ = try await waitForRecordedValue(
+            queuedStarts,
+            at: 0,
+            description: "waiting for queued request to start on the initial static channel"
+        )
+
         await initial.blockNextCancellation()
         manager.handleRequestLeaseTimeout(
             leaseID,
@@ -1464,9 +1470,6 @@ struct RuntimeCoordinatorSchedulingTests {
             upstreamIndex: replacementProof.slotID.rawValue,
             applyBackoff: false
         )
-        for _ in 0..<20 {
-            await Task.yield()
-        }
         #expect(await replacement.sentCount() == 0)
         #expect(
             manager.upstreamSlotScheduler.debugSnapshot()

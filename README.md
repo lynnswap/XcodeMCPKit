@@ -8,11 +8,14 @@ the workspace model when no GUI owns it.
 
 - macOS 15.4+
 - Swift 6.3+ for building from source
-- An Xcode installation that provides the native tool contracts used by the host
+- An Xcode installation that provides supported native GUI or headless tool contracts
 
 Native packaging and live behavior have been verified with Xcode 27 and Swift
-6.4. Missing framework or API contracts produce diagnostics; this verification
-record does not restrict other Xcode versions by version number.
+6.4. The inspected Xcode 26.6 installation provides its GUI catalog when a
+workspace is open; its headless initialization lacks a required native contract.
+Missing framework or API contracts produce diagnostics. The server keeps the
+selected developer directory and does not switch to another installed SDK to
+make headless initialization pass.
 
 The release installer uses Python 3 and `codesign` to stage and verify the native
 application before replacing it.
@@ -189,11 +192,32 @@ disabled = ["RunAllTests", "RunSomeTests"]
 
 ## Tool discovery
 
-The native host supplies the canonical tool catalog. Each explicit `tools/list`
-refreshes it, and concurrent callers share an in-flight load. GUI catalogs load
-in the background for owner routing. A GUI response cannot hide a failed native
-catalog load. Catalog notifications depend on changes in the exposed tool
-surface, not on which connection supplied it.
+The proxy exposes tools from the catalogs that native and GUI connections
+actually supply. Each explicit `tools/list` refreshes discovery, and concurrent
+callers share an in-flight load while keeping independent deadlines. When some
+providers have refreshed and another is still pending, a caller can receive the
+fresh providers. The remaining reads continue and publish `tools/list_changed`
+when they update the catalog. A refresh fails if no provider supplies a fresh
+result. If the selected SDK cannot initialize the
+headless host, a usable GUI catalog remains available for that GUI's operations.
+The headless failure still applies to requests that require a headless model.
+
+For tools shared by several providers, the public schema preserves their
+variants through the existing workspace, tab and interaction-session selectors.
+Calls without a selector use the default provider's input schema. The proxy
+removes routing selectors that the selected SDK does not declare before sending
+the call. Each tool's `_meta["com.lynnswap.xcode-mcpkit/providers"]` lists the
+providers and their original `descriptor`, including input and output schemas.
+Provider metadata identifies the Xcode installation, process, and cancellation
+contract. A call uses the selected owner's definition, captured for that request;
+another provider's schema cannot change its response contract mid-operation.
+
+The helper's initialize and catalog results expose installation facts under
+`_meta["com.lynnswap.xcode-mcpkit/origin"]`. `toolCancellation` is `task` for the
+headless host, `nativeMessage` for a GUI connection with native cancellation,
+or `waitForNativeCompletion` when GUI cancellation is advisory. Inspect the
+reported contract for the connection you use. The connection checks its SDK's
+native message decoder; the Xcode version number does not choose this behavior.
 
 ## Select a workspace
 
@@ -206,13 +230,23 @@ Use `XcodeListWindows` to inspect GUI tabs. When several tabs own the same path,
 select a `tabIdentifier` from the reported candidates. A lost known GUI owner
 produces an error rather than replaying the operation in another workspace.
 Native `workspaceIdentifier` values from `XcodeOpenWorkspace` or
-`XcodeListWorkspaces` are also accepted. Close a headless workspace explicitly
+`XcodeListWorkspaces` select the host that owns that model, independently of
+unrelated GUI inventory failures. A known GUI owner that lacks the requested
+tool returns an explicit error. Close a headless workspace explicitly
 when you no longer need it; the host closes only resources it owns during shutdown.
 
 GUI operations use Xcode's workspace context. GUI builds save pending editor
 changes and use the active scheme. Native file-reading tools return disk-backed
 content; they do not promise an unsaved editor buffer. Tools without workspace
-scope, such as `DocumentationSearch`, use the native host.
+scope, such as `DocumentationSearch`, prefer the native host when it advertises
+the requested tool.
+
+Cancellation follows the selected connection's native capability. Xcode 27 can
+receive a matching native cancel message. Xcode 26.6 cancellation is advisory
+after dispatch: the operation remains tracked until its native completion or a
+connection failure. Cancelling a queued request can prevent its dispatch.
+Shutdown reports dispatched calls that lack confirmed cancellation; closing
+their connection does not establish that Xcode stopped the native operation.
 
 The former proxy-only `workspacePath` input is unsupported. Native list results
 can still include `workspacePath` as output.

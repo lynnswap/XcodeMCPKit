@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPWire
 
 package struct NativeXcodeInstallation: Sendable {
     package let developerDirectory: URL
@@ -34,5 +35,19 @@ package struct NativeXcodeInstallation: Sendable {
             environment[key] = (paths + inherited).filter { seen.insert($0).inserted }.joined(separator: ":")
         }
         return environment
+    }
+
+    package func origin(kind: String, processID: Int32, toolCancellation: String) -> [String: JSONValue] {
+        let app = contentsDirectory.deletingLastPathComponent()
+        let bundle = Bundle(url: app)
+        let version = bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        var result: [String: JSONValue] = [
+            "kind": .string(kind), "processID": .number(.int(Int64(processID))),
+            "hostPID": .number(.int(Int64(getpid()))), "appPath": .string(app.path),
+            "developerDirectory": .string(developerDirectory.path), "toolCancellation": .string(toolCancellation),
+        ]
+        if let version { result["xcodeVersion"] = .string(version) }
+        return result
     }
 }

@@ -14,29 +14,23 @@ enum DeviceInteractionToolCall: Equatable, Sendable {
             return nil
         }
 
+        if let selector = continuationSelector(for: toolName) {
+            return continuation(
+                arguments: params["arguments"],
+                keyName: selector.argumentName,
+                endsSession: selector.endsSession
+            )
+        }
+        return toolName == "DeviceInteractionStartSession" || toolName == "DeviceInteractionStartWorkspaceSession"
+            ? .startsSession : nil
+    }
+
+    static func continuationSelector(for toolName: String) -> (argumentName: String, endsSession: Bool)? {
         switch toolName {
-        case "DeviceInteractionStartSession", "DeviceInteractionStartWorkspaceSession":
-            return .startsSession
-        case "DeviceInteractionSynthesize":
-            return continuation(
-                arguments: params["arguments"],
-                keyName: "interactSessionKey",
-                endsSession: false
-            )
-        case "DeviceInteractionInstallAndRun":
-            return continuation(
-                arguments: params["arguments"],
-                keyName: "interactionSessionKey",
-                endsSession: false
-            )
-        case "DeviceInteractionEndSession":
-            return continuation(
-                arguments: params["arguments"],
-                keyName: "interactionSessionKey",
-                endsSession: true
-            )
-        default:
-            return nil
+        case "DeviceInteractionSynthesize": return ("interactSessionKey", false)
+        case "DeviceInteractionInstallAndRun": return ("interactionSessionKey", false)
+        case "DeviceInteractionEndSession": return ("interactionSessionKey", true)
+        default: return nil
         }
     }
 

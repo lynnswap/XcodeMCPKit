@@ -1,12 +1,12 @@
 import XcodeMCPCore
 
 extension ProxyRuntimeConfiguration {
-    var mcpBridgeRuntimeConfiguration: MCPBridgeRuntime.Configuration {
-        MCPBridgeRuntime.Configuration(proxyConfig: self)
+    var nativeHostRuntimeConfiguration: NativeHostRuntime.Configuration {
+        NativeHostRuntime.Configuration(proxyConfig: self)
     }
 }
 
-extension MCPBridgeRuntime.Configuration {
+extension NativeHostRuntime.Configuration {
     init(proxyConfig config: ProxyRuntimeConfiguration) {
         self.init(
             nativeHostBundleURL: config.nativeHostBundleURL,

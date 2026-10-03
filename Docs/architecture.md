@@ -2,8 +2,9 @@
 
 `xcode-mcp-proxy-server` serves MCP over Streamable HTTP and starts the packaged
 native helper. The helper loads Xcode frameworks through ABIBridge method
-handles. One headless host provides the canonical native catalog and workspace
-models; each GUI Xcode owner gets one native connection. Requests multiplex on
+handles. One headless host provides native workspace models when the selected
+SDK supports those contracts; each GUI Xcode owner gets one native connection.
+The public catalog includes definitions from usable providers. Requests multiplex on
 those connections instead of requiring a configurable process pool.
 
 ## Request routing
@@ -22,10 +23,14 @@ flowchart LR
 The runtime discovers GUI ownership through its cached Xcode inventory and
 window identifiers. An absolute `workspaceIdentifier` selects its GUI owner
 when one exists. Otherwise, the host loads the workspace model for the operation.
-Opaque native workspace identifiers stay on the native host. Opaque GUI tab
-identifiers select their known GUI owner. Symlinks are resolved when matching
+Known GUI identifiers retain their GUI owner. The native workspace inventory
+proves ownership of remaining opaque identifiers before the runtime queries
+unrelated GUI owners. A GUI inventory failure does not block a model whose
+native ownership is established. Opaque GUI tab identifiers select their known
+GUI owner. Symlinks are resolved when matching
 workspace paths. Ambiguous GUI ownership requires an explicit tab selection;
-a failed known owner is not replaced by another owner.
+a failed known owner is not replaced by another owner. A known GUI owner's
+missing tool produces an error even if another provider advertises that name.
 
 GUI builds use the active workspace scheme and save pending editor changes.
 Native read/current-file results keep their disk-backed semantics. The runtime
@@ -33,17 +38,28 @@ does not promise that every tool exposes an unsaved GUI buffer.
 
 ## Catalog ownership
 
-The owned native host must complete `tools/list` before the proxy exposes a
-canonical catalog. A successful GUI catalog does not substitute for native host
-failure. Concurrent client refreshes share their load and deadline ownership.
-GUI catalog refreshes run in the background and provide routing metadata.
-Catalog change notifications reflect a changed exposed tool surface.
+The control plane keeps each catalog with its supplying connection. A usable GUI
+catalog can provide GUI operations when the selected SDK's headless contracts
+are unavailable. It does not establish a working headless host or trigger an SDK
+switch. Concurrent client refreshes share their load and deadline ownership.
+
+Shared tool names expose whole input/output schema variants through `anyOf`.
+When a provider has no output schema, the public descriptor omits it.
+Tool `_meta["com.lynnswap.xcode-mcpkit/providers"]` retains each provider's origin
+and original descriptor. Routing captures the selected provider's definition
+with the operation lease; response normalization uses that definition throughout
+the call. Catalog change notifications reflect the exposed definitions and
+provider metadata.
 
 The runtime owns request correlation, cancellation, and connection recovery.
 Multiplexing preserves independent request IDs and progress lanes on each
-connection. Cancellation ends only the matching request. A GUI action remains
-tracked until its native reply or connection termination; shutdown cancels and
-awaits producers and invalidates owned connections.
+connection. The selected native contract determines cancellation behavior:
+headless actions use Task cancellation; a capable GUI connection sends the
+matching cancel message. After dispatch on a GUI connection without native
+cancellation, cancellation is advisory and the action remains tracked until its
+native reply or connection termination. Shutdown awaits producers and
+invalidates owned connections, reporting any dispatched uncancellable action
+whose native completion was not confirmed.
 
 ## Ports and discovery
 

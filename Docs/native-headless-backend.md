@@ -51,6 +51,14 @@ flag or a change to the MCP tool catalog. If the same project is open in multipl
 Xcode instances, expose those actual owners and request an unambiguous workspace
 selection; the frontmost window is not a project identity.
 
+Known GUI identifiers retain their GUI owner. An opaque identifier returned by
+the owned host selects that host's model after matching the actual native
+workspace inventory. This proof does not depend on
+unrelated GUI connections. Absolute paths still require enough GUI ownership
+information to choose the correct owner; unresolved ownership produces an error.
+A selected GUI owner must itself provide the tool. Another provider's matching
+name does not authorize replay against a different workspace model.
+
 "No workspace open" means that agents need not open a workspace window or issue
 an explicit Open call. Scoped build and project operations still require Xcode
 to load the project model internally. Unscoped tools such as documentation
@@ -145,6 +153,19 @@ building. Apple's `XcodeRead` and `XcodeGetCurrentFile` implementations read the
 document's file URL from disk, including when the editor has an unsaved buffer;
 the connection preserves those native reading semantics.
 
+The native messaging contracts vary by installation. The inspected Xcode 26.6
+provides a GUI catalog when a workspace is open, while its headless initializer
+lacks a required contract. Its cold Welcome state can disconnect before catalog or
+window discovery completes. The runtime reports that unavailable inventory
+instead of treating it as proof that no GUI workspace exists.
+
+Cancellation follows the actual messaging capability. Xcode 27 supports a native
+cancel message. Xcode 26.6 cancellation is advisory once an action is dispatched;
+the connection retains the action until its reply or disconnection. A queued
+request can be cancelled before dispatch. Shutdown warns about dispatched
+uncancellable actions still awaiting replies. Disconnecting their connection
+does not prove that Xcode stopped them.
+
 ## Dynamic tool contracts and maintenance
 
 For each catalog request, or a validated native catalog invalidation, the host:
@@ -161,6 +182,20 @@ arrays, and nested schemas. It handles schema forms, not tool names. Workspace
 scope comes from the action's associated `Input` type and
 `IDEWorkspaceStatefulActionInput` / `IDEWorkspaceStatefulActionInputV2`
 conformance, not a name prefix or a manually maintained set.
+
+The proxy retains native and GUI catalogs as separate provider records. A usable
+GUI catalog can supply GUI operations after headless initialization or discovery
+fails. That fallback does not satisfy headless requests and does not select
+another developer directory. SDK support follows detected contracts rather than
+a build-number allowlist.
+
+When providers advertise the same name with different schemas, the public
+descriptor preserves whole variants through `anyOf`. Each entry under tool
+`_meta["com.lynnswap.xcode-mcpkit/providers"]` contains its origin and original
+`descriptor`. The helper supplies installation and cancellation facts under
+`_meta["com.lynnswap.xcode-mcpkit/origin"]` on initialization and catalog results.
+Routing snapshots the chosen provider's definition with the operation lease;
+normalization uses that snapshot even if another catalog refreshes during the call.
 
 The 2026-10-03 prototype generated the 54 headless tools from native settings and
 metadata without `mcpbridge`. All 54 input and output schema structures matched
@@ -186,7 +221,9 @@ behavior, output encoding, and native errors remain Apple's implementation.
 The host retains images and values for the duration of the stream.
 
 Progress and completion become standard MCP notifications and results.
-Cancellation must terminate the operation, not merely stop forwarding events.
+Where the native contract supports cancellation, the host forwards cancellation
+to the operation. An advisory cancellation retains ownership until native
+completion; stopping event delivery does not establish that a mutation stopped.
 Errors embedded in completed native values retain their native meaning. A
 stream ending without a final result is not a successful empty response.
 

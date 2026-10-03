@@ -529,7 +529,7 @@ struct ControlPlaneAuthorityTests {
             older.processID,
             latest.processID,
         ])
-        #expect(authority.canonicalToolsCatalogRaw() == nil)
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
 
         _ = authority.applySupportEligibility(
             usability: usability([0]),
@@ -547,8 +547,8 @@ struct ControlPlaneAuthorityTests {
             older.processID,
             latest.processID,
         ])
-        #expect(authority.canonicalToolsCatalogRaw() == nil)
-        #expect(authority.canonicalSourceProof() == nil)
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+        #expect(authority.canonicalSourceProof() == testTopologyProof(0))
 
         let latestRoute = try #require(authority.route(forProcessID: latest.processID))
         _ = authority.retireRoute(
@@ -613,8 +613,8 @@ struct ControlPlaneAuthorityTests {
             older.processID,
             latest.processID,
         ])
-        #expect(authority.canonicalToolsCatalogRaw() == nil)
-        #expect(authority.canonicalSourceProof() == nil)
+        #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["OlderTool"])
+        #expect(authority.canonicalSourceProof() == testTopologyProof(0))
 
         try commit(catalog("LatestFresh"), processID: latest.processID, upstream: 1, to: authority)
         #expect(toolNames(authority.canonicalToolsCatalogRaw()) == ["LatestFresh", "OlderTool"])

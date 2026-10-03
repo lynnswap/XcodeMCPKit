@@ -118,7 +118,7 @@ struct RuntimeCoordinatorCatalogTests {
     }
 
     @Test(arguments: [false, true])
-    func nativeCatalogReturnsBeforeGUIRefreshCompletes(cachedGUI: Bool) async throws {
+    func explicitCatalogRequestWaitsForTheGUIRefresh(cachedGUI: Bool) async throws {
         let native = TestUpstreamClient()
         let gui = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
@@ -142,18 +142,17 @@ struct RuntimeCoordinatorCatalogTests {
         }
         let request = try await sentValue(from: native, at: 0, timeout: .seconds(2))
         await native.yield(.message(try paginatedToolsResponse(request: request, names: ["DocumentationSearch"])))
-        let catalog = try await waitWithTimeout("native catalog does not wait for GUI inventory", timeout: .seconds(1)) {
-            try await refresh.value
-        }
-        #expect(toolNames(in: catalog).contains("DocumentationSearch"))
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
         let guiRequest = try await gui.nextSent { methodName(from: $0) == "tools/list" }
         await gui.yield(.message(try paginatedToolsResponse(request: guiRequest, names: ["XcodeRead"])))
-        await manager.drainRuntimeTasksForTesting()
+        let catalog = try await waitWithTimeout("explicit catalog includes the fresh GUI response", timeout: .seconds(1)) {
+            try await refresh.value
+        }
+        #expect(toolNames(in: catalog) == ["DocumentationSearch", "XcodeRead"])
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
+        await manager.drainRuntimeTasksForTesting()
     }
 
-    @Test func unchangedCatalogDoesNotNotifyWhenItsSourceBridgeChanges() throws {
+    @Test func changedCatalogOriginNotifiesEvenWhenSchemasStayTheSame() throws {
         var config = makeConfig(requestTimeout: 5)
         let fixture = RuntimeCoordinatorFixture(
             config: config, upstreams: [TestUpstreamClient(), TestUpstreamClient()], startImmediately: false
@@ -168,7 +167,7 @@ struct RuntimeCoordinatorCatalogTests {
         _ = session.router.drainBufferedNotifications()
         try seedUnboundToolCatalog(on: manager, upstreamIndex: 1, tools: tools)
         #expect(manager.processControlPlane.canonicalSourceUpstream() == 1)
-        #expect(session.router.drainBufferedNotifications().isEmpty)
+        #expect(session.router.drainBufferedNotifications().count == 1)
     }
 
     @Test func explicitCatalogRequestDiscoversToolsWithoutChangeNotification() async throws {
@@ -297,7 +296,8 @@ struct RuntimeCoordinatorCatalogTests {
         #expect(fixture.manager.cachedToolsListResult() == nil)
     }
 
-    @Test func paginatedCatalogCancelsTheCurrentPage() async throws {
+    @Test(arguments: [false, true])
+    func paginatedCatalogDistinguishesProviderAndCallerCancellation(cancelCaller: Bool) async throws {
         let upstream = TestUpstreamClient()
         let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
         defer { fixture.shutdownAndWait() }
@@ -309,9 +309,14 @@ struct RuntimeCoordinatorCatalogTests {
         let first = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         await upstream.yield(.message(try paginatedToolsResponse(request: first, names: ["First"], nextCursor: .string("second"))))
         let second = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        if cancelCaller { load.cancel() }
         let delivery = try #require(handle.cancel())
         _ = await delivery.wait()
-        await #expect(throws: CancellationError.self) { _ = try await load.value }
+        if cancelCaller {
+            await #expect(throws: CancellationError.self) { _ = try await load.value }
+        } else {
+            await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) { _ = try await load.value }
+        }
         let cancellation = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
         #expect(try extractCancellationRequestID(from: cancellation) == extractUpstreamID(from: second))
         #expect(fixture.manager.cachedToolsListResult() == nil)
@@ -364,7 +369,7 @@ struct RuntimeCoordinatorCatalogTests {
                 (remainingTarget, 1, [toolDescriptor(name: "RemainingOnlyTool")])
             ]
         )
-        #expect(manager.cachedToolsListResult() == nil)
+        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["RemainingOnlyTool"])
 
         manager.reconcileXcodeProcessTargets(
             [remainingTarget],

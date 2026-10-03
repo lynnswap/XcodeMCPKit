@@ -11,9 +11,9 @@ struct ToolSurface: Sendable {
     private let callNormalizer: ToolCallNormalizer
     private let hiddenToolNames: Set<String>
 
-    init(config: ProxyRuntimeConfiguration, sessionManager: any RuntimeToolsCatalogPort) {
+    init(config: ProxyRuntimeConfiguration) {
         self.refreshCodeIssuesMode = config.refreshCodeIssuesMode
-        self.callNormalizer = ToolCallNormalizer(sessionManager: sessionManager)
+        self.callNormalizer = ToolCallNormalizer()
         self.hiddenToolNames = config.disabledToolNames
     }
 
@@ -22,7 +22,7 @@ struct ToolSurface: Sendable {
         toolName: String?,
         originalID: JSONRPC.ID?,
         cachesToolsListResult: Bool = false,
-        upstreamIndex: Int? = nil,
+        toolDefinition: ToolDefinitionSnapshot? = nil,
         upstreamData: Data
     ) -> ToolSurface.RewriteResult {
         let resourcesData = rewriteUnsupportedResourcesListResponseIfNeeded(
@@ -37,8 +37,7 @@ struct ToolSurface: Sendable {
         let normalizedToolCallData = callNormalizer.normalizeResponseDataIfNeeded(
             method: method,
             toolName: toolName,
-            toolsCatalogOverride: toolsListResult,
-            upstreamIndex: upstreamIndex,
+            toolsCatalogOverride: toolsListResult ?? toolDefinition?.catalogResult,
             upstreamData: toolsListData
         )
         let responseData = rewriteToolsListResponseIfNeeded(

@@ -23,6 +23,121 @@ struct NativeGUIBackendTests {
         }
     }
 
+    @Test func detachedConsumersDoNotAbandonUncancellableNativeOperations() async throws {
+        try await withGUIBackend { fixture in
+            fixture.transport.supportsToolCancellation = false
+            _ = try await fixture.listTools([Self.unscopedTool])
+            #expect(!fixture.backend.supportsToolCancellation)
+            #expect(fixture.backend.origin?["toolCancellation"] == .string("waitForNativeCompletion"))
+            let stream = try await fixture.backend.execute("NativeSearch", arguments: [:], context: fixture.toolContext)
+            let request = try await fixture.transport.nextRequest()
+            let consumer = Task { @MainActor in for await _ in stream {} }
+            consumer.cancel()
+            await consumer.value
+            #expect(fixture.transport.oneWayMessages.count == 1)
+            #expect(fixture.transport.invalidationCount == 0)
+            try request.respond(.object(["content": .array([]), "isError": .bool(false)]))
+            await Task.yield()
+            try await fixture.backend.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+        }
+    }
+
+    @Test func shutdownReleasesUncancellableCallsWithoutSendingAnUnsupportedMessage() async throws {
+        try await withGUIBackend { fixture in
+            fixture.transport.supportsToolCancellation = false
+            _ = try await fixture.listTools([Self.unscopedTool])
+            let stream = try await fixture.backend.execute("NativeSearch", arguments: [:], context: fixture.toolContext)
+            _ = try await fixture.transport.nextRequest()
+            try await fixture.backend.shutdown()
+            #expect(fixture.transport.oneWayMessages.count == 1)
+            #expect(fixture.transport.invalidationCount == 1)
+            var iterator = stream.makeAsyncIterator()
+            #expect(await iterator.next(isolation: MainActor.shared) == nil)
+        }
+    }
+
+    @Test(arguments: ["call", "catalog"])
+    func sessionShutdownInterruptsPendingGUIRequestsWithoutNativeReplies(requestKind: String) async throws {
+        try await withGUIBackend(initialize: false) { fixture in
+            fixture.transport.supportsToolCancellation = false
+            let output = AsyncStream<Data>.makeStream()
+            var responses = output.stream.makeAsyncIterator()
+            let session = NativeMCPSession(backend: fixture.backend,
+                artifactsRoot: fixture.directory.appendingPathComponent("artifacts"),
+                output: { output.continuation.yield($0) })
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("initialize"), "method": .string("initialize"),
+                "params": .object(["protocolVersion": .string("2025-06-18"), "capabilities": .object([:]),
+                    "clientInfo": .object(fixture.sessionContext.clientInfo)]),
+            ])))
+            _ = try #require(await responses.next(isolation: MainActor.shared))
+            _ = try await fixture.listTools([Self.unscopedTool])
+            if requestKind == "call" {
+                try session.receive(guiBackendData(.object([
+                    "jsonrpc": .string("2.0"), "id": .string("pending-native-request"), "method": .string("tools/call"),
+                    "params": .object(["name": .string("NativeSearch"), "arguments": .object(["query": .string("read")])]),
+                ])))
+            } else {
+                try session.receive(guiBackendData(.object([
+                    "jsonrpc": .string("2.0"), "id": .string("pending-native-request"), "method": .string("tools/list"),
+                ])))
+            }
+            let call = try await fixture.transport.nextRequest()
+            if requestKind == "call" {
+                #expect(try nativeTestField(nativeTestJSON(call.message), "callTool", "name") == .string("NativeSearch"))
+                #expect(fixture.backend.pendingInvocationCount == 1)
+            } else {
+                #expect(try nativeTestJSON(call.message) == .object(["listTools": .object([:])]))
+            }
+            try await session.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+            #expect(fixture.transport.oneWayMessages.count == 1)
+            #expect(fixture.backend.pendingInvocationCount == 0)
+            #expect(!fixture.connection.isConnected)
+            let cancelled = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
+            #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
+            try call.respond(requestKind == "call"
+                ? .object(["content": .array([]), "isError": .bool(false)])
+                : .object(["toolSchemas": .array([Self.unscopedTool])]))
+            try await session.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+        }
+    }
+
+    @Test func cancelledSessionInitializationPreservesItsTransportCleanupFailure() async throws {
+        try await withGUIBackend(initialize: false, connectsImmediately: false) { fixture in
+            fixture.transport.cleanupError = .cleanup
+            let output = AsyncStream<Data>.makeStream()
+            var responses = output.stream.makeAsyncIterator()
+            let session = NativeMCPSession(backend: fixture.backend,
+                artifactsRoot: fixture.directory.appendingPathComponent("artifacts"),
+                output: { output.continuation.yield($0) })
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("initialization-cleanup-failure"), "method": .string("initialize"),
+                "params": .object(["protocolVersion": .string("2025-06-18"), "capabilities": .object([:]),
+                    "clientInfo": .object(fixture.sessionContext.clientInfo)]),
+            ])))
+            try await fixture.transport.nextActivation()
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "method": .string("notifications/cancelled"),
+                "params": .object(["requestId": .string("initialization-cleanup-failure")]),
+            ])))
+            let cancelled = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
+            #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
+            guard case .string(let message) = try nativeTestField(cancelled, "error", "message") else {
+                Issue.record("The cancelled initialization must retain its cleanup diagnostic")
+                return
+            }
+            #expect(message.contains("Request cancelled"))
+            #expect(message.contains(GUIBackendTestError.cleanup.description))
+            #expect(fixture.transport.invalidationCount == 1)
+            #expect(fixture.transport.oneWayMessages.isEmpty)
+            try await session.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+        }
+    }
+
     @Test func refreshesTheNativeCatalogAndPreservesSelectorOptionality() async throws {
         try await withGUIBackend { fixture in
             let first = try await fixture.listTools([
@@ -278,6 +393,51 @@ struct NativeGUIBackendTests {
         }
     }
 
+    @Test func unsupportedNativeCancellationStillPreventsDispatchDuringWindowLookup() async throws {
+        try await withGUIBackend(initialize: false) { fixture in
+            fixture.transport.supportsToolCancellation = false
+            let output = AsyncStream<Data>.makeStream()
+            var responses = output.stream.makeAsyncIterator()
+            let session = NativeMCPSession(backend: fixture.backend,
+                artifactsRoot: fixture.directory.appendingPathComponent("artifacts"),
+                output: { output.continuation.yield($0) })
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("initialize"), "method": .string("initialize"),
+                "params": .object(["protocolVersion": .string("2025-06-18"), "capabilities": .object([:]),
+                    "clientInfo": .object(fixture.sessionContext.clientInfo)]),
+            ])))
+            _ = try #require(await responses.next(isolation: MainActor.shared))
+            _ = try await fixture.listTools([Self.requiredWorkspaceTool])
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("cancel-before-send"), "method": .string("tools/call"),
+                "params": .object(["name": .string("MutateWorkspace"), "arguments": .object([
+                    "query": .string("edit"), "workspaceIdentifier": .string("/tmp/Project.xcodeproj"),
+                ])]),
+            ])))
+            let windows = try await fixture.transport.nextRequest()
+            #expect(try nativeTestField(nativeTestJSON(windows.message), "callTool", "name") == .string("XcodeListWindows"))
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "method": .string("notifications/cancelled"),
+                "params": .object(["requestId": .string("cancel-before-send")]),
+            ])))
+            let cancelled = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
+            #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
+            try windows.respond(.object([
+                "content": .array([]), "isError": .bool(false),
+                "structuredContent": .object(["message": .string(
+                    "* tabIdentifier: ready-tab, workspacePath: /tmp/Project.xcodeproj")]),
+            ]))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while fixture.backend.pendingInvocationCount > 0, ContinuousClock.now < deadline {
+                await Task.yield()
+            }
+            #expect(fixture.backend.pendingInvocationCount == 0)
+            #expect(fixture.transport.requestMessages.count == 2)
+            #expect(fixture.transport.oneWayMessages.count == 1)
+            try await session.shutdown()
+        }
+    }
+
     private static var optionalWorkspaceTool: JSONValue {
         get throws {
             try nativeTestJSON(Data(#"{"name":"InspectWorkspace","inputSchema":{"properties":[{"name":"query","isRequired":true,"type":{"string":{}}},{"name":"tabIdentifier","isRequired":false,"type":{"string":{}}}]}}"#.utf8))
@@ -399,6 +559,7 @@ private final class GUIBackendRequest {
 
 @MainActor
 private final class GUIBackendTransport: NativeGUIConnectionTransport {
+    var supportsToolCancellation = true
     var connectsImmediately = true
     var oneWayError: GUIBackendTestError?
     var cleanupError: GUIBackendTestError?

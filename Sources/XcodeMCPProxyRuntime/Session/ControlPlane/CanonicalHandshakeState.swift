@@ -290,6 +290,7 @@ final class CanonicalHandshakeState: Sendable {
     private static func semanticInitializeResult(_ value: JSONValue) -> JSONValue {
         guard case .object(var object) = value else { return value }
         object.removeValue(forKey: "serverInfo")
+        object.removeValue(forKey: "_meta")
         return .object(object)
     }
 

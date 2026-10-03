@@ -144,6 +144,7 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         let sessionID: String
         let operationLease: UpstreamOperationLease
         let admission: RouteForwardingAdmission?
+        let toolDefinition: ToolDefinitionSnapshot?
 
         var upstreamIndex: Int { operationLease.upstreamIndex }
 
@@ -151,12 +152,14 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             transform: RequestTransform,
             sessionID: String,
             operationLease: UpstreamOperationLease,
-            admission: RouteForwardingAdmission? = nil
+            admission: RouteForwardingAdmission? = nil,
+            toolDefinition: ToolDefinitionSnapshot? = nil
         ) {
             self.transform = transform
             self.sessionID = sessionID
             self.operationLease = operationLease
             self.admission = admission
+            self.toolDefinition = toolDefinition
         }
     }
 
@@ -184,6 +187,7 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         let requestTimeout: TimeAmount?
         let routerPendingToken: UUID
         let future: EventLoopFuture<ByteBuffer>
+        let toolDefinition: ToolDefinitionSnapshot?
 
         var upstreamIndex: Int { operationLease.upstreamIndex }
 
@@ -192,13 +196,15 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             operationLease: UpstreamOperationLease,
             requestTimeout: TimeAmount?,
             routerPendingToken: UUID,
-            future: EventLoopFuture<ByteBuffer>
+            future: EventLoopFuture<ByteBuffer>,
+            toolDefinition: ToolDefinitionSnapshot? = nil
         ) {
             self.transform = transform
             self.operationLease = operationLease
             self.requestTimeout = requestTimeout
             self.routerPendingToken = routerPendingToken
             self.future = future
+            self.toolDefinition = toolDefinition
         }
     }
 
@@ -235,6 +241,10 @@ struct ProxyUpstreamRequestRuntime: Sendable {
                 return nil
             }
             operationLease = chosen
+        }
+        if let definition = admission?.toolDefinition,
+           definition.sourceProof != operationLease.proof {
+            throw Error.staleUpstreamTopology
         }
 
         let rewritten = port.rewriteOwnerBoundRequest(
@@ -358,7 +368,8 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             operationLease: prepared.operationLease,
             requestTimeout: requestTimeout,
             routerPendingToken: registration.token,
-            future: registration.future
+            future: registration.future,
+            toolDefinition: prepared.toolDefinition
         )
     }
 

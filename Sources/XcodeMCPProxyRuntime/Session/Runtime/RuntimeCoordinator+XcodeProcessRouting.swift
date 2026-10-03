@@ -513,15 +513,6 @@ extension RuntimeCoordinator {
             }
             return affinityDecision
         }
-        if ["XcodeOpenWorkspace", "XcodeCloseWorkspace", "XcodeListWorkspaces"].contains(request.toolName) {
-            guard request.tabIdentifier == nil else {
-                return .reject(errors: toolRoutingErrors(
-                    for: request,
-                    message: "GUI tab identifiers cannot close an owned native workspace"
-                ))
-            }
-            return nativeHostToolRoutingDecision(for: request)
-        }
         if let identifier = request.workspaceIdentifier, request.workspacePath == nil, !identifier.isEmpty {
             guard request.tabIdentifier == nil else {
                 return .reject(errors: toolRoutingErrors(
@@ -543,11 +534,15 @@ extension RuntimeCoordinator {
             return .localXcodeListWindows
         }
         if !hasOwnerHint(request), !defaultBackendUpstreamIndices.isEmpty {
-            let catalog = processControlPlane.unboundToolsCatalogRaw()
-            let hasServiceTool = ProcessToolCatalogCodec.toolsByName(in: catalog)[request.toolName] != nil
+            let preferredProvider = processControlPlane.defaultToolProvider(named: request.toolName)
+            let hasNativeTool = preferredProvider != nil && preferredProvider?.target == nil
             let hasGUIProvider = !processControlPlane.processIDsHavingTool(request.toolName).isEmpty
-            if request.workspaceIdentifier != nil || hasServiceTool || (catalog == nil && !hasGUIProvider) {
-                return .forwardAny(preferredUpstreamIndices: defaultBackendUpstreamIndices.sorted())
+            let nativeIsAvailable = defaultBackendUpstreamIndices.contains {
+                upstreamHealthManager.state(for: UpstreamSlotID(rawValue: $0))?
+                    .initPhase.isUsableInitialized == true
+            }
+            if hasNativeTool && nativeIsAvailable || !hasGUIProvider {
+                return nativeHostToolRoutingDecision(for: request)
             }
         }
         guard isOwnerBoundRoutingRequest(request) else {
@@ -566,16 +561,37 @@ extension RuntimeCoordinator {
     private func nativeHostToolRoutingDecision(
         for request: ToolRoutingRequest, workspaceIdentifier: String? = nil
     ) -> ToolRoutingDecision {
+        let provider = processControlPlane.defaultToolProvider(named: request.toolName).flatMap {
+            $0.target == nil ? $0 : nil
+        } ?? processControlPlane.unboundToolsCatalogProvider()
         let topology = upstreamTopology.snapshot()
-        let proofs = topology.entries.compactMap {
-            $0.backend == .nativeHost ? topology.proof($0.id) : nil
-        }
+        let proofs = provider.map { [$0.sourceProof] }
+            ?? topology.entries.compactMap {
+                $0.backend == .nativeHost ? topology.proof($0.id) : nil
+            }
         guard !proofs.isEmpty else {
             return .reject(errors: toolRoutingErrors(for: request, message: "The owned native host is not available"))
         }
+        if let proof = proofs.first, let unavailable = unavailableNativeToolDecision(for: request, sourceProof: proof) {
+            return unavailable
+        }
         return .forwardAdmitted(
             preferredUpstreamIndices: proofs.map { $0.slotID.rawValue },
-            admission: RouteForwardingAdmission(upstreamProofs: proofs, workspaceIdentifier: workspaceIdentifier))
+            admission: RouteForwardingAdmission(
+                upstreamProofs: proofs, workspaceIdentifier: workspaceIdentifier,
+                toolDefinition: provider?.definition(named: request.toolName)
+                    ?? proofs.first.flatMap { toolDefinition(named: request.toolName, sourceProof: $0) }
+            ))
+    }
+
+    private func unavailableNativeToolDecision(
+        for request: ToolRoutingRequest, sourceProof: UpstreamTopologyProof
+    ) -> ToolRoutingDecision? {
+        guard let selected = processControlPlane.providerCatalog(for: sourceProof),
+              selected.definition(named: request.toolName) == nil,
+              processControlPlane.defaultToolProvider(named: request.toolName) != nil else { return nil }
+        return .reject(errors: toolRoutingErrors(
+            for: request, message: "tool is not available in the selected native host"))
     }
 
     private func workspaceIdentifierRoutingDecision(
@@ -583,10 +599,10 @@ extension RuntimeCoordinator {
         requestTimeoutOverride: TimeAmount?
     ) async -> ToolRoutingDecision {
         var resolution = cachedOwnerResolution(tabIdentifier: identifier, workspacePath: nil)
-        var nativeInventoryFailure: String?
         let knownGUIIdentifier = windowOwnershipAuthority.snapshot().identities.contains {
             $0.proxyTabIdentifier == identifier || $0.rawTabIdentifier == identifier
         }
+        var nativeInventoryFailure: String?
         if !knownGUIIdentifier {
             do {
                 let inventory = try await nativeWorkspaceInventory(
@@ -594,10 +610,14 @@ extension RuntimeCoordinator {
                     deadline: timeoutDeadline(for: requestTimeoutOverride
                         ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: config.requestTimeout)))
                 if inventory.entries.contains(where: { $0.tabIdentifier == identifier }) {
+                    if let unavailable = unavailableNativeToolDecision(for: request, sourceProof: inventory.sourceProof) {
+                        return unavailable
+                    }
                     return .forwardAdmitted(
                         preferredUpstreamIndices: [inventory.sourceProof.slotID.rawValue],
                         admission: RouteForwardingAdmission(
-                            upstreamProofs: [inventory.sourceProof], workspaceIdentifier: identifier))
+                            upstreamProofs: [inventory.sourceProof], workspaceIdentifier: identifier,
+                            toolDefinition: toolDefinition(named: request.toolName, sourceProof: inventory.sourceProof)))
                 }
             } catch {
                 nativeInventoryFailure = ControlPlane.ErrorMapper.jsonRPCError(for: error).message
@@ -622,7 +642,8 @@ extension RuntimeCoordinator {
             return .reject(errors: toolRoutingErrors(
                 for: request,
                 message: nativeInventoryFailure.map { "Unable to determine native workspace ownership: \($0)" }
-                    ?? "Unknown workspaceIdentifier '\(identifier)'; select an identifier from the workspace inventory"))
+                    ?? "Unknown workspaceIdentifier '\(identifier)'; select an identifier from the workspace inventory"
+            ))
         case .resolved, .conflict:
             var object = object
             var params = object["params"] as? [String: Any] ?? [:]
@@ -642,17 +663,31 @@ extension RuntimeCoordinator {
     }
 
     private func nativeWorkspaceInventory(
-        route: ControlPlane.Route, expectedUpstreamProof: UpstreamTopologyProof? = nil,
+        route: ControlPlane.Route,
+        expectedUpstreamProof: UpstreamTopologyProof? = nil,
         deadline: UInt64?
     ) async throws -> NativeWorkspaceInventory {
         try Task.checkCancellation()
         if let deadline, nowUptimeNanoseconds() >= deadline { throw TimeoutError() }
+        if route == .nativeHost {
+            let nativeIsInitialized = upstreamTopology.snapshot().entries.contains { entry in
+                entry.backend == .nativeHost
+                    && upstreamHealthManager.state(for: entry.id)?.initPhase.isUsableInitialized == true
+            }
+            guard nativeIsInitialized else {
+                throw ControlPlane.Error.proxyFailure(code: -32001, message: "The owned native host is not available")
+            }
+        }
+        let catalogSource = route == .nativeHost
+            ? processControlPlane.unboundToolsCatalogProvider()?.sourceProof : nil
         let response = try await performControlPlaneRPC(
-            route: route, purpose: "workspaces", label: "tools/call:XcodeListWorkspaces",
+            route: catalogSource.map { .pinnedUpstream($0.slotID.rawValue) } ?? route,
+            purpose: "workspaces", label: "tools/call:XcodeListWorkspaces",
             requestObject: JSONRPC.Wire.requestObject(
                 id: "__control-plane-workspaces-\(UUID().uuidString)", method: "tools/call",
                 params: .object(["name": .string("XcodeListWorkspaces"), "arguments": .object([:])])),
-            requestTimeout: timeAmount(until: deadline), expectedUpstreamProof: expectedUpstreamProof)
+            requestTimeout: timeAmount(until: deadline),
+            expectedUpstreamProof: expectedUpstreamProof ?? catalogSource)
         guard upstreamTopology.validate(response.operationLease) else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
@@ -737,9 +772,15 @@ extension RuntimeCoordinator {
                         : "Multiple native workspaces match '\(selector)'; select a workspaceIdentifier from XcodeListWorkspaces"
                 ))
             }
+            if let unavailable = unavailableNativeToolDecision(for: request, sourceProof: inventory.sourceProof) {
+                return unavailable
+            }
             return .forwardAdmitted(
                 preferredUpstreamIndices: [inventory.sourceProof.slotID.rawValue],
-                admission: RouteForwardingAdmission(upstreamProofs: [inventory.sourceProof], workspaceIdentifier: identifier)
+                admission: RouteForwardingAdmission(
+                    upstreamProofs: [inventory.sourceProof], workspaceIdentifier: identifier,
+                    toolDefinition: toolDefinition(named: request.toolName, sourceProof: inventory.sourceProof)
+                )
             )
         } catch {
             return .reject(errors: toolRoutingErrors(
@@ -837,10 +878,14 @@ extension RuntimeCoordinator {
                     )
                 )
             }
+            if let unavailable = unavailableNativeToolDecision(for: request, sourceProof: affinity.upstreamProof) {
+                return unavailable
+            }
             return .forwardAdmitted(
                 preferredUpstreamIndices: [affinity.upstreamProof.slotID.rawValue],
                 admission: RouteForwardingAdmission(
-                    upstreamProofs: [affinity.upstreamProof]
+                    upstreamProofs: [affinity.upstreamProof],
+                    toolDefinition: toolDefinition(named: request.toolName, sourceProof: affinity.upstreamProof)
                 )
             )
         }
@@ -887,7 +932,8 @@ extension RuntimeCoordinator {
             admission: RouteForwardingAdmission(
                 route: routeAdmission,
                 upstreamProofs: [affinity.upstreamProof],
-                window: windowAdmission
+                window: windowAdmission,
+                toolDefinition: toolDefinition(named: request.toolName, sourceProof: affinity.upstreamProof)
             )
         )
     }
@@ -1009,13 +1055,11 @@ extension RuntimeCoordinator {
             request: request,
             owners: owners
         )
-        let ownerUpstreamIndices = usableInitializedUpstreamIndices(in: ownerRoute)
+        let catalog = processControlPlane.catalog(forProcessID: ownerProcessID)
+        let ownerUpstreamIndices = catalog.map { [$0.upstreamIndex] }
+            ?? usableInitializedUpstreamIndices(in: ownerRoute)
 
-        if processControlPlane.catalog(forProcessID: ownerProcessID) != nil,
-           processControlPlane.hasTool(
-            request.toolName,
-            processID: ownerProcessID
-           ) == false {
+        if let catalog, !catalog.toolNames.contains(request.toolName) {
             return .reject(
                 errors: toolRoutingErrors(
                     for: request,
@@ -1034,9 +1078,8 @@ extension RuntimeCoordinator {
         }
 
         let topology = upstreamTopology.snapshot()
-        let upstreamProofs = ownerUpstreamIndices.compactMap { topology.proof(
-            UpstreamSlotID(rawValue: $0)
-        ) }
+        let upstreamProofs = catalog.map { [$0.upstreamProof] }
+            ?? ownerUpstreamIndices.compactMap { topology.proof(UpstreamSlotID(rawValue: $0)) }
         guard upstreamProofs.count == ownerUpstreamIndices.count else {
             return .reject(
                 errors: toolRoutingErrors(
@@ -1054,7 +1097,9 @@ extension RuntimeCoordinator {
                     proof: windowProof,
                     route: routeAdmission,
                     rewritePlan: rewritePlan
-                )
+                ),
+                toolDefinition: catalog?.provider.definition(named: request.toolName)
+                    ?? upstreamProofs.first.flatMap { toolDefinition(named: request.toolName, sourceProof: $0) }
             )
         )
     }
@@ -1109,10 +1154,6 @@ extension RuntimeCoordinator {
             usableInitializedUpstreamIndices(in: $0).isEmpty == false
                 && unavailableXcodeProcessIDs().contains($0.target.processID) == false
         }
-        if usableRoutes.count == 1 {
-            return usableRoutes[0].target.processID
-        }
-
         let usableProcessIDs = Set(usableRoutes.map(\.target.processID))
         let usableCandidates = processControlPlane
             .processIDsHavingTool(request.toolName)
@@ -1153,7 +1194,11 @@ extension RuntimeCoordinator {
         guard candidateProcessIDs.isEmpty == false else {
             return nil
         }
-        guard let route = preferredAvailableRoute(in: candidateProcessIDs) else {
+        guard let provider = processControlPlane.defaultToolProvider(named: request.toolName),
+              let target = provider.target,
+              let route = xcodeProcessRoutes.first(where: { $0.target.processID == target.processID }),
+              !unavailableXcodeProcessIDs().contains(target.processID),
+              firstUsableInitializedUpstreamIndex(in: route) != nil else {
             return .reject(
                 errors: toolRoutingErrors(
                     for: request,
@@ -1161,7 +1206,9 @@ extension RuntimeCoordinator {
                 )
             )
         }
-        let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+        let catalog = processControlPlane.catalog(forProcessID: route.target.processID)
+        let upstreamIndices = catalog.map { [$0.upstreamIndex] }
+            ?? usableInitializedUpstreamIndices(in: route)
         let topology = upstreamTopology.snapshot()
         guard let routeProof = processControlPlane.routeProof(routeID: route.id),
               let routeAdmission = processControlPlane.admit(routeProof) else {
@@ -1172,9 +1219,8 @@ extension RuntimeCoordinator {
                 )
             )
         }
-        let upstreamProofs = upstreamIndices.compactMap {
-            topology.proof(UpstreamSlotID(rawValue: $0))
-        }
+        let upstreamProofs = catalog.map { [$0.upstreamProof] }
+            ?? upstreamIndices.compactMap { topology.proof(UpstreamSlotID(rawValue: $0)) }
         guard upstreamProofs.count == upstreamIndices.count else {
             return .reject(
                 errors: toolRoutingErrors(
@@ -1187,32 +1233,11 @@ extension RuntimeCoordinator {
             preferredUpstreamIndices: upstreamIndices,
             admission: RouteForwardingAdmission(
                 route: routeAdmission,
-                upstreamProofs: upstreamProofs
+                upstreamProofs: upstreamProofs,
+                toolDefinition: catalog?.provider.definition(named: request.toolName)
+                    ?? upstreamProofs.first.flatMap { toolDefinition(named: request.toolName, sourceProof: $0) }
             )
         )
-    }
-
-    private func preferredAvailableRoute(in processIDs: Set<pid_t>) -> XcodeProcessRoute? {
-        let unavailable = unavailableXcodeProcessIDs()
-        return xcodeProcessRoutes
-            .filter {
-                processIDs.contains($0.target.processID)
-                    && unavailable.contains($0.target.processID) == false
-            }
-            .sorted { lhs, rhs in
-                let versionComparison = lhs.target.xcodeVersion.compare(
-                    rhs.target.xcodeVersion,
-                    options: [.numeric]
-                )
-                if versionComparison != .orderedSame {
-                    return versionComparison == .orderedDescending
-                }
-                if lhs.target.appPath != rhs.target.appPath {
-                    return lhs.target.appPath < rhs.target.appPath
-                }
-                return lhs.target.processID < rhs.target.processID
-            }
-            .first { firstUsableInitializedUpstreamIndex(in: $0) != nil }
     }
 
     @discardableResult
@@ -1427,28 +1452,46 @@ extension RuntimeCoordinator {
               let object = parsedRequestJSON as? [String: Any] else {
             return (bodyData, parsedRequestJSON)
         }
+        var rewritten = object
+        var changed = false
         if let identifier = admission?.workspaceIdentifier,
            var params = object["params"] as? [String: Any],
            var arguments = params["arguments"] as? [String: Any] {
             arguments["workspaceIdentifier"] = identifier
             params["arguments"] = arguments
-            var rewritten = object
             rewritten["params"] = params
-            if let data = try? JSONSerialization.data(withJSONObject: rewritten) {
-                return (data, rewritten)
-            }
+            changed = true
+        } else if let plan = admission?.window?.rewritePlan {
+            let result = rewriteOwnerBoundRequestObject(object, plan: plan)
+            rewritten = result.value
+            changed = result.changed
         }
-        guard let rewritePlan = admission?.window?.rewritePlan else { return (bodyData, parsedRequestJSON) }
-        let rewritten = rewriteOwnerBoundRequestObject(object, plan: rewritePlan)
-        guard rewritten.changed,
-              JSONSerialization.isValidJSONObject(rewritten.value),
+        if var params = rewritten["params"] as? [String: Any],
+           let name = params["name"] as? String,
+           var arguments = params["arguments"] as? [String: Any],
+           let definition = admission?.toolDefinition
+                ?? toolDefinition(named: name, sourceProof: operationLease.proof) {
+            if let rawTabIdentifier = admission?.window?.rewritePlan.tabIdentifier,
+               definition.declaresArgument("workspaceIdentifier") {
+                arguments["workspaceIdentifier"] = rawTabIdentifier
+                changed = true
+            }
+            // Routing hints are SDK arguments only when this provider declares them.
+            for selector in ["workspaceIdentifier", "tabIdentifier"] where !definition.declaresArgument(selector) {
+                changed = arguments.removeValue(forKey: selector) != nil || changed
+            }
+            params["arguments"] = arguments
+            rewritten["params"] = params
+        }
+        guard changed,
+              JSONSerialization.isValidJSONObject(rewritten),
               let data = try? JSONSerialization.data(
-                withJSONObject: rewritten.value,
+                withJSONObject: rewritten,
                 options: []
               ) else {
             return (bodyData, parsedRequestJSON)
         }
-        return (data, rewritten.value)
+        return (data, rewritten)
     }
 
     private func rewriteOwnerBoundRequestObject(

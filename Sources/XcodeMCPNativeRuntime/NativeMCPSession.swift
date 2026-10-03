@@ -11,7 +11,11 @@ package final class NativeMCPSession {
     private var initialized = false
     private var stopping = false
     private var outputFailed = false
-    private var requests: [String: Task<Void, Never>] = [:]
+    @MainActor private final class Request {
+        var task: Task<Void, Never>?
+        var wasDispatched = false
+    }
+    private var requests: [String: Request] = [:]
 
     package init(backend: any NativeToolBackend, artifactsRoot: URL,
                  output: @escaping @MainActor (Data) throws -> Void) {
@@ -44,7 +48,9 @@ package final class NativeMCPSession {
             if method == "notifications/cancelled",
                let parameters = object["params"] as? [String: Any],
                let id = requestID(parameters["requestId"]) {
-                requests[id.key]?.cancel()
+                if let request = requests[id.key], backend.supportsToolCancellation || !request.wasDispatched {
+                    request.task?.cancel()
+                }
             }
         case .request(let method, let id):
             guard !stopping else {
@@ -56,25 +62,30 @@ package final class NativeMCPSession {
                 return
             }
             let params = object["params"].flatMap(JSONValue.init(any:))
-            requests[id.key] = Task { @MainActor in
+            let request = Request()
+            requests[id.key] = request
+            request.task = Task { @MainActor in
                 defer { requests[id.key] = nil }
                 do {
                     try Task.checkCancellation()
-                    let result = try await perform(method, params: params)
+                    let result = try await perform(method, params: params, request: request)
                     try Task.checkCancellation()
                     try sendResult(id: id, result: result)
-                } catch is CancellationError {
-                    reportError(id: id, code: -32800, message: "Request cancelled")
-                } catch let error as NativeRuntimeError {
-                    let code: Int
-                    switch error {
-                    case .invalidRequest: code = -32602
-                    case .methodNotFound: code = -32601
-                    case .unavailable, .unsupportedContract, .invocation: code = -32603
-                    }
-                    reportError(id: id, code: code, message: error.description)
                 } catch {
-                    reportError(id: id, code: -32603, message: String(describing: error))
+                    if Task.isCancelled || error is CancellationError {
+                        let message = error is CancellationError ? "Request cancelled" : "Request cancelled: \(error)"
+                        reportError(id: id, code: -32800, message: message)
+                    } else if let error = error as? NativeRuntimeError {
+                        let code: Int
+                        switch error {
+                        case .invalidRequest: code = -32602
+                        case .methodNotFound: code = -32601
+                        case .unavailable, .unsupportedContract, .invocation: code = -32603
+                        }
+                        reportError(id: id, code: code, message: error.description)
+                    } else {
+                        reportError(id: id, code: -32603, message: String(describing: error))
+                    }
                 }
             }
         case .malformed(let id):
@@ -94,7 +105,7 @@ package final class NativeMCPSession {
         }
     }
 
-    private func perform(_ method: String, params: JSONValue?) async throws -> JSONValue {
+    private func perform(_ method: String, params: JSONValue?, request: Request) async throws -> JSONValue {
         if method == "initialize" {
             guard case .object(let fields) = params,
                   case .string = fields["protocolVersion"],
@@ -105,7 +116,7 @@ package final class NativeMCPSession {
             }
             try await backend.initialize(context: NativeSessionContext(conversationID: conversationID, clientInfo: clientInfo))
             initialized = true
-            return .object([
+            return withOrigin([
                 "protocolVersion": .string(MCPProtocolVersion.current),
                 "capabilities": .object(["tools": .object([:])]),
                 "serverInfo": .object(["name": .string("XcodeMCPKit Native Host"), "version": .string("1")]),
@@ -116,7 +127,7 @@ package final class NativeMCPSession {
         switch method {
         case "tools/list":
             let tools = try await backend.listTools()
-            return .object(["tools": .array(tools.map(\.descriptor))])
+            return withOrigin(["tools": .array(tools.map(\.descriptor))])
         case "tools/call":
             guard case .object(let fields) = params, case .string(let name) = fields["name"] else {
                 throw NativeRuntimeError.invalidRequest("tools/call requires a tool name")
@@ -130,7 +141,8 @@ package final class NativeMCPSession {
             }
             let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID)
+            let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID,
+                                           onDispatch: { request.wasDispatched = true })
             let updates: AsyncStream<Data>
             do {
                 updates = try await backend.execute(name, arguments: arguments, context: context)
@@ -174,6 +186,14 @@ package final class NativeMCPSession {
         default:
             throw NativeRuntimeError.methodNotFound("Unsupported MCP method '\(method)'")
         }
+    }
+
+    private func withOrigin(_ fields: [String: JSONValue]) -> JSONValue {
+        var result = fields
+        if let origin = backend.origin {
+            result["_meta"] = .object(["com.lynnswap.xcode-mcpkit/origin": .object(origin)])
+        }
+        return .object(result)
     }
 
     private func fieldsForMetadata(_ params: JSONValue?) -> JSONValue? {
@@ -234,8 +254,9 @@ package final class NativeMCPSession {
 
     package func shutdown() async throws {
         stopping = true
-        let pending = Array(requests.values)
+        let pending = requests.values.compactMap(\.task)
         for request in pending { request.cancel() }
+        backend.beginShutdown()
         for request in pending { await request.value }
         try await backend.shutdown()
     }

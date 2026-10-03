@@ -13,6 +13,12 @@ package struct NativeActionClass: ABIBridgeValue, BitwiseCopyable {
     package static let abiType: NativeType = try! .structure(named: "NativeActionClass", fields: [.pointer, .pointer])
 }
 
+@unsafe
+struct NativeMetadataResponse {
+    var metadata: UnsafeRawPointer?
+    var state: UInt64
+}
+
 @MainActor
 @safe
 final class NativeABI {
@@ -40,6 +46,25 @@ final class NativeABI {
         let type = try unsafe require(ABICreateScalarType(kind, &failure), failure: &failure)
         unsafe valueTypes.append(type)
         return unsafe type
+    }
+
+    func typeMetadata(named name: String, in image: URL) async throws -> Any.Type {
+        let accessor = try await ABIRuntime.shared.resolve(
+            .init(name: "type metadata accessor for " + name, language: .swift),
+            in: .path(image), loading: .loadedOnly)
+        let pointer = try unsafe scalar(Int32(ABIValuePointer))
+        let word = try unsafe scalar(Int32(ABIValueUInt64))
+        let result = try unsafe storage(for: NativeMetadataResponse.self, components: [pointer, word])
+        let interface = try unsafe callInterface(result: result, parameters: [word])
+        var request: UInt64 = 0
+        let response: NativeMetadataResponse = try unsafe withUnsafeMutablePointer(to: &request) {
+            try unsafe invoke(symbol: accessor, interface: interface,
+                              arguments: [UnsafeMutableRawPointer($0)], returning: NativeMetadataResponse.self)
+        }
+        guard let metadata = unsafe response.metadata, response.state == 0 else {
+            throw NativeRuntimeError.unsupportedContract("Complete native type metadata is unavailable for " + name)
+        }
+        return unsafe unsafeBitCast(metadata, to: Any.Type.self)
     }
 
     func storage<T>(for type: T.Type, components: [OpaquePointer]) throws -> OpaquePointer {

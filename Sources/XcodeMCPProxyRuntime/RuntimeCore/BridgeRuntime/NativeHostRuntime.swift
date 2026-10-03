@@ -1,7 +1,7 @@
 import XcodeMCPCore
 import Foundation
 
-enum MCPBridgeRuntime {
+enum NativeHostRuntime {
     struct Configuration: Sendable {
         let nativeHostBundleURL: URL?
         let developerDirectoryURL: URL?
@@ -18,7 +18,7 @@ enum MCPBridgeRuntime {
         config: Configuration,
         xcodeTargets: [XcodeProcessTarget],
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> MCPBridgeUpstreamPlan {
+    ) -> NativeHostUpstreamPlan {
         var upstreams = [makeUnboundUpstreamSlot(config: config, baseEnvironment: baseEnvironment)]
         var bindings: [XcodeProcessBinding] = []
         for target in orderedXcodeTargets(xcodeTargets) {
@@ -28,7 +28,7 @@ enum MCPBridgeRuntime {
             bindings.append(XcodeProcessBinding(target: target, slotIDs: [slotID]))
         }
         let topology = UpstreamTopologySnapshot(slotCount: upstreams.count, xcodeProcessBindings: bindings)
-        return MCPBridgeUpstreamPlan(upstreams: upstreams, xcodeProcessRoutes: topology.xcodeProcessRoutes(), topology: topology)
+        return NativeHostUpstreamPlan(upstreams: upstreams, xcodeProcessRoutes: topology.xcodeProcessRoutes(), topology: topology)
     }
 
     static func makeProcessBoundUpstreamSlots(
@@ -104,13 +104,6 @@ enum MCPBridgeRuntime {
         _ targets: [XcodeProcessTarget]
     ) -> [XcodeProcessTarget] {
         targets.sorted { lhs, rhs in
-            let versionComparison = compareDocumentationVersion(
-                lhs.xcodeVersion,
-                rhs.xcodeVersion
-            )
-            if versionComparison != .orderedSame {
-                return versionComparison == .orderedDescending
-            }
             if lhs.appPath != rhs.appPath {
                 return lhs.appPath < rhs.appPath
             }
@@ -118,36 +111,10 @@ enum MCPBridgeRuntime {
         }
     }
 
-    private static func compareDocumentationVersion(
-        _ lhs: String,
-        _ rhs: String
-    ) -> ComparisonResult {
-        let lhsParts = numericDocumentationVersionParts(lhs)
-        let rhsParts = numericDocumentationVersionParts(rhs)
-        let count = max(lhsParts.count, rhsParts.count)
-        for index in 0..<count {
-            let lhsValue = index < lhsParts.count ? lhsParts[index] : 0
-            let rhsValue = index < rhsParts.count ? rhsParts[index] : 0
-            if lhsValue < rhsValue {
-                return .orderedAscending
-            }
-            if lhsValue > rhsValue {
-                return .orderedDescending
-            }
-        }
-        return lhs.localizedStandardCompare(rhs)
-    }
 
-    private static func numericDocumentationVersionParts(_ version: String) -> [Int] {
-        version
-            .split { character in
-                !character.isNumber
-            }
-            .compactMap { Int($0) }
-    }
 }
 
-struct MCPBridgeUpstreamPlan: Sendable {
+struct NativeHostUpstreamPlan: Sendable {
     let upstreams: [ManagedUpstreamSlot]
     let xcodeProcessRoutes: [XcodeProcessRoute]
     let topology: UpstreamTopologySnapshot
@@ -174,12 +141,12 @@ struct MCPBridgeUpstreamPlan: Sendable {
 }
 
 struct NativeHostSessionFactory: UpstreamSessionFactory {
-    let configuration: MCPBridgeRuntime.Configuration
+    let configuration: NativeHostRuntime.Configuration
     let xcodeTarget: XcodeProcessTarget?
     let environment: [String: String]
 
     func processConfiguration() throws -> UpstreamProcess.Config {
-        try MCPBridgeRuntime.makeDefaultUpstreamConfig(
+        try NativeHostRuntime.makeDefaultUpstreamConfig(
             config: configuration, xcodeTarget: xcodeTarget, baseEnvironment: environment)
     }
 

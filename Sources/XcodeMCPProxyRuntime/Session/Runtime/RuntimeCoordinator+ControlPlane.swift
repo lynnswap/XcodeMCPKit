@@ -125,15 +125,69 @@ extension RuntimeCoordinator {
 
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
-        rpcHandle: ControlPlane.RPCHandle
+        rpcHandle: ControlPlane.RPCHandle,
+        onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void = { _ in }
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let startedAt = nowUptimeNanoseconds()
         let timeout = requestTimeout ?? MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
-        let result = try await loadUnboundToolsCatalog(
-            requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
+        let deadline = deadlineUptimeNanoseconds(for: timeout)
+        let topology = upstreamTopology.snapshot()
+        let exposure = processRouteExposure(policy: .toolsCatalog)
+        let routes = exposure.routes.compactMap { exposed -> AvailableToolsCatalogRoute? in
+            guard let id = exposed.usableUpstreamIDs.first,
+                  let proof = topology.proof(id),
+                  let (lease, transition) = beginProcessCatalogAttemptIfRunning(
+                      routeID: exposed.route.id, preferredUpstreamProof: proof
+                  ) else { return nil }
+            applyProcessControlPlaneTransition(transition)
+            return AvailableToolsCatalogRoute(route: exposed.route, target: exposed.route.target,
+                upstreamIndices: exposed.usableUpstreamIndices, lease: lease)
+        }
+        async let guiLoad = loadAvailableToolsCatalogsInBatch(
+            routes, requestTimeout: timeout, deadlineUptimeNs: deadline, startedAt: startedAt,
+            exposedProcessIDs: exposure.processIDs, returnAfterFirstSuccess: false,
+            onFreshProvider: onFreshProvider)
+        let nativeIsInitialized = topology.entries.contains { entry in
+            entry.backend == .nativeHost
+                && upstreamHealthManager.state(for: entry.id)?.initPhase.isUsableInitialized == true
+        }
+        var nativeFailure: (any Error)?
+        var refreshedProvider = false
+        if nativeIsInitialized {
+            do {
+                _ = try await loadUnboundToolsCatalog(
+                    requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt,
+                    onFreshProvider: onFreshProvider)
+                refreshedProvider = true
+            } catch {
+                try Task.checkCancellation()
+                nativeFailure = catalogProviderFailure(error)
+            }
+        }
+        var guiFailure: (any Error)?
+        do {
+            _ = try await guiLoad
+            refreshedProvider = true
+        } catch {
+            try Task.checkCancellation()
+            guiFailure = catalogProviderFailure(error)
+        }
         try Task.checkCancellation()
-        refreshProcessToolsCatalogsIfNeeded(reason: "client_tools_list", refreshCached: true)
-        return result
+        if refreshedProvider, let current = currentCatalogResult(
+            startedAt: startedAt, exposedProcessIDs: processToolCatalogExposedProcessIDs()) {
+            return current
+        }
+        throw nativeFailure ?? guiFailure ?? UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+
+    private func catalogProviderFailure(_ error: any Error) -> any Error {
+        guard ControlPlane.ErrorMapper.underlyingError(error) is CancellationError else { return error }
+        let unavailable = UpstreamSlotScheduler.AcquisitionError.unavailable
+        guard let request = error as? ControlPlane.RequestError else { return unavailable }
+        if let lease = request.operationLease {
+            return ControlPlane.RequestError(route: request.route, operationLease: lease, underlying: unavailable)
+        }
+        return ControlPlane.RequestError(route: request.route, upstreamIndex: request.upstreamIndex, underlying: unavailable)
     }
 
     private func beginDefaultBackendCatalogLoad(allowsConcurrentLoad: Bool) -> CatalogLease? {
@@ -152,13 +206,15 @@ extension RuntimeCoordinator {
     }
 
     private func loadUnboundToolsCatalog(
-        requestTimeout: TimeAmount?, rpcHandle: ControlPlane.RPCHandle, startedAt: UInt64
+        requestTimeout: TimeAmount?, rpcHandle: ControlPlane.RPCHandle, startedAt: UInt64,
+        onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void
     ) async throws -> CanonicalToolsCatalogLoadResult {
         guard let lease = beginDefaultBackendCatalogLoad(allowsConcurrentLoad: true) else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
         return try await loadUnboundToolsCatalog(
-            lease: lease, requestTimeout: requestTimeout, rpcHandle: rpcHandle, startedAt: startedAt
+            lease: lease, requestTimeout: requestTimeout, rpcHandle: rpcHandle, startedAt: startedAt,
+            onFreshProvider: onFreshProvider
         )
     }
 
@@ -166,7 +222,8 @@ extension RuntimeCoordinator {
         lease: CatalogLease,
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlane.RPCHandle,
-        startedAt: UInt64
+        startedAt: UInt64,
+        onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void
     ) async throws -> CanonicalToolsCatalogLoadResult {
         applyProcessControlPlaneTransition(
             processControlPlane.attach(.rpc(rpcHandle), to: lease)
@@ -196,6 +253,7 @@ extension RuntimeCoordinator {
             switch commit {
             case .accepted(let snapshot, let transition):
                 applyProcessControlPlaneTransition(transition)
+                await onFreshProvider(sourceProof)
                 guard let rawResult = snapshot.canonicalToolsCatalogRaw else {
                     throw UpstreamSlotScheduler.AcquisitionError.unavailable
                 }
@@ -208,9 +266,11 @@ extension RuntimeCoordinator {
                 )
             case .discarded(_, let transition):
                 applyProcessControlPlaneTransition(transition)
-                guard let rawResult = processControlPlane.canonicalToolsCatalogRaw() else {
+                guard let provider = processControlPlane.satisfiedCatalogProvider(for: lease),
+                      let rawResult = processControlPlane.canonicalToolsCatalogRaw() else {
                     throw UpstreamSlotScheduler.AcquisitionError.unavailable
                 }
+                await onFreshProvider(provider.sourceProof)
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: rawResult,
                     sourceProof: processControlPlane.canonicalSourceProof(),
@@ -227,7 +287,10 @@ extension RuntimeCoordinator {
                 nowUptimeNanoseconds: nowUptimeNanoseconds()
             ))
             if isCurrentLoad == false,
+               let provider = processControlPlane.satisfiedCatalogProvider(for: lease),
                let rawResult = processControlPlane.canonicalToolsCatalogRaw() {
+                try Task.checkCancellation()
+                await onFreshProvider(provider.sourceProof)
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: rawResult,
                     sourceProof: processControlPlane.canonicalSourceProof(),
@@ -246,7 +309,8 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>,
-        returnAfterFirstSuccess: Bool = true
+        returnAfterFirstSuccess: Bool = true,
+        onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void = { _ in }
     ) async throws -> CanonicalToolsCatalogLoadResult {
         for route in routes {
             scheduleProcessRouteActivationCatalogTimeoutIfNeeded(lease: route.lease)
@@ -258,6 +322,11 @@ extension RuntimeCoordinator {
         ) { group in
             for route in routes {
                 group.addTask {
+                    defer {
+                        self.applyCatalogCommit(self.commitProcessCatalog(
+                            .failed, lease: route.lease,
+                            nowUptimeNanoseconds: self.nowUptimeNanoseconds()))
+                    }
                     do {
                         try Task.checkCancellation()
                         let result = try await self.loadToolsCatalogFromAvailableProcessRoute(
@@ -274,53 +343,39 @@ extension RuntimeCoordinator {
                         ) else {
                             return .stale
                         }
+                        if let source = result.sourceProof { await onFreshProvider(source) }
                         return .success(
                             route: route,
                             result: recordedResult
                         )
-                    } catch is CancellationError {
-                        if self.processControlPlane.validateCatalogLoad(route.lease) == false {
-                            if let current = self.currentCatalogResult(
-                                startedAt: startedAt,
-                                exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
-                            ) {
-                                return .success(route: route, result: current)
-                            }
-                            return .stale
-                        }
-                        self.applyCatalogCommit(self.commitProcessCatalog(
-                            .failed,
-                            lease: route.lease,
-                            nowUptimeNanoseconds: self.nowUptimeNanoseconds()
-                        ))
-                        throw CancellationError()
-                    } catch is TimeoutError {
-                        if self.processControlPlane.validateCatalogLoad(route.lease) == false {
-                            if let current = self.currentCatalogResult(
-                                startedAt: startedAt,
-                                exposedProcessIDs: self.processToolCatalogExposedProcessIDs()
-                            ) {
-                                return .success(route: route, result: current)
-                            }
-                            return .stale
-                        }
-                        let cancellationDeliveries = self.applyCatalogCommit(
-                            self.commitProcessCatalog(
-                                .unusable,
-                                lease: route.lease,
-                                nowUptimeNanoseconds: self.nowUptimeNanoseconds()
-                            )
-                        )
-                        self.scheduleMissingProcessToolsCatalogRetry(
-                            processID: route.target.processID,
-                            lease: route.lease,
-                            after: cancellationDeliveries,
-                            reason: "process_catalog_timeout"
-                        )
-                        throw TimeoutError()
                     } catch {
+                        try Task.checkCancellation()
+                        if let provider = self.processControlPlane.satisfiedCatalogProvider(for: route.lease),
+                           let current = self.currentCatalogResult(
+                            startedAt: startedAt,
+                            exposedProcessIDs: self.processToolCatalogExposedProcessIDs()) {
+                            await onFreshProvider(provider.sourceProof)
+                            return .success(route: route, result: current)
+                        }
+                        let underlying = ControlPlane.ErrorMapper.underlyingError(error)
+                        if underlying is CancellationError {
+                            guard self.processControlPlane.validateCatalogLoad(route.lease) else { return .stale }
+                            throw CancellationError()
+                        }
+                        if underlying is TimeoutError {
+                            guard self.processControlPlane.validateCatalogLoad(route.lease) else { return .stale }
+                            let deliveries = self.applyCatalogCommit(self.commitProcessCatalog(
+                                .unusable, lease: route.lease,
+                                nowUptimeNanoseconds: self.nowUptimeNanoseconds()))
+                            self.scheduleMissingProcessToolsCatalogRetry(
+                                processID: route.target.processID, lease: route.lease,
+                                after: deliveries, reason: "process_catalog_timeout")
+                            return .failure(route: route,
+                                upstreamIndex: route.upstreamIndices.last ?? -1,
+                                error: underlying)
+                        }
                         let retriesActivation: Bool
-                        if case ControlPlane.Error.upstreamRPC = ControlPlane.ErrorMapper.underlyingError(error),
+                        if case ControlPlane.Error.upstreamRPC = underlying,
                            let claim = self.upstreamHealthManager.currentCatalogActivationClaim(
                                upstreamIndex: route.lease.upstreamIndex
                            ), claim.topologyProof == route.lease.topologyProof {
@@ -340,25 +395,9 @@ extension RuntimeCoordinator {
                                 after: deliveries, reason: "activation_catalog_rpc_error"
                             )
                         }
-                        if let surface = self.processControlPlane.availableToolCatalogSurface(
-                            processIDs: exposedProcessIDs
-                        ), let surfaceSourceProof = surface.sourceProof {
-                            return .success(
-                                route: route,
-                                result: CanonicalToolsCatalogLoadResult(
-                                    rawResult: surface.rawResult,
-                                    sourceProof: surfaceSourceProof,
-                                    durationMilliseconds: self.elapsedMilliseconds(
-                                        sinceUptimeNanoseconds: startedAt
-                                    )
-                                )
-                            )
-                        }
-                        return .failure(
-                            route: route,
+                        return .failure(route: route,
                             upstreamIndex: route.upstreamIndices.last ?? -1,
-                            error: error
-                        )
+                            error: underlying)
                     }
                 }
             }
@@ -680,10 +719,7 @@ extension RuntimeCoordinator {
                     nowUptimeNanoseconds: nowUptimeNanoseconds()
                 )
             )
-            return currentCatalogResult(
-                startedAt: startedAt,
-                exposedProcessIDs: exposedProcessIDs
-            )
+            return nil
         }
         let sourceUpstream = sourceProof.slotID.rawValue
 
@@ -710,10 +746,7 @@ extension RuntimeCoordinator {
                 after: cancellationDeliveries,
                 reason: "empty_process_catalog"
             )
-            return currentCatalogResult(
-                startedAt: startedAt,
-                exposedProcessIDs: exposedProcessIDs
-            )
+            return nil
         }
 
         let commit = commitProcessCatalog(
@@ -777,6 +810,7 @@ extension RuntimeCoordinator {
                     "reason": .string(String(describing: reason)),
                 ]
             )
+            guard processControlPlane.catalogLoadWasSatisfied(route.lease) else { return nil }
             return currentCatalogResult(
                 startedAt: startedAt,
                 exposedProcessIDs: processToolCatalogExposedProcessIDs()
