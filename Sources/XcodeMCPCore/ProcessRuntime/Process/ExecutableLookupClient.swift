@@ -101,7 +101,7 @@ package struct ExecutableLookupClient: DependencyClient {
         ) {
             executablePath = resolvedCommandPath
         } else {
-            executablePath = MCPBridgeInvocation.xcrunCommand
+            executablePath = "/usr/bin/xcrun"
         }
 
         guard let output = runCommand(executablePath, preToolArguments + ["--find", toolName])?

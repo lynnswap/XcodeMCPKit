@@ -3,15 +3,17 @@ import Foundation
 
 /// Settings used to connect to and initialize an MCP endpoint.
 ///
-/// The default configuration starts `xcrun mcpbridge` with the current process
-/// environment and a conservative per-request timeout. Use
-/// ``XcodeMCPConfiguration/Transport/streamableHTTP(endpoint:)`` to connect to
-/// a proxy Streamable HTTP endpoint instead.
+/// The default configuration discovers the running XcodeMCPKit proxy, which
+/// automatically selects an existing GUI workspace or a windowless model. Use
+/// ``XcodeMCPConfiguration/Transport/localBridge(_:)`` for a standalone native
+/// host or a custom MCP process.
 public struct XcodeMCPConfiguration: Equatable, Sendable {
     /// Upstream bridge process policy.
     public enum Bridge: Equatable, Sendable {
-        /// Use Xcode's default `xcrun mcpbridge` invocation.
-        case defaultMCPBridge
+        /// Launch an owned windowless native host.
+        ///
+        /// Supply a helper application location when embedding the client.
+        case nativeHost(bundleURL: URL? = nil, developerDirectoryURL: URL? = nil)
 
         /// Use an explicit upstream bridge command.
         case custom(
@@ -20,26 +22,18 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
             environment: [String: String]
         )
 
-        package var invocation: MCPBridgeInvocation {
+        package func invocation() throws -> MCPBridgeInvocation {
             switch self {
-            case .defaultMCPBridge:
-                return .defaultMCPBridge
+            case .nativeHost(let bundleURL, let developerDirectoryURL):
+                return try NativeHostInvocation.resolve(bundleURL: bundleURL, developerDirectoryURL: developerDirectoryURL)
             case .custom(let command, let arguments, _):
                 return MCPBridgeInvocation(command: command, arguments: arguments)
             }
         }
 
-        package var command: String {
-            invocation.command
-        }
-
-        package var arguments: [String] {
-            invocation.arguments
-        }
-
         package var environment: [String: String] {
             switch self {
-            case .defaultMCPBridge:
+            case .nativeHost:
                 return ProcessInfo.processInfo.environment
             case .custom(_, _, let environment):
                 return environment
@@ -66,7 +60,7 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
         }
 
         /// Launch and talk to a local bridge process over stdio.
-        public static func localBridge(_ bridge: Bridge = .defaultMCPBridge) -> Self {
+        public static func localBridge(_ bridge: Bridge = .nativeHost()) -> Self {
             Self(storage: .localBridge(bridge))
         }
 
@@ -132,7 +126,7 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
     ///   - requestTimeout: Maximum duration to wait for each request, or `nil`
     ///     to disable client-side request timeouts.
     public init(
-        transport: Transport = .localBridge(),
+        transport: Transport = .streamableHTTPProxyDiscovery(),
         clientName: String = "XcodeMCPKit",
         clientVersion: String = "dev",
         capabilities: [String: MCPJSONValue] = [:],
@@ -151,8 +145,8 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
 /// `XcodeMCP` connects through the configured transport, performs the MCP
 /// initialize handshake, and exposes the dynamic Xcode tool catalog through
 /// ``listTools()`` and ``callTool(_:arguments:onProgress:)``. The default
-/// transport starts a local `mcpbridge` process. Streamable HTTP transport can
-/// connect to a running proxy endpoint.
+/// transport discovers a running proxy endpoint. Local transport can start an
+/// owned windowless host or a custom MCP process.
 ///
 /// The tool catalog is discovered at runtime. This package intentionally does
 /// not promise tool-specific Swift methods or typed request/response models for
@@ -212,9 +206,10 @@ public actor XcodeMCP {
             switch configuration.transport.storage {
             case .localBridge(let bridge):
                 recipe = MCPTransportRecipe {
-                    try await UpstreamProcessXcodeMCPTransport.start(
-                        command: bridge.command,
-                        arguments: bridge.arguments,
+                    let invocation = try bridge.invocation()
+                    return try await UpstreamProcessXcodeMCPTransport.start(
+                        command: invocation.command,
+                        arguments: invocation.arguments,
                         environment: bridge.environment,
                         maxQueuedWriteBytes: bridge.maxQueuedWriteBytes
                     )
