@@ -3203,6 +3203,16 @@ enum ProcessToolCatalogCodec {
         .object(["anyOf": .array(ownerSelectors.map(nonemptyStringCondition))])
     }
 
+    private static var compatibleOwnerSelectors: JSONValue {
+        .object(["not": .object(["allOf": .array([
+            nonemptyStringCondition("workspaceIdentifier"),
+            nonemptyStringCondition("tabIdentifier"),
+            .object(["properties": .object([
+                "workspaceIdentifier": .object(["not": .object(["pattern": .string("^/")])])
+            ])])
+        ])])])
+    }
+
     private static func nonemptyStringCondition(_ name: String) -> JSONValue {
         .object([
             "required": .array([.string(name)]),
@@ -3213,10 +3223,11 @@ enum ProcessToolCatalogCodec {
     private static func routedInputSchema(
         name: String, entries: [(ToolCatalogProvider, JSONValue)]
     ) -> JSONValue? {
-        let schemas = entries.compactMap { _, descriptor -> JSONValue? in
+        let inputs = entries.compactMap { provider, descriptor -> (ToolCatalogProvider, JSONValue)? in
             guard case .object(let fields) = descriptor else { return nil }
-            return fields["inputSchema"]
+            return fields["inputSchema"].map { (provider, $0) }
         }
+        let schemas = inputs.map(\.1)
         guard let first = schemas.first, let preferred = entries.first else { return nil }
         let ownerBound = entries.contains { isOwnerBoundTool($0.1) }
         let hasDefault = preferred.0.target == nil || !ownerBound || entries.count == 1
@@ -3224,20 +3235,39 @@ enum ProcessToolCatalogCodec {
         let requiresOwner = entries.contains { entry in
             ownerSelectors.contains { tool(entry.1, requiresArgument: $0) }
         }
-        if hasDefault, !requiresOwner, schemas.allSatisfy({ $0 == first }) {
-            return addingProxySelectors(to: first, replacesRequiredSelectors: false)
+        if hasDefault, !requiresOwner, affinitySelector == nil, schemas.allSatisfy({ $0 == first }),
+           case .object(var schema) = addingProxySelectors(to: first, replacesRequiredSelectors: false) {
+            var constraints: [JSONValue] = []
+            if case .array(let existing)? = schema["allOf"] { constraints = existing }
+            constraints.append(compatibleOwnerSelectors)
+            schema["allOf"] = .array(constraints)
+            return .object(schema)
         }
         var branches: [JSONValue] = []
         let noOwner = JSONValue.object(["not": ownerSelectorCondition])
-        if hasDefault, affinitySelector == nil {
-            branches.append(.object(["allOf": .array([
-                addingProxySelectors(to: first, replacesRequiredSelectors: false), noOwner
-            ])]))
+        if hasDefault {
+            var defaultConstraints = [addingProxySelectors(to: first, replacesRequiredSelectors: false), noOwner]
+            if let affinitySelector {
+                defaultConstraints.append(.object(["not": nonemptyStringCondition(affinitySelector)]))
+            }
+            branches.append(.object(["allOf": .array(defaultConstraints)]))
         }
-        for schema in schemas {
-            branches.append(.object(["allOf": .array([
+        for (provider, schema) in inputs {
+            var selectedConstraints = [
                 addingProxySelectors(to: schema, replacesRequiredSelectors: true), ownerSelectorCondition
-            ])]))
+            ]
+            if affinitySelector == nil {
+                selectedConstraints.append(compatibleOwnerSelectors)
+            } else if let affinitySelector {
+                let hasSession = nonemptyStringCondition(affinitySelector)
+                let affinityOwners: JSONValue = provider.target == nil
+                    ? .object(["not": nonemptyStringCondition("tabIdentifier")]) : .object([:])
+                selectedConstraints.append(.object(["anyOf": .array([
+                    .object(["allOf": .array([hasSession, affinityOwners])]),
+                    .object(["allOf": .array([.object(["not": hasSession]), compatibleOwnerSelectors])])
+                ])]))
+            }
+            branches.append(.object(["allOf": .array(selectedConstraints)]))
             if let affinitySelector {
                 branches.append(.object(["allOf": .array([
                     addingProxySelectors(to: schema, replacesRequiredSelectors: false),

@@ -74,7 +74,7 @@ struct ToolCatalogProviderTests {
               case .array(let guiParts)? = alternative["allOf"],
               case .object(let guiInput)? = guiParts.first,
               case .object(let guiProperties)? = guiInput["properties"],
-              case .object(let guiCondition)? = guiParts.last,
+              case .object(let guiCondition) = guiParts[1],
               case .array(let hints)? = guiCondition["anyOf"] else {
             Issue.record("Missing selected GUI branch"); return
         }
@@ -103,7 +103,7 @@ struct ToolCatalogProviderTests {
         for branch in branches {
             guard case .object(let object) = branch, case .array(let parts)? = object["allOf"],
                   case .object(let input)? = parts.first, case .object(let properties)? = input["properties"],
-                  case .object(let condition)? = parts.last else {
+                  case .object(let condition) = parts[1] else {
                 Issue.record("Missing owner branch"); return
             }
             #expect(properties["workspaceIdentifier"] != nil)
@@ -126,9 +126,11 @@ struct ToolCatalogProviderTests {
               case .array(let branches)? = schema["anyOf"] else {
             Issue.record("Missing affinity variants"); return
         }
-        #expect(branches.count == 4)
+        #expect(branches.count == 5)
         let affinityBranches = branches.compactMap { branch -> [JSONValue]? in
             guard case .object(let object) = branch, case .array(let parts)? = object["allOf"], parts.count == 3 else { return nil }
+            guard case .object(let condition)? = parts.last,
+                  condition["required"] == .array([.string(key)]) else { return nil }
             return parts
         }
         #expect(affinityBranches.count == 2)
@@ -136,6 +138,56 @@ struct ToolCatalogProviderTests {
             guard case .object(let condition)? = parts.last else { continue }
             #expect(condition["required"] == .array([.string(key)]))
         }
+    }
+
+    @Test(arguments: [false, true])
+    func publicSchemaMatchesOrdinaryOwnerSelectorCombinations(identicalSchemas: Bool) throws {
+        let native = closedProvider(index: 0, field: "value")
+        let gui = closedProvider(index: 1, field: identicalSchemas ? "value" : "guiValue", guiVersion: "27.0")
+        let schema = try inputSchema(name: "DynamicTool", providers: [native, gui])
+        let guiField = identicalSchemas ? "value" : "guiValue"
+        let cases: [(String, [String: JSONValue], Bool)] = [
+            ("no hint", ["value": .string("native")], true),
+            ("opaque workspace", [guiField: .string("gui"), "workspaceIdentifier": .string("gui-opaque")], true),
+            ("tab", [guiField: .string("gui"), "tabIdentifier": .string("gui-tab")], true),
+            ("opaque workspace and tab", [guiField: .string("gui"), "workspaceIdentifier": .string("gui-opaque"), "tabIdentifier": .string("gui-tab")], false),
+            ("absolute workspace and tab", [guiField: .string("gui"), "workspaceIdentifier": .string("/Work/App.xcodeproj"), "tabIdentifier": .string("gui-tab")], true),
+            ("absolute workspace", [guiField: .string("gui"), "workspaceIdentifier": .string("/Work/App.xcodeproj")], true),
+            ("empty hints", ["value": .string("native"), "workspaceIdentifier": .string(""), "tabIdentifier": .string("")], true),
+            ("empty workspace and tab", [guiField: .string("gui"), "workspaceIdentifier": .string(""), "tabIdentifier": .string("gui-tab")], true),
+            ("opaque workspace and empty tab", [guiField: .string("gui"), "workspaceIdentifier": .string("gui-opaque"), "tabIdentifier": .string("")], true)
+        ]
+        for (label, arguments, expected) in cases {
+            #expect(try acceptsFixtureInput(.object(arguments), schema: schema) == expected, Comment(rawValue: label))
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func identicalAffinitySchemasPreserveTheirProviderOwnerPolicy(includesGUI: Bool) throws {
+        let name = "DeviceInteractionSynthesize"
+        let key = "interactSessionKey"
+        let native = closedProvider(index: 0, field: "value", name: name, sessionKey: key)
+        let gui = closedProvider(index: 1, field: "value", guiVersion: "27.0", name: name, sessionKey: key)
+        let schema = try inputSchema(name: name, providers: includesGUI ? [native, gui] : [native])
+        let base: [String: JSONValue] = ["value": .string("input"), key: .string("existing-session")]
+        #expect(try acceptsFixtureInput(.object(base), schema: schema))
+        for workspace in ["gui-opaque", "/Work/App.xcodeproj"] {
+            var arguments = base
+            arguments["workspaceIdentifier"] = .string(workspace)
+            arguments["tabIdentifier"] = .string("gui-tab")
+            #expect(try acceptsFixtureInput(.object(arguments), schema: schema) == includesGUI)
+        }
+        var empty = base
+        empty["workspaceIdentifier"] = .string("")
+        empty["tabIdentifier"] = .string("")
+        #expect(try acceptsFixtureInput(.object(empty), schema: schema))
+        empty[key] = .string("")
+        #expect(try acceptsFixtureInput(.object(empty), schema: schema))
+        empty["workspaceIdentifier"] = .string("gui-opaque")
+        empty["tabIdentifier"] = .string("gui-tab")
+        #expect(try !acceptsFixtureInput(.object(empty), schema: schema))
+        empty["workspaceIdentifier"] = .string("/Work/App.xcodeproj")
+        #expect(try acceptsFixtureInput(.object(empty), schema: schema))
     }
 
     @Test func identicalSchemasAreDeduplicatedWithoutDiscardingProviderOrigins() throws {
@@ -212,6 +264,54 @@ struct ToolCatalogProviderTests {
               case .array(let providers)? = metadata[ToolCatalogProvider.providersMetadataKey],
               case .object(let origin) = providers[providerIndex] else { return nil }
         return origin["descriptor"]
+    }
+
+    private func inputSchema(name: String, providers: [ToolCatalogProvider]) throws -> JSONValue {
+        let result = try #require(ProcessToolCatalogCodec.toolsListResult(from: providers))
+        guard case .object(let tool)? = ProcessToolCatalogCodec.toolsByName(in: result)[name] else {
+            throw NSError(domain: "ToolCatalogProviderTests", code: 1)
+        }
+        return try #require(tool["inputSchema"])
+    }
+
+    // This test consumer evaluates the JSON Schema keywords used by the fixtures;
+    // production routing never validates or selects a provider from input shape.
+    private func acceptsFixtureInput(_ value: JSONValue, schema: JSONValue) throws -> Bool {
+        guard case .object(let fields) = schema else {
+            if case .bool(let allowed) = schema { return allowed }
+            throw NSError(domain: "ToolCatalogProviderTests", code: 2)
+        }
+        if case .array(let constraints)? = fields["allOf"],
+           try !constraints.allSatisfy({ try acceptsFixtureInput(value, schema: $0) }) { return false }
+        if case .array(let choices)? = fields["anyOf"],
+           try !choices.contains(where: { try acceptsFixtureInput(value, schema: $0) }) { return false }
+        if let negated = fields["not"], try acceptsFixtureInput(value, schema: negated) { return false }
+        if case .string(let type)? = fields["type"] {
+            switch (type, value) {
+            case ("object", .object), ("string", .string): break
+            default: return false
+            }
+        }
+        if case .string(let text) = value {
+            if case .number(.int(let minimum))? = fields["minLength"], Int64(text.unicodeScalars.count) < minimum { return false }
+            if case .string(let pattern)? = fields["pattern"] {
+                let expression = try NSRegularExpression(pattern: pattern)
+                if expression.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) == nil { return false }
+            }
+        }
+        if case .object(let object) = value {
+            if case .array(let required)? = fields["required"], required.contains(where: {
+                if case .string(let name) = $0 { return object[name] == nil }
+                return false
+            }) { return false }
+            var properties: [String: JSONValue] = [:]
+            if case .object(let declared)? = fields["properties"] { properties = declared }
+            if fields["additionalProperties"] == .bool(false), object.keys.contains(where: { properties[$0] == nil }) { return false }
+            for (name, property) in properties {
+                if let field = object[name], try !acceptsFixtureInput(field, schema: property) { return false }
+            }
+        }
+        return true
     }
 
     private func target(pid: Int32, version: String) -> XcodeProcessTarget {
