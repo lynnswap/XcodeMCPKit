@@ -19,11 +19,16 @@ package enum NativeToolResultFormat {
 package struct NativeToolContext: Sendable {
     package let artifactsDirectory: URL
     package let conversationID: String
+    private let onDispatch: (@MainActor @Sendable () -> Void)?
 
-    package init(artifactsDirectory: URL, conversationID: String) {
+    package init(artifactsDirectory: URL, conversationID: String,
+                 onDispatch: (@MainActor @Sendable () -> Void)? = nil) {
         self.artifactsDirectory = artifactsDirectory
         self.conversationID = conversationID
+        self.onDispatch = onDispatch
     }
+
+    @MainActor package func didDispatch() { onDispatch?() }
 }
 
 @MainActor

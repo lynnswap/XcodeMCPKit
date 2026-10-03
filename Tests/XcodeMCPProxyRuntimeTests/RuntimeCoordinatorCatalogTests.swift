@@ -118,7 +118,7 @@ struct RuntimeCoordinatorCatalogTests {
     }
 
     @Test(arguments: [false, true])
-    func nativeCatalogReturnsBeforeGUIRefreshCompletes(cachedGUI: Bool) async throws {
+    func explicitCatalogRequestWaitsForTheGUIRefresh(cachedGUI: Bool) async throws {
         let native = TestUpstreamClient()
         let gui = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
@@ -142,15 +142,14 @@ struct RuntimeCoordinatorCatalogTests {
         }
         let request = try await sentValue(from: native, at: 0, timeout: .seconds(2))
         await native.yield(.message(try paginatedToolsResponse(request: request, names: ["DocumentationSearch"])))
-        let catalog = try await waitWithTimeout("native catalog does not wait for GUI inventory", timeout: .seconds(1)) {
-            try await refresh.value
-        }
-        #expect(toolNames(in: catalog).contains("DocumentationSearch"))
-        #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
         let guiRequest = try await gui.nextSent { methodName(from: $0) == "tools/list" }
         await gui.yield(.message(try paginatedToolsResponse(request: guiRequest, names: ["XcodeRead"])))
-        await manager.drainRuntimeTasksForTesting()
+        let catalog = try await waitWithTimeout("explicit catalog includes the fresh GUI response", timeout: .seconds(1)) {
+            try await refresh.value
+        }
+        #expect(toolNames(in: catalog) == ["DocumentationSearch", "XcodeRead"])
         #expect(manager.debugSnapshot().controlPlane?.canonicalToolsSourceUpstream == 0)
+        await manager.drainRuntimeTasksForTesting()
     }
 
     @Test func changedCatalogOriginNotifiesEvenWhenSchemasStayTheSame() throws {

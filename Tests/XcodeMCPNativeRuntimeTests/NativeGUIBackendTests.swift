@@ -312,6 +312,51 @@ struct NativeGUIBackendTests {
         }
     }
 
+    @Test func unsupportedNativeCancellationStillPreventsDispatchDuringWindowLookup() async throws {
+        try await withGUIBackend(initialize: false) { fixture in
+            fixture.transport.supportsToolCancellation = false
+            let output = AsyncStream<Data>.makeStream()
+            var responses = output.stream.makeAsyncIterator()
+            let session = NativeMCPSession(backend: fixture.backend,
+                artifactsRoot: fixture.directory.appendingPathComponent("artifacts"),
+                output: { output.continuation.yield($0) })
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("initialize"), "method": .string("initialize"),
+                "params": .object(["protocolVersion": .string("2025-06-18"), "capabilities": .object([:]),
+                    "clientInfo": .object(fixture.sessionContext.clientInfo)]),
+            ])))
+            _ = try #require(await responses.next(isolation: MainActor.shared))
+            _ = try await fixture.listTools([Self.requiredWorkspaceTool])
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("cancel-before-send"), "method": .string("tools/call"),
+                "params": .object(["name": .string("MutateWorkspace"), "arguments": .object([
+                    "query": .string("edit"), "workspaceIdentifier": .string("/tmp/Project.xcodeproj"),
+                ])]),
+            ])))
+            let windows = try await fixture.transport.nextRequest()
+            #expect(try nativeTestField(nativeTestJSON(windows.message), "callTool", "name") == .string("XcodeListWindows"))
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "method": .string("notifications/cancelled"),
+                "params": .object(["requestId": .string("cancel-before-send")]),
+            ])))
+            let cancelled = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
+            #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
+            try windows.respond(.object([
+                "content": .array([]), "isError": .bool(false),
+                "structuredContent": .object(["message": .string(
+                    "* tabIdentifier: ready-tab, workspacePath: /tmp/Project.xcodeproj")]),
+            ]))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while fixture.backend.pendingInvocationCount > 0, ContinuousClock.now < deadline {
+                await Task.yield()
+            }
+            #expect(fixture.backend.pendingInvocationCount == 0)
+            #expect(fixture.transport.requestMessages.count == 2)
+            #expect(fixture.transport.oneWayMessages.count == 1)
+            try await session.shutdown()
+        }
+    }
+
     private static var optionalWorkspaceTool: JSONValue {
         get throws {
             try nativeTestJSON(Data(#"{"name":"InspectWorkspace","inputSchema":{"properties":[{"name":"query","isRequired":true,"type":{"string":{}}},{"name":"tabIdentifier","isRequired":false,"type":{"string":{}}}]}}"#.utf8))

@@ -129,27 +129,8 @@ extension RuntimeCoordinator {
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let startedAt = nowUptimeNanoseconds()
         let timeout = requestTimeout ?? MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
-        refreshProcessToolsCatalogsIfNeeded(reason: "client_tools_list", refreshCached: true)
+        let deadline = deadlineUptimeNanoseconds(for: timeout)
         let topology = upstreamTopology.snapshot()
-        let nativeIsInitialized = topology.entries.contains { entry in
-            entry.backend == .nativeHost
-                && upstreamHealthManager.state(for: entry.id)?.initPhase.isUsableInitialized == true
-        }
-        var nativeFailure: (any Error)?
-        if nativeIsInitialized {
-            do {
-                _ = try await loadUnboundToolsCatalog(
-                    requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
-            } catch {
-                if error is CancellationError { throw error }
-                nativeFailure = error
-            }
-        }
-        try Task.checkCancellation()
-        if let current = currentCatalogResult(startedAt: startedAt,
-                                              exposedProcessIDs: processToolCatalogExposedProcessIDs()) {
-            return current
-        }
         let exposure = processRouteExposure(policy: .toolsCatalog)
         let routes = exposure.routes.compactMap { exposed -> AvailableToolsCatalogRoute? in
             guard let id = exposed.usableUpstreamIDs.first,
@@ -161,14 +142,39 @@ extension RuntimeCoordinator {
             return AvailableToolsCatalogRoute(route: exposed.route, target: exposed.route.target,
                 upstreamIndices: exposed.usableUpstreamIndices, lease: lease)
         }
-        guard !routes.isEmpty else {
-            throw nativeFailure ?? UpstreamSlotScheduler.AcquisitionError.unavailable
+        async let guiLoad = loadAvailableToolsCatalogsInBatch(
+            routes, requestTimeout: timeout, deadlineUptimeNs: deadline, startedAt: startedAt,
+            exposedProcessIDs: exposure.processIDs, returnAfterFirstSuccess: false)
+        let nativeIsInitialized = topology.entries.contains { entry in
+            entry.backend == .nativeHost
+                && upstreamHealthManager.state(for: entry.id)?.initPhase.isUsableInitialized == true
         }
-        return try await loadAvailableToolsCatalogsInBatch(
-            routes, requestTimeout: timeout,
-            deadlineUptimeNs: deadlineUptimeNanoseconds(for: timeout), startedAt: startedAt,
-            exposedProcessIDs: exposure.processIDs, returnAfterFirstSuccess: false
-        )
+        var nativeFailure: (any Error)?
+        var refreshedProvider = false
+        if nativeIsInitialized {
+            do {
+                _ = try await loadUnboundToolsCatalog(
+                    requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
+                refreshedProvider = true
+            } catch {
+                if error is CancellationError { throw error }
+                nativeFailure = error
+            }
+        }
+        var guiFailure: (any Error)?
+        do {
+            _ = try await guiLoad
+            refreshedProvider = true
+        } catch {
+            if error is CancellationError { throw error }
+            guiFailure = error
+        }
+        try Task.checkCancellation()
+        if refreshedProvider, let current = currentCatalogResult(
+            startedAt: startedAt, exposedProcessIDs: processToolCatalogExposedProcessIDs()) {
+            return current
+        }
+        throw nativeFailure ?? guiFailure ?? UpstreamSlotScheduler.AcquisitionError.unavailable
     }
 
     private func beginDefaultBackendCatalogLoad(allowsConcurrentLoad: Bool) -> CatalogLease? {
@@ -352,7 +358,9 @@ extension RuntimeCoordinator {
                             after: cancellationDeliveries,
                             reason: "process_catalog_timeout"
                         )
-                        throw TimeoutError()
+                        return .failure(route: route,
+                            upstreamIndex: route.upstreamIndices.last ?? -1,
+                            error: TimeoutError())
                     } catch {
                         let retriesActivation: Bool
                         if case ControlPlane.Error.upstreamRPC = ControlPlane.ErrorMapper.underlyingError(error),

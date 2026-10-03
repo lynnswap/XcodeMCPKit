@@ -1042,6 +1042,20 @@ struct DocumentationProviderTests {
         #expect(try upstreamMaxQueuedWriteBytes(from: factory) == 8_000_000)
     }
 
+    @Test(arguments: [false, true])
+    func nativeMessageLimitIncludesTheConfiguredHTTPBodyBudget(gui: Bool) throws {
+        let bodyLimit = 64 * 1024 * 1024
+        let config = try NativeHostRuntime.Configuration(nativeHostBundleURL: nativeHostBundleURLForTests(),
+                                                    maxBodyBytes: bodyLimit)
+        let process = try NativeHostRuntime.makeDefaultUpstreamConfig(config: config,
+            xcodeTarget: gui ? xcodeProcessTarget(processID: 715, xcodeVersion: "27.0") : nil,
+            baseEnvironment: [:])
+        let index = try #require(process.args.firstIndex(of: "--max-message-bytes"))
+        let limit = try #require(Int(process.args[index + 1]))
+        #expect(limit == process.maxQueuedWriteBytes)
+        #expect(limit >= bodyLimit)
+    }
+
     @Test func processBoundSessionFactoryRemovesInheritedSessionIDWithoutSharedSession()
         throws
     {
