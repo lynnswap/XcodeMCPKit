@@ -49,6 +49,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
     private let selection: NativeToolSelection
     private let scope: NativeWorkspaceScope
     private let workspaces: NativeWorkspaceRegistry
+    private let crashCorrection: NativeCrashToolCorrection
     private var actions: [String: NativeActionClass] = unsafe [:]
     private var tools: [String: NativeTool] = [:]
 
@@ -57,6 +58,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         selection = try await NativeToolSelection(installation: installation)
         scope = try await NativeWorkspaceScope(installation: installation)
         workspaces = try await NativeWorkspaceRegistry(installation: installation)
+        crashCorrection = NativeCrashToolCorrection(installation: installation)
     }
 
     package func listTools() async throws -> [NativeTool] {
@@ -96,6 +98,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
         arguments["temporaryArtifactsPath"] = .string(context.artifactsDirectory.path)
         arguments["conversationID"] = .string(context.conversationID)
         let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
+        if let kind = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
+            return try unsafe crashCorrection.execute(kind, inputType: scope.inputType(for: action), input: input)
+        }
         let stream = try unsafe await bridge.execute(action: action, input: input)
         // Preserve native stream cancellation: the caller consumes this stream
         // directly rather than creating an unowned forwarding producer Task.
@@ -103,6 +108,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
     }
 
     package func shutdown() async throws {
+        await crashCorrection.shutdown()
         try await workspaces.closeAllWorkspaces()
     }
 }
