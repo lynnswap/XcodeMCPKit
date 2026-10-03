@@ -70,15 +70,30 @@ reject_matches \
     '(^|[^[:alnum:]_])Process[[:space:]]*\(|MCPBridgeRuntime|mcpbridgePath' \
     Sources/XcodeMCPPermissionApproverTool
 
+reject_matches \
+    "native host and wire modules must not import NIO or the proxy/client runtime" \
+    '^[[:space:]]*([[:alnum:]_@()]+[[:space:]]+)*import[[:space:]]+((class|enum|func|let|protocol|struct|typealias|var)[[:space:]]+)?(NIO[[:alnum:]_]*|CNIO[[:alnum:]_]*|_NIO[[:alnum:]_]*|XcodeMCPCore|XcodeMCPKit|XcodeMCPProxy[[:alnum:]_]*)([[:space:].;]|$)' \
+    Sources/XcodeMCPNativeHost Sources/XcodeMCPNativeRuntime Sources/XcodeMCPWire
+
 package_description="$(swift package describe --type json)"
 if ! jq -e '
-    .targets | map({key: .name, value: (.target_dependencies // [])}) | from_entries as $graph |
+    .targets | map({key: .name, value: ((.target_dependencies // []) + (.product_dependencies // []))}) | from_entries as $graph |
     def dependencies($target):
         [$graph[$target][]? as $child | $child, dependencies($child)[]] | unique;
     def excludes($target; $forbidden):
         (dependencies($target) - $forbidden) == dependencies($target);
     def directlyUses($target; $dependency):
         ($graph[$target] | index($dependency)) != null;
+    def hasOnlyNativeDependencies($target):
+        dependencies($target) | all(test("^(NIO|CNIO|_NIO|XcodeMCPCore$|XcodeMCPKit$|XcodeMCPProxy)") | not);
+    hasOnlyNativeDependencies("XcodeMCPNativeHost") and
+    hasOnlyNativeDependencies("XcodeMCPNativeRuntime") and
+    ($graph["XcodeMCPWire"] == []) and
+    directlyUses("XcodeMCPNativeHost"; "XcodeMCPNativeRuntime") and
+    directlyUses("XcodeMCPNativeHost"; "XcodeMCPWire") and
+    directlyUses("XcodeMCPNativeRuntime"; "XcodeMCPWire") and
+    directlyUses("XcodeMCPNativeRuntime"; "ABIBridge") and
+    directlyUses("XcodeMCPCore"; "XcodeMCPWire") and
     excludes("XcodeMCPCore"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit", "XcodeMCPPermissionAutomation"]) and
     excludes("XcodeMCPKit"; ["XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit", "XcodeMCPPermissionAutomation"]) and
     excludes("XcodeMCPProxyRuntime"; ["XcodeMCPKit", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
@@ -105,8 +120,8 @@ if ! jq -e '
     directlyUses("XcodeMCPProxyKit"; "XcodeMCPPermissionAutomation") and
     directlyUses("XcodeMCPPermissionApproverTool"; "XcodeMCPPermissionAutomation")
 ' <<< "${package_description}" >/dev/null; then
-    echo "error: package dependencies violate the shared-core or proxy ownership boundaries" >&2
+    echo "error: package dependencies violate the native-host, shared-core, or proxy ownership boundaries" >&2
     exit 1
 fi
 
-echo "Proxy target boundaries verified."
+echo "Native host and proxy target boundaries verified."
