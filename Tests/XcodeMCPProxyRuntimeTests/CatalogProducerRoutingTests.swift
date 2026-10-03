@@ -44,9 +44,8 @@ struct CatalogProducerRoutingTests {
         _ = manager.session(id: sessionID)
         manager.sessionRegistry.markInitialized(id: sessionID, negotiatedProtocolVersion: MCP.ProtocolVersion.current)
         let executor = ClientMCPRequestExecutor(
-            config: fixture.config, sessionManager: manager,
-            refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: fixture.config.requestTimeout)
+            config: fixture.config,
+            sessionManager: manager
         )
         let operation = executor.handle(
             bodyData: try JSONRPC.Wire.data(from: request),
