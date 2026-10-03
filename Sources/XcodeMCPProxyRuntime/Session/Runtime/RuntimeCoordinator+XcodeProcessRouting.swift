@@ -572,6 +572,9 @@ extension RuntimeCoordinator {
         guard !proofs.isEmpty else {
             return .reject(errors: toolRoutingErrors(for: request, message: "The owned native host is not available"))
         }
+        if let proof = proofs.first, let unavailable = unavailableNativeToolDecision(for: request, sourceProof: proof) {
+            return unavailable
+        }
         return .forwardAdmitted(
             preferredUpstreamIndices: proofs.map { $0.slotID.rawValue },
             admission: RouteForwardingAdmission(
@@ -579,6 +582,16 @@ extension RuntimeCoordinator {
                 toolDefinition: provider?.definition(named: request.toolName)
                     ?? proofs.first.flatMap { toolDefinition(named: request.toolName, sourceProof: $0) }
             ))
+    }
+
+    private func unavailableNativeToolDecision(
+        for request: ToolRoutingRequest, sourceProof: UpstreamTopologyProof
+    ) -> ToolRoutingDecision? {
+        guard let selected = processControlPlane.providerCatalog(for: sourceProof),
+              selected.definition(named: request.toolName) == nil,
+              processControlPlane.defaultToolProvider(named: request.toolName) != nil else { return nil }
+        return .reject(errors: toolRoutingErrors(
+            for: request, message: "tool is not available in the selected native host"))
     }
 
     private func workspaceIdentifierRoutingDecision(
@@ -597,6 +610,9 @@ extension RuntimeCoordinator {
                     deadline: timeoutDeadline(for: requestTimeoutOverride
                         ?? MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: config.requestTimeout)))
                 if inventory.entries.contains(where: { $0.tabIdentifier == identifier }) {
+                    if let unavailable = unavailableNativeToolDecision(for: request, sourceProof: inventory.sourceProof) {
+                        return unavailable
+                    }
                     return .forwardAdmitted(
                         preferredUpstreamIndices: [inventory.sourceProof.slotID.rawValue],
                         admission: RouteForwardingAdmission(
@@ -756,6 +772,9 @@ extension RuntimeCoordinator {
                         : "Multiple native workspaces match '\(selector)'; select a workspaceIdentifier from XcodeListWorkspaces"
                 ))
             }
+            if let unavailable = unavailableNativeToolDecision(for: request, sourceProof: inventory.sourceProof) {
+                return unavailable
+            }
             return .forwardAdmitted(
                 preferredUpstreamIndices: [inventory.sourceProof.slotID.rawValue],
                 admission: RouteForwardingAdmission(
@@ -858,6 +877,9 @@ extension RuntimeCoordinator {
                         message: "device interaction session is no longer available"
                     )
                 )
+            }
+            if let unavailable = unavailableNativeToolDecision(for: request, sourceProof: affinity.upstreamProof) {
+                return unavailable
             }
             return .forwardAdmitted(
                 preferredUpstreamIndices: [affinity.upstreamProof.slotID.rawValue],
