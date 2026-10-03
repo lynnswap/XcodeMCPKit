@@ -5,30 +5,34 @@ import XcodeMCPCore
 extension ControlPlaneCoordinator {
     func replaceToolsCatalogRequestLoad(
         _ current: ToolsCatalogLoadState,
-        requestTimeout: TimeAmount?,
-        responseDeadlineUptimeNs: UInt64?
+        requestTimeout: TimeAmount?
     ) -> UUID {
         var previous = current
         toolsCatalogLoad = nil
         let migratedWaiters = removeForegroundToolsCatalogWaiters(from: &previous)
         cancelToolsCatalogLoad(previous, error: CancellationError())
-        let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout,
-            responseDeadlineUptimeNs: responseDeadlineUptimeNs)
+        let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout)
+        if current.hasPublishedPartialResult, var replacement = currentToolsCatalogLoadState(loadID: newLoadID) {
+            replacement.hasPublishedPartialResult = true
+            setToolsCatalogLoadState(replacement)
+        }
         attachToolsCatalogWaiters(loadID: newLoadID, waiters: migratedWaiters)
         return newLoadID
     }
 
     func promotePrewarmToolsCatalogLoad(
         _ current: ToolsCatalogLoadState,
-        requestTimeout: TimeAmount?,
-        responseDeadlineUptimeNs: UInt64?
+        requestTimeout: TimeAmount?
     ) -> UUID {
         var previous = current
         prewarmToolsCatalogLoad = nil
         let migratedWaiters = removeForegroundToolsCatalogWaiters(from: &previous)
         cancelToolsCatalogLoad(previous, error: CancellationError())
-        let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout,
-            responseDeadlineUptimeNs: responseDeadlineUptimeNs)
+        let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout)
+        if current.hasPublishedPartialResult, var replacement = currentToolsCatalogLoadState(loadID: newLoadID) {
+            replacement.hasPublishedPartialResult = true
+            setToolsCatalogLoadState(replacement)
+        }
         attachToolsCatalogWaiters(loadID: newLoadID, waiters: migratedWaiters)
         return newLoadID
     }
@@ -82,13 +86,17 @@ extension ControlPlaneCoordinator {
                 waiter.continuation.resume(throwing: TimeoutError())
                 continue
             }
-            let timeoutTask = makeTimeoutTask(deadlineUptimeNs: waiter.deadlineUptimeNs) {
-                await self.timeoutToolsCatalogWaiter(loadID: loadID, waiterID: waiterID)
+            let phaseDeadline = waiter.partialPublicationUptimeNs.flatMap {
+                $0 > clock.uptimeNanoseconds() ? $0 : nil
+            } ?? waiter.deadlineUptimeNs
+            let timeoutTask = makeTimeoutTask(deadlineUptimeNs: phaseDeadline) {
+                await self.toolsCatalogWaiterPhaseReached(loadID: loadID, waiterID: waiterID)
             }
             load.waiters[waiterID] = ToolsCatalogWaiterRecord(
                 continuation: waiter.continuation,
                 kind: waiter.kind,
                 deadlineUptimeNs: waiter.deadlineUptimeNs,
+                partialPublicationUptimeNs: waiter.partialPublicationUptimeNs,
                 timeoutTask: timeoutTask
             )
             if waiter.kind == .foreground {

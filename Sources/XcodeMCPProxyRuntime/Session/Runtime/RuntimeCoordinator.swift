@@ -779,17 +779,24 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             cachedToolsCatalog: { [processControlPlane] in
                 processControlPlane.canonicalToolsCatalogRaw()
             },
+            refreshedToolsCatalog: { [processControlPlane] sources in
+                guard sources.contains(where: { processControlPlane.providerCatalog(for: $0) != nil }) else {
+                    return nil
+                }
+                return processControlPlane.canonicalToolsCatalogRaw()
+            },
             canonicalToolsSource: { [processControlPlane] in
                 processControlPlane.canonicalSourceUpstream()
             },
             debugMirror: self.controlPlaneDebugMirror,
-            toolsCatalogLoader: { [runtimeBox] requestTimeout, rpcHandle in
+            toolsCatalogLoader: { [runtimeBox] requestTimeout, rpcHandle, onFreshProvider in
                 guard let runtime = runtimeBox.value else {
                     throw CancellationError()
                 }
                 return try await runtime.loadCanonicalToolsCatalog(
                     requestTimeout: requestTimeout,
-                    rpcHandle: rpcHandle
+                    rpcHandle: rpcHandle,
+                    onFreshProvider: onFreshProvider
                 )
             },
             windowsLoader: { [runtimeBox] route, requestTimeout, rpcHandle in
