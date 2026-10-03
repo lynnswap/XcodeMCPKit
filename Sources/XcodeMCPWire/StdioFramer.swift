@@ -75,7 +75,11 @@ package final class StdioFramer {
     private var rawJSONScanner: JSONBoundaryScanner?
     private let mode: Mode
 
-    package init(mode: Mode = .jsonValues) {
+    package convenience init() {
+        self.init(mode: .jsonValues)
+    }
+
+    package init(mode: Mode) {
         self.mode = mode
     }
 
