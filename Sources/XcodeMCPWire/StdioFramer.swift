@@ -199,7 +199,7 @@ package final class StdioFramer {
 
     private func nextLineMessage() -> Data? {
         guard let first = firstNonWhitespaceIndex(from: buffer.startIndex),
-              !isPotentialContentLengthHeaderPrefix(at: first) else { return nil }
+              !startsWithContentLengthHeader(at: first) else { return nil }
         guard let end = buffer[max(first, lineSearchIndex)...].firstIndex(of: 0x0A) else {
             lineSearchIndex = buffer.endIndex
             return nil

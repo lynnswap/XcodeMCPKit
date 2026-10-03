@@ -4,6 +4,22 @@ import XcodeMCPWire
 
 @Suite
 struct NativeStdioFramingTests {
+    @Test(arguments: ["C", "Content-", "Content-Lengt"], [1, 4096])
+    func incompleteHeaderPrefixesBecomeLinesWhenTheDelimiterArrives(prefix: String, chunkSize: Int) {
+        let framer = StdioFramer(mode: .delimitedMessages)
+        let following = Data(#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.utf8)
+        let input = Data((prefix + "\n").utf8) + following + Data([0x0A])
+        var messages: [Data] = []
+        for offset in stride(from: 0, to: input.count, by: chunkSize) {
+            let end = min(offset + chunkSize, input.count)
+            let result = framer.append(input.subdata(in: offset..<end))
+            #expect(result.protocolViolation == nil)
+            messages.append(contentsOf: result.messages)
+        }
+        #expect(messages == [Data(prefix.utf8), following])
+        #expect(framer.bufferedMessageByteCount == 0)
+    }
+
     @Test func lengthDelimitedMalformedJSONWaitsForTheEntireBody() {
         let framer = StdioFramer(mode: .delimitedMessages)
         let malformed = Data(#"{"jsonrpc":"2.0" invalid}"#.utf8)

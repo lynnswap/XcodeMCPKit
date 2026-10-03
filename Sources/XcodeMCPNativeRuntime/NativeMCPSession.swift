@@ -94,9 +94,12 @@ package final class NativeMCPSession {
 
     private func perform(_ method: String, params: JSONValue?) async throws -> JSONValue {
         if method == "initialize" {
-            var clientInfo: [String: JSONValue] = [:]
-            if case .object(let fields) = params, case .object(let info) = fields["clientInfo"] {
-                clientInfo = info
+            guard case .object(let fields) = params,
+                  case .string = fields["protocolVersion"],
+                  case .object = fields["capabilities"],
+                  case .object(let clientInfo) = fields["clientInfo"],
+                  case .string = clientInfo["name"], case .string = clientInfo["version"] else {
+                throw NativeRuntimeError.invalidRequest("initialize requires protocolVersion, capabilities and clientInfo name/version")
             }
             try await backend.initialize(context: NativeSessionContext(conversationID: conversationID, clientInfo: clientInfo))
             initialized = true
