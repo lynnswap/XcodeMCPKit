@@ -15,20 +15,17 @@ extension XcodeMCPProxyServer {
         }
 
         private final class Resources: @unchecked Sendable {
-            let config: ProxyConfig
             let httpGateway: any ProxyHTTPGatewayServing
             let runtime: any ProxyRuntimeServing
             let autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
             let endpoint: Endpoint
 
             init(
-                config: ProxyConfig,
                 httpGateway: any ProxyHTTPGatewayServing,
                 runtime: any ProxyRuntimeServing,
                 autoApprover: (any ProxyServerPermissionDialogAutoApprover)?,
                 endpoint: Endpoint
             ) {
-                self.config = config
                 self.httpGateway = httpGateway
                 self.runtime = runtime
                 self.autoApprover = autoApprover
@@ -43,7 +40,6 @@ extension XcodeMCPProxyServer {
         }
 
         private let configuration: XcodeMCPProxyServerConfiguration
-        private let preparedProxyConfig: ProxyConfig?
         private let dependencies: Dependencies
         private let logger: Logger
         private var phase: Phase = .idle
@@ -56,12 +52,10 @@ extension XcodeMCPProxyServer {
 
         init(
             configuration: XcodeMCPProxyServerConfiguration,
-            preparedProxyConfig: ProxyConfig?,
             dependencies: Dependencies,
             logger: Logger
         ) {
             self.configuration = configuration
-            self.preparedProxyConfig = preparedProxyConfig
             self.dependencies = dependencies
             self.logger = logger
         }
@@ -75,20 +69,9 @@ extension XcodeMCPProxyServer {
             }
 
             phase = .starting
-            // Explicit file IO and all public-value validation happen before
-            // the event-loop factory can acquire a thread.
-            let config: ProxyConfig
+            let runtimeConfiguration: ProxyRuntimeConfiguration
             do {
-                if let preparedProxyConfig {
-                    config = preparedProxyConfig
-                } else {
-                    config = try ProxyConfig.resolving(
-                        configuration,
-                        loadFileConfiguration: dependencies.loadFileConfiguration
-                    )
-                }
-                try config.validateModernProtocolConfiguration()
-
+                runtimeConfiguration = try configuration.runtimeConfiguration()
             } catch {
                 phase = .stopped
                 throw error
@@ -97,7 +80,7 @@ extension XcodeMCPProxyServer {
             let task = Task {
                 try await Self.acquire(
                     configuration: configuration,
-                    config: config,
+                    runtimeConfiguration: runtimeConfiguration,
                     dependencies: dependencies,
                     logger: logger
                 )
@@ -262,13 +245,13 @@ extension XcodeMCPProxyServer {
 
         private func logStartupSummary(for resources: Resources) {
             let displayHost =
-                resources.config.listenHost == "localhost"
+                configuration.listenHost == "localhost"
                 ? "localhost"
                 : resources.endpoint.host
             let summary = XcodeMCPProxyServer.startupSummary(
                 displayHost: displayHost,
                 port: resources.endpoint.port,
-                config: resources.config,
+                config: configuration,
                 xcodeTargets: resources.runtime.inventorySnapshot().xcodeTargets
             )
             logger.info("\(summary)")
@@ -282,20 +265,19 @@ extension XcodeMCPProxyServer {
 
         private static func acquire(
             configuration: XcodeMCPProxyServerConfiguration,
-            config: ProxyConfig,
+            runtimeConfiguration: ProxyRuntimeConfiguration,
             dependencies: Dependencies,
             logger: Logger
         ) async throws -> Resources {
-            let runtimeConfiguration = config.runtimeConfiguration()
             let runtime = try dependencies.makeRuntime(runtimeConfiguration)
             let autoApprover = runtimeConfiguration.usesPermissionDialogAutomation
-                ? dependencies.makeAutoApprover(config, runtime)
+                ? dependencies.makeAutoApprover(configuration, runtime)
                 : nil
             let httpGateway = dependencies.makeHTTPGateway(
                 ProxyHTTPConfiguration(
-                    listenHost: config.listenHost,
-                    listenPort: config.listenPort,
-                    maxBodyBytes: config.maxBodyBytes
+                    listenHost: configuration.listenHost,
+                    listenPort: configuration.listenPort,
+                    maxBodyBytes: configuration.maxBodyBytes
                 ),
                 runtime,
                 logger
@@ -312,12 +294,11 @@ extension XcodeMCPProxyServer {
                     configuration.discovery,
                     resolvedHost: resolvedHost,
                     port: resolvedPort,
-                    configuredHost: config.listenHost,
+                    configuredHost: configuration.listenHost,
                     dependencies: dependencies
                 )
 
                 return Resources(
-                    config: config,
                     httpGateway: httpGateway,
                     runtime: runtime,
                     autoApprover: autoApprover,

@@ -1090,10 +1090,6 @@ func compileOnlyProxyConfigurationSurface() {
         developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer"),
         maxBodyBytes: 1_048_576,
         requestTimeout: .seconds(120),
-        configurationFileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-config.toml"),
-        toolPolicy: .init(
-            disabledToolNames: ["RunAllTests", "RunSomeTests"]
-        ),
         initializeHandshake: .init(
             protocolVersion: "2025-06-18",
             clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
@@ -1110,16 +1106,11 @@ func compileOnlyProxyConfigurationSurface() {
         ),
         discovery: .file(URL(fileURLWithPath: "/tmp/xcode-mcp-discovery.json")),
         approvalPolicy: .manual,
-        featurePolicy: .init(
-            prewarmToolsList: false,
-            refreshCodeIssuesMode: .proxy
-        )
+        prewarmToolsList: false
     )
-    let typedToolPolicy = config.toolPolicy
     let typedHandshake = config.initializeHandshake
     let typedCapabilities: [String: MCPJSONValue]? = typedHandshake?.capabilities
     let metadataIsNull = typedCapabilities?["experimental"]?.objectValue?["metadata"]?.isNull
-    let upstreamMode = XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode.upstream
     let server = XcodeMCPProxyServer(configuration: config)
     let adapterConfig = XcodeMCPProxyStdioAdapterConfiguration(
         endpoint: .url(URL(string: "http://localhost:8765/mcp")!),
@@ -1129,11 +1120,9 @@ func compileOnlyProxyConfigurationSurface() {
 
     _ = (
         config,
-        typedToolPolicy,
         typedHandshake,
         typedCapabilities,
         metadataIsNull,
-        upstreamMode,
         server,
         adapterConfig,
         adapter
