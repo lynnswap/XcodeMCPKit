@@ -2006,6 +2006,10 @@ final class ProcessControlPlaneAuthority: Sendable {
         state.withLockedValue { $0.nativeCatalog?.rawResult }
     }
 
+    func unboundToolsCatalogProvider() -> ToolCatalogProvider? {
+        state.withLockedValue(\.nativeCatalog)
+    }
+
     func providerCatalog(for proof: UpstreamTopologyProof) -> ToolCatalogProvider? {
         state.withLockedValue { state in
             if let native = state.nativeCatalog, native.sourceProof == proof { return native }

@@ -561,10 +561,12 @@ extension RuntimeCoordinator {
     private func nativeHostToolRoutingDecision(
         for request: ToolRoutingRequest, workspaceIdentifier: String? = nil
     ) -> ToolRoutingDecision {
+        let provider = processControlPlane.unboundToolsCatalogProvider()
         let topology = upstreamTopology.snapshot()
-        let proofs = topology.entries.compactMap {
-            $0.backend == .nativeHost ? topology.proof($0.id) : nil
-        }
+        let proofs = provider.map { [$0.sourceProof] }
+            ?? topology.entries.compactMap {
+                $0.backend == .nativeHost ? topology.proof($0.id) : nil
+            }
         guard !proofs.isEmpty else {
             return .reject(errors: toolRoutingErrors(for: request, message: "The owned native host is not available"))
         }
@@ -572,7 +574,8 @@ extension RuntimeCoordinator {
             preferredUpstreamIndices: proofs.map { $0.slotID.rawValue },
             admission: RouteForwardingAdmission(
                 upstreamProofs: proofs, workspaceIdentifier: workspaceIdentifier,
-                toolDefinition: proofs.first.flatMap { toolDefinition(named: request.toolName, sourceProof: $0) }
+                toolDefinition: provider?.definition(named: request.toolName)
+                    ?? proofs.first.flatMap { toolDefinition(named: request.toolName, sourceProof: $0) }
             ))
     }
 
@@ -657,12 +660,16 @@ extension RuntimeCoordinator {
                 throw ControlPlane.Error.proxyFailure(code: -32001, message: "The owned native host is not available")
             }
         }
+        let catalogSource = route == .nativeHost
+            ? processControlPlane.unboundToolsCatalogProvider()?.sourceProof : nil
         let response = try await performControlPlaneRPC(
-            route: route, purpose: "workspaces", label: "tools/call:XcodeListWorkspaces",
+            route: catalogSource.map { .pinnedUpstream($0.slotID.rawValue) } ?? route,
+            purpose: "workspaces", label: "tools/call:XcodeListWorkspaces",
             requestObject: JSONRPC.Wire.requestObject(
                 id: "__control-plane-workspaces-\(UUID().uuidString)", method: "tools/call",
                 params: .object(["name": .string("XcodeListWorkspaces"), "arguments": .object([:])])),
-            requestTimeout: timeAmount(until: deadline), expectedUpstreamProof: expectedUpstreamProof)
+            requestTimeout: timeAmount(until: deadline),
+            expectedUpstreamProof: expectedUpstreamProof ?? catalogSource)
         guard upstreamTopology.validate(response.operationLease) else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
@@ -1022,13 +1029,11 @@ extension RuntimeCoordinator {
             request: request,
             owners: owners
         )
-        let ownerUpstreamIndices = usableInitializedUpstreamIndices(in: ownerRoute)
+        let catalog = processControlPlane.catalog(forProcessID: ownerProcessID)
+        let ownerUpstreamIndices = catalog.map { [$0.upstreamIndex] }
+            ?? usableInitializedUpstreamIndices(in: ownerRoute)
 
-        if processControlPlane.catalog(forProcessID: ownerProcessID) != nil,
-           processControlPlane.hasTool(
-            request.toolName,
-            processID: ownerProcessID
-           ) == false {
+        if let catalog, !catalog.toolNames.contains(request.toolName) {
             return .reject(
                 errors: toolRoutingErrors(
                     for: request,
@@ -1047,9 +1052,8 @@ extension RuntimeCoordinator {
         }
 
         let topology = upstreamTopology.snapshot()
-        let upstreamProofs = ownerUpstreamIndices.compactMap { topology.proof(
-            UpstreamSlotID(rawValue: $0)
-        ) }
+        let upstreamProofs = catalog.map { [$0.upstreamProof] }
+            ?? ownerUpstreamIndices.compactMap { topology.proof(UpstreamSlotID(rawValue: $0)) }
         guard upstreamProofs.count == ownerUpstreamIndices.count else {
             return .reject(
                 errors: toolRoutingErrors(
@@ -1068,9 +1072,8 @@ extension RuntimeCoordinator {
                     route: routeAdmission,
                     rewritePlan: rewritePlan
                 ),
-                toolDefinition: upstreamProofs.first.flatMap {
-                    toolDefinition(named: request.toolName, sourceProof: $0)
-                }
+                toolDefinition: catalog?.provider.definition(named: request.toolName)
+                    ?? upstreamProofs.first.flatMap { toolDefinition(named: request.toolName, sourceProof: $0) }
             )
         )
     }
@@ -1173,7 +1176,9 @@ extension RuntimeCoordinator {
                 )
             )
         }
-        let upstreamIndices = usableInitializedUpstreamIndices(in: route)
+        let catalog = processControlPlane.catalog(forProcessID: route.target.processID)
+        let upstreamIndices = catalog.map { [$0.upstreamIndex] }
+            ?? usableInitializedUpstreamIndices(in: route)
         let topology = upstreamTopology.snapshot()
         guard let routeProof = processControlPlane.routeProof(routeID: route.id),
               let routeAdmission = processControlPlane.admit(routeProof) else {
@@ -1184,9 +1189,8 @@ extension RuntimeCoordinator {
                 )
             )
         }
-        let upstreamProofs = upstreamIndices.compactMap {
-            topology.proof(UpstreamSlotID(rawValue: $0))
-        }
+        let upstreamProofs = catalog.map { [$0.upstreamProof] }
+            ?? upstreamIndices.compactMap { topology.proof(UpstreamSlotID(rawValue: $0)) }
         guard upstreamProofs.count == upstreamIndices.count else {
             return .reject(
                 errors: toolRoutingErrors(
@@ -1200,9 +1204,8 @@ extension RuntimeCoordinator {
             admission: RouteForwardingAdmission(
                 route: routeAdmission,
                 upstreamProofs: upstreamProofs,
-                toolDefinition: upstreamProofs.first.flatMap {
-                    toolDefinition(named: request.toolName, sourceProof: $0)
-                }
+                toolDefinition: catalog?.provider.definition(named: request.toolName)
+                    ?? upstreamProofs.first.flatMap { toolDefinition(named: request.toolName, sourceProof: $0) }
             )
         )
     }
