@@ -125,7 +125,8 @@ extension RuntimeCoordinator {
 
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
-        rpcHandle: ControlPlane.RPCHandle
+        rpcHandle: ControlPlane.RPCHandle,
+        onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void = { _ in }
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let startedAt = nowUptimeNanoseconds()
         let timeout = requestTimeout ?? MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: config.requestTimeout)
@@ -144,7 +145,8 @@ extension RuntimeCoordinator {
         }
         async let guiLoad = loadAvailableToolsCatalogsInBatch(
             routes, requestTimeout: timeout, deadlineUptimeNs: deadline, startedAt: startedAt,
-            exposedProcessIDs: exposure.processIDs, returnAfterFirstSuccess: false)
+            exposedProcessIDs: exposure.processIDs, returnAfterFirstSuccess: false,
+            onFreshProvider: onFreshProvider)
         let nativeIsInitialized = topology.entries.contains { entry in
             entry.backend == .nativeHost
                 && upstreamHealthManager.state(for: entry.id)?.initPhase.isUsableInitialized == true
@@ -154,7 +156,8 @@ extension RuntimeCoordinator {
         if nativeIsInitialized {
             do {
                 _ = try await loadUnboundToolsCatalog(
-                    requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt)
+                    requestTimeout: timeout, rpcHandle: rpcHandle, startedAt: startedAt,
+                    onFreshProvider: onFreshProvider)
                 refreshedProvider = true
             } catch {
                 if error is CancellationError { throw error }
@@ -193,13 +196,15 @@ extension RuntimeCoordinator {
     }
 
     private func loadUnboundToolsCatalog(
-        requestTimeout: TimeAmount?, rpcHandle: ControlPlane.RPCHandle, startedAt: UInt64
+        requestTimeout: TimeAmount?, rpcHandle: ControlPlane.RPCHandle, startedAt: UInt64,
+        onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void
     ) async throws -> CanonicalToolsCatalogLoadResult {
         guard let lease = beginDefaultBackendCatalogLoad(allowsConcurrentLoad: true) else {
             throw UpstreamSlotScheduler.AcquisitionError.unavailable
         }
         return try await loadUnboundToolsCatalog(
-            lease: lease, requestTimeout: requestTimeout, rpcHandle: rpcHandle, startedAt: startedAt
+            lease: lease, requestTimeout: requestTimeout, rpcHandle: rpcHandle, startedAt: startedAt,
+            onFreshProvider: onFreshProvider
         )
     }
 
@@ -207,7 +212,8 @@ extension RuntimeCoordinator {
         lease: CatalogLease,
         requestTimeout: TimeAmount?,
         rpcHandle: ControlPlane.RPCHandle,
-        startedAt: UInt64
+        startedAt: UInt64,
+        onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void
     ) async throws -> CanonicalToolsCatalogLoadResult {
         applyProcessControlPlaneTransition(
             processControlPlane.attach(.rpc(rpcHandle), to: lease)
@@ -237,6 +243,7 @@ extension RuntimeCoordinator {
             switch commit {
             case .accepted(let snapshot, let transition):
                 applyProcessControlPlaneTransition(transition)
+                await onFreshProvider(sourceProof)
                 guard let rawResult = snapshot.canonicalToolsCatalogRaw else {
                     throw UpstreamSlotScheduler.AcquisitionError.unavailable
                 }
@@ -288,7 +295,8 @@ extension RuntimeCoordinator {
         deadlineUptimeNs: UInt64?,
         startedAt: UInt64,
         exposedProcessIDs: Set<pid_t>,
-        returnAfterFirstSuccess: Bool = true
+        returnAfterFirstSuccess: Bool = true,
+        onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void = { _ in }
     ) async throws -> CanonicalToolsCatalogLoadResult {
         for route in routes {
             scheduleProcessRouteActivationCatalogTimeoutIfNeeded(lease: route.lease)
@@ -316,6 +324,7 @@ extension RuntimeCoordinator {
                         ) else {
                             return .stale
                         }
+                        if let source = result.sourceProof { await onFreshProvider(source) }
                         return .success(
                             route: route,
                             result: recordedResult

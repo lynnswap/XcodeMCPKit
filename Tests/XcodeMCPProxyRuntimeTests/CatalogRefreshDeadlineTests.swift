@@ -9,32 +9,78 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .timeLimit(.minutes(1)), .asyncTestCleanup)
 struct CatalogRefreshDeadlineTests {
-    @Test func freshNativeAndHealthyGUIResultsPublishBeforeTheCallerDeadlineWhenAnotherGUIIsSilent() async throws {
+    @Test func freshResultsPublishBeforeTheCallerDeadlineAndTheLateGUIStillCommits() async throws {
         let fixture = try CatalogDeadlineFixture(hasNative: true, guiCount: 2)
         defer { fixture.manager.shutdownAndWait() }
+        let observer = fixture.manager.session(id: "deadline-observer")
+        fixture.manager.sessionRegistry.markInitialized(id: observer.id, negotiatedProtocolVersion: MCP.ProtocolVersion.current)
+        _ = observer.router.drainBufferedNotifications()
         let load = fixture.loadCatalog()
         defer { load.cancel() }
         try await fixture.waitForCallerCount(1)
         let nativeRequest = try await fixture.nextCatalogRequest(upstreamIndex: 0)
         let healthyRequest = try await fixture.nextCatalogRequest(upstreamIndex: 1)
-        _ = try await fixture.nextCatalogRequest(upstreamIndex: 2)
+        let lateRequest = try await fixture.nextCatalogRequest(upstreamIndex: 2)
         try await fixture.reply(to: nativeRequest, upstreamIndex: 0, toolName: "FreshNativeTool")
         try await fixture.reply(to: healthyRequest, upstreamIndex: 1, toolName: "FreshGUITool")
         try await fixture.waitForRefreshSuccess(upstreamIndex: 0)
-        try await fixture.waitForRefreshSuccess(upstreamIndex: 1)
+        try await fixture.waitForGUICommit(upstreamIndex: 1)
 
-        try await fixture.timeoutClock.sleep(untilSuspendedFor: .seconds(5))
         await fixture.advance(byMilliseconds: 2_500)
         let result = try await fixture.result(of: load)
-        let names = Set(toolNames(in: result))
-        #expect(names.contains("FreshNativeTool"))
-        #expect(names.contains("FreshGUITool"))
-        #expect(!names.contains("CachedNativeTool"))
-        #expect(!names.contains("CachedGUITool1"))
-        #expect(fixture.uptimeClock.now() == 2_500_000_000)
-        fixture.uptimeClock.advance(by: .milliseconds(2_500))
-        fixture.timeoutClock.advance(by: .milliseconds(2_500))
-        #expect(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting() == nil)
+        #expect(Set(toolNames(in: result)).isSuperset(of: ["FreshNativeTool", "FreshGUITool"]))
+        let background = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
+        #expect(background.waiterCount == 0)
+        _ = observer.router.drainBufferedNotifications()
+        await fixture.advance(byMilliseconds: 500)
+        try await fixture.reply(to: lateRequest, upstreamIndex: 2, toolName: "LateFreshGUITool")
+        try await fixture.waitForGUICommit(upstreamIndex: 2)
+        #expect(toolNames(in: fixture.manager.cachedToolsListResult() ?? .null).contains("LateFreshGUITool"))
+        #expect(!observer.router.drainBufferedNotifications().isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func aLaterCallersCancellationCannotAbandonUpdatesOwnedByAnEarlierPartialPublication(extendsReadBudget: Bool) async throws {
+        let fixture = try CatalogDeadlineFixture(hasNative: true, guiCount: 1)
+        defer { fixture.manager.shutdownAndWait() }
+        let observer = fixture.manager.session(id: "partial-background-observer")
+        fixture.manager.sessionRegistry.markInitialized(id: observer.id, negotiatedProtocolVersion: MCP.ProtocolVersion.current)
+        let first = fixture.loadCatalog()
+        defer { first.cancel() }
+        try await fixture.waitForCallerCount(1)
+        let nativeRequest = try await fixture.nextCatalogRequest(upstreamIndex: 0)
+        let guiRequest = try await fixture.nextCatalogRequest(upstreamIndex: 1)
+        try await fixture.reply(to: nativeRequest, upstreamIndex: 0, toolName: "PublishedPartialNative")
+        try await fixture.waitForRefreshSuccess(upstreamIndex: 0)
+        await fixture.advance(byMilliseconds: 2_500)
+        #expect(toolNames(in: try await fixture.result(of: first)).contains("PublishedPartialNative"))
+        let background = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
+        #expect(background.waiterCount == 0)
+        _ = observer.router.drainBufferedNotifications()
+        let later = fixture.loadCatalog(timeout: extendsReadBudget ? .seconds(10) : .seconds(1))
+        defer { later.cancel() }
+        try await fixture.waitForCallerCount(1)
+        let joined = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
+        #expect((joined.loadID != background.loadID) == extendsReadBudget)
+        let pendingGUIRequest: Data
+        if extendsReadBudget {
+            let newNativeRequest = try await fixture.nextCatalogRequest(upstreamIndex: 0, startingAt: 1)
+            pendingGUIRequest = try await fixture.nextCatalogRequest(upstreamIndex: 1, startingAt: 1)
+            try await fixture.reply(to: newNativeRequest, upstreamIndex: 0, toolName: "RefreshedExtendedNative")
+        } else {
+            pendingGUIRequest = guiRequest
+        }
+        later.cancel()
+        await #expect(throws: CancellationError.self) { try await fixture.result(of: later) }
+        let preserved = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
+        #expect(preserved.loadID == joined.loadID)
+        #expect(preserved.waiterCount == 0)
+        #expect(preserved.rpcHandle.isCancelled() == false)
+        await fixture.advance(byMilliseconds: 500)
+        try await fixture.reply(to: pendingGUIRequest, upstreamIndex: 1, toolName: "GUIUpdateAfterLaterCancel")
+        try await fixture.waitForGUICommit(upstreamIndex: 1)
+        #expect(toolNames(in: fixture.manager.cachedToolsListResult() ?? .null).contains("GUIUpdateAfterLaterCancel"))
+        #expect(!observer.router.drainBufferedNotifications().isEmpty)
     }
 
     @Test(arguments: [false, true])
@@ -48,18 +94,14 @@ struct CatalogRefreshDeadlineTests {
         if replies {
             await fixture.advance(byMilliseconds: 1_000)
             try await fixture.reply(to: request, upstreamIndex: 0, toolName: "FreshGUIOnlyTool")
-            let result = try await fixture.result(of: load)
-            #expect(Set(toolNames(in: result)) == Set(["FreshGUIOnlyTool"]))
-            #expect(fixture.uptimeClock.now() == 1_000_000_000)
+            #expect(Set(toolNames(in: try await fixture.result(of: load))) == Set(["FreshGUIOnlyTool"]))
         } else {
             await fixture.advance(byMilliseconds: 2_500)
-            let outcome = try await waitWithTimeout("waiting for a catalog with no fresh provider to fail", timeout: .seconds(2)) {
-                await load.result
-            }
-            if case .success(let result) = outcome {
-                Issue.record("A silent GUI returned its cached catalog as a successful refresh: \(toolNames(in: result))")
-            }
-            #expect(fixture.uptimeClock.now() == 2_500_000_000)
+            let pending = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
+            #expect(pending.foregroundWaiterCount == 1)
+            try await fixture.timeoutClock.sleep(untilSuspendedFor: .milliseconds(2_500))
+            await fixture.advance(byMilliseconds: 2_500)
+            await #expect(throws: TimeoutError.self) { try await fixture.result(of: load) }
         }
     }
 
@@ -72,7 +114,7 @@ struct CatalogRefreshDeadlineTests {
         for index in fixture.upstreams.indices {
             let request = try await fixture.nextCatalogRequest(upstreamIndex: index)
             await fixture.upstreams[index].yield(.message(try JSONRPC.Wire.errorResponseData(
-                id: try #require(JSONRPC.ID(any: extractUpstreamID(from: request))),
+                id: JSONRPC.ID(any: try extractUpstreamID(from: request)),
                 code: -32603, message: "Origin \(index) catalog failed"
             )))
         }
@@ -80,58 +122,95 @@ struct CatalogRefreshDeadlineTests {
             await load.result
         }
         switch outcome {
-        case .success(let result):
-            Issue.record("Origin RPC errors returned cached tools as success: \(toolNames(in: result))")
-        case .failure(let error):
-            #expect(ControlPlane.ErrorMapper.jsonRPCError(for: error).code == -32603)
+        case .success(let result): Issue.record("Cached tools were treated as a fresh reply: \(toolNames(in: result))")
+        case .failure(let error): #expect(ControlPlane.ErrorMapper.jsonRPCError(for: error).code == -32603)
         }
     }
 
-    @Test func equalDeadlinesShareOneRefreshAndAShorterCallerKeepsTheLongWaiters() async throws {
+    @Test(arguments: [false, true])
+    func aShortCallerCannotReduceTheLongCallersReadBudget(cancelShort: Bool) async throws {
+        let fixture = try CatalogDeadlineFixture(hasNative: true, guiCount: 1)
+        defer { fixture.manager.shutdownAndWait() }
+        let long = fixture.loadCatalog()
+        defer { long.cancel() }
+        try await fixture.waitForCallerCount(1)
+        let nativeRequest = try await fixture.nextCatalogRequest(upstreamIndex: 0)
+        _ = try await fixture.nextCatalogRequest(upstreamIndex: 1)
+        let original = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
+        let short = fixture.loadCatalog(timeout: .seconds(1))
+        defer { short.cancel() }
+        try await fixture.waitForCallerCount(2)
+        let shared = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
+        #expect(shared.loadID == original.loadID)
+        for origin in fixture.upstreams {
+            #expect(await origin.sent().filter { methodName(from: $0) == "tools/list" }.count == 1)
+        }
+        if cancelShort {
+            short.cancel()
+            await #expect(throws: CancellationError.self) { try await fixture.result(of: short) }
+        } else {
+            await fixture.advance(byMilliseconds: 500)
+            try await fixture.timeoutClock.sleep(untilSuspendedFor: .milliseconds(500))
+            await fixture.advance(byMilliseconds: 500)
+            await #expect(throws: TimeoutError.self) { try await fixture.result(of: short) }
+        }
+        let preserved = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
+        #expect(preserved.loadID == original.loadID)
+        #expect(preserved.foregroundWaiterCount == 1)
+        await fixture.advance(byMilliseconds: cancelShort ? 2_000 : 1_000)
+        try await fixture.reply(to: nativeRequest, upstreamIndex: 0, toolName: "NativeReplyAfterTwoSeconds")
+        try await fixture.waitForRefreshSuccess(upstreamIndex: 0)
+        await fixture.advance(byMilliseconds: 500)
+        #expect(toolNames(in: try await fixture.result(of: long)).contains("NativeReplyAfterTwoSeconds"))
+        #expect(fixture.uptimeClock.now() == 2_500_000_000)
+    }
+
+    @Test func aFreshCommitAfterTheShortCallersPublicationPhaseCanReturnPartialBeforeItsHardDeadline() async throws {
+        let fixture = try CatalogDeadlineFixture(hasNative: true, guiCount: 1)
+        defer { fixture.manager.shutdownAndWait() }
+        let long = fixture.loadCatalog()
+        defer { long.cancel() }
+        try await fixture.waitForCallerCount(1)
+        let nativeRequest = try await fixture.nextCatalogRequest(upstreamIndex: 0)
+        _ = try await fixture.nextCatalogRequest(upstreamIndex: 1)
+        let short = fixture.loadCatalog(timeout: .seconds(1))
+        defer { short.cancel() }
+        try await fixture.waitForCallerCount(2)
+        await fixture.advance(byMilliseconds: 500)
+        try await fixture.timeoutClock.sleep(untilSuspendedFor: .milliseconds(500))
+        await fixture.advance(byMilliseconds: 250)
+        try await fixture.reply(to: nativeRequest, upstreamIndex: 0, toolName: "FreshBeforeOneSecond")
+        #expect(toolNames(in: try await fixture.result(of: short)).contains("FreshBeforeOneSecond"))
+        #expect(fixture.uptimeClock.now() == 750_000_000)
+        await fixture.advance(byMilliseconds: 1_750)
+        #expect(toolNames(in: try await fixture.result(of: long)).contains("FreshBeforeOneSecond"))
+    }
+
+    @Test func equalDeadlineCallersShareOneReadOperation() async throws {
         let fixture = try CatalogDeadlineFixture(hasNative: true, guiCount: 1)
         defer { fixture.manager.shutdownAndWait() }
         let first = fixture.loadCatalog()
         defer { first.cancel() }
         try await fixture.waitForCallerCount(1)
-        _ = try await fixture.nextCatalogRequest(upstreamIndex: 0)
+        let request = try await fixture.nextCatalogRequest(upstreamIndex: 0)
         _ = try await fixture.nextCatalogRequest(upstreamIndex: 1)
-        let originalLoad = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
-
+        let original = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
         let second = fixture.loadCatalog()
         defer { second.cancel() }
         try await fixture.waitForCallerCount(2)
-        let sharedLoad = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
-        #expect(sharedLoad.loadID == originalLoad.loadID)
-        for upstream in fixture.upstreams {
-            #expect(await upstream.sent().filter { methodName(from: $0) == "tools/list" }.count == 1)
+        #expect(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting()?.loadID == original.loadID)
+        for origin in fixture.upstreams {
+            #expect(await origin.sent().filter { methodName(from: $0) == "tools/list" }.count == 1)
         }
-
-        let shorter = fixture.loadCatalog(timeout: .seconds(4))
-        defer { shorter.cancel() }
-        try await fixture.waitForCallerCount(3)
-        let replannedLoad = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
-        #expect(replannedLoad.loadID != originalLoad.loadID)
-        #expect(replannedLoad.foregroundWaiterCount == 3)
-        let nativeRequest = try await fixture.nextCatalogRequest(upstreamIndex: 0, startingAt: 1)
-        _ = try await fixture.nextCatalogRequest(upstreamIndex: 1, startingAt: 1)
-        for upstream in fixture.upstreams {
-            #expect(await upstream.sent().filter { methodName(from: $0) == "tools/list" }.count == 2)
-        }
-        try await fixture.reply(to: nativeRequest, upstreamIndex: 0, toolName: "FreshReplannedNativeTool")
+        try await fixture.reply(to: request, upstreamIndex: 0, toolName: "SharedFreshNative")
         try await fixture.waitForRefreshSuccess(upstreamIndex: 0)
-        try await fixture.timeoutClock.sleep(untilSuspendedFor: .seconds(4))
-        await fixture.advance(byMilliseconds: 2_000)
-        for waiter in [first, second, shorter] {
-            let result = try await fixture.result(of: waiter)
-            #expect(toolNames(in: result).contains("FreshReplannedNativeTool"))
-            #expect(!toolNames(in: result).contains("CachedNativeTool"))
+        await fixture.advance(byMilliseconds: 2_500)
+        for caller in [first, second] {
+            #expect(toolNames(in: try await fixture.result(of: caller)).contains("SharedFreshNative"))
         }
-        #expect(fixture.uptimeClock.now() == 2_000_000_000)
-        fixture.uptimeClock.advance(by: .milliseconds(3_000))
-        fixture.timeoutClock.advance(by: .milliseconds(3_000))
-        #expect(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting() == nil)
     }
 }
+
 
 private struct CatalogDeadlineFixture {
     let eventLoop: NIOAsyncTestingEventLoop
@@ -140,6 +219,7 @@ private struct CatalogDeadlineFixture {
     let upstreams: [TestUpstreamClient]
     let manager: RuntimeCoordinator
     let refreshEvents: LockedRecordedValues<(Int, Bool)>
+    let guiCommits: LockedRecordedValues<Int>
 
     init(hasNative: Bool, guiCount: Int) throws {
         let clocks = makeRuntimeCoordinatorDeterministicClocks()
@@ -155,11 +235,14 @@ private struct CatalogDeadlineFixture {
         }
         let refreshEvents = LockedRecordedValues<(Int, Bool)>()
         self.refreshEvents = refreshEvents
+        let guiCommits = LockedRecordedValues<Int>()
+        self.guiCommits = guiCommits
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5), eventLoop: eventLoop, upstreams: upstreams,
             clock: clocks.clock,
             xcodeProcessRoutes: guiEntries.map { XcodeProcessRoute(target: $0.target, upstreamIndices: [$0.index]) },
-            testHooks: .init(toolsListRefreshCompleted: { refreshEvents.append(($0, $1)) }),
+            testHooks: .init(toolsListRefreshCompleted: { refreshEvents.append(($0, $1)) },
+                processRouteCatalogCommitted: { _, index in guiCommits.append(index) }),
             startImmediately: false
         )
         self.manager = manager
@@ -209,6 +292,17 @@ private struct CatalogDeadlineFixture {
             while true {
                 let event = try await events.nextValue(at: index)
                 if event.0 == upstreamIndex && event.1 { return }
+                index += 1
+            }
+        }
+    }
+
+    func waitForGUICommit(upstreamIndex: Int) async throws {
+        let commits = guiCommits
+        try await waitWithTimeout("waiting for the actual GUI catalog commit", timeout: .seconds(2)) {
+            var index = 0
+            while true {
+                if try await commits.nextValue(at: index) == upstreamIndex { return }
                 index += 1
             }
         }
