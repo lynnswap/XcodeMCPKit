@@ -128,7 +128,13 @@ package final class NativeMCPSession {
             let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID)
-            let updates = try await backend.execute(name, arguments: arguments, context: context)
+            let updates: AsyncStream<Data>
+            do {
+                updates = try await backend.execute(name, arguments: arguments, context: context)
+            } catch let error as NativeToolExecutionError {
+                try Task.checkCancellation()
+                return try toolResult(.string(error.message), isError: true)
+            }
             var completed: JSONValue?
             for await data in updates {
                 guard let event = JSONValue(any: try JSONSerialization.jsonObject(with: data)),

@@ -1,5 +1,9 @@
 import Foundation
 
+package struct NativeToolExecutionError: Error, Sendable {
+    package let message: String
+}
+
 package enum NativeRuntimeError: Error, CustomStringConvertible, Sendable {
     case unavailable(String)
     case invalidRequest(String)
