@@ -73,7 +73,6 @@ final class UpstreamSlotScheduler: Sendable {
 
     private struct State: Sendable {
         var pendingRequests: [PendingRequest] = []
-        var activeLeaseIDsByUpstream: [Int: LeaseManager.ID] = [:]
         var reservationsByLeaseID: [LeaseManager.ID: Reservation] = [:]
     }
 
@@ -106,12 +105,7 @@ final class UpstreamSlotScheduler: Sendable {
         self.validateOperationLease = validateOperationLease
         self.applyHealthEffects = applyHealthEffects
         self.testHooks = testHooks
-        self.state = NIOLockedValueBox(
-            State(
-                pendingRequests: [],
-                activeLeaseIDsByUpstream: [:]
-            )
-        )
+        self.state = NIOLockedValueBox(State())
     }
 
     func enqueueRequest(
@@ -182,13 +176,10 @@ final class UpstreamSlotScheduler: Sendable {
 
     func releaseUpstreamSlot(upstreamIndex: Int? = nil, leaseID: LeaseManager.ID) {
         let releasedUpstreamIndex = state.withLockedValue { state -> Int? in
-            guard let upstreamIndex = upstreamIndex
-                    ?? state.reservationsByLeaseID[leaseID]?.upstreamIndex,
-                  state.activeLeaseIDsByUpstream[upstreamIndex] == leaseID
-            else { return nil }
-            state.activeLeaseIDsByUpstream.removeValue(forKey: upstreamIndex)
+            guard let reservation = state.reservationsByLeaseID[leaseID],
+                  upstreamIndex == nil || upstreamIndex == reservation.upstreamIndex else { return nil }
             state.reservationsByLeaseID.removeValue(forKey: leaseID)
-            return upstreamIndex
+            return reservation.upstreamIndex
         }
         guard let releasedUpstreamIndex else { return }
         logger.debug(
@@ -209,14 +200,6 @@ final class UpstreamSlotScheduler: Sendable {
                 .filter { $0.hasStarted == false }
                 .map(\.request)
 
-            for reservation in state.reservationsByLeaseID.values
-            where reservation.hasStarted == false {
-                if state.activeLeaseIDsByUpstream[reservation.upstreamIndex]
-                    == reservation.request.leaseID
-                {
-                    state.activeLeaseIDsByUpstream.removeValue(forKey: reservation.upstreamIndex)
-                }
-            }
             state.reservationsByLeaseID = state.reservationsByLeaseID.filter { _, reservation in
                 reservation.hasStarted
             }
@@ -254,9 +237,6 @@ final class UpstreamSlotScheduler: Sendable {
                     return nil
                 }
                 state.reservationsByLeaseID.removeValue(forKey: leaseID)
-                if state.activeLeaseIDsByUpstream[reservation.upstreamIndex] == leaseID {
-                    state.activeLeaseIDsByUpstream.removeValue(forKey: reservation.upstreamIndex)
-                }
                 return .reserved(reservation.request, reservation.upstreamIndex)
             }
             return .pending(state.pendingRequests.remove(at: index))
@@ -290,16 +270,12 @@ final class UpstreamSlotScheduler: Sendable {
         state.withLockedValue { state in
             UpstreamSlotScheduler.DebugSnapshot(
                 queuedRequestCount: state.pendingRequests.count,
-                activeLeaseCountByUpstream: state.activeLeaseIDsByUpstream.reduce(into: [:]) {
-                    counts, item in
-                    counts[item.key] = 1
+                activeLeaseCountByUpstream: state.reservationsByLeaseID.values.reduce(into: [:]) {
+                    counts, reservation in
+                    counts[reservation.upstreamIndex, default: 0] += 1
                 }
             )
         }
-    }
-
-    func occupiedUpstreamIndices() -> Set<Int> {
-        state.withLockedValue { Set($0.activeLeaseIDsByUpstream.keys) }
     }
 
     func reset() {
@@ -309,7 +285,6 @@ final class UpstreamSlotScheduler: Sendable {
                 .filter { $0.hasStarted == false }
                 .map(\.request)
             state.pendingRequests.removeAll()
-            state.activeLeaseIDsByUpstream.removeAll()
             state.reservationsByLeaseID.removeAll()
             return pendingRequests + reservedRequests
         }
@@ -345,21 +320,14 @@ final class UpstreamSlotScheduler: Sendable {
             var genericSelectionUnavailable = false
 
             while state.pendingRequests.isEmpty == false {
-                let occupied = Set(state.activeLeaseIDsByUpstream.keys)
                 var chosenPendingIndex: Int?
                 var chosenOperationLease: UpstreamOperationLease?
                 var unavailablePendingIndex: Int?
 
                 for (pendingIndex, request) in state.pendingRequests.enumerated() {
                     if request.preferredUpstreamIndices.isEmpty == false {
-                        var preferredCandidateIsOccupied = false
                         var preferredRecoveryStarted = false
                         for preferredUpstreamIndex in request.preferredUpstreamIndices {
-                            guard state.activeLeaseIDsByUpstream[preferredUpstreamIndex] == nil
-                            else {
-                                preferredCandidateIsOccupied = true
-                                continue
-                            }
                             let evaluation = canUseUpstream(preferredUpstreamIndex)
                             healthEffects.append(contentsOf: evaluation.effects)
                             if Self.effectsStartRecovery(evaluation.effects) {
@@ -376,7 +344,7 @@ final class UpstreamSlotScheduler: Sendable {
                         }
                         if chosenPendingIndex != nil {
                             break
-                        } else if preferredCandidateIsOccupied || preferredRecoveryStarted {
+                        } else if preferredRecoveryStarted {
                             continue
                         } else {
                             unavailablePendingIndex = pendingIndex
@@ -385,16 +353,12 @@ final class UpstreamSlotScheduler: Sendable {
                     }
 
                     guard !genericSelectionUnavailable else { continue }
-                    let selection = selectUpstream(occupied)
+                    let selection = selectUpstream([])
                     healthEffects.append(contentsOf: selection.effects)
                     guard let proof = selection.proof,
                           let selectedLease = operationLease(proof) else {
                         genericSelectionUnavailable = true
                         continue
-                    }
-                    let selectedUpstreamIndex = selectedLease.upstreamIndex
-                    guard state.activeLeaseIDsByUpstream[selectedUpstreamIndex] == nil else {
-                        break
                     }
                     chosenPendingIndex = pendingIndex
                     chosenOperationLease = selectedLease
@@ -412,8 +376,6 @@ final class UpstreamSlotScheduler: Sendable {
                 }
 
                 let pendingRequest = state.pendingRequests.remove(at: chosenPendingIndex)
-                let upstreamIndex = chosenOperationLease.upstreamIndex
-                state.activeLeaseIDsByUpstream[upstreamIndex] = pendingRequest.leaseID
                 state.reservationsByLeaseID[pendingRequest.leaseID] = Reservation(
                     request: pendingRequest,
                     operationLease: chosenOperationLease

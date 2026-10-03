@@ -344,27 +344,16 @@ struct DocumentationProviderTests {
         await shutdownTask.value
     }
 
-    @Test func localDocumentationProviderIsUsedWhenServiceIsAbsent() {
-        var config = makeConfig(requestTimeout: 5)
-        let transport = UnavailableDocumentationProviderTransport()
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
-            config: config,
-            discovery: StubXcodeTargetDiscovery(targets: []),
-            transport: transport
-        ) != nil)
-
-        config.disabledToolNames = [DocumentationProvider.ToolCatalog.toolName]
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
-            config: config,
-            discovery: StubXcodeTargetDiscovery(targets: []),
-            transport: transport
-        ) == nil)
-
-        config.disabledToolNames = []
-        config.includesXcodeService = true
-        #expect(RuntimeCoordinator.makeDefaultDocumentationProviderManager(
-            config: config, discovery: StubXcodeTargetDiscovery(targets: []), transport: transport
-        ) == nil)
+    @Test func nativeCompositionUsesOneHostWithoutAnExtraDocumentationProvider() {
+        let group = borrowSharedTestEventLoopGroup()
+        defer { shutdownAndWait(group) }
+        let manager = RuntimeCoordinator(
+            config: makeConfig(requestTimeout: 5), eventLoop: group.next(),
+            xcodeTargetDiscovery: StubXcodeTargetDiscovery(targets: []), startImmediately: false)
+        defer { manager.shutdownAndWait() }
+        #expect(manager.upstreamSlotIDs.count == 1)
+        #expect(manager.defaultBackendUpstreamIndices == [0])
+        #expect(manager.documentationProviderManager == nil)
     }
 
     @Test func documentationProviderPrefersInstalledAssetWhenConfigured()
@@ -899,42 +888,24 @@ struct DocumentationProviderTests {
         #expect(await factory.documentationQueries(for: target.processID).isEmpty)
     }
 
-    @Test func xcodeVersionKeyDistinguishesDeveloperDirAndMCPBridgePath() {
-        let base = XcodeVersionKey(
-            xcodeVersion: "27.0",
-            developerDir: "/Applications/Xcode.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge"
-        )
-        let differentDeveloperDir = XcodeVersionKey(
-            xcodeVersion: "27.0",
-            developerDir: "/Applications/Xcode-Beta.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge"
-        )
-        let differentMCPBridgePath = XcodeVersionKey(
-            xcodeVersion: "27.0",
-            developerDir: "/Applications/Xcode.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode-Beta.app/Contents/Developer/usr/bin/mcpbridge"
-        )
-
-        #expect(base != differentDeveloperDir)
-        #expect(base != differentMCPBridgePath)
+    @Test func xcodeVersionKeyDistinguishesSelectedInstallations() {
+        let base = XcodeVersionKey(xcodeVersion: "27.0", developerDir: "/Applications/Xcode.app/Contents/Developer")
+        let beta = XcodeVersionKey(xcodeVersion: "27.0", developerDir: "/Applications/Xcode-Beta.app/Contents/Developer")
+        #expect(base != beta)
     }
 
     @Test func upstreamTopologyResolvesSelectionScopes() {
         let sharedDeveloperDir = "/Applications/Xcode.app/Contents/Developer"
-        let sharedMCPBridgePath = "\(sharedDeveloperDir)/usr/bin/mcpbridge"
         let firstSharedVersionTarget = XcodeProcessTarget(
             processID: 700,
             appPath: "/Applications/Xcode.app",
             developerDir: sharedDeveloperDir,
-            mcpbridgePath: sharedMCPBridgePath,
             xcodeVersion: "27.0"
         )
         let secondSharedVersionTarget = XcodeProcessTarget(
             processID: 701,
             appPath: "/Applications/Xcode.app",
             developerDir: sharedDeveloperDir,
-            mcpbridgePath: sharedMCPBridgePath,
             xcodeVersion: "27.0"
         )
         let otherVersionTarget = xcodeProcessTarget(processID: 702, xcodeVersion: "26.6")
@@ -1001,104 +972,73 @@ struct DocumentationProviderTests {
         ])
     }
 
-    @Test func automaticUpstreamPlanKeepsServiceAlongsideGUI() throws {
+    @Test func automaticUpstreamPlanKeepsOneNativeHostAlongsideOneGUIConnection() throws {
         let target = xcodeProcessTarget(processID: 731, xcodeVersion: "27.0")
-        var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
-        config.upstreamProcessCount = 2
-        let plan = MCPBridgeRuntime.makeUpstreamPlan(
-            config: makeBridgeRuntimeConfig(config), xcodeTargets: [target]
-        )
-        #expect(plan.upstreams.count == 4)
-        #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [2, 3])
-        for upstream in plan.upstreams.prefix(2) {
-            #expect(try upstreamEnvironment(from: upstream)["MCP_XCODE_PID"] == nil)
-        }
-        for upstream in plan.upstreams.suffix(2) {
-            #expect(try upstreamEnvironment(from: upstream)["MCP_XCODE_PID"] == "731")
-        }
+        let plan = try MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)), xcodeTargets: [target])
+        #expect(plan.upstreams.count == 2)
+        #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [1])
+        let headless = try #require(plan.upstreams.first)
+        #expect(try upstreamEnvironment(from: headless)["MCP_XCODE_PID"] == nil)
+        #expect(try upstreamArgs(from: headless).contains("--gui-pid") == false)
+        let gui = try #require(plan.upstreams.last)
+        let arguments = try upstreamArgs(from: gui)
+        #expect(zip(arguments, arguments.dropFirst()).contains { $0 == "--gui-pid" && $1 == "731" })
     }
 
     @Test func backendOwnershipSurvivesReplacementAndGUIRetirement() throws {
         let service = TestUpstreamClient()
         let gui = TestUpstreamClient()
         let guiID = UpstreamBackend.xcodeProcess(XcodeProcessID(rawValue: 732))
-        let topology = UpstreamTopologyAuthority([service], backend: { _ in .xcodeService })
+        let topology = UpstreamTopologyAuthority([service], backend: { _ in .nativeHost })
         let added = topology.append([gui], backend: guiID)
         let serviceID = UpstreamSlotID(rawValue: 0)
         let guiSlotID = try #require(added.addedIDs.first)
         let proof = try #require(topology.operationLease(for: serviceID)?.proof)
         let replacement = try #require(topology.replace(proof, with: TestUpstreamClient()))
-        #expect(replacement.snapshot.slotIDs(for: .xcodeService) == [serviceID])
+        #expect(replacement.snapshot.slotIDs(for: .nativeHost) == [serviceID])
         #expect(replacement.snapshot.slotIDs(for: guiID) == [guiSlotID])
         #expect(!topology.validate(proof))
         let retired = topology.retire([guiSlotID])
         #expect(retired.snapshot.slotIDs == [serviceID])
-        #expect(retired.snapshot.slotIDs(for: .xcodeService) == [serviceID])
+        #expect(retired.snapshot.slotIDs(for: .nativeHost) == [serviceID])
         #expect(retired.snapshot.slotIDs(for: guiID).isEmpty)
     }
 
-    @Test func defaultUpstreamPlanBindsEachSlotToSingleXcodeProcess() throws {
+    @Test func defaultUpstreamPlanBindsGUIConnectionToItsOwner() throws {
         let target = xcodeProcessTarget(processID: 710, xcodeVersion: "27.0")
-        var config = makeConfig(requestTimeout: 5)
-        config.upstreamProcessCount = 2
-
-        let plan = MCPBridgeRuntime.makeUpstreamPlan(
-            config: makeBridgeRuntimeConfig(config), xcodeTargets: [target],
-            baseEnvironment: ["MCP_XCODE_PID": "inherited", "MCP_XCODE_SESSION_ID": "parent-session"]
-        )
-
+        let plan = try MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)), xcodeTargets: [target],
+            baseEnvironment: ["MCP_XCODE_PID": "inherited", "MCP_XCODE_SESSION_ID": "parent-session"])
         #expect(plan.upstreams.count == 2)
-        #expect(plan.xcodeProcessRoutes.count == 1)
-        #expect(plan.xcodeProcessRoutes.first?.target.processID == target.processID)
-        #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [0, 1])
-        #expect(plan.topology.slotIDs == [
-            UpstreamSlotID(rawValue: 0),
-            UpstreamSlotID(rawValue: 1),
-        ])
-        #expect(plan.topology.xcodeProcessRoutes() == plan.xcodeProcessRoutes)
+        #expect(plan.xcodeProcessRoutes.first?.upstreamIndices == [1])
         let binding = try #require(plan.topology.xcodeProcessBindings.first)
-        #expect(binding.processID == XcodeProcessID(rawValue: target.processID))
-        #expect(binding.versionKey == XcodeVersionKey(target))
-        #expect(binding.slotIDs == [
-            UpstreamSlotID(rawValue: 0),
-            UpstreamSlotID(rawValue: 1),
-        ])
+        #expect(binding.processID == XcodeProcessID(target))
+        #expect(binding.slotIDs == [UpstreamSlotID(rawValue: 1)])
+        #expect(plan.topology.binding(forUpstreamIndex: 0) == nil)
         #expect(plan.topology.binding(forUpstreamIndex: 1)?.processID == binding.processID)
-        for upstream in plan.upstreams {
-            let environment = try upstreamEnvironment(from: upstream)
-            #expect(try upstreamCommand(from: upstream) == target.mcpbridgePath)
-            #expect(try upstreamArgs(from: upstream).isEmpty)
-            #expect(environment["MCP_XCODE_PID"] == "\(target.processID)")
-            #expect(environment["DEVELOPER_DIR"] == target.developerDir)
-            #expect(environment["MCP_XCODE_SESSION_ID"] == nil)
-        }
+        let gui = try #require(plan.upstreams.last)
+        let environment = try upstreamEnvironment(from: gui)
+        #expect(environment["MCP_XCODE_PID"] == nil)
+        #expect(environment["MCP_XCODE_SESSION_ID"] == nil)
+        #expect(environment["DEVELOPER_DIR"] == target.developerDir)
+        #expect(try upstreamCommand(from: gui) == nativeHostBundleURLForTests().appendingPathComponent("Contents/MacOS/xcode-mcp-native-host").path)
     }
 
-    @Test func processBoundSessionFactoryShapesBridgeEnvironment() throws {
+    @Test func processBoundSessionFactoryShapesNativeEnvironment() throws {
         let target = xcodeProcessTarget(processID: 715, xcodeVersion: "27.0")
         var config = makeConfig(requestTimeout: 5)
         config.maxMessageBytes = 2_000_000
-
-        let factory = MCPBridgeRuntime.makeProcessBoundSessionFactory(
-            config: makeBridgeRuntimeConfig(config),
-            xcodeTarget: target,
-            baseEnvironment: [
-                "KEEP": "value",
-                "XCODE_PID": "legacy",
-                "MCP_XCODE_PID": "inherited-pid",
-                "MCP_XCODE_SESSION_ID": "inherited-session",
-            ]
-        )
-
+        let factory = try MCPBridgeRuntime.makeProcessBoundSessionFactory(
+            config: makeBridgeRuntimeConfig(config), xcodeTarget: target,
+            baseEnvironment: ["KEEP": "value", "XCODE_PID": "legacy", "MCP_XCODE_PID": "inherited-pid", "MCP_XCODE_SESSION_ID": "inherited-session"])
         let environment = try upstreamEnvironment(from: factory)
-        #expect(try upstreamCommand(from: factory) == target.mcpbridgePath)
-        #expect(try upstreamArgs(from: factory).isEmpty)
         #expect(environment["KEEP"] == "value")
         #expect(environment["XCODE_PID"] == nil)
-        #expect(environment["MCP_XCODE_PID"] == "\(target.processID)")
-        #expect(environment["DEVELOPER_DIR"] == target.developerDir)
+        #expect(environment["MCP_XCODE_PID"] == nil)
         #expect(environment["MCP_XCODE_SESSION_ID"] == nil)
+        #expect(environment["DEVELOPER_DIR"] == target.developerDir)
+        #expect(try upstreamCommand(from: factory) == nativeHostBundleURLForTests().appendingPathComponent("Contents/MacOS/xcode-mcp-native-host").path)
         #expect(try upstreamMaxQueuedWriteBytes(from: factory) == 8_000_000)
     }
 
@@ -1108,7 +1048,7 @@ struct DocumentationProviderTests {
         let target = xcodeProcessTarget(processID: 716, xcodeVersion: "27.0")
         let config = makeConfig(requestTimeout: 5)
 
-        let factory = MCPBridgeRuntime.makeProcessBoundSessionFactory(
+        let factory = try MCPBridgeRuntime.makeProcessBoundSessionFactory(
             config: makeBridgeRuntimeConfig(config),
             xcodeTarget: target,
             baseEnvironment: [
@@ -1118,77 +1058,48 @@ struct DocumentationProviderTests {
 
         let environment = try upstreamEnvironment(from: factory)
         #expect(environment["MCP_XCODE_SESSION_ID"] == nil)
-        #expect(environment["MCP_XCODE_PID"] == "\(target.processID)")
+        #expect(environment["MCP_XCODE_PID"] == nil)
         #expect(environment["DEVELOPER_DIR"] == target.developerDir)
     }
 
-    @Test func defaultUpstreamPlanScalesWithXcodeProcessCount()
-        throws
-    {
+    @Test func defaultUpstreamPlanCreatesOneConnectionPerGUIOwner() throws {
         let older = xcodeProcessTarget(processID: 720, xcodeVersion: "26.6")
         let newer = xcodeProcessTarget(processID: 721, xcodeVersion: "27.0")
-        let config = makeConfig(requestTimeout: 5)
-
-        let plan = MCPBridgeRuntime.makeUpstreamPlan(
-            config: makeBridgeRuntimeConfig(config), xcodeTargets: [older, newer], baseEnvironment: [:]
-        )
-
-        #expect(plan.upstreams.count == 2)
-        #expect(plan.xcodeProcessRoutes.map(\.target.processID) == [
-            newer.processID,
-            older.processID,
-        ])
-        #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[0], [1]])
-        #expect(plan.topology.xcodeProcessRoutes() == plan.xcodeProcessRoutes)
-        #expect(plan.topology.xcodeProcessBindings.map(\.processID) == [
-            XcodeProcessID(rawValue: newer.processID),
-            XcodeProcessID(rawValue: older.processID),
-        ])
-        let firstEnvironment = try upstreamEnvironment(from: try #require(plan.upstreams.first))
-        let secondEnvironment = try upstreamEnvironment(from: try #require(plan.upstreams.dropFirst().first))
-        #expect(firstEnvironment["MCP_XCODE_PID"] == "\(newer.processID)")
-        #expect(firstEnvironment["DEVELOPER_DIR"] == newer.developerDir)
-        #expect(secondEnvironment["MCP_XCODE_PID"] == "\(older.processID)")
-        #expect(secondEnvironment["DEVELOPER_DIR"] == older.developerDir)
+        let plan = try MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)), xcodeTargets: [older, newer], baseEnvironment: [:])
+        #expect(plan.upstreams.count == 3)
+        #expect(plan.xcodeProcessRoutes.map(\.target.processID) == [newer.processID, older.processID])
+        #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[1], [2]])
+        for (target, upstream) in zip([newer, older], plan.upstreams.dropFirst()) {
+            let environment = try upstreamEnvironment(from: upstream)
+            #expect(environment["MCP_XCODE_PID"] == nil)
+            #expect(environment["DEVELOPER_DIR"] == target.developerDir)
+        }
     }
 
     @Test func defaultUpstreamPlanIgnoresInheritedMCPXcodePIDForProcessRouting() throws {
-        let pinned = xcodeProcessTarget(processID: 730, xcodeVersion: "26.6")
-        let newer = xcodeProcessTarget(processID: 731, xcodeVersion: "27.0")
-        var config = makeConfig(requestTimeout: 5)
-        config.upstreamProcessCount = 2
-
-        let plan = MCPBridgeRuntime.makeUpstreamPlan(
-            config: makeBridgeRuntimeConfig(config), xcodeTargets: [newer, pinned],
-            baseEnvironment: ["MCP_XCODE_PID": "\(pinned.processID)"]
-        )
-
-        #expect(plan.upstreams.count == 4)
-        #expect(plan.xcodeProcessRoutes.map(\.target.processID) == [
-            newer.processID,
-            pinned.processID,
-        ])
-        #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[0, 1], [2, 3]])
-        let environments = try plan.upstreams.map { try upstreamEnvironment(from: $0) }
-        #expect(environments[0]["MCP_XCODE_PID"] == "\(newer.processID)")
-        #expect(environments[1]["MCP_XCODE_PID"] == "\(newer.processID)")
-        #expect(environments[2]["MCP_XCODE_PID"] == "\(pinned.processID)")
-        #expect(environments[3]["MCP_XCODE_PID"] == "\(pinned.processID)")
+        let first = xcodeProcessTarget(processID: 730, xcodeVersion: "26.6")
+        let second = xcodeProcessTarget(processID: 731, xcodeVersion: "27.0")
+        let plan = try MCPBridgeRuntime.makeUpstreamPlan(
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)), xcodeTargets: [second, first],
+            baseEnvironment: ["MCP_XCODE_PID": "730"])
+        #expect(plan.upstreams.count == 3)
+        #expect(plan.xcodeProcessRoutes.map(\.upstreamIndices) == [[1], [2]])
+        for upstream in plan.upstreams { #expect(try upstreamEnvironment(from: upstream)["MCP_XCODE_PID"] == nil) }
     }
 
-    @Test func guiCompositionStartsWithNoFallbackWhenDiscoveryIsEmpty() {
+    @Test func nativeCompositionStartsWithoutGUI() {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = false
         config.disabledToolNames = [DocumentationProvider.ToolCatalog.toolName]
         let manager = RuntimeCoordinator(
             config: config, eventLoop: group.next(),
             xcodeTargetDiscovery: CountingXcodeTargetDiscovery(targets: []), startImmediately: false
         )
         defer { manager.shutdownAndWait() }
-        #expect(manager.upstreamSlotIDs.isEmpty)
-        #expect(manager.defaultBackendUpstreamIndices.isEmpty)
+        #expect(manager.upstreamSlotIDs.count == 1)
+        #expect(manager.defaultBackendUpstreamIndices == [0])
     }
 
     @Test func runtimeCoordinatorUsesXcodeDiscoveryWhenProcessRoutingIsEnabled()
@@ -1792,110 +1703,7 @@ struct DocumentationProviderTests {
         #expect(await localProvider.requestedQueries() == ["SwiftUI"])
     }
 
-    @Test func runtimeDocumentationTransportTimesOutQueuedPinnedRouteBeforeDispatch()
-        async throws
-    {
-        let upstream = TestUpstreamClient()
-        let target = xcodeProcessTarget(processID: 746, xcodeVersion: "27.0")
-        let runtimeBox = WeakRuntimeCoordinatorBox()
-        let (clock, timeoutClock, uptimeClock) = makeRuntimeCoordinatorDeterministicClocks()
-        let providerManager = DocumentationProviderManager(
-            discovery: StubXcodeTargetDiscovery(targets: [target]),
-            transport: RuntimeDocumentationProviderTransport(
-                runtimeBox: runtimeBox,
-                clock: clock
-            ),
-            providerSelectionTimeout: .seconds(1),
-            clock: clock
-        )
-        let queuedRequestLabels = LockedRecordedValues<String>()
-        let fixture = RuntimeCoordinatorFixture(
-            upstreams: [upstream],
-            clock: clock,
-            xcodeProcessRoutes: [xcodeProcessRoute(target: target)],
-            documentationProviderManager: providerManager,
-            testHooks: RuntimeCoordinatorTestHooks(
-                upstreamRequestQueued: { _, descriptor, queuedRequestCount in
-                    if descriptor.label == "tools/list:DocumentationProvider",
-                       queuedRequestCount > 0
-                    {
-                        queuedRequestLabels.append(descriptor.label)
-                    }
-                }
-            ),
-            startImmediately: false,
-            runtimeBox: runtimeBox
-        )
-        defer { fixture.shutdownAndWait() }
-        let eventLoop = fixture.eventLoop
-        let manager = fixture.manager
-        manager.markUpstreamInitialized(upstreamIndex: 0)
 
-        let activeDescriptor = SessionRequestPipeline.Descriptor(
-            sessionID: "session-active",
-            label: "tools/call:LongRunning",
-            expectsResponse: true,
-            isTopLevelClientRequest: true
-        )
-        let activeLeaseID = manager.createRequestLease(descriptor: activeDescriptor)
-        let activePromise = eventLoop.makePromise(of: Void.self)
-        defer { activePromise.fail(CancellationError()) }
-        let activeFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
-            leaseID: activeLeaseID,
-            descriptor: activeDescriptor,
-            on: eventLoop,
-            preferredUpstreamIndex: 0
-        ) { selectedOperationLease in
-            manager.activateRequestLease(
-                activeLeaseID,
-                requestIDKey: nil,
-                upstreamIndex: selectedOperationLease.upstreamIndex,
-                timeout: nil
-            )
-            return activePromise.futureResult
-        }
-        _ = activeFuture
-        try await waitWithTimeout(
-            "waiting for active lease registration",
-            timeout: .seconds(2)
-        ) {
-            try await eventLoop.submit { () }.get()
-        }
-        #expect(
-            manager.debugSnapshot().leases.contains { lease in
-                lease.leaseID == activeLeaseID.uuidString && lease.state == .active
-            }
-        )
-
-        let outcomeTask = Task {
-            try await providerManager.callDocumentationSearch(
-                requestData: makeDocumentationSearchRequest(id: 96, query: "UIView"),
-                requestTimeoutOverride: .milliseconds(10)
-            )
-        }
-        try await waitWithTimeout("waiting for queued documentation provider route") {
-            try await queuedRequestLabels.nextValue(at: 0)
-        }
-        try await advanceRuntimeCoordinatorTimeout(
-            timeoutClock: timeoutClock,
-            uptimeClock: uptimeClock,
-            by: .milliseconds(10)
-        )
-        let outcome = try await waitWithTimeout(
-            "documentation search should honor caller timeout while upstream slot is busy",
-            timeout: .milliseconds(500)
-        ) {
-            try await outcomeTask.value
-        }
-
-        guard case .failed(let error, _) = outcome else {
-            Issue.record("expected timed-out outcome, got \(outcome)")
-            return
-        }
-        #expect(error is TimeoutError)
-        #expect(await upstream.sentCount() == 0)
-        #expect(manager.debugSnapshot().queuedRequestCount == 0)
-    }
 
     @Test func runtimeDocumentationTransportClosesFallbackOpenedAfterRouteInvalidation()
         async throws
@@ -2204,14 +2012,12 @@ struct DocumentationProviderTests {
             processID: 761,
             appPath: "/Applications/Xcode-Z.app",
             developerDir: "/Applications/Xcode-Z.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode-Z.app/Contents/Developer/usr/bin/mcpbridge",
             xcodeVersion: "27.0"
         )
         let stableTarget = XcodeProcessTarget(
             processID: 762,
             appPath: "/Applications/Xcode-A.app",
             developerDir: "/Applications/Xcode-A.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode-A.app/Contents/Developer/usr/bin/mcpbridge",
             xcodeVersion: "27.0"
         )
         let runtime = RuntimeCoordinator(
@@ -2545,118 +2351,9 @@ struct DocumentationProviderTests {
         #expect(await documentationProvider.toolListUpdateCount() == 0)
     }
 
-    @Test func sharedToolsListDoesNotWaitForStartupDocumentationPrewarm() async throws {
-        let upstream = TestUpstreamClient()
-        let prewarmStarted = TestSignal()
-        let prewarmGate = AsyncGate()
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0")),
-            prewarmStarted: prewarmStarted,
-            prewarmBlocker: prewarmGate
-        )
-        let fixture = RuntimeCoordinatorFixture(
-            upstreams: [upstream],
-            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
-            documentationProviderManager: documentationProvider,
-            startImmediately: false
-        )
-        defer { fixture.shutdownAndWait() }
-        let manager = fixture.manager
-        manager.seedCanonicalToolsCatalog(
-            try jsonValue([
-                "tools": [
-                    [
-                        "name": "XcodeRead",
-                        "description": "read",
-                    ],
-                ],
-            ]),
-            sourceUpstream: 0
-        )
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-        await upstream.respondToToolsLists(with: try #require(manager.cachedToolsListResult()))
 
-        manager.prewarmDocumentationProvider()
-        try await prewarmStarted.wait(description: "documentation prewarm started")
 
-        let result = try await waitWithTimeout(
-            "tools/list should not wait for documentation provider prewarm"
-        ) {
-            try await manager.sharedToolsList(
-                sessionID: "session-docs-tools-prewarm",
-                requestTimeoutOverride: .seconds(1)
-            )
-        }
-        #expect(await documentationProvider.toolListUpdateCount() == 0)
 
-        #expect(toolNames(in: result) == ["XcodeRead", "DocumentationSearch"])
-        #expect(
-            documentationDescriptorDescription(in: result)
-                == "Search Apple developer documentation."
-        )
-        #expect(await documentationProvider.prewarmCount() == 0)
-
-        await prewarmGate.signal()
-        try await waitWithTimeout("waiting for documentation prewarm to finish") {
-            try await documentationProvider.waitForPrewarmCount(1)
-        }
-    }
-
-    @Test func sharedToolsListSurfaceDoesNotDependOnProviderInvalidation() async throws {
-        let upstream = TestUpstreamClient()
-        let documentationProvider = StubDocumentationProviderManager(
-            toolListUpdate: .available(documentationDescriptor(version: "27.0"))
-        )
-        let fixture = RuntimeCoordinatorFixture(
-            upstreams: [upstream],
-            xcodeProcessRoutes: [xcodeProcessRoute(target: xcodeProcessTarget(processID: 752, xcodeVersion: "27.0"))],
-            documentationProviderManager: documentationProvider,
-            startImmediately: false
-        )
-        defer { fixture.shutdownAndWait() }
-        let manager = fixture.manager
-        manager.seedCanonicalToolsCatalog(
-            try jsonValue([
-                "tools": [
-                    [
-                        "name": "XcodeRead",
-                        "description": "read",
-                    ],
-                ],
-            ]),
-            sourceUpstream: 0
-        )
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-        await upstream.respondToToolsLists(with: try #require(manager.cachedToolsListResult()))
-
-        manager.prewarmDocumentationProvider()
-        try await waitWithTimeout("waiting for documentation prewarm") {
-            try await documentationProvider.waitForPrewarmCount(1)
-        }
-
-        let prewarmedResult = try await manager.sharedToolsList(
-            sessionID: "session-docs-tools-prewarm-once",
-            requestTimeoutOverride: .seconds(1)
-        )
-        #expect(toolNames(in: prewarmedResult) == ["XcodeRead", "DocumentationSearch"])
-        #expect(
-            documentationDescriptorDescription(in: prewarmedResult)
-                == "Search Apple developer documentation."
-        )
-
-        await documentationProvider.invalidate(reason: "test")
-        let refreshedResult = try await manager.sharedToolsList(
-            sessionID: "session-docs-tools-after-prewarm",
-            requestTimeoutOverride: .seconds(1)
-        )
-
-        #expect(toolNames(in: refreshedResult) == ["XcodeRead", "DocumentationSearch"])
-        #expect(
-            documentationDescriptorDescription(in: refreshedResult)
-                == "Search Apple developer documentation."
-        )
-        #expect(await documentationProvider.toolListUpdateCount() == 0)
-    }
 
     @Test func sharedToolsListReplacesStaleDocumentationSearchWhenProviderUnavailable() async throws {
         let upstream = TestUpstreamClient()

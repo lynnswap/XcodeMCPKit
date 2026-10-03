@@ -466,7 +466,7 @@ extension RuntimeCoordinator {
         ) else {
             return
         }
-        let rejectedBridgeRecovery: ProcessBridgePoolRecovery?
+        let rejectedBridgeRecovery: ProcessConnectionRecovery?
         if case .processBridgeRecovery(let recovery) = cleared.initializeOwner {
             rejectedBridgeRecovery = recovery.reservation
         } else {
@@ -475,7 +475,7 @@ extension RuntimeCoordinator {
         guard let replacement = replaceOrRetireInitializeChannel(
             proof,
             expectedRouteID: route?.id,
-            requestsBridgePoolRecovery: false
+            requestsConnectionRecovery: false
         ) else {
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             return
@@ -1312,11 +1312,9 @@ extension RuntimeCoordinator {
 
     func handleUpstreamStderr(_ message: String, upstreamIndex: Int) {
         debugRecorder.recordStderr(message, upstreamIndex: upstreamIndex)
-        let classification = UpstreamStderrClassifier.classify(message)
         let decision = upstreamStderrLogLimiter.decision(
             upstreamIndex: upstreamIndex,
             message: message,
-            classification: classification,
             nowUptimeNs: nowUptimeNanoseconds()
         )
         guard decision.shouldLog else { return }
@@ -1328,19 +1326,8 @@ extension RuntimeCoordinator {
             metadata["suppressed_duplicates"] = .string("\(decision.suppressedDuplicateCount)")
         }
 
-        switch classification {
-        case .xcodeUnavailable:
-            logger.info(
-                "mcpbridge reported that no Xcode process is running; waiting for Xcode before restarting",
-                metadata: metadata
-            )
-        case .unknown:
-            metadata["message"] = .string(message)
-            logger.error(
-                "Upstream stderr",
-                metadata: metadata
-            )
-        }
+        metadata["message"] = .string(message)
+        logger.error("Upstream stderr", metadata: metadata)
     }
 
     func handleUpstreamProtocolViolation(

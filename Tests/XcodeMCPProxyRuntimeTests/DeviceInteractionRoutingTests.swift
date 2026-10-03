@@ -164,7 +164,6 @@ struct DeviceInteractionRoutingTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: group.next(),
@@ -236,7 +235,6 @@ struct DeviceInteractionRoutingTests {
         let first = TestUpstreamClient()
         let owner = TestUpstreamClient()
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
         let fixture = RuntimeCoordinatorFixture(
             config: config, upstreams: [first, owner], startImmediately: false
         )
@@ -274,7 +272,6 @@ struct DeviceInteractionRoutingTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
         let manager = RuntimeCoordinator(
             config: config,
             eventLoop: group.next(),
@@ -303,7 +300,6 @@ struct DeviceInteractionRoutingTests {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
         let target = xcodeProcessTarget(processID: 705, xcodeVersion: "27.0")
         let manager = RuntimeCoordinator(
             config: config,

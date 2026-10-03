@@ -214,14 +214,6 @@ extension RuntimeCoordinator {
 
     private func primaryInitializeRetryUpstreamIndex(failedUpstreamIndex: Int) -> Int? {
         let excludedUpstreamIndices: Set<Int> = [failedUpstreamIndex]
-        if let failedRoute = xcodeProcessRoute(forUpstreamIndex: failedUpstreamIndex),
-           let siblingUpstreamIndex = primaryInitializeCandidate(
-               in: failedRoute,
-               excluding: excludedUpstreamIndices
-           )
-        {
-            return siblingUpstreamIndex
-        }
         return primaryInitializeUpstreamIndex(excluding: excludedUpstreamIndices)
     }
 

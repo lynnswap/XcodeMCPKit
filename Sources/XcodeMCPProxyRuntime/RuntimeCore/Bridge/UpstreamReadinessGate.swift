@@ -153,7 +153,7 @@ final class UpstreamReadinessCoordinator: Sendable {
 
             if didLogWaiting == false {
                 logger.info(
-                    "Waiting for Xcode before starting mcpbridge",
+                    "Waiting for the upstream before starting it",
                     metadata: [
                         "target": .string(gate.targetName)
                     ]
@@ -225,7 +225,7 @@ final class UpstreamReadinessCoordinator: Sendable {
 
         if didWait {
             logger.info(
-                "Detected Xcode; starting mcpbridge",
+                "Upstream is ready; starting it",
                 metadata: [
                     "target": .string(gate.targetName)
                 ]
@@ -239,7 +239,7 @@ final class UpstreamReadinessCoordinator: Sendable {
             fire(waiters: waiters, epoch: epoch)
         case .deferWaiters(let delay):
             logger.debug(
-                "Backing off before restarting mcpbridge",
+                "Backing off before restarting the upstream",
                 metadata: [
                     "target": .string(gate.targetName),
                     "delay_ms": .string("\(delay / 1_000_000)"),

@@ -616,16 +616,16 @@ extension RuntimeCoordinator {
         _ initializeClaim: UpstreamHealthManager.InitializeClaim
     ) -> InitializeChannelReplacement? {
         guard let proof = initializeClaim.topologyProof else { return nil }
-        let requestsBridgePoolRecovery: Bool
+        let requestsConnectionRecovery: Bool
         if initializeClaim.owner == .regular {
-            requestsBridgePoolRecovery = true
+            requestsConnectionRecovery = true
         } else {
-            requestsBridgePoolRecovery = false
+            requestsConnectionRecovery = false
         }
         return replaceOrRetireInitializeChannel(
             proof,
             expectedRouteID: nil,
-            requestsBridgePoolRecovery: requestsBridgePoolRecovery
+            requestsConnectionRecovery: requestsConnectionRecovery
         )
     }
 
@@ -633,14 +633,14 @@ extension RuntimeCoordinator {
     func replaceOrRetireInitializeChannel(
         _ proof: UpstreamTopologyProof,
         expectedRouteID: ProcessRouteID?,
-        requestsBridgePoolRecovery: Bool
+        requestsConnectionRecovery: Bool
     ) -> InitializeChannelReplacement? {
         var replacement: InitializeChannelReplacement?
         guard initializeManager.performIfRunning({
             replacement = replaceOrRetireInitializeChannelWhileRunning(
                 proof,
                 expectedRouteID: expectedRouteID,
-                requestsBridgePoolRecovery: requestsBridgePoolRecovery
+                requestsConnectionRecovery: requestsConnectionRecovery
             )
         }) else {
             return nil
@@ -651,7 +651,7 @@ extension RuntimeCoordinator {
     private func replaceOrRetireInitializeChannelWhileRunning(
         _ proof: UpstreamTopologyProof,
         expectedRouteID: ProcessRouteID?,
-        requestsBridgePoolRecovery: Bool
+        requestsConnectionRecovery: Bool
     ) -> InitializeChannelReplacement? {
         let upstreamIndex = proof.slotID.rawValue
         let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex)
@@ -691,7 +691,7 @@ extension RuntimeCoordinator {
                 for unused in replacements.dropFirst() {
                     retireUpstreamSlot(unused)
                 }
-                if requestsBridgePoolRecovery {
+                if requestsConnectionRecovery {
                     addRuntimeTask { [weak self, replacementLease] in
                         guard let self,
                               await self.waitUntilUpstreamOperationActivatable(replacementLease),
@@ -700,7 +700,7 @@ extension RuntimeCoordinator {
                         if let route {
                             var transition = ProcessControlPlaneTransition.none
                             guard self.initializeManager.performIfRunning({
-                                transition = self.processControlPlane.requestBridgePoolRecovery(
+                                transition = self.processControlPlane.requestConnectionRecovery(
                                     routeID: route.id,
                                     upstreamID: replacementLease.proof.slotID
                                 )

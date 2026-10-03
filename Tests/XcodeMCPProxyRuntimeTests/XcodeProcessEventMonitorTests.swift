@@ -21,7 +21,6 @@ struct XcodeProcessEventMonitorTests {
         #expect(targets.count == 1)
         #expect(targets.first?.processID == 101)
         #expect(targets.first?.appPath == fixture.appPath)
-        #expect(targets.first?.mcpbridgePath == fixture.mcpbridgePath)
         let readiness = monitor.readinessSnapshot()
         #expect(readiness.isReady)
         #expect(readiness.generation == 1)
@@ -154,6 +153,12 @@ struct XcodeProcessEventMonitorTests {
                 isTerminated: false
             ),
             RunningApplicationSnapshot(
+                processID: 46,
+                bundleIdentifier: "com.apple.dt.mcp-server",
+                bundlePath: nil,
+                isTerminated: false
+            ),
+            RunningApplicationSnapshot(
                 processID: 45,
                 bundleIdentifier: "com.apple.dt.ExternalViewService",
                 bundlePath: nil,
@@ -165,7 +170,7 @@ struct XcodeProcessEventMonitorTests {
 
         monitor.start()
 
-        #expect(monitor.permissionDialogProcessIDs() == [41, 42, 43])
+        #expect(monitor.permissionDialogProcessIDs() == [41, 42, 43, 46])
         #expect(monitor.runningXcodeTargets().isEmpty)
     }
 
@@ -325,7 +330,6 @@ private func makeMonitor(
 private struct TemporaryXcodeApplicationFixture {
     let rootURL: URL
     let appPath: String
-    let mcpbridgePath: String
     let snapshot: RunningApplicationSnapshot
 }
 
@@ -356,7 +360,6 @@ private func makeTemporaryXcodeApplication(
     return TemporaryXcodeApplicationFixture(
         rootURL: rootURL,
         appPath: appURL.path,
-        mcpbridgePath: mcpbridgeURL.path,
         snapshot: RunningApplicationSnapshot(
             processID: processID,
             bundleIdentifier: "com.apple.dt.Xcode",
@@ -439,7 +442,6 @@ private final class BlockingTargetMapper: @unchecked Sendable {
                 processID: application.processID,
                 appPath: appPath,
                 developerDir: "\(appPath)/Contents/Developer",
-                mcpbridgePath: "\(appPath)/Contents/Developer/usr/bin/mcpbridge",
                 xcodeVersion: "27.0"
             )
         }

@@ -398,29 +398,6 @@ protocol DocumentationProviderSessionMaking: Sendable {
     func startSession(for target: XcodeProcessTarget) async throws -> any UpstreamSession
 }
 
-struct LiveDocumentationProviderSessionFactory: DocumentationProviderSessionMaking {
-    private let bridgeRuntimeConfig: MCPBridgeRuntime.Configuration
-    private let baseEnvironment: [String: String]
-
-    init(
-        config: ProxyRuntimeConfiguration,
-        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
-    ) {
-        self.bridgeRuntimeConfig = config.mcpBridgeRuntimeConfiguration
-        self.baseEnvironment = baseEnvironment
-    }
-
-    func startSession(for target: XcodeProcessTarget) async throws
-        -> any UpstreamSession
-    {
-        try await MCPBridgeRuntime.startProcessBoundSession(
-            config: bridgeRuntimeConfig,
-            xcodeTarget: target,
-            baseEnvironment: baseEnvironment
-        )
-    }
-}
-
 private final class DocumentationSearchServiceRepairWaiter: @unchecked Sendable {
     struct Result: Sendable {
         let repairResult: DocumentationSearchServiceRepairResult?
@@ -660,7 +637,6 @@ struct DocumentationSearchActionProvider: DocumentationSearchProviding {
         processID: 0,
         appPath: "documentation-search-action",
         developerDir: "documentation-search-action",
-        mcpbridgePath: "documentation-search-action",
         xcodeVersion: "documentation-search-action"
     )
 
@@ -698,16 +674,11 @@ struct DocumentationSearchActionProvider: DocumentationSearchProviding {
             return nil
         }
         let appURL = developerURL.deletingLastPathComponent().deletingLastPathComponent()
-        let mcpbridgePath = developerURL.appendingPathComponent("usr/bin/mcpbridge").path
-        guard FileManager.default.isExecutableFile(atPath: mcpbridgePath) else {
-            return nil
-        }
         let bundle = Bundle(url: appURL)
         return XcodeProcessTarget(
             processID: 0,
             appPath: appURL.path,
             developerDir: developerURL.path,
-            mcpbridgePath: mcpbridgePath,
             xcodeVersion: bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
                 ?? bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
                 ?? ""

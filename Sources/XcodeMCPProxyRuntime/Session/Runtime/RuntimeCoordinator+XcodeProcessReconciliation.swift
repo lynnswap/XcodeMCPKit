@@ -325,21 +325,13 @@ extension RuntimeCoordinator {
         for route in activeRoutes where pendingProcessIDs.contains(route.target.processID) {
             startProcessRouteActivation(for: route)
         }
-        guard isInitialized() else { return }
-        for route in activeRoutes where pendingProcessIDs.contains(route.target.processID) {
-            var transition = ProcessControlPlaneTransition.none
-            guard initializeManager.performIfRunning({
-                transition = processControlPlane.beginBridgePoolRecovery(routeID: route.id)
-            }) else { return }
-            applyProcessControlPlaneTransition(transition)
-        }
         refreshProcessToolsCatalogsIfNeeded(
             reason: "pending_process_route_\(reason)",
             processIDs: pendingProcessIDs
         )
     }
 
-    func restoreProcessBridgePool(_ recovery: ProcessBridgePoolRecovery) {
+    func restoreProcessConnection(_ recovery: ProcessConnectionRecovery) {
         guard initializeManager.snapshot().isShuttingDown == false else { return }
         guard let route = xcodeProcessRoutes.first(where: { $0.id == recovery.routeID }) else {
             return
@@ -373,7 +365,7 @@ extension RuntimeCoordinator {
             topologyProof: proof
         )
         logger.debug(
-            "bridge_pool_recovery_started",
+            "connection_recovery_started",
             metadata: [
                 "pid": .string("\(route.target.processID)"),
                 "upstream": .string("\(recovery.upstreamID.rawValue)"),
@@ -387,7 +379,7 @@ extension RuntimeCoordinator {
     }
 
     func scheduleProcessBridgeRecoveryRetry(
-        _ recovery: ProcessBridgePoolRecovery,
+        _ recovery: ProcessConnectionRecovery,
         reason: String
     ) {
         var retry: ProcessBridgeRecoveryRetry?
@@ -407,7 +399,7 @@ extension RuntimeCoordinator {
         reason: String
     ) {
         logger.debug(
-            "bridge_pool_recovery_retry_scheduled",
+            "connection_recovery_retry_scheduled",
             metadata: [
                 "pid": .string("\(retry.reservation.routeID.processID)"),
                 "upstream": .string("\(retry.reservation.upstreamID.rawValue)"),
@@ -453,7 +445,7 @@ extension RuntimeCoordinator {
         let replacement = replaceOrRetireInitializeChannel(
             recovery.topologyProof,
             expectedRouteID: recovery.routeID,
-            requestsBridgePoolRecovery: false
+            requestsConnectionRecovery: false
         )
         var retry: ProcessBridgeRecoveryRetry?
         guard initializeManager.performIfRunning({

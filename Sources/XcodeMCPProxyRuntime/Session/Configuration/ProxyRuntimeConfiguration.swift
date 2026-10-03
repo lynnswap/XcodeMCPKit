@@ -60,8 +60,8 @@ package struct ProxyRuntimeConfiguration: Sendable {
         }
     }
 
-    package var includesXcodeService: Bool
-    package var upstreamProcessCount: Int
+    package var nativeHostBundleURL: URL?
+    package var developerDirectoryURL: URL?
     package var maxMessageBytes: Int
     package var requestTimeout: TimeInterval
     package var prewarmToolsList: Bool
@@ -71,8 +71,8 @@ package struct ProxyRuntimeConfiguration: Sendable {
     package var initializeParamsOverride: InitializeHandshakeOverride?
 
     package init(
-        includesXcodeService: Bool = false,
-        upstreamProcessCount: Int = 1,
+        nativeHostBundleURL: URL? = nil,
+        developerDirectoryURL: URL? = nil,
         maxMessageBytes: Int,
         requestTimeout: TimeInterval,
         prewarmToolsList: Bool = true,
@@ -81,8 +81,8 @@ package struct ProxyRuntimeConfiguration: Sendable {
         disabledToolNames: Set<String> = [],
         initializeParamsOverride: InitializeHandshakeOverride? = nil
     ) {
-        self.includesXcodeService = includesXcodeService
-        self.upstreamProcessCount = upstreamProcessCount
+        self.nativeHostBundleURL = nativeHostBundleURL
+        self.developerDirectoryURL = developerDirectoryURL
         self.maxMessageBytes = maxMessageBytes
         self.requestTimeout = requestTimeout
         self.prewarmToolsList = prewarmToolsList

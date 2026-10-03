@@ -46,8 +46,32 @@ func makeConfig(requestTimeout: TimeInterval) -> ProxyRuntimeConfiguration {
 
 func makeBridgeRuntimeConfig(
     _ config: ProxyRuntimeConfiguration
-) -> MCPBridgeRuntime.Configuration {
-    config.mcpBridgeRuntimeConfiguration
+) throws -> MCPBridgeRuntime.Configuration {
+    var config = config
+    config.nativeHostBundleURL = try nativeHostBundleURLForTests()
+    return config.mcpBridgeRuntimeConfiguration
+}
+
+private let nativeHostBundleFixture = NIOLockedValueBox<URL?>(nil)
+
+func nativeHostBundleURLForTests() throws -> URL {
+    try nativeHostBundleFixture.withLockedValue { value in
+        if let value { return value }
+        let bundle = FileManager.default.temporaryDirectory.appendingPathComponent("NativeHostRuntimeTests-" + UUID().uuidString + ".app")
+        let contents = bundle.appendingPathComponent("Contents")
+        let binaries = contents.appendingPathComponent("MacOS")
+        try FileManager.default.createDirectory(at: binaries, withIntermediateDirectories: true)
+        let executable = binaries.appendingPathComponent("xcode-mcp-native-host")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let plist = try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": "test.XcodeMCPNativeHost", "CFBundlePackageType": "APPL",
+            "CFBundleExecutable": "xcode-mcp-native-host",
+        ], format: .xml, options: 0)
+        try plist.write(to: contents.appendingPathComponent("Info.plist"))
+        value = bundle
+        return bundle
+    }
 }
 
 func jsonValue(_ object: [String: Any]) throws -> JSONValue {
@@ -370,7 +394,6 @@ func xcodeProcessTarget(processID: pid_t) -> XcodeProcessTarget {
         processID: processID,
         appPath: "/Applications/Xcode-\(processID).app",
         developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
-        mcpbridgePath: "/Applications/Xcode-\(processID).app/Contents/Developer/usr/bin/mcpbridge",
         xcodeVersion: "\(processID).0"
     )
 }
@@ -383,7 +406,6 @@ func xcodeProcessTarget(
         processID: processID,
         appPath: "/Applications/Xcode-\(processID).app",
         developerDir: "/Applications/Xcode-\(processID).app/Contents/Developer",
-        mcpbridgePath: "/Applications/Xcode-\(processID).app/Contents/Developer/usr/bin/mcpbridge",
         xcodeVersion: xcodeVersion
     )
 }

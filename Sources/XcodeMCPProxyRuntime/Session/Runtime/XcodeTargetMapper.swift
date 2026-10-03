@@ -25,18 +25,11 @@ enum XcodeTargetMapper {
         let developerDir = URL(fileURLWithPath: appPath)
             .appendingPathComponent("Contents/Developer")
             .path
-        let mcpbridgePath = URL(fileURLWithPath: developerDir)
-            .appendingPathComponent("usr/bin/mcpbridge")
-            .path
-        guard FileManager.default.isExecutableFile(atPath: mcpbridgePath) else {
-            return nil
-        }
         let xcodeVersion = xcodeVersion(appPath: appPath)
         return XcodeProcessTarget(
             processID: processID,
             appPath: appPath,
             developerDir: developerDir,
-            mcpbridgePath: mcpbridgePath,
             xcodeVersion: xcodeVersion
         )
     }

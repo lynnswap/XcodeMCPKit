@@ -32,23 +32,19 @@ struct XcodeProcessID: Sendable, Hashable, Comparable {
 struct XcodeVersionKey: Sendable, Hashable {
     let xcodeVersion: String
     let developerDir: String
-    let mcpbridgePath: String
 
     init(
         xcodeVersion: String,
-        developerDir: String,
-        mcpbridgePath: String
+        developerDir: String
     ) {
         self.xcodeVersion = xcodeVersion
         self.developerDir = developerDir
-        self.mcpbridgePath = mcpbridgePath
     }
 
     init(_ target: XcodeProcessTarget) {
         self.init(
             xcodeVersion: target.xcodeVersion,
             developerDir: target.developerDir,
-            mcpbridgePath: target.mcpbridgePath
         )
     }
 }

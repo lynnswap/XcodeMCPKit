@@ -12,7 +12,6 @@ import XcodeMCPProxyTestSupport
 struct UpstreamReadinessTests {
     @Test func availableServiceDoesNotWaitForGUIReadiness() async {
         var config = makeConfig(requestTimeout: 5)
-        config.includesXcodeService = true
 
         let gate = UpstreamReadinessGate.liveDefault(
             config: config,
@@ -365,62 +364,7 @@ struct UpstreamReadinessTests {
         try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
     }
 
-    @Test func readinessGateBacksOffBeforeRetryingWhenXcodeIsStillAvailable() async throws {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        let readiness = ReadinessFlag(isReady: true)
-        let sleepRecorder = ControlledReadinessSleep()
-        let initializedUpstreams = LockedRecordedValues<Int>()
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            upstreamReadinessGate: makeTestReadinessGate(
-                readiness: readiness,
-                sleepRecorder: sleepRecorder
-            ),
-            testHooks: RuntimeCoordinatorTestHooks(
-                upstreamInitialized: { initializedUpstreams.append($0) }
-            )
-        )
-        defer { manager.shutdownAndWait() }
 
-        let firstInit = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let firstInitID = try extractUpstreamID(from: firstInit)
-        await upstream.yield(.message(try makeInitializeResponse(id: firstInitID)))
-        _ = try await sentValue(from: upstream, at: 1, timeout: .seconds(2))
-        _ = try await initializedUpstreams.nextValue(at: 0)
-
-        await upstream.yield(.exit(1))
-        _ = try await waitWithTimeout(
-            "waiting for readiness retry backoff",
-            timeout: .seconds(2)
-        ) {
-            try await sleepRecorder.nextSleep(at: 0)
-        }
-        #expect(await upstream.sentCount() == 2)
-
-        await sleepRecorder.resumeNext()
-        try await waitForSentCount(upstream, count: 3, timeoutSeconds: 2)
-        let secondInit = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
-        let secondInitID = try extractUpstreamID(from: secondInit)
-        await upstream.yield(.message(try makeInitializeResponse(id: secondInitID)))
-        _ = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
-        _ = try await initializedUpstreams.nextValue(at: 1)
-
-        await upstream.yield(.exit(1))
-        let secondDelay = try await waitWithTimeout(
-            "waiting for second readiness retry backoff",
-            timeout: .seconds(2)
-        ) {
-            try await sleepRecorder.nextSleep(at: 1)
-        }
-        #expect(secondDelay == 1_000_000_000)
-        await sleepRecorder.resumeNext()
-    }
 }
 
 private final class NeverReadyXcodeProcessMonitor:

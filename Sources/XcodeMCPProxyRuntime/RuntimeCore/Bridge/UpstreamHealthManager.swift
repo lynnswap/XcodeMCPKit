@@ -631,7 +631,7 @@ final class UpstreamHealthManager: Sendable {
         nowUptimeNs: UInt64,
         commit: () -> Bool
     ) -> (
-        recovery: ProcessBridgePoolRecovery,
+        recovery: ProcessConnectionRecovery,
         cleared: ClearedUpstreamState?
     )? {
         state.withLockedValue { state in

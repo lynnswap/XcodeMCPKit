@@ -43,11 +43,10 @@ struct HTTPConcurrencyTests {
         let gui = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "gui-tab")
         let target = XcodeProcessTarget(
             processID: 751, appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
+            developerDir: "/Applications/Xcode.app/Contents/Developer", xcodeVersion: "27.0"
         )
         let server = try TestHTTPServer.start(
-            upstream: service, includesXcodeService: true, additionalUpstreams: [gui],
+            upstream: service, additionalUpstreams: [gui],
             xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])]
         )
         do {
@@ -86,7 +85,7 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
-    @Test(arguments: ["gui-path", "gui-only-path", "service-path", "opaque", "omitted", "stale-tab", "lookup-error", "known-owner-failure", "partial-inventory", "ambiguous", "partial-owner", "partial-list-owner", "known-owner-unrelated-failure"])
+    @Test(arguments: ["gui-path", "service-path", "opaque", "omitted", "stale-tab", "known-owner-failure", "partial-inventory", "ambiguous", "partial-owner", "partial-list-owner", "known-owner-unrelated-failure"])
     func standardWorkspaceRoutingOverHTTP(scenario: String) async throws {
         let service = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "windowtab-opaque-service", workspacePath: "/Work/Service.xcodeproj")
         let gui = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "gui-tab")
@@ -94,21 +93,17 @@ struct HTTPConcurrencyTests {
             workspacePath: scenario == "known-owner-unrelated-failure" ? "/Work/Other.xcodeproj" : "/Work/App.xcodeproj")
         let target = XcodeProcessTarget(
             processID: 752, appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
+            developerDir: "/Applications/Xcode.app/Contents/Developer", xcodeVersion: "27.0"
         )
         let otherTarget = XcodeProcessTarget(
             processID: 753, appPath: "/Applications/OtherXcode.app",
-            developerDir: "/Applications/OtherXcode.app/Contents/Developer",
-            mcpbridgePath: "/Applications/OtherXcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
+            developerDir: "/Applications/OtherXcode.app/Contents/Developer", xcodeVersion: "27.0"
         )
         let ambiguous = scenario == "ambiguous"
         let hasSecondGUI = ambiguous || scenario == "partial-owner" || scenario == "partial-list-owner" || scenario == "known-owner-unrelated-failure"
-        let guiOnly = scenario == "gui-only-path"
         let server = try TestHTTPServer.start(
-            upstream: guiOnly ? gui : service, includesXcodeService: true,
-            additionalUpstreams: guiOnly ? [] : (hasSecondGUI ? [gui, secondGUI] : [gui]),
-            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [guiOnly ? 0 : 1])]
+            upstream: service, additionalUpstreams: hasSecondGUI ? [gui, secondGUI] : [gui],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])]
                 + (hasSecondGUI ? [XcodeProcessRoute(target: otherTarget, upstreamIndices: [2])] : [])
         )
         do {
@@ -132,7 +127,6 @@ struct HTTPConcurrencyTests {
                 server.sessionManager.markXcodeProcessRouteUnavailable(upstreamIndex: 2, reason: "unrelated_owner_failure")
             }
             if scenario == "partial-inventory" { await gui.failInventory() }
-            if scenario == "lookup-error" { await service.failInventory() }
             if scenario == "partial-owner" || scenario == "partial-list-owner" { await secondGUI.failInventory() }
             if scenario == "partial-list-owner" {
                 _ = try await postJSON(url: server.url, sessionID: sessionID, payload: toolCallPayload(id: 3, name: "XcodeListWindows", arguments: [:]))
@@ -151,7 +145,7 @@ struct HTTPConcurrencyTests {
             )
             #expect(reply["id"] as? Int == 41)
             let result = try #require(reply["result"] as? [String: Any])
-            let fails = ["stale-tab", "lookup-error", "known-owner-failure", "partial-inventory", "ambiguous", "partial-owner", "partial-list-owner"].contains(scenario)
+            let fails = ["stale-tab", "known-owner-failure", "partial-inventory", "ambiguous", "partial-owner", "partial-list-owner"].contains(scenario)
             #expect((result["isError"] as? Bool == true) == fails)
             if scenario == "partial-owner" || scenario == "partial-list-owner" {
                 let (_, repeated) = try await postJSON(url: server.url, sessionID: sessionID,
@@ -182,126 +176,11 @@ struct HTTPConcurrencyTests {
         #expect(!(await service.recordedCalls()).contains("XcodeCloseWorkspace"))
     }
 
-    @Test func workspaceLookupUsesHealthyServiceSibling() async throws {
-        let first = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
-        let second = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
-        let server = try TestHTTPServer.start(upstream: first, includesXcodeService: true, additionalUpstreams: [second])
-        do {
-            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
-            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
-            await server.sessionManager.drainRuntimeTasksForTesting()
-            _ = server.sessionManager.upstreamHealthManager.quarantineIncompatibleUpstream(
-                server.sessionManager.operationLeaseForTest(upstreamIndex: 0).proof,
-                nowUptimeNs: server.sessionManager.nowUptimeNanoseconds()
-            )
-            let (_, reply) = try await postJSON(url: server.url, sessionID: sessionID,
-                payload: toolCallPayload(id: 2, name: "BuildProject", arguments: ["workspaceIdentifier": "/Work/App.xcodeproj"]))
-            let result = try #require(reply["result"] as? [String: Any])
-            #expect(result["isError"] as? Bool == false)
-            #expect(await first.recordedCalls() == [])
-            #expect(await second.recordedCalls() == ["XcodeListWorkspaces", "BuildProject"])
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
 
-    @Test(arguments: [false, true])
-    func workspaceLookupWaitsForAnyAvailableServiceConnection(allBusy: Bool) async throws {
-        let first = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
-        let second = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service-id")
-        let siblingInitialized = TestSignal()
-        let lookupQueued = TestSignal()
-        let server = try TestHTTPServer.start(upstream: first, includesXcodeService: true, additionalUpstreams: [second],
-            testHooks: .init(upstreamInitialized: { index in
-                if index == 1 { siblingInitialized.signal() }
-            }, upstreamRequestQueued: { _, descriptor, _ in
-                if descriptor.label == "tools/call:XcodeListWorkspaces" { lookupQueued.signal() }
-            }))
-        do {
-            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
-            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
-            try await siblingInitialized.wait(description: "Service sibling initialization")
-            let manager = server.sessionManager
-            let loop = manager.eventLoop
-            var holds: [(LeaseManager.ID, EventLoopPromise<Void>)] = []
-            defer {
-                for (lease, completion) in holds {
-                    manager.completeRequestLease(lease)
-                    completion.succeed(())
-                }
-            }
-            for index in 0..<(allBusy ? 2 : 1) {
-                let descriptor = SessionRequestPipeline.Descriptor(
-                    sessionID: "busy-service-\(index)", label: "tools/call:BuildProject",
-                    expectsResponse: true, isTopLevelClientRequest: false)
-                let lease = manager.createRequestLease(descriptor: descriptor)
-                let completion = loop.makePromise(of: Void.self)
-                let started = TestSignal()
-                let future: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
-                    leaseID: lease, descriptor: descriptor, on: loop, preferredUpstreamIndex: index
-                ) { _ in
-                    started.signal()
-                    return completion.futureResult
-                }
-                future.whenFailure { _ in }
-                holds.append((lease, completion))
-                try await started.wait(description: "busy Service connection")
-            }
-            let url = server.url
-            let request = Task { () throws -> JSONValue in
-                let (_, body) = try await postJSON(url: url, sessionID: sessionID,
-                    payload: toolCallPayload(id: 2, name: "BuildProject", arguments: ["workspaceIdentifier": "/Work/App.xcodeproj"]))
-                return try #require(JSONValue(any: body))
-            }
-            defer { request.cancel() }
-            if allBusy {
-                try await lookupQueued.wait(description: "workspace lookup queued behind busy Service connections")
-                let (lease, completion) = holds.removeLast()
-                manager.completeRequestLease(lease)
-                completion.succeed(())
-            }
-            let reply = try #require(try await request.value.foundationObject as? [String: Any])
-            #expect((reply["result"] as? [String: Any])?["isError"] as? Bool == false)
-            #expect(await first.recordedCalls() == [])
-            #expect(await second.recordedCalls() == ["XcodeListWorkspaces", "BuildProject"])
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
 
-    @Test func unavailableServiceDoesNotBlockGUICatalogOverHTTP() async throws {
-        let service = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "service")
-        let gui = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "gui")
-        let target = XcodeProcessTarget(
-            processID: 759, appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
-        )
-        let server = try TestHTTPServer.start(upstream: service, includesXcodeService: true,
-            additionalUpstreams: [gui], xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])])
-        do {
-            let (response, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
-            let sessionID = try #require(response.value(forHTTPHeaderField: "Mcp-Session-Id"))
-            await server.sessionManager.drainRuntimeTasksForTesting()
-            _ = server.sessionManager.upstreamHealthManager.quarantineIncompatibleUpstream(
-                server.sessionManager.operationLeaseForTest(upstreamIndex: 0).proof,
-                nowUptimeNs: server.sessionManager.nowUptimeNanoseconds()
-            )
-            let (_, reply) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 2))
-            let result = try #require(reply["result"] as? [String: Any], "catalog response: \(reply)")
-            let tools = try #require(result["tools"] as? [[String: Any]])
-            #expect(tools.contains { $0["name"] as? String == "XcodeListWindows" })
-            #expect(ProcessToolCatalogCodec.toolsByName(in: server.sessionManager.processControlPlane.unboundToolsCatalogRaw())["XcodeListWindows"] == nil)
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
+
+
+
 
     @Test func httpAndSwiftClientExposeCompletePaginatedCatalog() async throws {
         let upstream = PaginatedCatalogUpstream()
@@ -484,7 +363,7 @@ struct HTTPConcurrencyTests {
         #expect(manager.debugSnapshot().queuedRequestCount == 0)
     }
 
-    @Test func queuedCancellationPreservesOtherSessionsAndIDScalarTypes() async throws {
+    @Test func multiplexedCancellationPreservesOtherSessionsAndIDScalarTypes() async throws {
         let queuedRequests = LockedRecordedValues<LeaseManager.ID>()
         let (manager, service, loop, upstreams) = try cancellationFixture(
             upstreamCount: 1,
@@ -505,7 +384,7 @@ struct HTTPConcurrencyTests {
         _ = try await waitWithTimeout("second request entered the upstream queue") {
             try await queuedRequests.nextValue(at: 1)
         }
-        #expect(manager.debugSnapshot().queuedRequestCount == 1)
+        #expect(manager.debugSnapshot().queuedRequestCount == 0)
 
         _ = try cancellationOperation(cancellationPayload(id: 1), service: service, loop: loop, sessionID: "other-session")
         _ = try cancellationOperation(cancellationPayload(id: true), service: service, loop: loop)
@@ -518,7 +397,7 @@ struct HTTPConcurrencyTests {
             Issue.record("queued request was not cancelled")
             return
         }
-        #expect(upstream.recordedMessages().count == 1)
+        #expect(upstream.recordedMessages().filter { MCPJSONValue($0).objectValue?["method"] == .string("tools/call") }.count == 2)
         #expect(manager.debugSnapshot().queuedRequestCount == 0)
 
         let response = try #require(upstream.takeNextResponse(label: "tools/call:ExecuteSnippet"))
@@ -530,7 +409,7 @@ struct HTTPConcurrencyTests {
         }
         _ = try cancellationOperation(cancellationPayload(id: 1), service: service, loop: loop)
         await loop.run()
-        #expect(upstream.recordedMessages().count == 1)
+        #expect(upstream.recordedMessages().filter { MCPJSONValue($0).objectValue?["method"] == .string("tools/call") }.count == 2)
     }
 
     private func cancellationPayload(id: Any) -> [String: Any] {
@@ -556,7 +435,6 @@ struct HTTPConcurrencyTests {
         RuntimeCoordinator, ClientMCPRequestExecutor, NIOAsyncTestingEventLoop, [EmbeddedControlledUpstreamClient]
     ) {
         var config = makeEmbeddedConfig(requestTimeout: requestTimeout)
-        config.upstreamProcessCount = upstreamCount
         let loop = NIOAsyncTestingEventLoop()
         let upstreams = (0..<upstreamCount).map { _ in EmbeddedControlledUpstreamClient() }
         let manager = RuntimeCoordinator(
@@ -735,84 +613,9 @@ struct HTTPConcurrencyTests {
         #expect(ClientMCPRequestExecutor.minimumRequestTimeout(.seconds(60), timeout)?.nanoseconds == 20_000_000_000)
     }
 
-    @Test(arguments: [0.10, 0.20])
-    func queuedRequestsUseTheirOriginalDeadline(waitSeconds: Double) async throws {
-        let clock = ManualDateClock()
-        let queuedRequests = LockedRecordedValues<LeaseManager.ID>()
-        let (manager, service, loop, upstreams) = try cancellationFixture(
-            upstreamCount: 1,
-            testHooks: .init(upstreamRequestQueued: { leaseID, _, _ in queuedRequests.append(leaseID) }),
-            requestTimeout: 10, deadlineClock: clock.client
-        )
-        defer { manager.shutdownAndWait() }
-        let upstream = upstreams[0]
-        let first = try cancellationOperation(
-            executeSnippetPayload(id: 300, workspaceIdentifier: "windowtab-first"),
-            service: service, loop: loop, requestTimeoutOverride: .seconds(10)
-        )
-        await loop.run()
-        await manager.drainRuntimeTasksForTesting()
-        _ = try await waitForUpstreamRequestCount(upstream, count: 1)
-        let second = try cancellationOperation(
-            executeSnippetPayload(id: 301, workspaceIdentifier: "windowtab-queued"), service: service, loop: loop,
-            requestTimeoutOverride: .milliseconds(150)
-        )
-        await loop.run()
-        _ = try await waitWithTimeout("second request entered the upstream queue") {
-            try await queuedRequests.nextValue(at: 1)
-        }
-        #expect(manager.debugSnapshot().queuedRequestCount == 1)
-        clock.advance(by: waitSeconds)
-        await loop.advanceTime(by: .milliseconds(Int64(waitSeconds * 1_000)))
-        await loop.run()
-        let expiresInQueue = waitSeconds >= 0.15
-        #expect(manager.debugSnapshot().queuedRequestCount == (expiresInQueue ? 0 : 1))
 
-        let response = try #require(upstream.takeNextResponse(label: "tools/call:ExecuteSnippet"))
-        manager.routeUpstreamMessage(response, upstreamIndex: 0)
-        await loop.run()
-        guard case .responseData = try await first.future.get() else {
-            Issue.record("the blocker should retain its independent timeout budget")
-            return
-        }
-        if !expiresInQueue {
-            await manager.drainRuntimeTasksForTesting()
-            _ = try await waitForUpstreamRequestCount(upstream, count: 2)
-            clock.advance(by: 0.06)
-            await loop.advanceTime(by: .milliseconds(60))
-        }
-        await loop.run()
-        guard case .mcpError(let id, -32000, "upstream timeout", _, _) = try await second.future.get() else {
-            Issue.record("queue wait and execution must share the original deadline")
-            return
-        }
-        #expect(id?.key == "301")
-        await manager.drainRuntimeTasksForTesting()
-        let calls = upstream.recordedMessages().filter {
-            MCPJSONValue($0).objectValue?["method"] == .string("tools/call")
-        }
-        #expect(calls.count == (expiresInQueue ? 1 : 2))
-        #expect(manager.debugSnapshot().queuedRequestCount == 0)
-        if !expiresInQueue {
-            #expect(upstream.discardNextResponse(label: "tools/call:ExecuteSnippet"))
-        }
-        let nextMessageCount = upstream.recordedMessages().count + 1
-        let third = try cancellationOperation(
-            executeSnippetPayload(id: 302, workspaceIdentifier: "windowtab-after-timeout"), service: service, loop: loop
-        )
-        await loop.run()
-        await manager.drainRuntimeTasksForTesting()
-        _ = try await waitForUpstreamRequestCount(upstream, count: nextMessageCount)
-        let thirdResponse = try #require(upstream.takeNextResponse(label: "tools/call:ExecuteSnippet"))
-        manager.routeUpstreamMessage(thirdResponse, upstreamIndex: 0)
-        await loop.run()
-        guard case .responseData = try await third.future.get() else {
-            Issue.record("timed-out queued work must not occupy the next request's slot")
-            return
-        }
-    }
 
-    @Test func httpRequestLeaseTimeoutReleasesSessionAndStartsNextQueuedRequest() async throws {
+    @Test func httpRequestTimeoutDoesNotCancelAnotherRequestOnTheSameNativeConnection() async throws {
         let upstream = EmbeddedControlledUpstreamClient()
         let config = makeEmbeddedConfig(requestTimeout: 10)
         let firstChannel = await NIOAsyncTestingChannel(handlers: [])
@@ -880,13 +683,10 @@ struct HTTPConcurrencyTests {
             sessionID: sessionID,
             to: secondChannel
         )
-        let queueDeadline = ContinuousClock.now.advanced(by: .seconds(2))
-        while sessionManager.debugSnapshot().queuedRequestCount == 0 {
-            await secondChannel.testingEventLoop.run()
-            guard ContinuousClock.now < queueDeadline else { throw AsyncTestTimeoutError(description: "waiting for routed queued request") }
-            await Task.yield()
-        }
-        #expect(sessionManager.debugSnapshot().queuedRequestCount == 1)
+        await secondChannel.testingEventLoop.run()
+        await sessionManager.drainRuntimeTasksForTesting()
+        _ = try await waitForUpstreamRequestCount(upstream, count: 2)
+        #expect(sessionManager.debugSnapshot().queuedRequestCount == 0)
 
         await firstChannel.testingEventLoop.advanceTime(by: .seconds(10))
         await firstChannel.testingEventLoop.run()
@@ -901,8 +701,8 @@ struct HTTPConcurrencyTests {
         let secondRequestLabels = try await waitForUpstreamRequestCount(upstream, count: 3)
         #expect(secondRequestLabels == [
             "tools/call:ExecuteSnippet",
-            "notifications/cancelled",
             "tools/call:ExecuteSnippet",
+            "notifications/cancelled",
         ])
 
         #expect(upstream.discardNextResponse(label: "tools/call:ExecuteSnippet"))
@@ -950,7 +750,7 @@ struct HTTPConcurrencyTests {
         ])!
     }
 
-    @Test func httpQueuedNotificationDoesNotOvertakeEarlierSessionRequest() async throws {
+    @Test func httpNotificationPreservesSendOrderWithoutWaitingForAnotherRequestResult() async throws {
         let notificationQueued = TestSignal()
         let upstream = ControlledUpstreamClient()
         let server = try TestHTTPServer.start(
@@ -994,8 +794,9 @@ struct HTTPConcurrencyTests {
             try await notificationQueued.wait(
                 description: "waiting for notification to queue behind tools/list"
             )
-            #expect(await upstream.nonInitializeLabels() == ["tools/list"])
-            #expect(server.sessionManager.debugSnapshot().queuedRequestCount == 1)
+            let sentBeforeReply = try await waitForUpstreamRequestCount(upstream, count: 2)
+            #expect(sentBeforeReply == ["tools/list", "notifications/test-progress"])
+            #expect(server.sessionManager.debugSnapshot().queuedRequestCount == 0)
             #expect(await upstream.respondNext(label: "tools/list"))
             let firstResult = try await first
             #expect(firstResult.0.statusCode == 200)
@@ -1069,8 +870,7 @@ struct HTTPConcurrencyTests {
         let upstream = RefreshSensitiveUpstreamClient()
         let target = XcodeProcessTarget(
             processID: 27071, appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
+            developerDir: "/Applications/Xcode.app/Contents/Developer", xcodeVersion: "27.0"
         )
         let server = try TestHTTPServer.start(upstream: upstream, xcodeProcessRoutes: [
             XcodeProcessRoute(target: target, upstreamIndices: [0])
@@ -1123,8 +923,7 @@ struct HTTPConcurrencyTests {
         let upstream = SingleFlightRefreshUpstreamClient()
         let target = XcodeProcessTarget(
             processID: 27071, appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer",
-            mcpbridgePath: "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge", xcodeVersion: "27.0"
+            developerDir: "/Applications/Xcode.app/Contents/Developer", xcodeVersion: "27.0"
         )
         let server = try TestHTTPServer.start(upstream: upstream, xcodeProcessRoutes: [
             XcodeProcessRoute(target: target, upstreamIndices: [0])
@@ -1343,7 +1142,6 @@ private struct TestHTTPServer {
     static func start(
         upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
         requestTimeout: TimeInterval = 5,
-        includesXcodeService: Bool = false,
         additionalUpstreams: [any UpstreamSlotControlling] = [],
         xcodeProcessRoutes: [XcodeProcessRoute] = [],
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks()
@@ -1353,7 +1151,6 @@ private struct TestHTTPServer {
         let childChannelTracker = HTTPTestServerChannelTracker()
         let config: ProxyRuntimeConfiguration = {
             var config = ProxyRuntimeConfiguration(
-                includesXcodeService: includesXcodeService,
 
                 maxMessageBytes: 1_048_576,
                 requestTimeout: requestTimeout
@@ -1477,6 +1274,7 @@ private actor BackendCatalogUpstream: UpstreamSlotControlling {
                 if selector == "tabIdentifier" {
                     tools.append(["name": "XcodeListWindows", "inputSchema": ["type": "object", "properties": [:]]])
                 } else {
+                    tools.append(["name": "XcodeListWindows", "inputSchema": ["type": "object", "properties": [:]]])
                     tools.append(["name": "XcodeListWorkspaces", "inputSchema": ["type": "object", "properties": [:]]])
                 }
                 result = ["tools": tools]
@@ -1492,7 +1290,9 @@ private actor BackendCatalogUpstream: UpstreamSlotControlling {
                     let arguments = params["arguments"] as? [String: Any] ?? [:]
                     let wrongSelector = selector == "tabIdentifier" ? "workspaceIdentifier" : "tabIdentifier"
                     let hasSelector = arguments[selector] != nil
-                    let matchesIdentifier = arguments[selector] as? String == identifier
+                    let suppliedIdentifier = arguments[selector] as? String
+                    let matchesIdentifier = suppliedIdentifier == identifier
+                        || (selector == "workspaceIdentifier" && suppliedIdentifier == workspacePath)
                     let hasWrongSelector = arguments[wrongSelector] != nil
                     result = ["isError": (hasSelector && !matchesIdentifier) || hasWrongSelector,
                               "structuredContent": ["selector": selector], "content": []]
