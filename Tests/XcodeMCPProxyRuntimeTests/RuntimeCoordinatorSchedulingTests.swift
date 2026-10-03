@@ -1433,6 +1433,12 @@ struct RuntimeCoordinatorSchedulingTests {
             return fixture.eventLoop.makeSucceededFuture(())
         }
 
+        _ = try await waitForRecordedValue(
+            queuedStarts,
+            at: 0,
+            description: "waiting for queued request to start on the initial static channel"
+        )
+
         await initial.blockNextCancellation()
         manager.handleRequestLeaseTimeout(
             leaseID,
@@ -1464,9 +1470,6 @@ struct RuntimeCoordinatorSchedulingTests {
             upstreamIndex: replacementProof.slotID.rawValue,
             applyBackoff: false
         )
-        for _ in 0..<20 {
-            await Task.yield()
-        }
         #expect(await replacement.sentCount() == 0)
         #expect(
             manager.upstreamSlotScheduler.debugSnapshot()
