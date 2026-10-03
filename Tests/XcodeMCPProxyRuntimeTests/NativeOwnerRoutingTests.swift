@@ -229,6 +229,191 @@ struct NativeOwnerRoutingTests {
         #expect(await native.sentCount() == 1)
     }
 
+    @Test func selectedNativeOwnerBoundToolRunsWithoutASelectorAndDoesNotRetryGUIOnToolError() async throws {
+        let native = TestUpstreamClient()
+        let oldGUI = TestUpstreamClient()
+        let newGUI = TestUpstreamClient()
+        let oldTarget = xcodeProcessTarget(processID: 810, xcodeVersion: "26.6")
+        let newTarget = xcodeProcessTarget(processID: 811, xcodeVersion: "27.0")
+        let config = makeConfig(requestTimeout: 5)
+        let fixture = RuntimeCoordinatorFixture(
+            config: config, upstreams: [native, oldGUI, newGUI],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: oldTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: newTarget, upstreamIndices: [2]),
+            ], startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        for index in 0...2 { manager.markUpstreamInitialized(upstreamIndex: index) }
+        seedCoordinatorSuiteInitialize(on: manager,
+            result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 0)
+        let nativeDescriptor = toolDescriptor(
+            name: "FutureWorkspaceTool", description: "Selected native definition",
+            inputProperties: ["workspaceIdentifier": ["type": "string"], "operationField": ["type": "string"]],
+            required: ["operationField"], outputSchema: ["type": "object"]
+        )
+        try seedUnboundToolCatalog(on: manager, upstreamIndex: 0, tools: [nativeDescriptor])
+        try seedProcessToolCatalogs(on: manager, entries: [
+            (oldTarget, 1, [ownerBoundToolDescriptor(name: "FutureWorkspaceTool"), toolDescriptor(name: "XcodeListWindows")]),
+            (newTarget, 2, [ownerBoundToolDescriptor(name: "FutureWorkspaceTool"), toolDescriptor(name: "XcodeListWindows")]),
+        ])
+        let request = toolsCallObject(id: 210, name: "FutureWorkspaceTool", arguments: ["operationField": "native-input"])
+        let decision = await manager.toolRoutingDecision(for: request, requestTimeoutOverride: .seconds(2))
+        guard case .forwardAdmitted(let indices, let admission) = decision else {
+            Issue.record("A native owner-bound tool must be usable without a workspace selector")
+            return
+        }
+        let proof = manager.operationLeaseForTest(upstreamIndex: 0).proof
+        #expect(indices == [0])
+        #expect(admission.upstreamProofs == [proof])
+        #expect(admission.route == nil)
+        #expect(admission.workspaceIdentifier == nil)
+        #expect(admission.toolDefinition?.sourceProof == proof)
+        #expect(admission.toolDefinition?.descriptor == (try jsonValue(nativeDescriptor)))
+        #expect(await native.sentCount() == 0)
+        #expect(await oldGUI.sentCount() == 0)
+        #expect(await newGUI.sentCount() == 0)
+
+        let sessionID = "native-preferred-without-workspace"
+        _ = manager.session(id: sessionID)
+        manager.sessionRegistry.markInitialized(id: sessionID, negotiatedProtocolVersion: MCP.ProtocolVersion.current)
+        let executor = ClientMCPRequestExecutor(
+            config: config, sessionManager: manager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout)
+        )
+        let operation = executor.handle(
+            bodyData: try JSONRPC.Wire.data(from: request),
+            headerSessionID: sessionID, headerSessionExists: true,
+            prefersEventStream: false, eventLoop: fixture.eventLoop
+        )
+        let sent = try await sentMessage(from: native, matching: {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "FutureWorkspaceTool"
+        }, timeout: .seconds(2))
+        let sentObject = try JSONRPC.Wire.object(fromData: sent)
+        let params = try #require(sentObject["params"] as? [String: Any])
+        #expect(JSONValue(any: try #require(params["arguments"])) == .object(["operationField": .string("native-input")]))
+        let nativeError: JSONValue = .object([
+            "isError": .bool(true),
+            "content": .array([.object(["type": .string("text"), "text": .string("Native tool refused the operation")])]),
+        ])
+        await native.yield(.message(try JSONRPC.Wire.resultResponseData(
+            id: try #require(JSONRPC.ID(any: extractUpstreamID(from: sent))), result: nativeError
+        )))
+        let resolution = try await waitWithTimeout("waiting for the native tool error without GUI retry", timeout: .seconds(2)) {
+            try await operation.future.get()
+        }
+        guard case .responseData(let data, _, _) = resolution else {
+            Issue.record("The native tool error must remain an MCP tool result")
+            return
+        }
+        let response = try JSONRPC.Wire.object(fromData: data)
+        #expect((response["id"] as? NSNumber)?.int64Value == 210)
+        #expect(JSONValue(any: try #require(response["result"])) == nativeError)
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await native.sentCount() == 1)
+        #expect(await oldGUI.sentCount() == 0)
+        #expect(await newGUI.sentCount() == 0)
+    }
+
+    @Test(arguments: [false, true])
+    func anUnscopedToolSelectsAStableGUIProviderWhenNativeDoesNotOfferIt(nativeInitialized: Bool) async throws {
+        let native = TestUpstreamClient()
+        let newGUI = TestUpstreamClient()
+        let oldGUI = TestUpstreamClient()
+        let newTarget = xcodeProcessTarget(processID: 811, xcodeVersion: "27.0")
+        let oldTarget = xcodeProcessTarget(processID: 810, xcodeVersion: "26.6")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [native, newGUI, oldGUI],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: newTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: oldTarget, upstreamIndices: [2]),
+            ], startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        for index in 1...2 { manager.markUpstreamInitialized(upstreamIndex: index) }
+        if nativeInitialized {
+            manager.markUpstreamInitialized(upstreamIndex: 0)
+            try seedUnboundToolCatalog(on: manager, upstreamIndex: 0, tools: [toolDescriptor(name: "OtherNativeTool")])
+        }
+        let oldDescriptor = toolDescriptor(name: "DocumentationLikeTool", description: "Actual Xcode 26 provider",
+            inputProperties: ["query": ["type": "string"]], required: ["query"])
+        let newDescriptor = toolDescriptor(name: "DocumentationLikeTool", description: "Actual Xcode 27 provider",
+            inputProperties: ["query": ["type": "string"]], required: ["query"])
+        try seedProcessToolCatalogs(on: manager, entries: [
+            (newTarget, 1, [newDescriptor]), (oldTarget, 2, [oldDescriptor]),
+        ])
+        let decision = await manager.toolRoutingDecision(for: toolsCallObject(
+            id: 211, name: "DocumentationLikeTool", arguments: ["query": "read docs"]),
+            requestTimeoutOverride: .seconds(2))
+        guard case .forwardAdmitted(let indices, let admission) = decision else {
+            Issue.record("An unscoped tool must select an available GUI provider when native does not offer it")
+            return
+        }
+        let proof = manager.operationLeaseForTest(upstreamIndex: 2).proof
+        #expect(indices == [2])
+        #expect(admission.route?.routeID.processID == oldTarget.processID)
+        #expect(admission.toolDefinition?.sourceProof == proof)
+        #expect(admission.toolDefinition?.descriptor == (try jsonValue(oldDescriptor)))
+        #expect(await native.sentCount() == 0)
+        #expect(await newGUI.sentCount() == 0)
+        #expect(await oldGUI.sentCount() == 0)
+    }
+
+    @Test func anOwnerBoundToolWithoutANativeDefinitionRequiresAGUIWorkspaceSelector() async throws {
+        let native = TestUpstreamClient()
+        let oldGUI = TestUpstreamClient()
+        let newGUI = TestUpstreamClient()
+        let oldTarget = xcodeProcessTarget(processID: 810, xcodeVersion: "26.6")
+        let newTarget = xcodeProcessTarget(processID: 811, xcodeVersion: "27.0")
+        let fixture = RuntimeCoordinatorFixture(
+            upstreams: [native, oldGUI, newGUI],
+            xcodeProcessRoutes: [
+                XcodeProcessRoute(target: oldTarget, upstreamIndices: [1]),
+                XcodeProcessRoute(target: newTarget, upstreamIndices: [2]),
+            ], startImmediately: false
+        )
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        for index in 0...2 { manager.markUpstreamInitialized(upstreamIndex: index) }
+        seedCoordinatorSuiteInitialize(on: manager,
+            result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 0)
+        try seedUnboundToolCatalog(on: manager, upstreamIndex: 0, tools: [toolDescriptor(name: "OtherNativeTool")])
+        let tools = [ownerBoundToolDescriptor(name: "FutureWorkspaceTool"), toolDescriptor(name: "XcodeListWindows")]
+        try seedProcessToolCatalogs(on: manager, entries: [(oldTarget, 1, tools), (newTarget, 2, tools)])
+        let routing = Task {
+            await manager.toolRoutingDecision(for: toolsCallObject(id: 212, name: "FutureWorkspaceTool", arguments: [:]),
+                requestTimeoutOverride: .seconds(2))
+        }
+        defer { routing.cancel() }
+        for (upstream, tab, path) in [
+            (oldGUI, "old-gui-tab", "/Work/Old.xcworkspace"),
+            (newGUI, "new-gui-tab", "/Work/New.xcworkspace"),
+        ] {
+            let inventory = try await sentMessage(from: upstream, matching: {
+                methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "XcodeListWindows"
+            }, timeout: .seconds(2))
+            await upstream.yield(.message(try makeXcodeListWindowsResponse(
+                id: extractUpstreamID(from: inventory), message: "* tabIdentifier: \(tab), workspacePath: \(path)")))
+        }
+        let decision = try await waitWithTimeout("waiting for ambiguous GUI ownership rejection", timeout: .seconds(2)) {
+            await routing.value
+        }
+        guard case .reject(let errors) = decision else {
+            Issue.record("Two GUI owners must require a workspace selector when native does not offer the tool")
+            return
+        }
+        #expect(errors.count == 1)
+        #expect(errors.first?.message.contains("owner") == true)
+        #expect(await native.sentCount() == 0)
+        #expect(await oldGUI.sentCount() == 1)
+        #expect(await newGUI.sentCount() == 1)
+    }
+
     @Test func requestsShareOneNativeConnectionAndCancellingOneDoesNotBlockTheOthers() {
         let eventLoop = EmbeddedEventLoop()
         let topology = UpstreamTopologyAuthority([TestUpstreamClient()])

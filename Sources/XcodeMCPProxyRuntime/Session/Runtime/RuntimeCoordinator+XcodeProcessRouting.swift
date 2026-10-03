@@ -537,8 +537,11 @@ extension RuntimeCoordinator {
             let catalog = processControlPlane.unboundToolsCatalogRaw()
             let hasNativeTool = ProcessToolCatalogCodec.toolsByName(in: catalog)[request.toolName] != nil
             let hasGUIProvider = !processControlPlane.processIDsHavingTool(request.toolName).isEmpty
-            if hasNativeTool && (!isKnownOwnerBoundTool(request.toolName) || !hasGUIProvider)
-                || (catalog == nil && !hasGUIProvider) {
+            let nativeIsAvailable = defaultBackendUpstreamIndices.contains {
+                upstreamHealthManager.state(for: UpstreamSlotID(rawValue: $0))?
+                    .initPhase.isUsableInitialized == true
+            }
+            if hasNativeTool && nativeIsAvailable || !hasGUIProvider {
                 return nativeHostToolRoutingDecision(for: request)
             }
         }
