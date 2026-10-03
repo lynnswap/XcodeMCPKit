@@ -68,9 +68,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         }
         var arguments = arguments
         if case .string(let selector) = arguments["workspaceIdentifier"] {
-            if name != "XcodeCloseWorkspace" {
-                arguments["workspaceIdentifier"] = .string(try await workspaces.resolve(selector))
-            }
+            arguments["workspaceIdentifier"] = .string(try await workspaces.resolve(selector, opensIfMissing: name != "XcodeCloseWorkspace"))
             try Task.checkCancellation()
             if tool.workspaceScoped, case .string(let identifier) = arguments["workspaceIdentifier"] {
                 try await workspaces.prepareDebugger(for: identifier)
@@ -85,11 +83,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         return stream
     }
 
-    package func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue) {
-        workspaces.observe(toolName: toolName, arguments: arguments, event: event)
-    }
-
     package func shutdown() async throws {
-        try await workspaces.closeOwnedWorkspaces()
+        try await workspaces.closeAllWorkspaces()
     }
 }

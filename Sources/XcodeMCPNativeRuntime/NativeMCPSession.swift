@@ -5,10 +5,12 @@ import XcodeMCPWire
 package final class NativeMCPSession {
     private let backend: any NativeToolBackend
     private let output: @MainActor (Data) throws -> Void
+    package var onOutputFailure: (@MainActor (any Error) -> Void)?
     private let artifactsRoot: URL
     private let conversationID = UUID().uuidString
     private var initialized = false
     private var stopping = false
+    private var outputFailed = false
     private var requests: [String: Task<Void, Never>] = [:]
 
     package init(backend: any NativeToolBackend, artifactsRoot: URL,
@@ -122,15 +124,16 @@ package final class NativeMCPSession {
             let updates = try await backend.execute(name, arguments: arguments, context: context)
             var completed: JSONValue?
             for await data in updates {
-                try Task.checkCancellation()
                 guard let event = JSONValue(any: try JSONSerialization.jsonObject(with: data)),
                       case .object(let fields) = event, case .string(let type) = fields["type"] else {
                     throw NativeRuntimeError.unsupportedContract("Native action emitted an unsupported event")
                 }
                 backend.observe(toolName: name, arguments: arguments, event: event)
+                try Task.checkCancellation()
                 switch type {
                 case "update":
                     if case .object(let metadata) = fieldsForMetadata(params), let token = metadata["progressToken"],
+                       requestID(token.foundationObject) != nil,
                        case .object(var progress) = fields["data"] {
                         progress["progressToken"] = token
                         try send(.object([
@@ -179,11 +182,11 @@ package final class NativeMCPSession {
     }
 
     private func sendResult(id: JSONRPC.ID, result: JSONValue) throws {
-        try output(JSONRPC.Wire.data(from: JSONRPC.Wire.resultResponseObject(id: id, result: result)))
+        try write(JSONRPC.Wire.data(from: JSONRPC.Wire.resultResponseObject(id: id, result: result)))
     }
 
     private func sendError(id: JSONRPC.ID?, code: Int, message: String) throws {
-        try output(JSONRPC.Wire.data(from: JSONRPC.Wire.errorResponseObject(id: id, code: code, message: message)))
+        try write(JSONRPC.Wire.data(from: JSONRPC.Wire.errorResponseObject(id: id, code: code, message: message)))
     }
 
     private func reportError(id: JSONRPC.ID, code: Int, message: String) {
@@ -192,7 +195,19 @@ package final class NativeMCPSession {
     }
 
     private func send(_ value: JSONValue) throws {
-        try output(JSONRPC.Wire.data(from: value.foundationObject))
+        try write(JSONRPC.Wire.data(from: value.foundationObject))
+    }
+
+    private func write(_ data: Data) throws {
+        do { try output(data) }
+        catch {
+            if !outputFailed {
+                outputFailed = true
+                stopping = true
+                onOutputFailure?(error)
+            }
+            throw error
+        }
     }
 
     package func shutdown() async throws {

@@ -97,4 +97,60 @@ struct NativeStdioFramingTests {
         #expect(rest.protocolViolation == nil)
         #expect(rest.bufferedByteCount == 0)
     }
+
+    @Test(arguments: [1, 64, 512], ["\n", "\r\n"])
+    func contentLengthHeadersDoNotContributeToBufferedMessageBytes(chunkSize: Int, lineEnding: String) {
+        let framer = StdioFramer(mode: .delimitedMessages)
+        let prefix = #"{"text":""#
+        let suffix = #""}"#
+        let body = Data((prefix + String(repeating: "a", count: 256 - prefix.utf8.count - suffix.utf8.count) + suffix).utf8)
+        let header = Data([
+            "Content-Length: \(body.count)",
+            "Content-Type: application/json",
+            "X-Padding: " + String(repeating: "x", count: 200),
+            "", "",
+        ].joined(separator: lineEnding).utf8)
+        let frame = header + body
+
+        for offset in stride(from: 0, to: frame.count - 1, by: chunkSize) {
+            let end = min(offset + chunkSize, frame.count - 1)
+            let result = framer.append(frame.subdata(in: offset..<end))
+            #expect(result.messages.isEmpty)
+            #expect(result.protocolViolation == nil)
+            #expect(result.bufferedByteCount == end)
+            #expect(framer.bufferedMessageByteCount == max(0, end - header.count))
+        }
+        #expect(framer.bufferedMessageByteCount == body.count - 1)
+
+        let completed = framer.append(Data(frame.suffix(1)))
+        #expect(completed.messages == [body])
+        #expect(completed.protocolViolation == nil)
+        #expect(framer.bufferedMessageByteCount == 0)
+    }
+
+    @Test func linePayloadSizeCountsUTF8BytesUntilTheDelimiterArrives() {
+        let framer = StdioFramer(mode: .delimitedMessages)
+        let message = Data(#"{"text":"é😃"}"#.utf8)
+        for offset in message.indices {
+            let result = framer.append(Data([message[offset]]))
+            #expect(result.messages.isEmpty)
+            #expect(result.protocolViolation == nil)
+            #expect(framer.bufferedMessageByteCount == offset + 1)
+        }
+        let completed = framer.append(Data([0x0A]))
+        #expect(completed.messages == [message])
+        #expect(completed.protocolViolation == nil)
+        #expect(framer.bufferedMessageByteCount == 0)
+    }
+
+    @Test(arguments: [false, true])
+    func headerSizeRemainsBoundedSeparatelyFromPayloadSize(completeHeader: Bool) {
+        let framer = StdioFramer(mode: .delimitedMessages)
+        var header = Data(("Content-Length: " + String(repeating: " ", count: 4 * 1024 * 1024) + "1").utf8)
+        if completeHeader { header.append(Data("\r\n\r\n".utf8)) }
+        let result = framer.append(header)
+        #expect(result.messages.isEmpty)
+        #expect(result.protocolViolation?.reason == .headerTooLarge)
+        #expect(framer.bufferedMessageByteCount == 0)
+    }
 }

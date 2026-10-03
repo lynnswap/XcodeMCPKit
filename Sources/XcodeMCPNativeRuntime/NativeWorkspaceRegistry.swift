@@ -1,28 +1,44 @@
 import ABIBridge
 import Foundation
-import XcodeMCPWire
 
 @MainActor
 final class NativeWorkspaceRegistry {
     private let runtime = ABIRuntime.shared
     private let registry: AnyObject
-    private var ownedIdentifiers = Set<String>()
+    private let workspaceInfoType: Any.Type
 
     init(installation: NativeXcodeInstallation) async throws {
         let type = try await runtime.swiftType(named: "IDEFoundation.IDEWorkspaceRegistry", in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
         let shared = try await type.staticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: AnyObject.self)
         registry = try unsafe shared.unsafeInvoke()
+        _ = try await runtime.swiftType(named: "IDEFoundation.IDEWorkspaceRegistry.WorkspaceInfo",
+                                        in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
+        guard let workspaceInfoType = _typeByName("13IDEFoundation20IDEWorkspaceRegistryC13WorkspaceInfoV") else {
+            throw NativeRuntimeError.unsupportedContract("Native workspace registry entry type is unavailable")
+        }
+        self.workspaceInfoType = workspaceInfoType
     }
 
-    func resolve(_ selector: String) async throws -> String {
+    func resolve(_ selector: String, opensIfMissing: Bool = true) async throws -> String {
         if selector.hasPrefix("/") {
             let path = URL(fileURLWithPath: selector).standardizedFileURL.resolvingSymlinksInPath().path
+            let matches = try await entries(workspaceInfoType).filter { entry in
+                entry.path.map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path } == path
+            }
+            if let match = matches.first {
+                guard matches.count == 1 else {
+                    throw NativeRuntimeError.invalidRequest("Multiple native workspaces match '\(selector)'; select a workspaceIdentifier: " + matches.map(\.identifier).sorted().joined(separator: ", "))
+                }
+                return match.identifier
+            }
+            guard opensIfMissing else {
+                throw NativeRuntimeError.invalidRequest("No open native workspace matches '\(selector)'")
+            }
             let open = try await runtime.object(registry).method(named: "open(path: Swift.String) async throws -> __C.IDEWorkspace", as: (@concurrent (String) async throws -> AnyObject).self)
             try Task.checkCancellation()
             let workspace = try unsafe await open.unsafeInvoke(path)
             let getter = try await runtime.object(workspace).getter(named: "workspaceIdentifier", as: String.self)
             let identifier = try unsafe getter.unsafeInvoke()
-            ownedIdentifiers.insert(identifier)
             return identifier
         }
         return selector
@@ -36,29 +52,36 @@ final class NativeWorkspaceRegistry {
         _ = try unsafe manager.unsafeInvoke()
     }
 
-    func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue) {
-        guard case .object(let fields) = event, case .string("completed") = fields["type"],
-              case .object(let data) = fields["data"] else { return }
-        if toolName == "XcodeOpenWorkspace", case .string(let identifier) = data["workspaceIdentifier"] {
-            ownedIdentifiers.insert(identifier)
-        } else if toolName == "XcodeCloseWorkspace", case .string(let identifier) = arguments["workspaceIdentifier"] {
-            ownedIdentifiers.remove(identifier)
-        }
-    }
-
-    func closeOwnedWorkspaces() async throws {
+    // This registry belongs to the headless host process. Its native snapshot
+    // also includes opens whose completion event a cancelled caller did not see.
+    func closeAllWorkspaces() async throws {
+        let identifiers = Set(try await entries(workspaceInfoType).map(\.identifier))
         let close = try await runtime.object(registry).method(named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self)
         var failures: [String] = []
-        for identifier in ownedIdentifiers.sorted() {
+        for identifier in identifiers.sorted() {
             do {
                 try unsafe close.unsafeInvoke(identifier)
-                ownedIdentifiers.remove(identifier)
             } catch {
                 failures.append("\(identifier): \(error)")
             }
         }
         if !failures.isEmpty {
-            throw NativeRuntimeError.invocation("Failed to close owned workspaces: " + failures.joined(separator: "; "))
+            throw NativeRuntimeError.invocation("Failed to close native workspaces: " + failures.joined(separator: "; "))
+        }
+    }
+
+    private func entries<T>(_ type: T.Type) async throws -> [(identifier: String, path: String?)] {
+        let list = try await runtime.object(registry).method(
+            named: "list()", as: (() -> [T]).self)
+        let values = try unsafe list.unsafeInvoke()
+        return try values.map { value in
+            let fields = Mirror(reflecting: value).children
+            guard let identifier = fields.first(where: { $0.label == "identifier" })?.value as? String,
+                  let pathField = fields.first(where: { $0.label == "path" }),
+                  let path = pathField.value as? String? else {
+                throw NativeRuntimeError.unsupportedContract("Native workspace registry entry has no identifier or optional path")
+            }
+            return (identifier, path)
         }
     }
 }

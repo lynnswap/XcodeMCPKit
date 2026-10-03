@@ -84,6 +84,15 @@ package final class StdioFramer {
         self.mode = mode
     }
 
+    package var bufferedMessageByteCount: Int {
+        guard let first = firstNonWhitespaceIndex(from: buffer.startIndex) else { return 0 }
+        if isPotentialContentLengthHeaderPrefix(at: first) {
+            guard let headerEnd = contentLengthHeaderEndIndex(from: first) else { return 0 }
+            return buffer.endIndex - headerEnd
+        }
+        return buffer.count
+    }
+
     package func append(_ data: Data) -> StdioFramer.AppendResult {
         if !data.isEmpty {
             buffer.append(data)
@@ -383,7 +392,7 @@ package final class StdioFramer {
     }
 
     private func parseContentLength(from headerText: String) -> Int? {
-        for line in headerText.split(separator: "\n") {
+        for line in headerText.split(whereSeparator: \.isNewline) {
             let parts = line.split(separator: ":", maxSplits: 1)
             guard parts.count == 2 else { continue }
             if parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
