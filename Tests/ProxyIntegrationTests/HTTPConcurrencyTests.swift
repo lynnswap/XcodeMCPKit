@@ -364,11 +364,7 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func multiplexedCancellationPreservesOtherSessionsAndIDScalarTypes() async throws {
-        let queuedRequests = LockedRecordedValues<LeaseManager.ID>()
-        let (manager, service, loop, upstreams) = try cancellationFixture(
-            upstreamCount: 1,
-            testHooks: .init(upstreamRequestQueued: { leaseID, _, _ in queuedRequests.append(leaseID) })
-        )
+        let (manager, service, loop, upstreams) = try cancellationFixture(upstreamCount: 1)
         defer { manager.shutdownAndWait() }
         let upstream = upstreams[0]
         let active = try cancellationOperation(
@@ -377,13 +373,16 @@ struct HTTPConcurrencyTests {
         await loop.run()
         await manager.drainRuntimeTasksForTesting()
         _ = try await waitForUpstreamRequestCount(upstream, count: 1)
-        var queuedBody = executeSnippetPayload(id: 2, workspaceIdentifier: "/Work/Queued.xcodeproj")
-        queuedBody["id"] = "1"
-        let queued = try cancellationOperation(queuedBody, service: service, loop: loop)
-        await loop.run()
-        _ = try await waitWithTimeout("second request entered the upstream queue") {
-            try await queuedRequests.nextValue(at: 1)
+        var stringIDBody = executeSnippetPayload(id: 2, workspaceIdentifier: "/Work/Queued.xcodeproj")
+        stringIDBody["id"] = "1"
+        let stringIDRequest = try cancellationOperation(stringIDBody, service: service, loop: loop)
+        let sendDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while upstream.recordedMessages().filter({ MCPJSONValue($0).objectValue?["method"] == .string("tools/call") }).count < 2 {
+            await loop.run()
+            guard ContinuousClock.now < sendDeadline else { throw AsyncTestTimeoutError(description: "waiting for both multiplexed requests to be sent") }
+            await Task.yield()
         }
+        await manager.drainRuntimeTasksForTesting()
         #expect(manager.debugSnapshot().queuedRequestCount == 0)
 
         _ = try cancellationOperation(cancellationPayload(id: 1), service: service, loop: loop, sessionID: "other-session")
@@ -393,8 +392,8 @@ struct HTTPConcurrencyTests {
         await loop.run()
         await manager.drainRuntimeTasksForTesting()
         await loop.run()
-        guard case .empty(.accepted, _) = try await queued.future.get() else {
-            Issue.record("queued request was not cancelled")
+        guard case .empty(.accepted, _) = try await stringIDRequest.future.get() else {
+            Issue.record("string ID request was not cancelled")
             return
         }
         #expect(upstream.recordedMessages().filter { MCPJSONValue($0).objectValue?["method"] == .string("tools/call") }.count == 2)
