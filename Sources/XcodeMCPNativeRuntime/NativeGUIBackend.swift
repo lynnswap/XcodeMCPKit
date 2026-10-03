@@ -217,14 +217,8 @@ package final class NativeGUIBackend: NativeToolBackend {
         }
     }
 
-    package func shutdown() async throws {
-        if let shutdownTask { return try await shutdownTask.value }
-        let task = Task { @MainActor in try await self.finishShutdown() }
-        shutdownTask = task
-        try await task.value
-    }
-
-    private func finishShutdown() async throws {
+    package func beginShutdown() {
+        guard shutdownTask == nil else { return }
         let pending = Array(invocations.values)
         let connecting = initialization
         let listener = progressListener
@@ -239,6 +233,20 @@ package final class NativeGUIBackend: NativeToolBackend {
         if unconfirmed > 0 {
             FileHandle.standardError.write(Data(("Native GUI shutdown disconnected from Xcode process \(processIdentifier) with \(unconfirmed) uncancellable tool call(s) still awaiting replies; native operations may continue.\n").utf8))
         }
+        shutdownTask = Task { @MainActor in
+            try await self.finishShutdown(pending: pending, connecting: connecting,
+                                          listener: listener, preparationErrors: errors)
+        }
+    }
+
+    package func shutdown() async throws {
+        beginShutdown()
+        if let shutdownTask { try await shutdownTask.value }
+    }
+
+    private func finishShutdown(pending: [Invocation], connecting: Task<NativeGUIConnection, any Error>?,
+                                listener: Task<Void, Never>?, preparationErrors: [any Error]) async throws {
+        var errors = preparationErrors
         if let connecting {
             do { try await connecting.value.invalidate() }
             catch is CancellationError {}

@@ -583,7 +583,7 @@ struct NativeMCPSessionTests {
             _ = try await harness.initialize()
             let callback = NativeSessionSuspendedCallback()
             harness.backend.beforeExecute = { await callback.waitForReply() }
-            harness.backend.onShutdown = { callback.release(fromShutdown: true) }
+            harness.backend.onBeginShutdown = { callback.release(fromShutdown: true) }
             if failsCleanup { harness.backend.shutdownError = .invocation("Owned native cleanup failed") }
             try harness.call("AwaitNativeReply", id: "pending-native-callback")
             await callback.waitUntilEntered()
@@ -602,11 +602,51 @@ struct NativeMCPSessionTests {
                 #expect(error.description == "Owned native cleanup failed")
             }
             #expect(callback.wasReleasedByShutdown)
+            #expect(harness.backend.beginShutdownCalls == 1)
             #expect(harness.backend.shutdownCalls == 1)
             let execution = try await harness.backend.nextExecution()
             #expect(await execution.wasCancelled())
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32800)))
             harness.backend.shutdownError = nil
+        }
+    }
+
+    @Test func shutdownClosesAWorkspaceThatFinishesOpeningAfterRequestCancellation() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            let registry = NativeSessionWorkspaceProbe()
+            let begun = AsyncStream<Void>.makeStream()
+            var beginIterator = begun.stream.makeAsyncIterator()
+            harness.backend.beforeExecute = {
+                await registry.open()
+                try Task.checkCancellation()
+            }
+            harness.backend.onBeginShutdown = { begun.continuation.yield(()) }
+            harness.backend.onShutdown = { registry.closeAll() }
+            try harness.call("OpenThenExecute", id: "late-workspace-open")
+            await registry.openReply.waitUntilEntered()
+            let shutdown = Task { @MainActor in try await harness.session.shutdown() }
+            defer { shutdown.cancel(); registry.openReply.release(fromShutdown: false) }
+            let watchdog = Task { @MainActor in
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { return }
+                Issue.record("Shutdown did not prepare the pending workspace open to drain")
+                registry.openReply.release(fromShutdown: false)
+                begun.continuation.yield(())
+            }
+            defer { watchdog.cancel() }
+            _ = try #require(await beginIterator.next(isolation: MainActor.shared))
+            #expect(harness.backend.beginShutdownCalls == 1)
+            #expect(harness.backend.shutdownCalls == 0)
+            #expect(registry.workspaceIDs.isEmpty)
+
+            registry.openReply.release(fromShutdown: false)
+            try await shutdown.value
+            #expect(registry.closedSnapshots == [["late-native-workspace"]])
+            #expect(registry.workspaceIDs.isEmpty)
+            #expect(harness.backend.executions.isEmpty)
+            #expect(harness.backend.shutdownCalls == 1)
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32800)))
         }
     }
 
@@ -838,13 +878,15 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     var listError: NativeRuntimeError?
     var executeError: (any Error)?
     var shutdownError: NativeRuntimeError?
-    var beforeExecute: (@MainActor () async -> Void)?
+    var beforeExecute: (@MainActor () async throws -> Void)?
+    var onBeginShutdown: (@MainActor () -> Void)?
     var onShutdown: (@MainActor () -> Void)?
     private(set) var executions: [NativeSessionExecution] = []
     private(set) var observations: [Observation] = []
     private(set) var initializationContexts: [NativeSessionContext] = []
     private(set) var listCalls = 0
     private(set) var shutdownCalls = 0
+    private(set) var beginShutdownCalls = 0
     private let executionEvents = AsyncStream<NativeSessionExecution>.makeStream()
     private var executionIterator: AsyncStream<NativeSessionExecution>.Iterator
 
@@ -862,7 +904,7 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     }
 
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data> {
-        if let beforeExecute { await beforeExecute() }
+        if let beforeExecute { try await beforeExecute() }
         if let executeError { throw executeError }
         context.didDispatch()
         let stream = AsyncStream<Data>.makeStream()
@@ -884,6 +926,11 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
 
     func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue) {
         observations.append(Observation(toolName: toolName, arguments: arguments, event: event))
+    }
+
+    func beginShutdown() {
+        beginShutdownCalls += 1
+        onBeginShutdown?()
     }
 
     func shutdown() async throws {
@@ -923,6 +970,23 @@ private final class NativeSessionSuspendedCallback {
         self.reply = nil
         wasReleasedByShutdown = fromShutdown
         reply.resume()
+    }
+}
+
+@MainActor
+private final class NativeSessionWorkspaceProbe {
+    let openReply = NativeSessionSuspendedCallback()
+    private(set) var workspaceIDs: Set<String> = []
+    private(set) var closedSnapshots: [[String]] = []
+
+    func open() async {
+        await openReply.waitForReply()
+        workspaceIDs.insert("late-native-workspace")
+    }
+
+    func closeAll() {
+        closedSnapshots.append(workspaceIDs.sorted())
+        workspaceIDs.removeAll()
     }
 }
 

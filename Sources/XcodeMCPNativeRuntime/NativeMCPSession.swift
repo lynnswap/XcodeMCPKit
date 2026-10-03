@@ -71,18 +71,21 @@ package final class NativeMCPSession {
                     let result = try await perform(method, params: params, request: request)
                     try Task.checkCancellation()
                     try sendResult(id: id, result: result)
-                } catch is CancellationError {
-                    reportError(id: id, code: -32800, message: "Request cancelled")
-                } catch let error as NativeRuntimeError {
-                    let code: Int
-                    switch error {
-                    case .invalidRequest: code = -32602
-                    case .methodNotFound: code = -32601
-                    case .unavailable, .unsupportedContract, .invocation: code = -32603
-                    }
-                    reportError(id: id, code: code, message: error.description)
                 } catch {
-                    reportError(id: id, code: -32603, message: String(describing: error))
+                    if Task.isCancelled || error is CancellationError {
+                        let message = error is CancellationError ? "Request cancelled" : "Request cancelled: \(error)"
+                        reportError(id: id, code: -32800, message: message)
+                    } else if let error = error as? NativeRuntimeError {
+                        let code: Int
+                        switch error {
+                        case .invalidRequest: code = -32602
+                        case .methodNotFound: code = -32601
+                        case .unavailable, .unsupportedContract, .invocation: code = -32603
+                        }
+                        reportError(id: id, code: code, message: error.description)
+                    } else {
+                        reportError(id: id, code: -32603, message: String(describing: error))
+                    }
                 }
             }
         case .malformed(let id):
@@ -253,10 +256,8 @@ package final class NativeMCPSession {
         stopping = true
         let pending = requests.values.compactMap(\.task)
         for request in pending { request.cancel() }
-        var cleanupError: (any Error)?
-        do { try await backend.shutdown() }
-        catch { cleanupError = error }
+        backend.beginShutdown()
         for request in pending { await request.value }
-        if let cleanupError { throw cleanupError }
+        try await backend.shutdown()
     }
 }

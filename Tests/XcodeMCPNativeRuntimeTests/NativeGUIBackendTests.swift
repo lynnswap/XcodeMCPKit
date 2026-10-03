@@ -57,7 +57,8 @@ struct NativeGUIBackendTests {
         }
     }
 
-    @Test func sessionShutdownDrainsAnUncancellableDispatchedCallWithoutItsNativeReply() async throws {
+    @Test(arguments: ["call", "catalog"])
+    func sessionShutdownInterruptsPendingGUIRequestsWithoutNativeReplies(requestKind: String) async throws {
         try await withGUIBackend(initialize: false) { fixture in
             fixture.transport.supportsToolCancellation = false
             let output = AsyncStream<Data>.makeStream()
@@ -72,13 +73,23 @@ struct NativeGUIBackendTests {
             ])))
             _ = try #require(await responses.next(isolation: MainActor.shared))
             _ = try await fixture.listTools([Self.unscopedTool])
-            try session.receive(guiBackendData(.object([
-                "jsonrpc": .string("2.0"), "id": .string("pending-native-call"), "method": .string("tools/call"),
-                "params": .object(["name": .string("NativeSearch"), "arguments": .object(["query": .string("read")])]),
-            ])))
+            if requestKind == "call" {
+                try session.receive(guiBackendData(.object([
+                    "jsonrpc": .string("2.0"), "id": .string("pending-native-request"), "method": .string("tools/call"),
+                    "params": .object(["name": .string("NativeSearch"), "arguments": .object(["query": .string("read")])]),
+                ])))
+            } else {
+                try session.receive(guiBackendData(.object([
+                    "jsonrpc": .string("2.0"), "id": .string("pending-native-request"), "method": .string("tools/list"),
+                ])))
+            }
             let call = try await fixture.transport.nextRequest()
-            #expect(try nativeTestField(nativeTestJSON(call.message), "callTool", "name") == .string("NativeSearch"))
-            #expect(fixture.backend.pendingInvocationCount == 1)
+            if requestKind == "call" {
+                #expect(try nativeTestField(nativeTestJSON(call.message), "callTool", "name") == .string("NativeSearch"))
+                #expect(fixture.backend.pendingInvocationCount == 1)
+            } else {
+                #expect(try nativeTestJSON(call.message) == .object(["listTools": .object([:])]))
+            }
             try await session.shutdown()
             #expect(fixture.transport.invalidationCount == 1)
             #expect(fixture.transport.oneWayMessages.count == 1)
@@ -86,7 +97,42 @@ struct NativeGUIBackendTests {
             #expect(!fixture.connection.isConnected)
             let cancelled = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
             #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
-            try call.respond(.object(["content": .array([]), "isError": .bool(false)]))
+            try call.respond(requestKind == "call"
+                ? .object(["content": .array([]), "isError": .bool(false)])
+                : .object(["toolSchemas": .array([Self.unscopedTool])]))
+            try await session.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+        }
+    }
+
+    @Test func cancelledSessionInitializationPreservesItsTransportCleanupFailure() async throws {
+        try await withGUIBackend(initialize: false, connectsImmediately: false) { fixture in
+            fixture.transport.cleanupError = .cleanup
+            let output = AsyncStream<Data>.makeStream()
+            var responses = output.stream.makeAsyncIterator()
+            let session = NativeMCPSession(backend: fixture.backend,
+                artifactsRoot: fixture.directory.appendingPathComponent("artifacts"),
+                output: { output.continuation.yield($0) })
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("initialization-cleanup-failure"), "method": .string("initialize"),
+                "params": .object(["protocolVersion": .string("2025-06-18"), "capabilities": .object([:]),
+                    "clientInfo": .object(fixture.sessionContext.clientInfo)]),
+            ])))
+            try await fixture.transport.nextActivation()
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "method": .string("notifications/cancelled"),
+                "params": .object(["requestId": .string("initialization-cleanup-failure")]),
+            ])))
+            let cancelled = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
+            #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
+            guard case .string(let message) = try nativeTestField(cancelled, "error", "message") else {
+                Issue.record("The cancelled initialization must retain its cleanup diagnostic")
+                return
+            }
+            #expect(message.contains("Request cancelled"))
+            #expect(message.contains(GUIBackendTestError.cleanup.description))
+            #expect(fixture.transport.invalidationCount == 1)
+            #expect(fixture.transport.oneWayMessages.isEmpty)
             try await session.shutdown()
             #expect(fixture.transport.invalidationCount == 1)
         }
