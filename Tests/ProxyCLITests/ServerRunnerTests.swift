@@ -3,7 +3,7 @@ import Foundation
 import Testing
 import XcodeMCPKit
 @testable import XcodeMCPProxyKit
-import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyRuntime
 
 @Suite
 struct ServerRunnerTests {
@@ -38,6 +38,45 @@ struct ServerRunnerTests {
         let (config, _) = try startPayload(action)
         #expect(config.bindAddress.host == "127.0.0.1")
         #expect(config.bindAddress.port == 9999)
+    }
+
+    @Test func serverLauncherPreservesInjectedNativeSelectionThroughChildConfiguration() async throws {
+        let temporary = try TemporaryDirectory()
+        defer { temporary.cleanup() }
+        let bundle = temporary.url.appendingPathComponent("Injected Native Host.app", isDirectory: true)
+        let executable = bundle.appendingPathComponent("Contents/MacOS/xcode-mcp-native-host")
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let developerDirectory = "/Applications/Injected Xcode.app/Contents/Developer"
+        let fakeServer = RecordingProxyServer()
+        let launcher = makeServerLauncher(makeServer: { configuration in
+            fakeServer.record(config: configuration)
+            return fakeServer
+        })
+
+        let exitCode = await launcher.run(
+            arguments: ["xcode-mcp-proxy-server"],
+            environment: [
+                "DEVELOPER_DIR": developerDirectory,
+                "XCODE_MCP_NATIVE_HOST_BUNDLE": bundle.path,
+            ],
+            stdout: { _ in }, stderr: { _ in }
+        )
+        #expect(exitCode == 0)
+        let configuration = try #require(fakeServer.recordedConfig())
+        let runtimeConfiguration = try configuration.runtimeConfiguration()
+        let child = try NativeHostRuntime.makeDefaultUpstreamConfig(
+            config: runtimeConfiguration.nativeHostRuntimeConfiguration,
+            xcodeTarget: nil,
+            baseEnvironment: [
+                "DEVELOPER_DIR": "/Applications/Parent Xcode.app/Contents/Developer",
+                "XCODE_MCP_NATIVE_HOST_BUNDLE": "/missing/Parent Native Host.app",
+            ]
+        )
+        #expect(child.command == executable.resolvingSymlinksInPath().path)
+        #expect(Array(child.args.prefix(2)) == ["--developer-dir", developerDirectory])
+        #expect(child.environment["DEVELOPER_DIR"] == developerDirectory)
     }
 
     @Test func serverLaunchPlanIgnoresRemovedXcodePIDEnvironment() throws {

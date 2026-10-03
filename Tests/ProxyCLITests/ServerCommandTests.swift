@@ -58,13 +58,22 @@ struct ServerCommandTests {
         #expect(!XcodeMCPProxyServer.serverUsage.contains(option + " "))
     }
 
-    @Test func nativeSelectionIsResolvedByTheRuntime() throws {
+    @Test func nativeSelectionIsPreservedFromTheLaunchEnvironment() throws {
         let config = try resolvedConfiguration(environment: [
             "DEVELOPER_DIR": "/Applications/Selected Xcode.app",
             "XCODE_MCP_NATIVE_HOST_BUNDLE": "/tmp/Native Host.app",
         ])
-        #expect(config.nativeHostBundleURL == nil)
-        #expect(config.developerDirectoryURL == nil)
+        #expect(config.nativeHostBundleURL?.path == "/tmp/Native Host.app")
+        #expect(config.developerDirectoryURL?.path == "/Applications/Selected Xcode.app")
+    }
+
+    @Test func emptyNativeEnvironmentValuesRemainExplicitOverrides() throws {
+        let config = try resolvedConfiguration(environment: [
+            "DEVELOPER_DIR": "",
+            "XCODE_MCP_NATIVE_HOST_BUNDLE": "",
+        ])
+        #expect(config.nativeHostBundleURL != nil)
+        #expect(config.developerDirectoryURL != nil)
     }
 
     @Test func removedConfigurationEnvironmentDoesNotAffectTheServer() throws {
