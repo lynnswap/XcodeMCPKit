@@ -32,8 +32,10 @@ verifier supplies the standard `workspaceIdentifier` for GUI and headless
 operations and records the actual owner in the report.
 
 The tracked `Fixtures/ProxyToolVerifierFixture` supplies an app, scheme, test
-target, SwiftUI preview, and String Catalog. The verifier restores files that
-its plan mutates and closes only the dedicated headless workspace it created.
+target, SwiftUI preview, and String Catalog. Headless runs copy the fixture into
+the output directory, where file and target mutations stay. GUI runs restore the
+fixture's tracked project and String Catalog files. The verifier closes only
+the dedicated headless workspace it created.
 `--keep-server` retains the server for inspection; otherwise the run shuts down
 its owned server and helpers.
 
@@ -65,6 +67,20 @@ swift run xcode-mcp-proxy-tool-verifier --port 18765 --request-timeout 600
 swift run xcode-mcp-proxy-tool-verifier --no-open-xcode --request-timeout 600
 swift run xcode-mcp-proxy-tool-verifier --keep-server
 ```
+
+Use `--run-destination` with a display title from `XcodeListRunDestinations` to
+choose the fixture's build and run destination. Use `--device-identifier` with
+an owned Simulator UUID for both device-interaction session tools. The caller
+creates and removes that Simulator. For example:
+
+```sh
+swift run xcode-mcp-proxy-tool-verifier --no-open-xcode \
+  --run-destination "Verifier iPhone" --device-identifier "$verifier_device_id"
+```
+
+The verifier stops fixture operations if scheme, destination, or test-plan
+selection fails. Project and target creation runs after build, runtime, and
+device checks so a new target's automatic scheme cannot change those checks.
 
 `--no-open-xcode` controls fixture-window ownership and does not disable GUI
 routing. `--upstream-processes` and `--xcode-mode` are unsupported. The proxy
