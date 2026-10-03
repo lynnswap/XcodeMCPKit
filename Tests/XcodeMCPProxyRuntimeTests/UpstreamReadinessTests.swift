@@ -81,6 +81,15 @@ struct UpstreamReadinessTests {
         }
     }
 
+    @Test func readinessGateDefaultSleepCompletesWhenItsTaskIsCancelled() async throws {
+        let gate = makeTestReadinessGate(readiness: ReadinessFlag(isReady: true))
+        let sleepTask = Task { await gate.sleepNanoseconds(1_000_000_000) }
+        sleepTask.cancel()
+        try await waitWithTimeout("waiting for cancelled readiness backoff", timeout: .seconds(2)) {
+            await sleepTask.value
+        }
+    }
+
     @Test func readinessGateDefersStartupUntilXcodeIsAvailable() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         defer { shutdownAndWait(group) }
