@@ -4,7 +4,7 @@ import XcodeMCPCore
 
 extension ClientMCPRequestExecutor {
     func makeTopLevelRequestFuture(
-        filteredRequest: FilteredToolCallRequest,
+        forwardedRequest: ForwardedToolCallRequest,
         sessionID: String,
         prefersEventStream: Bool,
         eventLoop: EventLoop,
@@ -15,8 +15,8 @@ extension ClientMCPRequestExecutor {
         requestTimeoutOverride: TimeAmount?,
         admission: RouteForwardingAdmission? = nil
     ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
-        guard let bodyData = filteredRequest.bodyData,
-            let requestObject = try? JSONRPC.Wire.object(fromData: bodyData)
+        let bodyData = forwardedRequest.bodyData
+        guard let requestObject = try? JSONRPC.Wire.object(fromData: bodyData)
         else {
             return makeImmediateLeaseResolution(
                 .mcpError(
@@ -32,43 +32,6 @@ extension ClientMCPRequestExecutor {
             )
         }
 
-        if let refreshRequest = refreshCodeIssuesRequest(from: requestObject),
-            let responseID = filteredRequest.forwardedResponseID
-        {
-            let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
-            let task = Task { [self] in
-                let result = await forwardRefreshCodeIssuesRequest(
-                    refreshRequest,
-                    bodyData: bodyData,
-                    sessionID: sessionID,
-                    responseID: responseID,
-                    requestTimeoutOverride: requestTimeoutOverride,
-                    eventLoop: eventLoop,
-                    leaseID: leaseID,
-                    cancellationHandle: cancellationHandle
-                )
-                let wasCancelled = Task.isCancelled
-                eventLoopCompletionExecutor.execute(on: eventLoop) {
-                    if wasCancelled {
-                        cancellationHandle?.markCompleted()
-                        promise.succeed(.empty(status: .accepted, sessionID: sessionID))
-                        return
-                    }
-                    cancellationHandle?.markCompleted()
-                    self.finishRefreshLease(leaseID, result: result)
-                    promise.succeed(
-                        self.makeResolution(
-                            from: result,
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream
-                        )
-                    )
-                }
-            }
-            cancellationHandle?.bindRefreshTask(task)
-            return promise.futureResult
-        }
-
         let prepared: MCPForwardingService.PreparedRequest
         do {
             guard let candidate = try forwardingService.prepareRequest(
@@ -81,7 +44,7 @@ extension ClientMCPRequestExecutor {
             ) else {
                 return makeImmediateLeaseResolution(
                     Self.makeUpstreamUnavailableResolution(
-                        responseID: filteredRequest.forwardedResponseID,
+                        responseID: forwardedRequest.forwardedResponseID,
                         sessionID: sessionID,
                         prefersEventStream: prefersEventStream
                     ),
@@ -179,7 +142,7 @@ extension ClientMCPRequestExecutor {
         } catch {
             return makeImmediateLeaseResolution(
                 .mcpError(
-                    id: filteredRequest.forwardedResponseID,
+                    id: forwardedRequest.forwardedResponseID,
                     code: -32600,
                     message: "missing id",
                     sessionID: sessionID,

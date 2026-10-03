@@ -7,15 +7,7 @@ struct ToolSurface: Sendable {
         let cacheableToolsListResult: JSONValue?
     }
 
-    private let refreshCodeIssuesMode: ProxyRuntimeConfiguration.RefreshCodeIssuesMode
-    private let callNormalizer: ToolCallNormalizer
-    private let hiddenToolNames: Set<String>
-
-    init(config: ProxyRuntimeConfiguration) {
-        self.refreshCodeIssuesMode = config.refreshCodeIssuesMode
-        self.callNormalizer = ToolCallNormalizer()
-        self.hiddenToolNames = config.disabledToolNames
-    }
+    private let callNormalizer = ToolCallNormalizer()
 
     func rewriteForwardedResponse(
         method: String?,
@@ -30,23 +22,17 @@ struct ToolSurface: Sendable {
             originalID: originalID,
             upstreamData: upstreamData
         )
-        let toolsListData = rewriteToolsListResponseIfNeeded(resourcesData, method: method)
         let toolsListResult = method == "tools/list"
-            ? extractToolsListResult(from: toolsListData)
+            ? extractToolsListResult(from: resourcesData)
             : nil
         let normalizedToolCallData = callNormalizer.normalizeResponseDataIfNeeded(
             method: method,
             toolName: toolName,
             toolsCatalogOverride: toolsListResult ?? toolDefinition?.catalogResult,
-            upstreamData: toolsListData
-        )
-        let responseData = rewriteToolsListResponseIfNeeded(
-            normalizedToolCallData,
-            method: method,
-            hiddenToolNames: hiddenToolNames
+            upstreamData: resourcesData
         )
         return ToolSurface.RewriteResult(
-            responseData: responseData,
+            responseData: normalizedToolCallData,
             cacheableToolsListResult: cachesToolsListResult ? toolsListResult : nil
         )
     }
@@ -142,19 +128,6 @@ struct ToolSurface: Sendable {
             return nil
         }
         return JSONValue(any: result)
-    }
-
-    private func rewriteToolsListResponseIfNeeded(
-        _ responseData: Data,
-        method: String?,
-        hiddenToolNames: Set<String> = []
-    ) -> Data {
-        RefreshCodeIssues.ToolsListRewriter.rewriteResponseDataIfNeeded(
-            responseData,
-            method: method,
-            mode: refreshCodeIssuesMode,
-            hiddenToolNames: hiddenToolNames
-        )
     }
 
     static func responseObject(

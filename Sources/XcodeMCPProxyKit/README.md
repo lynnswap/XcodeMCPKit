@@ -59,19 +59,16 @@ may be incomplete, even though the server lifecycle has stopped.
 - `developerDirectoryURL`: selected Xcode app/developer directory, or `nil` for the selected installation.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
-- `configurationFileURL`: optional TOML file. An explicit unreadable or invalid
-  file makes `start()` fail before runtime resources are acquired.
-- `toolPolicy` and `initializeHandshake`: typed overrides for file-backed tool
-  visibility and upstream initialization.
+- `initializeHandshake`: typed upstream initialization for embedding.
 - `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
 - `approvalPolicy`: manual or automatic Xcode permission handling.
-- `featurePolicy`: tools-list prewarming and refresh-code-issues routing.
+- `prewarmToolsList`: whether discovery begins during startup.
 
 The server starts one owned headless native host and one connection for each
 GUI Xcode owner. Concurrent requests multiplex on each connection. Pass an
 absolute `workspaceIdentifier` to prefer its open GUI owner; otherwise the host
-loads its model lazily. The native host provides the canonical catalog, and
-GUI catalogs load in the background for routing.
+loads its model lazily. Discovery preserves the actual provider catalogs and their schema variants.
+Usable GUI catalogs remain available when headless contracts are missing.
 
 `start()` does not require an open GUI workspace or Xcode Service enable/status.
 Install `XcodeMCPNativeHost.app` beside the proxy executable, or supply its bundle
@@ -93,8 +90,6 @@ import XcodeMCPKit
 import XcodeMCPProxyKit
 
 let configuration = XcodeMCPProxyServerConfiguration(
-    configurationFileURL: URL(fileURLWithPath: "/etc/xcode-mcp/proxy.toml"),
-    toolPolicy: .init(disabledToolNames: ["RunAllTests"]),
     initializeHandshake: .init(
         clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
         capabilities: ["roots": ["listChanged": true]]

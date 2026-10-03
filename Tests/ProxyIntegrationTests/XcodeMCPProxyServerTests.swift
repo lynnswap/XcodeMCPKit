@@ -47,54 +47,6 @@ struct XcodeMCPProxyServerTests {
         ).isEmpty)
     }
 
-    @Test func configurationMirrorsHTTPProxyConfigForCLIBoundary() throws {
-        let fileManager = FileManager.default
-        let directoryURL = fileManager.temporaryDirectory
-            .appendingPathComponent("xcode-mcp-proxy-config-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-        defer { try? fileManager.removeItem(at: directoryURL) }
-
-        let configURL = directoryURL.appendingPathComponent("proxy.toml")
-        try """
-        [upstream_handshake]
-        clientName = "XcodeMCPKit"
-
-        [tools]
-        disabled = []
-        """.write(to: configURL, atomically: true, encoding: .utf8)
-
-        let discoveryURL = URL(fileURLWithPath: "/tmp/xcode-mcp-proxy-discovery.json")
-        let proxyConfig = ProxyConfig(
-            listenHost: "127.0.0.1",
-            listenPort: 9876,
-
-            nativeHostBundleURL: directoryURL.appendingPathComponent("NativeHost.app"),
-            developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer"),
-
-            maxBodyBytes: 2048,
-            requestTimeout: 12,
-            configPath: configURL.path,
-            discoveryFileURL: discoveryURL,
-            prewarmToolsList: false,
-            autoApproveXcodeDialog: true,
-            refreshCodeIssuesMode: .upstream
-        )
-
-        let config = XcodeMCPProxyServerConfiguration(serverProxyConfig: proxyConfig)
-
-        #expect(config.listenHost == "127.0.0.1")
-        #expect(config.listenPort == 9876)
-        #expect(config.nativeHostBundleURL == proxyConfig.nativeHostBundleURL)
-        #expect(config.developerDirectoryURL == proxyConfig.developerDirectoryURL)
-        #expect(config.maxBodyBytes == 2048)
-        #expect(config.requestTimeout == .seconds(12))
-        #expect(config.configPath == configURL.path)
-        #expect(config.discovery == .file(discoveryURL))
-        #expect(config.prewarmToolsList == false)
-        #expect(config.autoApproveXcodeDialog == true)
-        #expect(config.refreshCodeIssuesMode == .upstream)
-    }
-
     @Test func existingServerControllerDetectsOnlyListeningProxyServerProcesses() throws {
         let processControl = ProcessControlClient(
             runCommand: { launchPath, arguments in
@@ -188,16 +140,15 @@ struct XcodeMCPProxyServerTests {
 
         let autoApprover = RecordingAutoApprover()
         let upstream = RecordingUpstreamSlot()
-        let config = ProxyConfig(
-            listenHost: "127.0.0.1",
-            listenPort: blockedPort,
+        let config = XcodeMCPProxyServerConfiguration(
+            bindAddress: .init(host: "127.0.0.1", port: blockedPort),
 
             maxBodyBytes: 1_048_576,
-            requestTimeout: 300,
-            autoApproveXcodeDialog: true
+            requestTimeout: .seconds(300),
+            approvalPolicy: .automatic
         )
         let server = XcodeMCPProxyServer(
-            proxyConfig: config,
+            configuration: config,
             dependencies: .init(
                 discoveryClient: .testValue,
                 makeAutoApprover: { _, _ in autoApprover },
@@ -296,16 +247,15 @@ struct XcodeMCPProxyServerTests {
     @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {
         let autoApprover = RecordingAutoApprover()
         let upstream = RecordingUpstreamSlot()
-        let config = ProxyConfig(
-            listenHost: "127.0.0.1",
-            listenPort: 0,
+        let config = XcodeMCPProxyServerConfiguration(
+            bindAddress: .init(host: "127.0.0.1", port: 0),
 
             maxBodyBytes: 1_048_576,
-            requestTimeout: 300,
-            autoApproveXcodeDialog: true
+            requestTimeout: .seconds(300),
+            approvalPolicy: .automatic
         )
         let server = XcodeMCPProxyServer(
-            proxyConfig: config,
+            configuration: config,
             dependencies: .init(
                 discoveryClient: .testValue,
                 makeAutoApprover: { _, _ in autoApprover },
@@ -336,16 +286,15 @@ struct XcodeMCPProxyServerTests {
     @Test func shutdownDoesNotWaitForCancelledAutoApproverWork() async throws {
         let autoApprover = BlockingAutoApprover()
         let upstream = RecordingUpstreamSlot()
-        let config = ProxyConfig(
-            listenHost: "127.0.0.1",
-            listenPort: 0,
+        let config = XcodeMCPProxyServerConfiguration(
+            bindAddress: .init(host: "127.0.0.1", port: 0),
 
             maxBodyBytes: 1_048_576,
-            requestTimeout: 300,
-            autoApproveXcodeDialog: true
+            requestTimeout: .seconds(300),
+            approvalPolicy: .automatic
         )
         let server = XcodeMCPProxyServer(
-            proxyConfig: config,
+            configuration: config,
             dependencies: .init(
                 discoveryClient: .testValue,
                 makeAutoApprover: { _, _ in autoApprover },
@@ -427,77 +376,6 @@ struct XcodeMCPProxyServerTests {
 
         // This test deliberately omits the server's explicit shutdown contract.
         // Deinit guarantees cancellation signaling rather than awaiting teardown.
-    }
-
-    @Test func explicitConfigurationReadFailurePrecedesResourceAcquisition() async throws {
-        let gatewayCreationCount = NIOLockedValueBox(0)
-        let missingURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("missing-\(UUID().uuidString).toml")
-        let server = XcodeMCPProxyServer(
-            configuration: .init(
-                configurationFileURL: missingURL,
-                discovery: .disabled
-            ),
-            dependencies: .init(
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { _ in
-                    fatalError("invalid configuration must not create a runtime")
-                },
-                makeHTTPGateway: { _, _, _ in
-                    gatewayCreationCount.withLockedValue { $0 += 1 }
-                    fatalError("invalid configuration must not create an HTTP gateway")
-                }
-            )
-        )
-
-        await #expect(throws: ProxyConfig.File.LoadError.self) {
-            _ = try await server.start()
-        }
-        #expect(gatewayCreationCount.withLockedValue { $0 } == 0)
-        #expect((await server.snapshot()).phase == .stopped)
-        await #expect(throws: XcodeMCPProxyServer.LifecycleError.alreadyStarted) {
-            _ = try await server.start()
-        }
-    }
-
-    @Test func cliPreparedConfigurationIsReusedWithoutASecondFileRead() async throws {
-        let configURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("single-read-\(UUID().uuidString).toml")
-        try "".write(to: configURL, atomically: true, encoding: .utf8)
-        let readCount = NIOLockedValueBox(0)
-        let action = try XcodeMCPProxyServer.resolveLaunchAction(
-            arguments: [
-                "xcode-mcp-proxy-server",
-                "--listen", "127.0.0.1:0",
-                "--config", configURL.path,
-            ],
-            environment: [:],
-            loadFileConfiguration: { url in
-                readCount.withLockedValue { $0 += 1 }
-                return try ProxyConfig.File.Loader.loadStrict(configURL: url)
-            }
-        )
-        guard case .start(let preparedConfiguration, _) = action else {
-            Issue.record("expected start action")
-            return
-        }
-        try FileManager.default.removeItem(at: configURL)
-
-        let upstream = RecordingUpstreamSlot()
-        let server = XcodeMCPProxyServer(
-            preparedConfiguration: preparedConfiguration,
-            dependencies: .init(
-                discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
-                makeRuntime: { config in
-                    makeServerTestRuntime(config: config, upstream: upstream)
-                }
-            )
-        )
-
-        _ = try await server.start()
-        try await server.shutdown()
-        #expect(readCount.withLockedValue { $0 } == 1)
     }
 
     @Test func zeroRequestTimeoutFailsBeforeResourceAcquisition() async throws {
@@ -720,15 +598,14 @@ struct XcodeMCPProxyServerTests {
 
     @Test func statusSnapshotExposesOnlySanitizedContractFields() async throws {
         let upstream = RecordingUpstreamSlot()
-        let config = ProxyConfig(
-            listenHost: "127.0.0.1",
-            listenPort: 0,
+        let config = XcodeMCPProxyServerConfiguration(
+            bindAddress: .init(host: "127.0.0.1", port: 0),
 
             maxBodyBytes: 1_048_576,
-            requestTimeout: 300
+            requestTimeout: .seconds(300)
         )
         let server = XcodeMCPProxyServer(
-            proxyConfig: config,
+            configuration: config,
             dependencies: .init(
                 discoveryClient: .testValue,
                 makeAutoApprover: { _, _ in RecordingAutoApprover() },

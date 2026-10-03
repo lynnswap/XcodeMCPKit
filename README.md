@@ -73,8 +73,7 @@ source ~/.zshrc
 
 The installed `XcodeMCPNativeHost.app` must stay beside the proxy executables.
 The server starts its own headless native host and discovers GUI Xcode owners.
-You can start it with no GUI workspace open. No Xcode Service enable command,
-`mcpbridge` launch, or process-count setting is required.
+You can start it with no GUI workspace open. The installed helper and Xcode origins are discovered automatically.
 
 ```bash
 xcode-mcp-proxy-server --auto-approve
@@ -137,12 +136,8 @@ xcode-mcp-proxy --help
 |--------|-------------|
 | `--listen host:port` | Listen address. Defaults to `localhost:8765`. |
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. |
-| `--native-host-bundle path` | Native helper app bundle. Defaults to automatic helper lookup. |
-| `--developer-dir path` | Selected Xcode app or developer directory. Defaults to the selected Xcode installation. |
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialize still has a bounded handshake timeout. |
-| `--config path` | TOML config path. |
 | `--auto-approve` | Automatically approve Xcode MCP connection dialogs for all agents, including direct connections outside the proxy. Requires Accessibility permission. |
-| `--refresh-code-issues-mode proxy|upstream` | Serve `XcodeRefreshCodeIssuesInFile` through proxy diagnostics (`proxy`, default) or pass through to Xcode live diagnostics (`upstream`). |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port and start a new one. |
 
 ### Environment Variables
@@ -151,10 +146,8 @@ xcode-mcp-proxy --help
 |----------|-------------|
 | `LISTEN` | Listen address, for example `127.0.0.1:8765`. |
 | `HOST` / `PORT` | Listen host and port when `LISTEN` is unset. |
-| `XCODE_MCP_NATIVE_HOST_BUNDLE` | Native helper bundle override; `--native-host-bundle` takes precedence. |
-| `DEVELOPER_DIR` | Xcode selection; `--developer-dir` takes precedence. |
-| `MCP_XCODE_CONFIG` | TOML config path. `--config` takes precedence. |
-| `MCP_XCODE_REFRESH_CODE_ISSUES_MODE` | `proxy` or `upstream`. |
+| `XCODE_MCP_NATIVE_HOST_BUNDLE` | Helper bundle override for custom embedded/install layouts. |
+| `DEVELOPER_DIR` | Standard Xcode selection for the headless host; GUI origins use their actual owning installation. |
 | `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, or `critical`. Defaults to `info`; `debug` includes HTTP access and route-recovery telemetry. |
 | `XCODE_MCP_PROXY_ENDPOINT` | STDIO adapter upstream URL. `--url` takes precedence. |
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
@@ -167,28 +160,6 @@ arguments choose the owner for each operation. Inherited `MCP_XCODE_PID` and
 
 See [automatic routing migration](Docs/automatic-routing-migration.md) for
 removed CLI flags, configuration properties, and the Swift client transport change.
-
-### TOML Configuration
-
-```toml
-[upstream_handshake]
-clientName = "XcodeMCPKit"
-
-[tools]
-disabled = ["RunAllTests", "RunSomeTests"]
-```
-
-| Key | Type | Default |
-|-----|------|---------|
-| `upstream_handshake.clientName` | string | `"XcodeMCPKit"` |
-| `upstream_handshake.clientVersion` | string | `"dev"` |
-| `upstream_handshake.capabilities` | table | `{}` |
-| `tools.disabled` | array of strings | `[]` |
-
-- Omitted `clientVersion`: resolved from Xcode's matching `IDEChat*Version`
-  defaults entry when available.
-- Disabled tools: removed from `tools/list` and rejected on direct `tools/call`.
-- Config changes require restarting `xcode-mcp-proxy-server`.
 
 ## Tool discovery
 

@@ -9,8 +9,9 @@ package struct ProxyServerCommand: ParsableCommand {
             commandName: "xcode-mcp-proxy-server",
             abstract: "Start the Streamable HTTP proxy server for Xcode MCP.",
             discussion: """
-                The server connects directly to Xcode through its native helper. HTTP-capable clients
-                should connect directly; use xcode-mcp-proxy only for STDIO compatibility.
+                The server locates its native helper and selected Xcode installation automatically.
+                HTTP-capable clients should connect directly; use xcode-mcp-proxy only for
+                STDIO compatibility.
                 """,
             version: XcodeMCPProxyServer.productMetadata.version
         )
@@ -30,9 +31,6 @@ package struct ProxyServerCommand: ParsableCommand {
     @Option(help: "Listen port in 0...65535. Defaults to 8765.")
     var port: Int?
 
-    @Option(help: ArgumentHelp("TOML configuration file.", valueName: "path"))
-    var config: String?
-
     @Flag(help: "Automatically approve Xcode MCP connection dialogs for all agents, including direct connections outside this proxy.")
     var autoApprove = false
 
@@ -46,15 +44,6 @@ package struct ProxyServerCommand: ParsableCommand {
     )
     var requestTimeout: CLIRequestTimeout?
 
-    @Option(name: .customLong("native-host-bundle"), help: ArgumentHelp("Native helper application bundle. Defaults to the installed helper.", valueName: "path"))
-    var nativeHostBundlePath: String?
-
-    @Option(name: .customLong("developer-dir"), help: ArgumentHelp("Xcode developer directory. Defaults to the selected Xcode installation.", valueName: "path"))
-    var developerDirectoryPath: String?
-
-    @Option(help: "Code issue refresh owner: proxy or upstream.")
-    var refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode?
-
     @Flag(help: "Terminate an existing proxy server on the listen port before starting.")
     var forceRestart = false
 
@@ -67,9 +56,6 @@ package struct ProxyServerCommand: ParsableCommand {
         }
         if let host, host.isEmpty {
             throw ValidationError("--host must not be empty")
-        }
-        if let config, config.isEmpty {
-            throw ValidationError("--config must not be empty")
         }
         if let port, (0...65_535).contains(port) == false {
             throw ValidationError("--port must be an integer in 0...65535")
@@ -109,5 +95,3 @@ package struct CLIListenAddress: Equatable, Sendable, CustomStringConvertible,
 
     package var description: String { "\(host):\(port)" }
 }
-
-extension ProxyConfig.RefreshCodeIssuesMode: ExpressibleByArgument {}

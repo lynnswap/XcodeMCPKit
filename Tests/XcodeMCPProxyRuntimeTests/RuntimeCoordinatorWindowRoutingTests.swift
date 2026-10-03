@@ -1163,11 +1163,7 @@ struct RuntimeCoordinatorWindowRoutingTests {
         let executor = ClientMCPRequestExecutor(
             config: config,
             sessionManager: fixture.manager,
-            refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: RefreshCodeIssues.DebugState(
-                defaultRequestTimeoutSeconds: config.requestTimeout
-            )
-        )
+)
         let requestData = try JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
             id: 2,
             method: "resources/list"

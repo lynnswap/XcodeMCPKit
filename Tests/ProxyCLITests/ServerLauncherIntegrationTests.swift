@@ -7,16 +7,10 @@ struct ServerLauncherIntegrationTests {
     @Test func serverRunnerDryRunUsesEnvironmentDerivedDefaults() async throws {
         let output = CapturedLines()
         let errors = CapturedLines()
-        let configURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("server-config-\(UUID().uuidString).toml")
-        try "".write(to: configURL, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: configURL) }
-
         let exitCode = await XcodeMCPProxyServer.run(
             arguments: ["xcode-mcp-proxy-server", "--dry-run"],
             environment: [
                 "LISTEN": "127.0.0.1:7777",
-                "MCP_XCODE_CONFIG": configURL.path,
             ],
             stdout: { output.append($0) },
             stderr: { errors.append($0) }
@@ -27,7 +21,7 @@ struct ServerLauncherIntegrationTests {
         let line = try #require(output.snapshot().first)
         #expect(
             line ==
-                "xcode-mcp-proxy-server --listen 127.0.0.1:7777 --config \(configURL.path)"
+                "xcode-mcp-proxy-server --listen 127.0.0.1:7777"
         )
     }
 
@@ -39,8 +33,8 @@ struct ServerLauncherIntegrationTests {
                 restarted.append("\(host):\(port)")
                 return true
             },
-            makeServer: { preparedConfiguration in
-                fakeServer.record(config: preparedConfiguration.configuration)
+            makeServer: { configuration in
+                fakeServer.record(config: configuration)
                 return fakeServer
             }
         )
@@ -72,7 +66,7 @@ private func makeIntegrationServerLauncher(
     forceRestartExistingServer: @escaping (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool = {
         _, _, _ in false
     },
-    makeServer: @escaping (XcodeMCPProxyServer.PreparedConfiguration) ->
+    makeServer: @escaping (XcodeMCPProxyServerConfiguration) ->
         any XcodeMCPProxyServer.LaunchServer = { _ in
         IntegrationRecordingProxyServer()
     }

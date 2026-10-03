@@ -90,16 +90,6 @@ extension ClientMCPRequestExecutor {
 
     static func makeToolResultErrorResponseObject(
         id: JSONRPC.ID,
-        toolName: String
-    ) -> [String: Any] {
-        makeToolResultErrorResponseObject(
-            id: id,
-            message: "tool '\(toolName)' is disabled by proxy config"
-        )
-    }
-
-    static func makeToolResultErrorResponseObject(
-        id: JSONRPC.ID,
         message: String
     ) -> [String: Any] {
         JSONRPC.Wire.resultResponseObject(
@@ -113,18 +103,6 @@ extension ClientMCPRequestExecutor {
                 ]),
                 "isError": .bool(true),
             ])
-        )
-    }
-
-    static func makeBlockedToolResponseData(
-        requestObject: [String: Any],
-        toolName: String
-    ) -> Data? {
-        guard let id = JSONRPC.Message.Inspector.requestID(from: requestObject) else {
-            return nil
-        }
-        return try? JSONRPC.Wire.data(
-            from: makeToolResultErrorResponseObject(id: id, toolName: toolName)
         )
     }
 
@@ -150,8 +128,55 @@ extension ClientMCPRequestExecutor {
         try? JSONRPC.Wire.resultResponseData(id: id, result: result)
     }
 
-    static func extractResponseID(from requestJSON: Any) -> JSONRPC.ID? {
-        guard let object = requestJSON as? [String: Any] else { return nil }
-        return JSONRPC.Message.Inspector.requestID(from: object)
+    static func requestLabel(from requestJSON: Any) -> String {
+        guard let object = requestJSON as? [String: Any] else { return "unknown" }
+        let method = (object["method"] as? String) ?? "unknown"
+        if method == "tools/call",
+            let params = object["params"] as? [String: Any],
+            let name = params["name"] as? String
+        {
+            return "\(method):\(name)"
+        }
+        return method
+    }
+
+    static func topLevelRequestDescriptor(
+        sessionID: String,
+        parsedRequestJSON: Any,
+        responseID: JSONRPC.ID?
+    ) -> SessionRequestPipeline.Descriptor {
+        SessionRequestPipeline.Descriptor(
+            sessionID: sessionID,
+            label: requestLabel(from: parsedRequestJSON),
+            expectsResponse: responseID != nil,
+            isTopLevelClientRequest: true
+        )
+    }
+
+    func makeImmediateLeaseResolution(
+        _ resolution: ClientMCPRequestExecutor.Resolution,
+        leaseID: LeaseManager.ID,
+        eventLoop: EventLoop,
+        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?
+    ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
+        cancellationHandle?.markCompleted()
+        sessionManager.completeRequestLease(leaseID)
+        return eventLoop.makeSucceededFuture(resolution)
+    }
+
+    func cancel(
+        _ handle: ClientMCPRequestExecutor.CancellationHandle,
+        source: ClientMCPRequestExecutor.CancellationSource = .channelInactive
+    ) {
+        logger.debug(
+            "Cancelling top-level upstream request",
+            metadata: [
+                "lease_id": .string(handle.leaseID.uuidString),
+                "session": .string(handle.sessionID),
+                "cancellation_source": .string(source.rawValue),
+                "request_ids": .string(handle.requestIDKeys.joined(separator: ",")),
+            ]
+        )
+        handle.cancel(using: sessionManager)
     }
 }

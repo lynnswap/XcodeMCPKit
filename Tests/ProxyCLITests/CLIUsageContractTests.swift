@@ -11,19 +11,18 @@ struct CLIUsageContractTests {
             "--listen <host:port>",
             "--host <host>",
             "--port <port>",
-            "--config <path>",
             "--auto-approve",
             "--max-body-bytes <max-body-bytes>",
             "--request-timeout <request-timeout>",
-            "--native-host-bundle <path>",
-            "--developer-dir <path>",
-            "--refresh-code-issues-mode <refresh-code-issues-mode>",
             "--force-restart",
             "--dry-run",
             "--version",
             "-h, --help",
         ] {
             #expect(help.contains(option))
+        }
+        for option in ["--config", "--native-host-bundle", "--developer-dir", "--refresh-code-issues-mode"] {
+            #expect(!help.contains(option))
         }
         #expect(help.contains("--upstream-processes") == false)
         #expect(help.contains("--lazy-init") == false)

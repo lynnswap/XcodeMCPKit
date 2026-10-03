@@ -7,13 +7,13 @@ extension XcodeMCPProxyServer {
 
     package struct Launcher {
         package struct Dependencies {
-            package var makeServer: (PreparedConfiguration) -> any LaunchServer
+            package var makeServer: (XcodeMCPProxyServerConfiguration) -> any LaunchServer
             package var isAddressAlreadyInUse: (Swift.Error) -> Bool
             package var forceRestartExistingServer: (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool
             package var detectExistingServerProcessIDs: (_ host: String, _ port: Int) -> [Int]
 
             package init(
-                makeServer: @escaping (PreparedConfiguration) -> any LaunchServer,
+                makeServer: @escaping (XcodeMCPProxyServerConfiguration) -> any LaunchServer,
                 isAddressAlreadyInUse: @escaping (Swift.Error) -> Bool,
                 forceRestartExistingServer:
                     @escaping (
@@ -32,11 +32,8 @@ extension XcodeMCPProxyServer {
             package static var live: Self {
                 let existingServerController = XcodeMCPProxyServer.ExistingServerController.liveValue
                 return Self(
-                    makeServer: { preparedConfiguration in
-                        XcodeMCPProxyServer(
-                            preparedConfiguration: preparedConfiguration,
-                            dependencies: .live
-                        )
+                    makeServer: { configuration in
+                        XcodeMCPProxyServer(configuration: configuration)
                     },
                     isAddressAlreadyInUse: XcodeMCPProxyServer.isAddressAlreadyInUse,
                     forceRestartExistingServer: { host, port, stderr in
@@ -74,9 +71,9 @@ extension XcodeMCPProxyServer {
                 case .dryRun(let commandLine):
                     stdout(commandLine)
                     return 0
-                case .start(let preparedConfiguration, let forceRestart):
+                case .start(let configuration, let forceRestart):
                     return try await startServer(
-                        preparedConfiguration: preparedConfiguration,
+                        configuration: configuration,
                         forceRestart: forceRestart,
                         stderr: stderr
                     )
@@ -91,32 +88,31 @@ extension XcodeMCPProxyServer {
         }
 
         private func startServer(
-            preparedConfiguration: PreparedConfiguration,
+            configuration: XcodeMCPProxyServerConfiguration,
             forceRestart: Bool,
             stderr: (String) -> Void
         ) async throws -> Int32 {
-            let serverConfig = preparedConfiguration.configuration
-            if forceRestart, serverConfig.bindAddress.port > 0 {
+            if forceRestart, configuration.bindAddress.port > 0 {
                 _ = dependencies.forceRestartExistingServer(
-                    serverConfig.bindAddress.host,
-                    serverConfig.bindAddress.port,
+                    configuration.bindAddress.host,
+                    configuration.bindAddress.port,
                     stderr
                 )
             }
 
-            let server = dependencies.makeServer(preparedConfiguration)
+            let server = dependencies.makeServer(configuration)
             let endpoint: Endpoint
             do {
                 endpoint = try await server.start()
             } catch {
-                if !(error is CleanupError), serverConfig.bindAddress.port > 0,
+                if !(error is CleanupError), configuration.bindAddress.port > 0,
                    dependencies.isAddressAlreadyInUse(error) {
                     let diagnostic = XcodeMCPProxyServer.PortInUseError(
-                        host: serverConfig.bindAddress.host,
-                        port: serverConfig.bindAddress.port,
+                        host: configuration.bindAddress.host,
+                        port: configuration.bindAddress.port,
                         processIdentifiers: dependencies.detectExistingServerProcessIDs(
-                            serverConfig.bindAddress.host,
-                            serverConfig.bindAddress.port
+                            configuration.bindAddress.host,
+                            configuration.bindAddress.port
                         )
                     )
                     stderr(diagnostic.description)

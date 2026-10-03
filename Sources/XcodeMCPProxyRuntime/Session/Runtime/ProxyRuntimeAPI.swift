@@ -161,14 +161,11 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         let sessions: [SessionRequestPipeline.DebugSnapshot]
         let leases: [LeaseManager.DebugSnapshot]
         let queuedRequestCount: Int
-        let refreshCodeIssues: RefreshCodeIssues.DebugSnapshot?
     }
 
     private let coordinator: any RuntimeCoordinating
     private let eventLoop: EventLoop
     private let eventSource: ProxyRuntimeEventSource
-    private let refreshCoordinator: RefreshCodeIssues.Coordinator
-    private let refreshDebugState: RefreshCodeIssues.DebugState
     private let requestExecutor: ClientMCPRequestExecutor
     private let ownedEventLoopGroup: EventLoopGroup?
     private let processEventMonitor: (any XcodeProcessEventMonitoring)?
@@ -178,31 +175,16 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         coordinator: any RuntimeCoordinating,
         eventLoop: EventLoop,
         eventSource: ProxyRuntimeEventSource,
-        refreshCoordinator: RefreshCodeIssues.Coordinator = .makeDefault(),
-        refreshTargetResolver: RefreshCodeIssues.TargetResolver = .init(),
-        refreshDebugState: RefreshCodeIssues.DebugState? = nil,
-        refreshClock: ClockClient = .liveValue,
         eventLoopCompletionExecutor: EventLoopCompletionExecutor = .eventLoop,
         ownedEventLoopGroup: EventLoopGroup? = nil,
         processEventMonitor: (any XcodeProcessEventMonitoring)? = nil
     ) {
-        let debugState =
-            refreshDebugState
-            ?? RefreshCodeIssues.DebugState(
-                defaultRequestTimeoutSeconds: config.requestTimeout
-            )
         self.coordinator = coordinator
         self.eventLoop = eventLoop
         self.eventSource = eventSource
-        self.refreshCoordinator = refreshCoordinator
-        self.refreshDebugState = debugState
         self.requestExecutor = ClientMCPRequestExecutor(
             config: config,
             sessionManager: coordinator,
-            refreshCodeIssuesCoordinator: refreshCoordinator,
-            refreshCodeIssuesTargetResolver: refreshTargetResolver,
-            refreshCodeIssuesDebugState: debugState,
-            refreshCodeIssuesClock: refreshClock,
             eventLoopCompletionExecutor: eventLoopCompletionExecutor,
             logger: ProxyLogging.make("runtime.request")
         )
@@ -415,10 +397,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
             recentTraffic: base.recentTraffic,
             sessions: base.sessions,
             leases: base.leases,
-            queuedRequestCount: base.queuedRequestCount,
-            refreshCodeIssues: includeSensitivePayloads
-                ? refreshDebugState.snapshot()
-                : nil
+            queuedRequestCount: base.queuedRequestCount
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -427,8 +406,6 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
     }
 
     package func reset() async {
-        await refreshCoordinator.reset()
-        refreshDebugState.reset()
         coordinator.debugReset()
     }
 }

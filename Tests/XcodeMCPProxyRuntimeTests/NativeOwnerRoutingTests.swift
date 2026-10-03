@@ -99,9 +99,7 @@ struct NativeOwnerRoutingTests {
         let sessionID = "selected-schema"
         _ = manager.session(id: sessionID)
         manager.sessionRegistry.markInitialized(id: sessionID, negotiatedProtocolVersion: MCP.ProtocolVersion.current)
-        let executor = ClientMCPRequestExecutor(config: config, sessionManager: manager,
-            refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout))
+        let executor = ClientMCPRequestExecutor(config: config, sessionManager: manager)
         let operation = executor.handle(bodyData: try JSONRPC.Wire.data(from: request),
             headerSessionID: sessionID, headerSessionExists: true, prefersEventStream: false, eventLoop: fixture.eventLoop)
         if selection == "native-opaque" {
@@ -350,7 +348,8 @@ struct NativeOwnerRoutingTests {
         #expect(await native.sentCount() == 1)
     }
 
-    @Test func selectedNativeOwnerBoundToolRunsWithoutASelectorAndDoesNotRetryGUIOnToolError() async throws {
+    @Test(arguments: ["FutureWorkspaceTool", "XcodeRefreshCodeIssuesInFile"])
+    func selectedNativeOwnerBoundToolRunsWithoutASelectorAndDoesNotRetryGUIOnToolError(toolName: String) async throws {
         let native = TestUpstreamClient()
         let oldGUI = TestUpstreamClient()
         let newGUI = TestUpstreamClient()
@@ -371,16 +370,16 @@ struct NativeOwnerRoutingTests {
             result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
             sourceUpstream: 0)
         let nativeDescriptor = toolDescriptor(
-            name: "FutureWorkspaceTool", description: "Selected native definition",
-            inputProperties: ["workspaceIdentifier": ["type": "string"], "operationField": ["type": "string"]],
-            required: ["operationField"], outputSchema: ["type": "object"]
+            name: toolName, description: "Selected native definition",
+            inputProperties: ["workspaceIdentifier": ["type": "string"], "filePath": ["type": "string"]],
+            required: ["filePath"], outputSchema: ["type": "object"]
         )
         try seedUnboundToolCatalog(on: manager, upstreamIndex: 0, tools: [nativeDescriptor])
         try seedProcessToolCatalogs(on: manager, entries: [
-            (oldTarget, 1, [ownerBoundToolDescriptor(name: "FutureWorkspaceTool"), toolDescriptor(name: "XcodeListWindows")]),
-            (newTarget, 2, [ownerBoundToolDescriptor(name: "FutureWorkspaceTool"), toolDescriptor(name: "XcodeListWindows")]),
+            (oldTarget, 1, [ownerBoundToolDescriptor(name: toolName), toolDescriptor(name: "XcodeListWindows")]),
+            (newTarget, 2, [ownerBoundToolDescriptor(name: toolName), toolDescriptor(name: "XcodeListWindows")]),
         ])
-        let request = toolsCallObject(id: 210, name: "FutureWorkspaceTool", arguments: ["operationField": "native-input"])
+        let request = toolsCallObject(id: 210, name: toolName, arguments: ["filePath": "Source.swift"])
         let decision = await manager.toolRoutingDecision(for: request, requestTimeoutOverride: .seconds(2))
         guard case .forwardAdmitted(let indices, let admission) = decision else {
             Issue.record("A native owner-bound tool must be usable without a workspace selector")
@@ -401,9 +400,7 @@ struct NativeOwnerRoutingTests {
         _ = manager.session(id: sessionID)
         manager.sessionRegistry.markInitialized(id: sessionID, negotiatedProtocolVersion: MCP.ProtocolVersion.current)
         let executor = ClientMCPRequestExecutor(
-            config: config, sessionManager: manager,
-            refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout)
+            config: config, sessionManager: manager
         )
         let operation = executor.handle(
             bodyData: try JSONRPC.Wire.data(from: request),
@@ -411,14 +408,14 @@ struct NativeOwnerRoutingTests {
             prefersEventStream: false, eventLoop: fixture.eventLoop
         )
         let sent = try await sentMessage(from: native, matching: {
-            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == "FutureWorkspaceTool"
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == toolName
         }, timeout: .seconds(2))
         let sentObject = try JSONRPC.Wire.object(fromData: sent)
         let params = try #require(sentObject["params"] as? [String: Any])
-        #expect(JSONValue(any: try #require(params["arguments"])) == .object(["operationField": .string("native-input")]))
+        #expect(JSONValue(any: try #require(params["arguments"])) == .object(["filePath": .string("Source.swift")]))
         let nativeError: JSONValue = .object([
             "isError": .bool(true),
-            "content": .array([.object(["type": .string("text"), "text": .string("Native tool refused the operation")])]),
+            "content": .array([.object(["type": .string("text"), "text": .string("(SourceEditorServiceErrorDomain error 5.)")])]),
         ])
         await native.yield(.message(try JSONRPC.Wire.resultResponseData(
             id: try #require(JSONRPC.ID(any: extractUpstreamID(from: sent))), result: nativeError

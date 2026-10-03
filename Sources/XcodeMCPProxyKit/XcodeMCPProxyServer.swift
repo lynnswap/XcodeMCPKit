@@ -61,59 +61,9 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         case automatic
     }
 
-    /// How `XcodeRefreshCodeIssuesInFile` requests are served.
-    public enum RefreshCodeIssuesMode: String, Equatable, Sendable {
-        /// Serve refresh-code-issues requests through proxy diagnostics.
-        case proxy
-
-        /// Forward refresh-code-issues requests to native Xcode tools.
-        case upstream
-    }
-
-    /// Optional proxy features that affect tool behavior.
-    public struct FeaturePolicy: Equatable, Sendable {
-        /// Whether the proxy should prewarm the upstream tools list.
-        public var prewarmToolsList: Bool
-
-        /// Refresh-code-issues handling mode.
-        public var refreshCodeIssuesMode: RefreshCodeIssuesMode
-
-        /// Creates a feature policy.
-        public init(
-            prewarmToolsList: Bool = true,
-            refreshCodeIssuesMode: RefreshCodeIssuesMode = .proxy
-        ) {
-            self.prewarmToolsList = prewarmToolsList
-            self.refreshCodeIssuesMode = refreshCodeIssuesMode
-        }
-
-        /// Default feature policy.
-        public static let `default` = Self()
-    }
-
-    /// Tool visibility policy applied by the proxy.
-    public struct ToolPolicy: Equatable, Sendable {
-        /// Tool names hidden from `tools/list` results and rejected for
-        /// `tools/call` requests.
-        ///
-        /// Names are normalized when the server builds its runtime config:
-        /// surrounding whitespace is trimmed and empty names are ignored.
-        public var disabledToolNames: Set<String>
-
-        /// Creates a tool policy.
-        public init(disabledToolNames: Set<String> = []) {
-            self.disabledToolNames = disabledToolNames
-        }
-
-        /// Default tool policy.
-        public static let `default` = Self()
-    }
-
-    /// Initialize handshake overrides sent from the proxy to native helpers.
+    /// Initialize handshake values sent from the proxy to native helpers.
     ///
-    /// Non-`nil` properties override the matching values loaded from
-    /// ``configurationFileURL``. Properties left as `nil` keep the file value
-    /// when present, otherwise the proxy's built-in default is used.
+    /// Properties left as `nil` use the built-in defaults.
     public struct InitializeHandshake: Equatable, Sendable {
         /// Upstream client information for the initialize handshake.
         public struct ClientInfo: Equatable, Sendable {
@@ -166,21 +116,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Request timeout. `nil` disables request timeouts.
     public var requestTimeout: Duration?
 
-    /// Optional TOML configuration file for initialize overrides and disabled
-    /// tools.
-    public var configurationFileURL: URL?
-
-    /// Explicit tool visibility policy.
-    ///
-    /// `nil` keeps disabled tools loaded from ``configurationFileURL``. A
-    /// non-`nil` policy overrides the file's `[tools].disabled` list.
-    public var toolPolicy: ToolPolicy?
-
-    /// Explicit initialize handshake override.
-    ///
-    /// Non-`nil` fields override the matching file-backed
-    /// `[upstream_handshake]` fields. Fields left `nil` keep the file value
-    /// when present, otherwise the built-in default is used.
+    /// Initialize handshake overrides. `nil` uses the built-in defaults.
     public var initializeHandshake: InitializeHandshake?
 
     /// Endpoint discovery policy.
@@ -189,8 +125,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Permission dialog automation policy.
     public var approvalPolicy: ApprovalPolicy
 
-    /// Optional proxy feature policy.
-    public var featurePolicy: FeaturePolicy
+    /// Whether to fetch native tool catalogs during startup.
+    public var prewarmToolsList: Bool
 
     /// Creates a public proxy server configuration.
     ///
@@ -200,11 +136,9 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///   - developerDirectoryURL: Xcode developer directory, or `nil` to use the selected installation.
     ///   - maxBodyBytes: Maximum accepted HTTP request body size.
     ///   - requestTimeout: Request timeout, or `nil` to disable it.
-    ///   - configurationFileURL: Optional TOML configuration file URL.
     ///   - discovery: Endpoint discovery policy.
     ///   - approvalPolicy: Permission dialog automation policy.
-    ///   - featurePolicy: Optional proxy feature policy.
-    ///   - toolPolicy: Explicit tool visibility policy.
+    ///   - prewarmToolsList: Whether to fetch native tool catalogs during startup.
     ///   - initializeHandshake: Explicit upstream initialize handshake override.
     public init(
         bindAddress: BindAddress = .localhost(),
@@ -212,59 +146,25 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         developerDirectoryURL: URL? = nil,
         maxBodyBytes: Int = 1_048_576,
         requestTimeout: Duration? = .seconds(300),
-        configurationFileURL: URL? = nil,
-        toolPolicy: ToolPolicy? = nil,
         initializeHandshake: InitializeHandshake? = nil,
         discovery: Discovery = .defaultLocation,
         approvalPolicy: ApprovalPolicy = .manual,
-        featurePolicy: FeaturePolicy = .default
+        prewarmToolsList: Bool = true
     ) {
         self.bindAddress = bindAddress
         self.nativeHostBundleURL = nativeHostBundleURL
         self.developerDirectoryURL = developerDirectoryURL
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
-        self.configurationFileURL = configurationFileURL
-        self.toolPolicy = toolPolicy
         self.initializeHandshake = initializeHandshake
         self.discovery = discovery
         self.approvalPolicy = approvalPolicy
-        self.featurePolicy = featurePolicy
-    }
-
-    init(serverProxyConfig proxyConfig: ProxyConfig) {
-        self.init(
-            bindAddress: BindAddress(
-                host: proxyConfig.listenHost,
-                port: proxyConfig.listenPort
-            ),
-            nativeHostBundleURL: proxyConfig.nativeHostBundleURL,
-            developerDirectoryURL: proxyConfig.developerDirectoryURL,
-            maxBodyBytes: proxyConfig.maxBodyBytes,
-            requestTimeout: proxyConfig.requestTimeout > 0
-                ? .seconds(proxyConfig.requestTimeout)
-                : nil,
-            configurationFileURL: proxyConfig.configPath.map {
-                URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath)
-            },
-            discovery: proxyConfig.discoveryFileURL.map(Discovery.file) ?? .defaultLocation,
-            approvalPolicy: proxyConfig.autoApproveXcodeDialog ? .automatic : .manual,
-            featurePolicy: FeaturePolicy(
-                prewarmToolsList: proxyConfig.prewarmToolsList,
-                refreshCodeIssuesMode: RefreshCodeIssuesMode(proxyConfig.refreshCodeIssuesMode)
-            )
-        )
+        self.prewarmToolsList = prewarmToolsList
     }
 
     var listenHost: String { bindAddress.host }
     var listenPort: Int { bindAddress.port }
-    var configPath: String? { configurationFileURL?.path }
-    var prewarmToolsList: Bool { featurePolicy.prewarmToolsList }
     var autoApproveXcodeDialog: Bool { approvalPolicy == .automatic }
-    var refreshCodeIssuesMode: RefreshCodeIssuesMode {
-        featurePolicy.refreshCodeIssuesMode
-    }
-
 }
 
 /// Embeddable Streamable HTTP proxy server for Xcode MCP.
@@ -434,26 +334,11 @@ public final class XcodeMCPProxyServer: Sendable {
         }
     }
 
-    package struct PreparedConfiguration: Sendable {
-        package let configuration: XcodeMCPProxyServerConfiguration
-        let proxyConfig: ProxyConfig
-
-        init(
-            configuration: XcodeMCPProxyServerConfiguration,
-            proxyConfig: ProxyConfig
-        ) {
-            self.configuration = configuration
-            self.proxyConfig = proxyConfig
-        }
-    }
-
     struct Dependencies: Sendable {
         var discoveryClient: DiscoveryClient
         var processID: @Sendable () -> Int
-        var loadFileConfiguration:
-            @Sendable (URL) throws -> ProxyConfig.File.LoadedConfiguration
         var makeAutoApprover:
-            @Sendable (ProxyConfig, any ProxyRuntimeServing) -> any ProxyServerPermissionDialogAutoApprover
+            @Sendable (XcodeMCPProxyServerConfiguration, any ProxyRuntimeServing) -> any ProxyServerPermissionDialogAutoApprover
         var makeRuntime: @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing
         var makeHTTPGateway:
             @Sendable (
@@ -467,12 +352,8 @@ public final class XcodeMCPProxyServer: Sendable {
             processID: @escaping @Sendable () -> Int = {
                 Int(ProcessInfo.processInfo.processIdentifier)
             },
-            loadFileConfiguration: @escaping @Sendable (URL) throws ->
-                ProxyConfig.File.LoadedConfiguration = {
-                    try ProxyConfig.File.Loader.loadStrict(configURL: $0)
-                },
             makeAutoApprover: @escaping @Sendable (
-                ProxyConfig,
+                XcodeMCPProxyServerConfiguration,
                 any ProxyRuntimeServing
             ) -> any ProxyServerPermissionDialogAutoApprover,
             makeRuntime: @escaping @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing,
@@ -490,7 +371,6 @@ public final class XcodeMCPProxyServer: Sendable {
         ) {
             self.discoveryClient = discoveryClient
             self.processID = processID
-            self.loadFileConfiguration = loadFileConfiguration
             self.makeAutoApprover = makeAutoApprover
             self.makeRuntime = makeRuntime
             self.makeHTTPGateway = makeHTTPGateway
@@ -536,14 +416,8 @@ public final class XcodeMCPProxyServer: Sendable {
                 }
             )
         }
-
-        static func live(config _: ProxyConfig) -> Self {
-            .live
-        }
     }
 
-    let configuration: XcodeMCPProxyServerConfiguration
-    let dependencies: Dependencies
     let logger: Logger = ProxyLogging.make("server")
     let lifecycle: Lifecycle
 
@@ -556,23 +430,8 @@ public final class XcodeMCPProxyServer: Sendable {
             XcodeMCPProxyServerConfiguration()
     ) {
         let dependencies = Dependencies.live
-        self.configuration = configuration
-        self.dependencies = dependencies
         self.lifecycle = Lifecycle(
             configuration: configuration,
-            preparedProxyConfig: nil,
-            dependencies: dependencies,
-            logger: logger
-        )
-    }
-
-    init(proxyConfig: ProxyConfig, dependencies: Dependencies) {
-        let configuration = XcodeMCPProxyServerConfiguration(serverProxyConfig: proxyConfig)
-        self.configuration = configuration
-        self.dependencies = dependencies
-        self.lifecycle = Lifecycle(
-            configuration: configuration,
-            preparedProxyConfig: proxyConfig,
             dependencies: dependencies,
             logger: logger
         )
@@ -582,25 +441,8 @@ public final class XcodeMCPProxyServer: Sendable {
         configuration: XcodeMCPProxyServerConfiguration,
         dependencies: Dependencies
     ) {
-        self.configuration = configuration
-        self.dependencies = dependencies
         self.lifecycle = Lifecycle(
             configuration: configuration,
-            preparedProxyConfig: nil,
-            dependencies: dependencies,
-            logger: logger
-        )
-    }
-
-    init(
-        preparedConfiguration: PreparedConfiguration,
-        dependencies: Dependencies
-    ) {
-        self.configuration = preparedConfiguration.configuration
-        self.dependencies = dependencies
-        self.lifecycle = Lifecycle(
-            configuration: preparedConfiguration.configuration,
-            preparedProxyConfig: preparedConfiguration.proxyConfig,
             dependencies: dependencies,
             logger: logger
         )
@@ -639,7 +481,7 @@ public final class XcodeMCPProxyServer: Sendable {
     static func startupSummary(
         displayHost: String,
         port: Int,
-        config: ProxyConfig,
+        config: XcodeMCPProxyServerConfiguration,
         xcodeTargets: [ProxyRuntimeInventorySnapshot.XcodeTarget]
     ) -> String {
         var lines = [
@@ -678,138 +520,67 @@ public final class XcodeMCPProxyServer: Sendable {
 
     }
 
-    private static func permissionDialogAssistantNameCandidates(config: ProxyConfig) -> [String] {
+    private static func permissionDialogAssistantNameCandidates(config: XcodeMCPProxyServerConfiguration) -> [String] {
         var candidates = Set<String>(["XcodeMCPKit"])
-        if let name = config.initializeParamsOverride?.clientName, name.isEmpty == false {
+        if let name = config.initializeHandshake?.clientInfo?.name, name.isEmpty == false {
             candidates.insert(name)
         }
         return Array(candidates)
     }
 }
 
-extension ProxyConfig {
-    static func resolving(
-        _ config: XcodeMCPProxyServerConfiguration,
-        loadFileConfiguration: @Sendable (URL) throws -> ProxyConfig.File.LoadedConfiguration = {
-            try ProxyConfig.File.Loader.loadStrict(configURL: $0)
+extension XcodeMCPProxyServerConfiguration {
+    func runtimeConfiguration() throws -> ProxyRuntimeConfiguration {
+        guard listenHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration("bindAddress.host must not be empty")
         }
-    ) throws -> Self {
-        let host = config.listenHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard host.isEmpty == false else {
-            throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration(
-                "bindAddress.host must not be empty"
-            )
+        guard (0...65_535).contains(listenPort) else {
+            throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration("bindAddress.port must be in 0...65535")
         }
-        guard (0...65_535).contains(config.listenPort) else {
-            throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration(
-                "bindAddress.port must be in 0...65535"
-            )
+        guard maxBodyBytes > 0 else {
+            throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration("maxBodyBytes must be greater than zero")
         }
-        guard config.maxBodyBytes > 0 else {
-            throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration(
-                "maxBodyBytes must be greater than zero"
-            )
-        }
-
-        let requestTimeout: TimeInterval
-        if let duration = config.requestTimeout {
-            let components = duration.components
-            requestTimeout = Double(components.seconds)
-                + Double(components.attoseconds) / 1_000_000_000_000_000_000
-            guard requestTimeout.isFinite, requestTimeout > 0 else {
-                throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration(
-                    "requestTimeout must be positive; use nil to disable it"
-                )
+        let timeout: TimeInterval
+        if let requestTimeout {
+            let components = requestTimeout.components
+            timeout = Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+            guard timeout > 0 else {
+                throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration("requestTimeout must be positive; use nil to disable it")
             }
         } else {
-            requestTimeout = 0
+            timeout = 0
         }
-
-        let loaded: ProxyConfig.File.LoadedConfiguration?
-        if let configURL = config.configurationFileURL {
-            loaded = try loadFileConfiguration(configURL)
-        } else {
-            loaded = nil
-        }
-
-        var resolved = Self(
-            listenHost: config.listenHost,
-            listenPort: config.listenPort,
-            nativeHostBundleURL: config.nativeHostBundleURL,
-            developerDirectoryURL: config.developerDirectoryURL,
-            maxBodyBytes: config.maxBodyBytes,
-            requestTimeout: requestTimeout,
-            configPath: config.configPath,
-            discoveryFileURL: {
-                if case .file(let url) = config.discovery { return url }
-                return nil
-            }(),
-            prewarmToolsList: config.prewarmToolsList,
-            autoApproveXcodeDialog: config.autoApproveXcodeDialog,
-            refreshCodeIssuesMode: ProxyConfig.RefreshCodeIssuesMode(config.refreshCodeIssuesMode),
-            disabledToolNames: config.toolPolicy?.disabledToolNames
-                ?? loaded?.disabledToolNames,
-            initializeParamsOverride: loaded?.initializeParamsOverride
+        let configuration = ProxyRuntimeConfiguration(
+            nativeHostBundleURL: nativeHostBundleURL,
+            developerDirectoryURL: developerDirectoryURL,
+            maxMessageBytes: maxBodyBytes,
+            requestTimeout: timeout,
+            prewarmToolsList: prewarmToolsList,
+            usesPermissionDialogAutomation: autoApproveXcodeDialog,
+            initializeParamsOverride: initializeHandshake.map { handshake in
+                .init(
+                    protocolVersion: handshake.protocolVersion,
+                    clientName: handshake.clientInfo?.name,
+                    clientVersion: handshake.clientInfo?.version,
+                    capabilities: handshake.capabilities?.mapValues(ProxyRuntimeConfiguration.JSONValue.init)
+                )
+            }
         )
-        if let initializeHandshake = config.initializeHandshake {
-            resolved.applyInitializeParamsOverride(
-                ProxyConfig.File.InitializeHandshakeOverride(initializeHandshake)
-            )
-        }
-        return resolved
+        try configuration.validateModernProtocolConfiguration()
+        return configuration
     }
 }
 
-private extension ProxyConfig.File.InitializeHandshakeOverride {
-    init(_ handshake: XcodeMCPProxyServerConfiguration.InitializeHandshake) {
-        self.init(
-            protocolVersion: handshake.protocolVersion,
-            clientName: handshake.clientInfo?.name,
-            clientVersion: handshake.clientInfo?.version,
-            capabilities: handshake.capabilities?.mapValues(ProxyConfig.File.Value.init)
-        )
-    }
-}
-
-private extension ProxyConfig.File.Value {
+private extension ProxyRuntimeConfiguration.JSONValue {
     init(_ value: MCPJSONValue) {
         switch value {
-        case .object(let object):
-            self = .object(object.mapValues(ProxyConfig.File.Value.init))
-        case .array(let array):
-            self = .array(array.map(ProxyConfig.File.Value.init))
-        case .string(let string):
-            self = .string(string)
-        case .integer(let integer):
-            self = .number(.int(integer))
-        case .double(let double):
-            self = .number(.double(double))
-        case .bool(let bool):
-            self = .bool(bool)
-        case .null:
-            self = .null
-        }
-    }
-}
-
-private extension ProxyConfig.RefreshCodeIssuesMode {
-    init(_ mode: XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode) {
-        switch mode {
-        case .proxy:
-            self = .proxy
-        case .upstream:
-            self = .upstream
-        }
-    }
-}
-
-private extension XcodeMCPProxyServerConfiguration.RefreshCodeIssuesMode {
-    init(_ mode: ProxyConfig.RefreshCodeIssuesMode) {
-        switch mode {
-        case .proxy:
-            self = .proxy
-        case .upstream:
-            self = .upstream
+        case .object(let object): self = .object(object.mapValues(Self.init))
+        case .array(let array): self = .array(array.map(Self.init))
+        case .string(let string): self = .string(string)
+        case .integer(let integer): self = .number(.integer(integer))
+        case .double(let double): self = .number(.double(double))
+        case .bool(let bool): self = .bool(bool)
+        case .null: self = .null
         }
     }
 }

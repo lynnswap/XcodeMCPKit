@@ -14,16 +14,16 @@ struct MCPForwardingService: Sendable {
         case failure(any Error)
     }
 
-    private let config: ProxyRuntimeConfiguration
     private let sessionManager: any RuntimeMCPForwardingPort
+    private let requestTimeoutSeconds: TimeInterval
     private let upstreamRuntime: ProxyUpstreamRequestRuntime
     private let toolSurface: ToolSurface
 
     init(configuration: ProxyRuntimeConfiguration, sessionManager: any RuntimeMCPForwardingPort) {
-        self.config = configuration
+        self.requestTimeoutSeconds = configuration.requestTimeout
         self.sessionManager = sessionManager
         self.upstreamRuntime = ProxyUpstreamRequestRuntime(port: sessionManager)
-        self.toolSurface = ToolSurface(config: configuration)
+        self.toolSurface = ToolSurface()
     }
 
     func prepareRequest(
@@ -85,7 +85,7 @@ struct MCPForwardingService: Sendable {
             requestTimeoutOverride
             ?? MCP.MethodDispatcher.timeoutForMethod(
                 prepared.transform.method,
-                defaultSeconds: config.requestTimeout
+                defaultSeconds: requestTimeoutSeconds
             )
         return try upstreamRuntime.startRequest(
             prepared,
@@ -157,246 +157,4 @@ struct MCPForwardingService: Sendable {
             return .failure(error)
         }
     }
-
-    func callInternalTool(
-        name: String,
-        arguments: [String: Any],
-        sessionID: String,
-        eventLoop: EventLoop,
-        cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil,
-        upstreamIndexOverride: Int? = nil,
-        requestTimeoutOverride: TimeAmount? = nil
-    ) async -> RefreshCodeIssues.Workflow.InternalToolResult {
-        guard let argumentValue = JSONValue(any: arguments) else {
-            return .unavailable
-        }
-        let requestObject = JSONRPC.Wire.requestObject(
-            id: "__internal-\(UUID().uuidString)",
-            method: "tools/call",
-            params: .object([
-                "name": .string(name),
-                "arguments": argumentValue,
-            ])
-        )
-        let internalRequestID = JSONRPC.ID(any: requestObject["id"]!)!
-
-        guard let bodyData = try? JSONRPC.Wire.data(from: requestObject)
-        else {
-            return .unavailable
-        }
-        guard let parsedRequestJSONValue = JSONValue(any: requestObject) else {
-            return .unavailable
-        }
-        var preferredUpstreamIndices: [Int]?
-        let admission: RouteForwardingAdmission?
-        switch await sessionManager.toolRoutingDecision(
-            for: requestObject,
-            requestTimeoutOverride: requestTimeoutOverride
-        ) {
-        case .forward(let resolvedUpstreamIndex):
-            preferredUpstreamIndices = resolvedUpstreamIndex.map { [$0] }
-            admission = nil
-        case .forwardAny(let resolvedUpstreamIndices):
-            preferredUpstreamIndices = resolvedUpstreamIndices
-            admission = nil
-        case .forwardAdmitted(let resolvedUpstreamIndices, let resolvedAdmission):
-            preferredUpstreamIndices = resolvedUpstreamIndices
-            admission = resolvedAdmission
-        case .localXcodeListWindows:
-            do {
-                let result = try await sessionManager.liveXcodeListWindowsResult(
-                    route: upstreamIndexOverride.map(ControlPlane.Route.pinnedUpstream) ?? .anyHealthy,
-                    requestTimeoutOverride: requestTimeoutOverride
-                )
-                guard let resultObject = result.foundationObject as? [String: Any] else {
-                    return .unavailable
-                }
-                if let isError = resultObject["isError"] as? Bool,
-                    isError
-                {
-                    return .unavailable
-                }
-                return .success(resultObject)
-            } catch is CancellationError {
-                return .cancelled
-            } catch {
-                return .unavailable
-            }
-        case .reject:
-            return .unavailable
-        }
-        if let upstreamIndexOverride {
-            if let preferredUpstreamIndices, !preferredUpstreamIndices.contains(upstreamIndexOverride) {
-                return .unavailable
-            }
-            preferredUpstreamIndices = [upstreamIndexOverride]
-        }
-
-        let descriptor = SessionRequestPipeline.Descriptor(
-            sessionID: sessionID,
-            label: "tools/call:\(name)",
-            expectsResponse: true,
-            isTopLevelClientRequest: false
-        )
-        let leaseID = sessionManager.createRequestLease(descriptor: descriptor)
-        let internalCancellationHandle = ClientMCPRequestExecutor.CancellationHandle(
-            leaseID: leaseID,
-            sessionID: sessionID,
-            requestIDKeys: []
-        )
-        if let cancellationHandle,
-           cancellationHandle.bindChildHandle(internalCancellationHandle) == false {
-            internalCancellationHandle.cancel(using: sessionManager)
-            return .cancelled
-        }
-        let session = sessionManager.session(id: sessionID)
-
-        let resolution: ResponseResolution
-        do {
-            resolution = try await sessionManager.enqueueOnUpstreamSlot(
-                leaseID: leaseID,
-                descriptor: descriptor,
-                on: eventLoop,
-                preferredUpstreamIndices: preferredUpstreamIndices
-            ) { selectedOperationLease -> EventLoopFuture<ResponseResolution> in
-                guard internalCancellationHandle.activate(
-                    operationLease: selectedOperationLease
-                ) else {
-                    return eventLoop.makeFailedFuture(CancellationError())
-                }
-                let parsedRequestJSON = parsedRequestJSONValue.foundationObject
-                let prepared: PreparedRequest
-                do {
-                    guard let candidate = try prepareRequest(
-                        bodyData: bodyData,
-                        parsedRequestJSON: parsedRequestJSON,
-                        sessionID: sessionID,
-                        operationLeaseOverride: selectedOperationLease,
-                        admission: admission,
-                        cancellationHandle: internalCancellationHandle
-                    ) else {
-                        return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
-                    }
-                    prepared = candidate
-                } catch is CancellationError {
-                    return eventLoop.makeFailedFuture(CancellationError())
-                } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
-                    return eventLoop.makeSucceededFuture(.upstreamUnavailable)
-                } catch {
-                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
-                }
-
-                let started: StartedRequest
-                do {
-                    started = try startRequest(
-                        prepared,
-                        session: session,
-                        on: eventLoop,
-                        requestTimeoutOverride: requestTimeoutOverride,
-                        leaseID: leaseID,
-                        cancellationHandle: internalCancellationHandle,
-                        onTimeout: { requestSendCompletion in
-                            self.sessionManager.handleRequestLeaseTimeout(
-                                leaseID,
-                                sessionID: sessionID,
-                                requestIDKeys: prepared.transform.responseID.map { [$0.key] } ?? [],
-                                operationLease: prepared.operationLease,
-                                after: requestSendCompletion
-                            )
-                        }
-                    )
-                } catch is CancellationError {
-                    return eventLoop.makeFailedFuture(CancellationError())
-                } catch ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology {
-                    return eventLoop.makeSucceededFuture(.upstreamUnavailable)
-                } catch {
-                    return eventLoop.makeSucceededFuture(.invalidUpstreamResponse)
-                }
-
-                return started.future.map { buffer in
-                    self.resolveResponse(
-                        .success(buffer),
-                        started: started,
-                        sessionID: sessionID
-                    )
-                }.flatMapErrorThrowing { error in
-                    if error is CancellationError {
-                        throw error
-                    }
-                    return self.resolveResponse(
-                        .failure(error),
-                        started: started,
-                        sessionID: sessionID,
-                        accountTimeout: false
-                    )
-                }
-            }.get()
-        } catch is CancellationError {
-            internalCancellationHandle.cancel(using: sessionManager)
-            return .cancelled
-        } catch {
-            internalCancellationHandle.markCompleted()
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .upstreamUnavailable
-            )
-            return .unavailable
-        }
-
-        switch resolution {
-        case .success(let responseData):
-            internalCancellationHandle.markCompleted()
-            sessionManager.completeRequestLease(leaseID)
-            guard let object = ToolSurface.responseObject(
-                from: responseData,
-                matching: internalRequestID.key
-            ),
-                let result = object["result"] as? [String: Any]
-            else {
-                return .unavailable
-            }
-            if let isError = result["isError"] as? Bool, isError {
-                return .unavailable
-            }
-            return .success(result)
-        case .timeout:
-            internalCancellationHandle.markCompleted()
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .timedOut,
-                reason: .timedOut
-            )
-            return .timeout
-        case .upstreamUnavailable:
-            internalCancellationHandle.markCompleted()
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .upstreamUnavailable
-            )
-            return .unavailable
-        case .invalidUpstreamResponse:
-            internalCancellationHandle.markCompleted()
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .invalidUpstreamResponse
-            )
-            return .unavailable
-        case .failure(let error):
-            if error is CancellationError {
-                internalCancellationHandle.cancel(using: sessionManager)
-                return .cancelled
-            }
-            internalCancellationHandle.markCompleted()
-            sessionManager.failRequestLease(
-                leaseID,
-                terminalState: .failed,
-                reason: .invalidUpstreamResponse
-            )
-            return .unavailable
-        }
-    }
-
 }

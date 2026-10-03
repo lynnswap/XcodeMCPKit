@@ -758,9 +758,7 @@ struct RuntimeCoordinatorRecoveryTests {
         try await waitForSentCount(upstream, count: 2, timeoutSeconds: 2)
         let executor = ClientMCPRequestExecutor(
             config: config, sessionManager: fixture.manager,
-            refreshCodeIssuesCoordinator: .makeDefault(),
-            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout)
-        )
+)
         let sentCount = await upstream.sentCount()
         let operation = try executor.handle(
             bodyData: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
@@ -1385,63 +1383,6 @@ struct RuntimeCoordinatorRecoveryTests {
             return
         }
         #expect(await existingUpstream.sent().filter { methodName(from: $0) != "notifications/cancelled" }.count == 0)
-    }
-
-    @Test func nativeCatalogIsRecordedBeforeDisabledToolFiltering()
-        async throws
-    {
-        let group = borrowSharedTestEventLoopGroup()
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let upstream = TestUpstreamClient()
-        var config = makeConfig(requestTimeout: 5)
-        config.disabledToolNames = ["HiddenOnlyTool"]
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-
-        let task = Task {
-            try await manager.sharedToolsList(
-                sessionID: "session-process-catalog-before-disabled-filtering",
-                requestTimeoutOverride: .seconds(5)
-            )
-        }
-        defer { task.cancel() }
-
-        let request = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        #expect(methodName(from: request) == "tools/list")
-        await upstream.yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: request),
-                    tools: [
-                        toolDescriptor(name: "HiddenOnlyTool")
-                    ]
-                )
-            )
-        )
-
-        let rawResult = try await waitWithTimeout(
-            "waiting for hidden-only process catalog",
-            timeout: .seconds(2)
-        ) {
-            try await task.value
-        }
-        await manager.drainRuntimeTasksForTesting()
-
-        #expect(toolNames(in: rawResult) == ["HiddenOnlyTool"])
-        #expect(toolNames(in: manager.cachedToolsListResult() ?? .null) == ["HiddenOnlyTool"])
-        let clientVisibleResult = RefreshCodeIssues.ToolsListRewriter.rewriteResult(
-            rawResult,
-            mode: config.refreshCodeIssuesMode,
-            hiddenToolNames: config.disabledToolNames
-        )
-        #expect(toolNames(in: clientVisibleResult).isEmpty)
     }
 
     @Test func sessionManagerTreatsSingleProcessEmptyToolsCatalogAsMissingSurface()

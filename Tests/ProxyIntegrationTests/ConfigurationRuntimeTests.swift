@@ -8,28 +8,15 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct ConfigurationRuntimeTests {
-    @Test func sessionManagerUsesInitializeParamsOverrideFromConfigFile() async throws {
-        let configPath = try makeTempProxyConfigFile(
-            """
-            [upstream_handshake]
-            clientName = "custom-proxy"
-
-            [upstream_handshake.capabilities]
-            roots = true
-            """
-        )
-        defer { try? FileManager.default.removeItem(atPath: configPath) }
-
+    @Test func sessionManagerUsesTypedInitializeHandshake() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = try ProxyConfig.resolving(
-            XcodeMCPProxyServerConfiguration(
-                requestTimeout: .seconds(5),
-                configurationFileURL: URL(fileURLWithPath: configPath),
-                featurePolicy: .init(prewarmToolsList: false)
-            )
+        let config = try XcodeMCPProxyServerConfiguration(
+            requestTimeout: .seconds(5),
+            initializeHandshake: .init(clientInfo: .init(name: "custom-proxy"), capabilities: ["roots": true]),
+            prewarmToolsList: false
         ).runtimeConfiguration()
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
@@ -46,76 +33,51 @@ struct ConfigurationRuntimeTests {
         #expect(capabilities["roots"] as? Bool == true)
     }
 
-    @Test func sessionManagerAppliesPublicInitializeHandshakeOverrideAfterConfigFile()
-        async throws
-    {
-        let configPath = try makeTempProxyConfigFile(
-            """
-            [upstream_handshake]
-            protocolVersion = "2025-06-18"
-            clientName = "file-proxy"
-            clientVersion = "file-version"
-
-            [upstream_handshake.capabilities]
-            roots = true
-            """
-        )
-        defer { try? FileManager.default.removeItem(atPath: configPath) }
-
-        let publicConfiguration = XcodeMCPProxyServerConfiguration(
-            configurationFileURL: URL(fileURLWithPath: configPath),
-            initializeHandshake: .init(
-                clientInfo: .init(name: "typed-proxy"),
-                capabilities: [
-                    "sampling": [
-                        "enabled": true
-                    ]
-                ]
-            ),
-            featurePolicy: .init(prewarmToolsList: false)
-        )
-        let config = try ProxyConfig.resolving(publicConfiguration).runtimeConfiguration()
-
+    @Test func sessionManagerPreservesTypedHandshakeValues() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        let config = try XcodeMCPProxyServerConfiguration(
+            initializeHandshake: .init(
+                protocolVersion: "2025-06-18",
+                clientInfo: .init(name: "EmbeddingClient", version: "1.2.3"),
+                capabilities: ["experimental": [
+                    "enabled": true,
+                    "limit": 3,
+                    "score": 0.5,
+                    "tags": ["swift", "xcode"],
+                    "optional": .null,
+                ]]
+            ),
+            prewarmToolsList: false
+        ).runtimeConfiguration()
+        let manager = RuntimeCoordinator(config: config, eventLoop: group.next(), upstreams: [upstream])
         defer { manager.shutdownAndWait() }
 
         let sent = try await sentValue(from: upstream, at: 0, timeout: .seconds(2))
-        let object = try JSONSerialization.jsonObject(with: sent, options: []) as? [String: Any]
-        let params = try #require(object?["params"] as? [String: Any])
-        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
+        let request = try #require(JSONSerialization.jsonObject(with: sent) as? [String: Any])
+        let params = try #require(request["params"] as? [String: Any])
+        let client = try #require(params["clientInfo"] as? [String: Any])
         let capabilities = try #require(params["capabilities"] as? [String: Any])
-        let sampling = try #require(capabilities["sampling"] as? [String: Any])
-
-        #expect(params["protocolVersion"] as? String == "2025-06-18")
-        #expect(clientInfo["name"] as? String == "typed-proxy")
-        #expect(clientInfo["version"] as? String == "file-version")
-        #expect(capabilities["roots"] == nil)
-        #expect(sampling["enabled"] as? Bool == true)
+        let experimental = try #require(capabilities["experimental"] as? [String: Any])
+        #expect(client["name"] as? String == "EmbeddingClient")
+        #expect(client["version"] as? String == "1.2.3")
+        #expect(experimental["enabled"] as? Bool == true)
+        #expect(experimental["limit"] as? Int == 3)
+        #expect(experimental["score"] as? Double == 0.5)
+        #expect(experimental["tags"] as? [String] == ["swift", "xcode"])
+        #expect(experimental["optional"] is NSNull)
     }
 
     @Test func sessionManagerAutoResolvesInitializeVersionFromConfiguredClientName() async throws {
-        let configPath = try makeTempProxyConfigFile(
-            """
-            [upstream_handshake]
-            clientName = "Claude"
-            """
-        )
-        defer { try? FileManager.default.removeItem(atPath: configPath) }
-
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
-        let config = try ProxyConfig.resolving(
-            XcodeMCPProxyServerConfiguration(
-                requestTimeout: .seconds(5),
-                configurationFileURL: URL(fileURLWithPath: configPath),
-                featurePolicy: .init(prewarmToolsList: false)
-            )
+        let config = try XcodeMCPProxyServerConfiguration(
+            requestTimeout: .seconds(5),
+            initializeHandshake: .init(clientInfo: .init(name: "Claude")),
+            prewarmToolsList: false
         ).runtimeConfiguration()
         let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
         defer { manager.shutdownAndWait() }
@@ -129,45 +91,19 @@ struct ConfigurationRuntimeTests {
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultClientVersion(for: "Claude"))
     }
 
-    @Test func strictConfigLoaderRejectsInvalidInitializeConfiguration() async throws {
-        let configPath = try makeTempProxyConfigFile(
-            """
-            [upstream_handshake
-            protocolVersion = "broken"
-            """
-        )
-        defer { try? FileManager.default.removeItem(atPath: configPath) }
-
-        #expect(throws: ProxyConfig.File.LoadError.self) {
-            _ = try ProxyConfig.File.Loader.loadStrict(
-                configURL: URL(fileURLWithPath: configPath)
-            )
-        }
-    }
-
     @Test func sessionManagerUsesConfiguredInitializeParamsAfterEagerInitTimesOut()
         async throws
     {
-        let configPath = try makeTempProxyConfigFile(
-            """
-            [upstream_handshake]
-            clientName = "configured-proxy"
-            """
-        )
-        defer { try? FileManager.default.removeItem(atPath: configPath) }
-
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
         let eventLoop = group.next()
         let upstream = TestUpstreamClient()
         let timeoutClock = TestClock()
         let initializeCleanupCompleted = TestSignal()
-        let config = try ProxyConfig.resolving(
-            XcodeMCPProxyServerConfiguration(
-                requestTimeout: .milliseconds(100),
-                configurationFileURL: URL(fileURLWithPath: configPath),
-                featurePolicy: .init(prewarmToolsList: false)
-            )
+        let config = try XcodeMCPProxyServerConfiguration(
+            requestTimeout: .milliseconds(100),
+            initializeHandshake: .init(clientInfo: .init(name: "configured-proxy")),
+            prewarmToolsList: false
         ).runtimeConfiguration()
         let manager = RuntimeCoordinator(
             config: config,
@@ -221,13 +157,4 @@ struct ConfigurationRuntimeTests {
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
     }
 
-}
-
-private func makeTempProxyConfigFile(_ contents: String) throws -> String {
-    let directory = FileManager.default.temporaryDirectory
-        .appendingPathComponent(UUID().uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let fileURL = directory.appendingPathComponent("proxy-config.toml")
-    try contents.write(to: fileURL, atomically: true, encoding: .utf8)
-    return fileURL.path
 }

@@ -24,9 +24,7 @@ struct ToolSurfaceTests {
             ),
             sourceUpstream: 0
         )
-        let surface = ToolSurface(
-            config: makeToolSurfaceConfig()
-        )
+        let surface = ToolSurface()
 
         let upstreamData = try JSONSerialization.data(
             withJSONObject: [
@@ -75,9 +73,7 @@ struct ToolSurfaceTests {
             ),
             sourceUpstream: 0
         )
-        let surface = ToolSurface(
-            config: makeToolSurfaceConfig()
-        )
+        let surface = ToolSurface()
 
         let upstreamData = try JSONSerialization.data(
             withJSONObject: [
@@ -125,9 +121,7 @@ struct ToolSurfaceTests {
             ),
             sourceUpstream: 0
         )
-        let surface = ToolSurface(
-            config: makeToolSurfaceConfig()
-        )
+        let surface = ToolSurface()
 
         let upstreamData = try JSONSerialization.data(
             withJSONObject: [
@@ -166,11 +160,8 @@ struct ToolSurfaceTests {
         #expect((issues[1]["line"] as? NSNumber)?.intValue == 0)
     }
 
-    @Test func toolSurfaceRewritesToolsList() throws {
-        var config = makeToolSurfaceConfig()
-        config.disabledToolNames = ["RunAllTests"]
-        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: config)
-        let surface = ToolSurface(config: config)
+    @Test func toolSurfacePreservesNativeToolsList() throws {
+        let surface = ToolSurface()
 
         let upstreamData = try JSONSerialization.data(
             withJSONObject: [
@@ -179,7 +170,7 @@ struct ToolSurfaceTests {
                 "result": [
                     "tools": [
                         [
-                            "name": RefreshCodeIssues.Request.toolName,
+                            "name": "XcodeRefreshCodeIssuesInFile",
                             "description": "old",
                         ],
                         [
@@ -204,47 +195,10 @@ struct ToolSurfaceTests {
         )
         let result = try #require(payload["result"] as? [String: Any])
         let tools = try #require(result["tools"] as? [[String: Any]])
-        #expect(tools.count == 1)
-        #expect(tools[0]["name"] as? String == RefreshCodeIssues.Request.toolName)
-        #expect((tools[0]["description"] as? String)?.contains("navigator issues") == true)
-    }
-
-    @Test func toolSurfaceAllowsDisabledToolsFilterToExposeEmptyToolsList() throws {
-        var config = makeToolSurfaceConfig()
-        config.refreshCodeIssuesMode = .upstream
-        config.disabledToolNames = ["RunAllTests"]
-        let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: config)
-        let surface = ToolSurface(config: config)
-
-        let upstreamData = try JSONSerialization.data(
-            withJSONObject: [
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": [
-                    "tools": [
-                        [
-                            "name": "RunAllTests",
-                            "description": "hidden",
-                        ],
-                    ],
-                ],
-            ],
-            options: []
-        )
-        let rewritten = surface.rewriteForwardedResponse(
-            method: "tools/list",
-            toolName: nil,
-            originalID: JSONRPC.ID(any: NSNumber(value: 1)),
-            cachesToolsListResult: true,
-            upstreamData: upstreamData
-        )
-
-        let payload = try #require(
-            JSONSerialization.jsonObject(with: rewritten.responseData, options: []) as? [String: Any]
-        )
-        let result = try #require(payload["result"] as? [String: Any])
-        let tools = try #require(result["tools"] as? [[String: Any]])
-        #expect(tools.isEmpty)
+        #expect(tools.count == 2)
+        #expect(tools[0]["name"] as? String == "XcodeRefreshCodeIssuesInFile")
+        #expect(tools[0]["description"] as? String == "old")
+        #expect(tools[1]["name"] as? String == "RunAllTests")
     }
 
     @Test func toolSurfaceNormalizesUsingSourceProcessCatalog() throws {
@@ -276,9 +230,7 @@ struct ToolSurfaceTests {
             ),
             upstreamIndex: 1
         )
-        let surface = ToolSurface(
-            config: makeToolSurfaceConfig()
-        )
+        let surface = ToolSurface()
 
         let upstreamData = try JSONSerialization.data(
             withJSONObject: [
@@ -329,9 +281,7 @@ struct ToolSurfaceTests {
 
     @Test func toolSurfaceTreatsOnlySyntheticOverloadErrorAsBackpressure() throws {
         let sessionManager = ToolSurfaceRuntimeCoordinator(configuration: makeToolSurfaceConfig())
-        let surface = ToolSurface(
-            config: makeToolSurfaceConfig()
-        )
+        let surface = ToolSurface()
 
         let exactOverload = try JSONSerialization.data(
             withJSONObject: [

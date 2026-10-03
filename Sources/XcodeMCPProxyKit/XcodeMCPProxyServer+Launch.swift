@@ -1,7 +1,4 @@
-import XcodeMCPCore
 import Foundation
-import XcodeMCPKit
-import XcodeMCPProxyRuntime
 
 package struct XcodeMCPProxyProductMetadata: Equatable, Sendable {
     package let name: String
@@ -17,7 +14,7 @@ extension XcodeMCPProxyServer {
     package enum LaunchAction: Sendable {
         case display(String)
         case dryRun(String)
-        case start(preparedConfiguration: PreparedConfiguration, forceRestart: Bool)
+        case start(configuration: XcodeMCPProxyServerConfiguration, forceRestart: Bool)
     }
 
     package static var productMetadata: XcodeMCPProxyProductMetadata {
@@ -32,22 +29,6 @@ extension XcodeMCPProxyServer {
         arguments: [String],
         environment: [String: String]
     ) throws -> LaunchAction {
-        try resolveLaunchAction(
-            arguments: arguments,
-            environment: environment,
-            loadFileConfiguration: {
-                try ProxyConfig.File.Loader.loadStrict(configURL: $0)
-            }
-        )
-    }
-
-    static func resolveLaunchAction(
-        arguments: [String],
-        environment: [String: String],
-        loadFileConfiguration:
-            @Sendable (URL) throws ->
-            ProxyConfig.File.LoadedConfiguration
-    ) throws -> LaunchAction {
         let command: ProxyServerCommand
         switch try CLICommandParser.parse(ProxyServerCommand.self, arguments: arguments) {
         case .cleanExit(let message):
@@ -56,79 +37,34 @@ extension XcodeMCPProxyServer {
             command = parsedCommand
         }
 
-        if isTruthy(environment["LAZY_INIT"]) {
-            throw CLICommandParser.validationError(
-                for: ProxyServerCommand.self,
-                message: removedLazyInitializationMessage
-            )
-        }
-
-        let proxyConfig: ProxyConfig
-        do {
-            proxyConfig = try command.resolveConfiguration(environment: environment)
-            try proxyConfig.validateModernProtocolConfiguration()
-        } catch let error as CLICommandError {
-            throw error
-        } catch {
-            throw CLICommandParser.validationError(
-                for: ProxyServerCommand.self,
-                message: String(describing: error)
-            )
-        }
-
-        let configuration = XcodeMCPProxyServerConfiguration(serverProxyConfig: proxyConfig)
-        let resolved: ProxyConfig
-        do {
-            resolved = try ProxyConfig.resolving(
-                configuration,
-                loadFileConfiguration: loadFileConfiguration
-            )
-            try resolved.validateModernProtocolConfiguration()
-        } catch {
-            throw CLICommandParser.validationError(
-                for: ProxyServerCommand.self,
-                message: String(describing: error)
-            )
-        }
-
+        let configuration = try command.resolveConfiguration(environment: environment)
+        _ = try configuration.runtimeConfiguration()
         if command.dryRun || isTruthy(environment["DRY_RUN"]) {
             return .dryRun(command.renderResolvedCommand(configuration: configuration))
         }
         return .start(
-            preparedConfiguration: PreparedConfiguration(
-                configuration: configuration,
-                proxyConfig: resolved
-            ),
+            configuration: configuration,
             forceRestart: command.forceRestart
         )
     }
 
     package static func bootstrapLogging(environment: [String: String]) {
-        ProxyLogging.bootstrap(environment: environment)
+        XcodeMCPProxyLogging.bootstrap(environment: environment)
     }
 }
 
 private extension ProxyServerCommand {
-    func resolveConfiguration(environment: [String: String]) throws -> ProxyConfig {
+    func resolveConfiguration(environment: [String: String]) throws -> XcodeMCPProxyServerConfiguration {
         let listenAddress = try resolvedListenAddress(environment: environment)
-        let refreshCodeIssuesMode = try resolvedRefreshCodeIssuesMode(
-            environment: environment
-        )
-        return ProxyConfig(
-            listenHost: listenAddress.host,
-            listenPort: listenAddress.port,
-            nativeHostBundleURL: (nativeHostBundlePath ?? nonEmpty(environment["XCODE_MCP_NATIVE_HOST_BUNDLE"])).map {
-                URL(fileURLWithPath: $0, isDirectory: true)
-            },
-            developerDirectoryURL: (developerDirectoryPath ?? nonEmpty(environment["DEVELOPER_DIR"])).map { URL(fileURLWithPath: $0, isDirectory: true) },
+        let timeout = requestTimeout?.seconds ?? 300
+        return XcodeMCPProxyServerConfiguration(
+            bindAddress: .init(host: listenAddress.host, port: listenAddress.port),
+            nativeHostBundleURL: environment["XCODE_MCP_NATIVE_HOST_BUNDLE"].map { URL(fileURLWithPath: $0) },
+            developerDirectoryURL: environment["DEVELOPER_DIR"].map { URL(fileURLWithPath: $0) },
             maxBodyBytes: maxBodyBytes ?? 1_048_576,
-            requestTimeout: requestTimeout?.seconds ?? 300,
-            configPath: config ?? nonEmpty(environment["MCP_XCODE_CONFIG"]),
-            discoveryFileURL: ProxyFilesystemLocations.discoveryFileURL(
-                environment: environment
-            ),
-            autoApproveXcodeDialog: autoApprove,
-            refreshCodeIssuesMode: refreshCodeIssuesMode
+            requestTimeout: timeout > 0 ? .seconds(timeout) : nil,
+            discovery: .file(ProxyFilesystemLocations.discoveryFileURL(environment: environment)),
+            approvalPolicy: autoApprove ? .automatic : .manual
         )
     }
 
@@ -165,33 +101,12 @@ private extension ProxyServerCommand {
         return CLIListenAddress(host: environmentHost, port: environmentPort)
     }
 
-    func resolvedRefreshCodeIssuesMode(
-        environment: [String: String]
-    ) throws -> ProxyConfig.RefreshCodeIssuesMode {
-        if let refreshCodeIssuesMode {
-            return refreshCodeIssuesMode
-        }
-        guard let value = nonEmpty(environment["MCP_XCODE_REFRESH_CODE_ISSUES_MODE"]) else {
-            return .proxy
-        }
-        guard let mode = ProxyConfig.RefreshCodeIssuesMode(rawValue: value) else {
-            throw CLICommandParser.validationError(
-                for: ProxyServerCommand.self,
-                message: "MCP_XCODE_REFRESH_CODE_ISSUES_MODE must be proxy or upstream"
-            )
-        }
-        return mode
-    }
-
     func renderResolvedCommand(configuration: XcodeMCPProxyServerConfiguration) -> String {
         var arguments = [
             "xcode-mcp-proxy-server",
             "--listen",
             "\(configuration.bindAddress.host):\(configuration.bindAddress.port)",
         ]
-        if let configPath = configuration.configurationFileURL?.path {
-            arguments += ["--config", configPath]
-        }
         if autoApprove {
             arguments.append("--auto-approve")
         }
@@ -200,23 +115,6 @@ private extension ProxyServerCommand {
         }
         if let requestTimeout {
             arguments += ["--request-timeout", requestTimeout.description]
-        }
-        if let bundleURL = configuration.nativeHostBundleURL {
-            arguments += ["--native-host-bundle", bundleURL.path]
-        }
-        if let developerURL = configuration.developerDirectoryURL {
-            arguments += ["--developer-dir", developerURL.path]
-        }
-        if let refreshCodeIssuesMode {
-            arguments += [
-                "--refresh-code-issues-mode",
-                refreshCodeIssuesMode.rawValue,
-            ]
-        } else if configuration.featurePolicy.refreshCodeIssuesMode != .proxy {
-            arguments += [
-                "--refresh-code-issues-mode",
-                configuration.featurePolicy.refreshCodeIssuesMode.rawValue,
-            ]
         }
         if forceRestart {
             arguments.append("--force-restart")
@@ -240,9 +138,6 @@ private func isTruthy(_ value: String?) -> Bool {
     }
     return ["1", "true", "yes", "on"].contains(value.lowercased())
 }
-
-private let removedLazyInitializationMessage =
-    "The proxy always uses eager initialization; --lazy-init has been removed."
 
 private func shellQuoted(_ value: String) -> String {
     let safeCharacters = CharacterSet.alphanumerics.union(

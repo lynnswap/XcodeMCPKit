@@ -1,5 +1,10 @@
 # Proxy Target Rearchitecture 2026-07 — Canonical Design
 
+This document records the target migration approved in July 2026. Its public
+configuration and refresh-workflow contracts have been superseded. Current
+behavior is described in [Architecture](architecture.md) and
+[Native routing migration](automatic-routing-migration.md).
+
 - Status: **APPROVED / IMPLEMENTED / VERIFIED**
 - Approved: 2026-07-13
 - Design baseline: `4b3c2ca493154091b267fd7beb0c1c20d9ff6438`
