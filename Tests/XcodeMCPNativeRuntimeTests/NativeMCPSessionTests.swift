@@ -246,6 +246,34 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test func cancellationBeforeDispatchDoesNotStartTheToolOrCreateArtifacts() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            // STDIO may deliver both messages in one chunk before the request Task runs.
+            try harness.call("QueuedAction", id: "cancel-before-dispatch")
+            try harness.notification("notifications/cancelled", params: .object([
+                "requestId": .string("cancel-before-dispatch"),
+            ]))
+            let cancelled = try await harness.nextMessage()
+            #expect(try nativeTestField(cancelled, "id") == .string("cancel-before-dispatch"))
+            #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
+            #expect(harness.backend.executions.isEmpty)
+            #expect(harness.backend.observations.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
+
+            try harness.request("ping", id: "after-cancellation")
+            #expect(try nativeTestField(await harness.nextMessage(), "result") == .object([:]))
+            try harness.call("ReplacementAction", id: "cancel-before-dispatch")
+            let replacement = try await harness.backend.nextExecution()
+            #expect(replacement.name == "ReplacementAction")
+            #expect(harness.backend.executions.count == 1)
+            try replacement.complete(.string("Still usable"))
+            let completed = try await harness.nextMessage()
+            #expect(try nativeTestField(completed, "id") == .string("cancel-before-dispatch"))
+            #expect(try nativeTestField(completed, "result", "isError") == .bool(false))
+        }
+    }
+
     @Test func cancellationOnlyEndsTheMatchingRequestAndAllowsIDReuse() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()

@@ -50,6 +50,7 @@ package final class NativeMCPSession {
             requests[id.key] = Task { @MainActor in
                 defer { requests[id.key] = nil }
                 do {
+                    try Task.checkCancellation()
                     let result = try await perform(method, params: params)
                     try Task.checkCancellation()
                     try sendResult(id: id, result: result)

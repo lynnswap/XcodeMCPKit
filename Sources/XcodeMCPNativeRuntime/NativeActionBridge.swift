@@ -85,6 +85,7 @@ final class NativeActionBridge {
         guard let entry = streamEntry, let interface = unsafe streamInterface else {
             throw NativeRuntimeError.unavailable("Native action executor is unavailable")
         }
+        try Task.checkCancellation()
         var input = input
         var metadata = unsafe action.metadata
         var witness = unsafe action.conformance

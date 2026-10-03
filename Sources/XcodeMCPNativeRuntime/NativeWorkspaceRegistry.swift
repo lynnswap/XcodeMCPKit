@@ -18,6 +18,7 @@ final class NativeWorkspaceRegistry {
         if selector.hasPrefix("/") {
             let path = URL(fileURLWithPath: selector).standardizedFileURL.resolvingSymlinksInPath().path
             let open = try await runtime.object(registry).method(named: "open(path: Swift.String) async throws -> __C.IDEWorkspace", as: (@concurrent (String) async throws -> AnyObject).self)
+            try Task.checkCancellation()
             let workspace = try unsafe await open.unsafeInvoke(path)
             let getter = try await runtime.object(workspace).getter(named: "workspaceIdentifier", as: String.self)
             let identifier = try unsafe getter.unsafeInvoke()
@@ -29,6 +30,7 @@ final class NativeWorkspaceRegistry {
 
     func prepareDebugger(for identifier: String) async throws {
         let lookup = try await runtime.object(registry).method(named: "workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)
+        try Task.checkCancellation()
         guard let workspace = try unsafe lookup.unsafeInvoke(identifier) else { return }
         let manager = try runtime.object(workspace).method(selector: "breakpointManager", as: (() -> AnyObject?).self)
         _ = try unsafe manager.unsafeInvoke()

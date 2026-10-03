@@ -62,6 +62,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
 
     package func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data> {
         if tools[name] == nil { _ = try await listTools() }
+        try Task.checkCancellation()
         guard let tool = tools[name], let action = unsafe actions[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
@@ -70,6 +71,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
             if name != "XcodeCloseWorkspace" {
                 arguments["workspaceIdentifier"] = .string(try await workspaces.resolve(selector))
             }
+            try Task.checkCancellation()
             if tool.workspaceScoped, case .string(let identifier) = arguments["workspaceIdentifier"] {
                 try await workspaces.prepareDebugger(for: identifier)
             }
