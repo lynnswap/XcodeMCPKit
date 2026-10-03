@@ -203,7 +203,10 @@ headless host, a usable GUI catalog remains available for that GUI's operations.
 The headless failure still applies to requests that require a headless model.
 
 For tools shared by several providers, the public schema preserves their
-variants. Each tool's `_meta["com.lynnswap.xcode-mcpkit/providers"]` lists the
+variants through the existing workspace, tab and interaction-session selectors.
+Calls without a selector use the default provider's input schema. The proxy
+removes routing selectors that the selected SDK does not declare before sending
+the call. Each tool's `_meta["com.lynnswap.xcode-mcpkit/providers"]` lists the
 providers and their original `descriptor`, including input and output schemas.
 Provider metadata identifies the Xcode installation, process, and cancellation
 contract. A call uses the selected owner's definition, captured for that request;
