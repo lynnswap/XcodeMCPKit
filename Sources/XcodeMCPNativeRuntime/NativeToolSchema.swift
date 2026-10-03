@@ -5,6 +5,13 @@ package struct NativeTool: Equatable, Sendable {
     package let name: String
     package let descriptor: JSONValue
     package let workspaceScoped: Bool
+
+    package var acceptsWorkspaceIdentifier: Bool {
+        guard case .object(let fields) = descriptor,
+              case .object(let input) = fields["inputSchema"],
+              case .object(let properties) = input["properties"] else { return false }
+        return properties["workspaceIdentifier"] != nil
+    }
 }
 
 package enum NativeSchemaConverter {

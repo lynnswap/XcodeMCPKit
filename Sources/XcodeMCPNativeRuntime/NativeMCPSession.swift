@@ -22,7 +22,9 @@ package final class NativeMCPSession {
 
     package func receive(_ data: Data) throws {
         let value: Any
-        do { value = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) }
+        do {
+            value = try StdioFramer.jsonObject(from: data)
+        }
         catch {
             try sendError(id: nil, code: -32700, message: "Invalid JSON")
             return
