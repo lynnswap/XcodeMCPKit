@@ -44,20 +44,42 @@ let package = Package(
             targets: ["XcodeMCPProxyToolVerifierCLI"]
         ),
         .executable(
+            name: "xcode-mcp-native-host",
+            targets: ["XcodeMCPNativeHost"]
+        ),
+        .executable(
             name: "xcode-mcp-permission-approver",
             targets: ["XcodeMCPPermissionApproverTool"]
         ),
     ],
     dependencies: [
+        .package(url: "https://github.com/lynnswap/ABIBridge.git", exact: "0.5.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
         .package(url: "https://github.com/dduan/TOMLDecoder.git", from: "0.4.3"),
     ],
     targets: [
+        .target(name: "XcodeMCPWire", swiftSettings: strictSwiftSettings),
+        .target(
+            name: "XcodeMCPNativeRuntime",
+            dependencies: ["XcodeMCPWire", .product(name: "ABIBridge", package: "ABIBridge")],
+            swiftSettings: strictSwiftSettings
+        ),
+        .executableTarget(
+            name: "XcodeMCPNativeHost",
+            dependencies: ["XcodeMCPNativeRuntime", "XcodeMCPWire"],
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "XcodeMCPNativeRuntimeTests",
+            dependencies: ["XcodeMCPNativeRuntime", "XcodeMCPWire"],
+            swiftSettings: strictSwiftSettings
+        ),
         .target(
             name: "XcodeMCPCore",
             dependencies: [
+                "XcodeMCPWire",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),

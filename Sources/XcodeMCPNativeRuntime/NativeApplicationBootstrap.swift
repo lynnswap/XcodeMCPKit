@@ -1,0 +1,45 @@
+import ABIBridge
+import AppKit
+import Foundation
+
+@MainActor
+package final class NativeApplicationBootstrap {
+    private var documentController: AnyObject?
+    private var kitBundle: Bundle?
+
+    package init() {}
+
+    package func application(for installation: NativeXcodeInstallation) throws -> NSApplication {
+        UserDefaults.standard.addSuite(named: "com.apple.dt.Xcode")
+        let framework = installation.contentsDirectory.appendingPathComponent("Frameworks/IDEKit.framework")
+        guard let bundle = Bundle(url: framework) else {
+            throw NativeRuntimeError.unavailable("Cannot locate IDEKit at \(framework.path)")
+        }
+        try bundle.loadAndReturnError()
+        kitBundle = bundle
+        guard let applicationClass = NSClassFromString("IDEApplication"),
+              let controllerClass = NSClassFromString("IDEDocumentController") else {
+            throw NativeRuntimeError.unavailable("Xcode native application classes are unavailable")
+        }
+        let runtime = ABIRuntime.shared
+        let shared = try runtime.object(applicationClass as AnyObject).method(selector: "sharedApplication", as: (() -> NSApplication).self)
+        let application = try unsafe shared.unsafeInvoke()
+        let createController = try runtime.object(controllerClass as AnyObject).method(selector: "new", as: (() -> AnyObject).self)
+        documentController = try unsafe createController.unsafeInvoke()
+        application.setActivationPolicy(.prohibited)
+        return application
+    }
+
+    package func initialize(installation: NativeXcodeInstallation) async throws {
+        let initialize = try unsafe await ABIRuntime.shared.cFunction(named: "IDEInitialize", as: ((UInt64, UnsafeMutableRawPointer?) -> Bool).self,
+                                                             in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
+        var errorAddress: UnsafeRawPointer?
+        let initialized = try withUnsafeMutablePointer(to: &errorAddress) {
+            try unsafe initialize.unsafeInvoke(7, UnsafeMutableRawPointer($0))
+        }
+        guard initialized else {
+            if let errorAddress = unsafe errorAddress { throw unsafe Unmanaged<NSError>.fromOpaque(errorAddress).takeUnretainedValue() }
+            throw NativeRuntimeError.unavailable("Xcode native initialization failed without an error")
+        }
+    }
+}
