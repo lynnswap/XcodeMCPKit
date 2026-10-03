@@ -36,7 +36,13 @@ final class NativeWorkspaceRegistry {
             }
             let open = try await runtime.object(registry).method(named: "open(path: Swift.String) async throws -> __C.IDEWorkspace", as: (@concurrent (String) async throws -> AnyObject).self)
             try Task.checkCancellation()
-            let workspace = try unsafe await open.unsafeInvoke(path)
+            let workspace: AnyObject
+            do {
+                workspace = try unsafe await open.unsafeInvoke(path)
+            } catch let error as NativeSwiftError {
+                if error.withUnderlyingError({ $0 is CancellationError }) { throw CancellationError() }
+                throw NativeToolExecutionError(message: error.description)
+            }
             let getter = try await runtime.object(workspace).getter(named: "workspaceIdentifier", as: String.self)
             let identifier = try unsafe getter.unsafeInvoke()
             return identifier

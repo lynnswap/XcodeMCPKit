@@ -268,6 +268,26 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test func workspacePreparationFailureReturnsAToolErrorAndAllowsTheNextCall() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            harness.backend.executeError = NativeToolExecutionError(message: "The project does not exist")
+            try harness.call("XcodeLS", id: "missing-project")
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestObject(response)["error"] == nil)
+            #expect(try nativeTestField(response, "result", "isError") == .bool(true))
+            #expect(try nativeTestField(response, "result", "content") == .array([
+                .object(["type": .string("text"), "text": .string("The project does not exist")]),
+            ]))
+            #expect(harness.backend.executions.isEmpty)
+
+            harness.backend.executeError = nil
+            try harness.call("XcodeLS", id: "existing-project")
+            try await harness.backend.nextExecution().complete(.object(["items": .array([])]))
+            #expect(try nativeTestField(await harness.nextMessage(), "result", "isError") == .bool(false))
+        }
+    }
+
     @Test func completedOutputDoesNotChangeTheMeaningOfAnErrorField() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
@@ -327,7 +347,7 @@ struct NativeMCPSessionTests {
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
             #expect(harness.backend.executions.isEmpty)
 
-            harness.backend.executeError = .invalidRequest("Unknown native tool 'RemovedTool'")
+            harness.backend.executeError = NativeRuntimeError.invalidRequest("Unknown native tool 'RemovedTool'")
             try harness.call("RemovedTool", id: "removed")
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32602)))
@@ -731,7 +751,7 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     var resultFormat = NativeToolResultFormat.actionValue
     var initializeError: NativeRuntimeError?
     var listError: NativeRuntimeError?
-    var executeError: NativeRuntimeError?
+    var executeError: (any Error)?
     var shutdownError: NativeRuntimeError?
     private(set) var executions: [NativeSessionExecution] = []
     private(set) var observations: [Observation] = []
