@@ -218,7 +218,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         let coordinator = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
-            upstreamReadinessGate: .liveDefault(config: config, clock: .liveValue, processEventMonitor: processEventMonitor),
+            upstreamReadinessGate: .liveDefault(clock: .liveValue),
             xcodeTargetDiscovery: processEventMonitor,
             xcodeProcessEventMonitor: processEventMonitor,
             notificationSink: { sessionID, data in
