@@ -10,6 +10,127 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .asyncTestCleanup)
 struct NativeOwnerRoutingTests {
+    @Test(arguments: ["workspace", "tab", "session", "native-empty", "native-opaque", "scoped-workspace", "scoped-workspace-argument"])
+    func providerSelectorsForwardOnlyTheSelectedSDKArguments(selection: String) async throws {
+        let native = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 990, xcodeVersion: "27.0")
+        let config = makeConfig(requestTimeout: 5)
+        let fixture = RuntimeCoordinatorFixture(config: config, upstreams: [native, gui],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])], startImmediately: false)
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        for index in 0...1 { manager.markUpstreamInitialized(upstreamIndex: index) }
+        seedCoordinatorSuiteInitialize(on: manager,
+            result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]), sourceUpstream: 0)
+        let name = selection == "session" ? "DeviceInteractionSynthesize" : "DynamicTool"
+        var nativeFields: [String: Any] = ["a": ["type": "string"], "sdkExtra": ["type": "string"]]
+        var guiFields: [String: Any] = ["b": ["type": "string"], "sdkExtra": ["type": "string"]]
+        var nativeRequired = ["a"]
+        var guiRequired = ["b"]
+        if selection == "native-opaque" {
+            nativeFields["workspaceIdentifier"] = ["type": "string"]
+            nativeRequired.append("workspaceIdentifier")
+        }
+        if selection == "session" {
+            nativeFields["interactSessionKey"] = ["type": "string"]
+            guiFields["interactSessionKey"] = ["type": "string"]
+            nativeRequired.append("interactSessionKey")
+            guiRequired.append("interactSessionKey")
+        }
+        if selection == "scoped-workspace" {
+            guiFields["tabIdentifier"] = ["type": "string"]
+            guiRequired.append("tabIdentifier")
+        }
+        if selection == "scoped-workspace-argument" {
+            guiFields["workspaceIdentifier"] = ["type": "string"]
+            guiRequired.append("workspaceIdentifier")
+        }
+        func closedDescriptor(fields: [String: Any], required: [String]) -> [String: Any] {
+            ["name": name, "inputSchema": ["type": "object", "properties": fields,
+                "required": required, "additionalProperties": false]]
+        }
+        let nativeDescriptor = closedDescriptor(fields: nativeFields, required: nativeRequired)
+        let guiDescriptor = closedDescriptor(fields: guiFields, required: guiRequired)
+        try seedUnboundToolCatalog(on: manager, upstreamIndex: 0, tools: [nativeDescriptor])
+        try seedProcessToolCatalogs(on: manager, entries: [(target, 1, [guiDescriptor, toolDescriptor(name: "XcodeListWindows")])])
+        #expect(manager.recordXcodeWindowOwners(from: try jsonValue(["structuredContent": [
+            "message": "* tabIdentifier: gui-tab, workspacePath: /Work/App.xcodeproj"]]), upstreamIndex: 1))
+        let guiLease = manager.operationLeaseForTest(upstreamIndex: 1)
+        if selection == "session" {
+            manager.recordDeviceInteractionAffinityIfNeeded(
+                requestData: try JSONRPC.Wire.data(from: toolsCallObject(id: 1, name: "DeviceInteractionStartSession",
+                    arguments: ["sessionIdentifier": "Selected GUI"])),
+                responseData: try JSONRPC.Wire.resultResponseData(id: try #require(JSONRPC.ID(any: 1)), result: .object([
+                    "structuredContent": .object(["interactionSessionKey": .string("gui-session")])])),
+                operationLease: guiLease)
+        }
+        let isNative = selection == "native-empty" || selection == "native-opaque"
+        var arguments: [String: Any] = isNative ? ["a": "native-value"] : ["b": "gui-value"]
+        arguments["sdkExtra"] = "preserved"
+        switch selection {
+        case "workspace", "scoped-workspace", "scoped-workspace-argument": arguments["workspaceIdentifier"] = "/Work/App.xcodeproj"
+        case "tab": arguments["tabIdentifier"] = "gui-tab"
+        case "session": arguments["interactSessionKey"] = "gui-session"
+        case "native-opaque":
+            arguments["workspaceIdentifier"] = "opaque-native"
+            arguments["tabIdentifier"] = ""
+        default: arguments["workspaceIdentifier"] = ""
+        }
+        let request = toolsCallObject(id: 220, name: name, arguments: arguments)
+        let requestData = try JSONRPC.Wire.data(from: request)
+        let routing = Task { await manager.toolRoutingDecision(
+            for: try JSONRPC.Wire.object(fromData: requestData), requestTimeoutOverride: .seconds(2)) }
+        if selection == "native-opaque" {
+            let inventory = try await sentMessage(from: native, matching: {
+                toolCallName(from: $0) == "XcodeListWorkspaces"
+            }, timeout: .seconds(2))
+            await native.yield(.message(try makeXcodeListWindowsResponse(id: extractUpstreamID(from: inventory),
+                message: "* workspaceIdentifier: opaque-native, workspacePath: /Work/Owned.xcodeproj")))
+        }
+        let decision = try await routing.value
+        guard case .forwardAdmitted(let indices, let admission) = decision else {
+            Issue.record("The existing selector must choose its provider"); return
+        }
+        let selectedIndex = isNative ? 0 : 1
+        let selected = selectedIndex == 0 ? native : gui
+        #expect(indices == [selectedIndex])
+        #expect(admission.toolDefinition?.descriptor == (try jsonValue(selectedIndex == 0 ? nativeDescriptor : guiDescriptor)))
+        let sessionID = "selected-schema"
+        _ = manager.session(id: sessionID)
+        manager.sessionRegistry.markInitialized(id: sessionID, negotiatedProtocolVersion: MCP.ProtocolVersion.current)
+        let executor = ClientMCPRequestExecutor(config: config, sessionManager: manager,
+            refreshCodeIssuesCoordinator: .makeDefault(),
+            refreshCodeIssuesDebugState: .init(defaultRequestTimeoutSeconds: config.requestTimeout))
+        let operation = executor.handle(bodyData: try JSONRPC.Wire.data(from: request),
+            headerSessionID: sessionID, headerSessionExists: true, prefersEventStream: false, eventLoop: fixture.eventLoop)
+        if selection == "native-opaque" {
+            let inventory = try await native.nextSent(at: 1)
+            #expect(toolCallName(from: inventory) == "XcodeListWorkspaces")
+            await native.yield(.message(try makeXcodeListWindowsResponse(id: extractUpstreamID(from: inventory),
+                message: "* workspaceIdentifier: opaque-native, workspacePath: /Work/Owned.xcodeproj")))
+        }
+        let sent = try await sentMessage(from: selected, matching: {
+            methodName(from: $0) == "tools/call" && toolCallName(from: $0) == name
+        }, timeout: .seconds(2))
+        let params = try #require(try JSONRPC.Wire.object(fromData: sent)["params"] as? [String: Any])
+        var expected: [String: JSONValue] = selectedIndex == 0 ? ["a": .string("native-value")] : ["b": .string("gui-value")]
+        expected["sdkExtra"] = .string("preserved")
+        if selection == "session" { expected["interactSessionKey"] = .string("gui-session") }
+        if selection == "scoped-workspace" { expected["tabIdentifier"] = .string("gui-tab") }
+        if selection == "scoped-workspace-argument" { expected["workspaceIdentifier"] = .string("gui-tab") }
+        if selection == "native-opaque" { expected["workspaceIdentifier"] = .string("opaque-native") }
+        #expect(JSONValue(any: try #require(params["arguments"])) == .object(expected))
+        await selected.yield(.message(try makeJSONRPCResponse(id: extractUpstreamID(from: sent), result: [
+            "content": [["type": "text", "text": "Selected provider completed"]]])))
+        _ = try await waitWithTimeout("waiting for the selected provider", timeout: .seconds(2)) {
+            try await operation.future.get()
+        }
+        await manager.drainRuntimeTasksForTesting()
+        #expect(await native.sentCount() == (selection == "native-opaque" ? 3 : selectedIndex == 0 ? 1 : 0))
+        #expect(await gui.sentCount() == (selectedIndex == 1 ? 1 : 0))
+    }
+
     @Test(arguments: [false, true])
     func availableGUIProviderSurvivesSelectedNativeCatalogFailure(fails: Bool) async throws {
         let native = TestUpstreamClient()
@@ -358,6 +479,15 @@ struct NativeOwnerRoutingTests {
         #expect(admission.route?.routeID.processID == oldTarget.processID)
         #expect(admission.toolDefinition?.sourceProof == proof)
         #expect(admission.toolDefinition?.descriptor == (try jsonValue(oldDescriptor)))
+        #expect(manager.processControlPlane.defaultToolProvider(named: "DocumentationLikeTool")?.sourceProof == proof)
+        guard case .object(let published)? = ProcessToolCatalogCodec.toolsByName(
+            in: manager.cachedToolsListResult())["DocumentationLikeTool"],
+              case .object(let metadata)? = published["_meta"],
+              case .array(let origins)? = metadata[ToolCatalogProvider.providersMetadataKey],
+              case .object(let first)? = origins.first else {
+            Issue.record("Missing published default provider"); return
+        }
+        #expect(first["descriptor"] == (try jsonValue(oldDescriptor)))
         #expect(await native.sentCount() == 0)
         #expect(await newGUI.sentCount() == 0)
         #expect(await oldGUI.sentCount() == 0)

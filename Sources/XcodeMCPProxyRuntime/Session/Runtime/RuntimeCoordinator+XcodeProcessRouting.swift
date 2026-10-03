@@ -534,8 +534,8 @@ extension RuntimeCoordinator {
             return .localXcodeListWindows
         }
         if !hasOwnerHint(request), !defaultBackendUpstreamIndices.isEmpty {
-            let catalog = processControlPlane.unboundToolsCatalogRaw()
-            let hasNativeTool = ProcessToolCatalogCodec.toolsByName(in: catalog)[request.toolName] != nil
+            let preferredProvider = processControlPlane.defaultToolProvider(named: request.toolName)
+            let hasNativeTool = preferredProvider != nil && preferredProvider?.target == nil
             let hasGUIProvider = !processControlPlane.processIDsHavingTool(request.toolName).isEmpty
             let nativeIsAvailable = defaultBackendUpstreamIndices.contains {
                 upstreamHealthManager.state(for: UpstreamSlotID(rawValue: $0))?
@@ -561,7 +561,9 @@ extension RuntimeCoordinator {
     private func nativeHostToolRoutingDecision(
         for request: ToolRoutingRequest, workspaceIdentifier: String? = nil
     ) -> ToolRoutingDecision {
-        let provider = processControlPlane.unboundToolsCatalogProvider()
+        let provider = processControlPlane.defaultToolProvider(named: request.toolName).flatMap {
+            $0.target == nil ? $0 : nil
+        } ?? processControlPlane.unboundToolsCatalogProvider()
         let topology = upstreamTopology.snapshot()
         let proofs = provider.map { [$0.sourceProof] }
             ?? topology.entries.compactMap {
@@ -860,7 +862,8 @@ extension RuntimeCoordinator {
             return .forwardAdmitted(
                 preferredUpstreamIndices: [affinity.upstreamProof.slotID.rawValue],
                 admission: RouteForwardingAdmission(
-                    upstreamProofs: [affinity.upstreamProof]
+                    upstreamProofs: [affinity.upstreamProof],
+                    toolDefinition: toolDefinition(named: request.toolName, sourceProof: affinity.upstreamProof)
                 )
             )
         }
@@ -907,7 +910,8 @@ extension RuntimeCoordinator {
             admission: RouteForwardingAdmission(
                 route: routeAdmission,
                 upstreamProofs: [affinity.upstreamProof],
-                window: windowAdmission
+                window: windowAdmission,
+                toolDefinition: toolDefinition(named: request.toolName, sourceProof: affinity.upstreamProof)
             )
         )
     }
@@ -1168,7 +1172,11 @@ extension RuntimeCoordinator {
         guard candidateProcessIDs.isEmpty == false else {
             return nil
         }
-        guard let route = preferredAvailableRoute(in: candidateProcessIDs) else {
+        guard let provider = processControlPlane.defaultToolProvider(named: request.toolName),
+              let target = provider.target,
+              let route = xcodeProcessRoutes.first(where: { $0.target.processID == target.processID }),
+              !unavailableXcodeProcessIDs().contains(target.processID),
+              firstUsableInitializedUpstreamIndex(in: route) != nil else {
             return .reject(
                 errors: toolRoutingErrors(
                     for: request,
@@ -1208,22 +1216,6 @@ extension RuntimeCoordinator {
                     ?? upstreamProofs.first.flatMap { toolDefinition(named: request.toolName, sourceProof: $0) }
             )
         )
-    }
-
-    private func preferredAvailableRoute(in processIDs: Set<pid_t>) -> XcodeProcessRoute? {
-        let unavailable = unavailableXcodeProcessIDs()
-        return xcodeProcessRoutes
-            .filter {
-                processIDs.contains($0.target.processID)
-                    && unavailable.contains($0.target.processID) == false
-            }
-            .sorted { lhs, rhs in
-                if lhs.target.appPath != rhs.target.appPath {
-                    return lhs.target.appPath < rhs.target.appPath
-                }
-                return lhs.target.processID < rhs.target.processID
-            }
-            .first { firstUsableInitializedUpstreamIndex(in: $0) != nil }
     }
 
     @discardableResult
@@ -1438,28 +1430,46 @@ extension RuntimeCoordinator {
               let object = parsedRequestJSON as? [String: Any] else {
             return (bodyData, parsedRequestJSON)
         }
+        var rewritten = object
+        var changed = false
         if let identifier = admission?.workspaceIdentifier,
            var params = object["params"] as? [String: Any],
            var arguments = params["arguments"] as? [String: Any] {
             arguments["workspaceIdentifier"] = identifier
             params["arguments"] = arguments
-            var rewritten = object
             rewritten["params"] = params
-            if let data = try? JSONSerialization.data(withJSONObject: rewritten) {
-                return (data, rewritten)
-            }
+            changed = true
+        } else if let plan = admission?.window?.rewritePlan {
+            let result = rewriteOwnerBoundRequestObject(object, plan: plan)
+            rewritten = result.value
+            changed = result.changed
         }
-        guard let rewritePlan = admission?.window?.rewritePlan else { return (bodyData, parsedRequestJSON) }
-        let rewritten = rewriteOwnerBoundRequestObject(object, plan: rewritePlan)
-        guard rewritten.changed,
-              JSONSerialization.isValidJSONObject(rewritten.value),
+        if var params = rewritten["params"] as? [String: Any],
+           let name = params["name"] as? String,
+           var arguments = params["arguments"] as? [String: Any],
+           let definition = admission?.toolDefinition
+                ?? toolDefinition(named: name, sourceProof: operationLease.proof) {
+            if let rawTabIdentifier = admission?.window?.rewritePlan.tabIdentifier,
+               definition.declaresArgument("workspaceIdentifier") {
+                arguments["workspaceIdentifier"] = rawTabIdentifier
+                changed = true
+            }
+            // Routing hints are SDK arguments only when this provider declares them.
+            for selector in ["workspaceIdentifier", "tabIdentifier"] where !definition.declaresArgument(selector) {
+                changed = arguments.removeValue(forKey: selector) != nil || changed
+            }
+            params["arguments"] = arguments
+            rewritten["params"] = params
+        }
+        guard changed,
+              JSONSerialization.isValidJSONObject(rewritten),
               let data = try? JSONSerialization.data(
-                withJSONObject: rewritten.value,
+                withJSONObject: rewritten,
                 options: []
               ) else {
             return (bodyData, parsedRequestJSON)
         }
-        return (data, rewritten.value)
+        return (data, rewritten)
     }
 
     private func rewriteOwnerBoundRequestObject(
