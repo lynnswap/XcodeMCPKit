@@ -29,17 +29,20 @@ struct PublicProductContractTests {
 
         try makeFixturePackage(at: fixtureURL, repositoryRoot: repositoryRoot)
 
-        let result = try runSwiftBuild(
-            packageURL: fixtureURL,
-            logURL: fixtureURL.appendingPathComponent("swift-build.log")
-        )
-        expectBuildSucceeded(result, context: "public product fixture build")
+        for target in ["XcodeMCPKitClient", "XcodeMCPKitTestingClient", "XcodeMCPProxyKitClient", "XcodeMCPProxyKitOnlyClient"] {
+            let result = try runSwiftBuild(
+                packageURL: fixtureURL,
+                logURL: fixtureURL.appendingPathComponent("\(target)-swift-build.log"),
+                target: target
+            )
+            expectBuildSucceeded(result, context: "\(target) public product fixture build")
+        }
 
         for check in lowLevelImportChecks {
             let result = try runSwiftBuild(
                 packageURL: fixtureURL,
                 logURL: fixtureURL.appendingPathComponent("\(check.targetName)-swift-build.log"),
-                targets: [check.targetName]
+                target: check.targetName
             )
             expectBuildFailedBecauseModuleIsUnavailable(
                 result,
@@ -52,7 +55,7 @@ struct PublicProductContractTests {
             let result = try runSwiftBuild(
                 packageURL: fixtureURL,
                 logURL: fixtureURL.appendingPathComponent("\(check.targetName)-swift-build.log"),
-                targets: [check.targetName]
+                target: check.targetName
             )
             expectBuildFailed(
                 result,
@@ -263,12 +266,7 @@ struct PublicProductContractTests {
     private func runSwiftBuild(
         packageURL: URL,
         logURL: URL,
-        targets: [String] = [
-            "XcodeMCPKitClient",
-            "XcodeMCPKitTestingClient",
-            "XcodeMCPProxyKitClient",
-            "XcodeMCPProxyKitOnlyClient",
-        ],
+        target: String,
         timeoutSeconds: TimeInterval = 180
     ) throws -> CommandResult {
         let outputFD = unsafe open(logURL.path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
@@ -279,7 +277,6 @@ struct PublicProductContractTests {
             close(outputFD)
         }
 
-        let targetDescription = targets.joined(separator: ", ")
         let process = try SpawnedProcessGroup.spawn(
             executable: "/usr/bin/env",
             arguments: [
@@ -288,7 +285,8 @@ struct PublicProductContractTests {
                 "build",
                 "--package-path",
                 packageURL.path,
-            ] + targets.flatMap { ["--target", $0] } + [
+                "--target",
+                target,
                 "-Xswiftc",
                 "-strict-concurrency=minimal",
             ],
@@ -300,7 +298,7 @@ struct PublicProductContractTests {
         ) { elapsedSeconds in
             reportWatchdogHeartbeat(
                 "PublicProductContractTests: swift build still running after \(Int(elapsedSeconds))s "
-                    + "for \(targetDescription); log: \(logURL.path)"
+                    + "for \(target); log: \(logURL.path)"
             )
         }
 
@@ -1088,7 +1086,8 @@ import XcodeMCPProxyKit
 func compileOnlyProxyConfigurationSurface() {
     let config = XcodeMCPProxyServerConfiguration(
         bindAddress: .init(host: "127.0.0.1", port: 0),
-        upstreamProcessCount: 1,
+        nativeHostBundleURL: URL(fileURLWithPath: "/tmp/XcodeMCPNativeHost.app"),
+        developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer"),
         maxBodyBytes: 1_048_576,
         requestTimeout: .seconds(120),
         configurationFileURL: URL(fileURLWithPath: "/tmp/xcode-mcp-config.toml"),
