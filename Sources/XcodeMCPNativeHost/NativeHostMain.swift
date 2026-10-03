@@ -79,11 +79,24 @@ private enum NativeHostMain {
                     let session = NativeMCPSession(backend: backend, artifactsRoot: artifacts) { data in
                         try output.write(contentsOf: data + Data([0x0A]))
                     }
-                    let framer = StdioFramer()
+                    session.onOutputFailure = { [weak session] error in
+                        guard let session else { return }
+                        Task { @MainActor in
+                            do { try await session.shutdown() }
+                            catch let cleanup {
+                                report("Native host output failed: \(error); cleanup failed: \(cleanup)")
+                                terminate(application, failure: true)
+                                return
+                            }
+                            report("Native host output failed: \(error)")
+                            terminate(application, failure: true)
+                        }
+                    }
+                    let framer = StdioFramer(mode: .delimitedMessages)
                     do {
                         for try await chunk in standardInput() {
                             let result = framer.append(chunk)
-                            guard result.bufferedByteCount <= arguments.maxMessageBytes else {
+                            guard framer.bufferedMessageByteCount <= arguments.maxMessageBytes else {
                                 throw NativeRuntimeError.invalidRequest("Native MCP input exceeds the configured message limit")
                             }
                             if let violation = result.protocolViolation {
@@ -155,28 +168,35 @@ private enum NativeHostMain {
     }
 
     private static func standardInput() -> AsyncThrowingStream<Data, any Error> {
-        AsyncThrowingStream { continuation in
-            let source = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: DispatchQueue(label: "xcode.native.stdin"))
-            source.setEventHandler {
-                do {
-                    var data = Data(count: 64 * 1024)
-                    let count = unsafe data.withUnsafeMutableBytes { bytes in
-                        unsafe Darwin.read(STDIN_FILENO, bytes.baseAddress, bytes.count)
+        let queue = DispatchQueue(label: "xcode.native.stdin")
+        return AsyncThrowingStream(unfolding: {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.async {
+                    do {
+                        while true {
+                            var data = Data(count: 64 * 1024)
+                            let count = unsafe data.withUnsafeMutableBytes { bytes in
+                                unsafe Darwin.read(STDIN_FILENO, bytes.baseAddress, bytes.count)
+                            }
+                            if count > 0 {
+                                data.count = count
+                                continuation.resume(returning: data)
+                                return
+                            }
+                            if count == 0 {
+                                continuation.resume(returning: nil)
+                                return
+                            }
+                            if errno != EINTR {
+                                throw NativeRuntimeError.unavailable("Native MCP stdin read failed: \(unsafe String(cString: strerror(errno)))")
+                            }
+                        }
+                    } catch {
+                        continuation.resume(throwing: error)
                     }
-                    if count > 0 {
-                        data.count = count
-                        continuation.yield(data)
-                    } else if count == 0 {
-                        continuation.finish()
-                        source.cancel()
-                    } else if errno != EINTR {
-                        throw NativeRuntimeError.unavailable("Native MCP stdin read failed: \(unsafe String(cString: strerror(errno)))")
-                    }
-                } catch { continuation.finish(throwing: error); source.cancel() }
+                }
             }
-            continuation.onTermination = { _ in source.cancel() }
-            source.resume()
-        }
+        })
     }
 
     private static func report(_ message: String) {

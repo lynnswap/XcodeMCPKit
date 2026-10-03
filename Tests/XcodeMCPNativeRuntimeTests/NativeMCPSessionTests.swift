@@ -161,6 +161,63 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test(arguments: [JSONValue.bool(true), .bool(false), .array([]), .object([:]), .null])
+    func invalidProgressTokensDoNotEmitNotifications(token: JSONValue) async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            try harness.call("Action", id: "invalid-token", progressToken: token)
+            let execution = try await harness.backend.nextExecution()
+            try execution.emit("update", data: .object(["progress": .number(.int(1))]))
+            try execution.complete(.string("Completed"))
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "id") == .string("invalid-token"))
+            #expect(try nativeTestField(response, "result", "isError") == .bool(false))
+            #expect(harness.backend.observations.count == 2)
+        }
+    }
+
+    @Test(arguments: ["progress", "result", "error"])
+    func outputFailureStopsDispatchAndNotifiesTheHostOnce(kind: String) async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            try harness.call("LongRunning", id: "pending")
+            let pending = try await harness.backend.nextExecution()
+            try harness.call("OutputProducer", id: "output-producer", progressToken: .string("progress"))
+            let producer = try await harness.backend.nextExecution()
+            let failure = NativeRuntimeError.invocation("Output pipe closed")
+            harness.outputControl.failure = failure
+            let failureEvents = AsyncStream<Void>.makeStream()
+            var failures: [String] = []
+            var shutdownTask: Task<Void, any Error>?
+            harness.session.onOutputFailure = { [weak session = harness.session] error in
+                failures.append(String(describing: error))
+                failureEvents.continuation.yield(())
+                if let session { shutdownTask = Task { try await session.shutdown() } }
+            }
+
+            switch kind {
+            case "progress":
+                try producer.emit("update", data: .object(["progress": .number(.int(1))]))
+            case "result":
+                try producer.complete(.string("Completed"))
+            default:
+                try producer.emit("unsupported", data: .object([:]))
+                producer.finish()
+            }
+
+            var failureIterator = failureEvents.stream.makeAsyncIterator()
+            #expect(await failureIterator.next(isolation: MainActor.shared) != nil)
+            #expect(throws: NativeRuntimeError.self) { try harness.call("MustNotRun", id: "after-output-failure") }
+            #expect(harness.backend.executions.map(\.name) == ["LongRunning", "OutputProducer"])
+            let shutdown = try #require(shutdownTask)
+            try await shutdown.value
+            #expect(await pending.wasCancelled())
+            #expect(harness.backend.shutdownCalls == 1)
+            #expect(failures == [failure.description])
+            harness.session.onOutputFailure = nil
+        }
+    }
+
     @Test func nativeToolErrorsRemainToolResultsWithStructuredDetails() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
@@ -359,6 +416,25 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test func cancellationPreservesANativeCompletionThatAlreadyArrived() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            try harness.call("Open", id: "completed-before-cancellation")
+            let execution = try await harness.backend.nextExecution()
+            let output: JSONValue = .object(["workspaceIdentifier": .string("owned-workspace")])
+            try execution.complete(output)
+            try harness.notification("notifications/cancelled", params: .object([
+                "requestId": .string("completed-before-cancellation"),
+            ]))
+
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "error", "code") == .number(.int(-32800)))
+            #expect(harness.backend.observations.map(\.event) == [
+                .object(["type": .string("completed"), "data": output]),
+            ])
+        }
+    }
+
     @Test func stringAndNumericRequestIDsRemainIndependent() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
@@ -422,6 +498,111 @@ struct NativeMCPSessionTests {
             #expect(try nativeTestField(response, "result") == .object([:]))
         }
     }
+
+    @Test(arguments: [
+        #"{"id":"invalid","method":"tools/call","params":{"name":"Action"}}"#,
+        #"{"jsonrpc":"1.0","id":"invalid","method":"tools/call","params":{"name":"Action"}}"#,
+        #"{"jsonrpc":2,"id":"invalid","method":"tools/call","params":{"name":"Action"}}"#,
+        #"{"jsonrpc":true,"id":"invalid","method":"tools/call","params":{"name":"Action"}}"#,
+        #"{"jsonrpc":"2.0","id":true,"method":"tools/call","params":{"name":"Action"}}"#,
+        #"{"jsonrpc":"2.0","id":false,"method":"tools/call","params":{"name":"Action"}}"#,
+        #"{"jsonrpc":"2.0","id":[],"method":"tools/call","params":{"name":"Action"}}"#,
+        #"{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{"name":"Action"}}"#,
+        #"{"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"Action"}}"#,
+    ])
+    func invalidEnvelopesCannotStartNativeOperations(raw: String) async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            try harness.session.receive(Data(raw.utf8))
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "error", "code") == .number(.int(-32600)))
+            #expect(try nativeTestField(response, "id") == (raw.contains(#""id":"invalid""#) ? .string("invalid") : .null))
+            #expect(harness.backend.executions.isEmpty)
+            #expect(harness.backend.observations.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
+            try harness.request("ping", id: "after-invalid-envelope")
+            #expect(try nativeTestField(await harness.nextMessage(), "result") == .object([:]))
+        }
+    }
+
+    @Test func invalidInitializeEnvelopeCannotInitializeTheSession() async throws {
+        try await withNativeSession { harness in
+            try harness.session.receive(Data(#"{"id":"invalid-initialize","method":"initialize"}"#.utf8))
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32600)))
+            try harness.request("tools/list", id: "still-uninitialized")
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
+            #expect(harness.backend.listCalls == 0)
+            _ = try await harness.initialize()
+            try harness.request("tools/list", id: "initialized-catalog")
+            #expect(try nativeTestField(await harness.nextMessage(), "result", "tools") == .array([]))
+            #expect(harness.backend.listCalls == 1)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func booleanCancellationIDsDoNotAliasNumericRequests(boolean: Bool) async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            let identifier: Int64 = boolean ? 1 : 0
+            try harness.request("tools/call", id: identifier, params: .object(["name": .string("MustComplete")]))
+            let execution = try await harness.backend.nextExecution()
+            try harness.notification("notifications/cancelled", params: .object(["requestId": .bool(boolean)]))
+            try execution.complete(.string("Completed"))
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "id") == .number(.int(identifier)))
+            #expect(try nativeTestField(response, "result", "isError") == .bool(false))
+        }
+    }
+
+    @Test func cancellationWithAnInvalidEnvelopeCannotCancelAnActiveRequest() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            try harness.call("MustComplete", id: "active")
+            let execution = try await harness.backend.nextExecution()
+            try harness.session.receive(Data(#"{"jsonrpc":"1.0","method":"notifications/cancelled","params":{"requestId":"active"}}"#.utf8))
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32600)))
+            try execution.complete(.string("Completed"))
+            #expect(try nativeTestField(await harness.nextMessage(), "result", "isError") == .bool(false))
+        }
+    }
+
+    @Test(arguments: [false, true], ["{malformed", "[]", "true", "null", "42", #""scalar""#])
+    func invalidFramesAndAValidRequestInTheSameChunkAreHandledSeparately(contentLength: Bool, raw: String) async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            let badFrame = contentLength ? "Content-Length: \(raw.utf8.count)\r\n\r\n\(raw)" : raw + "\n"
+            let valid = #"{"jsonrpc":"2.0","id":"after-frame-error","method":"ping"}"#
+            let framing = try harness.receiveChunk(Data((badFrame + valid + "\n").utf8))
+            #expect(framing.messages == [Data(raw.utf8), Data(valid.utf8)])
+            #expect(framing.bufferedByteCount == 0)
+            let error = try await harness.nextMessage()
+            #expect(try nativeTestField(error, "id") == .null)
+            #expect(try nativeTestField(error, "error", "code") == .number(.int(raw == "{malformed" ? -32700 : -32600)))
+            let validResponse = try await harness.nextMessage()
+            #expect(try nativeTestField(validResponse, "id") == .string("after-frame-error"))
+            #expect(try nativeTestField(validResponse, "result") == .object([:]))
+            #expect(harness.backend.executions.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
+        }
+    }
+
+    @Test func aPartialInvalidLineCannotExecuteItsValidObjectPrefix() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            let raw = #"{"jsonrpc":"2.0","id":"never-execute","method":"tools/call","params":{"name":"DoNotExecute"}} trailing garbage"#
+            let partial = try harness.receiveChunk(Data(raw.utf8))
+            #expect(partial.messages.isEmpty)
+            #expect(partial.bufferedByteCount == raw.utf8.count)
+            #expect(harness.backend.executions.isEmpty)
+            let valid = #"{"jsonrpc":"2.0","id":"after-delimiter","method":"ping"}"#
+            let completed = try harness.receiveChunk(Data(("\n" + valid + "\n").utf8))
+            #expect(completed.messages == [Data(raw.utf8), Data(valid.utf8)])
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32700)))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("after-delimiter"))
+            #expect(harness.backend.executions.isEmpty)
+            #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
+        }
+    }
 }
 
 @MainActor
@@ -442,12 +623,17 @@ private final class NativeSessionHarness {
     let backend = NativeSessionBackendProbe()
     let artifactsRoot = FileManager.default.temporaryDirectory.appendingPathComponent("NativeMCPSessionTests-\(UUID().uuidString)", isDirectory: true)
     let session: NativeMCPSession
+    let outputControl: NativeSessionOutputControl
+    private let framer = StdioFramer(mode: .delimitedMessages)
     private var outputIterator: AsyncStream<Data>.Iterator
 
     init() {
         let output = AsyncStream<Data>.makeStream()
+        let control = NativeSessionOutputControl()
+        outputControl = control
         outputIterator = output.stream.makeAsyncIterator()
         session = NativeMCPSession(backend: backend, artifactsRoot: artifactsRoot) { data in
+            if let failure = control.failure { throw failure }
             output.continuation.yield(data)
         }
     }
@@ -472,6 +658,13 @@ private final class NativeSessionHarness {
         try session.receive(JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(method: method, params: params)))
     }
 
+    func receiveChunk(_ data: Data) throws -> StdioFramer.AppendResult {
+        let result = framer.append(data)
+        #expect(result.protocolViolation == nil)
+        for message in result.messages { try session.receive(message) }
+        return result
+    }
+
     func call(_ name: String, id: String, arguments: [String: JSONValue] = [:], progressToken: JSONValue? = nil) throws {
         var params: [String: JSONValue] = ["name": .string(name), "arguments": .object(arguments)]
         if let progressToken { params["_meta"] = .object(["progressToken": progressToken]) }
@@ -484,6 +677,11 @@ private final class NativeSessionHarness {
         outputIterator = iterator
         return try nativeTestJSON(#require(data))
     }
+}
+
+@MainActor
+private final class NativeSessionOutputControl {
+    var failure: NativeRuntimeError?
 }
 
 @MainActor

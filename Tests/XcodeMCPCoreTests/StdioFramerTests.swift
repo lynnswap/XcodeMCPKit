@@ -53,6 +53,29 @@ struct StdioFramerTests {
         #expect(String(data: result.messages[0], encoding: .utf8) == json)
     }
 
+    @Test(arguments: ["\n", "\r\n"])
+    func stdioFramerAcceptsAdditionalContentLengthHeaders(lineEnding: String) {
+        let framer = StdioFramer()
+        let message = Data(#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.utf8)
+        let following = Data(#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#.utf8)
+        let header = Data([
+            "Content-Length: \(message.count)",
+            "Content-Type: application/json",
+            "X-Padding: " + String(repeating: "x", count: 200),
+            "", "",
+        ].joined(separator: lineEnding).utf8)
+
+        let prefix = framer.append(header + message.dropLast())
+        #expect(prefix.messages.isEmpty)
+        #expect(prefix.protocolViolation == nil)
+        #expect(framer.bufferedMessageByteCount == message.count - 1)
+
+        let completed = framer.append(message.suffix(1) + following)
+        #expect(completed.messages == [message, following])
+        #expect(completed.protocolViolation == nil)
+        #expect(completed.bufferedByteCount == 0)
+    }
+
     @Test func stdioFramerBuffersPartialContentLengthFrameAcrossAppends() {
         let framer = StdioFramer()
         let json = #"{"jsonrpc":"2.0","id":1}"#
