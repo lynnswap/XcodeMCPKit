@@ -5,6 +5,42 @@ import XcodeMCPKitTesting
 @testable import XcodeMCPProxyToolVerifier
 
 struct ProxyToolVerifierTests {
+    @Test func repeatedOutputDirectoryKeepsBothGeneratedProjects() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.outputRoot) }
+        let runtime = XcodeMCPTestRuntime(tools: [
+            tool("XcodeOpenWorkspace", properties: ["path"]),
+            tool("XcodeCloseWorkspace", properties: ["workspaceIdentifier"]),
+            tool("XcodeNewProject", properties: ["templateIdentifier", "productName", "destinationPath", "organizationIdentifier", "options"]),
+        ])
+        await runtime.setToolHandler { call in
+            if call.name == "XcodeOpenWorkspace" { return result(["workspaceIdentifier": "owned-native-id"]) }
+            if call.name == "XcodeNewProject" {
+                let destination = URL(fileURLWithPath: try #require(call.arguments["destinationPath"]?.stringValue))
+                let name = try #require(call.arguments["productName"]?.stringValue)
+                let project = destination.appendingPathComponent(name + ".xcodeproj")
+                try FileManager.default.createDirectory(at: project, withIntermediateDirectories: false)
+                try Data("native generated contents".utf8).write(to: project.appendingPathComponent("project.pbxproj"))
+                return result(["projectPath": .string(project.path)])
+            }
+            return result(["message": "closed"])
+        }
+        for _ in 0..<2 {
+            #expect(try await !verify(runtime: runtime, fixture: fixture, noOpenXcode: true))
+        }
+        let calls = await runtime.recordedToolCalls().filter { $0.name == "XcodeNewProject" }
+        #expect(calls.count == 2)
+        let destinations = try calls.map { URL(fileURLWithPath: try #require($0.arguments["destinationPath"]?.stringValue)) }
+        #expect(Set(destinations).count == 2)
+        for destination in destinations {
+            var relationship = FileManager.URLRelationship.other
+            try FileManager.default.getRelationship(&relationship, ofDirectoryAt: fixture.outputRoot, toItemAt: destination)
+            #expect(relationship == .contains)
+            let contents = destination.appendingPathComponent("ProxyVerifierGeneratedCLI.xcodeproj/project.pbxproj")
+            #expect(try String(contentsOf: contents, encoding: .utf8) == "native generated contents")
+        }
+    }
+
     @Test(arguments: ["success", "result"])
     func nativeFalseCompletionIsReportedAsFailure(flag: String) async throws {
         let fixture = try makeFixture()
@@ -153,7 +189,10 @@ struct ProxyToolVerifierTests {
                 let project = try referencedProject(in: URL(fileURLWithPath: workspace))
                 try Data("native mutation".utf8).write(to: project.deletingLastPathComponent().appendingPathComponent("ownership-marker"))
             case "XcodeNewProject":
-                #expect(call.arguments["destinationPath"] == .string(fixture.outputRoot.path))
+                let destination = URL(fileURLWithPath: try #require(call.arguments["destinationPath"]?.stringValue))
+                var relationship = FileManager.URLRelationship.other
+                try FileManager.default.getRelationship(&relationship, ofDirectoryAt: fixture.outputRoot, toItemAt: destination)
+                #expect(relationship == .contains)
             case "XcodeCloseWorkspace":
                 await ownership.close()
             default:
