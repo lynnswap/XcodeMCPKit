@@ -67,6 +67,7 @@ actor ControlPlaneCoordinator {
         let origin: ToolsCatalogLoadOrigin
         let requestTimeout: TimeAmount?
         let requestDeadlineUptimeNs: UInt64?
+        let responseDeadlineUptimeNs: UInt64?
         let rpcHandle: ControlPlane.RPCHandle
         let task: Task<CanonicalToolsCatalogLoadResult, Error>
         var waiters: [WaiterID: ToolsCatalogWaiterRecord] = [:]
@@ -282,19 +283,25 @@ actor ControlPlaneCoordinator {
 
     func startToolsCatalogLoad(
         origin: ToolsCatalogLoadOrigin,
-        requestTimeout: TimeAmount?
+        requestTimeout: TimeAmount?,
+        responseDeadlineUptimeNs: UInt64? = nil
     ) -> UUID {
         let loadID = UUID()
         let rpcHandle = ControlPlane.RPCHandle()
         let requestDeadlineUptimeNs = requestDeadline(for: requestTimeout)
+        let responseDeadlineUptimeNs = earliestDeadline(responseDeadlineUptimeNs, requestDeadlineUptimeNs)
+        let refreshDeadline = toolsCatalogRefreshDeadline(responseDeadlineUptimeNs)
         let task = Task.detached {
-            try await self.toolsCatalogLoader(requestTimeout, rpcHandle)
+            let refreshTimeout = await self.requestTimeout(until: refreshDeadline)
+            guard refreshTimeout?.nanoseconds != 0 else { throw TimeoutError() }
+            return try await self.toolsCatalogLoader(refreshTimeout, rpcHandle)
         }
         let load = ToolsCatalogLoadState(
             loadID: loadID,
             origin: origin,
             requestTimeout: requestTimeout,
             requestDeadlineUptimeNs: requestDeadlineUptimeNs,
+            responseDeadlineUptimeNs: responseDeadlineUptimeNs,
             rpcHandle: rpcHandle,
             task: task
         )
@@ -361,24 +368,29 @@ actor ControlPlaneCoordinator {
         requestedPromotionDeadlineUptimeNs: UInt64?
     ) -> UUID {
         if let current = toolsCatalogLoad {
-            if current.foregroundWaiterCount <= 1 && shouldPromoteSharedLoad(
+            let responseDeadline = earliestDeadline(current.responseDeadlineUptimeNs, requestedPromotionDeadlineUptimeNs)
+            let needsEarlierResponse = responseDeadline != current.responseDeadlineUptimeNs
+            if needsEarlierResponse || (current.foregroundWaiterCount <= 1 && shouldPromoteSharedLoad(
                 currentRequestDeadlineUptimeNs: current.requestDeadlineUptimeNs,
-                requestedRequestDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs
-            ) {
-                return replaceToolsCatalogRequestLoad(current, requestTimeout: requestTimeout)
+                requestedRequestDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs)) {
+                return replaceToolsCatalogRequestLoad(current, requestTimeout: requestTimeout,
+                    responseDeadlineUptimeNs: responseDeadline)
             }
             return current.loadID
         }
         if let current = prewarmToolsCatalogLoad {
-            if current.foregroundWaiterCount <= 1 && shouldPromoteSharedLoad(
+            let responseDeadline = earliestDeadline(current.responseDeadlineUptimeNs, requestedPromotionDeadlineUptimeNs)
+            let needsEarlierResponse = responseDeadline != current.responseDeadlineUptimeNs
+            if needsEarlierResponse || (current.foregroundWaiterCount <= 1 && shouldPromoteSharedLoad(
                 currentRequestDeadlineUptimeNs: current.requestDeadlineUptimeNs,
-                requestedRequestDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs
-            ) {
-                return promotePrewarmToolsCatalogLoad(current, requestTimeout: requestTimeout)
+                requestedRequestDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs)) {
+                return promotePrewarmToolsCatalogLoad(current, requestTimeout: requestTimeout,
+                    responseDeadlineUptimeNs: responseDeadline)
             }
             return current.loadID
         }
-        return startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout)
+        return startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout,
+            responseDeadlineUptimeNs: requestedPromotionDeadlineUptimeNs)
     }
 
     func ensureWindowLoad(

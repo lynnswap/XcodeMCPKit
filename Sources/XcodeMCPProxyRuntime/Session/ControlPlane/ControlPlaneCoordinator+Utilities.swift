@@ -136,6 +136,24 @@ extension ControlPlaneCoordinator {
         }
     }
 
+    func earliestDeadline(_ first: UInt64?, _ second: UInt64?) -> UInt64? {
+        switch (first, second) {
+        case let (.some(first), .some(second)): return min(first, second)
+        case let (.some(first), .none): return first
+        case let (.none, .some(second)): return second
+        case (.none, .none): return nil
+        }
+    }
+
+    func toolsCatalogRefreshDeadline(_ responseDeadline: UInt64?) -> UInt64? {
+        guard let responseDeadline else { return nil }
+        let now = clock.uptimeNanoseconds()
+        guard responseDeadline > now else { return now }
+        // Origin RPCs run in parallel. Keep the second half of the caller's budget
+        // for cancellation, projection commit and delivery to all shared waiters.
+        return now + (responseDeadline - now) / 2
+    }
+
     func shouldPromoteSharedLoad(
         currentRequestDeadlineUptimeNs: UInt64?,
         requestedRequestDeadlineUptimeNs: UInt64?
