@@ -151,13 +151,15 @@ struct NativeGUIBackendTests {
             let message: JSONValue = .object(["message": .string("* tabIdentifier: tab-one, workspacePath: \(workspace)\n* tabIdentifier: tab-two, workspacePath: \(workspace)")])
             let text = String(decoding: try guiBackendData(message), as: UTF8.self)
             try windows.respond(.object(["content": .array([.object(["type": .string("text"), "text": .string(text)])])]))
-            do {
-                _ = try await execution.value
-                Issue.record("An ambiguous workspace dispatched a mutation")
-            } catch let error as NativeRuntimeError {
-                #expect(error.description.contains("Multiple GUI tabs own"))
-                #expect(error.description.contains("tab-one, tab-two"))
+            var events = try await execution.value.makeAsyncIterator()
+            let failure = try nativeTestJSON(#require(await events.next(isolation: MainActor.shared)))
+            #expect(try nativeTestField(failure, "type") == .string("error"))
+            guard case .string(let message) = try nativeTestField(failure, "data") else {
+                Issue.record("Expected the workspace-selection failure")
+                return
             }
+            #expect(message.contains("Multiple GUI tabs own"))
+            #expect(message.contains("tab-one, tab-two"))
             #expect(fixture.transport.requestMessages.count == 2)
         }
     }
@@ -237,6 +239,41 @@ struct NativeGUIBackendTests {
             fixture.transport.connect()
             #expect(!fixture.connection.isConnected)
             try await fixture.backend.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+        }
+    }
+
+    @Test func sessionShutdownInterruptsWindowLookupWithoutANativeReply() async throws {
+        try await withGUIBackend(initialize: false) { fixture in
+            let output = AsyncStream<Data>.makeStream()
+            var responses = output.stream.makeAsyncIterator()
+            let session = NativeMCPSession(backend: fixture.backend,
+                artifactsRoot: fixture.directory.appendingPathComponent("artifacts"),
+                output: { output.continuation.yield($0) })
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("initialize"), "method": .string("initialize"),
+                "params": .object(["protocolVersion": .string("2025-06-18"), "capabilities": .object([:]),
+                    "clientInfo": .object(fixture.sessionContext.clientInfo)]),
+            ])))
+            let initialized = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
+            #expect(try nativeTestField(initialized, "result", "protocolVersion") == .string("2025-06-18"))
+            _ = try await fixture.listTools([Self.requiredWorkspaceTool])
+            try session.receive(guiBackendData(.object([
+                "jsonrpc": .string("2.0"), "id": .string("window-lookup"), "method": .string("tools/call"),
+                "params": .object(["name": .string("MutateWorkspace"), "arguments": .object([
+                    "query": .string("edit"), "workspaceIdentifier": .string("/tmp/Project.xcodeproj"),
+                ])]),
+            ])))
+            let windows = try await fixture.transport.nextRequest()
+            #expect(try nativeTestField(nativeTestJSON(windows.message), "callTool", "name") == .string("XcodeListWindows"))
+
+            try await session.shutdown()
+            #expect(fixture.transport.invalidationCount == 1)
+            #expect(!fixture.connection.isConnected)
+            #expect(fixture.transport.requestMessages.count == 2)
+            let cancelled = try nativeTestJSON(#require(await responses.next(isolation: MainActor.shared)))
+            #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
+            try windows.respond(.object(["content": .array([]), "isError": .bool(false)]))
             #expect(fixture.transport.invalidationCount == 1)
         }
     }
