@@ -296,7 +296,8 @@ struct RuntimeCoordinatorCatalogTests {
         #expect(fixture.manager.cachedToolsListResult() == nil)
     }
 
-    @Test func paginatedCatalogCancelsTheCurrentPage() async throws {
+    @Test(arguments: [false, true])
+    func paginatedCatalogDistinguishesProviderAndCallerCancellation(cancelCaller: Bool) async throws {
         let upstream = TestUpstreamClient()
         let fixture = RuntimeCoordinatorFixture(upstreams: [upstream])
         defer { fixture.shutdownAndWait() }
@@ -308,9 +309,14 @@ struct RuntimeCoordinatorCatalogTests {
         let first = try await sentValue(from: upstream, at: 2, timeout: .seconds(2))
         await upstream.yield(.message(try paginatedToolsResponse(request: first, names: ["First"], nextCursor: .string("second"))))
         let second = try await sentValue(from: upstream, at: 3, timeout: .seconds(2))
+        if cancelCaller { load.cancel() }
         let delivery = try #require(handle.cancel())
         _ = await delivery.wait()
-        await #expect(throws: CancellationError.self) { _ = try await load.value }
+        if cancelCaller {
+            await #expect(throws: CancellationError.self) { _ = try await load.value }
+        } else {
+            await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) { _ = try await load.value }
+        }
         let cancellation = try await sentValue(from: upstream, at: 4, timeout: .seconds(2))
         #expect(try extractCancellationRequestID(from: cancellation) == extractUpstreamID(from: second))
         #expect(fixture.manager.cachedToolsListResult() == nil)

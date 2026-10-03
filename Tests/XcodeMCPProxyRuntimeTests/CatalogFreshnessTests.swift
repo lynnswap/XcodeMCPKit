@@ -9,7 +9,7 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .timeLimit(.minutes(1)), .asyncTestCleanup)
 struct CatalogFreshnessTests {
-    @Test(arguments: ["cold", "ready", "unavailable"])
+    @Test(arguments: ["cold", "ready", "unavailable", "invalidated"])
     func explicitRequestReturnsTheNewGUICatalog(nativePhase: String) async throws {
         let native = TestUpstreamClient()
         let gui = TestUpstreamClient()
@@ -43,6 +43,17 @@ struct CatalogFreshnessTests {
             if nativePhase == "ready" {
                 await native.yield(.message(try makeDocumentationToolsListResponse(
                     id: extractUpstreamID(from: nativeRequest), tools: [toolDescriptor(name: "NativeTool")])))
+            } else if nativePhase == "invalidated" {
+                await native.yield(.message(try JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(
+                    method: "notifications/tools/list_changed"))))
+                let cancellation = try await sentMessage(from: native, matching: {
+                    methodName(from: $0) == "notifications/cancelled"
+                }, timeout: .seconds(2))
+                let cancellationObject = try JSONRPC.Wire.object(fromData: cancellation)
+                let params = try #require(cancellationObject["params"] as? [String: Any])
+                let cancelledID = try #require(JSONRPC.ID(any: params["requestId"]))
+                let nativeID = try #require(JSONRPC.ID(any: extractUpstreamID(from: nativeRequest)))
+                #expect(cancelledID.key == nativeID.key)
             } else {
                 await native.yield(.message(try JSONRPC.Wire.errorResponseData(
                     id: JSONRPC.ID(any: extractUpstreamID(from: nativeRequest)),
@@ -56,7 +67,51 @@ struct CatalogFreshnessTests {
         try expectVersion2(in: result)
         #expect(returned.withLockedValue { $0 })
         #expect(await gui.sentCount() == 1)
-        #expect(await native.sentCount() == (nativePhase == "cold" ? 0 : 1))
+        #expect(await native.sent().filter { methodName(from: $0) == "tools/list" }.count == (nativePhase == "cold" ? 0 : 1))
+        if nativePhase == "invalidated" {
+            #expect(manager.processControlPlane.unboundToolsCatalogRaw() == nil)
+            #expect(await gui.sent().filter { methodName(from: $0) == "notifications/cancelled" }.isEmpty)
+        }
+    }
+
+    @Test func allProviderFailuresAfterNativeInvalidationAreUnavailableInsteadOfCallerCancellation() async throws {
+        let native = TestUpstreamClient()
+        let gui = TestUpstreamClient()
+        let target = xcodeProcessTarget(processID: 7304, xcodeVersion: "26.6")
+        var config = makeConfig(requestTimeout: 5)
+        config.prewarmToolsList = false
+        let fixture = RuntimeCoordinatorFixture(config: config, upstreams: [native, gui],
+            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])],
+            startImmediately: false)
+        defer { fixture.shutdownAndWait() }
+        let manager = fixture.manager
+        for index in 0...1 { manager.markUpstreamInitialized(upstreamIndex: index) }
+        seedCoordinatorSuiteInitialize(on: manager,
+            result: try jsonValue(["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]),
+            sourceUpstream: 1)
+        try seedProcessToolCatalogs(on: manager, entries: [(target, 1, [descriptor(version: 1)])])
+        let request = Task {
+            try await manager.sharedToolsList(sessionID: "provider-invalidation-all-failed", requestTimeoutOverride: .seconds(5))
+        }
+        defer { request.cancel() }
+        let guiRequest = try await sentMessage(from: gui, matching: { methodName(from: $0) == "tools/list" }, timeout: .seconds(2))
+        _ = try await sentMessage(from: native, matching: { methodName(from: $0) == "tools/list" }, timeout: .seconds(2))
+        await native.yield(.message(try JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(
+            method: "notifications/tools/list_changed"))))
+        _ = try await sentMessage(from: native, matching: { methodName(from: $0) == "notifications/cancelled" }, timeout: .seconds(2))
+        await gui.yield(.message(try JSONRPC.Wire.errorResponseData(
+            id: JSONRPC.ID(any: extractUpstreamID(from: guiRequest)), code: -32603, message: "GUI catalog is unavailable")))
+        do {
+            _ = try await request.value
+            Issue.record("A refresh without a fresh provider must fail despite its cached GUI catalog")
+        } catch {
+            #expect(!(error is CancellationError))
+            #expect(ControlPlane.ErrorMapper.underlyingError(error) is UpstreamSlotScheduler.AcquisitionError)
+            let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
+            #expect(mapped.code == -32001)
+            #expect(mapped.message == "upstream unavailable")
+        }
+        #expect(await gui.sent().filter { methodName(from: $0) == "notifications/cancelled" }.isEmpty)
     }
 
     @Test func concurrentRequestsShareTheInFlightRefreshAndReturnTheNewVersion() async throws {

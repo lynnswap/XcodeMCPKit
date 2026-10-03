@@ -160,8 +160,8 @@ extension RuntimeCoordinator {
                     onFreshProvider: onFreshProvider)
                 refreshedProvider = true
             } catch {
-                if error is CancellationError { throw error }
-                nativeFailure = error
+                try Task.checkCancellation()
+                nativeFailure = catalogProviderFailure(error)
             }
         }
         var guiFailure: (any Error)?
@@ -169,8 +169,8 @@ extension RuntimeCoordinator {
             _ = try await guiLoad
             refreshedProvider = true
         } catch {
-            if error is CancellationError { throw error }
-            guiFailure = error
+            try Task.checkCancellation()
+            guiFailure = catalogProviderFailure(error)
         }
         try Task.checkCancellation()
         if refreshedProvider, let current = currentCatalogResult(
@@ -178,6 +178,16 @@ extension RuntimeCoordinator {
             return current
         }
         throw nativeFailure ?? guiFailure ?? UpstreamSlotScheduler.AcquisitionError.unavailable
+    }
+
+    private func catalogProviderFailure(_ error: any Error) -> any Error {
+        guard ControlPlane.ErrorMapper.underlyingError(error) is CancellationError else { return error }
+        let unavailable = UpstreamSlotScheduler.AcquisitionError.unavailable
+        guard let request = error as? ControlPlane.RequestError else { return unavailable }
+        if let lease = request.operationLease {
+            return ControlPlane.RequestError(route: request.route, operationLease: lease, underlying: unavailable)
+        }
+        return ControlPlane.RequestError(route: request.route, upstreamIndex: request.upstreamIndex, underlying: unavailable)
     }
 
     private func beginDefaultBackendCatalogLoad(allowsConcurrentLoad: Bool) -> CatalogLease? {
