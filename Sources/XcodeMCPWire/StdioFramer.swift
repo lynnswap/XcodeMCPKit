@@ -84,6 +84,19 @@ package final class StdioFramer {
         self.mode = mode
     }
 
+    // Foundation accepts trailing commas. Reuse the framing grammar for a
+    // complete payload; an array envelope also permits valid scalar fragments.
+    package static func jsonObject(from data: Data) throws -> Any {
+        var enclosed = Data([0x5B])
+        enclosed.append(data)
+        enclosed.append(0x5D)
+        var scanner = JSONBoundaryScanner(cursor: enclosed.startIndex)
+        guard case .complete(let end) = scanner.scan(in: enclosed, through: enclosed.endIndex), end == enclosed.endIndex else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Invalid JSON syntax"))
+        }
+        return try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+    }
+
     package var bufferedMessageByteCount: Int {
         guard let first = firstNonWhitespaceIndex(from: buffer.startIndex) else { return 0 }
         if isPotentialContentLengthHeaderPrefix(at: first) {

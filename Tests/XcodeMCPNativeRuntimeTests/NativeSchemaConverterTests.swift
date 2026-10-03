@@ -5,6 +5,13 @@ import XcodeMCPWire
 
 @Suite
 struct NativeSchemaConverterTests {
+    @Test func explicitWorkspaceInputsRemainResolvableWithoutStatefulConformance() throws {
+        let tool = try NativeSchemaConverter.tool(from: Data(#"{"name":"CloseWorkspace","inputSchema":{"properties":[{"name":"workspaceIdentifier","type":{"string":{}},"isRequired":true}]}}"#.utf8), workspaceScoped: false)
+        #expect(!tool.workspaceScoped)
+        #expect(tool.acceptsWorkspaceIdentifier)
+        let unscoped = try NativeSchemaConverter.tool(from: Data(#"{"name":"ListTemplates","inputSchema":{"properties":[]}}"#.utf8), workspaceScoped: false)
+        #expect(!unscoped.acceptsWorkspaceIdentifier)
+    }
     @Test func exposesNewNativeToolsWithoutASeparateToolDefinition() throws {
         let tool = try NativeSchemaConverter.tool(from: Data(Self.richNativeSchema.utf8), workspaceScoped: true)
         #expect(tool.name == "FutureNativeTool")

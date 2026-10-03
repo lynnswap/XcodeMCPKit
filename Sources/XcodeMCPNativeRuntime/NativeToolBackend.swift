@@ -88,7 +88,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
         var arguments = arguments
-        if case .string(let selector) = arguments["workspaceIdentifier"] {
+        if tool.acceptsWorkspaceIdentifier, case .string(let selector) = arguments["workspaceIdentifier"] {
             arguments["workspaceIdentifier"] = .string(try await workspaces.resolve(selector, opensIfMissing: name != "XcodeCloseWorkspace"))
             try Task.checkCancellation()
             if tool.workspaceScoped, case .string(let identifier) = arguments["workspaceIdentifier"] {

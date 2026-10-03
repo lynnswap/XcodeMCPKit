@@ -185,6 +185,8 @@ private final class BoardServicesGUITransport: NativeGUIConnectionTransport {
     private var assertion: AnyObject?
     private var connection: AnyObject?
     private var remoteTarget: AnyObject?
+    private var replySender: NativeObjCMethod<Void, Data, NativeGUIReply>?
+    private var messageSender: NativeObjCMethod<Void, Data>?
     private var delegate: NativeGUIListenerDelegate?
     private var receiver: NativeGUIReceiver?
     private var didConnect: (@MainActor @Sendable () -> Void)?
@@ -268,11 +270,9 @@ private final class BoardServicesGUITransport: NativeGUIConnectionTransport {
     }
 
     func send(_ message: Data, reply: @escaping @MainActor @Sendable (Result<Data, any Error>) -> Void) throws {
-        guard !invalidated, let remoteTarget else {
+        guard !invalidated, let remoteTarget, let replySender else {
             throw NativeGUIConnectionError.disconnected(processIdentifier: processIdentifier)
         }
-        let send = try ABIRuntime.shared.object(remoteTarget).method(
-            selector: "sendMessage:replyHandler:", as: ((Data, @escaping NativeGUIReply) -> Void).self)
         let callback: NativeGUIReply = { data, error in
             Task { @MainActor in
                 if let error { reply(.failure(error)) }
@@ -280,14 +280,14 @@ private final class BoardServicesGUITransport: NativeGUIConnectionTransport {
                 else { reply(.failure(NativeRuntimeError.invocation("Xcode returned an empty native GUI reply"))) }
             }
         }
-        try unsafe send.unsafeInvoke(message, callback)
+        try unsafe replySender.unsafeInvoke(on: remoteTarget, message, callback)
     }
 
     func sendOneWay(_ message: Data) throws {
-        guard !invalidated, let remoteTarget else {
+        guard !invalidated, let remoteTarget, let messageSender else {
             throw NativeGUIConnectionError.disconnected(processIdentifier: processIdentifier)
         }
-        try nativeGUISend(remoteTarget, "sendMessage:", message)
+        try unsafe messageSender.unsafeInvoke(on: remoteTarget, message)
     }
 
     func invalidate() throws {
@@ -305,6 +305,8 @@ private final class BoardServicesGUITransport: NativeGUIConnectionTransport {
         }
         connection = nil
         remoteTarget = nil
+        replySender = nil
+        messageSender = nil
         listener = nil
         assertion = nil
         delegate = nil
@@ -340,7 +342,12 @@ private final class BoardServicesGUITransport: NativeGUIConnectionTransport {
                     Task { @MainActor in
                         guard let self, !self.invalidated else { return }
                         do {
-                            self.remoteTarget = try nativeGUICall(reference.object, "remoteTarget", returning: AnyObject.self)
+                            let target = try nativeGUICall(reference.object, "remoteTarget", returning: AnyObject.self)
+                            let object = ABIRuntime.shared.object(target)
+                            self.replySender = try object.method(selector: "sendMessage:replyHandler:",
+                                as: ((Data, @escaping NativeGUIReply) -> Void).self).method
+                            self.messageSender = try object.method(selector: "sendMessage:", as: ((Data) -> Void).self).method
+                            self.remoteTarget = target
                             self.didConnect?()
                         } catch { self.didInvalidate?(error) }
                     }

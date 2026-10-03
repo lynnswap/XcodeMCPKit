@@ -106,11 +106,9 @@ package final class NativeGUIBackend: NativeToolBackend {
             throw NativeRuntimeError.invalidRequest("Unknown native GUI tool '\(name)'")
         }
         let connected = try activeConnection()
-        let arguments = try await nativeArguments(arguments, for: tool, connection: connected)
         try Task.checkCancellation()
         let token = UUID()
-        let request = try NativeGUICodec.call(name, arguments: arguments, token: token)
-        let cancellation = try NativeGUICodec.cancel(name, token: token)
+        let processIdentifier = self.processIdentifier
         let (stream, continuation) = AsyncStream<Data>.makeStream()
         let producer = Task { @MainActor [weak self] in
             defer {
@@ -118,6 +116,11 @@ package final class NativeGUIBackend: NativeToolBackend {
                 self?.invocations.removeValue(forKey: token)
             }
             do {
+                let arguments = try await Self.nativeArguments(arguments, for: tool, connection: connected,
+                                                               processIdentifier: processIdentifier)
+                try Task.checkCancellation()
+                let request = try NativeGUICodec.call(name, arguments: arguments, token: token)
+                let cancellation = try NativeGUICodec.cancel(name, token: token)
                 let reply = try await connected.request(request, cancellationMessage: cancellation)
                 continuation.yield(try NativeGUICodec.event("completed", data: NativeGUICodec.decode(reply)))
             } catch {
@@ -150,8 +153,8 @@ package final class NativeGUIBackend: NativeToolBackend {
         return connection
     }
 
-    private func nativeArguments(_ arguments: [String: JSONValue], for tool: NativeTool,
-                                 connection: NativeGUIConnection) async throws -> [String: JSONValue] {
+    private static func nativeArguments(_ arguments: [String: JSONValue], for tool: NativeTool,
+                                        connection: NativeGUIConnection, processIdentifier: Int32) async throws -> [String: JSONValue] {
         guard tool.workspaceScoped else { return arguments }
         var arguments = arguments
         guard let value = arguments.removeValue(forKey: "workspaceIdentifier") else { return arguments }
