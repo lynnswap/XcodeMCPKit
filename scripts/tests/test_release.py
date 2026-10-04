@@ -96,6 +96,19 @@ class FakeGitHub:
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_published_release_retries_reject_missing_or_changed_assets_without_writes(self):
+        for damage in (lambda assets: assets.pop(),
+                       lambda assets: assets[0].update(digest="sha256:" + "0" * 64)):
+            github = FakeGitHub(draft())
+            digest = release.fingerprint(github.release)
+            self.publish(github, digest)
+            self.assertFalse(github.release["draft"])
+            damage(github.release["assets"])
+            writes = len(github.writes)
+            with self.assertRaises(release.ReleaseError):
+                self.publish(github, digest)
+            self.assertEqual(len(github.writes), writes)
+
     def setUp(self):
         self.tested_delivery = dict(formula_sha256="a" * 64, bottle_sha256="b" * 64, bottle_url="https://example.test/verified.bottle.tar.gz")
         readiness = patch("release.verify_homebrew_ready", return_value=self.tested_delivery.copy())

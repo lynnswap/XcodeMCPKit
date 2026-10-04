@@ -312,22 +312,23 @@ def verify_homebrew_ready(github, tag, release_dir):
 def publish(github, release_id, sha, digest, release_dir, tested_delivery=None):
     release = verify(github, release_id, sha, digest)
     tag = release["tag_name"]
+    names = asset_names(tag)
+    paths = [release_dir / name for name in names]
+    expected = {path.name: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in paths}
     if not release["draft"]:
         if tag_commit(github, tag) != sha:
             raise ReleaseError("The published release no longer has its approved tag.")
+        verify_uploaded_assets(release, expected)
         print(f"Already published: {release['html_url']}")
         return
     identity_fields = ("formula_sha256", "bottle_sha256", "bottle_url")
     if not release["prerelease"] and (not tested_delivery or not all(tested_delivery.get(key) for key in identity_fields)):
         raise ReleaseError("Supply the installed and verified Formula and bottle identity before stable publication.")
 
-    names = asset_names(tag)
     unexpected = [asset["name"] for asset in release["assets"] if asset["name"] not in names]
     if unexpected:
         raise ReleaseError(f"Remove unexpected draft assets before retrying: {', '.join(unexpected)}")
-    paths = [release_dir / name for name in names]
-    expected = {path.name: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-                for path in paths}
     try:
         github.upload(tag, paths)
         release = verify(github, release_id, sha, digest)
