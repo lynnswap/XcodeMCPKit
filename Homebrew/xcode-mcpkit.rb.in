@@ -31,6 +31,11 @@ __EXPLICIT_VERSION__
   end
 
   test do
-    system "python3", pkgshare/"smoke-homebrew.py", "--prefix", prefix, "--version", "v#{version}"
+    %w[xcode-mcp-proxy xcode-mcp-proxy-server].each do |command|
+      assert_equal "v#{version}", shell_output("#{bin}/#{command} --version").strip
+    end
+    assert_equal "xcode-mcp-proxy-server --listen 127.0.0.1:0",
+                 shell_output("#{bin}/xcode-mcp-proxy-server --host 127.0.0.1 --port 0 --dry-run").strip
+    system "codesign", "--verify", "--deep", "--strict", libexec/"XcodeMCPNativeHost.app"
   end
 end

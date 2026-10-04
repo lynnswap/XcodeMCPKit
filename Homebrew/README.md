@@ -49,7 +49,9 @@ its own `GITHUB_TOKEN`, without another human deployment approval.
 
 The source workflow installs the public bottle, checks its CLI versions and
 signature, and exercises native and proxy MCP sessions against a disposable
-project. It rechecks the tested delivery before publishing the approved Draft.
+project. The Formula test covers CLI options and signatures; Xcode integration
+runs outside Homebrew's test sandbox in both tap CI and source-release CI.
+The source publisher rechecks the tested delivery before publishing the approved Draft.
 Stable publication never runs when the bottle is missing or installation fails.
 An existing running server must be restarted to use an upgraded payload.
 

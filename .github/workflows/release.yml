@@ -402,6 +402,9 @@ jobs:
           installed_binary="$(brew --prefix "$formula")/bin/xcode-mcp-proxy-server"
           test "$("$installed_binary" --version)" = "$VERSION"
           brew test "$formula"
+          "$(brew --prefix python@3.14)/bin/python3.14" \
+            "$(brew --prefix "$formula")/share/xcode-mcpkit/smoke-homebrew.py" \
+            --prefix "$(brew --prefix "$formula")" --version "$VERSION"
 
   publication-summary:
     name: Review verified release outputs

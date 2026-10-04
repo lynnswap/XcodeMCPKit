@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export HOMEBREW_NO_AUTO_UPDATE=1
+export HOMEBREW_NO_INSTALL_CLEANUP=1
+export HOMEBREW_NO_AUTOREMOVE=1
+
 release_dir="${1:?Usage: scripts/test-homebrew.sh <release-dir>}"
 release_dir="$(cd "$release_dir" && pwd)"
 formula=xcodemcpkit/verification/xcode-mcpkit
@@ -24,17 +28,27 @@ trap cleanup EXIT
 tap_root="$(brew --repository xcodemcpkit/verification)"
 cp "$release_dir/xcode-mcpkit.rb" "$tap_root/Formula/xcode-mcpkit.rb"
 source_archive="$(find "$release_dir" -maxdepth 1 -name 'xcode-mcpkit-*.tar.gz' -print)"
+expected_version="$(basename "$source_archive" .tar.gz)"
+expected_version="v${expected_version#xcode-mcpkit-}"
 cache="$(brew --cache --build-from-source "$formula")"
 mkdir -p "$(dirname "$cache")"
 cp "$source_archive" "$cache"
 brew trust --formula "$formula"
 brew install --build-bottle "$formula"
-brew test "$formula"
 cd "$work"
 brew bottle --json --root-url=https://example.invalid/xcodemcpkit-verification "$formula"
 brew bottle --merge --write --no-commit "$work/"*.bottle.json
 bottle_cache="$(brew --cache --force-bottle "$formula")"
 cp "$work/"*.bottle.tar.gz "$bottle_cache"
+verify_installation() {
+  local prefix python
+  brew test "$formula"
+  prefix="$(brew --prefix "$formula")"
+  python="$(brew --prefix python@3.14)/bin/python3.14"
+  "$python" "$prefix/share/xcode-mcpkit/smoke-homebrew.py" \
+    --prefix "$prefix" --version "$expected_version"
+}
+verify_installation
 brew uninstall "$formula"
 brew install --force-bottle "$formula"
 brew info --json=v2 "$formula" | python3 -c '
@@ -42,4 +56,4 @@ import json, sys
 if not json.load(sys.stdin)["formulae"][0]["installed"][0]["poured_from_bottle"]:
     sys.exit("Verification expected a bottle installation.")
 '
-brew test "$formula"
+verify_installation
