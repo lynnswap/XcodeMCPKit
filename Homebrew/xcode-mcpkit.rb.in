@@ -1,0 +1,36 @@
+class XcodeMcpkit < Formula
+  desc "Use Xcode build, test, preview, and editing tools through MCP"
+  homepage "https://github.com/__REPOSITORY__"
+  url "https://github.com/__REPOSITORY__/archive/refs/tags/v__VERSION__.tar.gz"
+__EXPLICIT_VERSION__
+  sha256 "__SHA256__"
+  license "MIT"
+
+  depends_on "python@3.14" => [:build, :test]
+  depends_on xcode: ["27.0", :build, :test]
+  depends_on arch: :arm64
+  depends_on macos: "15.4"
+
+  def install
+    system "scripts/build-release.sh", "--version", "v#{version}", "--dist-root", buildpath/"products"
+    libexec.install Dir["products/arm64/bin/*"]
+    bin.install_symlink libexec/"xcode-mcp-proxy", libexec/"xcode-mcp-proxy-server"
+    pkgshare.install "scripts/smoke-homebrew.py"
+    pkgshare.install "Fixtures/ProxyToolVerifierFixture"
+  end
+
+  def caveats
+    <<~EOS
+      Start the server before connecting MCP clients:
+        xcode-mcp-proxy-server
+
+      Xcode is required at runtime. Headless tools require Xcode's native service contracts.
+      Restart the server after upgrading. If an older standalone installation is on PATH,
+      use the Homebrew executable at #{opt_bin}/xcode-mcp-proxy-server.
+    EOS
+  end
+
+  test do
+    system "python3", pkgshare/"smoke-homebrew.py", "--prefix", prefix, "--version", "v#{version}"
+  end
+end

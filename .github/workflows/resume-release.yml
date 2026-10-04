@@ -1,0 +1,44 @@
+name: Resume prepared releases
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+concurrency:
+  group: resume-prepared-releases
+  cancel-in-progress: false
+
+jobs:
+  resume:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      # GitHub requires push access to read unpublished Draft releases.
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Resume only approved delivery verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release_sync.py resume --repo "$GITHUB_REPOSITORY" \
+            | tee "$RUNNER_TEMP/release-resumption.json"
+          {
+            echo '## Prepared release delivery'
+            echo
+            echo '```json'
+            cat "$RUNNER_TEMP/release-resumption.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

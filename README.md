@@ -20,7 +20,16 @@ for installation selection and limitations.
 
 ### Install
 
-Build the current native backend from `main`:
+Install the server, STDIO adapter, and signed native helper through Homebrew:
+
+```bash
+brew install lynnswap/tap/xcode-mcpkit
+```
+
+The Formula installs both commands on Homebrew's `PATH` and keeps the helper app
+with their versioned payload. Xcode is still required to run its tools.
+
+For an unreleased build from `main`, use the source installer:
 
 ```bash
 git clone https://github.com/lynnswap/XcodeMCPKit.git
@@ -28,7 +37,7 @@ cd XcodeMCPKit
 swift run -c release xcode-mcp-proxy-install
 ```
 
-The installer places the server, STDIO adapter, and signed native helper app in
+The source installer places the server, STDIO adapter, and signed native helper app in
 `~/.local/bin`. Keep `XcodeMCPNativeHost.app` beside the executables. Add the
 installation directory to your `PATH`, or put this line in `~/.zshrc`:
 
@@ -39,6 +48,25 @@ export PATH="$HOME/.local/bin:$PATH"
 For a custom destination, the installer accepts `--prefix directory` or
 `--bindir directory`. Run `swift run -c release xcode-mcp-proxy-install --help`
 for its options.
+
+### Upgrade or remove
+
+Stop the server, then upgrade and start it again:
+
+```bash
+brew update
+brew upgrade lynnswap/tap/xcode-mcpkit
+xcode-mcp-proxy-server
+```
+
+If an older standalone installation under `~/.local/bin` takes precedence, use
+`"$(brew --prefix xcode-mcpkit)/bin/xcode-mcp-proxy-server"` and update any MCP client
+configuration that names an old absolute executable path. Remove the old
+standalone files only after stopping their server and confirming the new setup.
+Homebrew does not remove those files or change your MCP client registrations.
+
+To remove the Homebrew installation, stop the server and run
+`brew uninstall xcode-mcpkit`.
 
 ### Start the server
 

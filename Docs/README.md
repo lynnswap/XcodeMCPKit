@@ -21,6 +21,8 @@
 - [Maintainer architecture](maintainer-architecture.md): module ownership, local checks,
   live verification, release flow, and cleanup.
 - [Native host design](native-headless-backend.md): Xcode framework integration through ABIBridge.
+- [Homebrew distribution](../Homebrew/README.md): Formula ownership, release approval, tap dispatch,
+  bottle verification, and recovery.
 - [Live tool verifier](../Sources/XcodeMCPProxyToolVerifier/README.md): fixture-based verification.
 - [MCP benchmarks](mcp-benchmark.md): measuring a running server.
 - [Permission automation](permission-automation-target-design.md) and

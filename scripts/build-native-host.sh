@@ -39,11 +39,20 @@ if [[ -z "$output" ]]; then output="$repo_root/.build/native/XcodeMCPNativeHost.
 if [[ "$output" != /* ]]; then output="$PWD/$output"; fi
 
 cd "$repo_root"
-DEVELOPER_DIR="$developer_dir" swift build -c "$configuration" --product xcode-mcp-native-host
+DEVELOPER_DIR="$developer_dir" swift build -c "$configuration" --disable-sandbox --force-resolved-versions --product xcode-mcp-native-host
 bin_path="$(DEVELOPER_DIR="$developer_dir" swift build -c "$configuration" --show-bin-path)"
 mkdir -p "$output/Contents/MacOS"
 cp "$bin_path/xcode-mcp-native-host" "$output/Contents/MacOS/xcode-mcp-native-host"
 chmod +x "$output/Contents/MacOS/xcode-mcp-native-host"
+DEVELOPER_DIR="$developer_dir" xcrun swift-stdlib-tool --copy --platform macosx \
+  --scan-executable "$output/Contents/MacOS/xcode-mcp-native-host" \
+  --destination "$output/Contents/Frameworks"
+DEVELOPER_DIR="$developer_dir" xcrun install_name_tool -add_rpath '@executable_path/../Frameworks' \
+  "$output/Contents/MacOS/xcode-mcp-native-host"
+for library in "$output/Contents/Frameworks/"*.dylib; do
+  [[ -f "$library" ]] || continue
+  /usr/bin/codesign --force --sign - "$library"
+done
 python3 - "$output/Contents/Info.plist" <<'PY'
 import pathlib, plistlib, sys
 pathlib.Path(sys.argv[1]).write_bytes(plistlib.dumps({

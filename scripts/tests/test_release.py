@@ -1,431 +1,455 @@
+"""Release protocol tests; all GitHub writes are in-memory."""
 import copy
-from contextlib import ExitStack
+import contextlib
+import io
 import hashlib
-import os
 from pathlib import Path
-import subprocess
-import sys
-import tarfile
 import tempfile
+import json
+import subprocess
 import unittest
 from unittest.mock import patch
 
+import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import release
 
+SHA = "a" * 40
+OTHER = "b" * 40
+
+
+def draft(**changes):
+    value = dict(id=42, tag_name="v0.1.0", target_commitish=SHA,
+                 name="First release", body="One\n\nTwo\n", prerelease=False,
+                 draft=True, assets=[], html_url="https://github.com/example/project/releases/42")
+    value.update(changes)
+    return value
+
+
+class FakeGitHub:
+    repository = "example/project"
+
+    def __init__(self, item=None):
+        self.release = copy.deepcopy(item)
+        self.tag = None
+        self.calls = []
+        self.dispatch_error = False
+        self.publish_error = False
+        self.tag_error = False
+        self.after_tag = None
+        self.before_publish = None
+        self.older_page = False
+        self.upload_error = False
+        self.after_upload = None
+
+    @property
+    def writes(self):
+        return [call for call in self.calls if call[1] != "GET"]
+
+    def upload(self, tag, paths):
+        self.calls.append(("upload", "POST", tag))
+        self.release["assets"] = [dict(name=path.name, state="uploaded",
+            digest="sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()) for path in paths]
+        if self.upload_error:
+            self.release["assets"].pop()
+            raise subprocess.CalledProcessError(1, "gh release upload")
+        if self.after_upload:
+            self.after_upload(self)
+
+    def api(self, path, method="GET", data=None):
+        self.calls.append((path, method, copy.deepcopy(data)))
+        if path == "":
+            return {"default_branch": "main"}
+        if path.startswith("commits/"):
+            return {"sha": path.split("/")[-1]}
+        if path.startswith("git/ref/tags/"):
+            if self.tag is None:
+                raise release.APIError(404, "Not Found")
+            return {"object": dict(type="commit", sha=self.tag)}
+        if path.startswith("releases?"):
+            if self.older_page and path.endswith("page=1"):
+                return [draft(id=i, tag_name=f"old-{i}") for i in range(100)]
+            return [copy.deepcopy(self.release)] if self.release else []
+        if path == "releases" and method == "POST":
+            self.release = dict(data, id=42, assets=[], html_url="https://github.com/example/project/releases/42")
+            return copy.deepcopy(self.release)
+        if path in ("actions/workflows/release.yml/dispatches", "actions/workflows/update-formula.yml/dispatches"):
+            if self.dispatch_error:
+                raise release.APIError(503, "Dispatch response unavailable")
+            return None
+        if path == "git/refs" and method == "POST":
+            if self.tag_error:
+                raise release.APIError(403, "Resource not accessible by integration: workflows permission required")
+            self.tag = data["sha"]
+            if self.after_tag:
+                self.after_tag(self)
+            return {"ref": data["ref"]}
+        if path == "releases/42":
+            if method == "PATCH":
+                if self.publish_error:
+                    raise release.APIError(503, "Publication failed")
+                if self.before_publish:
+                    self.before_publish(self)
+                self.release.update({key: value for key, value in data.items() if key != "make_latest"})
+            return copy.deepcopy(self.release)
+        raise AssertionError((path, method, data))
+
 
 class ReleaseTests(unittest.TestCase):
-    repository = "lynnswap/XcodeMCPKit"
-    version = "v0.17.0"
-    sha = "a" * 40
-
     def setUp(self):
-        self.directory_context = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory_context.cleanup)
-        self.directory = Path(self.directory_context.name)
-        self.assets = self.directory / "release"
-        self.assets.mkdir()
-        binaries = self.directory / "bin"
-        binaries.mkdir()
-        for name in ("xcode-mcp-proxy", "xcode-mcp-proxy-server"):
-            (binaries / name).write_bytes(b"release binary fixture")
-        native = binaries / "XcodeMCPNativeHost.app" / "Contents"
-        (native / "MacOS").mkdir(parents=True)
-        (native / "_CodeSignature").mkdir()
-        (native / "Info.plist").write_bytes(b"native app fixture")
-        (native / "MacOS" / "xcode-mcp-native-host").write_bytes(b"native executable fixture")
-        (native / "_CodeSignature" / "CodeResources").write_bytes(b"signature fixture")
-        with tarfile.open(self.assets / release.ASSET_NAMES[0], "w:gz") as archive:
-            archive.add(binaries, arcname="bin")
-        subprocess.run([
-            str(Path(release.__file__).with_name("render-install-script.sh")),
-            "--version", self.version, "--repo", self.repository,
-            "--output", str(self.assets / "install.sh"),
-        ], check=True, capture_output=True)
-        self.checksums = {
-            name: hashlib.sha256((self.assets / name).read_bytes()).hexdigest()
-            for name in (release.ASSET_NAMES[0], "install.sh")
-        }
-        (self.assets / "SHA256SUMS.txt").write_text(
-            "".join(f"{checksum}  {name}\n" for name, checksum in self.checksums.items())
-        )
-        self.checksums["SHA256SUMS.txt"] = hashlib.sha256((self.assets / "SHA256SUMS.txt").read_bytes()).hexdigest()
-        self.draft = {
-            "id": 17, "tag_name": self.version, "target_commitish": self.sha,
-            "draft": True, "prerelease": False, "name": "Approved title",
-            "body": "Approved notes\n\n日本語 and literal `$(command)`\n", "assets": [],
-            "html_url": f"https://github.com/{self.repository}/releases/tag/{self.version}",
-        }
-        self.tag = None
-        self.api_calls = []
-        self.uploads = []
-        self.after_upload = lambda: None
-        self.before_tag_create = lambda: None
-        self.before_publish = lambda: None
-        self.real_run = release.run
-        env = {
-            "GITHUB_ACTIONS": "true", "GITHUB_REF": "refs/heads/main", "RELEASE_BRANCH": "main",
-            "GITHUB_SHA": self.sha, "GITHUB_REPOSITORY": self.repository,
-        }
-        context = ExitStack()
-        self.addCleanup(context.close)
-        commands = self.directory / "commands"
-        commands.mkdir()
-        signer = commands / "codesign"
-        signer.write_text("#!/bin/sh\n[ \"$1\" = --verify ] && [ \"$2\" = --strict ] && [ -f \"$3/Contents/_CodeSignature/CodeResources\" ]\n")
-        signer.chmod(0o755)
-        env["PATH"] = str(commands) + os.pathsep + os.environ.get("PATH", "")
-        context.enter_context(patch.dict(os.environ, env))
-        self.api_mock = context.enter_context(patch.object(release, "api", side_effect=self.fake_api))
-        context.enter_context(patch.object(release, "run", side_effect=self.fake_run))
+        self.tested_delivery = dict(formula_sha256="a" * 64, bottle_sha256="b" * 64, bottle_url="https://example.test/verified.bottle.tar.gz")
+        readiness = patch("release.verify_homebrew_ready", return_value=self.tested_delivery.copy())
+        self.readiness = readiness.start()
+        self.addCleanup(readiness.stop)
+        self.output = io.StringIO()
+        self.redirect = contextlib.redirect_stdout(self.output)
+        self.redirect.__enter__()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.release_dir = Path(directory.name)
+        for name in release.asset_names("v0.1.0"):
+            (self.release_dir / name).write_text("verified " + name)
 
-    def rewrite_archive(self, *, missing=None, extra=None, symlink=False):
-        archive_path = self.assets / release.ASSET_NAMES[0]
-        source = self.directory / "bin"
-        if missing:
-            (source / missing).unlink()
-        if extra:
-            target = source / extra
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if symlink:
-                target.symlink_to("/etc/passwd")
+    def tearDown(self):
+        self.redirect.__exit__(None, None, None)
+
+    def start(self, github, **overrides):
+        values = dict(tag="v0.1.0", sha=SHA, title="First release",
+                      notes="One\n\nTwo\n")
+        values.update(overrides)
+        release.start(github, **values)
+
+    def publish(self, github, digest):
+        release.publish(github, 42, SHA, digest, self.release_dir, self.tested_delivery)
+
+    def test_stable_tag_notification_starts_only_the_main_tap_workflow(self):
+        github = FakeGitHub()
+        release.dispatch_tap(github, "lynnswap/XcodeMCPKit", "v0.1.0", SHA, self.release_dir)
+        self.assertEqual(github.writes, [("actions/workflows/update-formula.yml/dispatches", "POST",
+            dict(ref="main", inputs=dict(source_repository="lynnswap/XcodeMCPKit", source_tag="v0.1.0", source_sha=SHA,
+                source_sha256=hashlib.sha256((self.release_dir / release.asset_names("v0.1.0")[0]).read_bytes()).hexdigest(),
+                formula_sha256=hashlib.sha256((self.release_dir / "xcode-mcpkit.rb").read_bytes()).hexdigest())))])
+        self.assertIsNone(github.tag)
+        self.assertIsNone(github.release)
+
+    def test_prereleases_and_invalid_tags_do_not_notify_the_stable_tap(self):
+        github = FakeGitHub()
+        release.dispatch_tap(github, "lynnswap/XcodeMCPKit", "v0.3.5-rc.1", SHA, self.release_dir)
+        for tag in ("custom-v0.1.0", "main", "v0.1.0\n", "v0.1.0; command"):
+            with self.subTest(tag=tag), self.assertRaises((release.ReleaseError, ValueError, subprocess.CalledProcessError)):
+                release.dispatch_tap(github, "lynnswap/XcodeMCPKit", tag, SHA, self.release_dir)
+        self.assertEqual(github.calls, [])
+
+    def test_failed_notification_reports_the_remaining_tag_without_retrying(self):
+        github = FakeGitHub()
+        github.dispatch_error = True
+        with self.assertRaisesRegex(release.ReleaseError, "Public source tag v0.1.0 remains"):
+            release.dispatch_tap(github, "lynnswap/XcodeMCPKit", "v0.1.0", SHA, self.release_dir)
+        self.assertEqual(len(github.writes), 1)
+
+    def test_start_keeps_notes_and_pins_dispatch_without_creating_tag(self):
+        github = FakeGitHub()
+        self.start(github)
+        self.assertEqual(github.release, draft())
+        self.assertIsNone(github.tag)
+        self.assertEqual([call[0] for call in github.writes],
+                         ["releases", "actions/workflows/release.yml/dispatches"])
+        dispatch = github.writes[-1][2]
+        self.assertEqual(dispatch["ref"], "main")
+        self.assertEqual(dispatch["inputs"], dict(
+            release_id="42", target_sha=SHA, content_digest=release.fingerprint(draft())))
+
+    def test_start_reuses_matching_draft_in_later_page(self):
+        github = FakeGitHub(draft())
+        github.older_page = True
+        self.start(github)
+        self.assertEqual(len(github.writes), 1)
+        self.assertIn("dispatches", github.writes[0][0])
+
+    def test_existing_content_or_published_release_is_not_overwritten(self):
+        for changes in (dict(body="Changed"), dict(name="Changed"),
+                        dict(target_commitish=OTHER), dict(prerelease=True), dict(draft=False)):
+            with self.subTest(changes=changes):
+                github = FakeGitHub(draft(**changes))
+                with self.assertRaises(release.ReleaseError):
+                    self.start(github)
+                self.assertEqual(github.writes, [])
+
+    def test_dispatch_failure_leaves_reusable_draft(self):
+        github = FakeGitHub()
+        github.dispatch_error = True
+        with self.assertRaisesRegex(release.ReleaseError, "Draft 42 remains"):
+            self.start(github)
+        self.assertTrue(github.release["draft"])
+        self.assertIsNone(github.tag)
+        github.dispatch_error = False
+        self.start(github)
+        self.assertEqual(sum(call[0] == "releases" for call in github.writes), 1)
+
+    def test_branch_target_or_conflicting_tag_never_creates_draft(self):
+        for target, tag in (("main", None), (SHA, OTHER)):
+            github = FakeGitHub()
+            github.tag = tag
+            with self.assertRaises(release.ReleaseError):
+                self.start(github, sha=target)
+            self.assertEqual(github.writes, [])
+
+    def test_annotated_tags_are_peeled(self):
+        github = FakeGitHub()
+        with patch.object(github, "api", side_effect=[
+            {"object": {"type": "tag", "sha": OTHER}},
+            {"object": {"type": "commit", "sha": SHA}},
+        ]):
+            self.assertEqual(release.check_tag(github, "v0.1.0", SHA), SHA)
+
+    def test_lookup_failure_is_not_treated_as_missing_tag(self):
+        github = FakeGitHub()
+        with patch.object(github, "api", side_effect=release.APIError(403, "Forbidden")):
+            with self.assertRaises(release.APIError):
+                release.tag_commit(github, "v0.1.0")
+
+    def test_verify_detects_content_target_and_tag_changes_without_writes(self):
+        original = draft()
+        for changes in (dict(body="Changed"), dict(name="Changed"), dict(prerelease=True),
+                        dict(tag_name="v0.2.0"), dict(target_commitish=OTHER)):
+            github = FakeGitHub(draft(**changes))
+            with self.assertRaises(release.ReleaseError):
+                release.verify(github, 42, SHA, release.fingerprint(original))
+            self.assertEqual(github.writes, [])
+        github = FakeGitHub(original)
+        github.tag = OTHER
+        with self.assertRaises(release.ReleaseError):
+            self.publish(github, release.fingerprint(original))
+        self.assertEqual(github.writes, [])
+
+    def test_verify_ignores_unrelated_metadata_and_never_publishes(self):
+        github = FakeGitHub(draft(updated_at="later", download_count=10))
+        release.verify(github, 42, SHA, release.fingerprint(draft()))
+        self.assertEqual(github.writes, [])
+        self.assertTrue(github.release["draft"])
+
+    def test_source_preparation_creates_only_the_approved_tag_and_keeps_release_draft(self):
+        github = FakeGitHub(draft())
+        digest = release.fingerprint(github.release)
+        prepared = release.prepare_source(github, 42, SHA, digest)
+        self.assertTrue(prepared["draft"])
+        self.assertEqual(github.tag, SHA)
+        self.assertEqual(github.writes, [("git/refs", "POST", dict(ref="refs/tags/v0.1.0", sha=SHA))])
+        github.calls.clear()
+        release.prepare_source(github, 42, SHA, digest)
+        self.assertEqual(github.writes, [])
+
+    def test_source_preparation_stops_for_changed_draft_tag_or_tag_permissions(self):
+        for mutation in (lambda g: g.release.update(body="unapproved"),
+                         lambda g: setattr(g, "tag", OTHER),
+                         lambda g: setattr(g, "tag_error", True)):
+            with self.subTest(mutation=mutation):
+                github = FakeGitHub(draft())
+                mutation(github)
+                with self.assertRaises(release.ReleaseError):
+                    release.prepare_source(github, 42, SHA, release.fingerprint(draft()))
+                self.assertTrue(github.release["draft"])
+                self.assertFalse(any(call[0] == "upload" or call[1] == "PATCH" for call in github.writes))
+
+    def test_draft_change_during_source_tag_creation_stops_preparation(self):
+        github = FakeGitHub(draft())
+        github.after_tag = lambda g: g.release.update(body="edited")
+        with self.assertRaises(release.ReleaseError):
+            release.prepare_source(github, 42, SHA, release.fingerprint(draft()))
+        self.assertTrue(github.release["draft"])
+        self.assertEqual(github.tag, SHA)
+
+    def test_publish_creates_exact_tag_and_preserves_stable_or_prerelease_content(self):
+        for prerelease in (False, True):
+            tag = "v0.1.0-rc.1" if prerelease else "v0.1.0"
+            for name in release.asset_names(tag):
+                (self.release_dir / name).write_text("verified " + name)
+            github = FakeGitHub(draft(tag_name=tag, prerelease=prerelease))
+            digest = release.fingerprint(github.release)
+            self.publish(github, digest)
+            self.assertEqual(github.tag, SHA)
+            self.assertFalse(github.release["draft"])
+            self.assertEqual(release.fingerprint(github.release), digest)
+            self.assertEqual(github.writes[1], ("git/refs", "POST", dict(ref="refs/tags/" + tag, sha=SHA)))
+            self.assertEqual(github.writes[2][2], dict(
+                tag_name=tag, target_commitish=SHA, name="First release",
+                body="One\n\nTwo\n", prerelease=prerelease, draft=False,
+                make_latest="false" if prerelease else "legacy"))
+
+    def test_publish_writes_approved_fields_even_if_the_draft_changes_after_verification(self):
+        github = FakeGitHub(draft())
+        digest = release.fingerprint(github.release)
+        github.before_publish = lambda state: state.release.update(
+            name="Unapproved title", body="Unapproved notes", tag_name="v9.9.9",
+            target_commitish=OTHER, prerelease=True)
+        self.publish(github, digest)
+        self.assertEqual(release.fingerprint(github.release), digest)
+        self.assertFalse(github.release["draft"])
+        self.assertEqual(github.tag, SHA)
+
+    def test_unexpected_assets_stop_publication_without_removing_them(self):
+        github = FakeGitHub(draft(assets=[{"id": 91, "name": "unapproved.zip"}]))
+        with self.assertRaisesRegex(release.ReleaseError, "Remove unexpected draft assets"):
+            self.publish(github, release.fingerprint(draft()))
+        self.assertEqual(github.writes, [])
+        self.assertEqual(github.release["assets"][0]["id"], 91)
+
+    def test_failed_upload_leaves_draft_and_can_resume(self):
+        github = FakeGitHub(draft())
+        github.upload_error = True
+        digest = release.fingerprint(draft())
+        with self.assertRaisesRegex(release.ReleaseError, "Draft/assets or tag"):
+            self.publish(github, digest)
+        self.assertTrue(github.release["draft"])
+        self.assertIsNone(github.tag)
+        github.upload_error = False
+        self.publish(github, digest)
+        self.assertFalse(github.release["draft"])
+        self.assertEqual({asset["name"] for asset in github.release["assets"]}, set(release.asset_names("v0.1.0")))
+
+    def test_changed_uploads_stop_publication(self):
+        def corrupt(state):
+            state.release["assets"][0]["digest"] = "sha256:" + "0" * 64
+        def missing(state):
+            state.release["assets"].pop()
+        def extra(state):
+            state.release["assets"].append(dict(name="unknown.zip"))
+        def notes(state):
+            state.release["body"] = "Unapproved notes"
+        for mutation in (corrupt, missing, extra, notes):
+            with self.subTest(mutation=mutation.__name__):
+                github = FakeGitHub(draft())
+                github.after_upload = mutation
+                with self.assertRaises(release.ReleaseError):
+                    self.publish(github, release.fingerprint(draft()))
+                self.assertTrue(github.release["draft"])
+                self.assertIsNone(github.tag)
+
+    def test_start_classifies_prerelease_and_rejects_empty_notes(self):
+        github = FakeGitHub()
+        self.start(github, tag="v0.1.0-rc.1")
+        self.assertTrue(github.release["prerelease"])
+        github = FakeGitHub()
+        with self.assertRaisesRegex(release.ReleaseError, "approved release notes"):
+            self.start(github, notes="  ")
+        self.assertEqual(github.writes, [])
+
+    def test_failed_publication_can_resume_without_recreating_tag(self):
+        github = FakeGitHub(draft())
+        digest = release.fingerprint(github.release)
+        github.publish_error = True
+        with self.assertRaisesRegex(release.ReleaseError, "Draft/assets or tag"):
+            self.publish(github, digest)
+        self.assertTrue(github.release["draft"])
+        self.assertEqual(github.tag, SHA)
+        github.publish_error = False
+        self.publish(github, digest)
+        self.assertFalse(github.release["draft"])
+        self.assertEqual(sum(call[0] == "git/refs" for call in github.writes), 1)
+        github.calls = []
+        self.publish(github, digest)
+        self.assertEqual(github.writes, [])
+
+    def test_changed_tap_after_approval_blocks_stable_publication_and_can_resume(self):
+        github = FakeGitHub(draft())
+        digest = release.fingerprint(github.release)
+        self.readiness.side_effect = release.ReleaseError("Homebrew is not ready")
+        with self.assertRaisesRegex(release.ReleaseError, "Homebrew is not ready"):
+            self.publish(github, digest)
+        self.assertTrue(github.release["draft"])
+        self.assertFalse(any(call[1] == "PATCH" for call in github.writes))
+        self.readiness.side_effect = None
+        self.publish(github, digest)
+        self.assertFalse(github.release["draft"])
+        github.calls.clear()
+        self.readiness.reset_mock()
+        self.readiness.side_effect = release.ReleaseError("Tap now has a newer version")
+        self.publish(github, digest)
+        self.assertEqual(github.writes, [])
+        self.readiness.assert_not_called()
+
+    def test_prerelease_publication_does_not_require_a_stable_tap_update(self):
+        tag = "v0.1.0-rc.1"
+        for name in release.asset_names(tag):
+            (self.release_dir / name).write_text("verified " + name)
+        github = FakeGitHub(draft(tag_name=tag, prerelease=True))
+        self.readiness.side_effect = release.ReleaseError("Stable tap not updated")
+        self.publish(github, release.fingerprint(github.release))
+        self.assertFalse(github.release["draft"])
+        self.readiness.assert_not_called()
+
+    def test_changed_installed_bottle_identity_blocks_publication_until_reverified(self):
+        for key, value in (("formula_sha256", "d" * 64), ("bottle_sha256", "c" * 64), ("bottle_url", "https://example.test/rebuilt.bottle.tar.gz")):
+            with self.subTest(key=key):
+                github = FakeGitHub(draft())
+                current = dict(self.tested_delivery, **{key: value})
+                self.readiness.return_value = current
+                digest = release.fingerprint(github.release)
+                with self.assertRaisesRegex(release.ReleaseError, "Re-run Verify published tap installation"):
+                    self.publish(github, digest)
+                self.assertTrue(github.release["draft"])
+                self.assertFalse(any(call[1] == "PATCH" for call in github.writes))
+                release.publish(github, 42, SHA, digest, self.release_dir, current)
+                self.assertFalse(github.release["draft"])
+
+    def test_stable_publication_requires_installed_bottle_evidence_before_writes(self):
+        github = FakeGitHub(draft())
+        with self.assertRaisesRegex(release.ReleaseError, "installed and verified"):
+            release.publish(github, 42, SHA, release.fingerprint(github.release), self.release_dir)
+        self.assertEqual(github.writes, [])
+
+    def test_change_during_tag_creation_stops_publication(self):
+        github = FakeGitHub(draft())
+        github.after_tag = lambda state: state.release.update(body="Edited during CI")
+        with self.assertRaises(release.ReleaseError):
+            self.publish(github, release.fingerprint(draft()))
+        self.assertTrue(github.release["draft"])
+        self.assertEqual(len(github.writes), 2)
+
+    def test_tag_permission_failure_preserves_draft_and_can_resume_after_fixing_rules(self):
+        github = FakeGitHub(draft())
+        digest = release.fingerprint(github.release)
+        github.tag_error = True
+        with self.assertRaisesRegex(release.ReleaseError, "GITHUB_TOKEN could not create the tested tag"):
+            self.publish(github, digest)
+        self.assertTrue(github.release["draft"])
+        self.assertIsNone(github.tag)
+        self.assertFalse(any(call[1] == "PATCH" for call in github.writes))
+        github.tag_error = False
+        self.publish(github, digest)
+        self.assertEqual(github.tag, SHA)
+        self.assertFalse(github.release["draft"])
+
+    def test_racing_tag_creation_only_accepts_the_same_commit(self):
+        for actual in (SHA, OTHER):
+            github = FakeGitHub(draft())
+            def create(state):
+                state.tag = actual
+                raise release.APIError(422, "Reference already exists")
+            github.after_tag = create
+            if actual == SHA:
+                self.publish(github, release.fingerprint(draft()))
+                self.assertFalse(github.release["draft"])
             else:
-                target.write_bytes(b"unexpected")
-        with tarfile.open(archive_path, "w:gz") as archive:
-            archive.add(source, arcname="bin")
-        for name in (release.ASSET_NAMES[0], "install.sh"):
-            self.checksums[name] = hashlib.sha256((self.assets / name).read_bytes()).hexdigest()
-        (self.assets / "SHA256SUMS.txt").write_text(
-            "".join(f"{self.checksums[name]}  {name}\n" for name in (release.ASSET_NAMES[0], "install.sh"))
-        )
-
-    def verifier(self):
-        return subprocess.run([
-            str(Path(release.__file__).with_name("verify-release-assets.sh")),
-            "--version", self.version, "--repo", self.repository, "--release-dir", str(self.assets),
-        ], capture_output=True, text=True)
-
-    def test_signed_native_bundle_subtree_is_required(self):
-        self.rewrite_archive(missing="XcodeMCPNativeHost.app/Contents/_CodeSignature/CodeResources")
-        result = self.verifier()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("missing required entries", result.stderr)
-        self.assert_no_publication()
-
-    def test_archive_rejects_bundled_apple_frameworks(self):
-        self.rewrite_archive(extra="XcodeMCPNativeHost.app/Contents/Frameworks/IDEFoundation.framework/IDEFoundation")
-        result = self.verifier()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unexpected entry", result.stderr)
-        self.assert_no_publication()
-
-    def test_archive_rejects_links_inside_the_native_bundle(self):
-        self.rewrite_archive(extra="XcodeMCPNativeHost.app/Contents/MacOS/linked-file", symlink=True)
-        self.assertNotEqual(self.verifier().returncode, 0)
-        self.assert_no_publication()
-
-    def run_downloaded_installer(self, destination):
-        commands = self.directory / "commands"
-        curl = commands / "curl"
-        curl.write_text("#!/bin/sh\nset -eu\n[ \"$1\" = -fsSL ]\n[ \"$2\" = -o ]\nname=${4##*/}\ncp \"$TEST_RELEASE_ASSETS/$name\" \"$3\"\n")
-        curl.chmod(0o755)
-        uname = commands / "uname"
-        uname.write_text("#!/bin/sh\ncase \"$1\" in -s) echo Darwin;; -m) echo arm64;; esac\n")
-        uname.chmod(0o755)
-        env = dict(os.environ, TEST_RELEASE_ASSETS=str(self.assets))
-        return subprocess.run(["sh", str(self.assets / "install.sh"), "--bindir", str(destination)],
-                              env=env, capture_output=True, text=True)
-
-    @unittest.skipUnless(sys.platform == "darwin", "atomic native bundle swap uses Darwin renamex_np")
-    def test_downloaded_installer_replaces_an_existing_native_bundle_atomically(self):
-        destination = self.directory / "installed"
-        old_native = destination / "XcodeMCPNativeHost.app" / "Contents" / "MacOS"
-        old_native.mkdir(parents=True)
-        (old_native / "xcode-mcp-native-host").write_bytes(b"old helper")
-        (old_native.parent / "obsolete").write_bytes(b"old bundle member")
-        for name in ("xcode-mcp-proxy", "xcode-mcp-proxy-server"):
-            (destination / name).write_bytes(b"old executable")
-        result = self.run_downloaded_installer(destination)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((old_native / "xcode-mcp-native-host").read_bytes(), b"native executable fixture")
-        self.assertFalse((old_native.parent / "obsolete").exists())
-        self.assertFalse(list(destination.glob(".xcode-mcp-install.*")))
-        self.assertEqual((destination / "xcode-mcp-proxy").stat().st_mode & 0o777, 0o755)
-        self.assert_no_publication()
-
-    def test_downloaded_installer_rejects_missing_native_signature_before_replacement(self):
-        destination = self.directory / "installed"
-        destination.mkdir()
-        executable = destination / "xcode-mcp-proxy"
-        executable.write_bytes(b"old executable")
-        self.rewrite_archive(missing="XcodeMCPNativeHost.app/Contents/_CodeSignature/CodeResources")
-        result = self.run_downloaded_installer(destination)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(executable.read_bytes(), b"old executable")
-        self.assert_no_publication()
-
-    def fake_api(self, endpoint, *, fields=None, paginate=False, method=None):
-        self.api_calls.append((endpoint, copy.deepcopy(fields)))
-        prefix = f"repos/{self.repository}"
-        if endpoint == f"{prefix}/releases?per_page=100":
-            self.assertTrue(paginate)
-            return [[], [copy.deepcopy(self.draft)]]
-        if endpoint == f"{prefix}/git/matching-refs/tags/{self.version}":
-            return [] if self.tag is None else [{"ref": f"refs/tags/{self.version}", "object": copy.deepcopy(self.tag)}]
-        if endpoint == f"{prefix}/git/refs":
-            self.assertEqual(method, "POST")
-            self.before_tag_create()
-            if self.tag is not None:
-                raise release.ReleaseError("Reference already exists")
-            self.tag = {"type": "commit", "sha": fields["sha"]}
-            return {"ref": fields["ref"], "object": copy.deepcopy(self.tag)}
-        if endpoint == f"{prefix}/releases/17":
-            if fields is not None:
-                self.assertNotIn("name", fields)
-                self.assertNotIn("body", fields)
-                if fields.get("draft") is False:
-                    self.before_publish()
-                self.draft.update(fields)
-                if fields.get("draft") is False and self.tag is None:
-                    self.tag = {"type": "commit", "sha": self.sha}
-            return copy.deepcopy(self.draft)
-        self.fail(f"Unexpected API call: {endpoint}")
-
-    def fake_run(self, arguments, *, input=None):
-        if arguments == ["git", "rev-parse", "HEAD"]:
-            return self.sha + "\n"
-        if arguments[:3] == ["gh", "release", "upload"]:
-            self.uploads.append(arguments)
-            # Model --clobber while leaving unrelated attachments visible.
-            self.draft["assets"] = [a for a in self.draft["assets"] if a["name"] not in release.ASSET_NAMES]
-            self.draft["assets"] += [
-                {"name": name, "state": "uploaded", "digest": f"sha256:{checksum}"}
-                for name, checksum in self.checksums.items()
-            ]
-            self.after_upload()
-            return ""
-        return self.real_run(arguments, input=input)
-
-    def publish(self, prerelease=False):
-        return release.publish(self.version, self.sha, 17, prerelease, self.assets,
-                               self.checksums[release.ASSET_NAMES[0]])
-
-    def assert_no_publication(self):
-        self.assertTrue(self.draft["draft"])
-        self.assertFalse(any(fields and fields.get("draft") is False for _, fields in self.api_calls))
-
-    def test_prepare_pins_branch_and_preserves_notes(self):
-        self.draft["target_commitish"] = "main"
-        before = copy.deepcopy(self.draft)
-        result = release.prepare(self.version, self.sha)
-        self.assertEqual(result, {**before, "target_commitish": self.sha})
-        self.assertIsNone(self.tag)
-
-    def test_prepare_accepts_pinned_commit_and_matching_tag_without_writes(self):
-        self.tag = {"type": "commit", "sha": self.sha}
-        self.assertEqual(release.prepare(self.version, self.sha), self.draft)
-        self.assertTrue(all(fields is None for _, fields in self.api_calls))
-
-    def test_prepare_accepts_annotated_matching_tag(self):
-        self.tag = {"type": "tag", "sha": "b" * 40}
-        def api_with_tag(endpoint, **kwargs):
-            if "/git/tags/" in endpoint:
-                return {"object": {"type": "commit", "sha": self.sha}}
-            return self.fake_api(endpoint, **kwargs)
-        self.api_mock.side_effect = api_with_tag
-        self.assertEqual(release.prepare(self.version, self.sha), self.draft)
-
-    def test_prepare_rejects_missing_or_ambiguous_draft(self):
-        for releases in ([], [self.draft, self.draft]):
-            with self.subTest(releases=len(releases)):
-                self.api_mock.side_effect = None
-                self.api_mock.return_value = [releases]
                 with self.assertRaises(release.ReleaseError):
-                    release.prepare(self.version, self.sha)
+                    self.publish(github, release.fingerprint(draft()))
+                self.assertTrue(github.release["draft"])
 
-    def test_prepare_rejects_unapproved_or_published_release(self):
-        for changes in ({"body": "  "}, {"draft": False}, {"target_commitish": "b" * 40}):
-            with self.subTest(changes=changes):
-                original = copy.deepcopy(self.draft)
-                self.draft.update(changes)
-                with self.assertRaises(release.ReleaseError):
-                    release.prepare(self.version, self.sha)
-                self.assertTrue(all(fields is None for _, fields in self.api_calls))
-                self.draft = original
-
-    def test_prepare_rejects_mismatched_tag_before_pinning(self):
-        self.draft["target_commitish"] = "main"
-        self.tag = {"type": "commit", "sha": "b" * 40}
-        with self.assertRaises(release.ReleaseError):
-            release.prepare(self.version, self.sha)
-        self.assertEqual(self.draft["target_commitish"], "main")
-
-    def test_prepare_propagates_api_failure(self):
-        self.api_mock.side_effect = release.ReleaseError("API unavailable")
-        with self.assertRaisesRegex(release.ReleaseError, "API unavailable"):
-            release.prepare(self.version, self.sha)
-
-    def test_wrong_branch_or_checkout_is_rejected(self):
-        for changes in ({"GITHUB_REF": "refs/heads/feature"}, {"GITHUB_SHA": "b" * 40}):
-            with self.subTest(changes=changes), patch.dict(os.environ, changes):
-                with self.assertRaises(release.ReleaseError):
-                    release.prepare(self.version, self.sha)
-        self.assertEqual(self.api_calls, [])
-
-    def test_publish_preserves_notes_and_publishes_all_verified_assets(self):
-        before = copy.deepcopy(self.draft)
-        self.assertEqual(self.publish(), before["html_url"])
-        self.assertEqual(self.draft["name"], before["name"])
-        self.assertEqual(self.draft["body"], before["body"])
-        self.assertFalse(self.draft["draft"])
-        self.assertEqual(self.tag["sha"], self.sha)
-        self.assertEqual(len(self.uploads), 1)
-
-    def test_publish_preserves_prerelease_and_note_edits(self):
-        self.draft["prerelease"] = True
-        self.after_upload = lambda: self.draft.update(name="Edited title", body="Edited notes\n")
-        self.publish(prerelease=True)
-        self.assertTrue(self.draft["prerelease"])
-        self.assertEqual(self.draft["name"], "Edited title")
-        self.assertEqual(self.draft["body"], "Edited notes\n")
-
-    def test_tag_is_pinned_before_publication(self):
-        def check_tag():
-            self.assertEqual(self.tag, {"type": "commit", "sha": self.sha})
-            self.assertTrue(self.draft["draft"])
-        self.before_publish = check_tag
-        self.publish()
-        self.assertIn((f"repos/{self.repository}/git/refs", {
-            "ref": f"refs/tags/{self.version}", "sha": self.sha,
-        }), self.api_calls)
-
-    def test_existing_matching_tag_is_not_recreated(self):
-        self.tag = {"type": "commit", "sha": self.sha}
-        self.publish()
-        self.assertFalse(any(endpoint.endswith("/git/refs") for endpoint, _ in self.api_calls))
-
-    def test_tag_creation_conflict_stops_before_publication(self):
-        for competing_sha in (self.sha, "b" * 40):
-            with self.subTest(competing_sha=competing_sha):
-                self.tag = None
-                def create_competing_tag():
-                    self.tag = {"type": "commit", "sha": competing_sha}
-                self.before_tag_create = create_competing_tag
-                with self.assertRaisesRegex(release.ReleaseError, "Reference already exists"):
-                    self.publish()
-                self.assertEqual(self.tag["sha"], competing_sha)
-                self.assert_no_publication()
-
-    def test_tag_creation_failure_leaves_draft(self):
-        def fail():
-            raise release.ReleaseError("Tag creation unavailable")
-        self.before_tag_create = fail
-        with self.assertRaisesRegex(release.ReleaseError, "Tag creation unavailable"):
-            self.publish()
-        self.assertIsNone(self.tag)
-        self.assert_no_publication()
-
-    def test_retry_after_publish_failure_reuses_created_tag(self):
-        def fail():
-            raise release.ReleaseError("Publication unavailable")
-        self.before_publish = fail
-        with self.assertRaisesRegex(release.ReleaseError, "Publication unavailable"):
-            self.publish()
-        self.assertTrue(self.draft["draft"])
-        self.assertEqual(self.tag["sha"], self.sha)
-        self.before_publish = lambda: None
-        self.api_calls.clear()
-        self.publish()
-        self.assertFalse(self.draft["draft"])
-        self.assertFalse(any(endpoint.endswith("/git/refs") for endpoint, _ in self.api_calls))
-
-    def test_publish_repairs_partial_draft_uploads(self):
-        self.draft["assets"] = [{"name": "install.sh", "state": "starter", "digest": None}]
-        self.publish()
-        self.assertEqual({a["name"] for a in self.draft["assets"]}, set(release.ASSET_NAMES))
-
-    def test_invalid_local_assets_fail_before_upload(self):
-        (self.assets / "install.sh").write_text("changed installer")
-        with self.assertRaises(release.ReleaseError):
-            self.publish()
-        self.assertEqual(self.uploads, [])
-        self.assert_no_publication()
-
-    def test_build_digest_mismatch_fails_before_upload(self):
-        with self.assertRaises(release.ReleaseError):
-            release.publish(self.version, self.sha, 17, False, self.assets, "0" * 64)
-        self.assertEqual(self.uploads, [])
-        self.assert_no_publication()
-
-    def test_missing_build_digest_cannot_skip_verification(self):
-        with self.assertRaises(release.ReleaseError):
-            release.publish(self.version, self.sha, 17, False, self.assets, "")
-        self.assertEqual(self.uploads, [])
-        self.assert_no_publication()
-
-    def test_upload_failure_leaves_draft(self):
-        def fail():
-            raise release.ReleaseError("Upload interrupted")
-        self.after_upload = fail
-        with self.assertRaisesRegex(release.ReleaseError, "Upload interrupted"):
-            self.publish()
-        self.assert_no_publication()
-
-    def test_bad_uploaded_digest_leaves_draft(self):
-        self.after_upload = lambda: self.draft["assets"][0].update(digest="sha256:incorrect")
-        with self.assertRaises(release.ReleaseError):
-            self.publish()
-        self.assert_no_publication()
-
-    def test_unrelated_attachment_stops_publication_without_deleting_it(self):
-        self.draft["assets"] = [{"name": "unrelated.txt"}]
-        with self.assertRaises(release.ReleaseError):
-            self.publish()
-        self.assertIn({"name": "unrelated.txt"}, self.draft["assets"])
-        self.assert_no_publication()
-
-    def test_identity_changes_before_upload_are_rejected(self):
-        for changes in ({"tag_name": "v1.0.0"}, {"target_commitish": "b" * 40}, {"prerelease": True}):
-            with self.subTest(changes=changes):
-                original = copy.deepcopy(self.draft)
-                self.draft.update(changes)
-                with self.assertRaises(release.ReleaseError):
-                    self.publish()
-                self.assertEqual(self.uploads, [])
-                self.assert_no_publication()
-                self.draft = original
-
-    def test_target_changes_during_upload_stop_publication(self):
-        self.after_upload = lambda: self.draft.update(target_commitish="b" * 40)
-        with self.assertRaises(release.ReleaseError):
-            self.publish()
-        self.assert_no_publication()
-
-    def test_tag_created_at_wrong_commit_during_upload_stops_publication(self):
-        def replace_tag():
-            self.tag = {"type": "commit", "sha": "b" * 40}
-        self.after_upload = replace_tag
-        with self.assertRaises(release.ReleaseError):
-            self.publish()
-        self.assert_no_publication()
-
-    def test_retry_after_publication_confirms_without_mutation(self):
-        self.publish()
-        before = copy.deepcopy(self.draft)
-        self.api_calls.clear()
-        self.uploads.clear()
-        self.assertEqual(self.publish(), before["html_url"])
-        self.assertEqual(self.draft, before)
-        self.assertEqual(self.uploads, [])
-        self.assertTrue(all(fields is None for _, fields in self.api_calls))
-
-    def test_retry_does_not_overwrite_different_published_assets(self):
-        self.publish()
-        self.draft["assets"][0]["digest"] = "sha256:unexpected"
-        self.uploads.clear()
-        with self.assertRaises(release.ReleaseError):
-            self.publish()
-        self.assertEqual(self.uploads, [])
+    def test_gh_transport_preserves_json_and_distinguishes_http_failure(self):
+        github = release.GitHub("example/project")
+        with patch("release.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, 'HTTP/2.0 201 Created\nX: value\n\n{"id":42}', "")
+            self.assertEqual(github.api("releases", "POST", {"body": "first\nsecond"}), {"id": 42})
+            self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"body": "first\nsecond"})
+            run.return_value = subprocess.CompletedProcess([], 1, 'HTTP/2.0 404 Not Found\n\n{"message":"Not Found"}', "")
+            with self.assertRaises(release.APIError) as caught:
+                github.api("releases/42")
+            self.assertEqual(caught.exception.status, 404)
+            run.return_value = subprocess.CompletedProcess([], 0, "HTTP/2.0 204 No Content\nX: value\n\n", "")
+            self.assertIsNone(github.api("actions/workflows/release.yml/dispatches", "POST", {}))
+            run.return_value = subprocess.CompletedProcess([], 0, 'HTTP/2.0 200 OK\n\n{"default_branch":"main"}', "")
+            self.assertEqual(github.api("")["default_branch"], "main")
+            self.assertEqual(run.call_args.args[0][-1], "repos/example/project")
 
 
 if __name__ == "__main__":

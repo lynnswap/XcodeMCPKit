@@ -1,10 +1,20 @@
 name: Release
 
+run-name: Release draft ${{ inputs.release_id }} at ${{ inputs.target_sha }}
+
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: Existing draft release tag to publish after checks succeed
+      release_id:
+        description: Draft ID supplied by scripts/release.py start
+        required: true
+        type: string
+      target_sha:
+        description: Approved full commit SHA
+        required: true
+        type: string
+      content_digest:
+        description: Approved draft fingerprint supplied by scripts/release.py start
         required: true
         type: string
 
@@ -12,191 +22,474 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.version }}
+  group: release-${{ inputs.release_id }}
   cancel-in-progress: false
 
 jobs:
-  verify-release:
-    name: Prepare Draft Release
+  prepare:
+    name: Check approved draft
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      # GitHub requires push access to read unpublished drafts.
       contents: write
     outputs:
-      release-id: ${{ steps.draft.outputs.release-id }}
+      version: ${{ steps.draft.outputs.version }}
       prerelease: ${{ steps.draft.outputs.prerelease }}
+      release_url: ${{ steps.draft.outputs.release_url }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Require default branch
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+          RELEASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: test "$WORKFLOW_REF" = "refs/heads/$RELEASE_BRANCH"
+
+      - name: Checkout workflow scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
-      - name: Validate and pin the approved draft
+      - name: Verify approved draft
         id: draft
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/release.py prepare --version "$RELEASE_VERSION" --source-sha "$GITHUB_SHA"
+          RELEASE_ID: ${{ inputs.release_id }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          CONTENT_DIGEST: ${{ inputs.content_digest }}
+        run: |
+          python3 scripts/release.py verify \
+            --repo "$GITHUB_REPOSITORY" --release-id "$RELEASE_ID" \
+            --target "$TARGET_SHA" --digest "$CONTENT_DIGEST" \
+            --github-output "$GITHUB_OUTPUT"
 
-  package-checks:
-    name: Package Checks
-    needs: verify-release
-    permissions:
-      contents: read
-    uses: ./.github/workflows/ci.yml
-    with:
-      concurrency_group: release-package-checks-${{ inputs.version }}
-
-  process-tests:
-    name: Process Tests (macOS, ${{ matrix.suite }})
-    needs: package-checks
-    runs-on: macos-26
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        suite:
-          - XcodeMCPProcessRuntimeTests
-          - ProxyStdioAdapterTests
+  source-approval-summary:
+    name: Review prepared source before tap dispatch
+    needs: [prepare, package-tests, source-tag, package-source]
+    if: needs.prepare.outputs.prerelease == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-
-      - name: Select latest Xcode
-        id: toolchain
-        run: |
-          set -euo pipefail
-          xcode_path="$(
-            ruby -e 'candidates = Dir["/Applications/Xcode*.app"].filter_map { |path| version = File.basename(path)[/\AXcode[_-](\d+(?:\.\d+)*)\.app\z/, 1]; version ? [version.split(".").map(&:to_i), path] : nil }; abort "No versioned Xcode apps found" if candidates.empty?; puts candidates.max_by(&:first).last'
-          )"
-          sudo xcode-select -s "${xcode_path}/Contents/Developer"
-          xcodebuild -version
-          swift --version
-          cache_id="$(xcodebuild -version | tr '\n ' '--' | tr -cd '[:alnum:]._-')"
-          echo "cache-id=${cache_id}" >> "$GITHUB_OUTPUT"
-
-      - name: Restore built package tests
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .build
-          key: spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
-          fail-on-cache-miss: true
-
-      - name: Run process tests
+      - name: Summarize the candidate before release approval
         env:
-          XCODE_MCP_RUN_PROCESS_TESTS: "1"
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          RELEASE_URL: ${{ needs.prepare.outputs.release_url }}
+          CONTENT_DIGEST: ${{ inputs.content_digest }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          ARTIFACT_ID: ${{ needs.package-source.outputs.artifact_id }}
         run: |
-          ./scripts/ci-test-watchdog.sh swift test \
-            --skip-build \
-            --no-parallel \
-            --filter "${{ matrix.suite }}" \
-            -Xswiftc -strict-concurrency=minimal
+          {
+            echo '## Prepared source awaiting tap dispatch approval'
+            echo
+            printf 'Version: <code>%s</code>\n\n' "$VERSION"
+            printf 'Source commit: <code>%s</code>\n\n' "$TARGET_SHA"
+            printf 'Approved content digest: <code>%s</code>\n\n' "$CONTENT_DIGEST"
+            printf '[Review draft title and notes](%s)\n\n' "$RELEASE_URL"
+            printf '[Review code receiving the private key](https://github.com/%s/blob/%s/.github/workflows/release.yml)\n\n' "$GITHUB_REPOSITORY" "$WORKFLOW_SHA"
+            printf '[Prepared source and Formula](https://github.com/%s/actions/runs/%s/artifacts/%s)\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$ARTIFACT_ID"
+            echo 'The approved source tag and assets are prepared. Approving release-publish permits the GitHub App private key to start the tap update. Matching bottle CI, publication, and source release verification then proceed automatically.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-  build-release:
-    name: Build Release
-    needs: process-tests
-    # This official preview image supplies the Service entitlement source.
-    # https://github.com/actions/runner-images/issues/14404
-    runs-on: xcode-27
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    outputs:
-      archive_sha256: ${{ steps.release_digests.outputs.archive_sha256 }}
-      artifact-id: ${{ steps.release_assets.outputs.artifact-id }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          ref: ${{ github.sha }}
-
-      - name: Select image-default Xcode
-        run: |
-          set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-          xcodebuild -version
-          swift --version
-
-      - name: Build release binaries
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: scripts/build-release.sh --version "${RELEASE_VERSION}" --dist-root dist
-
-      - name: Package release assets
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          scripts/package-release.sh \
-            --version "${RELEASE_VERSION}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --dist-root dist \
-            --output-dir release
-
-      - name: Verify release assets
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          scripts/verify-release-assets.sh \
-            --version "${RELEASE_VERSION}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --release-dir release
-
-      - name: Record trusted release digest
-        id: release_digests
-        run: |
-          set -euo pipefail
-          archive_sha256="$(shasum -a 256 release/xcode-mcp-proxy-darwin-arm64.tar.gz | awk '{ print $1 }')"
-          echo "archive_sha256=${archive_sha256}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload release assets
-        id: release_assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            release/xcode-mcp-proxy-darwin-arm64.tar.gz
-            release/SHA256SUMS.txt
-            release/install.sh
-          if-no-files-found: error
-
-  publish-release:
-    name: Publish Release
-    needs: [verify-release, build-release]
+  source-tag:
+    name: Prepare public approved source tag
+    needs: [prepare, package-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
+    outputs:
+      source_url: ${{ steps.source.outputs.source_url }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Checkout workflow scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - name: Create only the approved tested tag
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          CONTENT_DIGEST: ${{ inputs.content_digest }}
+        run: |
+          python3 scripts/release.py prepare-source \
+            --repo "$GITHUB_REPOSITORY" --release-id "$RELEASE_ID" \
+            --target "$TARGET_SHA" --digest "$CONTENT_DIGEST" \
+            --github-output "$GITHUB_OUTPUT"
 
-      - name: Download this run's release assets
+  dispatch-tap:
+    name: Start approved stable tap update
+    needs: [prepare, source-tag, package-source, source-approval-summary]
+    if: needs.prepare.outputs.prerelease == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release-publish
+    permissions:
+      # Reading the approved Draft requires Contents write.
+      contents: write
+    steps:
+      - name: Checkout trusted notification code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Revalidate approved content before using the App key
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          CONTENT_DIGEST: ${{ inputs.content_digest }}
+        run: |
+          python3 scripts/release.py verify --repo "$GITHUB_REPOSITORY" \
+            --release-id "$RELEASE_ID" --target "$TARGET_SHA" --digest "$CONTENT_DIGEST"
+      - name: Download the prepared source and Formula
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          artifact-ids: ${{ needs.build-release.outputs.artifact-id }}
+          artifact-ids: ${{ needs.package-source.outputs.artifact_id }}
+          path: release
+          digest-mismatch: error
+      - name: Verify prepared release assets
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHECKSUMS_SHA256: ${{ needs.package-source.outputs.checksums_sha256 }}
+        run: |
+          python3 scripts/package_release.py verify --version "$VERSION" \
+            --release-dir release --checksums-sha256 "$CHECKSUMS_SHA256"
+      - name: Create a token scoped to tap workflow dispatch
+        id: tap-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.TAP_DISPATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TAP_DISPATCH_APP_PRIVATE_KEY }}
+          owner: lynnswap
+          repositories: homebrew-tap
+          permission-actions: write
+      - name: Start the matching stable tap update
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          python3 scripts/release.py dispatch-tap \
+            --source-repository "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --target "$TARGET_SHA" --release-dir release
+
+  package-source:
+    name: Package approved source and Formula
+    needs: [prepare, source-tag]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      checksums_sha256: ${{ steps.digest.outputs.checksums_sha256 }}
+      artifact_id: ${{ steps.assets.outputs.artifact-id }}
+    steps:
+      - name: Checkout workflow scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Checkout approved source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Package source and Formula
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          COMMIT: ${{ inputs.target_sha }}
+          SOURCE_URL: ${{ needs.source-tag.outputs.source_url }}
+        run: |
+          curl --fail --location "$SOURCE_URL" --output source.tar.gz
+          python3 scripts/package_release.py create \
+            --source-root source --commit "$COMMIT" --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" --output-dir release --source-archive source.tar.gz
+          python3 scripts/package_release.py verify --version "$VERSION" --release-dir release
+
+      - name: Record release checksums digest
+        id: digest
+        run: echo "checksums_sha256=$(sha256sum release/SHA256SUMS.txt | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload source release assets
+        id: assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-${{ github.run_attempt }}
+          path: release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 35
+
+  package-tests:
+    name: Test approved source
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ inputs.target_sha }}
+      run_process_tests: true
+      concurrency_group: release-package-checks-${{ inputs.release_id }}
+
+  record-plan:
+    name: Record prepared release
+    needs: [prepare, source-tag, package-source]
+    if: needs.prepare.outputs.prerelease == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Record the approved run and prepared artifact identity
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          CONTENT_DIGEST: ${{ inputs.content_digest }}
+          ARTIFACT_ID: ${{ needs.package-source.outputs.artifact_id }}
+          CHECKSUMS_SHA256: ${{ needs.package-source.outputs.checksums_sha256 }}
+        run: |
+          python3 scripts/release_sync.py record --release-id "$RELEASE_ID" \
+            --version "$VERSION" --target "$TARGET_SHA" --content-digest "$CONTENT_DIGEST" \
+            --source-artifact-id "$ARTIFACT_ID" --checksums-sha256 "$CHECKSUMS_SHA256" \
+            --output "$RUNNER_TEMP/release-plan.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-plan-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-plan.json
+          if-no-files-found: error
+          retention-days: 35
+
+  homebrew:
+    name: Test prerelease Formula and installed bottle
+    needs: [prepare, package-source]
+    if: needs.prepare.outputs.prerelease == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Checkout workflow scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Download source release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.package-source.outputs.artifact_id }}
           path: release
           digest-mismatch: error
 
-      - name: Verify assets and publish the approved draft
+      - name: Verify transferred assets
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHECKSUMS_SHA256: ${{ needs.package-source.outputs.checksums_sha256 }}
+        run: |
+          python3 scripts/package_release.py verify --version "$VERSION" \
+            --release-dir release --checksums-sha256 "$CHECKSUMS_SHA256"
+
+      - name: Build, bottle, reinstall and exercise the native helper and proxy
+        run: scripts/test-homebrew.sh release
+
+  tap-status:
+    name: Check stable tap delivery
+    needs: [prepare, package-source, package-tests, record-plan, dispatch-tap]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.package-source.result == 'success' &&
+      needs.package-tests.result == 'success' &&
+      (needs.prepare.outputs.prerelease == 'true' ||
+       (needs.record-plan.result == 'success' && needs.dispatch-tap.result == 'success'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.tap.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.package-source.outputs.artifact_id }}
+          path: release
+          digest-mismatch: error
+      - name: Inspect prepared tap delivery
+        id: tap
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_BRANCH: ${{ github.event.repository.default_branch }}
-          RELEASE_ID: ${{ needs.verify-release.outputs.release-id }}
-          RELEASE_PRERELEASE: ${{ needs.verify-release.outputs.prerelease }}
-          ARCHIVE_SHA256: ${{ needs.build-release.outputs.archive_sha256 }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHECKSUMS_SHA256: ${{ needs.package-source.outputs.checksums_sha256 }}
+        run: |
+          python3 scripts/package_release.py verify --version "$VERSION" \
+            --release-dir release --checksums-sha256 "$CHECKSUMS_SHA256"
+          python3 scripts/release.py tap-status --version "$VERSION" \
+            --release-dir release --github-output "$GITHUB_OUTPUT"
+      - name: Report normal tap preparation wait
+        if: steps.tap.outputs.ready == 'false'
+        run: |
+          echo 'The approved release remains a Draft while the tap PR awaits CI and publication. Resume prepared releases will retry this probe and its dependents after matching public delivery; completed package checks are reused.' >> "$GITHUB_STEP_SUMMARY"
+
+  homebrew-ready:
+    name: Verify published tap installation
+    needs: [prepare, package-source, tap-status]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.package-source.result == 'success' &&
+      needs.tap-status.result == 'success' && needs.tap-status.outputs.ready == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    outputs:
+      required: ${{ steps.tap.outputs.required }}
+      tap_sha: ${{ steps.tap.outputs.tap_sha }}
+      formula_sha256: ${{ steps.tap.outputs.formula_sha256 }}
+      bottle_sha256: ${{ steps.tap.outputs.bottle_sha256 }}
+      bottle_url: ${{ steps.tap.outputs.bottle_url }}
+    steps:
+      - name: Checkout workflow scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Download prepared release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.package-source.outputs.artifact_id }}
+          path: release
+          digest-mismatch: error
+      - name: Verify transferred assets
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHECKSUMS_SHA256: ${{ needs.package-source.outputs.checksums_sha256 }}
+        run: |
+          python3 scripts/package_release.py verify --version "$VERSION" \
+            --release-dir release --checksums-sha256 "$CHECKSUMS_SHA256"
+      - name: Verify public Formula and bottle metadata
+        id: tap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 scripts/release.py homebrew-ready --version "$VERSION" \
+            --release-dir release --github-output "$GITHUB_OUTPUT"
+      - name: Install and test the published stable bottle
+        if: steps.tap.outputs.required == 'true'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAP_SHA: ${{ steps.tap.outputs.tap_sha }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          formula=lynnswap/tap/xcode-mcpkit
+          brew tap lynnswap/tap
+          tap_root="$(brew --repository lynnswap/tap)"
+          git -C "$tap_root" fetch origin "$TAP_SHA"
+          git -C "$tap_root" checkout --detach "$TAP_SHA"
+          brew trust --formula "$formula"
+          brew install "$formula"
+          brew info --json=v2 "$formula" | python3 -c '
+          import json, sys
+          installed = json.load(sys.stdin)["formulae"][0]["installed"][0]
+          if not installed["poured_from_bottle"]:
+              sys.exit("Published tap verification expected a bottle installation.")
+          '
+          installed_binary="$(brew --prefix "$formula")/bin/xcode-mcp-proxy-server"
+          test "$("$installed_binary" --version)" = "$VERSION"
+          brew test "$formula"
+
+  publication-summary:
+    name: Review verified release outputs
+    needs: [prepare, package-source, package-tests, homebrew, homebrew-ready]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.package-source.result == 'success' &&
+      needs.package-tests.result == 'success' && needs.homebrew-ready.result == 'success' &&
+      (needs.prepare.outputs.prerelease == 'false' || needs.homebrew.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Summarize the candidate before publication
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          RELEASE_URL: ${{ needs.prepare.outputs.release_url }}
+          CONTENT_DIGEST: ${{ inputs.content_digest }}
+          CHECKSUMS_SHA256: ${{ needs.package-source.outputs.checksums_sha256 }}
+          ARTIFACT_ID: ${{ needs.package-source.outputs.artifact_id }}
+          TAP_REQUIRED: ${{ needs.homebrew-ready.outputs.required }}
+          TAP_SHA: ${{ needs.homebrew-ready.outputs.tap_sha }}
+          BOTTLE_SHA256: ${{ needs.homebrew-ready.outputs.bottle_sha256 }}
+          BOTTLE_URL: ${{ needs.homebrew-ready.outputs.bottle_url }}
+        run: |
+          {
+            echo '## Approved release verification complete'
+            echo
+            printf 'Version: <code>%s</code>\n\n' "$VERSION"
+            printf 'Source commit: <code>%s</code>\n\n' "$TARGET_SHA"
+            printf 'Approved content digest: <code>%s</code>\n\n' "$CONTENT_DIGEST"
+            printf 'Checksums file SHA-256: <code>%s</code>\n\n' "$CHECKSUMS_SHA256"
+            printf '[Draft release](%s)\n\n' "$RELEASE_URL"
+            printf '[Verified source and Formula artifact](https://github.com/%s/actions/runs/%s/artifacts/%s)\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$ARTIFACT_ID"
+            if [[ "$TAP_REQUIRED" == true ]]; then
+              printf '[Published tap Formula](https://github.com/lynnswap/homebrew-tap/blob/%s/Formula/xcode-mcpkit.rb)\n\n' "$TAP_SHA"
+              printf '[Installed published bottle](%s), SHA-256: <code>%s</code>\n\n' "$BOTTLE_URL" "$BOTTLE_SHA256"
+              echo 'The matching public tap bottle was installed and tested successfully.'
+            fi
+            echo 'The approved candidate and matching published tap passed verification. The publisher will revalidate their identity and publish automatically.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish verified source release
+    needs: [prepare, source-tag, package-source, homebrew-ready, publication-summary]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.source-tag.result == 'success' &&
+      needs.package-source.result == 'success' && needs.homebrew-ready.result == 'success' &&
+      needs.publication-summary.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout workflow scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Publication credentials never execute code from the release target.
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.package-source.outputs.artifact_id }}
+          path: release
+          digest-mismatch: error
+
+      - name: Verify transferred assets
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHECKSUMS_SHA256: ${{ needs.package-source.outputs.checksums_sha256 }}
+        run: |
+          python3 scripts/package_release.py verify --version "$VERSION" \
+            --release-dir release --checksums-sha256 "$CHECKSUMS_SHA256"
+
+      - name: Upload assets and publish approved draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+          CONTENT_DIGEST: ${{ inputs.content_digest }}
+          TESTED_FORMULA_SHA256: ${{ needs.homebrew-ready.outputs.formula_sha256 }}
+          TESTED_BOTTLE_SHA256: ${{ needs.homebrew-ready.outputs.bottle_sha256 }}
+          TESTED_BOTTLE_URL: ${{ needs.homebrew-ready.outputs.bottle_url }}
         run: |
           python3 scripts/release.py publish \
-            --version "$RELEASE_VERSION" \
-            --source-sha "$GITHUB_SHA" \
-            --release-id "$RELEASE_ID" \
-            --prerelease "$RELEASE_PRERELEASE" \
-            --directory release \
-            --archive-sha256 "$ARCHIVE_SHA256"
+            --repo "$GITHUB_REPOSITORY" --release-id "$RELEASE_ID" \
+            --target "$TARGET_SHA" --digest "$CONTENT_DIGEST" \
+            --release-dir release --tested-formula-sha256 "$TESTED_FORMULA_SHA256" \
+            --tested-bottle-sha256 "$TESTED_BOTTLE_SHA256" \
+            --tested-bottle-url "$TESTED_BOTTLE_URL"
