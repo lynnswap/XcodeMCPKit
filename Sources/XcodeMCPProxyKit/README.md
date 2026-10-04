@@ -82,7 +82,7 @@ identity candidates include the native helper executable and child process IDs.
 Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` do not select a proxy backend.
 For a standalone headless or generic MCP process, use `XcodeMCPKit`'s explicit
 `.localBridge(.nativeHost(...))` or `.localBridge(.custom(...))` transport.
-See [native routing migration](../../Docs/automatic-routing-migration.md).
+See [native routing migration](../../Docs/migrations/native-backend.md).
 
 ```swift
 import Foundation
@@ -170,6 +170,6 @@ xcode-mcp-proxy-install
 xcode-mcp-proxy-install --dry-run
 ```
 
-See [native routing migration](../../Docs/automatic-routing-migration.md) for
+See [native routing migration](../../Docs/migrations/native-backend.md) for
 the current transport and configuration changes. The earlier
-[breaking migration guide](../../Docs/migration-2026-07.md) records the v0.14.0 API changes.
+[breaking migration guide](../../Docs/migrations/v0.14.0.md) records the v0.14.0 API changes.

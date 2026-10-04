@@ -3,7 +3,7 @@
 This document records the target migration approved in July 2026. Its public
 configuration and refresh-workflow contracts have been superseded. Current
 behavior is described in [Architecture](architecture.md) and
-[Native routing migration](automatic-routing-migration.md).
+[Native routing migration](migrations/native-backend.md).
 
 - Status: **APPROVED / IMPLEMENTED / VERIFIED**
 - Approved: 2026-07-13

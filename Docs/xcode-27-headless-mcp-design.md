@@ -3,14 +3,14 @@
 This document records the former Xcode Service backend and its investigation.
 Its commands and configuration examples are obsolete. Current behavior is
 described in [Architecture](architecture.md) and
-[Native routing migration](automatic-routing-migration.md).
+[Native routing migration](migrations/native-backend.md).
 
 ## Former Service-based contract
 
 The proxy keeps GUI routes and the enabled native Xcode Service pool available
 at the same time. Workspace selection happens for each request. The server has
 no GUI/headless mode, configured PID, Apple session ID, or custom upstream.
-See [automatic routing migration](automatic-routing-migration.md) for removed
+See [automatic routing migration](migrations/native-backend.md) for removed
 configuration and [the embedded API](../Sources/XcodeMCPProxyKit/README.md).
 
 ```sh

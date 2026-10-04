@@ -3,7 +3,7 @@
 This document records the implementation approved in July 2026. Its bridge,
 configuration-file and tool-policy contracts have been superseded. Current
 behavior is described in [Architecture](../architecture.md) and
-[Native routing migration](../automatic-routing-migration.md).
+[Native routing migration](../migrations/native-backend.md).
 
 - Status: **APPROVED / IMPLEMENTED**
 - Approved: 2026-07-10
