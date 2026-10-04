@@ -21,8 +21,7 @@ let server = XcodeMCPProxyServer(
     configuration: .init(
         bindAddress: .localhost(port: 0),
         requestTimeout: .seconds(300),
-        discovery: .defaultLocation,
-        approvalPolicy: .manual
+        discovery: .defaultLocation
     )
 )
 
@@ -41,7 +40,7 @@ through `snapshot()` and MCP requests. A discovery write failure unwinds acquire
 throws. Use `waitUntilShutdown()` when another task owns the shutdown signal.
 
 `shutdown()` is idempotent and is the graceful completion boundary. It returns
-after listener and accepted channels, runtime activity, permission automation,
+after listener and accepted channels, runtime activity,
 and event-loop resources have stopped. A server instance is one-shot; construct
 a new instance after shutdown.
 
@@ -61,7 +60,6 @@ may be incomplete, even though the server lifecycle has stopped.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
 - `initializeHandshake`: typed upstream initialization for embedding.
 - `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
-- `approvalPolicy`: manual or automatic Xcode permission handling.
 - `prewarmToolsList`: whether discovery begins during startup.
 
 The server starts one owned headless native host and one connection for each
@@ -75,9 +73,10 @@ Install `XcodeMCPNativeHost.app` beside the proxy executable, or supply its bund
 URL. Missing helper or required native contracts return diagnostics. Embedded
 hosts must keep AppKit's main run loop available for GUI process observation.
 
-`approvalPolicy: .automatic` handles recognized connection dialogs for all
-agents. It requires Accessibility permission for the embedding host. Agent
-identity candidates include the native helper executable and child process IDs.
+The native helper automatically enables Xcode agent access and allows all agents.
+Before connecting, it records its own signing identity, or its executable path
+and current hash for an ad-hoc build, in Xcode's permission store. These settings
+persist after shutdown. `ApprovalPolicy` and `approvalPolicy` have been removed.
 
 Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` do not select a proxy backend.
 For a standalone headless or generic MCP process, use `XcodeMCPKit`'s explicit

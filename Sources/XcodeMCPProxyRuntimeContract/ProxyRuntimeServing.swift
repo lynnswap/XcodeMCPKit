@@ -116,11 +116,9 @@ package struct ProxyRuntimeInventorySnapshot: Sendable {
     }
 
     package let xcodeTargets: [XcodeTarget]
-    package let permissionDialogProcessIDs: [pid_t]
 
-    package init(xcodeTargets: [XcodeTarget], permissionDialogProcessIDs: [pid_t]) {
+    package init(xcodeTargets: [XcodeTarget]) {
         self.xcodeTargets = xcodeTargets
-        self.permissionDialogProcessIDs = permissionDialogProcessIDs
     }
 }
 

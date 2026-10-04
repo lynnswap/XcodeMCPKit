@@ -25,10 +25,10 @@ contract leaves GUI tools usable, while requests for a headless model retain
 that error. Check the selected owner and its reported native capabilities.
 
 Set `MCP_LOG_LEVEL=debug` to inspect native connection startup, catalog loads,
-request cancellation, and recovery. Approve pending connection dialogs when
-needed. With `--auto-approve`, grant Accessibility permission to the app that
-launches the proxy. Opening a GUI workspace or enabling Xcode Service is not a
-prerequisite for the headless catalog.
+request cancellation, and recovery. The native helper enables agent access and
+registers itself before connecting. A permission-store failure appears in the
+helper diagnostic; check that the selected Xcode supplies the required native
+contracts. Opening a GUI workspace is not a prerequisite for the headless catalog.
 
 For workspace operations, check the absolute `workspaceIdentifier` and any
 reported GUI owner or tab candidates. An unavailable known GUI owner returns an

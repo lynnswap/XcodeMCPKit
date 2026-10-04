@@ -12,8 +12,8 @@ server to its native frameworks.
 - Swift 6.3+ to build from source
 - An Xcode installation with native MCP tools
 
-Headless operation has been verified with Xcode 27. Xcode 26.6 provides GUI
-tools, but lacks a required headless contract. See [Xcode compatibility](Docs/configuration.md#xcode-compatibility)
+Headless and GUI operation have been verified with Xcode 27. Automatic agent
+access requires its native permission-store contracts; Xcode 26.6 lacks them. See [Xcode compatibility](Docs/configuration.md#xcode-compatibility)
 for installation selection and limitations.
 
 ## Quick start
@@ -37,7 +37,7 @@ cd XcodeMCPKit
 swift run -c release xcode-mcp-proxy-install
 ```
 
-The source installer places the server, STDIO adapter, and signed native helper app in
+The source installer places the server, STDIO adapter, and ad-hoc-signed native helper app in
 `~/.local/bin`. Keep `XcodeMCPNativeHost.app` beside the executables. Add the
 installation directory to your `PATH`, or put this line in `~/.zshrc`:
 
@@ -71,13 +71,13 @@ To remove the Homebrew installation, stop the server and run
 ### Start the server
 
 ```bash
-xcode-mcp-proxy-server --auto-approve
+xcode-mcp-proxy-server
 ```
 
-Allow the app launching the server, such as Terminal, in **System Settings >
-Privacy & Security > Accessibility**. `--auto-approve` clicks **Allow** on
-recognized Xcode connection dialogs for all agents, including other clients.
-Omit the flag and run `xcode-mcp-proxy-server` to approve connections manually.
+The native helper enables Xcode's agent access and automatically allows all
+agents, including other clients. It registers its own identity before connecting
+so Xcode does not display an agent connection dialog. This setting persists in
+Xcode's permission store. No startup option or Accessibility permission is needed.
 
 Keep the server running. You can start it without opening a workspace in Xcode.
 

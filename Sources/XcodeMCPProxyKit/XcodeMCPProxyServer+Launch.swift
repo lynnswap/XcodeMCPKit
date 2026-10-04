@@ -63,8 +63,7 @@ private extension ProxyServerCommand {
             developerDirectoryURL: environment["DEVELOPER_DIR"].map { URL(fileURLWithPath: $0) },
             maxBodyBytes: maxBodyBytes ?? 1_048_576,
             requestTimeout: timeout > 0 ? .seconds(timeout) : nil,
-            discovery: .file(ProxyFilesystemLocations.discoveryFileURL(environment: environment)),
-            approvalPolicy: autoApprove ? .automatic : .manual
+            discovery: .file(ProxyFilesystemLocations.discoveryFileURL(environment: environment))
         )
     }
 
@@ -107,9 +106,6 @@ private extension ProxyServerCommand {
             "--listen",
             "\(configuration.bindAddress.host):\(configuration.bindAddress.port)",
         ]
-        if autoApprove {
-            arguments.append("--auto-approve")
-        }
         if let maxBodyBytes {
             arguments += ["--max-body-bytes", String(maxBodyBytes)]
         }

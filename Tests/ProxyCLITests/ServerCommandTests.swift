@@ -11,7 +11,6 @@ struct ServerCommandTests {
         #expect(config.developerDirectoryURL == nil)
         #expect(config.maxBodyBytes == 1_048_576)
         #expect(config.requestTimeout == .seconds(300))
-        #expect(config.approvalPolicy == .manual)
     }
 
     @Test func serverCommandMapsTypedOptionsToConfiguration() throws {
@@ -19,12 +18,10 @@ struct ServerCommandTests {
             "--listen", "0.0.0.0:9999",
             "--max-body-bytes", "2048",
             "--request-timeout", "12.5",
-            "--auto-approve",
         ])
         #expect(config.bindAddress == .init(host: "0.0.0.0", port: 9999))
         #expect(config.maxBodyBytes == 2048)
         #expect(config.requestTimeout == .seconds(12.5))
-        #expect(config.approvalPolicy == .automatic)
     }
 
     @Test func serverCommandAllowsPortZeroAndZeroTimeout() throws {
@@ -47,7 +44,7 @@ struct ServerCommandTests {
     }
 
     @Test(arguments: [
-        "--config", "--native-host-bundle", "--developer-dir", "--refresh-code-issues-mode",
+        "--auto-approve", "--config", "--native-host-bundle", "--developer-dir", "--refresh-code-issues-mode",
         "--upstream-processes", "--xcode-mode", "--session-id", "--upstream-command",
         "--upstream-args", "--upstream-arg",
     ])
@@ -83,7 +80,6 @@ struct ServerCommandTests {
             "MCP_XCODE_AUTO_APPROVE": "1",
             "LAZY_INIT": "true",
         ])
-        #expect(config.approvalPolicy == .manual)
         #expect(config.initializeHandshake == nil)
         #expect(config.prewarmToolsList)
     }

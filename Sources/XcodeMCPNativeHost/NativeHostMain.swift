@@ -69,9 +69,16 @@ private enum NativeHostMain {
                 ?? FileManager.default.temporaryDirectory.appendingPathComponent("XcodeMCPNativeHost", isDirectory: true)
             Task { @MainActor in
                 do {
+                    guard let executable = Bundle.main.executableURL else {
+                        throw NativeRuntimeError.unavailable("The native helper executable path is unavailable")
+                    }
+                    let signingIdentity = try NativeSigningIdentity.read(executable: executable)
+                    let access = try await NativeAgentAccess(installation: installation)
+                    try await access.authorize(executable: executable, identity: signingIdentity)
                     let backend: any NativeToolBackend
                     if let identifier = arguments.guiProcessIdentifier {
-                        backend = NativeGUIBackend(processIdentifier: identifier, installation: installation)
+                        backend = NativeGUIBackend(processIdentifier: identifier, installation: installation,
+                                                   signingIdentity: signingIdentity)
                     } else {
                         try await bootstrap.initialize(installation: installation)
                         backend = try await NativeXcodeBackend(installation: installation)

@@ -1,5 +1,9 @@
 # Design Audit 2026-07 — Canonical Remediation Design
 
+> Historical design/investigation. Accessibility permission automation was removed.
+> See [native routing migration](../migrations/native-backend.md) for the current automatic native permission flow.
+
+
 This document records the implementation approved in July 2026. Its bridge,
 configuration-file and tool-policy contracts have been superseded. Current
 behavior is described in [Architecture](../architecture.md) and

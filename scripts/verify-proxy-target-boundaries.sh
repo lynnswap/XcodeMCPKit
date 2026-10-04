@@ -56,21 +56,6 @@ reject_matches \
     Sources Tests Package.swift
 
 reject_matches \
-    "XcodeMCPPermissionAutomation must not depend on proxy/runtime modules" \
-    '^import (XcodeMCPKit|XcodeMCPProxy)' \
-    Sources/XcodeMCPPermissionAutomation
-
-reject_matches \
-    "XcodeMCPPermissionAutomation must consume caller-owned process inventory" \
-    'NSWorkspace' \
-    Sources/XcodeMCPPermissionAutomation
-
-reject_matches \
-    "permission approver diagnostic must not launch processes" \
-    '(^|[^[:alnum:]_])Process[[:space:]]*\(|MCPBridgeRuntime|mcpbridgePath' \
-    Sources/XcodeMCPPermissionApproverTool
-
-reject_matches \
     "native host and wire modules must not import NIO or the proxy/client runtime" \
     '^[[:space:]]*([[:alnum:]_@()]+[[:space:]]+)*import[[:space:]]+((class|enum|func|let|protocol|struct|typealias|var)[[:space:]]+)?(NIO[[:alnum:]_]*|CNIO[[:alnum:]_]*|_NIO[[:alnum:]_]*|XcodeMCPCore|XcodeMCPKit|XcodeMCPProxy[[:alnum:]_]*)([[:space:].;]|$)' \
     Sources/XcodeMCPNativeHost Sources/XcodeMCPNativeRuntime Sources/XcodeMCPWire
@@ -94,12 +79,11 @@ if ! jq -e '
     directlyUses("XcodeMCPNativeRuntime"; "XcodeMCPWire") and
     directlyUses("XcodeMCPNativeRuntime"; "ABIBridge") and
     directlyUses("XcodeMCPCore"; "XcodeMCPWire") and
-    excludes("XcodeMCPCore"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit", "XcodeMCPPermissionAutomation"]) and
-    excludes("XcodeMCPKit"; ["XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit", "XcodeMCPPermissionAutomation"]) and
+    excludes("XcodeMCPCore"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
+    excludes("XcodeMCPKit"; ["XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyRuntime"; ["XcodeMCPKit", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyHTTP"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPDocumentationSearch", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyRuntimeContract"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
-    excludes("XcodeMCPPermissionAutomation"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPCoreTests"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProcessRuntimeTests"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyRuntimeTests"; ["XcodeMCPKit", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
@@ -116,9 +100,7 @@ if ! jq -e '
     directlyUses("XcodeMCPProxyHTTP"; "XcodeMCPProxyRuntimeContract") and
     directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPProxyRuntimeContract") and
     directlyUses("XcodeMCPProxyKit"; "XcodeMCPProxyRuntime") and
-    directlyUses("XcodeMCPProxyKit"; "XcodeMCPProxyHTTP") and
-    directlyUses("XcodeMCPProxyKit"; "XcodeMCPPermissionAutomation") and
-    directlyUses("XcodeMCPPermissionApproverTool"; "XcodeMCPPermissionAutomation")
+    directlyUses("XcodeMCPProxyKit"; "XcodeMCPProxyHTTP")
 ' <<< "${package_description}" >/dev/null; then
     echo "error: package dependencies violate the native-host, shared-core, or proxy ownership boundaries" >&2
     exit 1

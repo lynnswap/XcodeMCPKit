@@ -3,7 +3,6 @@ import XcodeMCPCore
 import Foundation
 import Logging
 import XcodeMCPKit
-import XcodeMCPPermissionAutomation
 import XcodeMCPProxyHTTP
 import XcodeMCPProxyRuntime
 
@@ -45,20 +44,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
 
         /// Publish to an explicit file URL.
         case file(URL)
-    }
-
-    /// Xcode permission dialog automation policy.
-    public enum ApprovalPolicy: Equatable, Sendable {
-        /// Do not automate the Xcode permission dialog.
-        case manual
-
-        /// Automatically approve Xcode MCP connection dialogs for all agents,
-        /// including agents connecting directly to Xcode outside this proxy.
-        ///
-        /// Preserves configured-agent identity matching and additionally accepts
-        /// the English heading `Allow “…” to access Xcode?` with an `Allow` button
-        /// for other agents. Requires macOS Accessibility permission for the host process.
-        case automatic
     }
 
     /// Initialize handshake values sent from the proxy to native helpers.
@@ -122,9 +107,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Endpoint discovery policy.
     public var discovery: Discovery
 
-    /// Permission dialog automation policy.
-    public var approvalPolicy: ApprovalPolicy
-
     /// Whether to fetch native tool catalogs during startup.
     public var prewarmToolsList: Bool
 
@@ -137,7 +119,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///   - maxBodyBytes: Maximum accepted HTTP request body size.
     ///   - requestTimeout: Request timeout, or `nil` to disable it.
     ///   - discovery: Endpoint discovery policy.
-    ///   - approvalPolicy: Permission dialog automation policy.
     ///   - prewarmToolsList: Whether to fetch native tool catalogs during startup.
     ///   - initializeHandshake: Explicit upstream initialize handshake override.
     public init(
@@ -148,7 +129,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         requestTimeout: Duration? = .seconds(300),
         initializeHandshake: InitializeHandshake? = nil,
         discovery: Discovery = .defaultLocation,
-        approvalPolicy: ApprovalPolicy = .manual,
         prewarmToolsList: Bool = true
     ) {
         self.bindAddress = bindAddress
@@ -158,13 +138,11 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         self.requestTimeout = requestTimeout
         self.initializeHandshake = initializeHandshake
         self.discovery = discovery
-        self.approvalPolicy = approvalPolicy
         self.prewarmToolsList = prewarmToolsList
     }
 
     var listenHost: String { bindAddress.host }
     var listenPort: Int { bindAddress.port }
-    var autoApproveXcodeDialog: Bool { approvalPolicy == .automatic }
 }
 
 /// Embeddable Streamable HTTP proxy server for Xcode MCP.
@@ -337,8 +315,6 @@ public final class XcodeMCPProxyServer: Sendable {
     struct Dependencies: Sendable {
         var discoveryClient: DiscoveryClient
         var processID: @Sendable () -> Int
-        var makeAutoApprover:
-            @Sendable (XcodeMCPProxyServerConfiguration, any ProxyRuntimeServing) -> any ProxyServerPermissionDialogAutoApprover
         var makeRuntime: @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing
         var makeHTTPGateway:
             @Sendable (
@@ -352,10 +328,6 @@ public final class XcodeMCPProxyServer: Sendable {
             processID: @escaping @Sendable () -> Int = {
                 Int(ProcessInfo.processInfo.processIdentifier)
             },
-            makeAutoApprover: @escaping @Sendable (
-                XcodeMCPProxyServerConfiguration,
-                any ProxyRuntimeServing
-            ) -> any ProxyServerPermissionDialogAutoApprover,
             makeRuntime: @escaping @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing,
             makeHTTPGateway: @escaping @Sendable (
                 ProxyHTTPConfiguration,
@@ -371,39 +343,12 @@ public final class XcodeMCPProxyServer: Sendable {
         ) {
             self.discoveryClient = discoveryClient
             self.processID = processID
-            self.makeAutoApprover = makeAutoApprover
             self.makeRuntime = makeRuntime
             self.makeHTTPGateway = makeHTTPGateway
         }
 
         static var live: Self {
             return Self(
-                makeAutoApprover: { config, runtime in
-                    let additionalCandidates = PermissionDialogExecutableResolver.executableCandidates(
-                        bundleURL: config.nativeHostBundleURL,
-                        developerDirectoryURL: config.developerDirectoryURL
-                    )
-                    return XcodePermissionDialogAutomation.AutoApprover(
-                        configuration: .init(
-                            permissionDialogProcessIDs: {
-                                runtime.inventorySnapshot().permissionDialogProcessIDs
-                            },
-                            agentPathCandidates: {
-                                XcodePermissionDialogAutomation.AutoApprover
-                                    .executablePathCandidates(additional: additionalCandidates)
-                            },
-                            assistantNameCandidates: {
-                                Set(XcodeMCPProxyServer.permissionDialogAssistantNameCandidates(config: config))
-                            },
-                            agentProcessIDCandidates: {
-                                XcodePermissionDialogAutomation.AutoApprover
-                                    .descendantProcessIDCandidates()
-                            },
-                            agentScope: .allAgents
-                        ),
-                        logger: ProxyLogging.make("xcode.permission")
-                    )
-                },
                 makeRuntime: { config in
                     let invocation = try NativeHostInvocation.resolve(
                         bundleURL: config.nativeHostBundleURL,
@@ -489,7 +434,7 @@ public final class XcodeMCPProxyServer: Sendable {
             "",
             "Server",
             "  URL: http://\(displayHost):\(port)/mcp",
-            "  Auto approve: \(config.autoApproveXcodeDialog ? "enabled" : "disabled")",
+            "  Agent access: automatically allowed",
             "",
             "Xcode",
         ]
@@ -520,13 +465,6 @@ public final class XcodeMCPProxyServer: Sendable {
 
     }
 
-    private static func permissionDialogAssistantNameCandidates(config: XcodeMCPProxyServerConfiguration) -> [String] {
-        var candidates = Set<String>(["XcodeMCPKit"])
-        if let name = config.initializeHandshake?.clientInfo?.name, name.isEmpty == false {
-            candidates.insert(name)
-        }
-        return Array(candidates)
-    }
 }
 
 extension XcodeMCPProxyServerConfiguration {
@@ -556,7 +494,6 @@ extension XcodeMCPProxyServerConfiguration {
             maxMessageBytes: maxBodyBytes,
             requestTimeout: timeout,
             prewarmToolsList: prewarmToolsList,
-            usesPermissionDialogAutomation: autoApproveXcodeDialog,
             initializeParamsOverride: initializeHandshake.map { handshake in
                 .init(
                     protocolVersion: handshake.protocolVersion,
@@ -584,14 +521,6 @@ private extension ProxyRuntimeConfiguration.JSONValue {
         }
     }
 }
-
-protocol ProxyServerPermissionDialogAutoApprover: Sendable {
-    func start()
-    func cancel()
-}
-
-extension XcodePermissionDialogAutomation.AutoApprover:
-    ProxyServerPermissionDialogAutoApprover {}
 
 extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {

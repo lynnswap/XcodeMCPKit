@@ -126,53 +126,7 @@ struct XcodeProcessEventMonitorTests {
         #expect(returnedAfterCancellation)
     }
 
-    @Test func permissionDialogProcessIDsIncludeXcodeAndKnownHelpersOnly() {
-        let observation = RunningApplicationsObservationFake(initial: [
-            RunningApplicationSnapshot(
-                processID: 43,
-                bundleIdentifier: "com.apple.dt.Xcode.DeveloperSystemPolicyService",
-                bundlePath: nil,
-                isTerminated: false
-            ),
-            RunningApplicationSnapshot(
-                processID: 41,
-                bundleIdentifier: "com.apple.dt.Xcode",
-                bundlePath: nil,
-                isTerminated: false
-            ),
-            RunningApplicationSnapshot(
-                processID: 42,
-                bundleIdentifier: "com.apple.dt.ExternalViewService",
-                bundlePath: nil,
-                isTerminated: false
-            ),
-            RunningApplicationSnapshot(
-                processID: 44,
-                bundleIdentifier: "com.example.Unrelated",
-                bundlePath: nil,
-                isTerminated: false
-            ),
-            RunningApplicationSnapshot(
-                processID: 46,
-                bundleIdentifier: "com.apple.dt.mcp-server",
-                bundlePath: nil,
-                isTerminated: false
-            ),
-            RunningApplicationSnapshot(
-                processID: 45,
-                bundleIdentifier: "com.apple.dt.ExternalViewService",
-                bundlePath: nil,
-                isTerminated: true
-            ),
-        ])
-        let monitor = makeMonitor(observation: observation)
-        defer { monitor.stop() }
 
-        monitor.start()
-
-        #expect(monitor.permissionDialogProcessIDs() == [41, 42, 43, 46])
-        #expect(monitor.runningXcodeTargets().isEmpty)
-    }
 
     @Test func readinessWaitDoesNotMissAChangeBeforeWaiterRegistration() async throws {
         let fixture = try makeTemporaryXcodeApplication(processID: 404)
@@ -282,7 +236,6 @@ struct XcodeProcessEventMonitorTests {
 
         monitor.start()
 
-        #expect(monitor.permissionDialogProcessIDs().isEmpty)
         #expect(monitor.runningXcodeTargets().isEmpty)
         #expect(monitor.readinessSnapshot().isReady == false)
     }
@@ -313,7 +266,6 @@ struct XcodeProcessEventMonitorTests {
         #expect(observation.cancellationCount() == 1)
         #expect(observation.observationCount() == 1)
         #expect(monitor.runningXcodeTargets().isEmpty)
-        #expect(monitor.permissionDialogProcessIDs().isEmpty)
         let readinessAfterLateCallback = monitor.readinessSnapshot()
         #expect(readinessAfterLateCallback.isReady == false)
         #expect(readinessAfterLateCallback.generation == stoppedReadiness.generation)

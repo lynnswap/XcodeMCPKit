@@ -17,23 +17,19 @@ extension XcodeMCPProxyServer {
         private final class Resources: @unchecked Sendable {
             let httpGateway: any ProxyHTTPGatewayServing
             let runtime: any ProxyRuntimeServing
-            let autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
             let endpoint: Endpoint
 
             init(
                 httpGateway: any ProxyHTTPGatewayServing,
                 runtime: any ProxyRuntimeServing,
-                autoApprover: (any ProxyServerPermissionDialogAutoApprover)?,
                 endpoint: Endpoint
             ) {
                 self.httpGateway = httpGateway
                 self.runtime = runtime
-                self.autoApprover = autoApprover
                 self.endpoint = endpoint
             }
 
             func signalCancellation() {
-                autoApprover?.cancel()
                 httpGateway.cancelForDeinit()
                 runtime.cancelForDeinit()
             }
@@ -110,7 +106,6 @@ extension XcodeMCPProxyServer {
             lastEndpoint = acquired.endpoint
 
             acquired.runtime.start()
-            acquired.autoApprover?.start()
             logStartupSummary(for: acquired)
             phase = .running
             return acquired.endpoint
@@ -270,9 +265,6 @@ extension XcodeMCPProxyServer {
             logger: Logger
         ) async throws -> Resources {
             let runtime = try dependencies.makeRuntime(runtimeConfiguration)
-            let autoApprover = runtimeConfiguration.usesPermissionDialogAutomation
-                ? dependencies.makeAutoApprover(configuration, runtime)
-                : nil
             let httpGateway = dependencies.makeHTTPGateway(
                 ProxyHTTPConfiguration(
                     listenHost: configuration.listenHost,
@@ -301,12 +293,10 @@ extension XcodeMCPProxyServer {
                 return Resources(
                     httpGateway: httpGateway,
                     runtime: runtime,
-                    autoApprover: autoApprover,
                     endpoint: boundEndpoint
                 )
             } catch {
                 let operationError = error
-                autoApprover?.cancel()
                 var cleanupError: (any Error)?
                 do {
                     try await httpGateway.shutdown()
@@ -365,7 +355,6 @@ extension XcodeMCPProxyServer {
         }
 
         private static func release(_ resources: Resources) async throws {
-            resources.autoApprover?.cancel()
             var firstError: (any Error)?
 
             do {

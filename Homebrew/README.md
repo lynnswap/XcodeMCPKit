@@ -8,7 +8,7 @@ on `PATH`, or supply its bundle explicitly.
 The Formula builds versioned source with the checked-in `Package.resolved`.
 `scripts/build-release.sh` stages the commands and calls
 `scripts/build-native-host.sh`, which owns the native bundle's Info.plist,
-selected-Xcode entitlements, and signature. Swift compatibility libraries are
+selected-Xcode entitlements, and ad-hoc build signature. Swift compatibility libraries are
 collected with `swift-stdlib-tool` and located relative to the executables.
 Apple's private frameworks are loaded from the user's selected Xcode installation.
 
@@ -44,8 +44,13 @@ The job dispatches the tap's `update-formula.yml` with the source tag, commit,
 and source/Formula digests. The tap checks those inputs against the public source,
 creates or reuses a Formula PR, and starts bottle CI for its exact head. This path
 handles the first Formula and subsequent versions; it does not use Renovate.
-The tap's existing publisher uploads the tested bottle and merges the PR using
-its own `GITHUB_TOKEN`, without another human deployment approval.
+The tap prepares a candidate with the tested bottle artifact ID and digest.
+Approve its `release-signing` deployment to allow Developer ID signing and
+notarization. The signing job handles the bottle as data and does not build or
+execute its payload. A separate job installs the signed bottle, checks the Team
+ID and stable helper signing identifier, validates its notarization ticket, and
+runs the native/proxy smoke tests. The tap then uploads that exact signed bottle
+and merges the Formula PR automatically using its own `GITHUB_TOKEN`.
 
 The source workflow installs the public bottle, checks its CLI versions and
 signature, and exercises native and proxy MCP sessions against a disposable
@@ -81,7 +86,15 @@ gh secret set TAP_DISPATCH_APP_PRIVATE_KEY --repo lynnswap/XcodeMCPKit \
   --env release-publish < /path/to/existing-app.private-key.pem
 ```
 
-Only the dispatch job receives that key. The job executes the workflow's pinned
+In the tap's separate `release-signing` Environment, require the maintainer as
+reviewer, restrict branches to `main`, and disable administrator bypass. Register
+`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`, and
+`NOTARY_API_PRIVATE_KEY` as Environment secrets. Set `APPLE_TEAM_ID`,
+`NOTARY_API_KEY_ID`, and `NOTARY_API_ISSUER_ID` as Environment variables. The
+installed helper uses signing identifier `com.lynnswap.XcodeMCPNativeHost`; its
+Team ID and signing identifier remain stable across bottle upgrades.
+
+Only the source dispatch job receives the GitHub App key. The job executes the workflow's pinned
 trusted scripts and revokes its installation token when it finishes. The tap
 maintains its own CI, publication permissions, and approval settings; see its
 [maintenance guide](https://github.com/lynnswap/homebrew-tap/blob/main/CONTRIBUTING.md).

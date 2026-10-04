@@ -60,7 +60,6 @@ package struct ProxyRuntimeConfiguration: Sendable {
     package var maxMessageBytes: Int
     package var requestTimeout: TimeInterval
     package var prewarmToolsList: Bool
-    package var usesPermissionDialogAutomation: Bool
     package var initializeParamsOverride: InitializeHandshakeOverride?
 
     package init(
@@ -69,7 +68,6 @@ package struct ProxyRuntimeConfiguration: Sendable {
         maxMessageBytes: Int,
         requestTimeout: TimeInterval,
         prewarmToolsList: Bool = true,
-        usesPermissionDialogAutomation: Bool = false,
         initializeParamsOverride: InitializeHandshakeOverride? = nil
     ) {
         self.nativeHostBundleURL = nativeHostBundleURL
@@ -77,7 +75,6 @@ package struct ProxyRuntimeConfiguration: Sendable {
         self.maxMessageBytes = maxMessageBytes
         self.requestTimeout = requestTimeout
         self.prewarmToolsList = prewarmToolsList
-        self.usesPermissionDialogAutomation = usesPermissionDialogAutomation
         self.initializeParamsOverride = initializeParamsOverride
     }
 

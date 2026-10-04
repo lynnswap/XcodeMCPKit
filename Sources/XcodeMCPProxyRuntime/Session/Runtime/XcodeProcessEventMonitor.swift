@@ -10,7 +10,6 @@ protocol XcodeProcessEventMonitoring: XcodeTargetDiscovering {
     func setChangeHandler(
         _ handler: @escaping @Sendable (_ reason: String) -> Void
     )
-    func permissionDialogProcessIDs() -> [pid_t]
     func readinessSnapshot() -> UpstreamReadinessSnapshot
     func waitForReadinessChange(after generation: UInt64) async
     func stop()
@@ -74,19 +73,11 @@ final class XcodeProcessEventMonitor: XcodeProcessEventMonitoring, @unchecked Se
         var observation: Observation?
         var changeHandler: (@Sendable (_ reason: String) -> Void)?
         var targets: [XcodeProcessTarget] = []
-        var permissionDialogProcessIDs: [pid_t] = []
         var applicationSnapshotSequence: UInt64 = 0
         var readinessGeneration: UInt64 = 0
         var readinessWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
         var cancelledReadinessWaiterIDs: Set<UUID> = []
     }
-
-    private static let permissionDialogBundleIdentifiers: Set<String> = [
-        "com.apple.dt.Xcode",
-        "com.apple.dt.mcp-server",
-        "com.apple.dt.ExternalViewService",
-        "com.apple.dt.Xcode.DeveloperSystemPolicyService",
-    ]
 
     private let dependencies: Dependencies
     private let lock = NSLock()
@@ -148,10 +139,6 @@ final class XcodeProcessEventMonitor: XcodeProcessEventMonitoring, @unchecked Se
         lock.withLock { state.targets }
     }
 
-    func permissionDialogProcessIDs() -> [pid_t] {
-        lock.withLock { state.permissionDialogProcessIDs }
-    }
-
     func readinessSnapshot() -> UpstreamReadinessSnapshot {
         lock.withLock {
             UpstreamReadinessSnapshot(
@@ -201,7 +188,6 @@ final class XcodeProcessEventMonitor: XcodeProcessEventMonitoring, @unchecked Se
             state.observation = nil
             state.changeHandler = nil
             state.targets.removeAll()
-            state.permissionDialogProcessIDs.removeAll()
             state.readinessGeneration &+= 1
             let waiters = Array(state.readinessWaiters.values)
             state.readinessWaiters.removeAll()
@@ -232,16 +218,6 @@ final class XcodeProcessEventMonitor: XcodeProcessEventMonitoring, @unchecked Se
         guard let sequence else { return }
 
         let targets = dependencies.targets(applications)
-        let permissionDialogProcessIDs = applications.compactMap { application -> pid_t? in
-            guard application.processID > 0,
-                  application.isTerminated == false,
-                  let bundleIdentifier = application.bundleIdentifier,
-                  Self.permissionDialogBundleIdentifiers.contains(bundleIdentifier)
-            else {
-                return nil
-            }
-            return application.processID
-        }.sorted()
 
         let update = lock.withLock { () -> (
             changeHandler: (@Sendable (String) -> Void)?,
@@ -256,7 +232,6 @@ final class XcodeProcessEventMonitor: XcodeProcessEventMonitoring, @unchecked Se
             }
             let didChangeTargets = state.targets != targets
             state.targets = targets
-            state.permissionDialogProcessIDs = permissionDialogProcessIDs
             guard didChangeTargets else {
                 return (nil, [])
             }

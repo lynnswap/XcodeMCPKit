@@ -259,9 +259,6 @@ final class StartupChangingXcodeProcessMonitor:
         lock.withLock { callCount }
     }
 
-    func permissionDialogProcessIDs() -> [pid_t] {
-        []
-    }
 
     func readinessSnapshot() -> UpstreamReadinessSnapshot {
         UpstreamReadinessSnapshot(isReady: true, generation: 0)
@@ -298,7 +295,6 @@ final class StartRecordingXcodeProcessMonitor:
 
     func runningXcodeTargets() -> [XcodeProcessTarget] { [] }
 
-    func permissionDialogProcessIDs() -> [pid_t] { [] }
 
     func readinessSnapshot() -> UpstreamReadinessSnapshot {
         UpstreamReadinessSnapshot(isReady: false, generation: 0)

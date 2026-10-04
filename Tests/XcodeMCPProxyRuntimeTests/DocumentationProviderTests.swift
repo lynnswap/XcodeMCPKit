@@ -5834,9 +5834,6 @@ private final class StubDocumentationProcessEventMonitor:
         []
     }
 
-    func permissionDialogProcessIDs() -> [pid_t] {
-        []
-    }
 
     func readinessSnapshot() -> UpstreamReadinessSnapshot {
         UpstreamReadinessSnapshot(isReady: false, generation: 0)
