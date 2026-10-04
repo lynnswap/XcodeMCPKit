@@ -67,7 +67,7 @@ source workflow uses its own `GITHUB_TOKEN` for source tags and releases.
 In XcodeMCPKit's `release-publish` Environment:
 
 - Require the maintainer as reviewer and restrict deployment branches to `main`.
-- Disable administrator bypass. Leave self-review enabled for the sole maintainer.
+- Disable administrator bypass. Leave **Prevent self-review** off for the sole maintainer.
 - Set `TAP_DISPATCH_APP_CLIENT_ID` to the existing App's Client ID.
 - Register the same PEM key as `TAP_DISPATCH_APP_PRIVATE_KEY`. Environment secrets
   are scoped to each repository; another repository's registration is not inherited.

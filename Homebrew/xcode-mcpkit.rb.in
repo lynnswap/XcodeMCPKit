@@ -9,7 +9,7 @@ __EXPLICIT_VERSION__
   depends_on "python@3.14" => [:build, :test]
   depends_on xcode: ["27.0", :build, :test]
   depends_on arch: :arm64
-  depends_on macos: "15.4"
+  depends_on macos: :sequoia
 
   def install
     system "scripts/build-release.sh", "--version", "v#{version}", "--dist-root", buildpath/"products"
