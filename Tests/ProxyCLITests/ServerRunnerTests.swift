@@ -13,8 +13,7 @@ struct ServerRunnerTests {
                 "xcode-mcp-proxy-server",
                 "--listen",
                 "127.0.0.1:9000",
-                "--auto-approve",
-                "--force-restart",
+                    "--force-restart",
             ],
             environment: [:]
         )
@@ -23,7 +22,6 @@ struct ServerRunnerTests {
         #expect(forceRestart == true)
         #expect(config.bindAddress.host == "127.0.0.1")
         #expect(config.bindAddress.port == 9000)
-        #expect(config.approvalPolicy == .automatic)
     }
 
     @Test func serverLaunchPlanNormalizesEnvironmentDefaults() throws {
@@ -397,16 +395,7 @@ struct ServerRunnerTests {
         #expect(line.contains("--lazy-init") == false)
     }
 
-    @Test func serverRunnerDryRunPrintsAutoApproveWhenExplicitlyEnabled() async throws {
-        let result = await runServer(
-            arguments: ["xcode-mcp-proxy-server", "--auto-approve", "--dry-run"]
-        )
 
-        #expect(result.exitCode == 0)
-        #expect(result.stderr.isEmpty)
-        let line = try #require(result.stdout.first)
-        #expect(line.contains("--auto-approve"))
-    }
 
     @Test func serverRunnerRejectsRemovedXcodeMode() async {
         let result = await runServer(arguments: ["xcode-mcp-proxy-server", "--xcode-mode", "headless", "--dry-run"])

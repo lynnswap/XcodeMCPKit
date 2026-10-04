@@ -168,7 +168,7 @@ extension RuntimeCoordinator {
             return nil
         }
         applyProcessControlPlaneTransition(transition)
-        let timeoutMs = upstreamInitTimeoutAmount(for: mode).map {
+        let timeoutMs = upstreamInitTimeoutAmount().map {
             $0.nanoseconds / 1_000_000
         }
         logger.debug(

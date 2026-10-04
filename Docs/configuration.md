@@ -11,7 +11,7 @@ installations, not a version allowlist:
 | Installation | Verified behavior |
 | --- | --- |
 | Xcode 27 / Swift 6.4 | Native packaging, headless tools, and GUI tools. |
-| Xcode 26.6 | GUI tools with a workspace open; headless initialization lacks a required native contract. |
+| Xcode 26.6 | Missing the permission-store contracts required for automatic access; native helper initialization reports this error. |
 
 The server keeps the selected developer directory and reports missing framework
 or API contracts. It does not switch SDKs to make headless initialization pass.
@@ -36,7 +36,6 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `--listen host:port` | Listen address. Defaults to `localhost:8765`; cannot be combined with `--host` or `--port`. |
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. Port `0` selects an available port. |
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialization remains bounded. |
-| `--auto-approve` | Approve recognized Xcode access dialogs for all agents. Requires Accessibility permission. |
 | `--max-body-bytes bytes` | Maximum accepted HTTP request body size. |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port before starting. |
 | `--dry-run` | Print the resolved server command without starting it. |

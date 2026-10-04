@@ -376,8 +376,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
                     processID: $0.processID,
                     appPath: $0.appPath
                 )
-            } ?? [],
-            permissionDialogProcessIDs: processEventMonitor?.permissionDialogProcessIDs() ?? []
+            } ?? []
         )
     }
 

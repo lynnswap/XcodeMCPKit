@@ -26,27 +26,6 @@ struct XcodeMCPProxyServerTests {
         #expect(endpoint.url.absoluteString == "http://127.0.0.1:8765/mcp")
     }
 
-    @Test func permissionDialogCandidatesUseTheConfiguredNativeHelper() {
-        let bundleURL = URL(fileURLWithPath: "/fixtures/XcodeMCPNativeHost.app")
-        let executable = bundleURL.appendingPathComponent("Contents/MacOS/xcode-mcp-native-host").path
-        let fileSystem = testDependency(of: FileSystemClient.self) {
-            $0.isExecutableFile = { $0 == executable }
-        }
-        #expect(PermissionDialogExecutableResolver.executableCandidates(
-            bundleURL: bundleURL, developerDirectoryURL: nil, fileSystem: fileSystem
-        ) == [executable])
-    }
-
-    @Test func optionalPermissionDialogCandidatesDoNotSubstituteAnotherExecutable() {
-        let fileSystem = testDependency(of: FileSystemClient.self) {
-            $0.isExecutableFile = { _ in false }
-        }
-        #expect(PermissionDialogExecutableResolver.executableCandidates(
-            bundleURL: URL(fileURLWithPath: "/missing/NativeHost.app"),
-            developerDirectoryURL: nil, fileSystem: fileSystem
-        ).isEmpty)
-    }
-
     @Test func existingServerControllerDetectsOnlyListeningProxyServerProcesses() throws {
         let processControl = ProcessControlClient(
             runCommand: { launchPath, arguments in
@@ -138,20 +117,17 @@ struct XcodeMCPProxyServerTests {
             .get()
         let blockedPort = try #require(blocker.localAddress?.port)
 
-        let autoApprover = RecordingAutoApprover()
         let upstream = RecordingUpstreamSlot()
         let config = XcodeMCPProxyServerConfiguration(
             bindAddress: .init(host: "127.0.0.1", port: blockedPort),
 
             maxBodyBytes: 1_048_576,
-            requestTimeout: .seconds(300),
-            approvalPolicy: .automatic
+            requestTimeout: .seconds(300)
         )
         let server = XcodeMCPProxyServer(
             configuration: config,
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in autoApprover },
                 makeRuntime: { config in
                     makeServerTestRuntime(config: config, upstream: upstream)
                 }
@@ -163,7 +139,6 @@ struct XcodeMCPProxyServerTests {
             Issue.record("expected bind failure")
         } catch {}
 
-        #expect(autoApprover.startCount == 0)
         #expect(upstream.startCount == 0)
 
         try? await server.shutdown()
@@ -179,7 +154,6 @@ struct XcodeMCPProxyServerTests {
                 discovery: .disabled
             ),
             dependencies: .init(
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
                 makeRuntime: { _ in runtime }
             )
         )
@@ -190,10 +164,7 @@ struct XcodeMCPProxyServerTests {
         try await server.shutdown()
     }
 
-    @Test(arguments: [false, true])
-    func nativeStartupWithoutGUIInventoryHonorsApprovalPolicy(autoApprove: Bool) async throws {
-        let autoApproverCreations = NIOLockedValueBox(0)
-        let autoApprover = RecordingAutoApprover()
+    @Test func nativeStartupWithoutGUIInventoryPreservesInstallationSelection() async throws {
         let runtimeConfiguration = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
         let runtime = StartupInventoryRuntime()
         let bundleURL = URL(fileURLWithPath: "/fixtures/XcodeMCPNativeHost.app")
@@ -203,15 +174,10 @@ struct XcodeMCPProxyServerTests {
                 bindAddress: .init(host: "127.0.0.1", port: 0),
                 nativeHostBundleURL: bundleURL,
                 developerDirectoryURL: developerURL,
-                discovery: .disabled,
-                approvalPolicy: autoApprove ? .automatic : .manual
+                discovery: .disabled
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in
-                    autoApproverCreations.withLockedValue { $0 += 1 }
-                    return autoApprover
-                },
                 makeRuntime: { config in
                     runtimeConfiguration.withLockedValue { $0 = config }
                     return runtime
@@ -222,12 +188,8 @@ struct XcodeMCPProxyServerTests {
         let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
         #expect(captured.nativeHostBundleURL == bundleURL)
         #expect(captured.developerDirectoryURL == developerURL)
-        #expect(captured.usesPermissionDialogAutomation == autoApprove)
         #expect(runtime.inventorySnapshot().xcodeTargets.isEmpty)
-        #expect(autoApproverCreations.withLockedValue { $0 } == (autoApprove ? 1 : 0))
-        #expect(autoApprover.startCount == (autoApprove ? 1 : 0))
         try await server.shutdown()
-        #expect(autoApprover.cancelCount == (autoApprove ? 1 : 0))
     }
 
     @Test func unavailableNativeHelperFailsStartupBeforeBindingTheEndpoint() async throws {
@@ -245,20 +207,17 @@ struct XcodeMCPProxyServerTests {
     }
 
     @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {
-        let autoApprover = RecordingAutoApprover()
         let upstream = RecordingUpstreamSlot()
         let config = XcodeMCPProxyServerConfiguration(
             bindAddress: .init(host: "127.0.0.1", port: 0),
 
             maxBodyBytes: 1_048_576,
-            requestTimeout: .seconds(300),
-            approvalPolicy: .automatic
+            requestTimeout: .seconds(300)
         )
         let server = XcodeMCPProxyServer(
             configuration: config,
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in autoApprover },
                 makeRuntime: { config in
                     makeServerTestRuntime(config: config, upstream: upstream)
                 }
@@ -271,7 +230,6 @@ struct XcodeMCPProxyServerTests {
         await #expect(throws: XcodeMCPProxyServer.LifecycleError.alreadyStarted) {
             _ = try await server.start()
         }
-        #expect(autoApprover.startCount == 1)
 
         let waiter = Task {
             try await server.waitUntilShutdown()
@@ -279,47 +237,16 @@ struct XcodeMCPProxyServerTests {
         try await server.shutdown()
         try await waiter.value
         try await server.shutdown()
-        #expect(autoApprover.cancelCount == 1)
         #expect((await server.snapshot()).phase == .stopped)
     }
 
-    @Test func shutdownDoesNotWaitForCancelledAutoApproverWork() async throws {
-        let autoApprover = BlockingAutoApprover()
-        let upstream = RecordingUpstreamSlot()
-        let config = XcodeMCPProxyServerConfiguration(
-            bindAddress: .init(host: "127.0.0.1", port: 0),
 
-            maxBodyBytes: 1_048_576,
-            requestTimeout: .seconds(300),
-            approvalPolicy: .automatic
-        )
-        let server = XcodeMCPProxyServer(
-            configuration: config,
-            dependencies: .init(
-                discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in autoApprover },
-                makeRuntime: { config in
-                    makeServerTestRuntime(config: config, upstream: upstream)
-                }
-            )
-        )
-
-        _ = try await server.start()
-        try await autoApprover.waitUntilWorkStarts()
-
-        try await server.shutdown()
-
-        #expect(autoApprover.cancelCount == 1)
-        #expect(autoApprover.isWorkFinished == false)
-        await autoApprover.releaseWork()
-    }
 
     @Test func unstartedServerDoesNotCreateHTTPGateway() async throws {
         let gatewayCreationCount = NIOLockedValueBox(0)
         let server = XcodeMCPProxyServer(
             configuration: .init(discovery: .disabled),
             dependencies: .init(
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
                 makeRuntime: { _ in
                     fatalError("an unstarted server must not create a runtime")
                 },
@@ -339,16 +266,13 @@ struct XcodeMCPProxyServerTests {
     @Test func startedServerDeinitSynchronouslyCancelsRuntimeRetainTasks() async throws {
         let runtimeReference = WeakRuntimeReference()
         let upstream = RecordingUpstreamSlot()
-        let autoApprover = RecordingAutoApprover()
         var server: XcodeMCPProxyServer? = XcodeMCPProxyServer(
             configuration: .init(
                 bindAddress: .init(host: "127.0.0.1", port: 0),
-                discovery: .disabled,
-                approvalPolicy: .automatic
+                discovery: .disabled
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in autoApprover },
                 makeRuntime: { config in
                     makeServerTestRuntime(
                         config: config,
@@ -372,7 +296,6 @@ struct XcodeMCPProxyServerTests {
         ) {
             await runtimeTaskDrains.wait()
         }
-        #expect(autoApprover.cancelCount == 1)
 
         // This test deliberately omits the server's explicit shutdown contract.
         // Deinit guarantees cancellation signaling rather than awaiting teardown.
@@ -386,7 +309,6 @@ struct XcodeMCPProxyServerTests {
                 discovery: .disabled
             ),
             dependencies: .init(
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
                 makeRuntime: { _ in
                     fatalError("invalid configuration must not create a runtime")
                 },
@@ -418,7 +340,6 @@ struct XcodeMCPProxyServerTests {
             ),
             dependencies: .init(
                 discoveryClient: discoveryClient,
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
                 makeRuntime: { config in
                     makeServerTestRuntime(config: config, upstream: upstream)
                 }
@@ -445,16 +366,14 @@ struct XcodeMCPProxyServerTests {
     func shutdownDuringStartupReportsCleanupFailure(discoveryFails: Bool) async throws {
         let gateway = ControlledShutdownGateway(holdStartup: true)
         let runtime = StartupInventoryRuntime()
-        let autoApprover = RecordingAutoApprover()
         var discovery = DiscoveryClient.testValue
         if discoveryFails {
             discovery.write = { _, _ in throw DiscoveryWriteFailure.expected }
         }
         let server = XcodeMCPProxyServer(
-            configuration: .init(approvalPolicy: .automatic),
+            configuration: .init(),
             dependencies: .init(
                 discoveryClient: discovery,
-                makeAutoApprover: { _, _ in autoApprover },
                 makeRuntime: { _ in runtime },
                 makeHTTPGateway: { _, _, _ in gateway }
             )
@@ -489,7 +408,6 @@ struct XcodeMCPProxyServerTests {
             : repeatedError as? GatewayShutdownFailure == .expected)
         #expect(gateway.shutdownCount == 1)
         #expect(runtime.shutdownCount == 1)
-        #expect(autoApprover.cancelCount == 1)
         let status = await server.snapshot()
         #expect(status.phase == .stopped)
         #expect(status.endpoint == gateway.endpoint)
@@ -505,7 +423,6 @@ struct XcodeMCPProxyServerTests {
             configuration: .init(),
             dependencies: .init(
                 discoveryClient: discovery,
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
                 makeRuntime: { _ in runtime },
                 makeHTTPGateway: { _, _, _ in gateway }
             )
@@ -538,7 +455,6 @@ struct XcodeMCPProxyServerTests {
                 discovery: .disabled
             ),
             dependencies: .init(
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
                 makeRuntime: { _ in runtime },
                 makeHTTPGateway: { configuration, runtime, logger in
                     ProxyHTTPGateway(
@@ -576,7 +492,6 @@ struct XcodeMCPProxyServerTests {
         let server = XcodeMCPProxyServer(
             configuration: .init(discovery: .disabled),
             dependencies: .init(
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
                 makeRuntime: { _ in runtime },
                 makeHTTPGateway: { _, _, _ in gateway }
             )
@@ -608,7 +523,6 @@ struct XcodeMCPProxyServerTests {
             configuration: config,
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
                 makeRuntime: { config in
                     makeServerTestRuntime(config: config, upstream: upstream)
                 }
@@ -647,7 +561,6 @@ struct XcodeMCPProxyServerTests {
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeAutoApprover: { _, _ in RecordingAutoApprover() },
                 makeRuntime: { config in
                     makeServerTestRuntime(config: config, upstream: upstream)
                 }
@@ -739,77 +652,6 @@ private final class ControlledShutdownGateway: ProxyHTTPGatewayServing, Sendable
     func cancelForDeinit() {}
 }
 
-private final class RecordingAutoApprover: @unchecked Sendable, ProxyServerPermissionDialogAutoApprover {
-    private let startCountBox = NIOLockedValueBox(0)
-    private let cancelCountBox = NIOLockedValueBox(0)
-
-    var startCount: Int {
-        startCountBox.withLockedValue { $0 }
-    }
-
-    var cancelCount: Int {
-        cancelCountBox.withLockedValue { $0 }
-    }
-
-    func start() {
-        startCountBox.withLockedValue { $0 += 1 }
-    }
-
-    func cancel() {
-        cancelCountBox.withLockedValue { $0 += 1 }
-    }
-}
-
-private final class BlockingAutoApprover: @unchecked Sendable,
-    ProxyServerPermissionDialogAutoApprover
-{
-    private let started = TestSignal()
-    private let releaseSemaphore = DispatchSemaphore(value: 0)
-    private let taskBox = NIOLockedValueBox<Task<Void, Never>?>(nil)
-    private let cancelCountBox = NIOLockedValueBox(0)
-    private let isWorkFinishedBox = NIOLockedValueBox(false)
-
-    var cancelCount: Int {
-        cancelCountBox.withLockedValue { $0 }
-    }
-
-    var isWorkFinished: Bool {
-        isWorkFinishedBox.withLockedValue { $0 }
-    }
-
-    func start() {
-        let started = started
-        let releaseSemaphore = releaseSemaphore
-        let isWorkFinishedBox = isWorkFinishedBox
-        let task = Task.detached {
-            started.signal()
-            Self.waitForSynchronousWorkRelease(releaseSemaphore)
-            isWorkFinishedBox.withLockedValue { $0 = true }
-        }
-        taskBox.withLockedValue { $0 = task }
-    }
-
-    func cancel() {
-        cancelCountBox.withLockedValue { $0 += 1 }
-        taskBox.withLockedValue { $0 }?.cancel()
-    }
-
-    func waitUntilWorkStarts() async throws {
-        try await started.wait(description: "waiting for blocking auto-approver work")
-    }
-
-    func releaseWork() async {
-        releaseSemaphore.signal()
-        await taskBox.withLockedValue { $0 }?.value
-    }
-
-    private static func waitForSynchronousWorkRelease(
-        _ semaphore: DispatchSemaphore
-    ) {
-        semaphore.wait()
-    }
-}
-
 private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeServing {
     private struct State {
         var started = false
@@ -881,8 +723,7 @@ private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeSe
             state.readInventoryBeforeStart = state.readInventoryBeforeStart || state.started == false
         }
         return ProxyRuntimeInventorySnapshot(
-            xcodeTargets: [],
-            permissionDialogProcessIDs: [42]
+            xcodeTargets: []
         )
     }
 

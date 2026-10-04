@@ -631,9 +631,8 @@ struct RuntimeCoordinatorProcessRoutingTests {
         }
     }
 
-    @Test func processRouteActivationUsesShortTimeoutWhenAutoApproveEnabled() async throws {
-        var config = makeConfig(requestTimeout: 5)
-        config.usesPermissionDialogAutomation = true
+    @Test func processRouteActivationUsesTheConfiguredInitializeTimeout() async throws {
+        let config = makeConfig(requestTimeout: 5)
         let target = xcodeProcessTarget(processID: 27009, xcodeVersion: "27.0")
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
@@ -650,17 +649,16 @@ struct RuntimeCoordinatorProcessRoutingTests {
         )
         defer { fixture.shutdownAndWait() }
 
-        fixture.manager.reconcileXcodeProcessTargets([target], reason: "test_auto_approve_timeout")
+        fixture.manager.reconcileXcodeProcessTargets([target], reason: "test_initialize_timeout")
         let upstream = try #require(createdUpstreams.withLockedValue { $0.first })
         _ = try await upstream.nextSent(at: 0)
 
         #expect(timeoutScheduler.scheduledCount() == 1)
-        #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
+        #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)?.nanoseconds)
     }
 
     @Test func processRouteActivationPreservesDisabledCatalogTimeout() async throws {
-        var config = makeConfig(requestTimeout: 0)
-        config.usesPermissionDialogAutomation = true
+        let config = makeConfig(requestTimeout: 0)
         let target = xcodeProcessTarget(processID: 27025, xcodeVersion: "27.0")
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let createdUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
@@ -699,15 +697,14 @@ struct RuntimeCoordinatorProcessRoutingTests {
         )
 
         #expect(timeoutScheduler.scheduledCount() == 1)
-        #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
+        #expect(timeoutScheduler.delay(at: 0)?.nanoseconds == MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)?.nanoseconds)
         #expect(timeoutScheduler.isCancelled(at: 0))
     }
 
     @Test func processRouteActivationCatalogTimeoutCancelsBeforeRetryingSameSlot()
         async throws
     {
-        var config = makeConfig(requestTimeout: 300)
-        config.usesPermissionDialogAutomation = true
+        let config = makeConfig(requestTimeout: 300)
         let olderUpstream = TestUpstreamClient()
         let olderTarget = xcodeProcessTarget(processID: 26626, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27026, xcodeVersion: "27.0")
@@ -787,7 +784,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
         }
 
         #expect(timeoutScheduler.scheduledCount() == 3)
-        #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == TimeAmount.seconds(3).nanoseconds)
+        #expect(timeoutScheduler.delay(at: 1)?.nanoseconds == MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)?.nanoseconds)
         #expect(timeoutScheduler.delay(at: 2)?.nanoseconds == TimeAmount.seconds(10).nanoseconds)
         await firstAttempt.blockNextCancellation()
         #expect(timeoutScheduler.fire(at: 2))
@@ -1460,8 +1457,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
     @Test func staleCatalogTimeoutCannotTerminateNewerRetryLoad()
         async throws
     {
-        var config = makeConfig(requestTimeout: 20)
-        config.usesPermissionDialogAutomation = true
+        let config = makeConfig(requestTimeout: 20)
         let olderUpstream = TestUpstreamClient()
         let olderTarget = xcodeProcessTarget(processID: 26629, xcodeVersion: "26.6")
         let newerTarget = xcodeProcessTarget(processID: 27029, xcodeVersion: "27.0")
@@ -3482,8 +3478,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
     @Test func processRoutingRetriesRelaunchedProcessCatalogAfterCatalogTimeout()
         async throws
     {
-        var config = makeConfig(requestTimeout: 20)
-        config.usesPermissionDialogAutomation = true
+        let config = makeConfig(requestTimeout: 20)
         let old26Upstream = TestUpstreamClient()
         let xcode27Upstream = TestUpstreamClient()
         let old26Target = XcodeProcessTarget(
@@ -3719,7 +3714,7 @@ struct RuntimeCoordinatorProcessRoutingTests {
             upstreamReadinessGate: makeTestReadinessGate(readiness: readiness),
             xcodeProcessRoutes: [
                 XcodeProcessRoute(target: oldTarget, upstreamIndices: [0])
-            ],
+            ]
             )
         defer { fixture.shutdownAndWait() }
         let manager = fixture.manager

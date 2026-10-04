@@ -883,7 +883,7 @@ extension RuntimeCoordinator {
         initializeClaim: UpstreamHealthManager.InitializeClaim
     ) {
         guard
-            let timeoutAmount = upstreamInitTimeoutAmount(for: mode)
+            let timeoutAmount = upstreamInitTimeoutAmount()
         else {
             return
         }
@@ -924,16 +924,8 @@ extension RuntimeCoordinator {
         attachment.replaced?.cancel()
     }
 
-    func upstreamInitTimeoutAmount(for mode: WarmInitializeMode) -> TimeAmount? {
-        switch mode {
-        case .regular:
-            return MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)
-        case .processRouteActivation, .processBridgeRecovery:
-            guard config.usesPermissionDialogAutomation else {
-                return MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)
-            }
-            return .seconds(3)
-        }
+    func upstreamInitTimeoutAmount() -> TimeAmount? {
+        MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: config.requestTimeout)
     }
 
     func handleUpstreamInitTimeout(

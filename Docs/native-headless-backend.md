@@ -154,6 +154,10 @@ building. Apple's `XcodeRead` and `XcodeGetCurrentFile` implementations read the
 document's file URL from disk, including when the editor has an unsaved buffer;
 the connection preserves those native reading semantics.
 
+Automatic access requires Xcode's native permission store before either GUI or
+headless initialization. Xcode 27 provides the verified contracts. Xcode 26.6
+lacks them, so its earlier GUI messaging results below describe only the transport.
+
 The native messaging contracts vary by installation. The inspected Xcode 26.6
 provides a GUI catalog when a workspace is open, while its headless initializer
 lacks a required contract. Its cold Welcome state can disconnect before catalog or

@@ -19,7 +19,17 @@ struct NativeGUIBackendTests {
             #expect(try nativeTestField(context, "clientInfo", "version") == .string("17.4"))
             #expect(try nativeTestField(context, "clientInfo", "binaryPath") == .string(#require(Bundle.main.executableURL).path))
             #expect(try nativeTestField(context, "clientInfo", "binaryPID") == .number(.int(Int64(getpid()))))
+            #expect(try nativeTestField(context, "clientInfo", "signingIdentity") == .object([
+                "teamIdentifier": .string("HELPERTEAM"), "signingIdentifier": .string("example.helper"),
+            ]))
             #expect(fixture.backend.resultFormat == .mcpResult)
+        }
+    }
+
+    @Test func unsignedHelpersKeepTheNormalGUIApprovalPath() async throws {
+        try await withGUIBackend(identity: nil) { fixture in
+            let message = try nativeTestJSON(#require(fixture.transport.oneWayMessages.first))
+            #expect(try nativeTestField(message, "initializeSession", "context", "clientInfo", "signingIdentity") == .null)
         }
     }
 
@@ -464,8 +474,9 @@ private func guiBackendData(_ value: JSONValue) throws -> Data {
 @MainActor
 private func withGUIBackend(initialize: Bool = true, connectsImmediately: Bool = true,
                             expectedShutdownError: GUIBackendTestError? = nil,
+                            identity: NativeSigningIdentity? = .init(teamIdentifier: "HELPERTEAM", signingIdentifier: "example.helper"),
                             _ body: @MainActor (GUIBackendFixture) async throws -> Void) async throws {
-    let fixture = try GUIBackendFixture(connectsImmediately: connectsImmediately)
+    let fixture = try GUIBackendFixture(connectsImmediately: connectsImmediately, identity: identity)
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
     do {
         if initialize { try await fixture.backend.initialize(context: fixture.sessionContext) }
@@ -492,12 +503,13 @@ private final class GUIBackendFixture {
     let sessionContext = NativeSessionContext(conversationID: "client-conversation", clientInfo: [
         "name": .string("Original MCP Client"), "version": .string("17.4"),
         "binaryPath": .string("/client/supplied/path"), "binaryPID": .number(.int(-1)),
+        "signingIdentity": .object(["teamIdentifier": .string("UNTRUSTED_CLIENT_CLAIM")]),
     ])
     var toolContext: NativeToolContext {
         NativeToolContext(artifactsDirectory: directory, conversationID: sessionContext.conversationID)
     }
 
-    init(connectsImmediately: Bool) throws {
+    init(connectsImmediately: Bool, identity: NativeSigningIdentity?) throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("native-gui-backend-\(UUID().uuidString)", isDirectory: true)
         self.directory = directory
         let contents = directory.appendingPathComponent("Xcode.app/Contents", isDirectory: true)
@@ -515,12 +527,13 @@ private final class GUIBackendFixture {
         self.transport = transport
         let connection = NativeGUIConnection(processIdentifier: processIdentifier, transport: transport)
         self.connection = connection
-        backend = NativeGUIBackend(processIdentifier: processIdentifier, installation: installation) { processIdentifier, message, installation in
+        backend = NativeGUIBackend(processIdentifier: processIdentifier, installation: installation,
+                                  signingIdentity: identity, connector: { processIdentifier, message, installation in
             transport.connectorProcessIdentifiers.append(processIdentifier)
             transport.connectorDeveloperDirectories.append(installation.developerDirectory)
             try await connection.start(initializingWith: message, timeout: .seconds(10))
             return connection
-        }
+        })
     }
 
     func listTools(_ schemas: [JSONValue]) async throws -> [NativeTool] {

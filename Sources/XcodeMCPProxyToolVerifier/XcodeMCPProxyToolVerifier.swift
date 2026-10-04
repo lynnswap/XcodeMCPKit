@@ -551,7 +551,6 @@ struct ProxyToolVerifier {
         let arguments = [
             "--listen", "\(options.host):\(options.port)",
             "--request-timeout", "\(options.requestTimeoutSeconds)",
-            "--auto-approve",
         ]
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment

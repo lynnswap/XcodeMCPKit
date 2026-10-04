@@ -37,22 +37,9 @@
     It does not own runtime policy.
 - `XcodeMCPProxyKit`
   - Public server/adapter embedding facades and composition of runtime, HTTP,
-    discovery publication, and permission automation.
+    and discovery publication.
   - CLI composition, installer implementation, build metadata, and launch
     diagnostics are package/executable concerns rather than public library API.
-- `XcodeMCPPermissionAutomation`
-  - Package-internal AX adapter, permission-dialog matcher, one-scan state, and
-    owned polling lifecycle shared by the proxy and maintainer diagnostic.
-  - Owns one scanner task per caller-supplied PID so a slow helper AX call does
-    not delay approval of another Xcode process's dialog.
-  - Consumes caller-supplied Xcode/helper and agent identities. The proxy adds
-    connection-heading matching to configured-agent matching; the diagnostic
-    uses only configured-agent matching. It does not own process inventory or
-    launch processes.
-- `XcodeMCPPermissionApproverTool`
-  - Maintainer executable that validates explicit existing PIDs and runs the
-    shared permission automation until interrupted. It never launches
-    a native connection and is not installed by the release installer.
 
 ## Ownership Boundaries
 
@@ -79,7 +66,7 @@
   - Owns the KVO subscription and cached snapshots derived from
     `NSWorkspace.runningApplications`. Each callback reads the current atomic
     property; it does not treat the KVO change payload as a full snapshot.
-    GUI routing and auto-approve consume this cache; they must not add
+    GUI routing and documentation lookup consume this cache; they must not add
     independent `pgrep`, libproc, or periodic membership scans.
   - Readiness changes are generation-fenced. Route cooldown recovery is a
     route-identity-fenced one-shot timer, not a process rescan.
@@ -96,9 +83,6 @@
     contracts. Each invocation is parsed once into typed values.
   - Server environment and file configuration precedence is resolved after
     parsing and before the existing launcher/runtime lifecycle begins.
-  - `XcodeMCPPermissionApproverCommand` accepts only explicit Xcode/helper PIDs,
-    agent root PIDs, and exact path/name candidates. It has no command-launch
-    surface.
 
 ## Dependency Direction
 
@@ -115,12 +99,9 @@
   runtime serving protocol in `XcodeMCPProxyRuntimeContract` connects these
   two owners. The contract retains the NIOCore timeout value without exposing
   channels or event loops.
-- `XcodeMCPProxyKit` composes Runtime, HTTP, permission automation, and the SDK
+- `XcodeMCPProxyKit` composes Runtime, HTTP, and the SDK
   session authority used by its STDIO adapter. Its internal files contain
   facade, CLI, installation, and launch concerns.
-- `XcodeMCPPermissionAutomation` depends only on `Logging`. `XcodeMCPProxyKit`
-  and `XcodeMCPPermissionApproverTool` depend on it; the automation target does
-  not depend back on proxy/runtime targets.
 - `XcodeMCPProxyCLI`, `XcodeMCPProxyServer`, and `XcodeMCPProxyInstall` depend on
   `XcodeMCPProxyKit`; `XcodeMCPProxyToolVerifier` depends on `XcodeMCPKit`;
   `ProxyBuildInfoTool` is a standalone build-tool dependency of
@@ -199,25 +180,24 @@ for, then verify each identifier is selected by exactly one CI shard.
   - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapterTests -Xswiftc -strict-concurrency=minimal`
 - Full local maintainer check:
   - `scripts/check.sh`
-- Permission diagnostic contract:
-  - `swift test --filter XcodeMCPPermissionAutomationTests -Xswiftc -strict-concurrency=minimal`
-  - `swift test --filter XcodeMCPPermissionApproverToolTests -Xswiftc -strict-concurrency=minimal`
 
 These checks use lower process/transport fixtures and do not require GUI Xcode
 or a live native helper unless explicitly selected.
 
-## Permission dialog diagnostic
+## Automatic agent access
 
-To diagnose permission dialogs without launching a native connection, run the
-package-only maintainer tool with explicit existing process identities:
+Before a native connection starts, the helper updates Xcode's
+`DefaultHeadlessPermissionStore` through its `withState` transaction. Xcode owns
+locking, persistence, and the Keychain integrity hash. The update enables agent
+access, allows all agents, and preserves unrelated agent and folder records.
+GUI trust also requires a matching helper record: Developer ID builds use the
+actual Team ID and stable signing identifier; ad-hoc builds refresh their path,
+SHA-256, and 24-hour expiration at startup. GUI initialization carries the
+helper's verified signing identity rather than a client-supplied claim.
 
-```bash
-swift run xcode-mcp-permission-approver \
-  --xcode-pid <xcode-pid> \
-  --agent-pid <proxy-server-pid> \
-  --agent-path <proxy-server-path> \
-  --assistant-name XcodeMCPKit
-```
+Failure to read or update this native state fails helper initialization with a
+diagnostic. The native contracts determine compatibility; Xcode 27 is verified,
+and Xcode 26.6 lacks these permission-store APIs.
 
 ## Release Flow
 

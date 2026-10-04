@@ -11,6 +11,16 @@ host loads the model when no GUI owns the path. See
 
 ## Server and CLI
 
+Remove `--auto-approve` and `XcodeMCPProxyServerConfiguration.approvalPolicy`.
+The `ApprovalPolicy` type and Accessibility permission automation are removed.
+The native helper enables Xcode agent access, allows all agents, and registers
+its own identity before opening a connection. These settings persist in Xcode's
+permission store, including the policy for other agents. Source builds refresh
+the helper's path/hash grant at startup; Developer ID builds use their Team ID
+and stable signing identifier across updates. No permission-management command
+or Accessibility setup is required. Xcode installations must provide the native
+permission-store contracts; the previously verified Xcode 26.6 GUI path lacks them.
+
 Remove `--upstream-processes` and `upstreamProcessCount`. The runtime owns one
 headless host and one connection per GUI owner, with concurrent requests on each
 connection. There is no process-count replacement option.

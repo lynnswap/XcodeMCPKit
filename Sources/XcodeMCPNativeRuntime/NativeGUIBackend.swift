@@ -22,6 +22,7 @@ package final class NativeGUIBackend: NativeToolBackend {
     private let processIdentifier: Int32
     private let installation: NativeXcodeInstallation
     private let connector: Connector
+    private let signingIdentity: NativeSigningIdentity?
     private var connection: NativeGUIConnection?
     private var initialization: Task<NativeGUIConnection, any Error>?
     private var progressListener: Task<Void, Never>?
@@ -32,6 +33,7 @@ package final class NativeGUIBackend: NativeToolBackend {
     package var pendingInvocationCount: Int { invocations.count }
 
     package init(processIdentifier: Int32, installation: NativeXcodeInstallation,
+                 signingIdentity: NativeSigningIdentity?,
                  connector: @escaping Connector = { processIdentifier, message, installation in
                      try await NativeGUIConnection.connect(to: processIdentifier,
                                                            initializingWith: message,
@@ -40,6 +42,7 @@ package final class NativeGUIBackend: NativeToolBackend {
         self.processIdentifier = processIdentifier
         self.installation = installation
         self.connector = connector
+        self.signingIdentity = signingIdentity
     }
 
     package func initialize(context: NativeSessionContext) async throws {
@@ -63,6 +66,7 @@ package final class NativeGUIBackend: NativeToolBackend {
                 "sessionID": .string(context.conversationID),
                 "clientInfo": .object([
                     "name": .string(clientName), "version": .string(clientVersion),
+                    "signingIdentity": signingIdentity?.json ?? .null,
                     "binaryPath": .string(executable.path),
                     "binaryPID": .number(.int(Int64(getpid()))),
                 ]),

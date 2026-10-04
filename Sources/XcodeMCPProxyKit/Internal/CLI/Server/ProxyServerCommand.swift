@@ -31,9 +31,6 @@ package struct ProxyServerCommand: ParsableCommand {
     @Option(help: "Listen port in 0...65535. Defaults to 8765.")
     var port: Int?
 
-    @Flag(help: "Automatically approve Xcode MCP connection dialogs for all agents, including direct connections outside this proxy.")
-    var autoApprove = false
-
     @Option(help: "Maximum accepted HTTP request body size in bytes.")
     var maxBodyBytes: Int?
 

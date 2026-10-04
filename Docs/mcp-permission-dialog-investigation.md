@@ -1,5 +1,9 @@
 # MCP Connection Permission Dialog Investigation (Xcode 26.3)
 
+> Historical design/investigation. Accessibility permission automation was removed.
+> See [native routing migration](migrations/native-backend.md) for the current automatic native permission flow.
+
+
 ## Summary
 This note summarizes a static analysis of the MCP connection dialog in Xcode ("Allow “Codex” to access Xcode?"), focusing on `IDEIntelligenceChat.framework`.  
 Conclusion: **no reliable path was found to skip the dialog using external parameters alone (environment variables / plist / normal settings).**

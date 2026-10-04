@@ -1,5 +1,9 @@
 # Xcode Permission Automation Target Design
 
+> Historical design/investigation. Accessibility permission automation was removed.
+> See [native routing migration](migrations/native-backend.md) for the current automatic native permission flow.
+
+
 ## Scope contract
 
 ### Outcome

@@ -103,8 +103,9 @@ service = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
 bridge = plistlib.loads(pathlib.Path(sys.argv[2]).read_bytes())
 # The host performs both native service work and the GUI connection's process role.
 entitlements = merge(service, bridge, 'entitlements')
+entitlements['com.apple.security.cs.allow-dyld-environment-variables'] = True
 pathlib.Path(sys.argv[3]).write_bytes(plistlib.dumps(entitlements))
 PY
-/usr/bin/codesign --force --sign - --entitlements "$entitlements" "$output"
+/usr/bin/codesign --force --sign - --identifier com.lynnswap.XcodeMCPNativeHost --entitlements "$entitlements" "$output"
 /usr/bin/codesign --verify --strict "$output"
 echo "Native host: $output/Contents/MacOS/xcode-mcp-native-host"

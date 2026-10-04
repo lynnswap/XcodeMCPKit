@@ -22,7 +22,7 @@ struct NativeHostLiveTests {
 
     @Test func installedProxyPublishesTheNativeCatalogWithoutServiceSetup() async throws {
         let server = XcodeMCPProxyServer(configuration: .init(bindAddress: .localhost(port: 0),
-            discovery: .disabled, approvalPolicy: .automatic))
+            discovery: .disabled))
         let endpoint = try await server.start()
         do {
             let client = try await XcodeMCP(configuration: .init(transport: .streamableHTTP(endpoint: endpoint.url), requestTimeout: .seconds(120)))

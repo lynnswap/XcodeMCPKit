@@ -14,7 +14,7 @@ See [automatic routing migration](migrations/native-backend.md) for removed
 configuration and [the embedded API](../Sources/XcodeMCPProxyKit/README.md).
 
 ```sh
-xcode-mcp-proxy-server --auto-approve --upstream-processes 2
+xcode-mcp-proxy-server
 ```
 
 ```swift

@@ -12,8 +12,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
             bindAddress: .init(host: "localhost", port: 8765),
 
             maxBodyBytes: 1_048_576,
-            requestTimeout: .seconds(300),
-            approvalPolicy: .automatic
+            requestTimeout: .seconds(300)
         )
         let target = ProxyRuntimeInventorySnapshot.XcodeTarget(
             processID: 9004, appPath: "/Applications/Xcode.app"
@@ -31,7 +30,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
 
         Server
           URL: http://localhost:8765/mcp
-          Auto approve: enabled
+          Agent access: automatically allowed
 
         Xcode
           App: /Applications/Xcode.app
@@ -44,8 +43,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
             bindAddress: .init(host: "localhost", port: 8765),
 
             maxBodyBytes: 1_048_576,
-            requestTimeout: .seconds(300),
-            approvalPolicy: .automatic
+            requestTimeout: .seconds(300)
         )
 
         let summary = XcodeMCPProxyServer.startupSummary(
@@ -60,7 +58,7 @@ struct XcodeMCPProxyServerBuildInfoTests {
 
         Server
           URL: http://localhost:8765/mcp
-          Auto approve: enabled
+          Agent access: automatically allowed
 
         Xcode
           GUI: not detected
