@@ -18,6 +18,8 @@ cleanup() {
   trap - EXIT
   if brew list --formula --versions xcode-mcpkit >/dev/null 2>&1; then
     brew uninstall --force "$formula" || result=1
+  else
+    brew untrust --formula "$formula" || result=1
   fi
   brew untap xcodemcpkit/verification || result=1
   if [[ "$result" == 0 ]]; then rm -rf "$work"; else echo "Verification files remain at $work" >&2; fi

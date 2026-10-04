@@ -36,7 +36,7 @@ elif args[0] == "bottle" and "--merge" not in args:
     pathlib.Path("xcode-mcpkit--0.0.0-local.arm64_tahoe.bottle.json").write_text("{}")
 elif args[0] == "info":
     print(json.dumps(dict(formulae=[dict(installed=[dict(version="0.0.0-local", poured_from_bottle=True)])])))
-elif args[0] not in ("trust", "test", "untap", "bottle"):
+elif args[0] not in ("trust", "untrust", "test", "untap", "bottle"):
     raise SystemExit("Unexpected brew command: " + repr(args))
 '''
 
@@ -82,6 +82,7 @@ class HomebrewCleanupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 23)
         self.assertTrue(all(call["no_autoremove"] == "1" for call in calls))
         self.assertFalse(any(call["args"][0] == "uninstall" for call in calls))
+        self.assertEqual(calls[-2]["args"], ["untrust", "--formula", "xcodemcpkit/verification/xcode-mcpkit"])
         self.assertEqual(calls[-1]["args"], ["untap", "xcodemcpkit/verification"])
 
     def test_existing_installation_is_left_untouched(self):
