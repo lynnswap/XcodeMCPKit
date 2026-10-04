@@ -93,7 +93,8 @@ flowchart LR
 
 Keep the existing package and public products. Add an internal native runtime
 target and a host executable, packaged as an application bundle. They depend on
-ABIBridge 0.7.0 and Foundation/AppKit, and must not link the proxy's NIO runtime.
+the ABIBridge revision pinned in `Package.swift` and Foundation/AppKit, and must
+not link the proxy's NIO runtime.
 The host loads frameworks from the selected Xcode installation without copying
 or redistributing Apple's frameworks.
 

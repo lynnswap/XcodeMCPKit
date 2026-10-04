@@ -32,7 +32,7 @@ final class NativeActionBridge {
 
     func actionClass(for metadata: AnyObject) async throws -> NativeActionClass {
         let getter = try unsafe await runtime.object(metadata).getter(
-            named: "actionClass.getter : DVTFoundation.DVTStatelessAction.Type", as: NativeActionClass.self
+            named: "actionClass.getter : DVTFoundation.DVTStatelessAction.Type", as: (() -> NativeActionClass).self
         )
         return try unsafe getter.unsafeInvoke()
     }

@@ -17,7 +17,7 @@ final class NativeToolSelection {
     init(installation: NativeXcodeInstallation) async throws {
         let image = installation.framework("IDEIntelligenceChat", in: "PlugIns")
         let type = try await runtime.swiftType(named: "IDEIntelligenceChat.AppStorageChatSettings", in: .path(image))
-        let shared = try await type.staticGetter(named: "shared.getter : IDEIntelligenceChat.AppStorageChatSettings", as: AnyObject.self)
+        let shared = try await type.staticGetter(named: "shared.getter : IDEIntelligenceChat.AppStorageChatSettings", as: (() -> AnyObject).self)
         settings = try unsafe shared.unsafeInvoke()
         unsafe (metadata = unsafeBitCast(Swift.type(of: settings), to: UnsafeRawPointer.self))
         let protocolSymbol = try await runtime.resolve(.init(name: "protocol descriptor for IDEIntelligenceChat.ChatSettings", language: .swift, kind: .data), in: .path(image))
