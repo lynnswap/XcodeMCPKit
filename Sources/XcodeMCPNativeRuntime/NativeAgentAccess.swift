@@ -36,19 +36,6 @@ package final class NativeAgentAccess {
         try await update(NativeAgentGrant(executable: executable, identity: identity))
     }
 
-    package func snapshot() async throws -> [String: JSONValue] {
-        let snapshot = try await storeType.method(
-            named: "snapshot() -> \(stateType.name)", as: (() -> NativeSwiftValue).self,
-            valueABIs: [stateType: .opaque(named: stateType.name)])
-        let value = try unsafe snapshot.unsafeInvoke(on: store)
-        return try value.withCopy { copy in
-            guard let encodable = copy as? any Encodable else {
-                throw NativeRuntimeError.unsupportedContract("Xcode's permission snapshot is not Encodable")
-            }
-            return try NativeAgentGrant.decode(JSONEncoder().encode(encodable))
-        }
-    }
-
     package func update(_ grant: NativeAgentGrant) async throws {
         try await edit(stateMetadata, grant: grant)
     }

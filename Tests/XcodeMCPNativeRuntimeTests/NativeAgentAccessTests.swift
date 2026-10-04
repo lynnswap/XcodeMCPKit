@@ -77,8 +77,6 @@ struct NativeAgentAccessTests {
         #expect(fixture.state.enabled)
         #expect(fixture.state.alwaysAllowAgents)
         #expect(fixture.state.onboardingWatermark == 7)
-        let snapshot = try await access.snapshot()
-        #expect(snapshot["onboardingWatermark"] == .number(.int(7)))
         fixture.failWrites = true
         await #expect(throws: (any Error).self) { try await access.update(NativeAgentGrant(identity: .signed(identity))) }
         #expect(fixture.state.agentPermissions.count == 1)
@@ -115,8 +113,6 @@ public final class NativePermissionStoreFixture: NSObject {
     var state = NativePermissionFixtureState()
     var transactions = 0
     var failWrites = false
-
-    @inline(never) public func snapshot() -> NativePermissionFixtureState { state }
 
     @inline(never) public func withState<Value>(_ body: (inout NativePermissionFixtureState) throws -> Value) throws -> Value {
         if failWrites { throw NSError(domain: "NativePermissionStoreFixture", code: 1) }
