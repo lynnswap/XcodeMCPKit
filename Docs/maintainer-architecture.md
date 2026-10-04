@@ -221,67 +221,24 @@ swift run xcode-mcp-permission-approver \
 
 ## Release Flow
 
-Create a draft with the approved version, title, notes, and source commit, then
-dispatch `release.yml` from the default branch. A successful run attaches the
-verified assets and publishes that same release automatically. Its title and
-notes are preserved; no local process needs to wait for the run.
+[Homebrew distribution](../Homebrew/README.md) owns the maintainer setup,
+approval, publication, and recovery instructions. Start an approved release with
+`scripts/release.py start`; CI pins the target commit and publication content,
+prepares the source tag and Formula, and waits for `release-publish` approval
+before using the GitHub App key to dispatch the tap update. The tap publishes
+tested bottles, and source CI verifies the installed public bottle before
+publishing the same Draft.
 
-```bash
-gh release create v1.2.3 --repo lynnswap/XcodeMCPKit --draft \
-  --target <approved-commit-sha> --title v1.2.3 \
-  --notes-file /path/to/release-notes.md
-gh workflow run release.yml --repo lynnswap/XcodeMCPKit --ref main -f version=v1.2.3
-```
-
-For a prerelease, add `--prerelease` when creating the draft. The workflow retains
-that setting. An existing draft prepared in GitHub can target `main`; the first
-job pins it to the workflow's full commit SHA. A draft already targeting a SHA
-must match the workflow commit. Creating or editing a draft does not start the
-workflow; dispatch it once with the draft's tag.
-
-The workflow runs package tests and the process/STDIO adapter suites, builds the
-arm64 archive, and verifies checksums, archive contents, and generated installer
-contents. The publish job downloads the build's artifact by ID, checks it against
-the build's archive digest, uploads the three assets, and verifies their uploaded
-digests before publishing. It creates any missing tag at the tested commit before
-making the draft public. A tag creation conflict or failure stops publication;
-an existing tag must point to the tested commit. The target stays fixed even if
-`main` advances during the run.
-
-Failures before publication leave the draft available. Rerun failed jobs to reuse
-successful builds; uploads replace the draft's assets with the verified files.
-If publication fails after tag creation, the tag remains at the tested commit
-and is reused on retry.
-Remove unrelated draft attachments before retrying publication. Keep the tag,
-target commit, and prerelease setting unchanged during a run. Title and note edits
-are preserved. If publication succeeded but confirmation failed, rerunning the
-publish job verifies the public release's assets and tag without modifying it.
-
-GitHub Releases contain `install.sh`, `xcode-mcp-proxy-darwin-arm64.tar.gz`, and
-`SHA256SUMS.txt`. The archive contains both proxy executables and the signed
-`bin/XcodeMCPNativeHost.app`. The checksum file covers both the archive and installer.
-x86_64 and universal archives are not produced.
-
-`scripts/build-native-host.sh` is the sole owner of native app Info.plist,
-selected-Xcode entitlement extraction, and signing. Source installation and
-release assembly invoke it rather than duplicate that configuration. Native
-packaging has been verified with Xcode 27 / Swift 6.4. The release build job
-must select an installation containing the required native service/GUI
-contracts; missing contracts fail with diagnostics instead of a version allowlist.
-
-Installers stage on the destination filesystem and verify the app signature
-before replacement. Darwin atomic directory swap moves an existing app into
-staging; cleanup failure reports the completed install and remaining staging
-path. Binary rename and executable permissions retain their install contract.
-Archive verification permits only the expected proxy files and signed native
-app subtree, including CodeResources. It rejects bundled Apple frameworks and
-links. Darwin verifies the app signature; publication also checks the trusted
-archive digest on the downloaded artifact.
+`scripts/build-native-host.sh` remains the sole owner of the native app's
+Info.plist, selected-Xcode entitlement extraction, and signing. Both source
+installation and Homebrew builds use it. Homebrew keeps the signed bundle beside
+the commands in `libexec` and links the commands into `bin`.
+The source installer retains its atomic replacement and cleanup diagnostics.
 
 Release orchestration tests run in CI and locally with:
 
 ```bash
-python3 -m unittest discover -s scripts/tests -v
+python3 -B -m unittest discover -s scripts/tests -v
 ```
 
 ## Stress Suite

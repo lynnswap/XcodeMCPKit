@@ -59,7 +59,7 @@ products=(
 pushd "$repo_root" >/dev/null
 
 for product in "${products[@]}"; do
-  XCODE_MCP_BUILD_VERSION="$version" swift build -c release \
+  XCODE_MCP_BUILD_VERSION="$version" swift build -c release --disable-sandbox --force-resolved-versions \
     -Xswiftc -strict-concurrency=minimal \
     --arch "$arch" \
     --product "$product"
@@ -71,9 +71,6 @@ mkdir -p "$bin_out"
 
 for product in "${products[@]}"; do
   source_path="$bin_path/$product"
-  if [[ ! -f "$source_path" ]]; then
-    source_path="$(find "$repo_root/.build" -type f -path "*/release/$product" | head -n 1 || true)"
-  fi
   if [[ -z "$source_path" || ! -f "$source_path" ]]; then
     echo "Failed to locate built binary: $product" >&2
     exit 1
@@ -82,6 +79,9 @@ for product in "${products[@]}"; do
   target_path="$bin_out/$product"
   cp "$source_path" "$target_path"
   chmod +x "$target_path"
+  xcrun swift-stdlib-tool --copy --platform macosx --scan-executable "$target_path" \
+    --destination "$bin_out/xcode-mcp-runtime"
+  xcrun install_name_tool -add_rpath '@loader_path/xcode-mcp-runtime' "$target_path"
   if command -v lipo >/dev/null 2>&1; then
     archs="$(lipo -archs "$target_path")"
     if [[ "$archs" != "arm64" ]]; then
@@ -92,6 +92,11 @@ for product in "${products[@]}"; do
   if command -v codesign >/dev/null 2>&1; then
     codesign --force --sign - "$target_path" >/dev/null
   fi
+done
+
+for library in "$bin_out/xcode-mcp-runtime/"*.dylib; do
+  [[ -f "$library" ]] || continue
+  codesign --force --sign - "$library"
 done
 
 XCODE_MCP_BUILD_VERSION="$version" "$repo_root/scripts/build-native-host.sh" \
