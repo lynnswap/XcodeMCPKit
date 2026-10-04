@@ -12,12 +12,16 @@ if brew list --formula --versions xcode-mcpkit >/dev/null 2>&1; then
   echo "Use a clean Homebrew installation to verify xcode-mcpkit; an existing keg was not changed." >&2
   exit 1
 fi
+trusted_before="$(brew trust --formula --json=v1 | python3 -c 'import json, sys; print("true" if sys.argv[1] in json.load(sys.stdin) else "false")' "$formula")"
 work="$(mktemp -d)"
+added_trust=false
 cleanup() {
   result=$?
   trap - EXIT
   if brew list --formula --versions xcode-mcpkit >/dev/null 2>&1; then
     brew uninstall --force "$formula" || result=1
+  elif [[ "$added_trust" == true ]]; then
+    brew untrust --formula "$formula" || result=1
   fi
   brew untap xcodemcpkit/verification || result=1
   if [[ "$result" == 0 ]]; then rm -rf "$work"; else echo "Verification files remain at $work" >&2; fi
@@ -33,6 +37,7 @@ expected_version="v${expected_version#xcode-mcpkit-}"
 cache="$(brew --cache --build-from-source "$formula")"
 mkdir -p "$(dirname "$cache")"
 cp "$source_archive" "$cache"
+if [[ "$trusted_before" == false ]]; then added_trust=true; fi
 brew trust --formula "$formula"
 brew install --build-bottle "$formula"
 cd "$work"

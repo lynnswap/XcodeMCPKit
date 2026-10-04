@@ -22,6 +22,8 @@ elif args[0] == "tap-new":
 elif args[0] == "--repository":
     print(root/"tap")
 elif args[0] == "--cache":
+    if os.environ.get("FAIL_SETUP"):
+        sys.exit(23)
     print(root/"cache"/args[1])
 elif args[0] == "install":
     if os.environ.get("FAIL_INSTALL"):
@@ -36,13 +38,15 @@ elif args[0] == "bottle" and "--merge" not in args:
     pathlib.Path("xcode-mcpkit--0.0.0-local.arm64_tahoe.bottle.json").write_text("{}")
 elif args[0] == "info":
     print(json.dumps(dict(formulae=[dict(installed=[dict(version="0.0.0-local", poured_from_bottle=True)])])))
-elif args[0] not in ("trust", "test", "untap", "bottle"):
+elif args[0] == "trust" and "--json=v1" in args:
+    print(json.dumps(["xcodemcpkit/verification/xcode-mcpkit"] if os.environ.get("EXISTING_TRUST") else []))
+elif args[0] not in ("trust", "untrust", "test", "untap", "bottle"):
     raise SystemExit("Unexpected brew command: " + repr(args))
 '''
 
 
 class HomebrewCleanupTests(unittest.TestCase):
-    def run_verification(self, existing=False, fail=False):
+    def run_verification(self, existing=False, fail=False, fail_setup=False, trusted=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -64,6 +68,10 @@ class HomebrewCleanupTests(unittest.TestCase):
                    BREW_FIXTURE=str(root), HOMEBREW_NO_AUTOREMOVE="0", TMPDIR=str(root))
         if fail:
             env["FAIL_INSTALL"] = "1"
+        if fail_setup:
+            env["FAIL_SETUP"] = "1"
+        if trusted:
+            env["EXISTING_TRUST"] = "1"
         result = subprocess.run(["bash", str(Path(__file__).resolve().parents[1]/"test-homebrew.sh"), str(assets)],
                                 env=env, capture_output=True, text=True)
         return result, root, [json.loads(line) for line in (root/"calls").read_text().splitlines()]
@@ -82,6 +90,7 @@ class HomebrewCleanupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 23)
         self.assertTrue(all(call["no_autoremove"] == "1" for call in calls))
         self.assertFalse(any(call["args"][0] == "uninstall" for call in calls))
+        self.assertEqual(calls[-2]["args"], ["untrust", "--formula", "xcodemcpkit/verification/xcode-mcpkit"])
         self.assertEqual(calls[-1]["args"], ["untap", "xcodemcpkit/verification"])
 
     def test_existing_installation_is_left_untouched(self):
@@ -89,6 +98,14 @@ class HomebrewCleanupTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((root/"installed").exists())
         self.assertEqual(len(calls), 1)
+
+    def test_failures_preserve_preexisting_trust_and_do_not_revoke_before_granting(self):
+        for options in (dict(fail=True, trusted=True), dict(fail_setup=True, trusted=True),
+                        dict(fail_setup=True, trusted=False)):
+            with self.subTest(options=options):
+                result, _, calls = self.run_verification(**options)
+                self.assertEqual(result.returncode, 23)
+                self.assertFalse(any(call["args"][0] == "untrust" for call in calls))
 
 
 if __name__ == "__main__":
