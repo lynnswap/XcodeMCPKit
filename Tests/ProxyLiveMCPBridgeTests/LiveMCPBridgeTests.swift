@@ -27,7 +27,14 @@ struct NativeHostLiveTests {
         do {
             let client = try await XcodeMCP(configuration: .init(transport: .streamableHTTP(endpoint: endpoint.url), requestTimeout: .seconds(120)))
             do {
-                let tools = try await client.listTools()
+                let clock = ContinuousClock()
+                let deadline = clock.now.advanced(by: .seconds(60))
+                var tools = try await client.listTools()
+                // A GUI catalog can arrive before the independent headless host is ready.
+                while !tools.contains(where: { $0.name == "XcodeOpenWorkspace" }), clock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(100))
+                    tools = try await client.listTools()
+                }
                 #expect(tools.contains { $0.name == "XcodeOpenWorkspace" })
                 #expect(tools.contains { $0.name == "XcodeListWindows" })
                 #expect(tools.contains { $0.name == "DocumentationSearch" })
@@ -37,6 +44,9 @@ struct NativeHostLiveTests {
                 throw error
             }
             try await server.shutdown()
+            try await server.shutdown()
+            let stopped = await server.snapshot()
+            #expect(stopped.phase == .stopped)
         } catch {
             do { try await server.shutdown() }
             catch let cleanupError {

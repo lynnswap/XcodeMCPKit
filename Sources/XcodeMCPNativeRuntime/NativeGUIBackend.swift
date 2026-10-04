@@ -148,7 +148,7 @@ package final class NativeGUIBackend: NativeToolBackend {
                     do {
                         continuation.yield(try NativeGUICodec.event("error", data: .string(String(describing: error))))
                     } catch let encodingError {
-                        FileHandle.standardError.write(Data(("Native GUI tool failed: \(error); error encoding also failed: \(encodingError)\n").utf8))
+                        try? FileHandle.standardError.write(contentsOf: Data(("Native GUI tool failed: \(error); error encoding also failed: \(encodingError)\n").utf8))
                     }
                 }
             }
@@ -235,7 +235,7 @@ package final class NativeGUIBackend: NativeToolBackend {
             do { try connection.invalidate() } catch { errors.append(error) }
         }
         if unconfirmed > 0 {
-            FileHandle.standardError.write(Data(("Native GUI shutdown disconnected from Xcode process \(processIdentifier) with \(unconfirmed) uncancellable tool call(s) still awaiting replies; native operations may continue.\n").utf8))
+            try? FileHandle.standardError.write(contentsOf: Data(("Native GUI shutdown disconnected from Xcode process \(processIdentifier) with \(unconfirmed) uncancellable tool call(s) still awaiting replies; native operations may continue.\n").utf8))
         }
         shutdownTask = Task { @MainActor in
             try await self.finishShutdown(pending: pending, connecting: connecting,
