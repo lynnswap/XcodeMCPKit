@@ -5,24 +5,17 @@ import Foundation
 final class NativeWorkspaceRegistry {
     private let runtime = ABIRuntime.shared
     private let registry: AnyObject
-    private let workspaceInfoType: Any.Type
 
     init(installation: NativeXcodeInstallation) async throws {
         let type = try await runtime.swiftType(named: "IDEFoundation.IDEWorkspaceRegistry", in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
-        let shared = try await type.staticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: AnyObject.self)
+        let shared = try await type.staticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)
         registry = try unsafe shared.unsafeInvoke()
-        _ = try await runtime.swiftType(named: "IDEFoundation.IDEWorkspaceRegistry.WorkspaceInfo",
-                                        in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
-        guard let workspaceInfoType = _typeByName("13IDEFoundation20IDEWorkspaceRegistryC13WorkspaceInfoV") else {
-            throw NativeRuntimeError.unsupportedContract("Native workspace registry entry type is unavailable")
-        }
-        self.workspaceInfoType = workspaceInfoType
     }
 
     func resolve(_ selector: String, opensIfMissing: Bool = true) async throws -> String {
         if selector.hasPrefix("/") {
             let path = URL(fileURLWithPath: selector).standardizedFileURL.resolvingSymlinksInPath().path
-            let matches = try await entries(workspaceInfoType).filter { entry in
+            let matches = try await entries().filter { entry in
                 entry.path.map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path } == path
             }
             if let match = matches.first {
@@ -43,7 +36,7 @@ final class NativeWorkspaceRegistry {
                 if error.withUnderlyingError({ $0 is CancellationError }) { throw CancellationError() }
                 throw NativeToolExecutionError(message: error.description)
             }
-            let getter = try await runtime.object(workspace).getter(named: "workspaceIdentifier", as: String.self)
+            let getter = try await runtime.object(workspace).getter(named: "workspaceIdentifier", as: (() -> String).self)
             let identifier = try unsafe getter.unsafeInvoke()
             return identifier
         }
@@ -61,7 +54,7 @@ final class NativeWorkspaceRegistry {
     // This registry belongs to the headless host process. Its native snapshot
     // also includes opens whose completion event a cancelled caller did not see.
     func closeAllWorkspaces() async throws {
-        let identifiers = Set(try await entries(workspaceInfoType).map(\.identifier))
+        let identifiers = Set(try await entries().map(\.identifier))
         let close = try await runtime.object(registry).method(named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self)
         var failures: [String] = []
         for identifier in identifiers.sorted() {
@@ -76,18 +69,24 @@ final class NativeWorkspaceRegistry {
         }
     }
 
-    private func entries<T>(_ type: T.Type) async throws -> [(identifier: String, path: String?)] {
+    private func entries() async throws -> [(identifier: String, path: String?)] {
         let list = try await runtime.object(registry).method(
-            named: "list()", as: (() -> [T]).self)
-        let values = try unsafe list.unsafeInvoke()
-        return try values.map { value in
-            let fields = Mirror(reflecting: value).children
-            guard let identifier = fields.first(where: { $0.label == "identifier" })?.value as? String,
-                  let pathField = fields.first(where: { $0.label == "path" }),
-                  let path = pathField.value as? String? else {
-                throw NativeRuntimeError.unsupportedContract("Native workspace registry entry has no identifier or optional path")
+            named: "list() -> Swift.Array<IDEFoundation.IDEWorkspaceRegistry.WorkspaceInfo>",
+            as: (() -> NativeSwiftValue).self)
+        let snapshot = try unsafe list.unsafeInvoke()
+        return try snapshot.withCopy { value in
+            guard let values = value as? [Any] else {
+                throw NativeRuntimeError.unsupportedContract("Native workspace registry did not return an array")
             }
-            return (identifier, path)
+            return try values.map { value in
+                let fields = Mirror(reflecting: value).children
+                guard let identifier = fields.first(where: { $0.label == "identifier" })?.value as? String,
+                      let pathField = fields.first(where: { $0.label == "path" }),
+                      let path = pathField.value as? String? else {
+                    throw NativeRuntimeError.unsupportedContract("Native workspace registry entry has no identifier or optional path")
+                }
+                return (identifier, path)
+            }
         }
     }
 }

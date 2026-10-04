@@ -19,7 +19,8 @@
     It does not own Xcode process inventory, MCP sessions, or provider routing.
 - `XcodeMCPNativeRuntime` and `XcodeMCPNativeHost`
   - Load selected Xcode frameworks and invoke native tool contracts through
-    ABIBridge 0.7 method handles.
+    ABIBridge method handles with complete function signatures. Workspace
+    snapshots use owned runtime values without importing Xcode's entry type.
   - Own workspace-model resources, native action streams, GUI connections,
     and helper STDIO framing/initialization.
   - Missing native contracts return diagnostics; tool failures and transport

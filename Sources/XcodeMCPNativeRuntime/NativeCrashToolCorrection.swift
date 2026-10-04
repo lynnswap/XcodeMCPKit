@@ -21,8 +21,8 @@ final class NativeCrashToolCorrection {
 
     private let runtime = ABIRuntime.shared
     private let installation: NativeXcodeInstallation
-    private var topMethod: NativeSwiftAsyncMethod<NativeAnalyticsDictionary, String, AnyObject, NativeAnalyticsBoolean, String?, NativeAnalyticsInteger>?
-    private var logsMethod: NativeSwiftAsyncMethod<NativeAnalyticsDictionary, String, String, AnyObject, NativeAnalyticsBoolean, String?>?
+    private var topMethod: NativeSwiftMethod<@concurrent (String, AnyObject, NativeAnalyticsBoolean, String?, NativeAnalyticsInteger) async throws -> NativeAnalyticsDictionary>?
+    private var logsMethod: NativeSwiftMethod<@concurrent (String, String, AnyObject, NativeAnalyticsBoolean, String?) async throws -> NativeAnalyticsDictionary>?
     private var operations: [UUID: Task<Void, Never>] = [:]
 
     init(installation: NativeXcodeInstallation) {
@@ -120,7 +120,7 @@ final class NativeCrashToolCorrection {
         do {
             switch kind {
             case .topIssues:
-                let prepared: NativeSwiftAsyncMethod<NativeAnalyticsDictionary, String, AnyObject, NativeAnalyticsBoolean, String?, NativeAnalyticsInteger>
+                let prepared: NativeSwiftMethod<@concurrent (String, AnyObject, NativeAnalyticsBoolean, String?, NativeAnalyticsInteger) async throws -> NativeAnalyticsDictionary>
                 if let topMethod { prepared = topMethod } else {
                     let bound = try await runtime.object(downloader).method(
                         named: "getTopCrashPoints(bundleId: Swift.String, platform: __C.DVTPlatform, isBeta: Swift.Optional<Swift.Bool>, appVersion: Swift.Optional<Swift.String>, count: Swift.Optional<Swift.Int>) async throws -> Swift.Dictionary<Swift.String, Any>",
@@ -132,7 +132,7 @@ final class NativeCrashToolCorrection {
                 value = try unsafe await method.unsafeInvoke(context.bundleIdentifier, context.platform,
                     NativeAnalyticsBoolean(value: input.isBeta), input.appVersion, NativeAnalyticsInteger(value: input.count ?? 5)).value
             case .logs:
-                let prepared: NativeSwiftAsyncMethod<NativeAnalyticsDictionary, String, String, AnyObject, NativeAnalyticsBoolean, String?>
+                let prepared: NativeSwiftMethod<@concurrent (String, String, AnyObject, NativeAnalyticsBoolean, String?) async throws -> NativeAnalyticsDictionary>
                 if let logsMethod { prepared = logsMethod } else {
                     let bound = try await runtime.object(downloader).method(
                         named: "getCrashLogs(bundleId: Swift.String, signatureName: Swift.String, platform: __C.DVTPlatform, isBeta: Swift.Optional<Swift.Bool>, appVersion: Swift.Optional<Swift.String>) async throws -> Swift.Dictionary<Swift.String, Any>",
@@ -161,7 +161,7 @@ final class NativeCrashToolCorrection {
         guard kind == .logs else { return json }
         let reportType = try await runtime.swiftType(named: "DVTAnalytics.AnalyticsReportType",
             in: .path(installation.framework("DVTAnalytics", in: "SharedFrameworks")))
-        let crashType = try await reportType.staticGetter(named: "crashPoint.getter : DVTAnalytics.AnalyticsReportType", as: AnyObject.self)
+        let crashType = try await reportType.staticGetter(named: "crashPoint.getter : DVTAnalytics.AnalyticsReportType", as: (() -> AnyObject).self)
         let provider = try await runtime.swiftType(named: "IDEAnalytics.TriageKnowledgeProvider",
             in: .path(installation.framework("IDEAnalytics", in: "PlugIns")))
         let format = try await provider.staticMethod(
@@ -300,7 +300,7 @@ final class NativeCrashToolCorrection {
     private func workspace(identifier: String?) async throws -> AnyObject? {
         guard let identifier else { return nil }
         let type = try await runtime.swiftType(named: "IDEFoundation.IDEWorkspaceRegistry", in: .path(installation.framework("IDEFoundation")))
-        let shared = try await type.staticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: AnyObject.self)
+        let shared = try await type.staticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)
         let registry = try unsafe shared.unsafeInvoke()
         let lookup = try await runtime.object(registry).method(named: "workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)
         return try unsafe lookup.unsafeInvoke(identifier)
