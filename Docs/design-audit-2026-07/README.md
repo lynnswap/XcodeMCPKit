@@ -20,7 +20,7 @@
 | A — control plane | 完了 | `ProcessControlPlaneAuthority`、`WindowOwnershipAuthority`、`UpstreamTopologyAuthority` がsemantic stateとexact leaseを所有し、coordinatorはI/O/effect配線に限定する |
 | B — lifecycle / protocol | 完了 | SDKとSTDIO adapterは単一`MCPClientSessionAuthority`を共有し、typed 404 recovery、1 logical deadline、cancel/progress/pagination、明示closeを同じownerで完結する。内部transportはsingle-messageのみ |
 | C — public API | 完了 | server/adapterはasync one-shot lifecycleとsanitized snapshotを公開し、launch-plan/installer library surface、旧CLI flag redirect、旧SDK escape hatchを直接削除した |
-| D — hygiene / docs | 完了 | 実在するnon-product test-support moduleの外部import失敗を検査し、architecture、module README、[breaking migration](../migration-2026-07.md)を現行surfaceへ同期した |
+| D — hygiene / docs | 完了 | 実在するnon-product test-support moduleの外部import失敗を検査し、architecture、module README、[breaking migration](../migrations/v0.14.0.md)を現行surfaceへ同期した |
 
 完了シグナル:
 

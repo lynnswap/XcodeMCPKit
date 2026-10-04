@@ -1,9 +1,13 @@
 # Native routing migration
 
+The native backend is available on `main`. Published v0.17.0 uses the earlier
+backend; its [README](https://github.com/lynnswap/XcodeMCPKit/blob/v0.17.0/README.md)
+records that version's setup.
+
 The proxy starts an owned native host and discovers GUI Xcode owners. Pass an
 absolute `workspaceIdentifier`; an open GUI owner takes priority, and the native
 host loads the model when no GUI owns the path. See
-[Select a workspace](../README.md#select-a-workspace).
+[Select a workspace](../usage.md#select-a-workspace).
 
 ## Server and CLI
 

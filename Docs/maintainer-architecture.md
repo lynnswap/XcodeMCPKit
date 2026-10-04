@@ -205,6 +205,19 @@ for, then verify each identifier is selected by exactly one CI shard.
 These checks use lower process/transport fixtures and do not require GUI Xcode
 or a live native helper unless explicitly selected.
 
+## Permission dialog diagnostic
+
+To diagnose permission dialogs without launching a native connection, run the
+package-only maintainer tool with explicit existing process identities:
+
+```bash
+swift run xcode-mcp-permission-approver \
+  --xcode-pid <xcode-pid> \
+  --agent-pid <proxy-server-pid> \
+  --agent-path <proxy-server-path> \
+  --assistant-name XcodeMCPKit
+```
+
 ## Release Flow
 
 Create a draft with the approved version, title, notes, and source commit, then
