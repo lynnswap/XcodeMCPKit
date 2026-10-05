@@ -253,6 +253,7 @@ extension RuntimeCoordinator {
             switch commit {
             case .accepted(let snapshot, let transition):
                 applyProcessControlPlaneTransition(transition)
+                testHooks.unboundToolsCatalogCommitted?(sourceProof.slotID.rawValue)
                 await onFreshProvider(sourceProof)
                 guard let rawResult = snapshot.canonicalToolsCatalogRaw else {
                     throw UpstreamSlotScheduler.AcquisitionError.unavailable
