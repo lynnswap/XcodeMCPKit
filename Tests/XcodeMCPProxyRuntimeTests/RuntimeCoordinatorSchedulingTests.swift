@@ -356,7 +356,13 @@ struct RuntimeCoordinatorSchedulingTests {
         let eventLoop = group.next()
         let upstream = AlwaysOverloadedUpstreamClient()
         let config = makeConfig(requestTimeout: 2)
-        let manager = RuntimeCoordinator(config: config, eventLoop: eventLoop, upstreams: [upstream])
+        // Eager initialization can retire this mock before the client registers.
+        let manager = RuntimeCoordinator(
+            config: config,
+            eventLoop: eventLoop,
+            upstreams: [upstream],
+            startImmediately: false
+        )
         defer { manager.shutdownAndWait() }
 
         let original = JSONRPC.ID(any: NSNumber(value: 1001))!
