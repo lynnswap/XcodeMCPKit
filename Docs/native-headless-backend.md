@@ -339,6 +339,16 @@ gets a separate artifacts directory in one conversation. Cancellation targets
 the matching request and propagates through the native action stream. EOF
 cancels outstanding requests and closes models owned by this host.
 
+The proxy CLI exits immediately on `SIGTERM`; it does not await public
+`shutdown()`. Its helpers observe stdin EOF and finish their own cleanup. A helper
+still initializing handles EOF once native initialization returns. Losing the
+parent's stdout or stderr reader must not interrupt that cleanup, so diagnostic
+writes use the throwing `FileHandle` API and tolerate an unavailable stderr.
+Embedding hosts should await `XcodeMCPProxyServer.shutdown()` when they need
+confirmation that owned resources have stopped and any cleanup failures reported.
+Helper exit does not confirm that an already-dispatched operation in GUI Xcode
+was cancelled.
+
 By default, the standalone host describes its own windowless state. Its window
 list is empty, and current-editor operations return a native error when no editor
 exists. To use the actual state of an existing Xcode process, start the helper

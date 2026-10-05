@@ -381,7 +381,7 @@ final class NativeCrashToolCorrection {
     private func errorEvent(_ error: any Error) -> Data {
         do { return try event("error", data: .string(String(describing: error))) }
         catch let encodingError {
-            FileHandle.standardError.write(Data("Native analytics failed: \(error); error encoding also failed: \(encodingError)\n".utf8))
+            try? FileHandle.standardError.write(contentsOf: Data("Native analytics failed: \(error); error encoding also failed: \(encodingError)\n".utf8))
             return Data(#"{"type":"error","data":"Could not encode the native analytics failure; see host diagnostics"}"#.utf8)
         }
     }

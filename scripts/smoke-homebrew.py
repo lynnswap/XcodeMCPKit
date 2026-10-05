@@ -51,6 +51,33 @@ async def exercise(process, fixture):
         raise RuntimeError(f"Installed native backend could not read the fixture: {result}")
 
 
+def verify_closed_pipes(executable, artifacts, environment):
+    # A parent can exit with initialization queued and both output readers closed.
+    with subprocess.Popen(
+        [str(executable), "--artifacts-root", str(artifacts)], env=environment,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ) as process:
+        try:
+            process.stdin.write(json.dumps(dict(
+                jsonrpc="2.0", id=1, method="initialize",
+                params=dict(protocolVersion="2025-06-18", capabilities={},
+                            clientInfo=dict(name="XcodeMCPKitDisconnectTest", version="1")),
+            )).encode() + b"\n")
+            process.stdin.close()
+            process.stdout.close()
+            process.stderr.close()
+            try:
+                status = process.wait(timeout=30)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("Native helper survived stdin EOF with closed output pipes") from error
+            if status not in (0, 1):
+                raise RuntimeError(f"Native helper crashed after its parent disconnected: {status}")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
 async def verify(prefix, version, fixture_source):
     server = prefix / "bin/xcode-mcp-proxy-server"
     adapter = prefix / "bin/xcode-mcp-proxy"
@@ -69,6 +96,9 @@ async def verify(prefix, version, fixture_source):
                            XCODE_MCP_PROXY_CACHE_ROOT=str(root / "cache"))
         environment.pop("XCODE_MCP_NATIVE_HOST_BUNDLE", None)
         environment.pop("XCODE_MCP_PROXY_ENDPOINT", None)
+        await asyncio.to_thread(verify_closed_pipes,
+                                bundle / "Contents/MacOS/xcode-mcp-native-host",
+                                root / "disconnect-artifacts", environment)
         processes = []
         with (root / "process.log").open("wb") as log:
             async def launch(*command):
@@ -113,7 +143,7 @@ async def verify(prefix, version, fixture_source):
                         except TimeoutError:
                             os.killpg(process.pid, signal.SIGKILL)
                             await process.wait()
-    print("Installed CLI versions, native signature, direct MCP, and proxy MCP passed.")
+    print("Installed CLI versions, native signature, early disconnect, direct MCP, and proxy MCP passed.")
 
 
 def main():
