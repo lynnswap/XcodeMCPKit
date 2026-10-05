@@ -212,9 +212,14 @@ struct UpstreamProcessTests {
         }
         #expect(await session.send(Data("next".utf8)) == .unavailable(.shuttingDown))
         let delay = try await scheduler.nextScheduledDelay()
+        #expect(fakeDriver.snapshot().closeStdinCount == 1)
+        #expect(fakeDriver.snapshot().terminateCount == 0)
+        #expect(fakeDriver.snapshot().stopOutputCount == 0)
+        delay.fire()
+        let signalDelay = try await scheduler.nextScheduledDelay(at: 1)
         #expect(fakeDriver.snapshot().terminateCount == 1)
         #expect(fakeDriver.snapshot().forceTerminateCount == 0)
-        delay.fire()
+        signalDelay.fire()
         await session.stop()
         #expect(fakeDriver.snapshot().forceTerminateCount == 1)
         #expect(fakeDriver.snapshot().stopOutputCount == 1)
@@ -237,6 +242,49 @@ struct UpstreamProcessTests {
         #expect(snapshot.closeStdinCount == 1)
         #expect(snapshot.stopOutputCount == 1)
         #expect(snapshot.terminateCount == 1)
+    }
+
+    @Test func stdoutEOFDrainsStderrBeforeTerminationNotification() async throws {
+        let scheduler = ControlledTerminationDelayScheduler()
+        let drainClock = TestClock()
+        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
+        let session = try await makeFakeUpstreamSession(
+            fakeDriver,
+            terminationDelayScheduler: scheduler,
+            clock: makeTestClockClient(drainClock)
+        )
+        let events = UpstreamEventRecorder(session.events)
+        defer {
+            events.cancel()
+            Task { await session.stop() }
+        }
+
+        fakeDriver.finishStdout()
+        _ = try await events.nextEvent {
+            if case .stdoutClosed = $0 { return true }
+            return false
+        }
+        let delay = try await scheduler.nextScheduledDelay()
+        #expect(await session.send(Data()) == .unavailable(.shuttingDown))
+        #expect(fakeDriver.snapshot().closeStdinCount == 1)
+        #expect(fakeDriver.snapshot().terminateCount == 0)
+        #expect(fakeDriver.snapshot().stopOutputCount == 0)
+
+        fakeDriver.emitStderr(Data("final diagnostic\n".utf8))
+        fakeDriver.emitTermination(status: 0)
+        fakeDriver.finishStderr()
+        let allEvents = await events.finishedEvents()
+        let stderrIndex = try #require(allEvents.firstIndex {
+            if case .stderr("final diagnostic") = $0 { return true }
+            return false
+        })
+        let exitIndex = try #require(allEvents.firstIndex {
+            if case .exit(0) = $0 { return true }
+            return false
+        })
+        #expect(stderrIndex < exitIndex)
+        await session.stop()
+        #expect(delay.isCancelled())
     }
 
     @Test func concurrentStopsShareOutputDrainCompletion() async throws {
