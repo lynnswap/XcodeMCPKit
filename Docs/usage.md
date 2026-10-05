@@ -30,10 +30,6 @@ The host reads saved project and source files. Save editor changes before an MCP
 operation. Opening the same project in Xcode does not transfer its unsaved buffers,
 active scheme, selected destination, or debugger session to the host.
 
-Xcode and an agent can work on the same saved project. Coordinate edits to each
-file: MCP writes are not merged with an unsaved editor buffer, and saving that
-buffer later can conflict with or replace the agent's changes.
-
 Use `XcodeListSchemes`, `XcodeListRunDestinations`, and `XcodeListTestPlans` to
 inspect the project's settings. Select the required values with
 `XcodeSwitchScheme`, `XcodeSwitchRunDestination`, and `XcodeSwitchTestPlan` before
