@@ -35,6 +35,23 @@ struct BackgroundCatalogSatisfactionTests {
         #expect(await fixture.otherGUI.sent().filter { methodName(from: $0) == "tools/list" }.count == 1)
     }
 
+    @Test func shutdownCancelsTheCallerBeforeProviderTeardownCanFinishTheRead() async throws {
+        let fixture = try BackgroundSatisfactionFixture(drainReadsAfterRouteReset: true)
+        defer { fixture.manager.shutdownAndWait() }
+        let pending = try await fixture.beginConcurrentRefresh()
+        defer { pending.foreground.cancel() }
+        try await fixture.acceptBackgroundReply(pending)
+
+        await fixture.manager.shutdown()
+
+        #expect(fixture.shutdownReadDrains.count() == 1)
+        await #expect(throws: CancellationError.self) { try await fixture.result(of: pending.foreground) }
+        #expect(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting() == nil)
+        await #expect(throws: CancellationError.self) {
+            try await fixture.manager.sharedToolsList(sessionID: "after-shutdown", requestTimeoutOverride: .seconds(5))
+        }
+    }
+
     @Test(arguments: [false, true])
     func aRealCallerCancellationOrShutdownRemainsAnErrorAfterBackgroundSatisfaction(shutdown: Bool) async throws {
         let fixture = try BackgroundSatisfactionFixture()
@@ -75,11 +92,12 @@ private struct BackgroundSatisfactionFixture {
     let freshTarget: XcodeProcessTarget
     let manager: RuntimeCoordinator
     let guiCommits: LockedRecordedValues<Int>
+    let shutdownReadDrains: LockedRecordedValues<Void>
 
     var freshGUIProof: UpstreamTopologyProof { manager.operationLeaseForTest(upstreamIndex: 1).proof }
     var otherGUIProof: UpstreamTopologyProof { manager.operationLeaseForTest(upstreamIndex: 2).proof }
 
-    init() throws {
+    init(drainReadsAfterRouteReset: Bool = false) throws {
         let clocks = makeRuntimeCoordinatorDeterministicClocks()
         timeoutClock = clocks.timeoutClock
         uptimeClock = clocks.uptimeClock
@@ -96,6 +114,9 @@ private struct BackgroundSatisfactionFixture {
         self.freshTarget = freshTarget
         let guiCommits = LockedRecordedValues<Int>()
         self.guiCommits = guiCommits
+        let shutdownReadDrains = LockedRecordedValues<Void>()
+        self.shutdownReadDrains = shutdownReadDrains
+        let runtimeBox = WeakRuntimeCoordinatorBox()
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5), eventLoop: eventLoop,
             upstreams: [native, freshGUI, otherGUI], clock: clocks.clock,
@@ -103,8 +124,23 @@ private struct BackgroundSatisfactionFixture {
                 XcodeProcessRoute(target: freshTarget, upstreamIndices: [1]),
                 XcodeProcessRoute(target: otherTarget, upstreamIndices: [2]),
             ],
-            testHooks: .init(processRouteCatalogCommitted: { _, index in guiCommits.append(index) }),
-            startImmediately: false
+            testHooks: .init(
+                processRouteCatalogCommitted: { _, index in guiCommits.append(index) },
+                processRoutesResetForShutdown: {
+                    guard drainReadsAfterRouteReset else { return }
+                    guard let coordinator = runtimeBox.value?.controlPlaneCoordinator else {
+                        Issue.record("Runtime disappeared before its shutdown read barrier")
+                        return
+                    }
+                    // Drain read completions before teardown continues; their callers
+                    // must already be cancelled at this boundary.
+                    let completions = await coordinator.completionTasks
+                    for completion in completions.values { await completion.value }
+                    shutdownReadDrains.append(())
+                }
+            ),
+            startImmediately: false,
+            runtimeBox: runtimeBox
         )
         self.manager = manager
         manager.markUpstreamInitialized(upstreamIndex: 1)

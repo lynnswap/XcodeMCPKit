@@ -56,6 +56,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     var unboundToolsCatalogCommitted: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var processRouteCatalogCommitted:
         (@Sendable (_ processID: pid_t, _ upstreamIndex: Int) -> Void)?
+    var processRoutesResetForShutdown: (@Sendable () async -> Void)?
     var xcodeProcessReconcileCompleted: (@Sendable (_ reason: String) -> Void)?
     var processRouteRetirementWillDetach: (@Sendable () -> Void)?
     var controlPlaneRPCWillEnqueue: (@Sendable () -> Void)?
@@ -88,6 +89,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         unboundToolsCatalogCommitted: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         processRouteCatalogCommitted:
             (@Sendable (_ processID: pid_t, _ upstreamIndex: Int) -> Void)? = nil,
+        processRoutesResetForShutdown: (@Sendable () async -> Void)? = nil,
         xcodeProcessReconcileCompleted: (@Sendable (_ reason: String) -> Void)? = nil,
         processRouteRetirementWillDetach: (@Sendable () -> Void)? = nil,
         controlPlaneRPCWillEnqueue: (@Sendable () -> Void)? = nil,
@@ -118,6 +120,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.upstreamInitialized = upstreamInitialized
         self.unboundToolsCatalogCommitted = unboundToolsCatalogCommitted
         self.processRouteCatalogCommitted = processRouteCatalogCommitted
+        self.processRoutesResetForShutdown = processRoutesResetForShutdown
         self.xcodeProcessReconcileCompleted = xcodeProcessReconcileCompleted
         self.processRouteRetirementWillDetach = processRouteRetirementWillDetach
         self.controlPlaneRPCWillEnqueue = controlPlaneRPCWillEnqueue
@@ -1089,6 +1092,13 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     func shutdown() async {
         deviceInteractionAffinityAuthority.clear()
         let shutdownState = initializeManager.beginShutdown()
+        // Stopping provider reads can finish a shared load with an already refreshed catalog.
+        // Cancel the callers before provider teardown can publish that result.
+        let controlPlaneDrain = await controlPlaneCoordinator.beginShutdown(
+            reason: "shutdown",
+            clearInitialize: true,
+            clearToolsCatalog: true
+        )
         let pendingInitializes = shutdownState.pending
         for pending in pendingInitializes {
             pending.eventLoop.execute {
@@ -1106,15 +1116,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessCoordinator.shutdown()
         xcodeProcessEventMonitor?.stop()
         resetAllProcessRouteActivations(reason: "shutdown")
+        await testHooks.processRoutesResetForShutdown?()
         applyProcessControlPlaneTransition(processControlPlane.detachAllCooldownTimeouts())
 
         let runtimeDrain = runtimeTasks.beginShutdown()
         applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
-        let controlPlaneDrain = await controlPlaneCoordinator.beginShutdown(
-            reason: "shutdown",
-            clearInitialize: true,
-            clearToolsCatalog: true
-        )
 
         let shutdownTopology = commitUpstreamTopologyMutation {
             upstreamTopology.retireAll()
