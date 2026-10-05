@@ -245,9 +245,7 @@ extension XcodeMCPProxyServer {
                 : resources.endpoint.host
             let summary = XcodeMCPProxyServer.startupSummary(
                 displayHost: displayHost,
-                port: resources.endpoint.port,
-                config: configuration,
-                xcodeTargets: resources.runtime.inventorySnapshot().xcodeTargets
+                port: resources.endpoint.port
             )
             logger.info("\(summary)")
         }

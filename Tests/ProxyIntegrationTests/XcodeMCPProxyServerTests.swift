@@ -146,27 +146,9 @@ struct XcodeMCPProxyServerTests {
         try await shutdown(blockerGroup)
     }
 
-    @Test func startupSummaryReadsInventoryAfterRuntimeStarts() async throws {
-        let runtime = StartupInventoryRuntime()
-        let server = XcodeMCPProxyServer(
-            configuration: .init(
-                bindAddress: .init(host: "127.0.0.1", port: 0),
-                discovery: .disabled
-            ),
-            dependencies: .init(
-                makeRuntime: { _ in runtime }
-            )
-        )
-
-        _ = try await server.start()
-        #expect(runtime.inventoryReadCount > 0)
-        #expect(runtime.readInventoryBeforeStart == false)
-        try await server.shutdown()
-    }
-
-    @Test func nativeStartupWithoutGUIInventoryPreservesInstallationSelection() async throws {
+    @Test func nativeStartupPreservesInstallationSelection() async throws {
         let runtimeConfiguration = NIOLockedValueBox<ProxyRuntimeConfiguration?>(nil)
-        let runtime = StartupInventoryRuntime()
+        let runtime = StartupTestRuntime()
         let bundleURL = URL(fileURLWithPath: "/fixtures/XcodeMCPNativeHost.app")
         let developerURL = URL(fileURLWithPath: "/fixtures/Xcode.app/Contents/Developer")
         let server = XcodeMCPProxyServer(
@@ -188,7 +170,6 @@ struct XcodeMCPProxyServerTests {
         let captured = try #require(runtimeConfiguration.withLockedValue { $0 })
         #expect(captured.nativeHostBundleURL == bundleURL)
         #expect(captured.developerDirectoryURL == developerURL)
-        #expect(runtime.inventorySnapshot().xcodeTargets.isEmpty)
         try await server.shutdown()
     }
 
@@ -239,8 +220,6 @@ struct XcodeMCPProxyServerTests {
         try await server.shutdown()
         #expect((await server.snapshot()).phase == .stopped)
     }
-
-
 
     @Test func unstartedServerDoesNotCreateHTTPGateway() async throws {
         let gatewayCreationCount = NIOLockedValueBox(0)
@@ -365,7 +344,7 @@ struct XcodeMCPProxyServerTests {
     @Test(arguments: [false, true])
     func shutdownDuringStartupReportsCleanupFailure(discoveryFails: Bool) async throws {
         let gateway = ControlledShutdownGateway(holdStartup: true)
-        let runtime = StartupInventoryRuntime()
+        let runtime = StartupTestRuntime()
         var discovery = DiscoveryClient.testValue
         if discoveryFails {
             discovery.write = { _, _ in throw DiscoveryWriteFailure.expected }
@@ -416,7 +395,7 @@ struct XcodeMCPProxyServerTests {
     @Test func startupFailurePreservesItsCleanupFailureAndBoundEndpoint() async throws {
         let gateway = ControlledShutdownGateway()
         gateway.allowShutdown.signal()
-        let runtime = StartupInventoryRuntime()
+        let runtime = StartupTestRuntime()
         var discovery = DiscoveryClient.testValue
         discovery.write = { _, _ in throw DiscoveryWriteFailure.expected }
         let server = XcodeMCPProxyServer(
@@ -447,7 +426,7 @@ struct XcodeMCPProxyServerTests {
     }
 
     @Test func gatewayAcquisitionFailurePreservesBothCausesThroughThePublicServer() async throws {
-        let runtime = StartupInventoryRuntime()
+        let runtime = StartupTestRuntime()
         let groupShutdownCount = NIOLockedValueBox(0)
         let server = XcodeMCPProxyServer(
             configuration: .init(
@@ -488,7 +467,7 @@ struct XcodeMCPProxyServerTests {
 
     @Test func runningShutdownSharesReleaseFailureWithoutRepeatingCleanup() async throws {
         let gateway = ControlledShutdownGateway()
-        let runtime = StartupInventoryRuntime()
+        let runtime = StartupTestRuntime()
         let server = XcodeMCPProxyServer(
             configuration: .init(discovery: .disabled),
             dependencies: .init(
@@ -652,25 +631,15 @@ private final class ControlledShutdownGateway: ProxyHTTPGatewayServing, Sendable
     func cancelForDeinit() {}
 }
 
-private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeServing {
+private final class StartupTestRuntime: @unchecked Sendable, ProxyRuntimeServing {
     private struct State {
         var started = false
         var shutdownCount = 0
-        var inventoryReadCount = 0
-        var readInventoryBeforeStart = false
     }
 
     private let state = NIOLockedValueBox(State())
 
-    var inventoryReadCount: Int {
-        state.withLockedValue(\.inventoryReadCount)
-    }
-
     var shutdownCount: Int { state.withLockedValue(\.shutdownCount) }
-
-    var readInventoryBeforeStart: Bool {
-        state.withLockedValue(\.readInventoryBeforeStart)
-    }
 
     func start() {
         state.withLockedValue { $0.started = true }
@@ -714,16 +683,6 @@ private final class StartupInventoryRuntime: @unchecked Sendable, ProxyRuntimeSe
             catalogAvailable: false,
             queuedRequestCount: 0,
             upstreams: []
-        )
-    }
-
-    func inventorySnapshot() -> ProxyRuntimeInventorySnapshot {
-        state.withLockedValue { state in
-            state.inventoryReadCount += 1
-            state.readInventoryBeforeStart = state.readInventoryBeforeStart || state.started == false
-        }
-        return ProxyRuntimeInventorySnapshot(
-            xcodeTargets: []
         )
     }
 

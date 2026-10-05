@@ -31,7 +31,6 @@ struct MCPForwardingService: Sendable {
         parsedRequestJSON: Any,
         sessionID: String,
         operationLeaseOverride: UpstreamOperationLease? = nil,
-        admission: RouteForwardingAdmission? = nil,
         cancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil
     ) throws -> PreparedRequest? {
         guard let candidate = try upstreamRuntime.prepareRequest(
@@ -39,7 +38,6 @@ struct MCPForwardingService: Sendable {
             parsedRequestJSON: parsedRequestJSON,
             sessionID: sessionID,
             operationLeaseOverride: operationLeaseOverride,
-            admission: admission
         ) else {
             return nil
         }
@@ -47,8 +45,7 @@ struct MCPForwardingService: Sendable {
             transform: candidate.transform,
             sessionID: candidate.sessionID,
             operationLease: candidate.operationLease,
-            admission: candidate.admission,
-            toolDefinition: candidate.admission?.toolDefinition ?? candidate.transform.toolName.flatMap {
+            toolDefinition: candidate.transform.toolName.flatMap {
                 sessionManager.toolDefinition(named: $0, sourceProof: candidate.operationLease.proof)
             }
         )

@@ -38,148 +38,31 @@ private func seedCanonicalInitializeForTesting(
 
 @Suite(.serialized, .asyncTestCleanup)
 struct HTTPConcurrencyTests {
-    @Test func mixedCatalogAllowsGUIAndServiceCallsUsingAdvertisedSelectors() async throws {
-        let service = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "workspace-service")
-        let gui = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "gui-tab")
-        let target = XcodeProcessTarget(
-            processID: 751, appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer", xcodeVersion: "27.0"
-        )
-        let server = try TestHTTPServer.start(
-            upstream: service, additionalUpstreams: [gui],
-            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])]
-        )
+    @Test(arguments: ["BuildProject", "FutureNativeTool"])
+    func nativeToolCallsPreserveWorkspacePathsAndProviderErrors(toolName: String) async throws {
+        let upstream = NativeWorkspaceUpstream()
+        let server = try TestHTTPServer.start(upstream: upstream)
         do {
             let (initialized, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
             let sessionID = try #require(initialized.value(forHTTPHeaderField: "Mcp-Session-Id"))
-            await server.sessionManager.drainRuntimeTasksForTesting()
             let (_, catalog) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 2))
-            let result = try #require(catalog["result"] as? [String: Any])
-            let tools = try #require(result["tools"] as? [[String: Any]])
-            let descriptor = try #require(tools.first { $0["name"] as? String == "BuildProject" })
-            let schema = try #require(descriptor["inputSchema"] as? [String: Any])
-            let properties = try #require(schema["properties"] as? [String: Any])
-            #expect(Set(properties.keys) == Set(["workspaceIdentifier", "tabIdentifier"]))
-            let (_, windows) = try await postJSON(
-                url: server.url, sessionID: sessionID, payload: toolCallPayload(id: 3, name: "XcodeListWindows", arguments: [:])
-            )
-            let windowResult = try #require(windows["result"] as? [String: Any])
-            let content = try #require(windowResult["structuredContent"] as? [String: Any])
-            let message = try #require(content["message"] as? String)
-            let range = try #require(message.range(of: "tabIdentifier: "))
-            let tab = try #require(message[range.upperBound...].split(separator: ",").first).description
-            for (index, selector, identifier) in [(4, "workspaceIdentifier", "workspace-service"), (5, "tabIdentifier", tab)] {
-                let (_, reply) = try await postJSON(
-                    url: server.url, sessionID: sessionID,
-                    payload: toolCallPayload(id: index, name: "BuildProject", arguments: [selector: identifier])
-                )
-                let result = try #require(reply["result"] as? [String: Any])
-                #expect(result["isError"] as? Bool == false)
-                let content = try #require(result["structuredContent"] as? [String: Any])
-                #expect(content["selector"] as? String == selector)
-            }
-        } catch {
-            try? await server.shutdown()
-            throw error
-        }
-        try await server.shutdown()
-    }
-
-    @Test(arguments: ["gui-path", "service-path", "opaque", "omitted", "stale-tab", "known-owner-failure", "partial-inventory", "ambiguous", "partial-owner", "partial-list-owner", "known-owner-unrelated-failure"])
-    func standardWorkspaceRoutingOverHTTP(scenario: String) async throws {
-        let service = BackendCatalogUpstream(selector: "workspaceIdentifier", identifier: "windowtab-opaque-service", workspacePath: "/Work/Service.xcodeproj")
-        let gui = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "gui-tab")
-        let secondGUI = BackendCatalogUpstream(selector: "tabIdentifier", identifier: "other-tab",
-            workspacePath: scenario == "known-owner-unrelated-failure" ? "/Work/Other.xcodeproj" : "/Work/App.xcodeproj")
-        let target = XcodeProcessTarget(
-            processID: 752, appPath: "/Applications/Xcode.app",
-            developerDir: "/Applications/Xcode.app/Contents/Developer", xcodeVersion: "27.0"
-        )
-        let otherTarget = XcodeProcessTarget(
-            processID: 753, appPath: "/Applications/OtherXcode.app",
-            developerDir: "/Applications/OtherXcode.app/Contents/Developer", xcodeVersion: "27.0"
-        )
-        let ambiguous = scenario == "ambiguous"
-        let hasSecondGUI = ambiguous || scenario == "partial-owner" || scenario == "partial-list-owner" || scenario == "known-owner-unrelated-failure"
-        let server = try TestHTTPServer.start(
-            upstream: service, additionalUpstreams: hasSecondGUI ? [gui, secondGUI] : [gui],
-            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])]
-                + (hasSecondGUI ? [XcodeProcessRoute(target: otherTarget, upstreamIndices: [2])] : [])
-        )
-        do {
-            let (initialized, _) = try await postJSON(url: server.url, sessionID: nil, payload: initializePayload(id: 1))
-            let sessionID = try #require(initialized.value(forHTTPHeaderField: "Mcp-Session-Id"))
-            await server.sessionManager.drainRuntimeTasksForTesting()
-            let (_, catalog) = try await postJSON(url: server.url, sessionID: sessionID, payload: toolListPayload(id: 2))
-            let catalogResult = try #require(catalog["result"] as? [String: Any])
-            let tools = try #require(catalogResult["tools"] as? [[String: Any]])
-            let build = try #require(tools.first { $0["name"] as? String == "BuildProject" })
-            let schema = try #require(build["inputSchema"] as? [String: Any])
-            let properties = try #require(schema["properties"] as? [String: Any])
-            #expect(properties["workspaceIdentifier"] != nil)
-            #expect(properties["workspacePath"] == nil)
-            if scenario == "known-owner-failure" {
-                _ = try await postJSON(url: server.url, sessionID: sessionID, payload: toolCallPayload(id: 3, name: "XcodeListWindows", arguments: [:]))
-                server.sessionManager.markXcodeProcessRouteUnavailable(upstreamIndex: 1, reason: "test_owner_connection_failure")
-            }
-            if scenario == "known-owner-unrelated-failure" {
-                _ = try await postJSON(url: server.url, sessionID: sessionID, payload: toolCallPayload(id: 3, name: "XcodeListWindows", arguments: [:]))
-                server.sessionManager.markXcodeProcessRouteUnavailable(upstreamIndex: 2, reason: "unrelated_owner_failure")
-            }
-            if scenario == "partial-inventory" { await gui.failInventory() }
-            if scenario == "partial-owner" || scenario == "partial-list-owner" { await secondGUI.failInventory() }
-            if scenario == "partial-list-owner" {
-                _ = try await postJSON(url: server.url, sessionID: sessionID, payload: toolCallPayload(id: 3, name: "XcodeListWindows", arguments: [:]))
-            }
-            let arguments: [String: Any]
-            switch scenario {
-            case "omitted": arguments = [:]
-            case "opaque": arguments = ["workspaceIdentifier": "windowtab-opaque-service"]
-            case "stale-tab": arguments = ["tabIdentifier": "xcode-mcp-tab-stale"]
-            case "service-path", "lookup-error", "partial-inventory": arguments = ["workspaceIdentifier": "/Work/Service.xcodeproj"]
-            default: arguments = ["workspaceIdentifier": "/Work/App.xcodeproj"]
-            }
-            let (_, reply) = try await postJSON(
-                url: server.url, sessionID: sessionID,
-                payload: toolCallPayload(id: 41, name: "BuildProject", arguments: arguments)
-            )
-            #expect(reply["id"] as? Int == 41)
+            let tools = try #require((catalog["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+            let schema = try #require(tools.first?["inputSchema"] as? [String: Any])
+            #expect((schema["properties"] as? [String: Any])?.keys.sorted() == ["workspaceIdentifier"])
+            #expect(schema["required"] as? [String] == ["workspaceIdentifier"])
+            let workspace = "/Work/Project with spaces.xcodeproj"
+            let (_, reply) = try await postJSON(url: server.url, sessionID: sessionID,
+                payload: toolCallPayload(id: 3, name: toolName, arguments: ["workspaceIdentifier": workspace]))
             let result = try #require(reply["result"] as? [String: Any])
-            let fails = ["stale-tab", "known-owner-failure", "partial-inventory", "ambiguous", "partial-owner", "partial-list-owner"].contains(scenario)
-            #expect((result["isError"] as? Bool == true) == fails)
-            if scenario == "partial-owner" || scenario == "partial-list-owner" {
-                let (_, repeated) = try await postJSON(url: server.url, sessionID: sessionID,
-                    payload: toolCallPayload(id: 42, name: "BuildProject", arguments: arguments))
-                #expect((repeated["result"] as? [String: Any])?["isError"] as? Bool == true)
-            }
-            let serviceCalls = await service.recordedCalls()
-            let guiCalls = await gui.recordedCalls()
-            if fails {
-                #expect(!serviceCalls.contains("BuildProject"))
-                #expect(!guiCalls.contains("BuildProject"))
-                if ambiguous {
-                    let content = try #require(result["content"] as? [[String: Any]])
-                    #expect(content.description.contains("tabIdentifier"))
-                }
-            } else {
-                let content = try #require(result["structuredContent"] as? [String: Any])
-                #expect(content["selector"] as? String == ((scenario.hasPrefix("gui-") || scenario == "known-owner-unrelated-failure") ? "tabIdentifier" : "workspaceIdentifier"))
-                #expect((serviceCalls + guiCalls).filter { $0 == "BuildProject" }.count == 1)
-            }
-            #expect(!(serviceCalls + guiCalls).contains("XcodeOpenWorkspace"))
-            #expect(!(serviceCalls + guiCalls).contains("XcodeCloseWorkspace"))
+            #expect(result["isError"] as? Bool == true)
+            #expect((result["structuredContent"] as? [String: Any])?["workspaceIdentifier"] as? String == workspace)
+            #expect(await upstream.recordedCalls() == [toolName])
         } catch {
             try? await server.shutdown()
             throw error
         }
         try await server.shutdown()
-        #expect(!(await service.recordedCalls()).contains("XcodeCloseWorkspace"))
     }
-
-
-
-
-
 
 
     @Test func httpAndSwiftClientExposeCompletePaginatedCatalog() async throws {
@@ -610,8 +493,6 @@ struct HTTPConcurrencyTests {
         #expect(ClientMCPRequestExecutor.minimumRequestTimeout(.seconds(60), timeout)?.nanoseconds == 20_000_000_000)
     }
 
-
-
     @Test func httpRequestTimeoutDoesNotCancelAnotherRequestOnTheSameNativeConnection() async throws {
         let upstream = EmbeddedControlledUpstreamClient()
         let config = makeEmbeddedConfig(requestTimeout: 10)
@@ -1027,7 +908,6 @@ private struct TestHTTPServer {
         upstream providedUpstream: (any UpstreamSlotControlling)? = nil,
         requestTimeout: TimeInterval = 5,
         additionalUpstreams: [any UpstreamSlotControlling] = [],
-        xcodeProcessRoutes: [XcodeProcessRoute] = [],
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
 ) throws -> TestHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
@@ -1049,7 +929,6 @@ private struct TestHTTPServer {
             config: config,
             eventLoop: runtimeEventLoop,
             upstreams: [upstream] + additionalUpstreams,
-            xcodeProcessRoutes: xcodeProcessRoutes,
             notificationSink: { sessionID, data in
                 runtimeEventSource.emit(
                     .notification(
@@ -1116,28 +995,14 @@ private struct TestHTTPServer {
     }
 }
 
-private actor BackendCatalogUpstream: UpstreamSlotControlling {
+private actor NativeWorkspaceUpstream: UpstreamSlotControlling {
     nonisolated let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
-    private let selector: String
-    private let identifier: String
-    private let workspacePath: String
-    private var inventoryFails = false
     private var calls: [String] = []
-
-    func failInventory() { inventoryFails = true }
-    func recordedCalls() -> [String] { calls }
-
-    init(selector: String, identifier: String, workspacePath: String = "/Work/App.xcodeproj") {
-        self.selector = selector
-        self.identifier = identifier
-        self.workspacePath = workspacePath
-        (events, continuation) = AsyncStream.makeStream()
-    }
-
+    init() { (events, continuation) = AsyncStream.makeStream() }
     func start() async {}
     func stop() async { continuation.finish() }
-
+    func recordedCalls() -> [String] { calls }
     func send(_ data: Data) async -> Upstream.SendResult {
         do {
             let object = try JSONRPC.Wire.object(fromData: data)
@@ -1147,40 +1012,17 @@ private actor BackendCatalogUpstream: UpstreamSlotControlling {
             case "initialize":
                 result = ["protocolVersion": MCP.ProtocolVersion.current, "capabilities": [:]]
             case "tools/list":
-                var tools: [[String: Any]] = [["name": "BuildProject", "inputSchema": [
-                    "type": "object", "properties": [selector: ["type": "string"]], "required": []
-                ]]]
-                if selector == "tabIdentifier" {
-                    tools.append(["name": "XcodeListWindows", "inputSchema": ["type": "object", "properties": [:]]])
-                } else {
-                    tools.append(["name": "XcodeListWindows", "inputSchema": ["type": "object", "properties": [:]]])
-                    tools.append(["name": "XcodeListWorkspaces", "inputSchema": ["type": "object", "properties": [:]]])
-                }
-                result = ["tools": tools]
+                result = ["tools": [["name": "BuildProject", "inputSchema": [
+                    "type": "object", "properties": ["workspaceIdentifier": ["type": "string"]],
+                    "required": ["workspaceIdentifier"]]]]]
             default:
                 let params = object["params"] as? [String: Any] ?? [:]
-                let name = params["name"] as? String ?? ""
-                calls.append(name)
-                if name == "XcodeListWindows" || name == "XcodeListWorkspaces" {
-                    result = inventoryFails
-                        ? ["isError": true, "structuredContent": ["message": "inventory unavailable"]]
-                        : ["structuredContent": ["message": "* \(selector): \(identifier), workspacePath: \(workspacePath)"]]
-                } else {
-                    let arguments = params["arguments"] as? [String: Any] ?? [:]
-                    let wrongSelector = selector == "tabIdentifier" ? "workspaceIdentifier" : "tabIdentifier"
-                    let hasSelector = arguments[selector] != nil
-                    let suppliedIdentifier = arguments[selector] as? String
-                    let matchesIdentifier = suppliedIdentifier == identifier
-                        || (selector == "workspaceIdentifier" && suppliedIdentifier == workspacePath)
-                    let hasWrongSelector = arguments[wrongSelector] != nil
-                    result = ["isError": (hasSelector && !matchesIdentifier) || hasWrongSelector,
-                              "structuredContent": ["selector": selector], "content": []]
-                }
+                calls.append(params["name"] as? String ?? "")
+                result = ["isError": true, "content": [["type": "text", "text": "project unavailable"]],
+                    "structuredContent": params["arguments"] as? [String: Any] ?? [:]]
             }
             continuation.yield(.message(try JSONRPC.Wire.resultResponseData(id: id, result: JSONValue(any: result)!)))
-        } catch {
-            Issue.record(error)
-        }
+        } catch { Issue.record(error) }
         return .accepted
     }
 }

@@ -1,56 +1,29 @@
 import Foundation
 import XcodeMCPWire
 
-package struct NativeSessionContext: Sendable {
-    package let conversationID: String
-    package let clientInfo: [String: JSONValue]
-
-    package init(conversationID: String, clientInfo: [String: JSONValue]) {
-        self.conversationID = conversationID
-        self.clientInfo = clientInfo
-    }
-}
-
-package enum NativeToolResultFormat {
-    case actionValue
-    case mcpResult
-}
-
 package struct NativeToolContext: Sendable {
     package let artifactsDirectory: URL
     package let conversationID: String
-    private let onDispatch: (@MainActor @Sendable () -> Void)?
 
-    package init(artifactsDirectory: URL, conversationID: String,
-                 onDispatch: (@MainActor @Sendable () -> Void)? = nil) {
+    package init(artifactsDirectory: URL, conversationID: String) {
         self.artifactsDirectory = artifactsDirectory
         self.conversationID = conversationID
-        self.onDispatch = onDispatch
     }
 
-    @MainActor package func didDispatch() { onDispatch?() }
 }
 
 @MainActor
 package protocol NativeToolBackend: AnyObject {
-    var resultFormat: NativeToolResultFormat { get }
     var origin: [String: JSONValue]? { get }
-    var supportsToolCancellation: Bool { get }
-    func initialize(context: NativeSessionContext) async throws
     func listTools() async throws -> [NativeTool]
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data>
-    func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue)
     /// Prepares pending requests to drain before shutdown performs final cleanup.
     func beginShutdown()
     func shutdown() async throws
 }
 
 extension NativeToolBackend {
-    package var resultFormat: NativeToolResultFormat { .actionValue }
     package var origin: [String: JSONValue]? { nil }
-    package var supportsToolCancellation: Bool { true }
-    package func initialize(context: NativeSessionContext) async throws {}
-    package func observe(toolName: String, arguments: [String: JSONValue], event: JSONValue) {}
     package func beginShutdown() {}
 }
 

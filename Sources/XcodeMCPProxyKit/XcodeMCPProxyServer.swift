@@ -410,8 +410,8 @@ public final class XcodeMCPProxyServer: Sendable {
 
     /// Shuts down the proxy server and its runtime resources.
     ///
-    /// Shutdown stops permission automation, closes listening and accepted
-    /// channels, shuts down the runtime coordinator, and terminates the event
+    /// Shutdown closes listening and accepted channels, shuts down the
+    /// native host, and terminates the event
     /// loop group.
     /// Repeated calls return the result of the same shutdown attempt, including
     /// any resource-release failure.
@@ -423,46 +423,14 @@ public final class XcodeMCPProxyServer: Sendable {
         "Xcode MCP proxy listening on http://\(displayHost):\(port) (version \(productMetadata.version))"
     }
 
-    static func startupSummary(
-        displayHost: String,
-        port: Int,
-        config: XcodeMCPProxyServerConfiguration,
-        xcodeTargets: [ProxyRuntimeInventorySnapshot.XcodeTarget]
-    ) -> String {
-        var lines = [
+    static func startupSummary(displayHost: String, port: Int) -> String {
+        [
             "\(productMetadata.name) \(productMetadata.version)",
             "",
             "Server",
             "  URL: http://\(displayHost):\(port)/mcp",
-            "  Agent access: automatically allowed",
-            "",
-            "Xcode",
-        ]
-        appendGUIXcodeStatus(xcodeTargets, to: &lines)
-
-        return lines.joined(separator: "\n")
-    }
-
-    private static func appendGUIXcodeStatus(
-        _ xcodeTargets: [ProxyRuntimeInventorySnapshot.XcodeTarget],
-        to lines: inout [String]
-    ) {
-        switch xcodeTargets.count {
-        case 0:
-            lines.append("  GUI: not detected")
-        case 1:
-            if let target = xcodeTargets.first {
-                lines.append("  App: \(target.appPath)")
-                lines.append("  PID: \(target.processID)")
-            }
-        default:
-            lines.append("  Detected: \(xcodeTargets.count)")
-            lines.append("  Apps:")
-            for target in xcodeTargets {
-                lines.append("    - \(target.appPath) (PID: \(target.processID))")
-            }
-        }
-
+            "  Xcode mode: headless (saved project files)",
+        ].joined(separator: "\n")
     }
 
 }

@@ -47,7 +47,7 @@ reject_matches \
 
 reject_matches \
     "XcodeMCPProxyHTTP references a Runtime implementation type" \
-    'ProcessControlPlaneAuthority|(^|[^[:alnum:]_])ControlPlane([^[:alnum:]_]|$)|LeaseManager|(^|[^[:alnum:]_])Upstream[A-Za-z0-9_]*([^[:alnum:]_]|$)|SessionContext|RuntimeCoordinator|DocumentationProvider|RefreshCodeIssues' \
+    'ToolsCatalogAuthority|(^|[^[:alnum:]_])ControlPlane([^[:alnum:]_]|$)|LeaseManager|(^|[^[:alnum:]_])Upstream[A-Za-z0-9_]*([^[:alnum:]_]|$)|SessionContext|RuntimeCoordinator|RefreshCodeIssues' \
     Sources/XcodeMCPProxyHTTP
 
 reject_matches \
@@ -92,7 +92,6 @@ if ! jq -e '
     excludes("XcodeMCPProxyHTTPTests"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyKit"]) and
     directlyUses("XcodeMCPKit"; "XcodeMCPCore") and
     directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPCore") and
-    directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPDocumentationSearch") and
     directlyUses("XcodeMCPDocumentationSearch"; "XcodeMCPCore") and
     excludes("XcodeMCPDocumentationSearch"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyRuntimeContract", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPDocumentationSearchTests"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and

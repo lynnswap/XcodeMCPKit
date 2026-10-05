@@ -500,7 +500,6 @@ private final class RecordingUpstreamRuntimePort: ProxyUpstreamRequestRuntimePor
         _ data: Data,
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission _: RouteForwardingAdmission?,
         requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {

@@ -104,24 +104,6 @@ package struct ProxyRuntimeSnapshot: Sendable {
     }
 }
 
-package struct ProxyRuntimeInventorySnapshot: Sendable {
-    package struct XcodeTarget: Sendable {
-        package let processID: pid_t
-        package let appPath: String
-
-        package init(processID: pid_t, appPath: String) {
-            self.processID = processID
-            self.appPath = appPath
-        }
-    }
-
-    package let xcodeTargets: [XcodeTarget]
-
-    package init(xcodeTargets: [XcodeTarget]) {
-        self.xcodeTargets = xcodeTargets
-    }
-}
-
 package protocol ProxyRuntimeRequestOperating: Sendable {
     func whenComplete(
         _ completion: @escaping @Sendable (Result<ProxyRuntimeReply, any Error>) -> Void
@@ -147,7 +129,6 @@ package protocol ProxyRuntimeServing: Sendable {
     func expireInactiveSessions(inactiveFor: TimeAmount)
     func removeSession(_ id: ProxySessionID)
     func snapshot() -> ProxyRuntimeSnapshot
-    func inventorySnapshot() -> ProxyRuntimeInventorySnapshot
     func debugSnapshotData(includeSensitivePayloads: Bool) -> Data?
     func reset() async
 }

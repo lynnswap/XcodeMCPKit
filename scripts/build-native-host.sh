@@ -24,17 +24,6 @@ if [[ -z "$developer_dir" ]]; then developer_dir="$(/usr/bin/xcode-select -p)"; 
 if [[ "$developer_dir" == *.app || "$developer_dir" == *.app/ ]]; then
   developer_dir="${developer_dir%/}/Contents/Developer"
 fi
-contents_dir="$(cd "$developer_dir/.." && pwd)"
-service_app="$contents_dir/Developer/Library/Xcode/Agents/Xcode Service.app"
-bridge_binary="$contents_dir/Developer/usr/bin/mcpbridge"
-if [[ ! -d "$service_app" ]]; then
-  echo "Selected Xcode has no Xcode Service entitlement source: $service_app" >&2
-  exit 1
-fi
-if [[ ! -f "$bridge_binary" ]]; then
-  echo "Selected Xcode has no GUI bridge entitlement source: $bridge_binary" >&2
-  exit 1
-fi
 if [[ -z "$output" ]]; then output="$repo_root/.build/native/XcodeMCPNativeHost.app"; fi
 if [[ "$output" != /* ]]; then output="$PWD/$output"; fi
 
@@ -64,48 +53,18 @@ pathlib.Path(sys.argv[1]).write_bytes(plistlib.dumps({
     'CFBundleVersion': '1',
     'LSUIElement': True,
     'NSPrincipalClass': 'NSApplication',
-    'BSServiceDomains': {
-        'com.apple.dt.mcpbridge.services': {
-            'Services': {
-                'com.apple.dt.mcpbridge.tool-service': {'LaunchWhitelisted': True},
-            },
-        },
-    },
 }))
 PY
 entitlements_directory="$(mktemp -d)"
 trap 'rm -rf "$entitlements_directory"' EXIT
-service_entitlements="$entitlements_directory/service.plist"
-bridge_entitlements="$entitlements_directory/bridge.plist"
 entitlements="$entitlements_directory/host.plist"
-/usr/bin/codesign -d --entitlements :- "$service_app" > "$service_entitlements" 2>/dev/null
-/usr/bin/codesign -d --entitlements :- "$bridge_binary" > "$bridge_entitlements" 2>/dev/null
-python3 - "$service_entitlements" "$bridge_entitlements" "$entitlements" <<'PY'
+python3 - "$entitlements" <<'PY'
 import pathlib, plistlib, sys
-
-def merge(service, bridge, key):
-    if isinstance(service, dict) and isinstance(bridge, dict):
-        result = dict(service)
-        for name, value in bridge.items():
-            result[name] = merge(result[name], value, f'{key}.{name}') if name in result else value
-        return result
-    if isinstance(service, list) and isinstance(bridge, list):
-        result = list(service)
-        for value in bridge:
-            if value not in result:
-                result.append(value)
-        return result
-    if type(service) is type(bridge) and service == bridge:
-        return service
-    raise ValueError(f'Incompatible native service and GUI bridge entitlement values for {key}')
-
-service = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
-bridge = plistlib.loads(pathlib.Path(sys.argv[2]).read_bytes())
-# The host performs both native service work and the GUI connection's process role.
-entitlements = merge(service, bridge, 'entitlements')
-entitlements['com.apple.security.cs.allow-dyld-environment-variables'] = True
-pathlib.Path(sys.argv[3]).write_bytes(plistlib.dumps(entitlements))
+# The host reexecs with loader paths for the selected Xcode's frameworks.
+pathlib.Path(sys.argv[1]).write_bytes(plistlib.dumps({
+    'com.apple.security.cs.allow-dyld-environment-variables': True,
+}))
 PY
 /usr/bin/codesign --force --sign - --identifier com.lynnswap.XcodeMCPNativeHost --entitlements "$entitlements" "$output"
-/usr/bin/codesign --verify --strict "$output"
+/usr/bin/codesign --verify --deep --strict "$output"
 echo "Native host: $output/Contents/MacOS/xcode-mcp-native-host"

@@ -4,16 +4,6 @@ import NIOFoundationCompat
 import XcodeMCPCore
 
 extension ClientMCPRequestExecutor {
-    enum ToolCallRouting {
-        case localOperation(LocalToolOperation)
-        case forward(ForwardedToolCallRequest)
-    }
-
-    struct LocalToolOperation {
-        let responseFuture: EventLoopFuture<Data?>
-        let cancellationHandle: ClientMCPRequestExecutor.CancellationHandle
-    }
-
     func resolveLocalHandling(
         _ handling: LocalPostHandling,
         prefersEventStream: Bool,
@@ -68,106 +58,6 @@ extension ClientMCPRequestExecutor {
                 )
             )
         }
-    }
-
-    func routeToolCall(
-        object: [String: Any],
-        bodyData: Data,
-        sessionID: String,
-        eventLoop: EventLoop,
-        requestTimeoutOverride: TimeAmount?,
-        admittedHandle: CancellationHandle? = nil,
-        requestDeadline: Date?
-    ) -> ToolCallRouting {
-        guard isDocumentationSearchRequest(object),
-            let responseID = JSONRPC.Message.Inspector.requestID(from: object)
-        else {
-            return .forward(
-                ForwardedToolCallRequest(
-                    bodyData: bodyData,
-                    forwardedResponseID: JSONRPC.Message.Inspector.requestID(from: object)
-                )
-            )
-        }
-
-        let descriptor = Self.topLevelRequestDescriptor(
-            sessionID: sessionID,
-            parsedRequestJSON: object,
-            responseID: responseID
-        )
-        let cancellationHandle = admittedHandle ?? ClientMCPRequestExecutor.CancellationHandle(
-            leaseID: sessionManager.createRequestLease(descriptor: descriptor),
-            sessionID: sessionID,
-            requestIDKeys: [responseID.key]
-        )
-        let deadline = requestDeadline
-        let promise = eventLoop.makePromise(of: Data?.self)
-        let task = Task { [self] in
-            let responseData: Data?
-            if Task.isCancelled {
-                responseData = nil
-            } else if deadline != nil, remainingRequestTimeout(until: deadline) == nil {
-                responseData = Self.makeJSONRPCErrorResponseData(
-                    id: responseID,
-                    code: -32000,
-                    message: "upstream timeout"
-                )
-            } else {
-                do {
-                    switch try await sessionManager.callDocumentationSearch(
-                        requestData: bodyData,
-                        requestTimeoutOverride: remainingRequestTimeout(until: deadline)
-                    ) {
-                    case .handled(let data):
-                        responseData = ToolCallNormalizer()
-                            .normalizeResponseDataIfNeeded(
-                                method: "tools/call",
-                                toolName: DocumentationProvider.ToolCatalog.toolName,
-                                upstreamData: data
-                            )
-                    case .unavailable(let reason):
-                        responseData = Self.makeJSONRPCErrorResponseData(
-                            id: responseID,
-                            code: -32001,
-                            message: reason.message
-                        )
-                    }
-                } catch {
-                    let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
-                    responseData = Self.makeJSONRPCErrorResponseData(
-                        id: responseID,
-                        code: mapped.code,
-                        message: mapped.message
-                    )
-                }
-            }
-            let wasCancelled = Task.isCancelled
-            eventLoopCompletionExecutor.execute(on: eventLoop) {
-                if wasCancelled {
-                    promise.fail(CancellationError())
-                } else {
-                    promise.succeed(responseData)
-                }
-            }
-        }
-        cancellationHandle.bindLocalTask(task)
-        return .localOperation(
-            LocalToolOperation(
-                responseFuture: promise.futureResult,
-                cancellationHandle: cancellationHandle
-            )
-        )
-    }
-
-    private func isDocumentationSearchRequest(_ object: [String: Any]) -> Bool {
-        guard sessionManager.hasDocumentationSearchService() else { return false }
-        guard case .request("tools/call", _) = JSONRPC.Message.Inspector.kind(of: object),
-            let params = object["params"] as? [String: Any],
-            params["name"] as? String == DocumentationProvider.ToolCatalog.toolName
-        else {
-            return false
-        }
-        return true
     }
 
     private static func isJSONRPCErrorResponse(_ data: Data) -> Bool {

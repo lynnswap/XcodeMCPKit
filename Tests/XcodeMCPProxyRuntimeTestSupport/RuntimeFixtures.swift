@@ -106,22 +106,6 @@ extension RuntimeCoordinator {
             data,
             operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex),
             ensureRunning: ensureRunning,
-            admission: nil,
-            onRejected: {}
-        )
-    }
-
-    func sendUpstream(
-        _ data: Data,
-        upstreamIndex: Int,
-        ensureRunning: Bool,
-        admission: RouteForwardingAdmission
-    ) {
-        _ = sendUpstream(
-            data,
-            operationLease: operationLeaseForTest(upstreamIndex: upstreamIndex),
-            ensureRunning: ensureRunning,
-            admission: admission,
             onRejected: {}
         )
     }
@@ -184,8 +168,6 @@ extension RuntimeCoordinator {
         )?.proof,
               let result = upstreamHealthManager.markInitialized(proof) else { return }
         result.timeout?.cancel()
-        markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
-        markProcessRouteActivationInitialized(proof: proof)
         testHooks.upstreamInitialized?(upstreamIndex)
         noteUpstreamInitializationSucceeded()
     }
@@ -210,86 +192,17 @@ extension RuntimeCoordinator {
     }
 
     func seedCanonicalToolsCatalog(_ result: JSONValue, sourceUpstream: Int) {
-        do {
-            let source = UpstreamSlotID(rawValue: sourceUpstream)
-            let lease: CatalogLease
-            if let route = processControlPlane.route(forUpstreamIndex: sourceUpstream) {
-                let slotIDs = Set(xcodeProcessRoutes.flatMap(\.upstreamIndices).map {
-                    UpstreamSlotID(rawValue: $0)
-                })
-                applyProcessControlPlaneTransition(processControlPlane.updateUsability(
-                    .init(
-                        snapshotUsableUpstreamIDs: slotIDs,
-                        recoveryAwareUsableUpstreamIDs: slotIDs
-                    ),
-                    nowUptimeNs: nowUptimeNanoseconds()
-                ))
-                let preferredProof = try #require(
-                    upstreamTopology.operationLease(for: source)?.proof
-                )
-                let started = try #require(processControlPlane.beginCatalogAttempt(
-                    routeID: route.id,
-                    preferredUpstreamProof: preferredProof,
-                    nowUptimeNanoseconds: nowUptimeNanoseconds()
-                ))
-                lease = started.0
-                applyProcessControlPlaneTransition(started.1)
-            } else {
-                let preferredProof = try #require(upstreamTopology.operationLease(for: source)?.proof)
-                let started = try #require(processControlPlane.beginUnboundCatalogAttempt(
-                    preferredUpstreamProof: preferredProof,
-                    nowUptimeNanoseconds: nowUptimeNanoseconds()
-                ))
-                lease = started.0
-                applyProcessControlPlaneTransition(started.1)
-            }
-            let sourceProof = try #require(
-                upstreamTopology.operationLease(for: source)?.proof
-            )
-            applyCatalogCommit(processControlPlane.completeCatalog(
-                .usable(result, source: sourceProof),
-                lease: lease,
-                nowUptimeNanoseconds: nowUptimeNanoseconds()
-            ))
-        } catch {
-            Issue.record("failed to seed canonical tools catalog: \(error)")
+        let proof = operationLeaseForTest(upstreamIndex: sourceUpstream).proof
+        let (lease, transition) = toolsCatalog.beginLoad(sourceProof: proof)
+        applyCatalogTransition(transition)
+        switch toolsCatalog.complete(ToolCatalogProvider(sourceProof: proof, rawResult: result), lease: lease) {
+        case .accepted(_, let transition), .discarded(let transition):
+            applyCatalogTransition(transition)
         }
     }
 
     func clearCanonicalToolsCatalogForTesting() {
-        applyProcessControlPlaneTransition(processControlPlane.invalidateCatalog(.reset))
-    }
-
-    @discardableResult
-    func beginProcessRouteAttachingForTesting(
-        processID: pid_t,
-        upstreamIndex: Int,
-        nowUptimeNs: UInt64
-    ) -> ProcessControlPlaneAuthority.ActivationStart? {
-        let readinessToken = UpstreamReadinessWaiterToken()
-        guard let route = processControlPlane.route(forProcessID: processID),
-              let upstreamProof = upstreamTopology.operationLease(
-                for: UpstreamSlotID(rawValue: upstreamIndex)
-              )?.proof,
-              let reserved = processControlPlane.reserveActivation(
-                  routeID: route.id,
-                  upstreamProof: upstreamProof,
-                  nowUptimeNs: nowUptimeNs,
-                  readinessToken: readinessToken
-              ) else {
-            Issue.record("failed to begin process route attempt for \(processID)")
-            return nil
-        }
-        applyProcessControlPlaneTransition(reserved.1)
-        guard let started = processControlPlane.beginAttaching(
-            reserved.0,
-            nowUptimeNs: nowUptimeNs
-        ) else {
-            Issue.record("failed to attach process route attempt for \(processID)")
-            return nil
-        }
-        applyProcessControlPlaneTransition(started.1)
-        return started.0
+        applyCatalogTransition(toolsCatalog.invalidate())
     }
 }
 

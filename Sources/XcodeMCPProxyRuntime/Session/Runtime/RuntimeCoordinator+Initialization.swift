@@ -14,11 +14,6 @@ extension RuntimeCoordinator {
 
     func startEagerInitializePrimary(applyBackoff: Bool = false) {
         guard let upstreamIndex = primaryInitializeUpstreamIndex() else {
-            if startXcodeProcessDiscoveryWhenReadyForPrimaryInitialize(
-                applyBackoff: applyBackoff
-            ) {
-                return
-            }
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             return
         }
@@ -27,7 +22,7 @@ extension RuntimeCoordinator {
             applyBackoff: applyBackoff
         ) { [weak self, upstreamIndex, applyBackoff] in
             guard let self else { return }
-            guard self.isActiveProcessBoundUpstream(upstreamIndex) else {
+            guard self.upstreamTopology.operationLease(for: UpstreamSlotID(rawValue: upstreamIndex)) != nil else {
                 self.startEagerInitializePrimary(applyBackoff: applyBackoff)
                 return
             }
@@ -35,29 +30,7 @@ extension RuntimeCoordinator {
         }
     }
 
-    @discardableResult
-    private func startXcodeProcessDiscoveryWhenReadyForPrimaryInitialize(
-        applyBackoff: Bool
-    ) -> Bool {
-        guard xcodeTargetDiscovery != nil,
-              xcodeProcessRoutes.isEmpty,
-              upstreamReadinessGate.isEnabled
-        else {
-            return false
-        }
-        runWhenUpstreamReady(
-            reason: "primary_initialize_process_discovery",
-            applyBackoff: applyBackoff
-        ) { [weak self] in
-            self?.triggerXcodeProcessReconcile(reason: "primary_initialize_readiness")
-        }
-        return true
-    }
-
     private func startEagerInitializePrimaryWhenReady(upstreamIndex: Int) {
-        guard processRouteActivationOwnsPrimaryInitialize(
-            upstreamIndex: upstreamIndex
-        ) == false else { return }
         let decision = initializeManager.beginEagerInitializePrimary(upstreamIndex: upstreamIndex)
         let shouldSend = decision.shouldSendRequest
         let shouldScheduleTimeout = decision.shouldScheduleTimeout
@@ -94,12 +67,6 @@ extension RuntimeCoordinator {
 
     private func sendPrimaryInitializeRequestIfStillPending() {
         guard let upstreamIndex = initializeManager.pendingPrimaryInitializeUpstreamIndex() else {
-            return
-        }
-        if processRouteActivationOwnsPrimaryInitialize(upstreamIndex: upstreamIndex) {
-            _ = initializeManager.releasePrimaryInitialize(
-                upstreamIndex: upstreamIndex
-            )
             return
         }
         guard let operationLease = upstreamTopology.operationLease(
@@ -147,7 +114,6 @@ extension RuntimeCoordinator {
                 data,
                 operationLease: operationLease,
                 ensureRunning: true,
-                admission: nil,
                 onRejected: { [weak self] in
                     self?.clearUpstreamState(initializeClaim: initializeClaim)
                 }
@@ -158,25 +124,7 @@ extension RuntimeCoordinator {
     }
 
     func primaryInitializeUpstreamIndex(excluding excludedUpstreamIndices: Set<Int> = []) -> Int? {
-        if let unbound = defaultBackendUpstreamIndices.sorted().first(where: {
-            !excludedUpstreamIndices.contains($0)
-        }) {
-            return unbound
-        }
-
-        let unavailable = unavailableXcodeProcessIDs()
-        for route in xcodeProcessRoutes {
-            guard unavailable.contains(route.target.processID) == false else {
-                continue
-            }
-            if let upstreamIndex = primaryInitializeCandidate(
-                in: route,
-                excluding: excludedUpstreamIndices
-            ) {
-                return upstreamIndex
-            }
-        }
-        return nil
+        upstreamSlotIDs.map(\.rawValue).sorted().first { !excludedUpstreamIndices.contains($0) }
     }
 
     func currentPrimaryInitializeUpstreamIndex() -> Int {
@@ -188,28 +136,6 @@ extension RuntimeCoordinator {
 
     func isCurrentPrimaryInitializeUpstream(_ upstreamIndex: Int) -> Bool {
         currentPrimaryInitializeUpstreamIndex() == upstreamIndex
-    }
-
-    private func primaryInitializeCandidate(
-        in route: XcodeProcessRoute,
-        excluding excludedUpstreamIndices: Set<Int>
-    ) -> Int? {
-        return route.upstreamIndices.first { upstreamIndex in
-            guard excludedUpstreamIndices.contains(upstreamIndex) == false,
-                  let state = upstreamHealthManager.state(
-                      for: UpstreamSlotID(rawValue: upstreamIndex)
-                  ) else { return false }
-            guard state.initInFlight == false,
-                  state.isInitialized == false else {
-                return false
-            }
-            switch state.healthState {
-            case .healthy, .degraded:
-                return true
-            case .quarantined:
-                return false
-            }
-        }
     }
 
     private func primaryInitializeRetryUpstreamIndex(failedUpstreamIndex: Int) -> Int? {
@@ -226,15 +152,7 @@ extension RuntimeCoordinator {
         guard let retryUpstreamIndex = primaryInitializeRetryUpstreamIndex(
             failedUpstreamIndex: failedUpstreamIndex
         ) else {
-            markXcodeProcessRouteUnavailable(upstreamIndex: failedUpstreamIndex, reason: reason)
             return false
-        }
-        let failedProcessID = xcodeProcessRoute(forUpstreamIndex: failedUpstreamIndex)?.target.processID
-        let retryProcessID = xcodeProcessRoute(forUpstreamIndex: retryUpstreamIndex)?.target.processID
-        if failedProcessID == retryProcessID {
-            markXcodeProcessRouteAvailable(upstreamIndex: retryUpstreamIndex)
-        } else {
-            markXcodeProcessRouteUnavailable(upstreamIndex: failedUpstreamIndex, reason: reason)
         }
         if let failedUpstreamID {
             if let claim = upstreamHealthManager.currentInitializeClaim(
@@ -243,7 +161,6 @@ extension RuntimeCoordinator {
             ) {
                 _ = clearUpstreamState(
                     initializeClaim: claim,
-                    resetsProcessRouteActivation: false
                 )
             }
         }
@@ -296,7 +213,6 @@ extension RuntimeCoordinator {
         guard let resultValue = object["result"], let result = JSONValue(any: resultValue) else {
             guard clearUpstreamState(
                 initializeClaim: ownership.initializeClaim,
-                resetsProcessRouteActivation: true
             ) else { return }
             if completePendingInitializesUsingCachedResultIfAvailable() {
                 retryInitializeAfterTerminalFailure(
@@ -361,7 +277,6 @@ extension RuntimeCoordinator {
         guard let sourceProof = ownership.initializeClaim.topologyProof else {
             _ = clearUpstreamState(
                 initializeClaim: ownership.initializeClaim,
-                resetsProcessRouteActivation: false
             )
             return
         }
@@ -388,26 +303,6 @@ extension RuntimeCoordinator {
             initializeClaim: ownership.initializeClaim
         ) { [weak self] in
             guard let self else { return }
-            if case .processBridgeRecovery = ownership.initializeClaim.owner {
-                guard let transition = self.prepareProcessBridgeAttachVerification(
-                    expectedUpstreamID: upstreamID,
-                    ownership: ownership,
-                    participantLease: participantLease
-                ) else {
-                    self.handleInitializeParticipantFailure(
-                        participantLease,
-                        ownership: ownership,
-                        upstreamIndex: upstreamIndex,
-                        expectedUpstreamID: upstreamID,
-                        treatsAsPrimary: handlesPrimaryInitialize
-                    )
-                    return
-                }
-                transition.timeout?.cancel()
-                self.testHooks.upstreamInitialized?(upstreamIndex)
-                self.probeUpstreamHealth(transition.probe)
-                return
-            }
             var upstreamCommit: CommittedUpstreamInitialization?
             let transaction = self.initializeManager.finishInitializeParticipant {
                 let committed = self.commitUpstreamInitialized(
@@ -431,16 +326,10 @@ extension RuntimeCoordinator {
                 guard let completion = transaction.publication else { return }
                 self.applyInitializePublication(
                     completion,
-                    upstreamIndex: upstreamIndex,
-                    refreshPendingProcessCatalog: ownership.initializeClaim.owner == .regular
+                    upstreamIndex: upstreamIndex
                 )
             case .joined:
                 self.upstreamSlotScheduler.wake()
-                if ownership.initializeClaim.owner == .regular {
-                    self.refreshPendingProcessToolsCatalogAfterWarmInitialize(
-                        upstreamIndex: upstreamIndex
-                    )
-                }
             case .incompatible(let incompatibility):
                 self.handleInitializeIncompatibility(
                     incompatibility,
@@ -471,19 +360,13 @@ extension RuntimeCoordinator {
 
     func applyInitializePublication(
         _ completion: InitializeManager.SuccessCompletion,
-        upstreamIndex: Int,
-        refreshPendingProcessCatalog: Bool
+        upstreamIndex: Int
     ) {
         completion.timeout?.cancel()
         completion.recoveryTimeout?.cancel()
         upstreamSlotScheduler.wake()
         if completion.shouldWarmSecondary {
             warmUpSecondaryUpstreams(excluding: upstreamIndex)
-        }
-        if refreshPendingProcessCatalog {
-            refreshPendingProcessToolsCatalogAfterWarmInitialize(
-                upstreamIndex: upstreamIndex
-            )
         }
         refreshToolsListIfNeeded()
         completePendingInitializes(
@@ -588,7 +471,6 @@ extension RuntimeCoordinator {
         ]
         _ = clearUpstreamState(
             initializeClaim: ownership.initializeClaim,
-            resetsProcessRouteActivation: false,
             replacesInitializedChannel: false
         )
         noteIncompatibleUpstream(
@@ -596,15 +478,6 @@ extension RuntimeCoordinator {
             kind: "initialize",
             reason: "unsupported protocol version"
         )
-        if case .processBridgeRecovery = ownership.initializeClaim.owner {
-            retryInitializeAfterTerminalFailure(
-                ownership: ownership,
-                upstreamIndex: upstreamIndex,
-                reason: "unsupported_initialize_protocol"
-            )
-            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-            return
-        }
         if handlesPrimaryInitialize {
             _ = initializeManager.releasePrimaryInitialize(
                 upstreamIndex: upstreamIndex,
@@ -751,7 +624,6 @@ extension RuntimeCoordinator {
         canonicalHandshakeState.cancelInitializeParticipant(participantLease)
         let cleared = clearUpstreamState(
             initializeClaim: ownership.initializeClaim,
-            resetsProcessRouteActivation: true
         )
         guard cleared else { return }
 
@@ -784,7 +656,6 @@ extension RuntimeCoordinator {
     ) {
         _ = clearUpstreamState(
             initializeClaim: ownership.initializeClaim,
-            resetsProcessRouteActivation: false,
             replacesInitializedChannel: false
         )
         noteIncompatibleUpstream(
@@ -792,15 +663,6 @@ extension RuntimeCoordinator {
             kind: incompatibility.kind,
             reason: incompatibility.reason
         )
-        if case .processBridgeRecovery = ownership.initializeClaim.owner {
-            retryInitializeAfterTerminalFailure(
-                ownership: ownership,
-                upstreamIndex: upstreamIndex,
-                reason: "incompatible_initialize_result"
-            )
-            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-            return
-        }
         _ = initializeManager.releasePrimaryInitialize(
             upstreamIndex: upstreamIndex,
             upstreamID: expectedUpstreamID
@@ -830,24 +692,11 @@ extension RuntimeCoordinator {
         upstreamIndex: Int,
         reason: String = "initialize_response_failed"
     ) {
-        switch ownership.initializeClaim.owner {
-        case .regular:
-            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
-        case .processRouteActivation:
-            guard let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex),
-                  unavailableXcodeProcessIDs().contains(route.target.processID) == false
-            else { return }
-            startProcessRouteActivation(for: route)
-        case .processBridgeRecovery(let recovery):
-            replaceProcessBridgeRecoveryChannelAndScheduleRetry(
-                recovery,
-                reason: reason
-            )
-        }
+        startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
     }
 
     private func hasOtherInitializeRouteInFlight(excluding upstreamIndex: Int) -> Bool {
-        activeProcessBoundUpstreamIndices().contains { candidate in
+        upstreamSlotIDs.map(\.rawValue).contains { candidate in
             guard candidate != upstreamIndex else { return false }
             return upstreamHealthManager.state(
                 for: UpstreamSlotID(rawValue: candidate)
@@ -904,7 +753,6 @@ extension RuntimeCoordinator {
         ) {
             _ = clearUpstreamState(
                 initializeClaim: claim,
-                resetsProcessRouteActivation: false
             )
         }
     }
@@ -925,22 +773,19 @@ extension RuntimeCoordinator {
     func clearUpstreamState(
         proof: UpstreamTopologyProof,
         expectedUpstreamID: Int64? = nil,
-        resetsProcessRouteActivation: Bool = true
     ) -> Bool {
         clearUpstreamStateReturningDetachedState(
             proof: proof,
             expectedUpstreamID: expectedUpstreamID,
-            resetsProcessRouteActivation: resetsProcessRouteActivation
         ) != nil
     }
 
     func clearUpstreamStateReturningDetachedState(
         proof: UpstreamTopologyProof,
         expectedUpstreamID: Int64? = nil,
-        resetsProcessRouteActivation: Bool = true
     ) -> UpstreamHealthManager.ClearedUpstreamState? {
         var cleared: UpstreamHealthManager.ClearedUpstreamState?
-        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
+        var catalogTransitions: [CatalogTransition] = []
         let eligibility = initializeManager.finishSupportEligibilityUpdate {
             var update: CanonicalHandshakeState.SupportEligibilityUpdate?
             guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
@@ -952,19 +797,18 @@ extension RuntimeCoordinator {
                 update = commitSupportEligibilityAfterHealthMutation(
                     topologySnapshot: topologySnapshot,
                     detachedProof: proof,
-                    processEligibility: &processEligibility
+                    catalogTransitions: &catalogTransitions
                 )
                 return true
             }) == true else { return nil }
             return update
         }
-        guard let cleared, let eligibility, let processEligibility else { return nil }
-        applyProcessControlPlaneTransition(processEligibility.transition)
+        guard let cleared, let eligibility else { return nil }
+        catalogTransitions.forEach(applyCatalogTransition)
         applySupportEligibilityCompletion(eligibility)
         finishClearingUpstreamState(
             proof: proof,
             cleared: cleared,
-            resetsProcessRouteActivation: resetsProcessRouteActivation
         )
         return cleared
     }
@@ -972,12 +816,10 @@ extension RuntimeCoordinator {
     @discardableResult
     func clearUpstreamState(
         initializeClaim: UpstreamHealthManager.InitializeClaim,
-        resetsProcessRouteActivation: Bool = true,
         replacesInitializedChannel: Bool = true
     ) -> Bool {
         clearUpstreamState(
             initializeClaim: initializeClaim,
-            resetsProcessRouteActivation: resetsProcessRouteActivation,
             replacesInitializedChannel: replacesInitializedChannel,
             clearClaim: upstreamHealthManager.clearInitializeClaim
         )
@@ -986,12 +828,10 @@ extension RuntimeCoordinator {
     @discardableResult
     func timeoutUpstreamInitialize(
         initializeClaim: UpstreamHealthManager.InitializeClaim,
-        resetsProcessRouteActivation: Bool = true,
         replacesInitializedChannel: Bool = true
     ) -> Bool {
         clearUpstreamState(
             initializeClaim: initializeClaim,
-            resetsProcessRouteActivation: resetsProcessRouteActivation,
             replacesInitializedChannel: replacesInitializedChannel,
             clearClaim: upstreamHealthManager.timeoutInitializeClaim
         )
@@ -999,14 +839,13 @@ extension RuntimeCoordinator {
 
     private func clearUpstreamState(
         initializeClaim: UpstreamHealthManager.InitializeClaim,
-        resetsProcessRouteActivation: Bool,
         replacesInitializedChannel: Bool,
         clearClaim: (UpstreamHealthManager.InitializeClaim)
             -> UpstreamHealthManager.ClearedUpstreamState?
     ) -> Bool {
         guard let proof = initializeClaim.topologyProof else { return false }
         var cleared: UpstreamHealthManager.ClearedUpstreamState?
-        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
+        var catalogTransitions: [CatalogTransition] = []
         let eligibility = initializeManager.finishSupportEligibilityUpdate {
             var update: CanonicalHandshakeState.SupportEligibilityUpdate?
             guard upstreamTopology.withValidatedSnapshot(proof, { topologySnapshot in
@@ -1015,28 +854,20 @@ extension RuntimeCoordinator {
                 update = commitSupportEligibilityAfterHealthMutation(
                     topologySnapshot: topologySnapshot,
                     detachedProof: proof,
-                    processEligibility: &processEligibility
+                    catalogTransitions: &catalogTransitions
                 )
                 return true
             }) == true else { return nil }
             return update
         }
-        guard let cleared, let eligibility, let processEligibility else { return false }
-        applyProcessControlPlaneTransition(processEligibility.transition)
+        guard let cleared, let eligibility else { return false }
+        catalogTransitions.forEach(applyCatalogTransition)
         applySupportEligibilityCompletion(eligibility)
         finishClearingUpstreamState(
             proof: proof,
             cleared: cleared,
-            resetsProcessRouteActivation: resetsProcessRouteActivation
         )
-        let isProcessBridgeRecovery: Bool
-        if case .processBridgeRecovery = initializeClaim.owner {
-            isProcessBridgeRecovery = true
-        } else {
-            isProcessBridgeRecovery = false
-        }
         if replacesInitializedChannel,
-           isProcessBridgeRecovery == false,
            (cleared.didReceiveInitializeResponse || cleared.didSendInitialized) {
             replaceOrRetireInitializeChannel(initializeClaim)
         }
@@ -1046,7 +877,6 @@ extension RuntimeCoordinator {
     func finishClearingUpstreamState(
         proof: UpstreamTopologyProof,
         cleared: UpstreamHealthManager.ClearedUpstreamState,
-        resetsProcessRouteActivation: Bool
     ) {
         let upstreamIndex = proof.slotID.rawValue
         cleared.timeout?.cancel()
@@ -1056,18 +886,13 @@ extension RuntimeCoordinator {
                 upstreamID: initUpstreamID
             )
         }
-        if resetsProcessRouteActivation {
-            resetProcessRouteActivationIfClearingPreCatalogUpstream(
-                upstreamIndex: upstreamIndex
-            )
-        }
         debugRecorder.resetUpstream(upstreamIndex)
     }
 
     func commitSupportEligibilityAfterHealthMutation(
         topologySnapshot: UpstreamTopologyAuthority.Snapshot,
         detachedProof: UpstreamTopologyProof?,
-        processEligibility: inout ProcessControlPlaneAuthority.SupportEligibilityResult?
+        catalogTransitions: inout [CatalogTransition]
     ) -> CanonicalHandshakeState.SupportEligibilityUpdate {
         let authoritativeProofs = Set(topologySnapshot.entries.map { $0.operationLease.proof })
         return upstreamHealthManager.withUsableInitializedTopologyProofs(
@@ -1084,17 +909,10 @@ extension RuntimeCoordinator {
                     retaining: healthUsableProofs
                 )
             }
-            // Process usability is the complete health projection, not the
-            // subset of raw supporters compatible with the canonical result.
-            let usableIDs = Set(healthUsableProofs.map(\.slotID))
-            processEligibility = processControlPlane.applySupportEligibility(
-                usability: ProcessControlPlaneAuthority.UpstreamUsabilitySnapshot(
-                    snapshotUsableUpstreamIDs: usableIDs,
-                    recoveryAwareUsableUpstreamIDs: usableIDs
-                ),
-                newlyIneligibleProofs: update.newlyIneligibleProofs,
-                nowUptimeNs: nowUptimeNanoseconds()
-            )
+            catalogTransitions = update.newlyIneligibleProofs.map { toolsCatalog.invalidate(sourceProof: $0) }
+            if let detachedProof, !update.newlyIneligibleProofs.contains(detachedProof) {
+                catalogTransitions.append(toolsCatalog.invalidate(sourceProof: detachedProof))
+            }
             return update
         }
     }
@@ -1116,7 +934,6 @@ extension RuntimeCoordinator {
         }
         guard completion.update.newlyEligibleProofs.isEmpty == false else { return }
         upstreamSlotScheduler.wake()
-        retryPendingProcessRouteReadiness(reason: "initialize_support_restored")
         refreshToolsListIfNeeded()
     }
 
@@ -1161,28 +978,6 @@ extension RuntimeCoordinator {
         )
     }
 
-    func prepareProcessBridgeAttachVerification(
-        expectedUpstreamID: Int64,
-        ownership: InitializeResponseOwnership,
-        participantLease: CanonicalHandshakeState.InitializeParticipantLease
-    ) -> UpstreamHealthManager.BridgeVerificationTransition? {
-        let initializeClaim = ownership.initializeClaim
-        guard let proof = initializeClaim.topologyProof,
-              proof == participantLease.topologyProof else { return nil }
-        var transition: UpstreamHealthManager.BridgeVerificationTransition?
-        let prepared = initializeManager.prepareInitializeParticipantForBridgeVerification {
-            upstreamTopology.withValidated(proof, {
-                transition = upstreamHealthManager.beginBridgeAttachVerification(
-                    initializeClaim,
-                    expectedUpstreamID: expectedUpstreamID,
-                    initializeParticipant: participantLease
-                )
-                return transition != nil
-            }) == true
-        }
-        return prepared ? transition : nil
-    }
-
     func finishUpstreamInitialized(
         upstreamIndex: Int,
         ownership: InitializeResponseOwnership,
@@ -1191,34 +986,18 @@ extension RuntimeCoordinator {
         guard committed.canonicalCommit.isAccepted,
               let healthTransition = committed.healthTransition else { return }
         healthTransition.timeout?.cancel()
-        markXcodeProcessRouteAvailable(upstreamIndex: upstreamIndex)
-        if ownership.initializeClaim.owner == .processRouteActivation {
-            finishProcessRouteActivationChannelInitialized(
-                upstreamIndex: upstreamIndex,
-                initializeClaim: ownership.initializeClaim
-            )
-        }
         testHooks.upstreamInitialized?(upstreamIndex)
         noteUpstreamInitializationSucceeded()
     }
 
     func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) {
         let resolvedPrimaryUpstreamIndex = primaryUpstreamIndex ?? currentPrimaryInitializeUpstreamIndex()
-        for upstreamIndex in defaultBackendUpstreamIndices where upstreamIndex != resolvedPrimaryUpstreamIndex {
+        for upstreamIndex in upstreamSlotIDs.map(\.rawValue) where upstreamIndex != resolvedPrimaryUpstreamIndex {
             startUpstreamWarmInitialize(upstreamIndex: upstreamIndex)
         }
-        for route in xcodeProcessRoutes {
-            if processControlPlane.catalog(forProcessID: route.target.processID) == nil {
-                startProcessRouteActivation(for: route)
-            }
-        }
-        retryPendingProcessRouteReadiness(reason: "canonical_initialize_succeeded")
     }
 
     func startPrimaryEagerRetry() {
-        // Process routes own their exact failed proof. The caller has
-        // already detached that channel; a global retry must not clear a
-        // sibling route that may have started publishing concurrently.
         startEagerInitializePrimary(applyBackoff: true)
     }
 

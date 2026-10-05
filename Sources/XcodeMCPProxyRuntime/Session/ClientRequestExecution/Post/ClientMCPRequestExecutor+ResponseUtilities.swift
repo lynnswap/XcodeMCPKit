@@ -106,13 +106,6 @@ extension ClientMCPRequestExecutor {
         )
     }
 
-    static func makeToolRoutingErrorResponseData(errors: [ToolRoutingError]) -> Data? {
-        guard let error = errors.first else { return nil }
-        return try? JSONRPC.Wire.data(
-            from: makeToolResultErrorResponseObject(id: error.id, message: error.message)
-        )
-    }
-
     static func makeJSONRPCErrorResponseData(
         id: JSONRPC.ID?,
         code: Int,

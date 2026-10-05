@@ -111,7 +111,6 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyRuntime",
             dependencies: [
-                "XcodeMCPDocumentationSearch",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 .product(name: "Logging", package: "swift-log"),

@@ -68,17 +68,10 @@ protocol ProxyUpstreamRequestRuntimePort: Sendable {
         requestIDKey: String,
         operationLease: UpstreamOperationLease
     )
-    func rewriteOwnerBoundRequest(
-        bodyData: Data,
-        parsedRequestJSON: Any,
-        operationLease: UpstreamOperationLease,
-        admission: RouteForwardingAdmission?
-    ) -> (bodyData: Data, parsedRequestJSON: Any)
     func sendUpstream(
         _ data: Data,
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission: RouteForwardingAdmission?,
         requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool
@@ -92,27 +85,16 @@ protocol ProxyUpstreamRequestRuntimePort: Sendable {
 }
 
 extension ProxyUpstreamRequestRuntimePort {
-    func rewriteOwnerBoundRequest(
-        bodyData: Data,
-        parsedRequestJSON: Any,
-        operationLease _: UpstreamOperationLease,
-        admission _: RouteForwardingAdmission?
-    ) -> (bodyData: Data, parsedRequestJSON: Any) {
-        (bodyData, parsedRequestJSON)
-    }
-
     @discardableResult
     func sendUpstream(
         _ data: Data,
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission: RouteForwardingAdmission?
     ) -> Bool {
         sendUpstream(
             data,
             operationLease: operationLease,
             ensureRunning: ensureRunning,
-            admission: admission,
             requestSendCompletion: nil,
             onRejected: {}
         )
@@ -123,14 +105,12 @@ extension ProxyUpstreamRequestRuntimePort {
         _ data: Data,
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission: RouteForwardingAdmission?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
         sendUpstream(
             data,
             operationLease: operationLease,
             ensureRunning: ensureRunning,
-            admission: admission,
             requestSendCompletion: nil,
             onRejected: onRejected
         )
@@ -143,7 +123,6 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         let transform: RequestTransform
         let sessionID: String
         let operationLease: UpstreamOperationLease
-        let admission: RouteForwardingAdmission?
         let toolDefinition: ToolDefinitionSnapshot?
 
         var upstreamIndex: Int { operationLease.upstreamIndex }
@@ -152,13 +131,11 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             transform: RequestTransform,
             sessionID: String,
             operationLease: UpstreamOperationLease,
-            admission: RouteForwardingAdmission? = nil,
             toolDefinition: ToolDefinitionSnapshot? = nil
         ) {
             self.transform = transform
             self.sessionID = sessionID
             self.operationLease = operationLease
-            self.admission = admission
             self.toolDefinition = toolDefinition
         }
     }
@@ -231,7 +208,6 @@ struct ProxyUpstreamRequestRuntime: Sendable {
         parsedRequestJSON: Any,
         sessionID: String,
         operationLeaseOverride: UpstreamOperationLease? = nil,
-        admission: RouteForwardingAdmission? = nil
     ) throws -> PreparedRequest? {
         let operationLease: UpstreamOperationLease
         if let operationLeaseOverride {
@@ -242,20 +218,9 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             }
             operationLease = chosen
         }
-        if let definition = admission?.toolDefinition,
-           definition.sourceProof != operationLease.proof {
-            throw Error.staleUpstreamTopology
-        }
-
-        let rewritten = port.rewriteOwnerBoundRequest(
-            bodyData: bodyData,
-            parsedRequestJSON: parsedRequestJSON,
-            operationLease: operationLease,
-            admission: admission
-        )
         let transform = try RequestInspector.transform(
-            rewritten.bodyData,
-            parsedJSON: rewritten.parsedRequestJSON,
+            bodyData,
+            parsedJSON: parsedRequestJSON,
             sessionID: sessionID,
             mapProgressToken: { _ in makeUpstreamProgressToken() },
             mapID: { sessionID, originalID in
@@ -273,7 +238,6 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             transform: transform,
             sessionID: sessionID,
             operationLease: operationLease,
-            admission: admission
         )
     }
 
@@ -354,7 +318,6 @@ struct ProxyUpstreamRequestRuntime: Sendable {
             prepared.transform.upstreamData,
             operationLease: prepared.operationLease,
             ensureRunning: false,
-            admission: prepared.admission,
             requestSendCompletion: requestSendCompletion,
             onRejected: reject
         )

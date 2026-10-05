@@ -7,7 +7,6 @@ package enum NativeHostInvocation {
     package static func resolve(
         bundleURL: URL? = nil,
         developerDirectoryURL: URL? = nil,
-        guiPID: Int32? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         executableURL: URL? = Bundle.main.executableURL,
         fileSystem: FileSystemClient = .liveValue
@@ -41,7 +40,6 @@ package enum NativeHostInvocation {
         }
         var arguments: [String] = []
         if let developerDirectoryURL { arguments += ["--developer-dir", developerDirectoryURL.path] }
-        if let guiPID { arguments += ["--gui-pid", String(guiPID)] }
         return MCPBridgeInvocation(command: executable.path, arguments: arguments)
     }
 

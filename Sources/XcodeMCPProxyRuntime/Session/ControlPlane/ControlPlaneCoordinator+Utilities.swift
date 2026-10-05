@@ -17,18 +17,6 @@ extension ControlPlaneCoordinator {
         }
     }
 
-    func cancelWindowLoad(
-        _ load: WindowLoadState,
-        error: Error
-    ) {
-        load.rpcHandle.cancel()
-        load.task.cancel()
-        for waiter in load.waiters.values {
-            waiter.timeoutTask?.cancel()
-            waiter.continuation.resume(throwing: error)
-        }
-    }
-
     func makeTimeoutTask(
         deadlineUptimeNs: UInt64?,
         operation: @escaping @Sendable () async -> Void

@@ -54,52 +54,6 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(started.withLockedValue { $0 } == [1] + Array(repeating: 0, count: 32))
     }
 
-    @Test func unavailableServiceRequestDoesNotBlockReadyGUIRequest() async throws {
-        let group = borrowSharedTestEventLoopGroup()
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let target = xcodeProcessTarget(processID: 759, xcodeVersion: "27.0")
-        var config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config, eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient(), TestUpstreamClient()],
-            xcodeProcessRoutes: [XcodeProcessRoute(target: target, upstreamIndices: [1])],
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 1)
-        let descriptor = SessionRequestPipeline.Descriptor(
-            sessionID: "queue-backends", label: "tools/list", expectsResponse: true, isTopLevelClientRequest: false
-        )
-        let serviceLease = manager.createRequestLease(descriptor: descriptor)
-        let serviceStarted = NIOLockedValueBox<Int?>(nil)
-        let serviceFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
-            leaseID: serviceLease, descriptor: descriptor, on: eventLoop, preferredUpstreamIndex: 0
-        ) { lease in
-            serviceStarted.withLockedValue { $0 = lease.upstreamIndex }
-            return eventLoop.makeSucceededFuture(())
-        }
-        serviceFuture.whenFailure { _ in }
-        let guiLease = manager.createRequestLease(descriptor: descriptor)
-        let guiStarted = NIOLockedValueBox<Int?>(nil)
-        let guiFuture: EventLoopFuture<Void> = manager.enqueueOnUpstreamSlot(
-            leaseID: guiLease, descriptor: descriptor, on: eventLoop, preferredUpstreamIndex: 1
-        ) { lease in
-            guiStarted.withLockedValue { $0 = lease.upstreamIndex }
-            return eventLoop.makeSucceededFuture(())
-        }
-        guiFuture.whenFailure { _ in }
-        try await eventLoop.submit {}.get()
-        #expect(guiStarted.withLockedValue { $0 } == 1)
-        #expect(serviceStarted.withLockedValue { $0 } == nil)
-        manager.completeRequestLease(guiLease)
-        manager.abandonRequestLease(serviceLease, sessionID: descriptor.sessionID, requestIDKeys: [], operationLease: nil)
-        await #expect(throws: UpstreamSlotScheduler.AcquisitionError.self) { try await serviceFuture.get() }
-        #expect(manager.debugSnapshot().queuedRequestCount == 0)
-    }
-
-
-
     @Test func sessionManagerPreferredRequestFailsWhenAllPreferredUpstreamsUnusable()
         async throws
     {
@@ -517,7 +471,7 @@ struct RuntimeCoordinatorSchedulingTests {
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
-            unboundUpstreamFactory: {
+            nativeUpstreamFactory: {
                 let replacement = TestUpstreamClient()
                 replacements.withLockedValue { $0.append(replacement) }
                 return replacement
@@ -1115,165 +1069,6 @@ struct RuntimeCoordinatorSchedulingTests {
         )
     }
 
-    @Test func processRouteInitializeErrorRetriesLocallyAndPreservesWinnerCatalog()
-        async throws
-    {
-        let group = borrowSharedTestEventLoopGroup()
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let failingUpstream = TestUpstreamClient()
-        let winningUpstream = TestUpstreamClient()
-        let replacementUpstreams = NIOLockedValueBox<[TestUpstreamClient]>([])
-        let failingTarget = xcodeProcessTarget(processID: 27120, xcodeVersion: "27.0")
-        let winningTarget = xcodeProcessTarget(processID: 26620, xcodeVersion: "26.6")
-        let config = makeConfig(requestTimeout: 5)
-        let manager = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [failingUpstream, winningUpstream],
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: failingTarget, upstreamIndices: [0]),
-                XcodeProcessRoute(target: winningTarget, upstreamIndices: [1]),
-            ],
-            dynamicUpstreamFactory: { target in
-                guard target.processID == failingTarget.processID else {
-                    return [TestUpstreamClient()]
-                }
-                let upstream = TestUpstreamClient()
-                replacementUpstreams.withLockedValue { $0.append(upstream) }
-                return [upstream]
-            }
-        )
-        defer { manager.shutdownAndWait() }
-
-        let failingInitialize = try await sentValue(
-            from: failingUpstream,
-            at: 0,
-            timeout: .seconds(2)
-        )
-        let winningInitialize = try await sentValue(
-            from: winningUpstream,
-            at: 0,
-            timeout: .seconds(2)
-        )
-        await winningUpstream.yield(
-            .message(
-                try makeInitializeResponse(
-                    id: try extractUpstreamID(from: winningInitialize),
-                    serverName: "Xcode 26.6"
-                ))
-        )
-        _ = try await sentValue(
-            from: winningUpstream,
-            startingAt: 1,
-            matching: { methodName(from: $0) == "notifications/initialized" },
-            timeout: .seconds(2),
-            description: "waiting for winner initialized notification"
-        )
-        let winningTools = try await sentValue(
-            from: winningUpstream,
-            startingAt: 2,
-            matching: { methodName(from: $0) == "tools/list" },
-            timeout: .seconds(2),
-            description: "waiting for winner tools catalog"
-        )
-        await winningUpstream.yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: winningTools),
-                    tools: [ownerBoundToolDescriptor(name: "BuildProject")]
-                ))
-        )
-        await manager.drainRuntimeTasksForTesting()
-        let winningCatalog = try #require(
-            manager.processControlPlane.catalog(forProcessID: winningTarget.processID)
-        )
-
-        let errorResponse: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": NSNumber(value: try extractUpstreamID(from: failingInitialize)),
-            "error": [
-                "code": -1,
-                "message": "route-local initialize failure",
-            ],
-        ]
-        await failingUpstream.yield(
-            .message(try JSONSerialization.data(withJSONObject: errorResponse, options: []))
-        )
-
-        let replacement = try await waitWithTimeout(
-            "waiting for route-local replacement after initialize error"
-        ) {
-            while true {
-                if let upstream = replacementUpstreams.withLockedValue({ $0.first }) {
-                    return upstream
-                }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-        }
-        let replacementInitialize = try await sentValue(
-            from: replacement,
-            startingAt: 0,
-            matching: { methodName(from: $0) == "initialize" },
-            timeout: .seconds(2),
-            description: "waiting for replacement initialize"
-        )
-        await replacement.yield(
-            .message(
-                try makeInitializeResponse(
-                    id: try extractUpstreamID(from: replacementInitialize),
-                    serverName: "Xcode 27"
-                ))
-        )
-        _ = try await sentValue(
-            from: replacement,
-            startingAt: 1,
-            matching: { methodName(from: $0) == "notifications/initialized" },
-            timeout: .seconds(2),
-            description: "waiting for replacement initialized notification"
-        )
-        let replacementTools = try await sentValue(
-            from: replacement,
-            startingAt: 2,
-            matching: { methodName(from: $0) == "tools/list" },
-            timeout: .seconds(2),
-            description: "waiting for replacement tools catalog"
-        )
-        await replacement.yield(
-            .message(
-                try makeDocumentationToolsListResponse(
-                    id: try extractUpstreamID(from: replacementTools),
-                    tools: [ownerBoundToolDescriptor(name: "BuildProject")]
-                ))
-        )
-        await manager.drainRuntimeTasksForTesting()
-
-        #expect(
-            manager.processControlPlane.catalog(forProcessID: winningTarget.processID)?.rawResult
-                == winningCatalog.rawResult
-        )
-        #expect(
-            manager.processControlPlane.catalog(forProcessID: failingTarget.processID) != nil
-        )
-        #expect(manager.canonicalHandshakeState.initializeSourceUpstream() == 1)
-        #expect(
-            manager.canonicalHandshakeState.snapshot().supporterProofs
-                .map(\.slotID.rawValue).sorted() == [0, 1]
-        )
-        #expect(
-            manager.processControlPlane.attemptSnapshot(
-                processID: winningTarget.processID
-            )?.phase == .cataloged
-        )
-        #expect(
-            manager.processControlPlane.attemptSnapshot(
-                processID: failingTarget.processID
-            )?.phase == .cataloged
-        )
-    }
-
-
-
     @Test func sessionManagerAbandonRequestLeaseDropsLateResponseAndReleasesSlot() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
@@ -1369,7 +1164,7 @@ struct RuntimeCoordinatorSchedulingTests {
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
             upstreams: [initial],
-            unboundUpstreamFactory: {
+            nativeUpstreamFactory: {
                 let replacement = TestUpstreamClient()
                 replacements.withLockedValue { $0.append(replacement) }
                 return replacement
@@ -1528,19 +1323,15 @@ struct RuntimeCoordinatorSchedulingTests {
     ) async throws {
         let initial = TestUpstreamClient()
         let replacements = NIOLockedValueBox<[TestUpstreamClient]>([])
-        let target = xcodeProcessTarget(processID: 27091, xcodeVersion: "27.0")
         let timeoutScheduler = RecordingRuntimeTimeoutScheduler()
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
             upstreams: [initial],
             scheduleRuntimeTimeout: timeoutScheduler.scheduler(),
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target, upstreamIndices: [0])
-            ],
-            dynamicUpstreamFactory: { _ in
+            nativeUpstreamFactory: {
                 let replacement = TestUpstreamClient()
                 replacements.withLockedValue { $0.append(replacement) }
-                return [replacement]
+                return replacement
             },
             startImmediately: false
         )
@@ -1556,12 +1347,7 @@ struct RuntimeCoordinatorSchedulingTests {
             ]),
             sourceUpstream: 0
         )
-        try seedProcessToolCatalogs(
-            on: manager,
-            entries: [
-                (target, 0, [toolDescriptor(name: "DocumentationSearch")])
-            ]
-        )
+        try seedNativeToolCatalog(on: manager, upstreamIndex: 0, tools: [toolDescriptor(name: "DocumentationSearch")])
 
         let sessionID = "session-rejected-\(trigger)"
         let descriptor = SessionRequestPipeline.Descriptor(
@@ -1640,11 +1426,6 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(replacements.withLockedValue(\.count) == 1)
         #expect(manager.upstreamTopology.validate(operationLease) == false)
 
-        let activationRetryIndex = try await timeoutScheduler.nextActiveTimeoutIndex(
-            delay: .milliseconds(250),
-            startingAtEventIndex: 0
-        )
-        #expect(timeoutScheduler.fire(at: activationRetryIndex))
         let replacement = try #require(replacements.withLockedValue { $0.first })
         _ = try await replacement.nextSent(
             matching: { methodName(from: $0) == "initialize" }
@@ -1744,7 +1525,7 @@ struct RuntimeCoordinatorSchedulingTests {
         let fixture = RuntimeCoordinatorFixture(
             config: makeConfig(requestTimeout: 300),
             upstreams: [upstream],
-            unboundUpstreamFactory: {
+            nativeUpstreamFactory: {
                 let replacement = TestUpstreamClient()
                 replacements.withLockedValue { $0.append(replacement) }
                 return replacement
@@ -2138,8 +1919,6 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(object["method"] as? String == "initialize")
     }
 
-
-
     @Test func sessionManagerFailsQueuedRequestsWhenHealthProbeRecoveryFails() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
@@ -2199,8 +1978,6 @@ struct RuntimeCoordinatorSchedulingTests {
         }
     }
 
-
-
     @Test func sessionManagerDebugResetClearsSessionsLeasesAndCache() async throws {
         let group = borrowSharedTestEventLoopGroup()
         defer { shutdownAndWait(group) }
@@ -2235,80 +2012,6 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(snapshot.sessions.isEmpty)
         #expect(snapshot.leases.isEmpty)
     }
-
-    @Test func sessionManagerDebugResetClearsProcessRouteCooldowns() async throws {
-        let group = borrowSharedTestEventLoopGroup()
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let target = xcodeProcessTarget(processID: 523, xcodeVersion: "27.0")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient()],
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target, upstreamIndices: [0])
-            ],
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-
-        manager.markXcodeProcessRouteUnavailableAfterCatalogFailure(
-            upstreamIndex: 0,
-            reason: "test_debug_reset"
-        )
-        #expect(manager.unavailableXcodeProcessIDs().contains(target.processID))
-
-        manager.debugReset()
-
-        #expect(manager.unavailableXcodeProcessIDs().contains(target.processID) == false)
-    }
-
-    @Test func sessionManagerDebugResetClearsXcodeWindowOwners() async throws {
-        let group = borrowSharedTestEventLoopGroup()
-        defer { shutdownAndWait(group) }
-        let eventLoop = group.next()
-        let target = xcodeProcessTarget(processID: 522, xcodeVersion: "27.0")
-        let manager = RuntimeCoordinator(
-            config: makeConfig(requestTimeout: 5),
-            eventLoop: eventLoop,
-            upstreams: [TestUpstreamClient()],
-            xcodeProcessRoutes: [
-                XcodeProcessRoute(target: target, upstreamIndices: [0])
-            ],
-            startImmediately: false
-        )
-        defer { manager.shutdownAndWait() }
-        manager.markUpstreamInitialized(upstreamIndex: 0)
-        try seedProcessToolCatalogs(
-            on: manager,
-            entries: [
-                (target, 0, [ownerBoundToolDescriptor(name: "BuildProject")])
-            ]
-        )
-        #expect(
-            manager.recordXcodeWindowOwners(
-                from: try jsonValue([
-                    "structuredContent": [
-                        "message": "* tabIdentifier: tab-a, workspacePath: /Work/A.xcworkspace"
-                    ]
-                ]),
-                upstreamIndex: 0
-            )
-        )
-        let request = toolsCallObject(
-            id: 1000,
-            name: "BuildProject",
-            arguments: ["tabIdentifier": "tab-a"]
-        )
-        #expect(manager.preferredUpstreamIndex(for: request) == 0)
-
-        manager.debugReset()
-
-        #expect(manager.preferredUpstreamIndex(for: request) == nil)
-    }
-
-
 
     @Test func requestLeaseRegistryKeepsOnlyBoundedReleasedHistory() async throws {
         let registry = LeaseManager(releasedHistoryLimit: 2)
@@ -2562,7 +2265,5 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(startedLeaseIDs.withLockedValue { $0 }.isEmpty)
         #expect(scheduler.debugSnapshot().queuedRequestCount == 0)
     }
-
-
 
 }

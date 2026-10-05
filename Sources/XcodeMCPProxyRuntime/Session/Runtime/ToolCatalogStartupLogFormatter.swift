@@ -2,39 +2,13 @@ import Foundation
 import XcodeMCPCore
 
 enum ToolCatalogStartupLogFormatter {
-    struct Process: Sendable, Equatable {
-        let appPath: String
-        let processID: pid_t
-
-        init(appPath: String, processID: pid_t) {
-            self.appPath = appPath
-            self.processID = processID
-        }
-    }
-
-    static func summary(
-        from result: JSONValue,
-        process: Process? = nil
-    ) -> String {
-        let names = toolNames(in: result)
-        let details = detailsLines(for: names, indent: process == nil ? "  " : "    ")
-
-        guard let process else {
-            return (["Tools"] + details).joined(separator: "\n")
-        }
-
-        return (
-            [
-                "Tools",
-            ] + [
-                "  - \(process.appPath) (PID: \(process.processID))",
-            ] + details
-        ).joined(separator: "\n")
+    static func summary(from result: JSONValue) -> String {
+        (["Tools"] + detailsLines(for: toolNames(in: result), indent: "  ")).joined(separator: "\n")
     }
 
     private static func detailsLines(for names: [String], indent: String) -> [String] {
         let documentationSearchStatus =
-            names.contains(DocumentationProvider.ToolCatalog.toolName)
+            names.contains("DocumentationSearch")
             ? "available"
             : "unavailable"
         let availableNames = names.isEmpty ? ["none"] : names

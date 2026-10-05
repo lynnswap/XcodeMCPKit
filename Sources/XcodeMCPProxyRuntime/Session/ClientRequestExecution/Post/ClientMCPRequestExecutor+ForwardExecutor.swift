@@ -13,7 +13,6 @@ extension ClientMCPRequestExecutor {
         operationLease: UpstreamOperationLease?,
         cancellationHandle: ClientMCPRequestExecutor.CancellationHandle?,
         requestTimeoutOverride: TimeAmount?,
-        admission: RouteForwardingAdmission? = nil
     ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
         let bodyData = forwardedRequest.bodyData
         guard let requestObject = try? JSONRPC.Wire.object(fromData: bodyData)
@@ -39,7 +38,6 @@ extension ClientMCPRequestExecutor {
                 parsedRequestJSON: requestObject,
                 sessionID: sessionID,
                 operationLeaseOverride: operationLease,
-                admission: admission,
                 cancellationHandle: cancellationHandle
             ) else {
                 return makeImmediateLeaseResolution(
@@ -83,7 +81,6 @@ extension ClientMCPRequestExecutor {
                     prepared.transform.upstreamData,
                     operationLease: prepared.operationLease,
                     ensureRunning: false,
-                    admission: prepared.admission
                 )
             }
             return makeImmediateLeaseResolution(
@@ -169,11 +166,6 @@ extension ClientMCPRequestExecutor {
             let responseID = started.transform.responseID
             switch resolution {
             case .success(let responseData):
-                self.sessionManager.recordDeviceInteractionAffinityIfNeeded(
-                    requestData: bodyData,
-                    responseData: responseData,
-                    operationLease: started.operationLease
-                )
                 cancellationHandle?.markCompleted()
                 self.sessionManager.completeRequestLease(leaseID)
                 self.logFinishedRequest(

@@ -155,8 +155,6 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         let warmupInFlight: Bool
         let controlPlane: ControlPlane.DebugSnapshot?
         let upstreams: [ProxyDebug.UpstreamSnapshot]
-        let processRoutes: [ProxyDebug.ProcessRouteSnapshot]
-        let processToolCatalogs: [ProcessControlPlaneAuthority.CatalogDebugSnapshot]
         let recentTraffic: [ProxyDebug.TrafficEvent]
         let sessions: [SessionRequestPipeline.DebugSnapshot]
         let leases: [LeaseManager.DebugSnapshot]
@@ -168,7 +166,6 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
     private let eventSource: ProxyRuntimeEventSource
     private let requestExecutor: ClientMCPRequestExecutor
     private let ownedEventLoopGroup: EventLoopGroup?
-    private let processEventMonitor: (any XcodeProcessEventMonitoring)?
 
     init(
         config: ProxyRuntimeConfiguration,
@@ -176,8 +173,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         eventLoop: EventLoop,
         eventSource: ProxyRuntimeEventSource,
         eventLoopCompletionExecutor: EventLoopCompletionExecutor = .eventLoop,
-        ownedEventLoopGroup: EventLoopGroup? = nil,
-        processEventMonitor: (any XcodeProcessEventMonitoring)? = nil
+        ownedEventLoopGroup: EventLoopGroup? = nil
     ) {
         self.coordinator = coordinator
         self.eventLoop = eventLoop
@@ -189,20 +185,16 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
             logger: ProxyLogging.make("runtime.request")
         )
         self.ownedEventLoopGroup = ownedEventLoopGroup
-        self.processEventMonitor = processEventMonitor
     }
 
     package convenience init(configuration config: ProxyRuntimeConfiguration) {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let eventLoop = group.next()
         let eventSource = ProxyRuntimeEventSource()
-        let processEventMonitor = XcodeProcessEventMonitor()
         let coordinator = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreamReadinessGate: .liveDefault(clock: .liveValue),
-            xcodeTargetDiscovery: processEventMonitor,
-            xcodeProcessEventMonitor: processEventMonitor,
             notificationSink: { sessionID, data in
                 eventSource.emit(
                     .notification(
@@ -223,8 +215,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
             coordinator: coordinator,
             eventLoop: eventLoop,
             eventSource: eventSource,
-            ownedEventLoopGroup: group,
-            processEventMonitor: processEventMonitor
+            ownedEventLoopGroup: group
         )
     }
 
@@ -369,17 +360,6 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         )
     }
 
-    package func inventorySnapshot() -> ProxyRuntimeInventorySnapshot {
-        ProxyRuntimeInventorySnapshot(
-            xcodeTargets: processEventMonitor?.runningXcodeTargets().map {
-                ProxyRuntimeInventorySnapshot.XcodeTarget(
-                    processID: $0.processID,
-                    appPath: $0.appPath
-                )
-            } ?? []
-        )
-    }
-
     package func debugSnapshotData(includeSensitivePayloads: Bool) -> Data? {
         let base = coordinator.debugSnapshot(
             includeSensitiveDebugPayloads: includeSensitivePayloads
@@ -391,8 +371,6 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
             warmupInFlight: base.warmupInFlight,
             controlPlane: base.controlPlane,
             upstreams: base.upstreams,
-            processRoutes: base.processRoutes,
-            processToolCatalogs: base.processToolCatalogs,
             recentTraffic: base.recentTraffic,
             sessions: base.sessions,
             leases: base.leases,
