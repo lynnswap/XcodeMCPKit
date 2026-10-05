@@ -1135,53 +1135,6 @@ func makeToolListResponse(id: Int64) throws -> Data {
     )
 }
 
-func makeXcodeListWindowsResponse(id: Int64, message: String) throws -> Data {
-    let encodedMessage = String(
-        decoding: try JSONSerialization.data(
-            withJSONObject: ["message": message],
-            options: [.sortedKeys]
-        ),
-        as: UTF8.self
-    )
-    return try JSONSerialization.data(
-        withJSONObject: [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": encodedMessage,
-                    ],
-                ],
-                "structuredContent": [
-                    "message": message,
-                ],
-            ],
-        ],
-        options: []
-    )
-}
-
-func makeXcodeListWindowsToolErrorResponse(id: Int64, message: String) throws -> Data {
-    try JSONSerialization.data(
-        withJSONObject: [
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": message,
-                    ],
-                ],
-                "isError": true,
-            ],
-        ],
-        options: []
-    )
-}
-
 func makeDocumentationToolsListResponse(id: Int64, version: String) throws -> Data {
     try makeDocumentationToolsListResponse(
         id: id,

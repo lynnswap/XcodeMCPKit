@@ -3,9 +3,6 @@ import XcodeMCPCore
 
 /// One catalog remains tied to the exact connection that supplied its definitions.
 struct ToolCatalogProvider: Sendable {
-    static let providersMetadataKey = "com.lynnswap.xcode-mcpkit/providers"
-    static let originMetadataKey = "com.lynnswap.xcode-mcpkit/origin"
-
     let sourceProof: UpstreamTopologyProof
     let rawResult: JSONValue
     let toolsByName: [String: JSONValue]
@@ -29,11 +26,4 @@ struct ToolDefinitionSnapshot: Sendable {
         .object(["tools": .array([descriptor])])
     }
 
-    func declaresArgument(_ name: String) -> Bool {
-        guard case .object(let fields) = descriptor,
-              case .object(let schema)? = fields["inputSchema"] else { return false }
-        if case .object(let properties)? = schema["properties"], properties[name] != nil { return true }
-        if case .array(let required)? = schema["required"] { return required.contains(.string(name)) }
-        return false
-    }
 }

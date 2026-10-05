@@ -29,8 +29,7 @@ extension RuntimeCoordinator {
         _ proof: UpstreamTopologyProof,
         restart: Bool
     ) -> InitializeChannelReplacement? {
-        let replacements = nativeUpstreamFactory.map { [$0()] } ?? []
-        if let replacement = replacements.first {
+        if let replacement = nativeUpstreamFactory?() {
             let previousStopCompletion = AsyncTerminalSignal()
             if let transition = commitUpstreamTopologyMutation({
                 upstreamTopology.replace(
@@ -52,9 +51,6 @@ extension RuntimeCoordinator {
                     previousStopCompletion.signal()
                 }
                 retireUpstreamSlot(previous, onStopped: finishPreviousStop)
-                for unused in replacements.dropFirst() {
-                    retireUpstreamSlot(unused)
-                }
                 if restart {
                     addRuntimeTask { [weak self, replacementLease] in
                         guard let self,
@@ -71,9 +67,7 @@ extension RuntimeCoordinator {
                     operationLease: replacementLease
                 )
             }
-        }
-        for unused in replacements {
-            retireUpstreamSlot(unused)
+            retireUpstreamSlot(replacement)
         }
         guard let transition = commitUpstreamTopologyMutation({
             upstreamTopology.retire(proof)

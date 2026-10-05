@@ -21,7 +21,6 @@ struct VerifierOptions {
     var requestTimeoutSeconds = 600
     var outputDirectory = URL(fileURLWithPath: "ProxyToolVerifierOutput", isDirectory: true)
     var keepServer = false
-    var noOpenXcode = false
     var runDestination: String?
     var deviceIdentifier: String?
     var verbose = false
@@ -43,8 +42,6 @@ struct VerifierOptions {
                 outputDirectory = URL(fileURLWithPath: try Self.value(after: argument, in: arguments, index: &index), isDirectory: true)
             case "--keep-server":
                 keepServer = true
-            case "--no-open-xcode":
-                noOpenXcode = true
             case "--run-destination":
                 runDestination = try Self.value(after: argument, in: arguments, index: &index)
             case "--device-identifier":
@@ -75,7 +72,6 @@ struct VerifierOptions {
       --request-timeout seconds   XcodeMCP request timeout. Default: 600
       --output path               Git-ignored verifier output directory. Default: ProxyToolVerifierOutput
       --keep-server               Leave the debug proxy server running.
-      --no-open-xcode             Do not open the fixture workspace in GUI Xcode.
       --run-destination name      Use this native destination display title for fixture operations.
       --device-identifier UUID    Use this owned device for device-interaction verification.
       -v, --verbose               Print tool arguments and response summaries.
@@ -106,15 +102,6 @@ struct ProxyToolVerifier {
 
         try prepareOutputDirectory(outputRoot)
         try prepareFixture(fixture)
-        let fixtureSnapshot = try FixtureSnapshot.capture(fixture)
-        defer {
-            try? fixtureSnapshot.restore()
-        }
-
-        if options.noOpenXcode == false {
-            try openFixtureInXcode(fixture.rootWorkspaceURL)
-        }
-
         try buildDebugProxyServer(in: repoRoot)
         try runProcess(executable: "/bin/bash", arguments: ["scripts/build-native-host.sh", "--output", ".build/debug/XcodeMCPNativeHost.app"], currentDirectory: repoRoot)
         let server = try startDebugProxyServer(repoRoot: repoRoot, outputRoot: outputRoot)
@@ -144,45 +131,15 @@ struct ProxyToolVerifier {
         fixture: FixtureLayout,
         outputRoot: URL
     ) async throws -> Bool {
-        var fixture = fixture
+        let fixture = try makeHeadlessFixture(from: fixture)
         var tools = try await client.listTools()
         var records: [ToolVerificationRecord] = []
-        var fixtureTab: String?
-        let discoveryDeadline = ContinuousClock.now.advanced(
-            by: .seconds(options.requestTimeoutSeconds)
-        )
-        while true {
-            if tools.contains(where: { $0.name == "XcodeListWindows" }) {
-                let inventory = await call("XcodeListWindows", arguments: [:], client: client)
-                records.append(inventory)
-                guard inventory.status == .passed, let result = inventory.rawResult else {
-                    throw VerifierFailure("Cannot determine GUI fixture ownership: \(inventory.detail)")
-                }
-                fixtureTab = parseWindowTab(from: result, fixturePaths: [fixture.rootWorkspaceURL.path])
-            }
-            if fixtureTab != nil || options.noOpenXcode {
-                break
-            }
-            // xed/open and GUI catalog activation finish asynchronously. A run
-            // that opened a GUI fixture must wait for that actual owner.
-            guard ContinuousClock.now < discoveryDeadline else {
-                throw VerifierFailure("GUI Xcode did not report the opened fixture before the request timeout")
-            }
-            try await Task.sleep(for: .milliseconds(250))
-            tools = try await client.listTools()
-        }
-        let workspaceSurface: WorkspaceToolSurface = fixtureTab == nil ? .headless : .gui
-        if workspaceSurface == .headless {
-            fixture = try makeHeadlessFixture(from: fixture)
-        }
         var state = VerificationState(
             fixture: fixture,
             tools: tools,
-            workspaceSurface: workspaceSurface,
             runDestination: options.runDestination,
             deviceIdentifier: options.deviceIdentifier
         )
-        state.tabIdentifier = fixtureTab
         let reportURL = outputRoot.appendingPathComponent("report.json")
 
         func currentReport() -> VerificationReport {
@@ -199,19 +156,17 @@ struct ProxyToolVerifier {
         }
 
         do {
-            if workspaceSurface == .headless {
-                let openRecord = await call(
-                    "XcodeOpenWorkspace",
-                    arguments: ["path": .string(fixture.rootWorkspaceURL.path)],
-                    client: client
-                )
-                records.append(openRecord)
-                try state.observe(toolName: "XcodeOpenWorkspace", record: openRecord)
-                // Explicit preload exercises the native Open contract for this owned fixture.
-                tools = try await client.listTools()
-                state.updateTools(tools)
-                try writeReport(currentReport(), to: reportURL, announce: false)
-            }
+            let openRecord = await call(
+                "XcodeOpenWorkspace",
+                arguments: ["path": .string(fixture.rootWorkspaceURL.path)],
+                client: client
+            )
+            records.append(openRecord)
+            try state.observe(toolName: "XcodeOpenWorkspace", record: openRecord)
+            // Explicit preload exercises the native Open contract for this owned fixture.
+            tools = try await client.listTools()
+            state.updateTools(tools)
+            try writeReport(currentReport(), to: reportURL, announce: false)
             try writeToolCatalog(
                 ToolCatalogArtifact(toolCount: tools.count, tools: tools.map(\.raw)),
                 to: outputRoot.appendingPathComponent("tool-catalog.json")
@@ -525,7 +480,6 @@ struct ProxyToolVerifier {
         guard fileManager.fileExists(atPath: fixture.xcodeProjectURL.path) else {
             throw VerifierFailure("missing tracked verifier fixture at \(fixture.xcodeProjectURL.path)")
         }
-        try? fileManager.removeItem(at: fixture.scratchDirectoryURL)
     }
 
     private func buildDebugProxyServer(in repoRoot: URL) throws {
@@ -573,22 +527,6 @@ struct ProxyToolVerifier {
         print("Started debug proxy server: \(options.endpoint.absoluteString)")
         print("Proxy log: \(logURL.path)")
         return RunningProcess(process: process, logHandle: logHandle)
-    }
-
-    private func openFixtureInXcode(_ projectURL: URL) throws {
-        if fileManager.isExecutableFile(atPath: "/usr/bin/xed") {
-            try runProcess(
-                executable: "/usr/bin/xed",
-                arguments: ["-b", projectURL.path],
-                currentDirectory: projectURL.deletingLastPathComponent()
-            )
-        } else {
-            try runProcess(
-                executable: "/usr/bin/open",
-                arguments: ["-a", "Xcode", projectURL.path],
-                currentDirectory: projectURL.deletingLastPathComponent()
-            )
-        }
     }
 
     private func repositoryRoot() throws -> URL {
@@ -654,11 +592,6 @@ struct ProxyToolVerifier {
     }
 }
 
-private enum WorkspaceToolSurface: String, Codable {
-    case gui
-    case headless
-}
-
 private enum ToolExecutionDecision {
     case call([String: MCPJSONValue])
     case skip(String)
@@ -669,7 +602,6 @@ private struct ToolPlanUnavailable: Error {
 }
 
 private struct WorkspaceVerificationRecord: Codable {
-    let surface: WorkspaceToolSurface
     let requestedPath: String
     let returnedIdentifier: String?
     let returnedPath: String?
@@ -681,11 +613,9 @@ private struct WorkspaceVerificationRecord: Codable {
 private struct VerificationState {
     let fixture: FixtureLayout
     private(set) var toolsByName: [String: MCPTool]
-    let workspaceSurface: WorkspaceToolSurface
     let requestedRunDestination: String?
     let deviceIdentifier: String?
     private(set) var availableTools: Set<String>
-    var tabIdentifier: String?
     var workspaceIdentifier: String?
     var workspaceReportedPath: String?
     var workspaceOpenedByVerifier = false
@@ -705,7 +635,6 @@ private struct VerificationState {
     init(
         fixture: FixtureLayout,
         tools: [MCPTool],
-        workspaceSurface: WorkspaceToolSurface,
         runDestination: String? = nil,
         deviceIdentifier: String? = nil
     ) {
@@ -713,7 +642,6 @@ private struct VerificationState {
         self.toolsByName = tools.reduce(into: [:]) { result, tool in
             result[tool.name] = tool
         }
-        self.workspaceSurface = workspaceSurface
         self.requestedRunDestination = runDestination
         self.deviceIdentifier = deviceIdentifier
         if let runDestination { self.runDestination = runDestination }
@@ -727,7 +655,6 @@ private struct VerificationState {
 
     var workspaceRecord: WorkspaceVerificationRecord {
         WorkspaceVerificationRecord(
-            surface: workspaceSurface,
             requestedPath: fixture.rootWorkspaceURL.path,
             returnedIdentifier: workspaceIdentifier,
             returnedPath: workspaceReportedPath,
@@ -765,14 +692,6 @@ private struct VerificationState {
     }
 
     func executionDecision(for toolName: String) throws -> ToolExecutionDecision {
-        if workspaceSurface == .gui,
-           ["XcodeListWorkspaces", "DeviceInteractionStartWorkspaceSession"].contains(toolName) {
-            return .skip("tool requires an owned headless workspace")
-        }
-        if workspaceSurface == .headless,
-           ["XcodeListWindows", "XcodeGetCurrentFile", "XcodeListNavigatorIssues"].contains(toolName) {
-            return .skip("tool requires GUI window, editor, or navigator state")
-        }
         let arguments: [String: MCPJSONValue]
         do {
             guard let plannedArguments = try plannedArguments(for: toolName) else {
@@ -810,9 +729,6 @@ private struct VerificationState {
     private func plannedArguments(for toolName: String) throws -> [String: MCPJSONValue]? {
         switch toolName {
         case "AddEntitlement":
-            guard workspaceSurface == .headless else {
-                throw ToolPlanUnavailable(reason: "entitlement mutation requires the disposable headless fixture")
-            }
             return try withWorkspaceScope(toolName, ["targetName": .string("ProxyToolVerifierFixture"),
                 "entitlementKey": .string("com.apple.developer.networking.wifi-info"), "entitlementValueType": .string("bool"),
                 "entitlementValue": .string("true")])
@@ -830,9 +746,6 @@ private struct VerificationState {
             }
             return try withWorkspaceScope(toolName, ["testPlanName": .string(testPlanName)])
         case "XcodeNewTarget":
-            guard workspaceSurface == .headless else {
-                throw ToolPlanUnavailable(reason: "target creation requires the disposable headless fixture")
-            }
             return try withWorkspaceScope(toolName, ["templateIdentifier": .string("com.apple.dt.unit.iosFramework"),
                 "productName": .string("ProxyVerifierExtraFramework"),
                 "organizationIdentifier": .string("dev.xcodemcp"),
@@ -989,11 +902,6 @@ private struct VerificationState {
                 "compilerFlags": .string("-DPROXY_TOOL_VERIFIER"),
                 "appendValue": .bool(false),
             ])
-        case "XcodeGetCurrentFile":
-            return try withWorkspaceScope(toolName, [
-                "includeContent": .bool(false),
-                "includeSelection": .bool(true),
-            ])
         case "XcodeGlob":
             return try withWorkspaceScope(toolName, [
                 "pattern": .string("**/*.swift"),
@@ -1004,8 +912,6 @@ private struct VerificationState {
                 "outputMode": .string("filesWithMatches"),
                 "headLimit": .integer(10),
             ])
-        case "XcodeListNavigatorIssues":
-            return try withWorkspaceScope(toolName, ["severity": .string("remark")])
         case "XcodeListRunDestinations":
             return try withWorkspaceScope(toolName, ["includeIncompatible": .bool(true)])
         case "XcodeListSchemes":
@@ -1014,7 +920,7 @@ private struct VerificationState {
             return try withWorkspaceScope(toolName)
         case "XcodeListTemplates":
             return ["templateIdentifier": .string("com.apple.dt.unit.iosFramework")]
-        case "XcodeListWindows", "XcodeListWorkspaces":
+        case "XcodeListWorkspaces":
             return [:]
         case "XcodeLS":
             return try withWorkspaceScope(toolName, [
@@ -1076,30 +982,14 @@ private struct VerificationState {
             throw ToolPlanUnavailable(reason: "tool descriptor has no object input schema")
         }
         var result = arguments
-        switch workspaceSurface {
-        case .headless:
-            guard schema.properties.contains("workspaceIdentifier") else {
-                throw ToolPlanUnavailable(
-                    reason: "Native schema has no workspaceIdentifier argument"
-                )
-            }
-            guard let workspaceIdentifier else {
-                throw VerifierFailure(
-                    "The verifier's headless workspace has not been opened for \(toolName)"
-                )
-            }
-            result["workspaceIdentifier"] = .string(workspaceIdentifier)
-            return result
-        case .gui:
-            guard schema.properties.contains("workspaceIdentifier") else {
-                throw ToolPlanUnavailable(reason: "tool has no workspace selector")
-            }
-            guard let tabIdentifier else {
-                throw VerifierFailure("fixture GUI tab has not been resolved")
-            }
-            result["workspaceIdentifier"] = .string(tabIdentifier)
-            return result
+        guard schema.properties.contains("workspaceIdentifier") else {
+            throw ToolPlanUnavailable(reason: "Native schema has no workspaceIdentifier argument")
         }
+        guard let workspaceIdentifier else {
+            throw VerifierFailure("The verifier's workspace has not been opened for \(toolName)")
+        }
+        result["workspaceIdentifier"] = .string(workspaceIdentifier)
+        return result
     }
 
     mutating func observe(toolName: String, record: ToolVerificationRecord) throws {
@@ -1134,19 +1024,6 @@ private struct VerificationState {
 
         guard let rawResult = record.rawResult else { return }
         switch toolName {
-        case "XcodeListWindows":
-            guard let parsed = parseWindowTab(
-                from: rawResult,
-                fixturePaths: [
-                    fixture.rootWorkspaceURL.path,
-                ]
-            ) else {
-                throw VerifierFailure(
-                    "XcodeListWindows did not report fixture workspace at "
-                        + "\(fixture.rootWorkspaceURL.path); refusing to run tab-scoped tools"
-                )
-            }
-            tabIdentifier = parsed
         case "XcodeListSchemes":
             if flattenedText(from: rawResult).contains(schemeName) {
                 break
@@ -1237,47 +1114,6 @@ struct FixtureLayout {
         projectRootURL.appendingPathComponent("ProxyToolVerifierFixture/VerifierScratch", isDirectory: true)
     }
 
-    var projectFileURL: URL {
-        xcodeProjectURL.appendingPathComponent("project.pbxproj")
-    }
-
-    var localizableCatalogURL: URL {
-        projectRootURL.appendingPathComponent("ProxyToolVerifierFixture/Localizable.xcstrings")
-    }
-
-    var infoPlistCatalogURL: URL {
-        projectRootURL.appendingPathComponent("ProxyToolVerifierFixture/ProxyToolVerifierFixture-InfoPlist.xcstrings")
-    }
-}
-
-private struct FixtureSnapshot {
-    let scratchDirectoryURL: URL
-    let files: [(url: URL, data: Data)]
-
-    static func capture(_ fixture: FixtureLayout) throws -> FixtureSnapshot {
-        try FixtureSnapshot(
-            scratchDirectoryURL: fixture.scratchDirectoryURL,
-            files: [
-                fixture.projectFileURL,
-                fixture.localizableCatalogURL,
-                fixture.infoPlistCatalogURL,
-            ].map { url in
-                (url: url, data: try Data(contentsOf: url))
-            }
-        )
-    }
-
-    func restore() throws {
-        let fileManager = FileManager.default
-        try? fileManager.removeItem(at: scratchDirectoryURL)
-        for file in files {
-            try fileManager.createDirectory(
-                at: file.url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try file.data.write(to: file.url, options: [.atomic])
-        }
-    }
 }
 
 private final class RunningProcess {
@@ -1482,7 +1318,6 @@ private func orderedKnownToolNames() -> [String] {
 
 private func catalogToolNames() -> [String] {
     [
-        "XcodeListWindows",
         "XcodeListWorkspaces",
         "XcodeListSchemes",
         "XcodeListRunDestinations",
@@ -1492,7 +1327,6 @@ private func catalogToolNames() -> [String] {
 
 private func bootstrapToolNames() -> [String] {
     [
-        "XcodeListWindows",
         "XcodeListWorkspaces",
         "XcodeListSchemes",
         "XcodeListRunDestinations",
@@ -1520,7 +1354,6 @@ private func navigatorToolNames() -> [String] {
         "XcodeLS",
         "XcodeRead",
         "XcodeGrep",
-        "XcodeGetCurrentFile",
         "XcodeMakeDir",
         "XcodeWrite",
         "XcodeUpdate",
@@ -1529,7 +1362,6 @@ private func navigatorToolNames() -> [String] {
         "GetFileCompilerFlags",
         "UpdateFileCompilerFlags",
         "XcodeRefreshCodeIssuesInFile",
-        "XcodeListNavigatorIssues",
     ]
 }
 
@@ -1618,33 +1450,6 @@ private func textContent(from result: MCPToolResult) -> String {
         }
     }
     .joined(separator: "\n")
-}
-
-private func parseWindowTab(
-    from value: MCPJSONValue,
-    fixturePaths: [String]
-) -> String? {
-    let normalizedFixturePaths = fixturePaths.map(normalizePath)
-    for text in allStrings(from: value) {
-        for line in text.split(whereSeparator: \.isNewline) {
-            let lineText = String(line)
-            guard let tab = extractValue(after: "tabIdentifier:", before: ", workspacePath: ", in: lineText),
-                  let workspace = extractValue(after: "workspacePath:", before: nil, in: lineText)
-            else {
-                continue
-            }
-            let normalizedWorkspace = normalizePath(workspace)
-            let matchesFixture = normalizedFixturePaths.contains { fixturePath in
-                normalizedWorkspace == fixturePath
-                    || normalizedWorkspace.hasPrefix(fixturePath + "/")
-                    || fixturePath.hasPrefix(normalizedWorkspace + "/")
-            }
-            if matchesFixture {
-                return tab
-            }
-        }
-    }
-    return nil
 }
 
 private func parseFirstString(named key: String, from value: MCPJSONValue) -> String? {
@@ -1774,23 +1579,6 @@ private func collectText(_ value: Any, into parts: inout [String]) {
             collectText(value, into: &parts)
         }
     }
-}
-
-private func extractValue(after marker: String, before endMarker: String?, in text: String) -> String? {
-    guard let markerRange = text.range(of: marker) else { return nil }
-    let tail = text[markerRange.upperBound...]
-    let valueSlice: Substring
-    if let endMarker, let endRange = tail.range(of: endMarker) {
-        valueSlice = tail[..<endRange.lowerBound]
-    } else {
-        valueSlice = tail[...]
-    }
-    let trimmed = valueSlice.trimmingCharacters(in: .whitespacesAndNewlines)
-    return trimmed.isEmpty ? nil : trimmed
-}
-
-private func normalizePath(_ path: String) -> String {
-    URL(fileURLWithPath: path).standardizedFileURL.path
 }
 
 private func stringValue(_ value: Any?) -> String? {

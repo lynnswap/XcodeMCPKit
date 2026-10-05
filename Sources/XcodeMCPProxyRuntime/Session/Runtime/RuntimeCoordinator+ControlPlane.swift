@@ -109,8 +109,7 @@ extension ControlPlane {
 extension RuntimeCoordinator {
     func loadCanonicalToolsCatalog(
         requestTimeout: TimeAmount?,
-        rpcHandle: ControlPlane.RPCHandle,
-        onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void = { _ in }
+        rpcHandle: ControlPlane.RPCHandle
     ) async throws -> CanonicalToolsCatalogLoadResult {
         let startedAt = nowUptimeNanoseconds()
         guard let source = chooseUpstreamOperationLease() else {
@@ -143,7 +142,6 @@ extension RuntimeCoordinator {
             case .accepted(let snapshot, let transition):
                 applyCatalogTransition(transition)
                 testHooks.nativeToolsCatalogCommitted?(proof.slotID.rawValue)
-                await onFreshProvider(proof)
                 guard let raw = snapshot.canonicalToolsCatalogRaw else {
                     throw UpstreamSlotScheduler.AcquisitionError.unavailable
                 }
@@ -163,7 +161,6 @@ extension RuntimeCoordinator {
             }
             try Task.checkCancellation()
             if let provider = toolsCatalog.satisfiedCatalogProvider(for: lease) {
-                await onFreshProvider(provider.sourceProof)
                 return CanonicalToolsCatalogLoadResult(
                     rawResult: provider.rawResult, sourceProof: provider.sourceProof,
                     durationMilliseconds: elapsedMilliseconds(sinceUptimeNanoseconds: startedAt))

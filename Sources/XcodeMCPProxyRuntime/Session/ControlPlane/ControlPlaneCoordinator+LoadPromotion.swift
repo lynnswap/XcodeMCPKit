@@ -12,10 +12,6 @@ extension ControlPlaneCoordinator {
         let migratedWaiters = removeForegroundToolsCatalogWaiters(from: &previous)
         cancelToolsCatalogLoad(previous, error: CancellationError())
         let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout)
-        if current.hasPublishedPartialResult, var replacement = currentToolsCatalogLoadState(loadID: newLoadID) {
-            replacement.hasPublishedPartialResult = true
-            setToolsCatalogLoadState(replacement)
-        }
         attachToolsCatalogWaiters(loadID: newLoadID, waiters: migratedWaiters)
         return newLoadID
     }
@@ -29,10 +25,6 @@ extension ControlPlaneCoordinator {
         let migratedWaiters = removeForegroundToolsCatalogWaiters(from: &previous)
         cancelToolsCatalogLoad(previous, error: CancellationError())
         let newLoadID = startToolsCatalogLoad(origin: .request, requestTimeout: requestTimeout)
-        if current.hasPublishedPartialResult, var replacement = currentToolsCatalogLoadState(loadID: newLoadID) {
-            replacement.hasPublishedPartialResult = true
-            setToolsCatalogLoadState(replacement)
-        }
         attachToolsCatalogWaiters(loadID: newLoadID, waiters: migratedWaiters)
         return newLoadID
     }
@@ -62,17 +54,13 @@ extension ControlPlaneCoordinator {
                 waiter.continuation.resume(throwing: TimeoutError())
                 continue
             }
-            let phaseDeadline = waiter.partialPublicationUptimeNs.flatMap {
-                $0 > clock.uptimeNanoseconds() ? $0 : nil
-            } ?? waiter.deadlineUptimeNs
-            let timeoutTask = makeTimeoutTask(deadlineUptimeNs: phaseDeadline) {
-                await self.toolsCatalogWaiterPhaseReached(loadID: loadID, waiterID: waiterID)
+            let timeoutTask = makeTimeoutTask(deadlineUptimeNs: waiter.deadlineUptimeNs) {
+                await self.timeoutToolsCatalogWaiter(loadID: loadID, waiterID: waiterID)
             }
             load.waiters[waiterID] = ToolsCatalogWaiterRecord(
                 continuation: waiter.continuation,
                 kind: waiter.kind,
                 deadlineUptimeNs: waiter.deadlineUptimeNs,
-                partialPublicationUptimeNs: waiter.partialPublicationUptimeNs,
                 timeoutTask: timeoutTask
             )
             if waiter.kind == .foreground {

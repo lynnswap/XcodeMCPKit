@@ -66,7 +66,6 @@ struct ServerRunnerTests {
         let runtimeConfiguration = try configuration.runtimeConfiguration()
         let child = try NativeHostRuntime.makeDefaultUpstreamConfig(
             config: runtimeConfiguration.nativeHostRuntimeConfiguration,
-            xcodeTarget: nil,
             baseEnvironment: [
                 "DEVELOPER_DIR": "/Applications/Parent Xcode.app/Contents/Developer",
                 "XCODE_MCP_NATIVE_HOST_BUNDLE": "/missing/Parent Native Host.app",

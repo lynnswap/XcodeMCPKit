@@ -20,21 +20,16 @@ a manufactured-version allowlist.
 ## Native catalog or tool request timed out
 
 Confirm that the proxy is running and inspect its error before increasing a
-client deadline. Available native and GUI origins supply their own catalogs. A missing headless
-contract leaves GUI tools usable, while requests for a headless model retain
-that error. Check the selected owner and its reported native capabilities.
+client deadline. Set `MCP_LOG_LEVEL=debug` to inspect native initialization,
+catalog loads, cancellation, and recovery. Check the selected Xcode installation
+for missing framework or API contracts.
 
-Set `MCP_LOG_LEVEL=debug` to inspect native connection startup, catalog loads,
-request cancellation, and recovery. The native helper enables agent access and
-registers itself before connecting. A permission-store failure appears in the
-helper diagnostic; check that the selected Xcode supplies the required native
-contracts. Opening a GUI workspace is not a prerequisite for the headless catalog.
-
-For workspace operations, check the absolute `workspaceIdentifier` and any
-reported GUI owner or tab candidates. An unavailable known GUI owner returns an
-error rather than redirecting the operation. A path without a GUI owner loads
-through the host's native model. Native tool failures keep their MCP `isError`
-result; transport and protocol failures remain request errors.
+For workspace operations, check the absolute `workspaceIdentifier` and save
+project/source changes to disk. Inspect and select the host's scheme, destination,
+and test plan. GUI selection and unsaved editor state do not configure the host.
+Native tool failures keep their MCP `isError` result; transport and protocol
+failures remain request errors. Headless startup does not require agent-access
+approval or changes to Xcode's permission store.
 
 ## Streamable HTTP client cannot connect
 - Set `MCP_LOG_LEVEL=debug` when per-connection and per-request access logs are
@@ -106,5 +101,3 @@ Ensure the client is using the server-issued `MCP-Session-Id`. Initialize reques
 An explicit `MCP-Protocol-Version` must match the negotiated supported version.
 When it is omitted, the proxy uses the session's negotiated version. Reinitialize
 a client that cached an incompatible protocol version.
-
-[apple-xcode-mcp-access]: https://developer.apple.com/documentation/xcode/giving-external-agents-access-to-xcode

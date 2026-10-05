@@ -4,7 +4,7 @@ import Foundation
 /// Settings used to connect to and initialize an MCP endpoint.
 ///
 /// The default configuration discovers the running XcodeMCPKit proxy, which
-/// automatically selects an existing GUI workspace or a windowless model. Use
+/// loads saved workspace models in its owned headless host. Use
 /// ``XcodeMCPConfiguration/Transport/localBridge(_:)`` for a standalone native
 /// host or a custom MCP process.
 public struct XcodeMCPConfiguration: Equatable, Sendable {

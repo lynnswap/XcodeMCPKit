@@ -5,13 +5,11 @@ import XcodeMCPCore
 
 actor ControlPlaneCoordinator {
     typealias ToolsCatalogLoader =
-        @Sendable (_ requestTimeout: TimeAmount?, _ rpcHandle: ControlPlane.RPCHandle,
-                   _ onFreshProvider: @escaping @Sendable (UpstreamTopologyProof) async -> Void) async throws
+        @Sendable (_ requestTimeout: TimeAmount?, _ rpcHandle: ControlPlane.RPCHandle) async throws
             -> CanonicalToolsCatalogLoadResult
     typealias UpstreamHandshakeStatesProvider = @Sendable () -> [String: String]
     typealias CachedToolsCatalogProvider = @Sendable () -> JSONValue?
     typealias CanonicalToolsSourceProvider = @Sendable () -> Int?
-    typealias RefreshedToolsCatalogProvider = @Sendable (Set<UpstreamTopologyProof>) -> JSONValue?
 
     struct Drain: Sendable {
         private let completionTasks: [Task<Void, Never>]
@@ -48,7 +46,6 @@ actor ControlPlaneCoordinator {
         let continuation: CheckedContinuation<JSONValue, Error>
         let kind: ToolsCatalogWaiterKind
         let deadlineUptimeNs: UInt64?
-        let partialPublicationUptimeNs: UInt64?
         var timeoutTask: Task<Void, Never>?
     }
 
@@ -61,13 +58,10 @@ actor ControlPlaneCoordinator {
         let task: Task<CanonicalToolsCatalogLoadResult, Error>
         var waiters: [WaiterID: ToolsCatalogWaiterRecord] = [:]
         var foregroundWaiterCount = 0
-        var freshSources: Set<UpstreamTopologyProof> = []
-        var hasPublishedPartialResult = false
     }
 
     let handshakeState: CanonicalHandshakeState
     let cachedToolsCatalog: CachedToolsCatalogProvider
-    let refreshedToolsCatalog: RefreshedToolsCatalogProvider
     let canonicalToolsSource: CanonicalToolsSourceProvider
     let debugMirror: ControlPlane.DebugMirror
     let toolsCatalogLoader: ToolsCatalogLoader
@@ -84,7 +78,6 @@ actor ControlPlaneCoordinator {
     init(
         handshakeState: CanonicalHandshakeState,
         cachedToolsCatalog: @escaping CachedToolsCatalogProvider,
-        refreshedToolsCatalog: @escaping RefreshedToolsCatalogProvider,
         canonicalToolsSource: @escaping CanonicalToolsSourceProvider,
         debugMirror: ControlPlane.DebugMirror,
         toolsCatalogLoader: @escaping ToolsCatalogLoader,
@@ -95,7 +88,6 @@ actor ControlPlaneCoordinator {
     ) {
         self.handshakeState = handshakeState
         self.cachedToolsCatalog = cachedToolsCatalog
-        self.refreshedToolsCatalog = refreshedToolsCatalog
         self.canonicalToolsSource = canonicalToolsSource
         self.debugMirror = debugMirror
         self.toolsCatalogLoader = toolsCatalogLoader
@@ -226,9 +218,7 @@ actor ControlPlaneCoordinator {
         let rpcHandle = ControlPlane.RPCHandle()
         let requestDeadlineUptimeNs = requestDeadline(for: requestTimeout)
         let task = Task.detached {
-            try await self.toolsCatalogLoader(requestTimeout, rpcHandle) { source in
-                await self.noteFreshToolsCatalogProvider(source, loadID: loadID)
-            }
+            try await self.toolsCatalogLoader(requestTimeout, rpcHandle)
         }
         let load = ToolsCatalogLoadState(
             loadID: loadID,
@@ -308,15 +298,13 @@ actor ControlPlaneCoordinator {
             continuation.resume(throwing: TimeoutError())
             return
         }
-        let publicationTime = kind == .foreground ? partialToolsCatalogPublicationTime(deadlineUptimeNs) : nil
-        let timeoutTask = makeTimeoutTask(deadlineUptimeNs: publicationTime ?? deadlineUptimeNs) {
-            await self.toolsCatalogWaiterPhaseReached(loadID: loadID, waiterID: waiterID)
+        let timeoutTask = makeTimeoutTask(deadlineUptimeNs: deadlineUptimeNs) {
+            await self.timeoutToolsCatalogWaiter(loadID: loadID, waiterID: waiterID)
         }
         load.waiters[waiterID] = ToolsCatalogWaiterRecord(
             continuation: continuation,
             kind: kind,
             deadlineUptimeNs: deadlineUptimeNs,
-            partialPublicationUptimeNs: publicationTime,
             timeoutTask: timeoutTask
         )
         if kind == .foreground {
@@ -324,50 +312,6 @@ actor ControlPlaneCoordinator {
         }
         setToolsCatalogLoadState(load)
         syncDebug()
-    }
-
-    func noteFreshToolsCatalogProvider(_ source: UpstreamTopologyProof, loadID: UUID) {
-        guard var load = currentToolsCatalogLoadState(loadID: loadID) else { return }
-        load.freshSources.insert(source)
-        setToolsCatalogLoadState(load)
-        for waiterID in load.waiters.keys {
-            _ = publishPartialToolsCatalogIfReady(loadID: loadID, waiterID: waiterID)
-        }
-    }
-
-    @discardableResult
-    private func publishPartialToolsCatalogIfReady(loadID: UUID, waiterID: WaiterID) -> Bool {
-        guard var load = currentToolsCatalogLoadState(loadID: loadID),
-              let waiter = load.waiters[waiterID],
-              let publicationTime = waiter.partialPublicationUptimeNs,
-              clock.uptimeNanoseconds() >= publicationTime,
-              deadlineExceeded(waiter.deadlineUptimeNs) == false,
-              let result = refreshedToolsCatalog(load.freshSources) else { return false }
-        load.waiters.removeValue(forKey: waiterID)
-        load.foregroundWaiterCount = max(0, load.foregroundWaiterCount - 1)
-        load.hasPublishedPartialResult = true
-        waiter.timeoutTask?.cancel()
-        // A successful partial response leaves the bounded read running so later
-        // provider commits can publish their catalog changes.
-        setToolsCatalogLoadState(load)
-        syncDebug()
-        waiter.continuation.resume(returning: result)
-        return true
-    }
-
-    func toolsCatalogWaiterPhaseReached(loadID: UUID, waiterID: WaiterID) {
-        if publishPartialToolsCatalogIfReady(loadID: loadID, waiterID: waiterID) { return }
-        guard var load = currentToolsCatalogLoadState(loadID: loadID),
-              var waiter = load.waiters[waiterID] else { return }
-        if deadlineExceeded(waiter.deadlineUptimeNs) {
-            timeoutToolsCatalogWaiter(loadID: loadID, waiterID: waiterID)
-            return
-        }
-        waiter.timeoutTask = makeTimeoutTask(deadlineUptimeNs: waiter.deadlineUptimeNs) {
-            await self.timeoutToolsCatalogWaiter(loadID: loadID, waiterID: waiterID)
-        }
-        load.waiters[waiterID] = waiter
-        setToolsCatalogLoadState(load)
     }
 
     func timeoutToolsCatalogWaiter(loadID: UUID, waiterID: WaiterID) {

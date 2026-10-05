@@ -1,12 +1,12 @@
 # Workspace and tool usage
 
 Start the server and [connect your MCP client](../README.md#connect-your-mcp-client).
-Workspace tools use the same endpoint for headless and GUI work.
+The server runs tools in its owned headless host.
 
 ## Select a workspace
 
-Pass an absolute project or workspace path as the standard `workspaceIdentifier`
-argument. For example, call `BuildProject` with:
+Pass an absolute project or workspace path as `workspaceIdentifier`. For example,
+call `BuildProject` with:
 
 ```json
 {
@@ -14,86 +14,61 @@ argument. For example, call `BuildProject` with:
 }
 ```
 
-An open GUI owner takes priority. If no GUI owns the path, the native host loads
-its workspace model for the operation. You do not need to open a GUI window or
-call `XcodeOpenWorkspace` first. The same selection applies to file, scheme,
-destination, build, and test tools that accept `workspaceIdentifier`.
+The native registry loads the project model when needed. Opening Xcode or calling
+`XcodeOpenWorkspace` first is optional for ordinary file, scheme, destination,
+build, and test operations that accept `workspaceIdentifier`.
 
-`XcodeOpenWorkspace` explicitly preloads a headless model and returns its native
-identifier. `XcodeListWorkspaces` lists those models. Close an owned model with
-`XcodeCloseWorkspace` when finished; closing it does not close a user's GUI window.
-The host closes resources it owns during shutdown.
+`XcodeOpenWorkspace` explicitly preloads a model and returns its native identifier.
+`XcodeListWorkspaces` lists the host's models. `XcodeCloseWorkspace` closes an
+owned model; host shutdown closes its remaining models. These operations do not
+manage windows in a separate Xcode application. Host restart invalidates native
+identifiers, so use the absolute project path to load it again.
 
-### Multiple Xcode instances
+## Saved files and operation settings
 
-Use `XcodeListWindows` to inspect GUI tabs. When several tabs own the same path,
-select a `tabIdentifier` from the reported candidates. Each GUI connection uses
-its owning Xcode installation and tool definitions.
+The host reads saved project and source files. Save editor changes before an MCP
+operation. Opening the same project in Xcode does not transfer its unsaved buffers,
+active scheme, selected destination, or debugger session to the host.
 
-A known GUI owner that lacks a requested tool returns an availability error.
-A lost known owner also produces an error; the server does not replay the
-operation in another workspace. Native workspace identifiers select their
-owning host independently of unrelated GUI inventory failures.
+Xcode and an agent can work on the same saved project. Coordinate edits to each
+file: MCP writes are not merged with an unsaved editor buffer, and saving that
+buffer later can conflict with or replace the agent's changes.
 
-### Editor and operation state
+Use `XcodeListSchemes`, `XcodeListRunDestinations`, and `XcodeListTestPlans` to
+inspect the project's settings. Select the required values with
+`XcodeSwitchScheme`, `XcodeSwitchRunDestination`, and `XcodeSwitchTestPlan` before
+building or testing. A test run requires a scheme with testable targets and a
+usable test plan; configure and save those project files first.
 
-GUI operations use Xcode's workspace context, active scheme, and selected run
-destination. GUI builds save pending editor changes before building. Native
-file-reading tools return disk content, including when a GUI editor has unsaved
-changes; an unsaved buffer is not part of their reading contract.
-
-Tools without workspace scope, such as `DocumentationSearch`, prefer the native
-host when it advertises the requested tool. Debugger and device-interaction
-sessions remain with the provider that created them.
+Tools without workspace scope, such as `DocumentationSearch`, run in the same
+host without loading a project. Device and debugger operations use the host's
+native sessions. Their permissions and runtime requirements still apply.
 
 ## Discover tools
 
-Call `tools/list` to discover the tools supplied by usable native and GUI
-connections. Tool names and schemas come from Xcode, so availability can differ
-between installations. The MCP client controls which tools an agent may call.
+Call `tools/list` to discover the selected Xcode installation's enabled headless
+tools. Xcode supplies tool names and schemas dynamically. GUI window, current
+editor, and navigator tools are outside this catalog. The MCP client controls
+which advertised tools an agent may call.
 
-Each explicit `tools/list` refreshes discovery. Concurrent callers share an
-in-flight load while keeping independent deadlines. If some providers have
-refreshed and another is pending, a caller can receive the fresh providers;
-remaining reads continue and publish `tools/list_changed` when they update the
-catalog. A refresh fails if no provider supplies a fresh result.
+Each explicit `tools/list` refreshes the catalog. Concurrent callers share an
+in-flight load while retaining independent deadlines and cancellation. The proxy
+preserves the native descriptors and captures the definition used by each call,
+so a later refresh cannot change that call's response contract. Native tool
+failures retain MCP `isError`; transport and protocol failures are request errors.
 
-When a selected SDK cannot initialize the headless host, a usable GUI catalog
-remains available for that GUI's operations. Requests that require a headless
-model retain the headless failure.
-
-### Provider metadata
-
-Shared tool names preserve schema variants through workspace, tab, and
-interaction-session selectors. Calls without a selector use the default
-provider's input schema. Routing selectors absent from the selected SDK's
-definition are removed before dispatch.
-
-Each tool's `_meta["com.lynnswap.xcode-mcpkit/providers"]` lists its providers and
-their original `descriptor`, including input and output schemas. A call uses
-the selected owner's definition throughout the operation, so another catalog
-refresh cannot change its response contract.
-
-Initialize and catalog results expose installation facts under
+Initialize and catalog results report installation facts under
 `_meta["com.lynnswap.xcode-mcpkit/origin"]`, including the Xcode installation,
-process, and cancellation contract. See [architecture](architecture.md#catalog-ownership)
-for catalog ownership and transport details.
+process, and `toolCancellation: "task"` contract. See
+[architecture](architecture.md#catalog-ownership) for lifecycle ownership.
 
 ## Cancellation
 
-Cancellation follows the selected connection's reported `toolCancellation`:
+MCP cancellation cancels the matching native action task. Cancelling queued work
+can prevent dispatch. After dispatch, cancellation is cooperative and does not
+undo file edits or other effects already performed by the tool.
 
-| Contract | Behavior |
-| --- | --- |
-| `task` | The headless host cancels its native action task. |
-| `nativeMessage` | The GUI connection sends the SDK's native cancellation message. |
-| `waitForNativeCompletion` | After dispatch, cancellation is advisory; the operation remains tracked until native completion or connection failure. |
-
-The inspected Xcode 27 GUI connection supports native cancellation. Xcode 26.6
-uses advisory cancellation after dispatch. The SDK's native message decoder
-determines this capability, rather than its version number. Cancelling queued
-work can prevent dispatch.
-
-Shutdown reports dispatched calls whose native cancellation or completion was
-not confirmed. Closing a connection does not establish that Xcode stopped its
-native operation.
+Shutdown stops admission, cancels pending requests, waits for owned tasks, and
+closes native workspace resources. A failed connection is not evidence that an
+operation completed or rolled back; mutations with unknown delivery are not
+replayed automatically.

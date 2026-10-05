@@ -102,7 +102,6 @@ extension ControlPlaneCoordinator {
     func shouldCancelToolsCatalogLoadAfterWaiterRemoval(
         _ load: ToolsCatalogLoadState
     ) -> Bool {
-        guard load.hasPublishedPartialResult == false else { return false }
         switch load.origin {
         case .request:
             return load.waiters.isEmpty
@@ -123,13 +122,6 @@ extension ControlPlaneCoordinator {
         case (.none, .none):
             return nil
         }
-    }
-
-    func partialToolsCatalogPublicationTime(_ deadline: UInt64?) -> UInt64? {
-        guard let deadline else { return nil }
-        let now = clock.uptimeNanoseconds()
-        guard deadline > now else { return now }
-        return now + (deadline - now) / 2
     }
 
     func shouldPromoteSharedLoad(

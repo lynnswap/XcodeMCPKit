@@ -44,7 +44,7 @@ struct RuntimeCoordinatorSchedulingTests {
         #expect(selectionState.withLockedValue { $0.count } == 32)
         scheduler.enqueueRequest(leaseID: UUID(), descriptor: descriptor, on: eventLoop, preferredUpstreamIndex: 1,
             starter: { lease in started.withLockedValue { $0.append(lease.upstreamIndex) } },
-            failUnavailable: { Issue.record("GUI request should run") }, failCancelled: {})
+            failUnavailable: { Issue.record("Native request should run") }, failCancelled: {})
         eventLoop.run()
         #expect(selectionState.withLockedValue { $0.count } == 33)
         #expect(started.withLockedValue { $0 } == [1])

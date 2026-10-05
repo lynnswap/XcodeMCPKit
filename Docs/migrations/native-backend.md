@@ -4,26 +4,20 @@ The native backend is available on `main`. Published v0.17.0 uses the earlier
 backend; its [README](https://github.com/lynnswap/XcodeMCPKit/blob/v0.17.0/README.md)
 records that version's setup.
 
-The proxy starts an owned native host and discovers GUI Xcode owners. Pass an
-absolute `workspaceIdentifier`; an open GUI owner takes priority, and the native
-host loads the model when no GUI owns the path. See
-[Select a workspace](../usage.md#select-a-workspace).
+The proxy runs one owned headless host. Pass an absolute `workspaceIdentifier`
+to load a saved project model. Open GUI windows do not supply editor state,
+schemes, or destinations. See [Select a workspace](../usage.md#select-a-workspace).
 
 ## Server and CLI
 
 Remove `--auto-approve` and `XcodeMCPProxyServerConfiguration.approvalPolicy`.
 The `ApprovalPolicy` type and Accessibility permission automation are removed.
-The native helper enables Xcode agent access, allows all agents, and registers
-its own identity before opening a connection. These settings persist in Xcode's
-permission store, including the policy for other agents. Source builds refresh
-the helper's path/hash grant at startup; Developer ID builds use their Team ID
-and stable signing identifier across updates. No permission-management command
-or Accessibility setup is required. Xcode installations must provide the native
-permission-store contracts; the previously verified Xcode 26.6 GUI path lacks them.
+The helper executes headless tools without updating Xcode's agent permission
+store. Startup neither registers an agent identity nor grants access to other
+clients. Existing permission settings from earlier builds are left as they are.
 
-Remove `--upstream-processes` and `upstreamProcessCount`. The runtime owns one
-headless host and one connection per GUI owner, with concurrent requests on each
-connection. There is no process-count replacement option.
+Remove `--upstream-processes` and `upstreamProcessCount`. One native host serves
+concurrent requests; there is no replacement process-count setting.
 
 The previously removed `--xcode-mode`, `--session-id`, `--upstream-command`,
 `--upstream-args`, and `--upstream-arg` remain unsupported. Remove Xcode Service
@@ -46,7 +40,7 @@ let endpoint = try await server.start()
 try await server.shutdown()
 ```
 
-The server CLI discovers the installed helper and owning Xcode processes.
+The server CLI discovers the installed helper.
 The standard `DEVELOPER_DIR` environment can select the headless installation.
 Explicit bundle and developer-directory URLs remain available for SDK embedding.
 The source and release installers now install `XcodeMCPNativeHost.app` beside
@@ -56,7 +50,7 @@ the proxy binaries. Keep that bundle with the executables when relocating them.
 
 `XcodeMCPConfiguration` now defaults to `.streamableHTTPProxyDiscovery()`.
 Start `xcode-mcp-proxy-server` before constructing a default client. This path
-provides automatic GUI ownership and headless fallback.
+provides shared headless execution over HTTP.
 
 The `.defaultMCPBridge` bridge case has been removed. For a standalone headless
 session, select the native host explicitly:
@@ -78,11 +72,15 @@ select the proxy's backend.
 
 ## Workspace behavior
 
-Explicit Open is optional for ordinary absolute-path operations. GUI builds use
-Xcode's active scheme and save pending editor changes. Native read/current-file
-results remain disk-backed. Usable GUI catalogs remain available when the
-selected installation lacks headless contracts; requests for a headless model
-retain that failure.
+Explicit Open is optional for ordinary absolute-path operations. Save project
+and source files before calling tools. Select the host's scheme, destination,
+and test plan explicitly; GUI selections and unsaved buffers are not imported.
+
+The public catalog now follows `enabledHeadlessMCPTools` only. GUI window,
+current-editor, and navigator tools and `tabIdentifier` routing are removed.
+Provider-union metadata and schema variants are removed; descriptors come from
+the single native host. Installation and cancellation facts remain in origin
+metadata. Documentation search uses the headless native action.
 
 ## Removed configuration
 

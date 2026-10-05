@@ -62,21 +62,14 @@ may be incomplete, even though the server lifecycle has stopped.
 - `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
 - `prewarmToolsList`: whether discovery begins during startup.
 
-The server starts one owned headless native host and one connection for each
-GUI Xcode owner. Concurrent requests multiplex on each connection. Pass an
-absolute `workspaceIdentifier` to prefer its open GUI owner; otherwise the host
-loads its model lazily. Discovery preserves the actual provider catalogs and their schema variants.
-Usable GUI catalogs remain available when headless contracts are missing.
+The server starts one owned headless native host. Concurrent requests multiplex
+on that connection. An absolute `workspaceIdentifier` loads its saved model
+lazily; tool definitions come from the selected Xcode's headless catalog.
 
-`start()` does not require an open GUI workspace or Xcode Service enable/status.
 Install `XcodeMCPNativeHost.app` beside the proxy executable, or supply its bundle
-URL. Missing helper or required native contracts return diagnostics. Embedded
-hosts must keep AppKit's main run loop available for GUI process observation.
-
-The native helper automatically enables Xcode agent access and allows all agents.
-Before connecting, it records its own signing identity, or its executable path
-and current hash for an ad-hoc build, in Xcode's permission store. These settings
-persist after shutdown. `ApprovalPolicy` and `approvalPolicy` have been removed.
+URL. Missing helpers or required native contracts return diagnostics. The helper
+owns its AppKit event loop. Server startup does not require a GUI workspace or
+Xcode Service and does not change Xcode's agent permission store.
 
 Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` do not select a proxy backend.
 For a standalone headless or generic MCP process, use `XcodeMCPKit`'s explicit

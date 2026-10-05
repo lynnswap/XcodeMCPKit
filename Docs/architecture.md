@@ -1,11 +1,8 @@
 # XcodeMCPProxy architecture
 
-`xcode-mcp-proxy-server` serves MCP over Streamable HTTP and starts the packaged
-native helper. The helper loads Xcode frameworks through ABIBridge method
-handles. One headless host provides native workspace models when the selected
-SDK supports those contracts; each GUI Xcode owner gets one native connection.
-The public catalog includes definitions from usable providers. Requests multiplex on
-those connections instead of requiring a configurable process pool.
+`xcode-mcp-proxy-server` serves MCP over Streamable HTTP and starts one packaged
+native helper for the selected Xcode installation. The helper loads Xcode
+frameworks through ABIBridge and executes the enabled headless actions.
 
 ## Request routing
 
@@ -14,52 +11,33 @@ flowchart LR
   client["MCP client"] -->|"Streamable HTTP"| proxy["Proxy server"]
   stdio["STDIO client"] --> adapter["xcode-mcp-proxy"]
   adapter -->|"Streamable HTTP"| proxy
-  proxy -->|"absolute workspace path without GUI owner"| host["Owned native host"]
-  proxy -->|"GUI workspace or tab owner"| gui["Native GUI connection"]
-  host --> model["Xcode workspace model"]
-  gui --> app["Existing GUI Xcode"]
+  proxy -->|"multiplexed MCP requests"| host["Owned native host"]
+  host --> model["Saved Xcode workspace model"]
+  host --> actions["Xcode native actions"]
 ```
 
-The runtime discovers GUI ownership through its cached Xcode inventory and
-window identifiers. An absolute `workspaceIdentifier` selects its GUI owner
-when one exists. Otherwise, the host loads the workspace model for the operation.
-Known GUI identifiers retain their GUI owner. The native workspace inventory
-proves ownership of remaining opaque identifiers before the runtime queries
-unrelated GUI owners. A GUI inventory failure does not block a model whose
-native ownership is established. Opaque GUI tab identifiers select their known
-GUI owner. Symlinks are resolved when matching
-workspace paths. Ambiguous GUI ownership requires an explicit tab selection;
-a failed known owner is not replaced by another owner. A known GUI owner's
-missing tool produces an error even if another provider advertises that name.
-
-GUI builds use the active workspace scheme and save pending editor changes.
-Native read/current-file results keep their disk-backed semantics. The runtime
-does not promise that every tool exposes an unsaved GUI buffer.
+An absolute `workspaceIdentifier` loads a model through the native registry when
+needed. The proxy forwards workspace arguments to that host. Workspace state,
+scheme selection, and native operation sessions belong to the host, independently
+of any open Xcode application. File tools use saved disk content.
 
 ## Catalog ownership
 
-The control plane keeps each catalog with its supplying connection. A usable GUI
-catalog can provide GUI operations when the selected SDK's headless contracts
-are unavailable. It does not establish a working headless host or trigger an SDK
-switch. Concurrent client refreshes share their load and deadline ownership.
+`ToolsCatalogAuthority` keeps the catalog tied to the native connection and
+refresh that supplied it. `ControlPlaneCoordinator` shares concurrent refresh
+work while keeping caller deadlines and cancellation independent. Topology and
+catalog leases prevent responses from an old connection from replacing the
+current catalog. A tool call captures the provider definition for response
+normalization, even if the catalog refreshes while the call is running.
 
-Shared tool names expose whole input/output schema variants through `anyOf`.
-When a provider has no output schema, the public descriptor omits it.
-Tool `_meta["com.lynnswap.xcode-mcpkit/providers"]` retains each provider's origin
-and original descriptor. Routing captures the selected provider's definition
-with the operation lease; response normalization uses that definition throughout
-the call. Catalog change notifications reflect the exposed definitions and
-provider metadata.
+The runtime owns request correlation, progress delivery, cancellation, and
+connection recovery. Requests multiplex on the native connection. Cancellation
+propagates to the matching native action task. Connection failure fails affected
+requests; delivery-unknown mutations are not replayed. Replacement initialization
+waits for the previous host to stop.
 
-The runtime owns request correlation, cancellation, and connection recovery.
-Multiplexing preserves independent request IDs and progress lanes on each
-connection. The selected native contract determines cancellation behavior:
-headless actions use Task cancellation; a capable GUI connection sends the
-matching cancel message. After dispatch on a GUI connection without native
-cancellation, cancellation is advisory and the action remains tracked until its
-native reply or connection termination. Shutdown awaits producers and
-invalidates owned connections, reporting any dispatched uncancellable action
-whose native completion was not confirmed.
+Shutdown first cancels shared catalog callers, then retires the host and drains
+owned request and event tasks. The host closes workspace resources it owns.
 
 ## Ports and discovery
 
@@ -93,24 +71,15 @@ startup; write failure unwinds acquired resources.
 - HTTP owns each session's bounded SSE notification buffer. On overflow it drops the oldest notification and emits at most one warning per 30 seconds per session. `dropped_notifications` is cumulative for that session, while the warning also reports the dropped delta and sanitized methods of the notifications actually evicted; notification payloads are never logged. Unhandled server notifications remain debug-level events.
 
 
-## Native helper and process observation
+## Native helper
 
 `NativeHostInvocation.resolve` locates `XcodeMCPNativeHost.app` beside the proxy
 binary, through `XCODE_MCP_NATIVE_HOST_BUNDLE`, or through installation paths.
 Explicit bundle and developer-directory URLs support embedding. Missing helper
-or required native contracts return diagnostics. Xcode Service enable/status
-and GUI launch/readiness are not common startup prerequisites.
+or native contracts return diagnostics.
 
-`XcodeProcessEventMonitor` owns the `NSWorkspace.runningApplications` KVO
-subscription and cached GUI/permission-dialog inventory. Routing and permission
-automation consume that snapshot; they do not independently poll process
-membership. Route recovery uses owned, generation-fenced work.
-
-Auto-approve polls AX windows because AppKit provides no dialog appearance event.
-Each eligible dialog-owner PID has an independent scanner. Configured agent
-identity matching uses the native helper executable and descendant process IDs;
-the proxy also accepts the recognized English Allow heading for all agents.
-The maintainer diagnostic retains configured-agent matching only.
-
-Embedding applications must keep the main run loop available for AppKit process
-observation and use the public asynchronous server lifecycle.
+The helper owns its AppKit event loop, document controller, and native framework
+lifetime. The proxy does not observe GUI processes or access Xcode's agent
+permission store. The helper uses the public dynamic-loader entitlement needed
+to load the selected Xcode's frameworks; it carries no copied Apple-restricted
+entitlements. See [native host design](native-headless-backend.md).
