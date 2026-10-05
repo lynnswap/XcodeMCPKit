@@ -723,10 +723,10 @@ private extension ProcessBackedUpstreamSession {
     func handleStdoutEOF() {
         stdoutDrained = true
         if !terminationObserved, !isStopping, !didFinishEvents {
-            // The stdout task has delivered every complete response before EOF.
-            // Notify request owners before waiting for process cleanup.
+            // Process termination and stderr can arrive after stdout EOF.
+            // Notify request owners now while normal shutdown drains remaining output.
             continuation.yield(.stdoutClosed)
-            _ = beginStop(suppressExitEvent: false)
+            _ = beginStop(suppressExitEvent: false, gracefully: true)
         }
         finishEventsIfNeeded()
     }
