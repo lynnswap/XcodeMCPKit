@@ -31,6 +31,20 @@ Native tool failures keep their MCP `isError` result; transport and protocol
 failures remain request errors. Headless startup does not require agent-access
 approval or changes to Xcode's permission store.
 
+## DocumentationSearch is unavailable
+
+The startup summary reports whether the native catalog contains the tool; it
+is not a search execution test. At startup the host selects the latest readable
+installed documentation index and sets its location only for that process.
+A saved `IDEChatDocumentationSearchConfigURL` override is not required.
+
+If the helper reports `no installed documentation index found`, check that
+Xcode's developer documentation has been installed. Asset discovery failures
+are logged on stderr and do not prevent other native tools from starting. When
+no installed index can be selected, the existing Xcode configuration remains
+in effect. Restart the server after installing documentation, then call the tool
+to verify the search itself.
+
 ## Streamable HTTP client cannot connect
 - Set `MCP_LOG_LEVEL=debug` when per-connection and per-request access logs are
   needed; routine HTTP traffic is not printed at the default log level.

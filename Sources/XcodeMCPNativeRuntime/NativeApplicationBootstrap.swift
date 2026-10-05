@@ -11,6 +11,15 @@ package final class NativeApplicationBootstrap {
 
     package func application(for installation: NativeXcodeInstallation) throws -> NSApplication {
         UserDefaults.standard.addSuite(named: "com.apple.dt.Xcode")
+        // Configure the installed index before Xcode initializes its chat settings.
+        // The downloadable-asset coordinator can have no location in a headless host.
+        do {
+            if try NativeDocumentationSearchAsset.configureLatest() == nil {
+                try? FileHandle.standardError.write(contentsOf: Data("DocumentationSearch: no installed documentation index found\n".utf8))
+            }
+        } catch {
+            try? FileHandle.standardError.write(contentsOf: Data("DocumentationSearch asset discovery failed: \(error)\n".utf8))
+        }
         let framework = installation.contentsDirectory.appendingPathComponent("Frameworks/IDEKit.framework")
         guard let bundle = Bundle(url: framework) else {
             throw NativeRuntimeError.unavailable("Cannot locate IDEKit at \(framework.path)")

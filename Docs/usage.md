@@ -41,8 +41,13 @@ building or testing. A test run requires a scheme with testable targets and a
 usable test plan; configure and save those project files first.
 
 Tools without workspace scope, such as `DocumentationSearch`, run in the same
-host without loading a project. Device and debugger operations use the host's
-native sessions. Their permissions and runtime requirements still apply.
+host without loading a project. DocumentationSearch uses the latest installed
+developer documentation at host startup, ordered by Xcode version and then
+documentation release. Restart the server after installing a newer documentation
+asset. The host does not download documentation or persist search settings.
+
+Device and debugger operations use the host's native sessions. Their permissions
+and runtime requirements still apply.
 
 ## Discover tools
 
