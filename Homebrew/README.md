@@ -13,11 +13,13 @@ collected with `swift-stdlib-tool` and located relative to the executables.
 Apple's private frameworks are loaded from the user's selected Xcode installation.
 
 The tap builds Apple Silicon bottles on the GitHub-hosted `xcode-27` image and
-retains the builder's normal Homebrew platform tag. The source release verifies
-installation on that image without forcing bottle selection. A host without a
-matching bottle can build from source with Xcode 27. The package's macOS 15.4
-deployment target and the environments covered by distribution checks are separate;
-the deployment target alone does not establish older-host compatibility.
+registers them as `arm64_tahoe` for macOS 26 and later. The bottle receipt retains
+the actual build environment. Before publication, the tap verifies ordinary
+bottle installation, CLI startup, and signing on macOS 26 and the Xcode 27 runner.
+Native and proxy MCP integration tests run on the Xcode 27 runner. The source
+release also verifies the public bottle on that image without forcing selection.
+A host without a matching bottle can build from source with Xcode 27. The
+package's macOS 15.4 deployment target is separate from bottle availability.
 
 ## Release an approved revision
 
