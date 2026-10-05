@@ -2,6 +2,20 @@ import XcodeMCPCore
 import Foundation
 
 enum NativeHostRuntime {
+    static func isTerminalCoreSimulatorDiagnostic(_ message: String) -> Bool {
+        guard let hostFrame = message.range(
+            of: #" xcode-mcp-native-host\[[0-9]+:[0-9]+\] "#,
+            options: .regularExpression
+        ) else { return false }
+        let diagnostic = message[hostFrame.upperBound...]
+        // CoreSimulator logs these fixed reasons when it invalidates its context.
+        // Unknown diagnostics remain logs; their wording is not a public API contract.
+        return diagnostic.hasPrefix(
+            "Loaded CoreSimulatorService is no longer valid for this process.  "
+                + "Simulator services will no longer be available.  Error="
+        ) || diagnostic == "CoreSimulatorService connection became invalid.  Simulator services will no longer be available."
+    }
+
     struct Configuration: Sendable {
         let nativeHostBundleURL: URL?
         let developerDirectoryURL: URL?
