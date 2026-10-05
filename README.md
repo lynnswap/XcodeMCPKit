@@ -18,12 +18,12 @@ For a new installation:
 brew install lynnswap/tap/xcode-mcpkit
 ```
 
-With Homebrew set up, no additional `PATH` setting is needed.
+> [!NOTE]
+> If you installed XcodeMCPKit with the shell installer or from source, run the
+> [migration installer](#homebrew-migration) once to switch existing commands to
+> Homebrew. This is also needed if you have already run `brew install`.
 
-If you already have a standalone or source installation, follow the
-[Homebrew migration instructions](#homebrew-migration) so existing command paths
-select the Homebrew version. Installing with `brew` alone leaves those older
-commands in place.
+With Homebrew set up, no additional `PATH` setting is needed.
 
 ### Start the server
 
