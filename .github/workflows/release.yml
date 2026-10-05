@@ -392,7 +392,7 @@ jobs:
           git -C "$tap_root" fetch origin "$TAP_SHA"
           git -C "$tap_root" checkout --detach "$TAP_SHA"
           brew trust --formula "$formula"
-          brew install "$formula"
+          brew install --include-test "$formula"
           brew info --json=v2 "$formula" | python3 -c '
           import json, sys
           installed = json.load(sys.stdin)["formulae"][0]["installed"][0]
