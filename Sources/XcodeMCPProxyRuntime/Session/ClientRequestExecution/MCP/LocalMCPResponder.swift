@@ -145,30 +145,6 @@ struct LocalMCPResponder {
             }
         }
 
-        if method == "tools/call",
-            let headerSessionID,
-            sessionManager.isInitialized(),
-            let originalID = JSONRPC.Message.Inspector.requestID(from: object),
-            let params = object["params"] as? [String: Any],
-            let toolName = params["name"] as? String,
-            toolName == "XcodeListWindows"
-        {
-            if headerSessionExists == false {
-                _ = sessionManager.session(id: headerSessionID)
-            }
-            let sessionManager = self.sessionManager
-            return handleLocalResult(
-                originalID: originalID,
-                sessionID: headerSessionID,
-                eventLoop: eventLoop
-            ) {
-                try await sessionManager.liveXcodeListWindowsResult(
-                    route: .anyHealthy,
-                    requestTimeoutOverride: requestTimeoutOverride
-                )
-            }
-        }
-
         return nil
     }
 

@@ -173,11 +173,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         var sentRequests: [SentRequest] = []
         var sentUpstreamPayloads: [Data] = []
         var availableUpstreamIndices: [Int?] = []
-        var preferredUpstreamIndex: Int?
-        var usablePreferredUpstreamIndices: Set<Int>?
-        var toolRoutingDecision: ToolRoutingDecision?
-        var toolRoutingStarted: TestSignal?
-        var toolRoutingGate: AsyncGate?
         var requestLeaseActivationHook: (@Sendable () -> Void)?
         var requeuedLeaseCount = 0
         var rejectNextUpstreamSend = false
@@ -197,8 +192,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?
     private let legacyUpstreamResponder:
         (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> Data)?
-    private let documentationSearchResponder:
-        (@Sendable (_ requestData: Data) async throws -> Data)?
     private let cancelAfterStartingEnqueueRequest: Bool
     private let requestLeaseRegistry = LeaseManager()
     private let upstreamTopology = UpstreamTopologyAuthority(
@@ -208,45 +201,36 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     init(
         config: HTTPTestConfiguration,
         upstreamResponder: (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> Data)? = nil,
-        documentationSearchResponder:
-            (@Sendable (_ requestData: Data) async throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config.runtime
         self.upstreamRequestResponder = nil
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = upstreamResponder
-        self.documentationSearchResponder = documentationSearchResponder
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     init(
         config: HTTPTestConfiguration,
         upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?,
-        documentationSearchResponder:
-            (@Sendable (_ requestData: Data) async throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config.runtime
         self.upstreamRequestResponder = nil
         self.upstreamResponder = upstreamPlanResponder
         self.legacyUpstreamResponder = nil
-        self.documentationSearchResponder = documentationSearchResponder
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
     init(
         config: HTTPTestConfiguration,
         upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?,
-        documentationSearchResponder:
-            (@Sendable (_ requestData: Data) async throws -> Data)? = nil,
         cancelAfterStartingEnqueueRequest: Bool = false
     ) {
         self.config = config.runtime
         self.upstreamRequestResponder = upstreamRequestResponder
         self.upstreamResponder = nil
         self.legacyUpstreamResponder = nil
-        self.documentationSearchResponder = documentationSearchResponder
         self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
     }
 
@@ -437,47 +421,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         return result
     }
 
-    func liveXcodeListWindowsResult(
-        route _: ControlPlane.Route,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> JSONValue {
-        _ = requestTimeoutOverride
-        let responseData = try await performSharedControlPlaneRequest(
-            method: "tools/call",
-            toolName: "XcodeListWindows",
-            sessionID: "__test-control-plane__"
-        )
-        guard let object = try JSONSerialization.jsonObject(
-            with: responseData,
-            options: []
-        ) as? [String: Any],
-            let resultAny = object["result"],
-            let result = JSONValue(any: resultAny)
-        else {
-            throw NSError(domain: "TestRuntimeCoordinator", code: 3)
-        }
-        return result
-    }
-
-    func callDocumentationSearch(
-        requestData: Data,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> DocumentationSearchOutcome {
-        _ = requestTimeoutOverride
-        guard let documentationSearchResponder else {
-            return .unavailable(.noAvailableProvider)
-        }
-        do {
-            return .handled(try await documentationSearchResponder(requestData))
-        } catch is UpstreamSlotScheduler.AcquisitionError {
-            return .unavailable(.noAvailableProvider)
-        }
-    }
-
-    func hasDocumentationSearchService() -> Bool {
-        documentationSearchResponder != nil
-    }
-
     func chooseUpstreamOperationLease() -> UpstreamOperationLease? {
         let upstreamIndex = state.withLockedValue { state in
             state.chooseUpstreamCalls.append(
@@ -497,29 +440,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         chooseUpstreamOperationLease()?.upstreamIndex
     }
 
-    func preferredUpstreamIndex(for requestJSON: Any) -> Int? {
-        _ = requestJSON
-        return state.withLockedValue { $0.preferredUpstreamIndex }
-    }
-
-    func toolRoutingDecision(
-        for requestJSON: Any,
-        requestTimeoutOverride: TimeAmount?
-    ) async -> ToolRoutingDecision {
-        _ = requestTimeoutOverride
-        let synchronization = state.withLockedValue {
-            ($0.toolRoutingStarted, $0.toolRoutingGate)
-        }
-        synchronization.0?.signal()
-        if let gate = synchronization.1 {
-            try? await gate.wait()
-        }
-        if let decision = state.withLockedValue({ $0.toolRoutingDecision }) {
-            return decision
-        }
-        return .forward(preferredUpstreamIndex: preferredUpstreamIndex(for: requestJSON))
-    }
-
     func enqueueOnUpstreamSlot<Output: Sendable>(
         leaseID _: LeaseManager.ID,
         descriptor _: SessionRequestPipeline.Descriptor,
@@ -529,12 +449,7 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
     ) -> EventLoopFuture<Output> {
         let upstreamIndex: Int?
         if let preferredUpstreamIndices, preferredUpstreamIndices.isEmpty == false {
-            upstreamIndex = state.withLockedValue { state in
-                guard let usable = state.usablePreferredUpstreamIndices else {
-                    return preferredUpstreamIndices.first
-                }
-                return preferredUpstreamIndices.first { usable.contains($0) }
-            }
+            upstreamIndex = preferredUpstreamIndices.first
         } else {
             upstreamIndex = chooseUpstreamOperationLease()?.upstreamIndex
         }
@@ -616,16 +531,12 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         _ data: Data,
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission: RouteForwardingAdmission?,
         requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
         let upstreamIndex = operationLease.upstreamIndex
         _ = ensureRunning
-        guard upstreamTopology.validate(operationLease),
-              admission.map({
-                $0.proof(for: upstreamIndex) == operationLease.proof
-              }) ?? true else {
+        guard upstreamTopology.validate(operationLease) else {
             requestSendCompletion?.complete(.notSent)
             onRejected()
             return false
@@ -1034,27 +945,6 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func setAvailableUpstreamIndices(_ values: [Int?]) {
         state.withLockedValue { $0.availableUpstreamIndices = values }
-    }
-
-    func setPreferredUpstreamIndex(_ value: Int?) {
-        state.withLockedValue { $0.preferredUpstreamIndex = value }
-    }
-
-    func setUsablePreferredUpstreamIndices(_ values: [Int]?) {
-        state.withLockedValue { state in
-            state.usablePreferredUpstreamIndices = values.map(Set.init)
-        }
-    }
-
-    func setToolRoutingDecision(_ value: ToolRoutingDecision?) {
-        state.withLockedValue { $0.toolRoutingDecision = value }
-    }
-
-    func setToolRoutingGate(started: TestSignal?, gate: AsyncGate?) {
-        state.withLockedValue {
-            $0.toolRoutingStarted = started
-            $0.toolRoutingGate = gate
-        }
     }
 
     func setRequestLeaseActivationHook(_ hook: (@Sendable () -> Void)?) {

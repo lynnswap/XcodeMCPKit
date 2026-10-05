@@ -1,8 +1,8 @@
 # XcodeMCPKit
 
 Use Xcode's build, test, preview, and editing tools through one local MCP server.
-Workspaces run headlessly when no GUI owns them; open workspaces use their Xcode
-instance's active scheme and state. Xcode supplies the tool definitions and
+The native host loads saved projects without opening Xcode windows.
+Xcode supplies the tool definitions and
 implementations; [ABIBridge](https://github.com/lynnswap/ABIBridge) connects the
 server to its native frameworks.
 
@@ -12,9 +12,9 @@ server to its native frameworks.
 - Swift 6.3+ to build from source
 - An Xcode installation with native MCP tools
 
-Headless and GUI operation have been verified with Xcode 27. Automatic agent
-access requires its native permission-store contracts; Xcode 26.6 lacks them. See [Xcode compatibility](Docs/configuration.md#xcode-compatibility)
-for installation selection and limitations.
+Headless initialization and workspace operations have been verified with Xcode 27
+on macOS with SIP and AMFI enabled. See [Xcode compatibility](Docs/configuration.md#xcode-compatibility)
+for installation selection and the verification boundary.
 
 ## Quick start
 
@@ -83,12 +83,9 @@ To remove the Homebrew installation, stop the server and run
 xcode-mcp-proxy-server
 ```
 
-The native helper enables Xcode's agent access and automatically allows all
-agents, including other clients. It registers its own identity before connecting
-so Xcode does not display an agent connection dialog. This setting persists in
-Xcode's permission store. No startup option or Accessibility permission is needed.
-
-Keep the server running. You can start it without opening a workspace in Xcode.
+Keep the server running. Its owned native host loads projects from disk and
+executes Xcode's headless tools. Xcode windows and agent-access approval are not
+required; startup does not modify Xcode's permission store.
 
 ### Connect your MCP client
 
@@ -118,12 +115,13 @@ claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 ## Use a workspace
 
 Pass an absolute `.xcworkspace` or `.xcodeproj` path as `workspaceIdentifier`
-to workspace tools. The server uses its open GUI owner, or loads the project
-without a window. Multiple Xcode instances can share the endpoint; if several
-tabs own the same path, select a `tabIdentifier` from `XcodeListWindows`.
+to workspace tools. The native host loads the project model when needed.
+Operations use saved files and the host's selected scheme, destination, and test
+plan. Save editor changes before using them through MCP.
 
-Available tools follow each installation's catalog. See [workspace and tool
-usage](Docs/usage.md) for build examples, GUI state, tool discovery, and cancellation.
+Available tools follow the selected installation's headless catalog. See
+[workspace and tool usage](Docs/usage.md) for build examples, tool discovery,
+and cancellation.
 
 ## Use from Swift
 

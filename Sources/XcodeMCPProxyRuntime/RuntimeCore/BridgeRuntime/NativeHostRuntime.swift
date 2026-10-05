@@ -14,72 +14,26 @@ enum NativeHostRuntime {
         }
     }
 
-    static func makeUpstreamPlan(
-        config: Configuration,
-        xcodeTargets: [XcodeProcessTarget],
-        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> NativeHostUpstreamPlan {
-        var upstreams = [makeUnboundUpstreamSlot(config: config, baseEnvironment: baseEnvironment)]
-        var bindings: [XcodeProcessBinding] = []
-        for target in orderedXcodeTargets(xcodeTargets) {
-            let slotID = UpstreamSlotID(rawValue: upstreams.count)
-            upstreams.append(contentsOf: makeProcessBoundUpstreamSlots(
-                config: config, xcodeTarget: target, baseEnvironment: baseEnvironment))
-            bindings.append(XcodeProcessBinding(target: target, slotIDs: [slotID]))
-        }
-        let topology = UpstreamTopologySnapshot(slotCount: upstreams.count, xcodeProcessBindings: bindings)
-        return NativeHostUpstreamPlan(upstreams: upstreams, xcodeProcessRoutes: topology.xcodeProcessRoutes(), topology: topology)
-    }
-
-    static func makeProcessBoundUpstreamSlots(
-        config: Configuration,
-        xcodeTarget: XcodeProcessTarget,
-        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> [ManagedUpstreamSlot] {
-        [ManagedUpstreamSlot(factory: makeProcessBoundSessionFactory(
-            config: config, xcodeTarget: xcodeTarget, baseEnvironment: baseEnvironment))]
-    }
-
-    static func makeUnboundUpstreamSlot(
+    static func makeUpstreamSlot(
         config: Configuration,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> ManagedUpstreamSlot {
         ManagedUpstreamSlot(factory: NativeHostSessionFactory(
-            configuration: config, xcodeTarget: nil, environment: baseEnvironment))
-    }
-
-    static func makeProcessBoundSessionFactory(
-        config: Configuration,
-        xcodeTarget: XcodeProcessTarget,
-        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> any UpstreamSessionFactory {
-        NativeHostSessionFactory(configuration: config, xcodeTarget: xcodeTarget, environment: baseEnvironment)
-    }
-
-    static func startProcessBoundSession(
-        config: Configuration,
-        xcodeTarget: XcodeProcessTarget,
-        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
-    ) async throws -> any UpstreamSession {
-        try await makeProcessBoundSessionFactory(
-            config: config, xcodeTarget: xcodeTarget, baseEnvironment: baseEnvironment).startSession()
+            configuration: config, environment: baseEnvironment))
     }
 
     static func makeDefaultUpstreamConfig(
         config: Configuration,
-        xcodeTarget: XcodeProcessTarget?,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> UpstreamProcess.Config {
         var environment = baseEnvironment
         environment.removeValue(forKey: "XCODE_PID")
         environment.removeValue(forKey: "MCP_XCODE_PID")
         environment.removeValue(forKey: "MCP_XCODE_SESSION_ID")
-        let developerDirectoryURL = xcodeTarget.map { URL(fileURLWithPath: $0.developerDir) }
-            ?? config.developerDirectoryURL
+        let developerDirectoryURL = config.developerDirectoryURL
         let invocation = try NativeHostInvocation.resolve(
             bundleURL: config.nativeHostBundleURL,
             developerDirectoryURL: developerDirectoryURL,
-            guiPID: xcodeTarget?.processID,
             environment: environment)
         if let developerDirectoryURL { environment["DEVELOPER_DIR"] = developerDirectoryURL.path }
         let messageLimit = maxQueuedWriteBytes(for: config)
@@ -100,54 +54,15 @@ enum NativeHostRuntime {
         return max(minimum, multiplied.partialValue)
     }
 
-    static func orderedXcodeTargets(
-        _ targets: [XcodeProcessTarget]
-    ) -> [XcodeProcessTarget] {
-        targets.sorted { lhs, rhs in
-            if lhs.appPath != rhs.appPath {
-                return lhs.appPath < rhs.appPath
-            }
-            return lhs.processID < rhs.processID
-        }
-    }
-
-
-}
-
-struct NativeHostUpstreamPlan: Sendable {
-    let upstreams: [ManagedUpstreamSlot]
-    let xcodeProcessRoutes: [XcodeProcessRoute]
-    let topology: UpstreamTopologySnapshot
-
-    init(
-        upstreams: [ManagedUpstreamSlot],
-        xcodeProcessRoutes: [XcodeProcessRoute] = [],
-        topology: UpstreamTopologySnapshot? = nil
-    ) {
-        self.upstreams = upstreams
-        self.topology = topology ?? UpstreamTopologySnapshot(
-            slotCount: upstreams.count,
-            xcodeProcessBindings: xcodeProcessRoutes.map { route in
-                XcodeProcessBinding(
-                    target: route.target,
-                    slotIDs: route.upstreamIndices.map { UpstreamSlotID(rawValue: $0) }
-                )
-            }
-        )
-        self.xcodeProcessRoutes = xcodeProcessRoutes.isEmpty
-            ? self.topology.xcodeProcessRoutes()
-            : xcodeProcessRoutes
-    }
 }
 
 struct NativeHostSessionFactory: UpstreamSessionFactory {
     let configuration: NativeHostRuntime.Configuration
-    let xcodeTarget: XcodeProcessTarget?
     let environment: [String: String]
 
     func processConfiguration() throws -> UpstreamProcess.Config {
         try NativeHostRuntime.makeDefaultUpstreamConfig(
-            config: configuration, xcodeTarget: xcodeTarget, baseEnvironment: environment)
+            config: configuration, baseEnvironment: environment)
     }
 
     func startSession() async throws -> any UpstreamSession {

@@ -6,21 +6,8 @@ import Foundation
 package final class NativeApplicationBootstrap {
     private var documentController: AnyObject?
     private var kitBundle: Bundle?
-    private var messagingBundle: Bundle?
 
     package init() {}
-
-    package func guiApplication(for installation: NativeXcodeInstallation) throws -> NSApplication {
-        let application = NSApplication.shared
-        let framework = installation.contentsDirectory.appendingPathComponent("PlugIns/IDEIntelligenceMessaging.framework")
-        guard let bundle = Bundle(url: framework) else {
-            throw NativeRuntimeError.unavailable("Cannot locate IDEIntelligenceMessaging at \(framework.path)")
-        }
-        try bundle.loadAndReturnError()
-        messagingBundle = bundle
-        application.setActivationPolicy(.prohibited)
-        return application
-    }
 
     package func application(for installation: NativeXcodeInstallation) throws -> NSApplication {
         UserDefaults.standard.addSuite(named: "com.apple.dt.Xcode")

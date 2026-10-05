@@ -275,49 +275,19 @@ final class ClientMCPRequestExecutor: Sendable {
             break
         }
 
-        switch routeToolCall(
-            object: requestObject,
-            bodyData: bodyData,
+        return makeForwardingOperation(
+            forwardedRequest: ForwardedToolCallRequest(
+                bodyData: bodyData,
+                forwardedResponseID: JSONRPC.Message.Inspector.requestID(from: requestObject)
+            ),
             sessionID: sessionID,
+            prefersEventStream: prefersEventStream,
             eventLoop: eventLoop,
             requestTimeoutOverride: requestTimeoutOverride,
+            parentCancellationHandle: parentCancellationHandle,
             admittedHandle: admittedHandle,
             requestDeadline: requestDeadline
-        ) {
-        case .localOperation(let operation):
-            if let parentCancellationHandle,
-                parentCancellationHandle.bindChildHandle(operation.cancellationHandle) == false
-            {
-                operation.cancellationHandle.cancel(using: sessionManager)
-                return immediate(.empty(status: .accepted, sessionID: sessionID), on: eventLoop)
-            }
-            let future = operation.responseFuture.map { responseData in
-                operation.cancellationHandle.markCompleted()
-                self.sessionManager.completeRequestLease(operation.cancellationHandle.leaseID)
-                return Self.makeLocalResponseResolution(
-                    responseData: responseData,
-                    sessionID: sessionID,
-                    prefersEventStream: prefersEventStream,
-                    emptyStatus: .accepted
-                )
-            }
-            return ClientMCPRequestExecutor.Operation(
-                future: future,
-                cancellationHandle: operation.cancellationHandle
-            )
-
-        case .forward(let request):
-            return makeForwardingOperation(
-                forwardedRequest: request,
-                sessionID: sessionID,
-                prefersEventStream: prefersEventStream,
-                eventLoop: eventLoop,
-                requestTimeoutOverride: requestTimeoutOverride,
-                parentCancellationHandle: parentCancellationHandle,
-                admittedHandle: admittedHandle,
-                requestDeadline: requestDeadline
-            )
-        }
+        )
     }
 
     func makeForwardingOperation(
@@ -385,170 +355,74 @@ final class ClientMCPRequestExecutor: Sendable {
                 )
             )
         }
-        @Sendable func route(
-            _ decision: ToolRoutingDecision
-        ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
+        @Sendable func forward() -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
             guard cancellationHandle.isTerminal == false else {
                 return eventLoop.makeSucceededFuture(.empty(status: .accepted, sessionID: sessionID))
             }
-            func forward(
-                preferredUpstreamIndices: [Int]?,
-                admission: RouteForwardingAdmission? = nil
-            ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
-                let remainingTimeout = forwardingTimeout()
-                if forwardingDeadline != nil, remainingTimeout == nil {
-                    return timeoutResolution()
-                }
-                return self.sessionManager.enqueueOnUpstreamSlot(
-                    leaseID: leaseID,
-                    descriptor: descriptor,
-                    on: eventLoop,
-                    preferredUpstreamIndices: preferredUpstreamIndices
-                ) { operationLease in
-                    let remainingTimeout = forwardingTimeout()
-                    if forwardingDeadline != nil, remainingTimeout == nil {
-                        return timeoutResolution()
-                    }
-                    guard cancellationHandle.activate(operationLease: operationLease) else {
-                        return eventLoop.makeFailedFuture(CancellationError())
-                    }
-                    self.sessionManager.activateRequestLease(
-                        leaseID,
-                        requestIDKey: nil,
-                        upstreamIndex: operationLease.upstreamIndex,
-                        timeout: nil,
-                        progressTokenMapping: nil
-                    )
-                    return self.makeTopLevelRequestFuture(
-                        forwardedRequest: forwardedRequest,
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream,
-                        eventLoop: eventLoop,
-                        session: session,
-                        leaseID: leaseID,
-                        operationLease: operationLease,
-                        cancellationHandle: cancellationHandle,
-                        requestTimeoutOverride: remainingTimeout,
-                        admission: admission
-                    )
-                }.flatMapError { error in
-                    if error is CancellationError {
-                        return eventLoop.makeFailedFuture(error)
-                    }
-                    cancellationHandle.markCompleted()
-                    let releaseReason: LeaseManager.ReleaseReason
-                    if error is UpstreamSlotScheduler.AcquisitionError {
-                        releaseReason = .upstreamUnavailable
-                    } else if case ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology = error {
-                        releaseReason = .upstreamUnavailable
-                    } else {
-                        releaseReason = .upstreamOverloaded
-                    }
-                    self.sessionManager.failRequestLease(
-                        leaseID,
-                        terminalState: .failed,
-                        reason: releaseReason
-                    )
-                    return eventLoop.makeSucceededFuture(
-                        Self.makeUpstreamUnavailableResolution(
-                            responseID: forwardedRequest.forwardedResponseID,
-                            sessionID: sessionID,
-                            prefersEventStream: prefersEventStream
-                        )
-                    )
-                }
-            }
-
-            switch decision {
-            case .reject(let errors):
-                cancellationHandle.markCompleted()
-                self.sessionManager.completeRequestLease(leaseID)
-                return eventLoop.makeSucceededFuture(
-                    Self.makeLocalResponseResolution(
-                        responseData: Self.makeToolRoutingErrorResponseData(errors: errors),
-                        sessionID: sessionID,
-                        prefersEventStream: prefersEventStream,
-                        emptyStatus: .accepted
-                    )
-                )
-            case .localXcodeListWindows:
-                guard let responseID = forwardedRequest.forwardedResponseID else {
-                    cancellationHandle.markCompleted()
-                    self.sessionManager.completeRequestLease(leaseID)
-                    return eventLoop.makeSucceededFuture(
-                        .empty(status: .accepted, sessionID: sessionID)
-                    )
-                }
-                let remainingTimeout = forwardingTimeout()
-                if forwardingDeadline != nil, remainingTimeout == nil {
-                    return timeoutResolution()
-                }
-                let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
-                let task = Task { [self] in
-                    let responseData: Data?
-                    do {
-                        let result = try await sessionManager.liveXcodeListWindowsResult(
-                            route: .anyHealthy,
-                            requestTimeoutOverride: remainingTimeout
-                        )
-                        responseData = Self.makeJSONRPCResultResponseData(id: responseID, result: result)
-                    } catch {
-                        let mapped = ControlPlane.ErrorMapper.jsonRPCError(for: error)
-                        responseData = Self.makeJSONRPCErrorResponseData(
-                            id: responseID,
-                            code: mapped.code,
-                            message: mapped.message
-                        )
-                    }
-                    eventLoopCompletionExecutor.execute(on: eventLoop) {
-                        cancellationHandle.markCompleted()
-                        self.sessionManager.completeRequestLease(leaseID)
-                        promise.succeed(
-                            Self.makeLocalResponseResolution(
-                                responseData: responseData,
-                                sessionID: sessionID,
-                                prefersEventStream: prefersEventStream,
-                                emptyStatus: .accepted
-                            )
-                        )
-                    }
-                }
-                cancellationHandle.bindLocalTask(task)
-                return promise.futureResult
-            case .forward(let preferredUpstreamIndex):
-                return forward(preferredUpstreamIndices: preferredUpstreamIndex.map { [$0] })
-            case .forwardAny(let preferredUpstreamIndices):
-                return forward(
-                    preferredUpstreamIndices: preferredUpstreamIndices
-                )
-            case .forwardAdmitted(let preferredUpstreamIndices, let admission):
-                return forward(
-                    preferredUpstreamIndices: preferredUpstreamIndices,
-                    admission: admission
-                )
-            }
-        }
-
-        let promise = eventLoop.makePromise(of: ClientMCPRequestExecutor.Resolution.self)
-        let task = Task { [self] in
             let remainingTimeout = forwardingTimeout()
             if forwardingDeadline != nil, remainingTimeout == nil {
-                eventLoopCompletionExecutor.execute(on: eventLoop) {
-                    timeoutResolution().cascade(to: promise)
-                }
-                return
+                return timeoutResolution()
             }
-            let decision = await sessionManager.toolRoutingDecision(
-                for: forwardedRequestJSON,
-                requestTimeoutOverride: remainingTimeout
-            )
-            eventLoopCompletionExecutor.execute(on: eventLoop) {
-                route(decision).cascade(to: promise)
+            return self.sessionManager.enqueueOnUpstreamSlot(
+                leaseID: leaseID,
+                descriptor: descriptor,
+                on: eventLoop,
+                preferredUpstreamIndices: nil
+            ) { operationLease in
+                let remainingTimeout = forwardingTimeout()
+                if forwardingDeadline != nil, remainingTimeout == nil {
+                    return timeoutResolution()
+                }
+                guard cancellationHandle.activate(operationLease: operationLease) else {
+                    return eventLoop.makeFailedFuture(CancellationError())
+                }
+                self.sessionManager.activateRequestLease(
+                    leaseID,
+                    requestIDKey: nil,
+                    upstreamIndex: operationLease.upstreamIndex,
+                    timeout: nil,
+                    progressTokenMapping: nil
+                )
+                return self.makeTopLevelRequestFuture(
+                    forwardedRequest: forwardedRequest,
+                    sessionID: sessionID,
+                    prefersEventStream: prefersEventStream,
+                    eventLoop: eventLoop,
+                    session: session,
+                    leaseID: leaseID,
+                    operationLease: operationLease,
+                    cancellationHandle: cancellationHandle,
+                    requestTimeoutOverride: remainingTimeout,
+                )
+            }.flatMapError { error in
+                if error is CancellationError {
+                    return eventLoop.makeFailedFuture(error)
+                }
+                cancellationHandle.markCompleted()
+                let releaseReason: LeaseManager.ReleaseReason
+                if error is UpstreamSlotScheduler.AcquisitionError {
+                    releaseReason = .upstreamUnavailable
+                } else if case ProxyUpstreamRequestRuntime.Error.staleUpstreamTopology = error {
+                    releaseReason = .upstreamUnavailable
+                } else {
+                    releaseReason = .upstreamOverloaded
+                }
+                self.sessionManager.failRequestLease(
+                    leaseID,
+                    terminalState: .failed,
+                    reason: releaseReason
+                )
+                return eventLoop.makeSucceededFuture(
+                    Self.makeUpstreamUnavailableResolution(
+                        responseID: forwardedRequest.forwardedResponseID,
+                        sessionID: sessionID,
+                        prefersEventStream: prefersEventStream
+                    )
+                )
             }
         }
-        cancellationHandle.bindLocalTask(task)
         return ClientMCPRequestExecutor.Operation(
-            future: promise.futureResult,
+            future: forward(),
             cancellationHandle: cancellationHandle
         )
     }

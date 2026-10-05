@@ -225,9 +225,7 @@ private final class GatewayTestRuntime: ProxyRuntimeServing, Sendable {
         fatalError("gateway lifecycle test does not read runtime state")
     }
 
-    func inventorySnapshot() -> ProxyRuntimeInventorySnapshot {
-        fatalError("gateway lifecycle test does not read process inventory")
-    }
+
 
     func debugSnapshotData(includeSensitivePayloads _: Bool) -> Data? {
         nil

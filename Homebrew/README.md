@@ -8,7 +8,7 @@ on `PATH`, or supply its bundle explicitly.
 The Formula builds versioned source with the checked-in `Package.resolved`.
 `scripts/build-release.sh` stages the commands and calls
 `scripts/build-native-host.sh`, which owns the native bundle's Info.plist,
-selected-Xcode entitlements, and ad-hoc build signature. Swift compatibility libraries are
+public loader entitlement, and ad-hoc build signature. Swift compatibility libraries are
 collected with `swift-stdlib-tool` and located relative to the executables.
 Apple's private frameworks are loaded from the user's selected Xcode installation.
 

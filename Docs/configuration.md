@@ -5,17 +5,15 @@ For installation and MCP client registration, see the
 
 ## Xcode compatibility
 
-The installed frameworks' contracts determine available tools. These are verified
-installations, not a version allowlist:
+The selected installation's native contracts determine available tools; the
+server does not use a version allowlist or switch installations after failure.
+Missing frameworks or API contracts produce initialization diagnostics.
 
-| Installation | Verified behavior |
-| --- | --- |
-| Xcode 27 / Swift 6.4 | Native packaging, headless tools, and GUI tools. |
-| Xcode 26.6 | Missing the permission-store contracts required for automatic access; native helper initialization reports this error. |
-
-The server keeps the selected developer directory and reports missing framework
-or API contracts. It does not switch SDKs to make headless initialization pass.
-Usable GUI catalogs remain available when the selected headless host cannot initialize.
+Xcode 27 / Swift 6.4 on macOS 26.6.2 is the verified environment for headless
+initialization and saved-project operations with SIP and AMFI enabled. Other
+installations need their own validation. Catalog discovery does not establish
+that every tool works: previews, device operations, and account-dependent tools
+can require permissions or services beyond those used by build and test.
 
 The headless host uses the selected Xcode installation. The standard
 `DEVELOPER_DIR` environment variable can select another installation:
@@ -23,9 +21,6 @@ The headless host uses the selected Xcode installation. The standard
 ```bash
 DEVELOPER_DIR=/Applications/Xcode_27.0.app/Contents/Developer xcode-mcp-proxy-server
 ```
-
-GUI operations use the installation that owns the workspace, even when it
-differs from the headless selection. See [workspace routing](usage.md#select-a-workspace).
 
 ## Server options
 
@@ -47,7 +42,7 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `LISTEN` | Listen address, for example `127.0.0.1:8765`. |
 | `HOST` / `PORT` | Listen host and port when `LISTEN` is unset. |
 | `XCODE_MCP_NATIVE_HOST_BUNDLE` | Helper bundle override for custom embedded/install layouts. |
-| `DEVELOPER_DIR` | Xcode selection for the headless host; GUI connections use their owning installation. |
+| `DEVELOPER_DIR` | Xcode selection for the native host. |
 | `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, or `critical`. Defaults to `info`; `debug` includes HTTP access and routing telemetry. |
 | `XCODE_MCP_PROXY_ENDPOINT` | STDIO adapter upstream URL. `--url` takes precedence. |
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |

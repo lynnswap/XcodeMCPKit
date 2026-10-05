@@ -7,15 +7,12 @@ enum ControlPlane {}
 extension ControlPlane {
     enum Route: Hashable, Sendable {
         case anyHealthy
-        case nativeHost
         case pinnedUpstream(Int)
 
         var debugLabel: String {
             switch self {
             case .anyHealthy:
                 return "any_healthy"
-            case .nativeHost:
-                return "native_host"
             case .pinnedUpstream(let upstreamIndex):
                 return "pinned_\(upstreamIndex)"
             }
@@ -45,7 +42,6 @@ extension ControlPlane {
     struct WaiterCounts: Codable, Sendable {
         let initialize: Int
         let toolsCatalog: Int
-        let windows: Int
     }
 }
 

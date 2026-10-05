@@ -11,8 +11,9 @@ struct NativeHostLiveTests {
             let tools = try await client.listTools()
             #expect(tools.contains { $0.name == "DocumentationSearch" })
             #expect(tools.contains { $0.name == "XcodeOpenWorkspace" })
-            let windows = try await client.callTool("XcodeListWindows")
-            #expect(!windows.isError)
+            let workspaces = try await client.callTool("XcodeListWorkspaces")
+            #expect(!workspaces.isError)
+            #expect(!tools.contains { $0.name == "XcodeListWindows" })
             await client.close()
         } catch {
             await client.close()
@@ -27,16 +28,9 @@ struct NativeHostLiveTests {
         do {
             let client = try await XcodeMCP(configuration: .init(transport: .streamableHTTP(endpoint: endpoint.url), requestTimeout: .seconds(120)))
             do {
-                let clock = ContinuousClock()
-                let deadline = clock.now.advanced(by: .seconds(60))
-                var tools = try await client.listTools()
-                // A GUI catalog can arrive before the independent headless host is ready.
-                while !tools.contains(where: { $0.name == "XcodeOpenWorkspace" }), clock.now < deadline {
-                    try await Task.sleep(for: .milliseconds(100))
-                    tools = try await client.listTools()
-                }
+                let tools = try await client.listTools()
                 #expect(tools.contains { $0.name == "XcodeOpenWorkspace" })
-                #expect(tools.contains { $0.name == "XcodeListWindows" })
+                #expect(!tools.contains { $0.name == "XcodeListWindows" })
                 #expect(tools.contains { $0.name == "DocumentationSearch" })
                 await client.close()
             } catch {

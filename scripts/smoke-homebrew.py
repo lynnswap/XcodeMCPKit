@@ -36,14 +36,10 @@ async def exercise(process, fixture):
     await request(process, 1, "initialize", dict(protocolVersion="2025-06-18", capabilities={},
                                               clientInfo=dict(name="XcodeMCPKitHomebrewTest", version="1")))
     await request(process, None, "notifications/initialized")
-    # GUI tools can be ready before the independent headless host finishes starting.
-    async with asyncio.timeout(60):
-        while True:
-            tools = await request(process, 2, "tools/list")
-            names = {tool["name"] for tool in tools["tools"]}
-            if {"XcodeRead", "XcodeListWorkspaces"} <= names:
-                break
-            await asyncio.sleep(0.1)
+    tools = await request(process, 2, "tools/list")
+    names = {tool["name"] for tool in tools["tools"]}
+    if not {"XcodeRead", "XcodeListWorkspaces"} <= names:
+        raise RuntimeError("Installed native backend is missing required headless tools")
     result = await request(process, 3, "tools/call", dict(name="XcodeRead", arguments=dict(
         workspaceIdentifier=str(fixture / "ProxyToolVerifierFixture.xcodeproj"),
         filePath="ProxyToolVerifierFixture/VerifierCore.swift", limit=40)))

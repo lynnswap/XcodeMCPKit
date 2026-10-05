@@ -21,7 +21,7 @@
   - Load selected Xcode frameworks and invoke native tool contracts through
     ABIBridge method handles with complete function signatures. Workspace
     snapshots use owned runtime values without importing Xcode's entry type.
-  - Own workspace-model resources, native action streams, GUI connections,
+  - Own workspace-model resources, native action streams,
     and helper STDIO framing/initialization.
   - Missing native contracts return diagnostics; tool failures and transport
     failures retain their separate MCP meanings.
@@ -29,7 +29,7 @@
   - Package request/reply/session/snapshot values and serving protocols shared
     by Runtime, HTTP, and facade composition. No execution state or I/O owner.
 - `XcodeMCPProxyRuntime`
-  - Proxy control plane, request/session ownership, native/GUI routing,
+  - Proxy control plane, request/session ownership, native request forwarding,
     connection topology, canonical native catalogs, and feature workflows.
 - `XcodeMCPProxyHTTP`
   - HTTP listener lifecycle, transport validation, response encoding, and SSE delivery.
@@ -43,33 +43,18 @@
 
 ## Ownership Boundaries
 
-- `ProcessControlPlaneAuthority`
-  - Owns route membership/exposure, activation attempts and their resources,
-    per-process tool catalogs, and the canonical tool projection in one lock.
-    Transitions return cancellation/I/O effects for execution outside the lock.
-  - Route-activation `tools/list` uses the configured request timeout, not the
-    short discovery/control-plane cap. The activation watchdog and RPC share
-    that deadline owner.
-- `WindowOwnershipAuthority` and `WindowRoutingResolver`
-  - The authority owns window/tab identity and `windowEpoch`; the stateless
-    resolver combines its snapshot with an immutable route snapshot. Neither
-    mutates catalog lifecycle.
+- `ToolsCatalogAuthority`
+  - Owns the native catalog and refresh leases. Transitions return cancellation
+    and notification effects for execution outside the lock. Invalidating a
+    retired connection prevents its late response from replacing current data.
 - `UpstreamTopologyAuthority`
   - Owns actual upstream slots, stable IDs, membership/order, and topology
     epoch. Routers, health state, schedulers, and debug views key local state by
     those IDs instead of mirroring the slot array.
 - `CanonicalHandshakeState` and `ControlPlaneCoordinator`
-  - Handshake state is independent from catalog/window epochs. The coordinator
+  - Handshake state is independent from catalog epochs. The coordinator
     owns shared load tasks and waiters, but writes semantic state only through
     authority leases and transitions.
-- `XcodeProcessEventMonitor`
-  - Owns the KVO subscription and cached snapshots derived from
-    `NSWorkspace.runningApplications`. Each callback reads the current atomic
-    property; it does not treat the KVO change payload as a full snapshot.
-    GUI routing and documentation lookup consume this cache; they must not add
-    independent `pgrep`, libproc, or periodic membership scans.
-  - Readiness changes are generation-fenced. Route cooldown recovery is a
-    route-identity-fenced one-shot timer, not a process rescan.
 - `XcodeMCPProxyHTTP` gateway
   - `HTTPRequestSecurityPolicy` validates Origin for every route before any
     side effect. The gateway enforces session headers and negotiated protocol
@@ -94,8 +79,7 @@
   converted at this SDK boundary and do not become public aliases.
 - Runtime and HTTP depend on Core rather than the public SDK. Runtime owns
   execution policy and request lifetimes; HTTP owns network delivery. The native
-  host owns ordinary DocumentationSearch execution. Optional documentation
-  backend components retain their Core/NIOCore boundary. The
+  host owns ordinary DocumentationSearch execution. The separate documentation-search module retains its Core/NIOCore boundary. The
   runtime serving protocol in `XcodeMCPProxyRuntimeContract` connects these
   two owners. The contract retains the NIOCore timeout value without exposing
   channels or event loops.
@@ -148,7 +132,7 @@ fixture helpers between unit and integration tests through testable imports;
 it does not add production API or test-only production branches. Fixtures used
 by only one suite remain with that suite.
 
-The seven coordinator suites keep their CI filter names and live in separate
+The four coordinator suites keep their CI filter names and live in separate
 files. HTTP/configuration integration cases run in the remaining shard. When
 moving tests, compare discovery identifiers with module/suite moves accounted
 for, then verify each identifier is selected by exactly one CI shard.
@@ -184,20 +168,14 @@ for, then verify each identifier is selected by exactly one CI shard.
 These checks use lower process/transport fixtures and do not require GUI Xcode
 or a live native helper unless explicitly selected.
 
-## Automatic agent access
+## Headless security boundary
 
-Before a native connection starts, the helper updates Xcode's
-`DefaultHeadlessPermissionStore` through its `withState` transaction. Xcode owns
-locking, persistence, and the Keychain integrity hash. The update enables agent
-access, allows all agents, and preserves unrelated agent and folder records.
-GUI trust also requires a matching helper record: Developer ID builds use the
-actual Team ID and stable signing identifier; ad-hoc builds refresh their path,
-SHA-256, and 24-hour expiration at startup. GUI initialization carries the
-helper's verified signing identity rather than a client-supplied claim.
-
-Failure to read or update this native state fails helper initialization with a
-diagnostic. The native contracts determine compatibility; Xcode 27 is verified,
-and Xcode 26.6 lacks these permission-store APIs.
+The helper does not connect to GUI Xcode or write agent permission settings. Its
+packaging uses the public dynamic-loader entitlement required for selected-Xcode
+framework loading and no Apple-restricted entitlements. Verify startup and
+workspace operations under normal SIP/AMFI settings, including a Developer ID
+hardened-runtime build before distribution. A valid signature or notarization
+alone does not prove that a tool can use a privileged service.
 
 ## Release Flow
 
@@ -210,7 +188,7 @@ tested bottles, and source CI verifies the installed public bottle before
 publishing the same Draft.
 
 `scripts/build-native-host.sh` remains the sole owner of the native app's
-Info.plist, selected-Xcode entitlement extraction, and signing. Both source
+Info.plist, public loader entitlement, and signing. Both source
 installation and Homebrew builds use it. Homebrew keeps the signed bundle beside
 the commands in `libexec` and links the commands into `bin`.
 The source installer retains its atomic replacement and cleanup diagnostics.
@@ -254,10 +232,10 @@ catalog, and close their helper on EOF. They do not require an existing GUI
 process. Use the opt-in environment and explicit test scheme documented by the
 suite before starting a live run.
 
-For GUI behavior, use an existing Xcode owner and inspect its native windows,
-active scheme, and file results. Do not infer unsaved-buffer behavior from a
-headless read. Isolate disposable workspaces under a temporary root and close
-only resources created by the run.
+Use a disposable saved project with an explicit scheme, run destination, and test
+plan for live build/test checks. Keep GUI Xcode closed when verifying headless
+independence. Isolate fixture files, discovery records, and logs under a temporary
+root and close only resources created by the run.
 
 ## Cleanup Expectations
 

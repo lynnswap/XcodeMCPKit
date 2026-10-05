@@ -92,9 +92,6 @@ extension RuntimeCoordinator {
     }
 
     func noteUpstreamInitializationSucceeded() {
-        if prewarmDocumentationProviderOnStartup {
-            prewarmDocumentationProvider()
-        }
         guard upstreamReadinessGate.isEnabled else { return }
         upstreamReadinessCoordinator.resetBackoff()
     }

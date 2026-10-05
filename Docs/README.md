@@ -4,7 +4,7 @@
 
 - [README quick start](../README.md#quick-start): installation and MCP client registration.
 - [Configuration](configuration.md): Xcode selection, CLI options, and environment variables.
-- [Workspace and tool usage](usage.md): headless and GUI routing, tool catalogs,
+- [Workspace and tool usage](usage.md): saved workspace models, tool catalogs,
   editor state, and cancellation.
 - [Troubleshooting](troubleshooting.md): connection, helper, timeout, and diagnostic errors.
 - [Migration guides](migrations/README.md): changes required when upgrading.
@@ -25,8 +25,6 @@
   bottle verification, and recovery.
 - [Live tool verifier](../Sources/XcodeMCPProxyToolVerifier/README.md): fixture-based verification.
 - [MCP benchmarks](mcp-benchmark.md): measuring a running server.
-- [Permission automation](permission-automation-target-design.md) and
-  [dialog investigation](mcp-permission-dialog-investigation.md).
 
 ## Historical design notes
 
@@ -34,3 +32,6 @@
 - [Proxy target rearchitecture](proxy-target-rearchitecture-2026-07.md)
 - [Xcode 27 headless MCP investigation](xcode-27-headless-mcp-design.md)
 - [Xcode 27 mcpbridge tool additions](xcode-27-mcpbridge-tools.md)
+
+- [Former permission automation](permission-automation-target-design.md) and
+  [dialog investigation](mcp-permission-dialog-investigation.md).

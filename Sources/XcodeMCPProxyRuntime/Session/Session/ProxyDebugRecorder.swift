@@ -156,8 +156,6 @@ final class ProxyDebugRecorder: Sendable {
         proxyInitialized: Bool,
         cachedToolsListAvailable: Bool,
         controlPlane: ControlPlane.DebugSnapshot?,
-        processRoutes: [ProxyDebug.ProcessRouteSnapshot],
-        processToolCatalogs: [ProcessControlPlaneAuthority.CatalogDebugSnapshot],
         upstreamStates: [(index: Int, state: UpstreamHealthManager.UpstreamState)],
         sessionSnapshots: [SessionRequestPipeline.DebugSnapshot],
         leaseSnapshots: [LeaseManager.DebugSnapshot],
@@ -223,8 +221,6 @@ final class ProxyDebugRecorder: Sendable {
             warmupInFlight: controlPlane?.phase == "loading_tools_catalog",
             controlPlane: controlPlane,
             upstreams: upstreamSnapshots,
-            processRoutes: processRoutes,
-            processToolCatalogs: processToolCatalogs,
             recentTraffic: recordedState.recentTraffic.map {
                 ProxyDebug.TrafficEvent(
                     timestamp: $0.timestamp,

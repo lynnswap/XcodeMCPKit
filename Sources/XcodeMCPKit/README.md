@@ -6,7 +6,7 @@ Swift client API for calling Xcode MCP from an app or tool.
 
 Use `XcodeMCPKit` when Swift code needs to discover and call Xcode MCP tools.
 The default transport discovers a running `xcode-mcp-proxy-server` endpoint.
-The proxy chooses an open GUI workspace owner or lazily loads its native model.
+The proxy loads saved workspace models through its owned headless native host.
 Start the proxy before constructing a default client.
 
 The public API is intentionally small:
@@ -100,7 +100,7 @@ let config = XcodeMCPConfiguration(
 
 ### Workspace routing
 
-Use the proxy transport when a request should follow an existing GUI workspace:
+Pass an absolute project or workspace path to a workspace-scoped tool:
 
 ```swift
 let result = try await xcode.callTool("XcodeRead", arguments: [
@@ -109,10 +109,10 @@ let result = try await xcode.callTool("XcodeRead", arguments: [
 ])
 ```
 
-An absolute path selects its GUI owner first. With no GUI owner, the proxy's
-native host loads the model for the operation. You do not need to open a GUI
-window or call Open first. Native workspace IDs and explicit GUI tab IDs are
-also supported. Ambiguous or unavailable known GUI owners return errors.
+The native host loads the model for the operation. Explicit Open is optional;
+native workspace IDs returned by `XcodeOpenWorkspace` are also accepted. Save
+editor changes to disk and select the host's scheme, destination, and test plan
+before building or testing. Open GUI windows do not supply state to this host.
 
 ### Standalone native session
 
@@ -132,7 +132,7 @@ await standalone.close()
 ```
 
 This transport exposes the host's native tools and owns its process lifecycle.
-Automatic routing to existing GUI owners is provided by the proxy transport.
+The proxy and standalone transports both execute headless tools.
 The verified Xcode 27 headless catalog contains 57 tools; the catalog remains
 dynamic, so callers should discover capabilities with `listTools()`.
 

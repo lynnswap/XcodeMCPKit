@@ -100,14 +100,9 @@ extension RuntimeCoordinator {
             guard upstreamTopology.validate(proof) else { return }
             if case .notification("notifications/tools/list_changed") =
                 JSONRPC.Message.Inspector.kind(of: object) {
-                let transition = processControlPlane.invalidateCatalog(.toolsChanged(proof, backend: operationLease.backend))
-                // Forward the upstream notification after invalidation without synthesizing a duplicate.
-                applyProcessControlPlaneTransition(ProcessControlPlaneTransition(
-                    addedRoutes: transition.addedRoutes,
-                    retiredRoutes: transition.retiredRoutes,
-                    effects: transition.effects,
-                    publishesToolsListChanged: false
-                ))
+                let transition = toolsCatalog.invalidate(sourceProof: proof)
+                // The upstream notification is forwarded below.
+                for handle in transition.cancelledRPCs { handle.cancel() }
             }
             routeUnmappedUpstreamMessage(data, operationLease: operationLease)
             return
@@ -220,10 +215,9 @@ extension RuntimeCoordinator {
         let slotID = UpstreamSlotID(rawValue: upstreamIndex)
         guard proof.slotID == slotID,
               upstreamTopology.validate(proof) else { return }
-        let bridgeRecovery = upstreamHealthManager.currentBridgeRecovery(for: proof)
         var cleared: UpstreamHealthManager.ClearedUpstreamState?
         var supportUpdate: CanonicalHandshakeState.SupportEligibilityUpdate?
-        var processEligibility: ProcessControlPlaneAuthority.SupportEligibilityResult?
+        var catalogTransitions: [CatalogTransition] = []
         // Detach request mappings before the slot becomes eligible for another
         // handshake. A sibling exit can otherwise initialize this slot while
         // this exit is still removing its previous requests.
@@ -237,46 +231,28 @@ extension RuntimeCoordinator {
                 supportUpdate = commitSupportEligibilityAfterHealthMutation(
                     topologySnapshot: topologySnapshot,
                     detachedProof: proof,
-                    processEligibility: &processEligibility
+                    catalogTransitions: &catalogTransitions
                 )
                 return true
             } == true
         }
-        guard let globalInit, let cleared, let supportUpdate, let processEligibility else { return }
-        applyProcessControlPlaneTransition(processEligibility.transition)
+        guard let globalInit, let cleared, let supportUpdate else { return }
+        catalogTransitions.forEach(applyCatalogTransition)
         applySupportEligibilityCompletion(.init(update: supportUpdate, publication: nil))
         finishClearingUpstreamState(
             proof: proof,
             cleared: cleared,
-            resetsProcessRouteActivation: true
         )
         testHooks.upstreamExitStateCleared?(upstreamIndex)
-        let suppressProcessRouteWarmRestart =
-            clearsInitializedProcessRouteActivationBeforeCatalog(upstreamIndex: upstreamIndex)
 
         let exitedActivePrimaryInitialize =
             globalInit.primaryInitUpstreamIndex == upstreamIndex && globalInit.wasInFlight
-        if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
-            markXcodeProcessRouteUnavailable(
-                upstreamIndex: upstreamIndex,
-                reason: reason
-            )
-        }
         releaseLeases(
             leaseManager.abandonActiveLeases(
                 upstreamIndex: upstreamIndex,
                 reason: leaseReleaseReason
             )
         )
-
-        if let bridgeRecovery, exitedActivePrimaryInitialize == false {
-            replaceProcessBridgeRecoveryChannelAndScheduleRetry(
-                bridgeRecovery,
-                reason: reason
-            )
-            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-            return
-        }
 
         if exitedActivePrimaryInitialize {
             if retryPrimaryInitializeOnAlternativeUpstream(
@@ -319,7 +295,7 @@ extension RuntimeCoordinator {
         if upstreamIndex == primaryUpstreamIndex {
             if shouldResetGlobalInit || !globalInit.hadGlobalInit {
                 startEagerInitializePrimary(applyBackoff: true)
-            } else if suppressProcessRouteWarmRestart == false {
+            } else {
                 startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
             }
         } else if globalInit.hadGlobalInit {
@@ -337,9 +313,7 @@ extension RuntimeCoordinator {
                     startEagerInitializePrimary(applyBackoff: true)
                 }
             }
-            if suppressProcessRouteWarmRestart == false {
-                startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
-            }
+            startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
         }
 
         if canonicalHandshakeState.initializeResult() == nil,
@@ -452,7 +426,6 @@ extension RuntimeCoordinator {
         reason: String
     ) async {
         let proof = operationLease.proof
-        let route = xcodeProcessRoute(forUpstreamIndex: operationLease.upstreamIndex)
         logger.warning(
             "Upstream cancellation was rejected; replacing its channel",
             metadata: [
@@ -460,23 +433,10 @@ extension RuntimeCoordinator {
                 "reason": .string(reason),
             ]
         )
-        guard let cleared = clearUpstreamStateReturningDetachedState(
-            proof: proof,
-            resetsProcessRouteActivation: false
-        ) else {
+        guard clearUpstreamStateReturningDetachedState(proof: proof) != nil else {
             return
         }
-        let rejectedBridgeRecovery: ProcessConnectionRecovery?
-        if case .processBridgeRecovery(let recovery) = cleared.initializeOwner {
-            rejectedBridgeRecovery = recovery.reservation
-        } else {
-            rejectedBridgeRecovery = nil
-        }
-        guard let replacement = replaceOrRetireInitializeChannel(
-            proof,
-            expectedRouteID: route?.id,
-            requestsConnectionRecovery: false
-        ) else {
+        guard let replacement = replaceOrRetireInitializeChannel(proof, restart: false) else {
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             return
         }
@@ -489,46 +449,14 @@ extension RuntimeCoordinator {
         guard initializeManager.snapshot().isShuttingDown == false else {
             return
         }
-        guard upstreamTopology.validate(replacement.proof) else {
+        guard upstreamTopology.validate(replacement.operationLease) else {
             failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
             return
         }
-        let replacementProof = replacement.proof
-        guard let route else {
-            startUpstreamWarmInitialize(
-                upstreamIndex: replacementProof.slotID.rawValue,
-                applyBackoff: true
-            )
-            return
-        }
-        var recovery: ProcessControlPlaneAuthority.RejectedCancellationRecovery?
-        guard initializeManager.performIfRunning({
-            recovery = processControlPlane.recoverAfterRejectedCancellation(
-                routeID: route.id,
-                failedProof: proof,
-                replacementProof: replacementProof,
-                rejectedBridgeRecovery: rejectedBridgeRecovery,
-                nowUptimeNs: nowUptimeNanoseconds()
-            )
-        }), let recovery else {
-            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-            return
-        }
-        switch recovery {
-        case .preserved(let transition):
-            applyProcessControlPlaneTransition(transition)
-        case .bridgeRecovery(let retry):
-            schedulePreparedProcessBridgeRecoveryRetry(retry, reason: reason)
-        case .freshActivation(let lease, let retry, let transition):
-            applyProcessControlPlaneTransition(transition)
-            scheduleProcessRouteActivationRetry(
-                processID: route.target.processID,
-                retry: retry,
-                lease: lease,
-                reason: reason
-            )
-        }
-        failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+        startUpstreamWarmInitialize(
+            upstreamIndex: replacement.operationLease.upstreamIndex,
+            applyBackoff: true
+        )
     }
 
     private func cancellationDelivery(
@@ -578,31 +506,17 @@ extension RuntimeCoordinator {
         markRequestSucceeded(operationLease)
     }
 
-    private func validatesForwardingAdmission(
-        _ admission: RouteForwardingAdmission?,
-        operationLease: UpstreamOperationLease
-    ) -> Bool {
-        guard let admission else { return true }
-        guard admission.proof(for: operationLease.upstreamIndex) == operationLease.proof else {
-            return false
-        }
-        guard let route = admission.route else { return true }
-        return processControlPlane.validate(route)
-    }
-
     @discardableResult
     func sendUpstream(
         _ data: Data,
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission: RouteForwardingAdmission?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
         sendUpstream(
             data,
             operationLease: operationLease,
             ensureRunning: ensureRunning,
-            admission: admission,
             requestSendCompletion: nil,
             onRejected: onRejected
         )
@@ -613,7 +527,6 @@ extension RuntimeCoordinator {
         _ data: Data,
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission: RouteForwardingAdmission?,
         requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {
@@ -623,18 +536,10 @@ extension RuntimeCoordinator {
             requestSendCompletion?.complete(.notSent)
             return false
         }
-        guard validatesForwardingAdmission(
-            admission,
-            operationLease: operationLease
-        ) else {
-            onRejected()
-            requestSendCompletion?.complete(.notSent)
-            return false
-        }
         var scheduled = false
         guard initializeManager.performIfRunning({
             scheduled = addRuntimeTask {
-                [weak self, operationLease, admission, requestSendCompletion, onRejected] in
+                [weak self, operationLease, requestSendCompletion, onRejected] in
                 guard let self else {
                     requestSendCompletion?.complete(.notSent)
                     return
@@ -648,14 +553,6 @@ extension RuntimeCoordinator {
                     await operationLease.slot.start()
                 }
                 guard self.upstreamTopology.validate(operationLease) else {
-                    requestSendCompletion?.complete(.notSent)
-                    onRejected()
-                    return
-                }
-                guard self.validatesForwardingAdmission(
-                    admission,
-                    operationLease: operationLease
-                ) else {
                     requestSendCompletion?.complete(.notSent)
                     onRejected()
                     return
@@ -712,30 +609,9 @@ extension RuntimeCoordinator {
         operationLease: UpstreamOperationLease,
         reason: Upstream.UnavailableReason
     ) {
-        let upstreamIndex = operationLease.upstreamIndex
         switch reason {
         case .terminated, .notStarted, .startFailed:
-            let bridgeRecovery = upstreamHealthManager.currentBridgeRecovery(
-                for: operationLease.proof
-            )
-            guard clearUpstreamState(
-                proof: operationLease.proof,
-                resetsProcessRouteActivation: bridgeRecovery == nil
-            ) else { return }
-            if let bridgeRecovery {
-                replaceProcessBridgeRecoveryChannelAndScheduleRetry(
-                    bridgeRecovery,
-                    reason: "upstream_\(reason)"
-                )
-                failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
-                return
-            }
-            if xcodeProcessRouteHasUsableInitializedUpstream(containing: upstreamIndex) == false {
-                markXcodeProcessRouteUnavailable(
-                    upstreamIndex: upstreamIndex,
-                    reason: "upstream_\(reason)"
-                )
-            }
+            _ = clearUpstreamState(proof: operationLease.proof)
         case .shuttingDown:
             break
         }
@@ -849,7 +725,6 @@ extension RuntimeCoordinator {
 
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         let initSnapshot = initializeManager.snapshot()
-        let processSnapshot = processControlPlane.snapshot()
         let controlPlaneSnapshot = controlPlaneDebugMirror.snapshot()
         let upstreamStates = upstreamHealthManager.activeStatesSnapshot().map {
             (index: $0.id.rawValue, state: $0.state)
@@ -859,24 +734,10 @@ extension RuntimeCoordinator {
             allSessionIDs: sessionRegistry.sessionIDs()
         )
         let schedulerSnapshot = upstreamSlotScheduler.debugSnapshot()
-        let processToolCatalogs = processControlPlane.debugCatalogSnapshots(
-            exposedCatalog: processSnapshot.canonicalToolsCatalogRaw,
-            tabOwnerCountsByProcessID: windowOwnershipAuthority.snapshot()
-                .tabOwnerCountsByProcessID(),
-            workspaceOwnerCountsByProcessID: windowOwnershipAuthority.snapshot()
-                .workspaceOwnerCountsByProcessID()
-        )
         return debugRecorder.snapshot(
             proxyInitialized: initSnapshot.hasInitResult && !initSnapshot.isShuttingDown,
-            cachedToolsListAvailable: processSnapshot.canonicalToolsCatalogRaw != nil,
+            cachedToolsListAvailable: toolsCatalog.canonicalToolsCatalogRaw() != nil,
             controlPlane: controlPlaneSnapshot,
-            processRoutes: processControlPlane.debugRouteSnapshots(
-                usableSlotCount: { [weak self] route in
-                    guard let self else { return 0 }
-                    return self.usableInitializedUpstreamIndices(in: route).count
-                }
-            ),
-            processToolCatalogs: processToolCatalogs,
             upstreamStates: upstreamStates,
             sessionSnapshots: sessionSnapshots,
             leaseSnapshots: leaseSnapshots,
@@ -1338,7 +1199,6 @@ extension RuntimeCoordinator {
         let slotID = UpstreamSlotID(rawValue: upstreamIndex)
         guard proof.slotID == slotID,
               upstreamTopology.validate(proof) else { return }
-        let bridgeRecovery = upstreamHealthManager.currentBridgeRecovery(for: proof)
         debugRecorder.recordProtocolViolation(protocolViolation, upstreamIndex: upstreamIndex)
         let nowUptimeNs = nowUptimeNanoseconds()
         let initSnapshot = initializeManager.snapshot()
@@ -1374,16 +1234,6 @@ extension RuntimeCoordinator {
                 "uptime_ns": .string("\(nowUptimeNs)"),
             ]
         )
-        if let bridgeRecovery {
-            replaceProcessBridgeRecoveryChannelAndScheduleRetry(
-                bridgeRecovery,
-                reason: "stdout_protocol_violation"
-            )
-            return
-        }
-        if let route = xcodeProcessRoute(forUpstreamIndex: upstreamIndex) {
-            startProcessRouteActivation(for: route)
-        }
         if violatedActivePrimaryInitialize {
             if retryPrimaryInitializeOnAlternativeUpstream(
                 failedUpstreamIndex: upstreamIndex,
@@ -1395,9 +1245,6 @@ extension RuntimeCoordinator {
             failInitPending(error: ControlPlane.Error.invalidResponse("upstream stdout protocol violation"))
         }
 
-        if !defaultBackendUpstreamIndices.contains(upstreamIndex) {
-            return
-        }
         let primaryUpstreamIndex = initSnapshot.activePrimaryUpstreamIndex ?? 0
         if upstreamIndex == primaryUpstreamIndex {
             if initSnapshot.hasInitResult || wasCanonicalSource {

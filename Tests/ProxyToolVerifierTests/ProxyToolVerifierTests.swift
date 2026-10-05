@@ -26,7 +26,7 @@ struct ProxyToolVerifierTests {
             return result(["message": "closed"])
         }
         for _ in 0..<2 {
-            #expect(try await !verify(runtime: runtime, fixture: fixture, noOpenXcode: true))
+            #expect(try await !verify(runtime: runtime, fixture: fixture))
         }
         let calls = await runtime.recordedToolCalls().filter { $0.name == "XcodeNewProject" }
         #expect(calls.count == 2)
@@ -57,7 +57,7 @@ struct ProxyToolVerifierTests {
             }
             return result(["message": "closed"])
         }
-        #expect(try await verify(runtime: runtime, fixture: fixture, noOpenXcode: true))
+        #expect(try await verify(runtime: runtime, fixture: fixture))
     }
 
     @Test func navigatorOperationsUseNativeCreatedDirectoryPath() async throws {
@@ -86,7 +86,7 @@ struct ProxyToolVerifierTests {
             }
             return result(["message": "ok"])
         }
-        #expect(try await !verify(runtime: runtime, fixture: fixture, noOpenXcode: true))
+        #expect(try await !verify(runtime: runtime, fixture: fixture))
         #expect(await runtime.recordedToolCalls().contains { $0.name == "XcodeRM" })
     }
 
@@ -113,7 +113,7 @@ struct ProxyToolVerifierTests {
             }
         }
         do {
-            _ = try await verify(runtime: runtime, fixture: fixture, noOpenXcode: true)
+            _ = try await verify(runtime: runtime, fixture: fixture)
             Issue.record("verification continued after a failed fixture selection")
         } catch {}
         let calls = await runtime.recordedToolCalls()
@@ -144,7 +144,7 @@ struct ProxyToolVerifierTests {
             default: return result(["message": "ok"])
             }
         }
-        #expect(try await !verify(runtime: runtime, fixture: fixture, noOpenXcode: true,
+        #expect(try await !verify(runtime: runtime, fixture: fixture,
             deviceIdentifier: "owned-device-id"))
         let calls = await runtime.recordedToolCalls()
         #expect(calls.filter { $0.name == "DeviceInteractionEndSession" }
@@ -200,7 +200,7 @@ struct ProxyToolVerifierTests {
             }
             return result(["message": "ok"])
         }
-        #expect(try await !verify(runtime: runtime, fixture: fixture, noOpenXcode: true))
+        #expect(try await !verify(runtime: runtime, fixture: fixture))
         #expect(try String(contentsOf: original, encoding: .utf8) == "original")
         let workspace = try #require(await ownership.path)
         let copiedProject = try referencedProject(in: URL(fileURLWithPath: workspace))
@@ -244,49 +244,10 @@ struct ProxyToolVerifierTests {
                 return MCPToolResult(content: [], isError: true)
             }
         }
-        let failed = try await verify(runtime: runtime, fixture: fixture, noOpenXcode: true,
+        let failed = try await verify(runtime: runtime, fixture: fixture,
             runDestination: explicitDestination ? ownedTitle : nil)
         #expect(!failed)
         #expect(await runtime.recordedToolCalls().contains { $0.name == "XcodeSwitchRunDestination" })
-    }
-
-    @Test func nativeCatalogWaitsForGUIAndPreservesSelectedTab() async throws {
-        let fixture = try makeFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.outputRoot) }
-        let runtime = XcodeMCPTestRuntime(tools: nativeTools)
-        let path = fixture.rootWorkspaceURL.path
-        await runtime.setToolHandler { call in
-            switch call.name {
-            case "XcodeListWindows":
-                return result(["message": .string([
-                    "* tabIdentifier: first-tab, workspacePath: \(path)",
-                    "* tabIdentifier: second-tab, workspacePath: \(path)",
-                ].joined(separator: "\n"))])
-            case "XcodeListWorkspaces":
-                return MCPToolResult(content: [], structuredContent: ["message": "Call XcodeOpenWorkspace for approval"], isError: true)
-            case "XcodeListSchemes", "XcodeGetCurrentFile", "XcodeListNavigatorIssues":
-                #expect(call.arguments["workspaceIdentifier"] == "first-tab")
-                #expect(call.arguments["tabIdentifier"] == nil)
-                return result(["message": "ProxyToolVerifierFixture"])
-            default:
-                Issue.record("unexpected GUI fixture call: \(call.name)")
-                return MCPToolResult(content: [], isError: true)
-            }
-        }
-        let catalogUpdate = Task {
-            while !Task.isCancelled, !(await runtime.recordedMessages()).contains(where: { $0.method == "tools/list" }) {
-                await Task.yield()
-            }
-            guard !Task.isCancelled else { return }
-            await runtime.setTools(mixedTools)
-        }
-        defer { catalogUpdate.cancel() }
-        let failed = try await verify(runtime: runtime, fixture: fixture, noOpenXcode: false)
-        #expect(!failed)
-        let calls = await runtime.recordedToolCalls()
-        #expect(calls.contains { $0.name == "XcodeListSchemes" })
-        #expect(calls.contains { $0.name == "XcodeGetCurrentFile" })
-        #expect(!calls.contains { ["XcodeOpenWorkspace", "XcodeListWorkspaces", "DeviceInteractionStartWorkspaceSession"].contains($0.name) })
     }
 
     @Test(arguments: [false, true])
@@ -295,12 +256,10 @@ struct ProxyToolVerifierTests {
         defer { try? FileManager.default.removeItem(at: fixture.outputRoot) }
         let previousRun = fixture.outputRoot.appendingPathComponent("Fixture")
         try FileManager.default.createDirectory(at: previousRun, withIntermediateDirectories: false)
-        let runtime = XcodeMCPTestRuntime(tools: mixedTools)
+        let runtime = XcodeMCPTestRuntime(tools: workspaceTools)
         let ownership = HeadlessFixtureState()
         await runtime.setToolHandler { call in
             switch call.name {
-            case "XcodeListWindows":
-                return result(["message": "* tabIdentifier: unrelated, workspacePath: /Other/App.xcworkspace"])
             case "XcodeOpenWorkspace":
                 let path = try #require(call.arguments["path"]?.stringValue)
                 #expect(path != fixture.rootWorkspaceURL.path)
@@ -324,21 +283,19 @@ struct ProxyToolVerifierTests {
                 return result(["message": "closed"])
             case "XcodeListSchemes", "DeviceInteractionStartWorkspaceSession":
                 #expect(call.arguments["workspaceIdentifier"] == "owned-native-id")
-                #expect(call.arguments["tabIdentifier"] == nil)
                 return MCPToolResult(content: [], structuredContent: ["message": "ProxyToolVerifierFixture"], isError: toolFails)
             default:
-                Issue.record("GUI-only tool reached Headless host: \(call.name)")
+                Issue.record("Unexpected fixture call: \(call.name)")
                 return MCPToolResult(content: [], isError: true)
             }
         }
-        let failed = try await verify(runtime: runtime, fixture: fixture, noOpenXcode: true)
+        let failed = try await verify(runtime: runtime, fixture: fixture)
         #expect(failed == toolFails)
         #expect(await ownership.closeCount == 1)
         let calls = await runtime.recordedToolCalls()
         let openIndex = try #require(calls.firstIndex { $0.name == "XcodeOpenWorkspace" })
         let listIndex = try #require(calls.firstIndex { $0.name == "XcodeListWorkspaces" })
         #expect(openIndex < listIndex)
-        #expect(!calls.contains { ["XcodeGetCurrentFile", "XcodeListNavigatorIssues"].contains($0.name) })
     }
 
     private func makeFixture() throws -> FixtureLayout {
@@ -349,12 +306,11 @@ struct ProxyToolVerifierTests {
         return fixture
     }
 
-    private func verify(runtime: XcodeMCPTestRuntime, fixture: FixtureLayout, noOpenXcode: Bool,
+    private func verify(runtime: XcodeMCPTestRuntime, fixture: FixtureLayout,
         runDestination: String? = nil, deviceIdentifier: String? = nil) async throws -> Bool {
         let client = try await runtime.makeClient()
         do {
             let options = try VerifierOptions(arguments: ["--request-timeout", "2"]
-                + (noOpenXcode ? ["--no-open-xcode"] : [])
                 + (runDestination.map { ["--run-destination", $0] } ?? [])
                 + (deviceIdentifier.map { ["--device-identifier", $0] } ?? []))
             let failed = try await ProxyToolVerifier(options: options).verify(client: client, fixture: fixture, outputRoot: fixture.outputRoot)
@@ -403,9 +359,6 @@ private let nativeTools = [
     tool("DeviceInteractionStartWorkspaceSession", properties: ["workspaceIdentifier", "sessionIdentifier"]),
 ]
 
-private let mixedTools = nativeTools + [
-    tool("XcodeListWindows", properties: []),
+private let workspaceTools = nativeTools + [
     tool("XcodeListSchemes", properties: ["workspaceIdentifier"]),
-    tool("XcodeGetCurrentFile", properties: ["workspaceIdentifier", "includeContent", "includeSelection"]),
-    tool("XcodeListNavigatorIssues", properties: ["workspaceIdentifier", "severity"]),
 ]

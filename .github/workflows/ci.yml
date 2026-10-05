@@ -103,12 +103,9 @@ jobs:
       fail-fast: false
       matrix:
         shard:
-          - RuntimeCoordinatorProcessRoutingTests
           - RuntimeCoordinatorInitializationTests
           - RuntimeCoordinatorRecoveryTests
           - RuntimeCoordinatorCatalogTests
-          - RuntimeCoordinatorWindowCatalogTests
-          - RuntimeCoordinatorWindowRoutingTests
           - RuntimeCoordinatorSchedulingTests
           - remaining
     steps:
@@ -146,7 +143,7 @@ jobs:
                 --skip-build \
                 --no-parallel \
                 --filter XcodeMCPProxyRuntimeTests \
-                --skip 'RuntimeCoordinatorProcessRoutingTests|RuntimeCoordinatorInitializationTests|RuntimeCoordinatorRecoveryTests|RuntimeCoordinatorCatalogTests|RuntimeCoordinatorWindowCatalogTests|RuntimeCoordinatorWindowRoutingTests|RuntimeCoordinatorSchedulingTests' \
+                --skip 'RuntimeCoordinatorInitializationTests|RuntimeCoordinatorRecoveryTests|RuntimeCoordinatorCatalogTests|RuntimeCoordinatorSchedulingTests' \
                 -Xswiftc -strict-concurrency=minimal
               ./scripts/ci-test-watchdog.sh swift test \
                 --skip-build \

@@ -358,14 +358,6 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         fatalError("unused in ToolSurfaceTests")
     }
 
-    func liveXcodeListWindowsResult(
-        route: ControlPlane.Route,
-        requestTimeoutOverride: TimeAmount?
-    ) async throws -> JSONValue {
-        fatalError("unused in ToolSurfaceTests")
-    }
-
-    func hasDocumentationSearchService() -> Bool { false }
 
     func chooseUpstreamOperationLease() -> UpstreamOperationLease? { nil }
 
@@ -406,7 +398,6 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         _ data: Data,
         operationLease: UpstreamOperationLease,
         ensureRunning: Bool,
-        admission: RouteForwardingAdmission?,
         requestSendCompletion: UpstreamRequestSendCompletion?,
         onRejected: @escaping @Sendable () -> Void
     ) -> Bool {

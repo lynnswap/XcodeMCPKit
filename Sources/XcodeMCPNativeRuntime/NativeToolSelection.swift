@@ -11,7 +11,6 @@ final class NativeToolSelection {
     private let metadata: UnsafeRawPointer
     private let witness: UnsafeRawPointer
     private let headlessGetter: ResolvedSymbol
-    private let guiGetter: ResolvedSymbol
     private let interface: OpaquePointer
 
     init(installation: NativeXcodeInstallation) async throws {
@@ -28,16 +27,13 @@ final class NativeToolSelection {
         }
         unsafe (witness = conformance)
         headlessGetter = try await runtime.resolve(.init(name: "async function pointer to (extension in IDEIntelligenceChat):IDEIntelligenceChat.ChatSettings.enabledHeadlessMCPTools.getter : Swift.Set<Swift.String>", language: .swift, kind: .data), in: .path(image))
-        guiGetter = try await runtime.resolve(.init(name: "async function pointer to (extension in IDEIntelligenceChat):IDEIntelligenceChat.ChatSettings.enabledMCPTools.getter : Swift.Set<Swift.String>", language: .swift, kind: .data), in: .path(image))
         let pointer = try unsafe abi.scalar(Int32(ABIValuePointer))
         let result = try unsafe abi.storage(for: Set<String>.self, components: [pointer])
         unsafe (interface = try abi.asyncInterface(result: result, parameters: [pointer, pointer]))
     }
 
     func publicToolNames() async throws -> Set<String> {
-        let headless = try await read(headlessGetter)
-        let gui = try await read(guiGetter)
-        return headless.union(gui)
+        try await read(headlessGetter)
     }
 
     private func read(_ getter: ResolvedSymbol) async throws -> Set<String> {

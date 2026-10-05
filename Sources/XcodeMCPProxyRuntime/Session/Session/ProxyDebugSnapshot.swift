@@ -117,21 +117,6 @@ extension ProxyDebug {
 }
 
 extension ProxyDebug {
-    struct ProcessRouteSnapshot: Codable, Sendable {
-        let state: String
-        let processID: pid_t
-        let appPath: String
-        let developerDir: String
-        let xcodeVersion: String
-        let upstreamIndices: [Int]
-        let usableSlotCount: Int
-        let toolsCatalogState: String
-        let firstSeenGeneration: UInt64
-        let lastSeenGeneration: UInt64
-        let lastSeenUptimeNs: UInt64?
-        let missingSinceUptimeNs: UInt64?
-        let lastReconcileReason: String
-    }
 }
 
 extension ProxyDebug {
@@ -142,8 +127,6 @@ extension ProxyDebug {
         let warmupInFlight: Bool
         let controlPlane: ControlPlane.DebugSnapshot?
         let upstreams: [ProxyDebug.UpstreamSnapshot]
-        let processRoutes: [ProxyDebug.ProcessRouteSnapshot]
-        let processToolCatalogs: [ProcessControlPlaneAuthority.CatalogDebugSnapshot]
         let recentTraffic: [ProxyDebug.TrafficEvent]
         let sessions: [SessionRequestPipeline.DebugSnapshot]
         let leases: [LeaseManager.DebugSnapshot]
@@ -156,8 +139,6 @@ extension ProxyDebug {
             warmupInFlight: Bool,
             controlPlane: ControlPlane.DebugSnapshot? = nil,
             upstreams: [ProxyDebug.UpstreamSnapshot],
-            processRoutes: [ProxyDebug.ProcessRouteSnapshot] = [],
-            processToolCatalogs: [ProcessControlPlaneAuthority.CatalogDebugSnapshot] = [],
             recentTraffic: [ProxyDebug.TrafficEvent],
             sessions: [SessionRequestPipeline.DebugSnapshot],
             leases: [LeaseManager.DebugSnapshot],
@@ -169,8 +150,6 @@ extension ProxyDebug {
             self.warmupInFlight = warmupInFlight
             self.controlPlane = controlPlane
             self.upstreams = upstreams
-            self.processRoutes = processRoutes
-            self.processToolCatalogs = processToolCatalogs
             self.recentTraffic = recentTraffic
             self.sessions = sessions
             self.leases = leases
