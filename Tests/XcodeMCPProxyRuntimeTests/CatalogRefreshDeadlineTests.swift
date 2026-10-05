@@ -23,8 +23,8 @@ struct CatalogRefreshDeadlineTests {
         let lateRequest = try await fixture.nextCatalogRequest(upstreamIndex: 2)
         try await fixture.reply(to: nativeRequest, upstreamIndex: 0, toolName: "FreshNativeTool")
         try await fixture.reply(to: healthyRequest, upstreamIndex: 1, toolName: "FreshGUITool")
-        try await fixture.waitForRefreshSuccess(upstreamIndex: 0)
-        try await fixture.waitForGUICommit(upstreamIndex: 1)
+        try await fixture.waitForCatalogCommit(upstreamIndex: 0)
+        try await fixture.waitForCatalogCommit(upstreamIndex: 1)
 
         await fixture.advance(byMilliseconds: 2_500)
         let result = try await fixture.result(of: load)
@@ -34,7 +34,7 @@ struct CatalogRefreshDeadlineTests {
         _ = observer.router.drainBufferedNotifications()
         await fixture.advance(byMilliseconds: 500)
         try await fixture.reply(to: lateRequest, upstreamIndex: 2, toolName: "LateFreshGUITool")
-        try await fixture.waitForGUICommit(upstreamIndex: 2)
+        try await fixture.waitForCatalogCommit(upstreamIndex: 2)
         #expect(toolNames(in: fixture.manager.cachedToolsListResult() ?? .null).contains("LateFreshGUITool"))
         #expect(!observer.router.drainBufferedNotifications().isEmpty)
     }
@@ -51,7 +51,7 @@ struct CatalogRefreshDeadlineTests {
         let nativeRequest = try await fixture.nextCatalogRequest(upstreamIndex: 0)
         let guiRequest = try await fixture.nextCatalogRequest(upstreamIndex: 1)
         try await fixture.reply(to: nativeRequest, upstreamIndex: 0, toolName: "PublishedPartialNative")
-        try await fixture.waitForRefreshSuccess(upstreamIndex: 0)
+        try await fixture.waitForCatalogCommit(upstreamIndex: 0)
         await fixture.advance(byMilliseconds: 2_500)
         #expect(toolNames(in: try await fixture.result(of: first)).contains("PublishedPartialNative"))
         let background = try #require(await fixture.manager.controlPlaneCoordinator.requestToolsCatalogLoadSnapshotForTesting())
@@ -78,7 +78,7 @@ struct CatalogRefreshDeadlineTests {
         #expect(preserved.rpcHandle.isCancelled() == false)
         await fixture.advance(byMilliseconds: 500)
         try await fixture.reply(to: pendingGUIRequest, upstreamIndex: 1, toolName: "GUIUpdateAfterLaterCancel")
-        try await fixture.waitForGUICommit(upstreamIndex: 1)
+        try await fixture.waitForCatalogCommit(upstreamIndex: 1)
         #expect(toolNames(in: fixture.manager.cachedToolsListResult() ?? .null).contains("GUIUpdateAfterLaterCancel"))
         #expect(!observer.router.drainBufferedNotifications().isEmpty)
     }
@@ -159,7 +159,7 @@ struct CatalogRefreshDeadlineTests {
         #expect(preserved.foregroundWaiterCount == 1)
         await fixture.advance(byMilliseconds: cancelShort ? 2_000 : 1_000)
         try await fixture.reply(to: nativeRequest, upstreamIndex: 0, toolName: "NativeReplyAfterTwoSeconds")
-        try await fixture.waitForRefreshSuccess(upstreamIndex: 0)
+        try await fixture.waitForCatalogCommit(upstreamIndex: 0)
         await fixture.advance(byMilliseconds: 500)
         #expect(toolNames(in: try await fixture.result(of: long)).contains("NativeReplyAfterTwoSeconds"))
         #expect(fixture.uptimeClock.now() == 2_500_000_000)
@@ -203,7 +203,7 @@ struct CatalogRefreshDeadlineTests {
             #expect(await origin.sent().filter { methodName(from: $0) == "tools/list" }.count == 1)
         }
         try await fixture.reply(to: request, upstreamIndex: 0, toolName: "SharedFreshNative")
-        try await fixture.waitForRefreshSuccess(upstreamIndex: 0)
+        try await fixture.waitForCatalogCommit(upstreamIndex: 0)
         await fixture.advance(byMilliseconds: 2_500)
         for caller in [first, second] {
             #expect(toolNames(in: try await fixture.result(of: caller)).contains("SharedFreshNative"))
@@ -218,8 +218,7 @@ private struct CatalogDeadlineFixture {
     let uptimeClock: TestUptimeClock
     let upstreams: [TestUpstreamClient]
     let manager: RuntimeCoordinator
-    let refreshEvents: LockedRecordedValues<(Int, Bool)>
-    let guiCommits: LockedRecordedValues<Int>
+    let catalogCommits: LockedRecordedValues<Int>
 
     init(hasNative: Bool, guiCount: Int) throws {
         let clocks = makeRuntimeCoordinatorDeterministicClocks()
@@ -233,16 +232,14 @@ private struct CatalogDeadlineFixture {
         let guiEntries = (nativeCount..<upstreams.count).map { index in
             (target: xcodeProcessTarget(processID: Int32(7200 + index), xcodeVersion: "27.0"), index: index)
         }
-        let refreshEvents = LockedRecordedValues<(Int, Bool)>()
-        self.refreshEvents = refreshEvents
-        let guiCommits = LockedRecordedValues<Int>()
-        self.guiCommits = guiCommits
+        let catalogCommits = LockedRecordedValues<Int>()
+        self.catalogCommits = catalogCommits
         let manager = RuntimeCoordinator(
             config: makeConfig(requestTimeout: 5), eventLoop: eventLoop, upstreams: upstreams,
             clock: clocks.clock,
             xcodeProcessRoutes: guiEntries.map { XcodeProcessRoute(target: $0.target, upstreamIndices: [$0.index]) },
-            testHooks: .init(toolsListRefreshCompleted: { refreshEvents.append(($0, $1)) },
-                processRouteCatalogCommitted: { _, index in guiCommits.append(index) }),
+            testHooks: .init(unboundToolsCatalogCommitted: { catalogCommits.append($0) },
+                processRouteCatalogCommitted: { _, index in catalogCommits.append(index) }),
             startImmediately: false
         )
         self.manager = manager
@@ -285,21 +282,11 @@ private struct CatalogDeadlineFixture {
         )))
     }
 
-    func waitForRefreshSuccess(upstreamIndex: Int) async throws {
-        let events = refreshEvents
-        try await waitWithTimeout("waiting for a successful refresh from origin \(upstreamIndex)", timeout: .seconds(2)) {
-            var index = 0
-            while true {
-                let event = try await events.nextValue(at: index)
-                if event.0 == upstreamIndex && event.1 { return }
-                index += 1
-            }
-        }
-    }
-
-    func waitForGUICommit(upstreamIndex: Int) async throws {
-        let commits = guiCommits
-        try await waitWithTimeout("waiting for the actual GUI catalog commit", timeout: .seconds(2)) {
+    func waitForCatalogCommit(upstreamIndex: Int) async throws {
+        let commits = catalogCommits
+        // RPC refresh success precedes publication; advance deadlines only after
+        // the requested provider is present in the canonical catalog.
+        try await waitWithTimeout("waiting for catalog commit from origin \(upstreamIndex)", timeout: .seconds(2)) {
             var index = 0
             while true {
                 if try await commits.nextValue(at: index) == upstreamIndex { return }

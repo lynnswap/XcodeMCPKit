@@ -53,6 +53,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
     var toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)?
     var toolsListPrewarmCompleted: (@Sendable () -> Void)?
     var upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)?
+    var unboundToolsCatalogCommitted: (@Sendable (_ upstreamIndex: Int) -> Void)?
     var processRouteCatalogCommitted:
         (@Sendable (_ processID: pid_t, _ upstreamIndex: Int) -> Void)?
     var xcodeProcessReconcileCompleted: (@Sendable (_ reason: String) -> Void)?
@@ -84,6 +85,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         toolsListRefreshCompleted: (@Sendable (_ upstreamIndex: Int, _ succeeded: Bool) -> Void)? = nil,
         toolsListPrewarmCompleted: (@Sendable () -> Void)? = nil,
         upstreamInitialized: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
+        unboundToolsCatalogCommitted: (@Sendable (_ upstreamIndex: Int) -> Void)? = nil,
         processRouteCatalogCommitted:
             (@Sendable (_ processID: pid_t, _ upstreamIndex: Int) -> Void)? = nil,
         xcodeProcessReconcileCompleted: (@Sendable (_ reason: String) -> Void)? = nil,
@@ -114,6 +116,7 @@ struct RuntimeCoordinatorTestHooks: Sendable {
         self.toolsListRefreshCompleted = toolsListRefreshCompleted
         self.toolsListPrewarmCompleted = toolsListPrewarmCompleted
         self.upstreamInitialized = upstreamInitialized
+        self.unboundToolsCatalogCommitted = unboundToolsCatalogCommitted
         self.processRouteCatalogCommitted = processRouteCatalogCommitted
         self.xcodeProcessReconcileCompleted = xcodeProcessReconcileCompleted
         self.processRouteRetirementWillDetach = processRouteRetirementWillDetach
