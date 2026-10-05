@@ -1,81 +1,34 @@
 # XcodeMCPKit
 
-Use Xcode's build, test, preview, and editing tools through one local MCP server.
-The native host loads saved projects without opening Xcode windows.
-Xcode supplies the tool definitions and
-implementations; [ABIBridge](https://github.com/lynnswap/ABIBridge) connects the
-server to its native frameworks.
+XcodeMCPKit is a server for using Xcode's MCP tools headlessly.
 
 ## Requirements
 
 - macOS 15.4+
-- Swift 6.3+ to build from source
 - An Xcode installation with native MCP tools
-
-Headless initialization and workspace operations have been verified with Xcode 27
-on macOS with SIP and AMFI enabled. See [Xcode compatibility](Docs/configuration.md#xcode-compatibility)
-for installation selection and the verification boundary.
+- [Homebrew](https://brew.sh/) for installation
 
 ## Quick start
 
 ### Install
 
-Install the server, STDIO adapter, and signed native helper through Homebrew:
+For a new installation:
 
 ```bash
 brew install lynnswap/tap/xcode-mcpkit
 ```
 
-The Formula installs both commands on Homebrew's `PATH` and keeps the helper app
-with their versioned payload. Xcode is still required to run its tools.
+> [!NOTE]
+> If you previously installed XcodeMCPKit with the shell installer or from source,
+> run this command once to migrate to Homebrew, even if you have already run `brew install`:
+>
+> ```bash
+> curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh
+> ```
+>
+> Restart the server and connected MCP clients afterward.
 
-For an unreleased build from `main`, use the source installer:
-
-```bash
-git clone https://github.com/lynnswap/XcodeMCPKit.git
-cd XcodeMCPKit
-swift run -c release xcode-mcp-proxy-install
-```
-
-The source installer places the server, STDIO adapter, and ad-hoc-signed native helper app in
-`~/.local/bin`. Keep `XcodeMCPNativeHost.app` beside the executables. Add the
-installation directory to your `PATH`, or put this line in `~/.zshrc`:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-For a custom destination, the installer accepts `--prefix directory` or
-`--bindir directory`. Run `swift run -c release xcode-mcp-proxy-install --help`
-for its options.
-
-### Upgrade or remove
-
-Stop the server, then upgrade and start it again:
-
-```bash
-brew update
-brew upgrade lynnswap/tap/xcode-mcpkit
-xcode-mcp-proxy-server
-```
-
-If you previously used the standalone or source installer, run the familiar
-installer once to switch those entry points to Homebrew:
-
-```bash
-curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh
-```
-
-The installer checks the Homebrew commands, saves the old executables and native
-helper in a backup directory, and makes their existing paths follow Homebrew
-upgrades. Use the same `--prefix` or `--bindir` for a custom old installation
-(`sh -s -- --bindir /path/to/bin` when piping). `--dry-run` reports the locations
-without changing them. Existing command paths in MCP configurations keep working;
-remove obsolete command arguments such as `--auto-approve` separately. Restart
-the server and clients that are already running. Shell profiles are unchanged.
-
-To remove the Homebrew installation, stop the server and run
-`brew uninstall xcode-mcpkit`.
+With Homebrew set up, no additional `PATH` setting is needed.
 
 ### Start the server
 
@@ -83,73 +36,124 @@ To remove the Homebrew installation, stop the server and run
 xcode-mcp-proxy-server
 ```
 
-Keep the server running. Its owned native host loads projects from disk and
-executes Xcode's headless tools. Xcode windows and agent-access approval are not
-required; startup does not modify Xcode's permission store.
+Keep this terminal open while using MCP. You can leave Xcode closed.
 
 ### Connect your MCP client
 
-Codex:
+In another terminal, run the command for your client.
+
+**Codex**
 
 ```bash
 codex mcp add xcode --url http://localhost:8765/mcp
 ```
 
-Claude Code:
+**Claude Code**
 
 ```bash
 claude mcp add --transport http xcode http://localhost:8765/mcp
 ```
 
-For other clients, use `http://localhost:8765/mcp` with Streamable HTTP. If an
-`xcode` registration already exists, remove it first with `codex mcp remove xcode`
-or `claude mcp remove xcode`.
+For other MCP clients, connect to `http://localhost:8765/mcp` using Streamable HTTP.
 
-For STDIO clients, register the adapter instead. The HTTP server must still be running:
+<details>
+<summary>Replacing an existing MCP registration</summary>
+
+If your client already has an `xcode` registration, remove it before running the
+connection command above:
+
+```bash
+codex mcp remove xcode
+# Or, for Claude Code:
+claude mcp remove xcode
+```
+
+Restart clients that are already running after changing their configuration.
+
+</details>
+
+<details>
+<summary>Clients that require STDIO</summary>
+
+Keep the HTTP server running and register the bundled STDIO adapter:
 
 ```bash
 codex mcp add xcode -- xcode-mcp-proxy
+# Or, for Claude Code:
 claude mcp add --transport stdio xcode -- xcode-mcp-proxy
 ```
 
-## Use a workspace
+For a source installation, use the adapter's full path in the chosen installation
+directory in place of `xcode-mcp-proxy`.
 
-Pass an absolute `.xcworkspace` or `.xcodeproj` path as `workspaceIdentifier`
-to workspace tools. The native host loads the project model when needed.
-Operations use saved files and the host's selected scheme, destination, and test
-plan. Save editor changes before using them through MCP.
+</details>
 
-Available tools follow the selected installation's headless catalog. See
-[workspace and tool usage](Docs/usage.md) for build examples, tool discovery,
-and cancellation.
+## Other installation options
 
-## Use from Swift
+<details>
+<summary>Build from source</summary>
 
-Add this package from `main` and the `XcodeMCPKit` product to your target. With
-the server running, discover its available tools:
+To build `main` locally, use a Swift 6.3+ toolchain and install it in a separate
+directory:
 
-```swift
-import XcodeMCPKit
-
-let xcode = try await XcodeMCP()
-let tools = try await xcode.listTools()
-await xcode.close()
-print(tools.map(\.name))
+```bash
+git clone https://github.com/lynnswap/XcodeMCPKit.git
+cd XcodeMCPKit
+swift run -c release xcode-mcp-proxy-install --bindir "$HOME/.local/opt/xcode-mcpkit-dev/bin"
 ```
 
-See the [Swift client guide](Sources/XcodeMCPKit/README.md) for tool calls and
-lifecycle handling, or [XcodeMCPProxyKit](Sources/XcodeMCPProxyKit/README.md) to
-embed the server or adapter.
+Stop any running proxy server, then start this build by its full path:
+
+```bash
+"$HOME/.local/opt/xcode-mcpkit-dev/bin/xcode-mcp-proxy-server"
+```
+
+Connect your client using the HTTP commands in Quick start. No `PATH` change is
+needed. The two commands and `XcodeMCPNativeHost.app` are installed together;
+keep the helper app beside the commands.
+
+Without `--bindir`, the source installer defaults to `~/.local/bin` and replaces
+existing commands there, including links created by the Homebrew migration.
+Using a separate directory keeps development builds independent of that installation.
+
+The installer also accepts `--prefix directory` to install into its `bin`
+subdirectory. Run `swift run -c release xcode-mcp-proxy-install --help` for details.
+
+</details>
+
+<details>
+<summary>Migration from a custom installation directory</summary>
+
+For an old custom location, use the same `--prefix` or `--bindir`; for example:
+
+```bash
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh -s -- --bindir /path/to/bin
+```
+
+Only the specified old installation directory is migrated. If you keep copies
+in multiple locations, repeat the migration with each location's `--bindir`.
+
+</details>
+
+## Update or uninstall a Homebrew installation
+
+Stop the server before updating, then start it again:
+
+```bash
+brew update
+brew upgrade lynnswap/tap/xcode-mcpkit
+xcode-mcp-proxy-server
+```
+
+To uninstall, stop the server and run `brew uninstall xcode-mcpkit`.
 
 ## Documentation
 
-- [Configuration reference](Docs/configuration.md)
+- [Configuration](Docs/configuration.md)
 - [Workspace and tool usage](Docs/usage.md)
-- [Migration guides](Docs/migrations/README.md)
 - [Troubleshooting](Docs/troubleshooting.md)
-
-For architecture, verification, and release instructions, see the
-[documentation index](Docs/README.md).
+- [Migration guides](Docs/migrations/README.md)
+- [Development and architecture](Docs/README.md)
 
 ## License
 
