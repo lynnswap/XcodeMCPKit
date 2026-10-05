@@ -19,9 +19,14 @@ brew install lynnswap/tap/xcode-mcpkit
 ```
 
 > [!NOTE]
-> If you installed XcodeMCPKit with the shell installer or from source, run the
-> [migration installer](#homebrew-migration) once to switch existing commands to
-> Homebrew. This is also needed if you have already run `brew install`.
+> If you previously installed XcodeMCPKit with the shell installer or from source,
+> run this command once to migrate to Homebrew, even if you have already run `brew install`:
+>
+> ```bash
+> curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh
+> ```
+>
+> Restart the server and connected MCP clients afterward.
 
 With Homebrew set up, no additional `PATH` setting is needed.
 
@@ -116,21 +121,8 @@ subdirectory. Run `swift run -c release xcode-mcp-proxy-install --help` for deta
 
 </details>
 
-<a id="homebrew-migration"></a>
-
 <details>
-<summary>Move an existing installation to Homebrew</summary>
-
-Run the current installer to move existing standalone or source-installed
-commands to Homebrew:
-
-```bash
-curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh
-```
-
-The installer backs up the old commands and helper, then makes their existing
-paths follow Homebrew upgrades. Existing MCP command paths keep working. Remove
-obsolete arguments such as `--auto-approve` from client configuration separately.
+<summary>Migration from a custom installation directory</summary>
 
 For an old custom location, use the same `--prefix` or `--bindir`; for example:
 
@@ -140,8 +132,6 @@ curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/inst
 
 Only the specified old installation directory is migrated. If you keep copies
 in multiple locations, repeat the migration with each location's `--bindir`.
-
-After migration, restart the server and connected MCP clients.
 
 </details>
 
