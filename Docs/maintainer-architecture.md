@@ -12,17 +12,12 @@
     completion for both the direct SDK and the proxy STDIO adapter.
   - `InitializedMCPClientSession` owns request IDs, response correlation, and
     request-scoped progress lanes; it does not own transport/session lifecycle.
-- `XcodeMCPDocumentationSearch`
-  - Installed documentation assets, selection cache, generated helper source,
-    helper preparation/invocation, and asset repair operations.
-  - Takes immutable installation/query values and returns typed documents.
-    It does not own Xcode process inventory, MCP sessions, or provider routing.
 - `XcodeMCPNativeRuntime` and `XcodeMCPNativeHost`
   - Load selected Xcode frameworks and invoke native tool contracts through
     ABIBridge method handles with complete function signatures. Workspace
     snapshots use owned runtime values without importing Xcode's entry type.
-  - Own workspace-model resources, native action streams,
-    and helper STDIO framing/initialization.
+  - Own workspace-model resources, native action streams, installed documentation
+    asset selection, and helper STDIO framing/initialization.
   - Missing native contracts return diagnostics; tool failures and transport
     failures retain their separate MCP meanings.
 - `XcodeMCPProxyRuntimeContract`
@@ -79,8 +74,8 @@
   converted at this SDK boundary and do not become public aliases.
 - Runtime and HTTP depend on Core rather than the public SDK. Runtime owns
   execution policy and request lifetimes; HTTP owns network delivery. The native
-  host owns ordinary DocumentationSearch execution. The separate documentation-search module retains its Core/NIOCore boundary. The
-  runtime serving protocol in `XcodeMCPProxyRuntimeContract` connects these
+  host selects the latest installed documentation index and executes
+  DocumentationSearch directly. The runtime serving protocol in `XcodeMCPProxyRuntimeContract` connects these
   two owners. The contract retains the NIOCore timeout value without exposing
   channels or event loops.
 - `XcodeMCPProxyKit` composes Runtime, HTTP, and the SDK
@@ -106,7 +101,7 @@ private implementation targets are not new public products.
 | --- | --- |
 | `XcodeMCPCoreTests` | Wire/framing primitives and low-level HTTP transport lifecycle; no SDK or proxy implementation dependency. |
 | `XcodeMCPProcessRuntimeTests` | Process I/O and termination through fake drivers and opt-in live smoke cases; no SDK dependency. |
-| `XcodeMCPDocumentationSearchTests` | Assets, repair, helper generation and invocation through lower process fakes. |
+| `XcodeMCPNativeRuntimeTests` | Native schemas, MCP execution, workspace lifecycle, and documentation asset selection. |
 | `XcodeMCPProxyHTTPTests` | HTTP/SSE delivery and gateway lifecycle using the runtime contract fake. |
 | `XcodeMCPProxyRuntimeTests` | Coordination, scheduling, routing and provider policy; no HTTP or facade dependency. |
 | `ProxyIntegrationTests` | Actual HTTP/runtime composition and public configuration paths. |

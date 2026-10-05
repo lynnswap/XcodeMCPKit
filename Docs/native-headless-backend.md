@@ -101,8 +101,15 @@ be inferred from a matching bundle identifier or a successful notarization.
 
 ## Native corrections
 
-Xcode preferences are added process-locally so installed documentation can be
-located. The workspace breakpoint manager is prepared on the main thread before
+Before loading Xcode frameworks, the host selects the latest installed developer
+documentation asset by Xcode version and then documentation release. It supplies
+that index through a process-local `IDEChatDocumentationSearchConfigURL` value.
+This avoids dependence on the headless downloadable-asset coordinator finding
+an index and leaves persisted Xcode preferences unchanged. DocumentationSearch
+continues through the native action executor without a generated helper process.
+Restart the host after installing newer documentation to select the new asset.
+
+The workspace breakpoint manager is prepared on the main thread before
 debugger launch to avoid the observed `DVTGlobalCustomDataStore.defaultStore`
 assertion.
 

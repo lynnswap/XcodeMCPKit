@@ -104,11 +104,6 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
-            name: "XcodeMCPDocumentationSearch",
-            dependencies: ["XcodeMCPCore", .product(name: "NIOCore", package: "swift-nio")],
-            swiftSettings: strictSwiftSettings
-        ),
-        .target(
             name: "XcodeMCPProxyRuntime",
             dependencies: [
                 "XcodeMCPProxyRuntimeContract",
@@ -247,15 +242,6 @@ let package = Package(
             path: "Tests/PublicProductContractTests",
             swiftSettings: strictSwiftSettings
         ),
-        .testTarget(
-            name: "XcodeMCPDocumentationSearchTests",
-            dependencies: [
-                "XcodeMCPDocumentationSearch", "XcodeMCPCore", "XcodeMCPProxyTestSupport",
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
-            ],
-            swiftSettings: strictSwiftSettings
-        ),
         .target(
             name: "XcodeMCPProxyRuntimeTestSupport",
             dependencies: [
@@ -269,7 +255,6 @@ let package = Package(
             name: "XcodeMCPProxyRuntimeTests",
             dependencies: [
                 "XcodeMCPProxyRuntimeTestSupport",
-                "XcodeMCPDocumentationSearch",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 "XcodeMCPProxyRuntime",
