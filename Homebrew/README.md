@@ -31,7 +31,7 @@ python3 scripts/release.py start vX.Y.Z --repo lynnswap/XcodeMCPKit \
 The script creates or reuses the matching Draft and dispatches `release.yml`
 from the default branch. CI tests the approved source, creates its public source
 tag, verifies GitHub's tag archive against that commit, and prepares the source
-archive, `xcode-mcpkit.rb`, and `SHA256SUMS.txt`. The Release remains a Draft.
+archive, `xcode-mcpkit.rb`, stable `install.sh`, and `SHA256SUMS.txt`. The Release remains a Draft.
 The generated Formula uses the public tag archive, so tap CI can build it before
 the Release is published.
 
@@ -144,3 +144,16 @@ its tree before generating the publishable Formula. The verification script uses
 its own tap and removes its installation afterward; it does not replace an
 existing Homebrew or standalone installation. Failed verification retains its
 temporary bottle files for diagnosis.
+
+## Release installer
+
+The release packager reads `Homebrew/installer.json` from the approved source
+commit, fetches the shared installer at that full homebrew-tap revision, verifies
+its SHA-256, and embeds it in `install.sh`. The release checksums and upload
+verification cover this asset alongside the source archive and Formula. Update
+the pin deliberately when adopting shared installer changes. The generated
+installer uses macOS Bash and downloads no additional migration code at execution
+time. Public release assets remain gated on the verified Homebrew delivery.
+
+Prereleases omit `install.sh` because the installer uses the stable tap. Their
+source archives and Formulae retain the existing isolated verification path.
