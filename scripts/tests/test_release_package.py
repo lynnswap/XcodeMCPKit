@@ -2,6 +2,8 @@
 import gzip
 import hashlib
 import io
+import json
+from unittest.mock import patch
 from pathlib import Path
 import subprocess
 import tarfile
@@ -34,6 +36,14 @@ class ReleasePackageTests(unittest.TestCase):
         template = self.source / "Homebrew/xcode-mcpkit.rb.in"
         template.parent.mkdir()
         template.write_text((Path(packaging.__file__).parent.parent / "Homebrew/xcode-mcpkit.rb.in").read_text())
+        self.engine = b'printf "shared installer: %s\\n" "$@"\n'
+        self.pin = {"revision": "a" * 40, "sha256": hashlib.sha256(self.engine).hexdigest()}
+        pin = self.source / "Homebrew/installer.json"
+        pin.parent.mkdir(exist_ok=True)
+        pin.write_text(json.dumps(self.pin))
+        download = patch.object(packaging.urllib.request, "urlopen", side_effect=lambda *a, **kw: io.BytesIO(self.engine))
+        self.download = download.start()
+        self.addCleanup(download.stop)
         self.git("add", ".")
         self.git("-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture")
         self.commit = self.git("rev-parse", "HEAD").strip()
@@ -111,7 +121,7 @@ class ReleasePackageTests(unittest.TestCase):
             packaging.archive_contents(data)
 
     def test_checksums_protect_both_source_and_formula(self):
-        for name in packaging.asset_names("v1.2.3")[:2]:
+        for name in packaging.asset_names("v1.2.3")[:-1]:
             with self.subTest(name=name):
                 self.package()
                 (self.output / name).write_bytes(b"damaged transfer")
@@ -137,6 +147,23 @@ class ReleasePackageTests(unittest.TestCase):
         self.assertNotIn("__EXPLICIT_VERSION__", formula)
         stable = packaging.render_formula("v1.2.3", "lynnswap/XcodeMCPKit", "a" * 64)
         self.assertNotIn('  version "1.2.3"', stable)
+
+    def test_installer_uses_the_approved_pin_and_runs_from_a_pipe(self):
+        (self.source / "Homebrew/installer.json").write_text(json.dumps({"revision": "b" * 40}))
+        self.package()
+        self.assertIn("/" + "a" * 40 + "/", self.download.call_args.args[0])
+        script = self.output / "install.sh"
+        result = subprocess.run(["/bin/sh", "-s", "--", "--dry-run", "path with ' quotes"],
+                                input=script.read_text(), text=True, capture_output=True, check=True)
+        self.assertIn("xcode-mcpkit", result.stdout)
+        self.assertIn("path with ' quotes", result.stdout)
+        self.assertTrue(script.stat().st_mode & 0o111)
+
+    def test_installer_download_must_match_approved_checksum(self):
+        self.download.side_effect = lambda *a, **kw: io.BytesIO(b"substituted script")
+        with self.assertRaisesRegex(ValueError, "installer checksum mismatch"):
+            self.package()
+        self.assertFalse((self.output / "SHA256SUMS.txt").exists())
 
     def test_version_classification(self):
         for tag, value in (("v1.2.3", False), ("v1.2.3-rc.1", True)):

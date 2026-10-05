@@ -273,3 +273,13 @@ only resources created by the run.
 - Bind/start/stop failure paths clean up listeners, timers, and child tasks.
 - Canonical initialize/tools cache cannot survive upstream exit/quarantine/eager retry windows.
 - New feature code does not add tool-specific branching to forwarding when a dedicated helper/workflow can own it instead.
+
+## Release installer
+
+The release packager reads `Homebrew/installer.json` from the approved source
+commit, fetches the shared installer at that full homebrew-tap revision, verifies
+its SHA-256, and embeds it in `install.sh`. The release checksums and upload
+verification cover this asset alongside the source archive and Formula. Update
+the pin deliberately when adopting shared installer changes. The generated
+installer uses macOS Bash and downloads no additional migration code at execution
+time. Public release assets remain gated on the verified Homebrew delivery.
