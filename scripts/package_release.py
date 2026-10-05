@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Package approved source and a Homebrew formula; verify transferred release assets."""
+"""Package approved source, a Homebrew formula, and an installer; verify transferred release assets."""
 
 import argparse
 import gzip
 import hashlib
 import io
+import json
+import shlex
+import urllib.request
 from pathlib import Path
 import re
 import subprocess
@@ -20,7 +23,8 @@ def is_prerelease(tag):
 
 def asset_names(tag):
     is_prerelease(tag)
-    return (f"xcode-mcpkit-{tag.removeprefix('v')}.tar.gz", "xcode-mcpkit.rb", "SHA256SUMS.txt")
+    return (f"xcode-mcpkit-{tag.removeprefix('v')}.tar.gz", "xcode-mcpkit.rb",
+            *(("install.sh",) if "-" not in tag else ()), "SHA256SUMS.txt")
 
 
 def sha256(path):
@@ -35,6 +39,22 @@ def render_formula(tag, repository, source_digest, template=None):
     return (template.replace("__EXPLICIT_VERSION__\n", explicit_version)
             .replace("__VERSION__", version)
             .replace("__REPOSITORY__", repository).replace("__SHA256__", source_digest))
+
+
+def render_installer(source, commit):
+    pin = json.loads(subprocess.check_output([
+        "git", "-C", str(source), "show", f"{commit}:Homebrew/installer.json",
+    ], text=True))
+    if not re.fullmatch(r"[0-9a-f]{40}", pin["revision"]) or not re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]):
+        raise ValueError("The installer requires an immutable tap revision and SHA-256.")
+    url = f"https://raw.githubusercontent.com/lynnswap/homebrew-tap/{pin['revision']}/scripts/install-homebrew.sh"
+    with urllib.request.urlopen(url, timeout=30) as response:
+        engine = response.read()
+    if hashlib.sha256(engine).hexdigest() != pin["sha256"]:
+        raise ValueError("Shared installer checksum mismatch.")
+    return (f"#!/bin/sh\n# Shared installer: lynnswap/homebrew-tap@{pin['revision']}\n"
+            + "exec /bin/bash -c " + shlex.quote(engine.decode("utf-8"))
+            + ' install.sh xcode-mcpkit "$@"\n')
 
 
 def archive_contents(data):
@@ -62,7 +82,9 @@ def package(source, commit, tag, repository, output, source_archive=None):
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
         raise ValueError("Use an owner/repository name.")
     output.mkdir(parents=True, exist_ok=True)
-    archive_name, formula_name, checksums_name = asset_names(tag)
+    names = asset_names(tag)
+    archive_name, formula_name = names[:2]
+    checksums_name = names[-1]
     prefix = f"xcode-mcpkit-{tag.removeprefix('v')}/"
     source_tar = subprocess.check_output([
         "git", "-C", str(source), "archive", "--format=tar", f"--prefix={prefix}", commit,
@@ -79,13 +101,17 @@ def package(source, commit, tag, repository, output, source_archive=None):
         "git", "-C", str(source), "show", f"{commit}:Homebrew/xcode-mcpkit.rb.in",
     ], text=True)
     (output / formula_name).write_text(render_formula(tag, repository, sha256(archive), template))
+    if "install.sh" in names:
+        (output / "install.sh").write_text(render_installer(source, commit))
+        (output / "install.sh").chmod(0o755)
     (output / checksums_name).write_text("".join(
-        f"{sha256(output / name)}  {name}\n" for name in (archive_name, formula_name)
+        f"{sha256(output / name)}  {name}\n" for name in names[:-1]
     ))
 
 
 def verify(directory, tag, checksums_digest=None):
-    archive, formula, checksums_name = asset_names(tag)
+    names = asset_names(tag)
+    checksums_name = names[-1]
     checksums = directory / checksums_name
     if checksums_digest is not None and sha256(checksums) != checksums_digest:
         raise ValueError("Transferred checksums differ from the verified release job.")
@@ -95,8 +121,8 @@ def verify(directory, tag, checksums_digest=None):
         if name in expected or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("Invalid release checksums.")
         expected[name] = digest
-    if set(expected) != {archive, formula}:
-        raise ValueError("Checksums must cover the source archive and Formula.")
+    if set(expected) != set(names[:-1]):
+        raise ValueError("Checksums must cover the expected release assets.")
     for name, digest in expected.items():
         if sha256(directory / name) != digest:
             raise ValueError(f"Release checksum mismatch: {name}")

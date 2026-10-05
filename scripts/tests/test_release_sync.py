@@ -42,11 +42,12 @@ class FakeCore:
         self.formula = package_release.render_formula("v1.2.3", self.repository, digest)
         sums = (f"{digest}  xcode-mcpkit-1.2.3.tar.gz\n"
                 f"{hashlib.sha256(self.formula.encode()).hexdigest()}  xcode-mcpkit.rb\n")
+        sums += f"{hashlib.sha256(b'installer').hexdigest()}  install.sh\n"
         self.receipt = dict(release_id=42, version="v1.2.3", target=sha,
                             content_digest=release.fingerprint(self.draft), source_artifact_id=2,
                             checksums_sha256=hashlib.sha256(sums.encode()).hexdigest())
         self.source_files = {"xcode-mcpkit-1.2.3.tar.gz": b"prepared source",
-                             "xcode-mcpkit.rb": self.formula, "SHA256SUMS.txt": sums}
+                             "xcode-mcpkit.rb": self.formula, "install.sh": b"installer", "SHA256SUMS.txt": sums}
         self.refresh_archives()
 
     def refresh_archives(self):

@@ -59,11 +59,20 @@ brew upgrade lynnswap/tap/xcode-mcpkit
 xcode-mcp-proxy-server
 ```
 
-If an older standalone installation under `~/.local/bin` takes precedence, use
-`"$(brew --prefix xcode-mcpkit)/bin/xcode-mcp-proxy-server"` and update any MCP client
-configuration that names an old absolute executable path. Remove the old
-standalone files only after stopping their server and confirming the new setup.
-Homebrew does not remove those files or change your MCP client registrations.
+If you previously used the standalone or source installer, run the familiar
+installer once to switch those entry points to Homebrew:
+
+```bash
+curl -fsSL https://github.com/lynnswap/XcodeMCPKit/releases/latest/download/install.sh | sh
+```
+
+The installer checks the Homebrew commands, saves the old executables and native
+helper in a backup directory, and makes their existing paths follow Homebrew
+upgrades. Use the same `--prefix` or `--bindir` for a custom old installation
+(`sh -s -- --bindir /path/to/bin` when piping). `--dry-run` reports the locations
+without changing them. Existing command paths in MCP configurations keep working;
+remove obsolete command arguments such as `--auto-approve` separately. Restart
+the server and clients that are already running. Shell profiles are unchanged.
 
 To remove the Homebrew installation, stop the server and run
 `brew uninstall xcode-mcpkit`.
