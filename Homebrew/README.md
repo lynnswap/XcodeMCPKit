@@ -105,7 +105,8 @@ maintains its own CI, publication permissions, and approval settings; see its
 
 While tap delivery is pending, the source workflow leaves the Draft and immutable
 prepared assets. After publishing the bottle and updating its Formula on `main`,
-the tap dispatches `resume-release.yml`. A successful source-release run also
+the tap's notification job waits for `source-notification` approval before using
+its dedicated App key to dispatch `resume-release.yml`. A successful source-release run also
 triggers the same check, covering a tap notification that arrives before source
 preparation finishes. There is no scheduled polling.
 
