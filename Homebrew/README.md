@@ -104,10 +104,15 @@ maintains its own CI, publication permissions, and approval settings; see its
 ## Retry and resume
 
 While tap delivery is pending, the source workflow leaves the Draft and immutable
-prepared assets. `resume-release.yml` checks every 15 minutes and reruns delivery
-verification and its dependent jobs after the matching bottle is public. It reuses
-the completed source tests, source archive, and tap-dispatch approval. It can also
-be dispatched manually from `main`.
+prepared assets. After publishing the bottle and updating its Formula on `main`,
+the tap's notification job waits for `source-notification` approval before using
+its dedicated App key to dispatch `resume-release.yml`. A successful source-release run also
+triggers the same check, covering a tap notification that arrives before source
+preparation finishes. There is no scheduled polling.
+
+The resume workflow reruns delivery verification and its dependent jobs only after
+the matching bottle is public. It reuses the completed source tests, source
+archive, and tap-dispatch approval. It can also be dispatched manually from `main`.
 
 Actual build, install, authentication, or publication failures need attention;
 the resumer does not repeatedly retry them. Rerun the failed jobs after fixing
