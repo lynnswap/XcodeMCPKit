@@ -31,6 +31,22 @@ Native tool failures keep their MCP `isError` result; transport and protocol
 failures remain request errors. Headless startup does not require agent-access
 approval or changes to Xcode's permission store.
 
+## CoreSimulator service connection becomes invalid
+
+When CoreSimulator declares that Simulator services are no longer available to
+the native host, the proxy replaces its owned host and initializes the replacement.
+Requests interrupted by replacement fail with `upstream unavailable`; operations
+whose completion is unknown are not replayed automatically.
+
+Replacement invalidates native workspace identifiers and sessions. Use the
+absolute project path to load a workspace again, then inspect its scheme,
+destination, and test plan before continuing device or build operations.
+
+Recovery recognizes the known terminal CoreSimulator diagnostics emitted by
+`xcode-mcp-native-host`. Ordinary connection interruptions and tool errors keep
+their existing behavior. If a newer CoreSimulator changes its diagnostic wording,
+automatic detection may not apply; restart the server to reload its native host.
+
 ## DocumentationSearch is unavailable
 
 The startup summary reports whether the native catalog contains the tool; it

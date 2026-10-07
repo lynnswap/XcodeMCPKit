@@ -658,7 +658,11 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                         proof: operationLease.proof
                     )
                 case .stderr(let message):
-                    self.handleUpstreamStderr(message, upstreamIndex: upstreamIndex)
+                    self.handleUpstreamStderr(
+                        message,
+                        upstreamIndex: upstreamIndex,
+                        proof: operationLease.proof
+                    )
                 case .stdoutProtocolViolation(let protocolViolation):
                     self.handleUpstreamProtocolViolation(
                         protocolViolation,

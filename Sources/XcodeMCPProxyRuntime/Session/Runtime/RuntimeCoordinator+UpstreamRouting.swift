@@ -210,7 +210,8 @@ extension RuntimeCoordinator {
         reason: String,
         leaseReleaseReason: LeaseManager.ReleaseReason,
         upstreamIndex: Int,
-        proof: UpstreamTopologyProof
+        proof: UpstreamTopologyProof,
+        replaceNativeHost: Bool = false
     ) {
         let slotID = UpstreamSlotID(rawValue: upstreamIndex)
         guard proof.slotID == slotID,
@@ -254,6 +255,12 @@ extension RuntimeCoordinator {
             )
         )
 
+        if replaceNativeHost,
+           replaceOrRetireInitializeChannel(proof, restart: false) == nil {
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            return
+        }
+
         if exitedActivePrimaryInitialize {
             if retryPrimaryInitializeOnAlternativeUpstream(
                 failedUpstreamIndex: upstreamIndex,
@@ -261,6 +268,9 @@ extension RuntimeCoordinator {
                 reason: "primary_\(reason)",
                 matching: globalInit.primaryInitializePhase
             ) {
+                if replaceNativeHost {
+                    startUpstreamWarmInitialize(upstreamIndex: upstreamIndex, applyBackoff: true)
+                }
                 return
             }
             if let failure = initializeManager.completePrimaryInitializeFailure(
@@ -1171,24 +1181,48 @@ extension RuntimeCoordinator {
         return []
     }
 
-    func handleUpstreamStderr(_ message: String, upstreamIndex: Int) {
+    func handleUpstreamStderr(
+        _ message: String,
+        upstreamIndex: Int,
+        proof: UpstreamTopologyProof
+    ) {
+        guard proof.slotID.rawValue == upstreamIndex,
+              upstreamTopology.validate(proof) else { return }
         debugRecorder.recordStderr(message, upstreamIndex: upstreamIndex)
         let decision = upstreamStderrLogLimiter.decision(
             upstreamIndex: upstreamIndex,
             message: message,
             nowUptimeNs: nowUptimeNanoseconds()
         )
-        guard decision.shouldLog else { return }
-
-        var metadata: [String: Logger.MetadataValue] = [
-            "upstream": .string("\(upstreamIndex)")
-        ]
-        if decision.suppressedDuplicateCount > 0 {
-            metadata["suppressed_duplicates"] = .string("\(decision.suppressedDuplicateCount)")
+        if decision.shouldLog {
+            var metadata: [String: Logger.MetadataValue] = [
+                "upstream": .string("\(upstreamIndex)")
+            ]
+            if decision.suppressedDuplicateCount > 0 {
+                metadata["suppressed_duplicates"] = .string("\(decision.suppressedDuplicateCount)")
+            }
+            metadata["message"] = .string(message)
+            logger.log(
+                level: UpstreamStderrLogFilter.level(for: message),
+                "Upstream stderr",
+                metadata: metadata
+            )
         }
 
-        metadata["message"] = .string(message)
-        logger.error("Upstream stderr", metadata: metadata)
+        if nativeUpstreamFactory != nil,
+           NativeHostRuntime.isTerminalCoreSimulatorDiagnostic(message) {
+            logger.warning(
+                "Replacing native host after terminal CoreSimulator failure",
+                metadata: ["upstream": .string("\(upstreamIndex)")]
+            )
+            handleUpstreamUnavailable(
+                reason: "native_core_simulator_unavailable",
+                leaseReleaseReason: .upstreamUnavailable,
+                upstreamIndex: upstreamIndex,
+                proof: proof,
+                replaceNativeHost: true
+            )
+        }
     }
 
     func handleUpstreamProtocolViolation(

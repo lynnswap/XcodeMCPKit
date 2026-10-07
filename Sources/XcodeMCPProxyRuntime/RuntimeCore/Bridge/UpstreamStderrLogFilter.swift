@@ -1,6 +1,20 @@
 import XcodeMCPCore
 import Foundation
+import Logging
 import NIOConcurrencyHelpers
+
+enum UpstreamStderrLogFilter {
+    static func level(for message: String) -> Logger.Level {
+        guard message.hasPrefix("["),
+              let frameEnd = message.range(of: "] "),
+              let separator = message[frameEnd.upperBound...].firstIndex(of: ":")
+        else { return .error }
+        let severity = message[frameEnd.upperBound..<separator]
+            .trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        return Logger.Level(rawValue: severity) ?? .error
+    }
+}
 
 struct UpstreamStderrLogDecision: Sendable {
     let shouldLog: Bool
