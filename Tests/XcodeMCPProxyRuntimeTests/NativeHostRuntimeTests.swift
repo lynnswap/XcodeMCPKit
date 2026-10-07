@@ -29,6 +29,126 @@ struct NativeHostRuntimeTests {
         #expect(configuration.environment["PATH"] == "/usr/bin")
     }
 
+    @Test func launchdBuildServicePathReachesNativeHostConfiguration() async throws {
+        let path = "/Users/Test User/Custom Build/SWBBuildServiceBundle "
+        let runner = BuildServiceEnvironmentProcessRunner(outputs: [
+            "XCBBUILDSERVICE_PATH": ProcessOutput(
+                terminationStatus: 0, stdout: path + "\n", stderr: ""),
+            "SWBBUILDSERVICE_BUNDLE_PATH": ProcessOutput(
+                terminationStatus: 0, stdout: "/Another/Service.bundle\n", stderr: ""),
+        ])
+        let environment = try await NativeHostRuntime.buildServiceEnvironment(
+            baseEnvironment: ["PATH": "/usr/bin", "MCP_XCODE_PID": "9876"],
+            processRunner: runner)
+        let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)),
+            baseEnvironment: environment)
+
+        #expect(configuration.environment["XCBBUILDSERVICE_PATH"] == path)
+        #expect(configuration.environment["PATH"] == "/usr/bin")
+        #expect(configuration.environment["MCP_XCODE_PID"] == nil)
+        #expect(configuration.environment["SWBBUILDSERVICE_BUNDLE_PATH"] == nil)
+        #expect(await runner.requests().map(\.arguments) == [
+            ["getenv", "SWBBUILDSERVICE_PATH"],
+            ["getenv", "XCBBUILDSERVICE_PATH"],
+        ])
+    }
+
+    @Test(arguments: [
+        "SWBBUILDSERVICE_PATH", "XCBBUILDSERVICE_PATH",
+        "SWBBUILDSERVICE_BUNDLE_PATH", "XCBBUILDSERVICE_BUNDLE_PATH",
+    ])
+    func explicitBuildServiceEnvironmentOverridesLaunchdAcrossAliases(key: String) async throws {
+        let baseEnvironment = [key: "/Explicit/Service", "PATH": "/usr/bin"]
+        let runner = BuildServiceEnvironmentProcessRunner(outputs: [
+            "SWBBUILDSERVICE_PATH": ProcessOutput(
+                terminationStatus: 0, stdout: "/Global/Service\n", stderr: ""),
+        ])
+
+        let environment = try await NativeHostRuntime.buildServiceEnvironment(
+            baseEnvironment: baseEnvironment, processRunner: runner)
+
+        #expect(environment == baseEnvironment)
+        #expect(await runner.requests().isEmpty)
+    }
+
+    @Test func emptyInheritedBuildServicePathAllowsLaunchdSelection() async throws {
+        let runner = BuildServiceEnvironmentProcessRunner(outputs: [
+            "SWBBUILDSERVICE_PATH": ProcessOutput(
+                terminationStatus: 0, stdout: "/Global/Service\n", stderr: ""),
+            "XCBBUILDSERVICE_PATH": ProcessOutput(
+                terminationStatus: 0, stdout: "/LowerPriority/Service\n", stderr: ""),
+        ])
+
+        let environment = try await NativeHostRuntime.buildServiceEnvironment(
+            baseEnvironment: ["XCBBUILDSERVICE_PATH": ""], processRunner: runner)
+
+        #expect(environment["SWBBUILDSERVICE_PATH"] == "/Global/Service")
+        #expect(environment["XCBBUILDSERVICE_PATH"] == "")
+        #expect(await runner.requests().count == 1)
+    }
+
+    @Test(arguments: ["SWBBUILDSERVICE_BUNDLE_PATH", "XCBBUILDSERVICE_BUNDLE_PATH"])
+    func launchdBuildServiceBundleSelectionIsInherited(key: String) async throws {
+        let runner = BuildServiceEnvironmentProcessRunner(outputs: [
+            key: ProcessOutput(
+                terminationStatus: 0, stdout: "/Global/Service.bundle\n", stderr: ""),
+        ])
+
+        let environment = try await NativeHostRuntime.buildServiceEnvironment(
+            baseEnvironment: ["PATH": "/usr/bin"], processRunner: runner)
+
+        #expect(environment[key] == "/Global/Service.bundle")
+        #expect(environment["PATH"] == "/usr/bin")
+    }
+
+    @Test func unsetLaunchdBuildServiceEnvironmentPreservesInheritedEnvironment() async throws {
+        let baseEnvironment = ["PATH": "/usr/bin", "DEVELOPER_DIR": "/Parent/Developer"]
+        let runner = BuildServiceEnvironmentProcessRunner()
+
+        let environment = try await NativeHostRuntime.buildServiceEnvironment(
+            baseEnvironment: baseEnvironment, processRunner: runner)
+
+        #expect(environment == baseEnvironment)
+        #expect(await runner.requests().count == 4)
+    }
+
+    @Test func failedLaunchdBuildServiceLookupPreservesInheritedEnvironment() async throws {
+        let baseEnvironment = ["PATH": "/usr/bin"]
+        let runner = BuildServiceEnvironmentProcessRunner(outputs: [
+            "SWBBUILDSERVICE_PATH": ProcessOutput(
+                terminationStatus: 5, stdout: "/Unusable/Service\n", stderr: "lookup failed"),
+        ])
+
+        let environment = try await NativeHostRuntime.buildServiceEnvironment(
+            baseEnvironment: baseEnvironment, processRunner: runner)
+
+        #expect(environment == baseEnvironment)
+        #expect(await runner.requests().count == 1)
+    }
+
+    @Test func launchdBuildServiceLookupLaunchFailurePreservesInheritedEnvironment() async throws {
+        let baseEnvironment = ["PATH": "/usr/bin"]
+        let runner = BuildServiceEnvironmentProcessRunner(failure: .launchFailed)
+
+        let environment = try await NativeHostRuntime.buildServiceEnvironment(
+            baseEnvironment: baseEnvironment, processRunner: runner)
+
+        #expect(environment == baseEnvironment)
+        #expect(await runner.requests().count == 1)
+    }
+
+    @Test func cancelledLaunchdBuildServiceLookupPropagatesCancellation() async {
+        let runner = BuildServiceEnvironmentProcessRunner(failure: .cancelled)
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await NativeHostRuntime.buildServiceEnvironment(
+                baseEnvironment: [:], processRunner: runner)
+        }
+
+        #expect(await runner.requests().count == 1)
+    }
+
 
     @Test func nativeHostSlotUsesConfiguredHelper() throws {
         let slot = try NativeHostRuntime.makeUpstreamSlot(
@@ -260,4 +380,39 @@ struct NativeHostRuntimeTests {
         }
     }
 
+}
+
+private actor BuildServiceEnvironmentProcessRunner: ProcessRunning {
+    enum Failure: Error {
+        case launchFailed
+        case cancelled
+    }
+
+    private let outputs: [String: ProcessOutput]
+    private let failure: Failure?
+    private var recordedRequests: [ProcessRequest] = []
+
+    init(outputs: [String: ProcessOutput] = [:], failure: Failure? = nil) {
+        self.outputs = outputs
+        self.failure = failure
+    }
+
+    func run(_ request: ProcessRequest) async throws -> ProcessOutput {
+        recordedRequests.append(request)
+        #expect(request.executablePath == "/bin/launchctl")
+        #expect(request.arguments.first == "getenv")
+        let key = try #require(request.arguments.last)
+        switch failure {
+        case .launchFailed:
+            throw Failure.launchFailed
+        case .cancelled:
+            throw CancellationError()
+        case nil:
+            return outputs[key] ?? ProcessOutput(terminationStatus: 0, stdout: "", stderr: "")
+        }
+    }
+
+    func requests() -> [ProcessRequest] {
+        recordedRequests
+    }
 }

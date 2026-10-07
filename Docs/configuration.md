@@ -47,3 +47,27 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `XCODE_MCP_PROXY_ENDPOINT` | STDIO adapter upstream URL. `--url` takes precedence. |
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
 | `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root for the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
+
+### Custom build services
+
+The native host inherits Swift Build's service overrides:
+`SWBBUILDSERVICE_PATH`, `XCBBUILDSERVICE_PATH`,
+`SWBBUILDSERVICE_BUNDLE_PATH`, and `XCBBUILDSERVICE_BUNDLE_PATH`.
+If the server's environment contains a nonempty value for any of these
+variables, that selection takes precedence over launchd's settings.
+
+Otherwise, each native host launch reads these variables from the user's
+launchd context with `launchctl getenv`, in the order listed above, and uses
+the first nonempty value. This also picks up settings registered with
+`launchctl setenv` after the server's terminal was opened. Restart the server
+to apply a changed setting to an already running native host.
+
+For an explicit override, start the server with the service executable path:
+
+```sh
+XCBBUILDSERVICE_PATH=/path/to/SWBBuildServiceBundle xcode-mcp-proxy-server
+```
+
+When neither environment specifies a service, Swift Build uses the selected
+Xcode's bundled service. If reading launchd's settings fails, the server logs
+a warning and starts the native host with its inherited environment.

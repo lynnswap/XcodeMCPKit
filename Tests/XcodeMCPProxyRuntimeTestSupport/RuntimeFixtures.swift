@@ -286,7 +286,7 @@ private func upstreamConfigMirror(from upstream: ManagedUpstreamSlot) throws -> 
 
 private func upstreamConfigMirror(from factory: any UpstreamSessionFactory) throws -> Mirror {
     if let factory = factory as? NativeHostSessionFactory {
-        return Mirror(reflecting: try factory.processConfiguration())
+        return Mirror(reflecting: try factory.processConfiguration(environment: factory.environment))
     }
     let factoryMirror = Mirror(reflecting: factory)
     let config = try #require(
