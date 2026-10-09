@@ -6,6 +6,7 @@ import Foundation
 package final class NativeApplicationBootstrap {
     private var documentController: AnyObject?
     private var kitBundle: Bundle?
+    private var workspaceOpenConfirmation: NativeWorkspaceOpenConfirmation?
 
     package init() {}
 
@@ -36,6 +37,7 @@ package final class NativeApplicationBootstrap {
         let createController = try runtime.object(controllerClass as AnyObject).method(selector: "new", as: (() -> AnyObject).self)
         documentController = try unsafe createController.unsafeInvoke()
         application.setActivationPolicy(.prohibited)
+        workspaceOpenConfirmation = NativeWorkspaceOpenConfirmation(application: application)
         return application
     }
 
