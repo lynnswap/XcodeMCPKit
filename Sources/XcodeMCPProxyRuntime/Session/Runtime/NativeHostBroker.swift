@@ -16,7 +16,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         var installations: [URL: String] = [:]
         var sessions: [ProxySessionID: NativeBrokerSession] = [:]
         var backendBindings: [ProxySessionID: Binding] = [:]
-        var closing: [Task<Void, Never>] = []
+        var closing: [UUID: Task<Void, Never>] = [:]
         var stopped = false
     }
     private let state = NIOLockedValueBox(State())
@@ -36,16 +36,17 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     init(configuration: ProxyRuntimeConfiguration, inventory: XcodeHostInventory,
-         factory: @escaping RuntimeFactory) {
+         factory: @escaping RuntimeFactory) throws {
         self.configuration = configuration
         self.inventory = inventory
         self.factory = factory
-        _ = register(installation: inventory.defaultInstallation, identifier: Self.defaultHostIdentifier)
+        _ = try register(installation: inventory.defaultInstallation, identifier: Self.defaultHostIdentifier)
     }
 
     private func register(installation: XcodeHostInstallation, identifier: String? = nil,
-                          independent: Bool = false) -> NativeBrokerHost {
-        state.withLockedValue { storage in
+                          independent: Bool = false) throws -> NativeBrokerHost {
+        try state.withLockedValue { storage in
+            guard !storage.stopped else { throw CancellationError() }
             if !independent, let id = storage.installations[installation.developerDirectory],
                let host = storage.hosts[id] { return host }
             let id = identifier ?? "host-" + UUID().uuidString
@@ -93,21 +94,36 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             } else { parameters = .object([:]) }
             let session = NativeBrokerSession(identifier: sessionID, defaultHost: Self.defaultHostIdentifier,
                                                initializeParameters: parameters)
-            state.withLockedValue { $0.sessions[sessionID] = session }
+            let registered = state.withLockedValue { storage in
+                guard !storage.stopped else { return false }
+                storage.sessions[sessionID] = session
+                return true
+            }
+            if !registered {
+                eventSource.emit(.sessionClosed(sessionID: sessionID))
+                return nil
+            }
         }
         guard let session = state.withLockedValue({ $0.sessions[sessionID] }) else { return nil }
-        let admission = session.state.withLockedValue { storage -> (String, UInt64) in
+        let admission = session.state.withLockedValue { storage -> (String, UInt64)? in
+            guard !storage.closed else { return nil }
             storage.activeRequests += 1
             storage.activity = DispatchTime.now().uptimeNanoseconds
             if Self.toolName(in: message) == Self.selectTool { storage.selectionRevision &+= 1 }
             return (storage.selectedHost, storage.selectionRevision)
         }
+        guard let admission else { return nil }
         let key = UUID()
         let operation = NativeHostBrokerOperation(cancelledReply: cancelled, requestIDKey: requestID?.key) { [self] cancellation in
             await process(message, in: session, hostIdentifier: admission.0,
                           selectionRevision: admission.1, cancellation: cancellation)
         }
-        session.state.withLockedValue { $0.operations[key] = operation }
+        let retained = session.state.withLockedValue { storage in
+            guard !storage.closed else { return false }
+            storage.operations[key] = operation
+            return true
+        }
+        if !retained { operation.cancel(reason: .channelInactive) }
         operation.whenComplete { _ in session.state.withLockedValue { $0.operations.removeValue(forKey: key) } }
         return operation
     }
@@ -185,7 +201,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                     do {
                         if name == Self.listTool {
                             for installation in try await inventory.discover() {
-                                _ = register(installation: installation)
+                                _ = try register(installation: installation)
                             }
                             result = .object(["hosts": .array(hosts().map { descriptor($0, for: session) })])
                         } else {
@@ -230,7 +246,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             }
             createsNew = flag
         } else { createsNew = false }
-        if createsNew { host = register(installation: host.installation, independent: true) }
+        if createsNew { host = try register(installation: host.installation, independent: true) }
         let channel = try await channel(for: host, session: session)
         let catalog = try ProxyRuntimeRequest(json: .object([
             "jsonrpc": .string("2.0"), "id": .string("broker-catalog"),
@@ -288,7 +304,9 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 .flatMap(JSONValue.init(any:)) else {
             throw NativeHostBrokerError("Unknown server request identifier")
         }
-        let backendID = ProxySessionID(rawValue: String(externalID[..<range.lowerBound]))
+        let channelIdentifier = String(externalID[..<range.lowerBound])
+        guard !channelIdentifier.isEmpty else { throw NativeHostBrokerError("Unknown server request identifier") }
+        let backendID = ProxySessionID(rawValue: channelIdentifier)
         guard let binding = state.withLockedValue({ $0.backendBindings[backendID] }),
               binding.session === session,
               let host = state.withLockedValue({ $0.hosts[binding.hostIdentifier] }) else {
@@ -378,14 +396,23 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
     package func expireInactiveSessions(inactiveFor: TimeAmount) {
         let now = DispatchTime.now().uptimeNanoseconds
-        let sessions = state.withLockedValue { Array($0.sessions.values) }
-        for session in sessions {
-            let expired = session.state.withLockedValue {
-                $0.activeRequests == 0 && $0.eventStreams == 0 && now >= $0.activity
-                    && now - $0.activity >= UInt64(inactiveFor.nanoseconds)
+        let expired = state.withLockedValue { storage in
+            let expired = storage.sessions.values.filter { session in
+                session.state.withLockedValue { value in
+                    guard !value.closed, value.activeRequests == 0, value.eventStreams == 0,
+                          now >= value.activity,
+                          now - value.activity >= UInt64(inactiveFor.nanoseconds) else { return false }
+                    value.closed = true
+                    return true
+                }
             }
-            if expired { removeSession(session.identifier) }
+            for session in expired {
+                storage.sessions.removeValue(forKey: session.identifier)
+                storage.backendBindings = storage.backendBindings.filter { $0.value.session !== session }
+            }
+            return expired
         }
+        for session in expired { close(session) }
     }
     package func removeSession(_ id: ProxySessionID) {
         let session = state.withLockedValue { storage in
@@ -393,11 +420,19 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             storage.backendBindings = storage.backendBindings.filter { $0.value.session !== session }
             return session
         }
-        if let session {
-            let closing = session.close()
-            state.withLockedValue { $0.closing.append(closing) }
-            eventSource.emit(.sessionClosed(sessionID: id))
+        if let session { close(session) }
+    }
+
+    private func close(_ session: NativeBrokerSession) {
+        let closing = session.close()
+        let key = UUID()
+        state.withLockedValue { storage in
+            storage.closing[key] = Task { [self] in
+                await closing.value
+                state.withLockedValue { $0.closing.removeValue(forKey: key) }
+            }
         }
+        eventSource.emit(.sessionClosed(sessionID: session.identifier))
     }
 
     package func cancelForDeinit() {
@@ -417,7 +452,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         for id in resources.0 { removeSession(id) }
         await withTaskGroup(of: Void.self) { group in
             for host in resources.1 { group.addTask { await host.shutdown() } }
-            for task in state.withLockedValue({ $0.closing }) { group.addTask { await task.value } }
+            for task in state.withLockedValue({ Array($0.closing.values) }) { group.addTask { await task.value } }
         }
         eventSource.finish()
     }
@@ -437,6 +472,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             var result: [String: Any] = ["hostIdentifier": host.identifier,
                                         "developerDirectory": host.installation.developerDirectory.path]
             if let snapshot = host.snapshot { result["isInitialized"] = snapshot.proxyInitialized }
+            if let data = host.runtimeIfStarted?.debugSnapshotData(
+                includeSensitivePayloads: includeSensitivePayloads
+            ) {
+                result["runtime"] = try? JSONSerialization.jsonObject(with: data)
+            }
             return result
         }
         return try? JSONSerialization.data(withJSONObject: ["hosts": values], options: [.sortedKeys])

@@ -2,10 +2,10 @@
 
 ## Scope
 
-XcodeMCPKit owns an MCP endpoint and one headless native workspace host. The
-installed Xcode supplies enabled headless tool definitions and implementations;
-ABIBridge invokes those contracts inside the helper. Build, test, editing, and
-other actions use saved project models without a GUI window.
+XcodeMCPKit owns one MCP endpoint and independently managed headless native
+workspace hosts. Each host loads its selected Xcode's tool definitions and
+implementations; ABIBridge invokes those contracts inside the helper. Build,
+test, editing, and other actions use saved project models without a GUI window.
 
 The host does not connect to GUI Xcode, launch `mcpbridge` or Xcode Service, or
 modify Xcode's agent permission store. The GUI path required Apple-restricted
@@ -31,10 +31,16 @@ frameworks are loaded from the selected installation and are not redistributed.
 | Build engine | Native host and its Swift Build child |
 
 The separate process isolates AppKit state, loaded native libraries, and
-termination handlers from the HTTP server. One host serves concurrent clients;
-a client disconnect does not close a shared workspace. Host restart invalidates
-its native identifiers and sessions. Mutations whose delivery is unknown are
-not replayed against the replacement host.
+termination handlers from the HTTP server. The broker owns logical host
+identities and client selections; each host keeps an independent runtime,
+native catalog, and recovery path. A client can select another host while
+earlier calls remain attached to their original backend channels.
+
+One host can serve several clients, and a client disconnect does not close its
+shared workspaces. Restart invalidates that host's native identifiers without
+restarting other hosts. Mutations whose delivery is unknown are not replayed
+against a replacement or another host. See the
+[concurrent-host design](concurrent-native-hosts-design.md).
 
 ## Workspace access
 

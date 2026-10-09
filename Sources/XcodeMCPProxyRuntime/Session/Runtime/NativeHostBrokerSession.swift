@@ -32,7 +32,8 @@ final class NativeBrokerHost: Sendable {
     }
 
     func activate() async throws -> any ProxyRuntimeServing {
-        let attempt = state.withLockedValue { state -> (Task<OwnedRuntime, any Error>, UInt64) in
+        let attempt = try state.withLockedValue { state -> (Task<OwnedRuntime, any Error>, UInt64) in
+            guard !state.stopped else { throw CancellationError() }
             if let task = state.activation { return (task, state.activationGeneration) }
             state.activationGeneration &+= 1
             let task = Task { [self] in
@@ -151,7 +152,8 @@ final class NativeBrokerSession: Sendable {
         register: @escaping @Sendable (ProxySessionID) throws -> Void,
         unregister: @escaping @Sendable (ProxySessionID) -> Void
     ) async throws -> NativeBrokerChannel {
-        let load = state.withLockedValue { state -> ChannelLoad in
+        let load = try state.withLockedValue { state -> ChannelLoad in
+            guard !state.closed else { throw CancellationError() }
             if let load = state.channels[host.identifier] { return load }
             let identifier = UUID()
             let task = Task { [self] in

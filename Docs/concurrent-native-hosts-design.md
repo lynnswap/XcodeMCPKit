@@ -1,11 +1,11 @@
 # Concurrent native Xcode hosts
 
-Proposal for [issue #292](https://github.com/lynnswap/XcodeMCPKit/issues/292).
+Approved design for [issue #292](https://github.com/lynnswap/XcodeMCPKit/issues/292).
 Baseline: `7fd4d71086b585345550895c8b05d8e128a13f45`.
 
 ## Goal and scope
 
-Keep one HTTP MCP endpoint while allowing a client to list Xcode hosts and change its selected host during a conversation. Each host has its own native process, Xcode installation, saved workspace models, tool catalog, and operation settings. Several hosts may use the same installation.
+Keep one HTTP MCP endpoint while allowing a client to list Xcode hosts and change its selected host during a conversation. Each host has its own native process, Xcode installation, saved workspace models, tool catalog, and operation settings. Several hosts may use the same installation. Build storage and compilation caches retain Xcode's existing sharing and locking behavior; the broker does not assign host-specific DerivedData directories.
 
 A new client starts on the server's terminal-default Xcode. Resolve the explicit embedding configuration first, then the server's inherited `DEVELOPER_DIR`, then `xcode-select -p`. Capture the resulting developer directory when registering the default host so restarting that host cannot silently change its installation.
 

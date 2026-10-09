@@ -10,7 +10,7 @@ import XcodeMCPProxyTestSupport
 @Suite(.serialized, .timeLimit(.minutes(1)), .asyncTestCleanup)
 struct NativeHostBrokerTests {
     @Test func selectionAndCatalogsAreScopedToTheClientSession() async throws {
-        let fixture = BrokerFixture()
+        let fixture = try BrokerFixture()
         let a = try await fixture.initialize("client-a")
         let b = try await fixture.initialize("client-b")
         _ = try await fixture.echo(b)
@@ -40,7 +40,7 @@ struct NativeHostBrokerTests {
     }
 
     @Test func sameInstallationCanHaveIndependentHosts() async throws {
-        let fixture = BrokerFixture()
+        let fixture = try BrokerFixture()
         let a = try await fixture.initialize("client-a")
         let b = try await fixture.initialize("client-b")
         let selection = try await fixture.call(a, name: NativeHostBroker.selectTool, arguments: [
@@ -58,7 +58,7 @@ struct NativeHostBrokerTests {
     }
 
     @Test func admittedRequestsFinishOnTheirOriginalHostAfterSelectionChanges() async throws {
-        let fixture = BrokerFixture()
+        let fixture = try BrokerFixture()
         let a = try await fixture.initialize("client-a")
         _ = try await fixture.echo(a)
         let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
@@ -80,7 +80,7 @@ struct NativeHostBrokerTests {
     }
 
     @Test func numericCancellationStillReachesTheOldHostAfterSwitching() async throws {
-        let fixture = BrokerFixture()
+        let fixture = try BrokerFixture()
         let a = try await fixture.initialize("client-a")
         _ = try await fixture.echo(a)
         let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
@@ -101,8 +101,113 @@ struct NativeHostBrokerTests {
         #expect(!replacement.cancelled.isSignaled())
     }
 
+    @Test func serverRequestsKeepTheirOriginalChannelAfterSwitchingHosts() async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("client-a")
+        let b = try await fixture.initialize("client-b")
+        _ = try await fixture.echo(a)
+        _ = try await fixture.echo(b)
+        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let pending = Task { try await fixture.request(a, method: "tools/call", parameters: .object([
+            "name": .string("Wait"), "arguments": .object([:]),
+        ]), id: 77) }
+        try await original.waiting.wait(description: "request owns original channel")
+        _ = try await fixture.call(a, name: NativeHostBroker.selectTool, arguments: [
+            "hostIdentifier": .string(NativeHostBroker.defaultHostIdentifier), "createsNewHost": .bool(true),
+        ])
+        try original.emitServerRequest()
+        try await fixture.serverRequestDelivered.wait(description: "server request delivered after host switch")
+        let requests = fixture.events.withLockedValue { values in
+            values.compactMap { event -> (ProxySessionID, JSONRPC.ID)? in
+                guard case .notification(let session, let data) = event,
+                      let object = try? JSONRPC.Wire.object(fromData: data),
+                      case .request("sampling/createMessage", let id) = JSONRPC.Message.Inspector.kind(of: object)
+                else { return nil }
+                return (session, id)
+            }
+        }
+        #expect(requests.count == 1)
+        let routed = try #require(requests.first)
+        #expect(routed.0 == a)
+        let response = try ProxyRuntimeRequest(json: .object([
+            "jsonrpc": .string("2.0"), "id": routed.1.value, "result": .object([:]),
+        ]), headerSessionExists: true, prefersEventStream: false)
+        let operation = try #require(fixture.broker.beginRequest(response, in: a))
+        _ = try await withCheckedThrowingContinuation { continuation in
+            operation.whenComplete { continuation.resume(with: $0) }
+        }
+        fixture.broker.clientRequestFinished(a)
+        try await original.serverResponseReceived.wait(description: "response returned to original host")
+        #expect(original.serverResponseIDs.withLockedValue { $0 } == [.string("native-server-request")])
+        let replacement = try #require(fixture.factory.transports.withLockedValue { $0.last })
+        #expect(replacement.serverResponseIDs.withLockedValue { $0.isEmpty })
+        await original.releaseWait()
+        _ = try await pending.value
+    }
+
+    @Test func closingOneClientKeepsAnotherClientAndTheSharedHostAlive() async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("client-a")
+        let b = try await fixture.initialize("client-b")
+        _ = try await fixture.echo(a)
+        _ = try await fixture.echo(b)
+        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let pending = Task { try await fixture.reply(a, method: "tools/call", parameters: .object([
+            "name": .string("Wait"), "arguments": .object([:]),
+        ]), id: 79) }
+        try await original.waiting.wait(description: "client request ready before close")
+        fixture.broker.removeSession(a)
+        guard case .mcpError(_, -32800, _, _, _) = try await pending.value else {
+            Issue.record("closed client's request was not cancelled"); return
+        }
+        #expect(fixture.broker.sessionState(a) == .missing)
+        #expect(try await fixture.echo(b) == .number(.int(1)))
+    }
+
+    @Test func malformedServerResponseDoesNotTrapOrCloseTheSession() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("client-a")
+        let request = try ProxyRuntimeRequest(json: .object([
+            "jsonrpc": .string("2.0"), "id": .string(":MA=="), "result": .object([:]),
+        ]), headerSessionExists: true, prefersEventStream: false)
+        let operation = try #require(fixture.broker.beginRequest(request, in: session))
+        let reply = try await withCheckedThrowingContinuation { continuation in
+            operation.whenComplete { continuation.resume(with: $0) }
+        }
+        fixture.broker.clientRequestFinished(session)
+        guard case .mcpError = reply else { Issue.record("invalid channel identifier was accepted"); return }
+        #expect(try await fixture.echo(session) == .number(.int(1)))
+    }
+
+    @Test func activeRequestsPreventSessionExpiry() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("client-a")
+        _ = try await fixture.echo(session)
+        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let pending = Task { try await fixture.request(session, method: "tools/call", parameters: .object([
+            "name": .string("Wait"), "arguments": .object([:]),
+        ]), id: 83) }
+        try await original.waiting.wait(description: "request active during expiry")
+        fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1))
+        #expect(fixture.broker.sessionState(session) == .initialized(protocolVersion: MCPProtocolVersion.current))
+        await original.releaseWait()
+        _ = try await pending.value
+    }
+
+    @Test func eventStreamsKeepIdleSessionsAliveUntilTheyClose() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("client-a")
+        #expect(fixture.broker.clientEventStreamOpened(session))
+        fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1))
+        #expect(fixture.broker.sessionState(session) == .initialized(protocolVersion: MCPProtocolVersion.current))
+        fixture.broker.clientEventStreamClosed(session)
+        fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1))
+        #expect(fixture.broker.sessionState(session) == .missing)
+        #expect(!fixture.broker.clientEventStreamOpened(session))
+    }
+
     @Test func failureKeepsThePreviousSelectionAndManagementToolsRemainAvailable() async throws {
-        let fixture = BrokerFixture()
+        let fixture = try BrokerFixture()
         let a = try await fixture.initialize("client-a")
         fixture.factory.failNewHosts.withLockedValue { $0 = true }
         let available = try await fixture.list(a)
@@ -125,6 +230,8 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
     private let continuation: AsyncStream<Upstream.Event>.Continuation
     let waiting = TestSignal()
     let cancelled = TestSignal()
+    let serverResponseReceived = TestSignal()
+    let serverResponseIDs = NIOLockedValueBox<[JSONValue]>([])
     let index: Int64
     private let pending = NIOLockedValueBox<[JSONRPC.ID]>([])
 
@@ -140,6 +247,11 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
     func send(_ data: Data) async -> Upstream.SendResult {
         do {
             let object = try JSONRPC.Wire.object(fromData: data)
+            if case .response(let id) = JSONRPC.Message.Inspector.kind(of: object) {
+                serverResponseIDs.withLockedValue { $0.append(id.value) }
+                serverResponseReceived.signal()
+                return .accepted
+            }
             let method = object["method"] as? String
             if method == "notifications/cancelled" { cancelled.signal(); return .accepted }
             guard let id = JSONRPC.Message.Inspector.requestID(from: object) else { return .accepted }
@@ -169,6 +281,13 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
             continuation.yield(.message(try JSONRPC.Wire.resultResponseData(id: id, result: result)))
         } catch { Issue.record(error) }
         return .accepted
+    }
+
+    func emitServerRequest() throws {
+        continuation.yield(.message(try JSONRPC.Wire.data(from: [
+            "jsonrpc": "2.0", "id": "native-server-request",
+            "method": "sampling/createMessage", "params": [String: Any](),
+        ])))
     }
 
     private var echoResult: JSONValue {
@@ -204,18 +323,27 @@ private final class BrokerFixture: Sendable {
     let broker: NativeHostBroker
     let factory = BrokerRuntimeFactory()
     let events = NIOLockedValueBox<[ProxyRuntimeEvent]>([])
+    let serverRequestDelivered = TestSignal()
     let defaultInstallation = XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Default.app"))
 
-    init() {
+    init() throws {
         let factory = factory
         let events = events
         let defaultInstallation = defaultInstallation
         let inventory = XcodeHostInventory(defaultInstallation: defaultInstallation) {
             [defaultInstallation, XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Other.app"))]
         }
-        broker = NativeHostBroker(configuration: makeConfig(requestTimeout: 5),
+        broker = try NativeHostBroker(configuration: makeConfig(requestTimeout: 5),
                                   inventory: inventory, factory: factory.make)
-        let cancel = broker.subscribeToEvents { event in events.withLockedValue { $0.append(event) } }
+        let delivered = serverRequestDelivered
+        let cancel = broker.subscribeToEvents { event in
+            events.withLockedValue { $0.append(event) }
+            if case .notification(_, let data) = event,
+               let object = try? JSONRPC.Wire.object(fromData: data),
+               case .request("sampling/createMessage", _) = JSONRPC.Message.Inspector.kind(of: object) {
+                delivered.signal()
+            }
+        }
         let broker = broker
         #expect(registerAsyncTestCleanup(description: "broker shutdown") {
             await broker.shutdown()

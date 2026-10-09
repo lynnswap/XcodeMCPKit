@@ -15,12 +15,18 @@ installations need their own validation. Catalog discovery does not establish
 that every tool works: previews, device operations, and account-dependent tools
 can require permissions or services beyond those used by build and test.
 
-The headless host uses the selected Xcode installation. The standard
-`DEVELOPER_DIR` environment variable can select another installation:
+The default host uses the server's explicitly configured developer directory,
+then its inherited `DEVELOPER_DIR`, then `xcode-select -p`. That installation is
+captured at server startup and retained when the host restarts. The standard
+`DEVELOPER_DIR` environment variable can select the terminal default:
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode_27.0.app/Contents/Developer xcode-mcp-proxy-server
 ```
+
+Use `XcodeMCPKitListHosts` and `XcodeMCPKitSelectHost` to change a client
+session's host without restarting the shared server. See
+[host selection](usage.md#select-an-xcode-host).
 
 ## Server options
 
