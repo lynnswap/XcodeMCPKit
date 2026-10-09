@@ -274,7 +274,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         if createsNew { host = try register(installation: host.installation, independent: true) }
         let channel = try await channel(for: host, session: session)
         var catalog = try ProxyRuntimeRequest(json: .object([
-            "jsonrpc": .string("2.0"), "id": .string("broker-catalog"),
+            "jsonrpc": .string("2.0"), "id": .string("broker-catalog-" + UUID().uuidString),
             "method": .string("tools/list"),
         ]), headerSessionExists: true, prefersEventStream: false)
         catalog.deadline = deadline
