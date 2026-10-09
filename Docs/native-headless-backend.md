@@ -115,6 +115,16 @@ an index and leaves persisted Xcode preferences unchanged. DocumentationSearch
 continues through the native action executor without a generated helper process.
 Restart the host after installing newer documentation to select the new asset.
 
+The host also resolves the installed Metal compiler with `xcrun` under the
+selected developer directory. For a downloaded Metal Toolchain, it supplies
+the containing directory and the identifier from `ToolchainInfo.plist` to
+Xcode's native downloadable-toolchain provider through process-local settings.
+Swift Build scans the containing directory for `.xctoolchain` bundles; passing
+the bundle itself leaves the compiler stub selected. This setup runs before
+Xcode initializes the provider and keeps the build service selected by the
+caller. Install the Metal Toolchain separately and restart the host after
+installing or replacing it. Persisted Xcode preferences are unchanged.
+
 The workspace breakpoint manager is prepared on the main thread before
 debugger launch to avoid the observed `DVTGlobalCustomDataStore.defaultStore`
 assertion.

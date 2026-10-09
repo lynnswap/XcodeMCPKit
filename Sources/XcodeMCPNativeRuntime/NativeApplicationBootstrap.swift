@@ -21,6 +21,11 @@ package final class NativeApplicationBootstrap {
         } catch {
             try? FileHandle.standardError.write(contentsOf: Data("DocumentationSearch asset discovery failed: \(error)\n".utf8))
         }
+        do {
+            _ = try NativeMetalToolchain.configure(for: installation)
+        } catch {
+            try? FileHandle.standardError.write(contentsOf: Data("Metal Toolchain discovery failed: \(error)\n".utf8))
+        }
         let framework = installation.contentsDirectory.appendingPathComponent("Frameworks/IDEKit.framework")
         guard let bundle = Bundle(url: framework) else {
             throw NativeRuntimeError.unavailable("Cannot locate IDEKit at \(framework.path)")
