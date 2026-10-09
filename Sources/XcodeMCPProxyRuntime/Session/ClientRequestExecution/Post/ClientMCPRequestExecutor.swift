@@ -3,10 +3,12 @@ import Logging
 import NIO
 import NIOConcurrencyHelpers
 import XcodeMCPCore
+import XcodeMCPProxyRuntimeContract
 
 final class ClientMCPRequestExecutor: Sendable {
     struct ForwardedToolCallRequest: Sendable {
         let bodyData: Data
+        let decodedJSON: JSONValue
         let forwardedResponseID: JSONRPC.ID?
     }
 
@@ -49,18 +51,23 @@ final class ClientMCPRequestExecutor: Sendable {
     }
 
     func handle(
-        bodyData: Data,
+        request: ProxyRuntimeRequest,
         headerSessionID: String?,
-        headerSessionExists: Bool,
-        prefersEventStream: Bool,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount? = nil,
         parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil
     ) -> ClientMCPRequestExecutor.Operation {
-        let parsedJSON: Any
-        do {
-            parsedJSON = try JSONSerialization.jsonObject(with: bodyData, options: [])
-        } catch {
+        let bodyData = request.data
+        var requestTimeoutOverride = requestTimeoutOverride
+        if let deadline = request.deadline {
+            let remaining = max(0, deadline.timeIntervalSince(deadlineClock.now()))
+            requestTimeoutOverride = Self.minimumRequestTimeout(
+                requestTimeoutOverride, .nanoseconds(Int64((remaining * 1_000_000_000).rounded(.up)))
+            )
+        }
+        let headerSessionExists = request.headerSessionExists
+        let prefersEventStream = request.prefersEventStream
+        guard let decodedJSON = request.decodedJSON else {
             return immediate(
                 .mcpError(
                     id: nil,
@@ -72,7 +79,7 @@ final class ClientMCPRequestExecutor: Sendable {
                 on: eventLoop
             )
         }
-        guard let requestObject = parsedJSON as? [String: Any] else {
+        guard let requestObject = decodedJSON.foundationObject as? [String: Any] else {
             return immediate(
                 .mcpError(
                     id: nil,
@@ -112,6 +119,7 @@ final class ClientMCPRequestExecutor: Sendable {
         }
         let operation = makeOperation(
             requestObject: requestObject,
+            decodedJSON: decodedJSON,
             bodyData: bodyData,
             headerSessionID: headerSessionID,
             headerSessionExists: headerSessionExists,
@@ -174,6 +182,7 @@ final class ClientMCPRequestExecutor: Sendable {
 
     private func makeOperation(
         requestObject: [String: Any],
+        decodedJSON: JSONValue,
         bodyData: Data,
         headerSessionID: String?,
         headerSessionExists: Bool,
@@ -278,6 +287,7 @@ final class ClientMCPRequestExecutor: Sendable {
         return makeForwardingOperation(
             forwardedRequest: ForwardedToolCallRequest(
                 bodyData: bodyData,
+                decodedJSON: decodedJSON,
                 forwardedResponseID: JSONRPC.Message.Inspector.requestID(from: requestObject)
             ),
             sessionID: sessionID,
@@ -300,8 +310,7 @@ final class ClientMCPRequestExecutor: Sendable {
         admittedHandle: CancellationHandle? = nil,
         requestDeadline: Date?
     ) -> ClientMCPRequestExecutor.Operation {
-        let forwardedBodyData = forwardedRequest.bodyData
-        guard let forwardedRequestJSON = try? JSONRPC.Wire.object(fromData: forwardedBodyData) else {
+        guard let forwardedRequestJSON = forwardedRequest.decodedJSON.foundationObject as? [String: Any] else {
             return immediate(
                 .mcpError(
                     id: nil,

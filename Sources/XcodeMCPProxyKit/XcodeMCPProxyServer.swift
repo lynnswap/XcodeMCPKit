@@ -357,7 +357,7 @@ public final class XcodeMCPProxyServer: Sendable {
                     var resolved = config
                     resolved.nativeHostBundleURL = URL(fileURLWithPath: invocation.command)
                         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                    return ProxyRuntime(configuration: resolved)
+                    return try NativeHostBroker(configuration: resolved)
                 }
             )
         }

@@ -1319,10 +1319,8 @@ struct HTTPHandlerTests {
         let bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
 
         let operation = service.handle(
-            bodyData: bodyData,
+            request: .init(data: bodyData, headerSessionExists: true, prefersEventStream: false),
             headerSessionID: "session-stale-send",
-            headerSessionExists: true,
-            prefersEventStream: false,
             eventLoop: group.next()
         )
         switch try await operation.future.get() {
@@ -2392,9 +2390,9 @@ struct HTTPHandlerTests {
         let sessionID = "failed-request"
         let session = manager.session(id: sessionID)
         let operation = try executor.handle(
-            bodyData: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: 503, method: "resources/read")),
-            headerSessionID: sessionID, headerSessionExists: true,
-            prefersEventStream: false, eventLoop: group.next()
+            request: .init(data: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: 503, method: "resources/read")),
+                headerSessionExists: true, prefersEventStream: false),
+            headerSessionID: sessionID, eventLoop: group.next()
         )
         try await manager.waitForSentUpstreamCount(1)
         #expect(session.router.failPending(idKey: "503", error: failure.error))

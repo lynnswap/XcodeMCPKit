@@ -70,6 +70,8 @@ final class HTTPEventDeliveryStore: Sendable {
             }
         case .notification(let sessionID, let data):
             receiveNotification(data, sessionID: sessionID)
+        case .catalogChanged:
+            break
         case .sessionClosed(let sessionID):
             let delivery = sessions.withLockedValue { $0.removeValue(forKey: sessionID) }
             delivery?.hub.closeAll()

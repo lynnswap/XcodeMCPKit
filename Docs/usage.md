@@ -1,7 +1,44 @@
 # Workspace and tool usage
 
 Start the server and [connect your MCP client](../README.md#connect-your-mcp-client).
-The server runs tools in its owned headless host.
+The server runs tools in owned headless hosts.
+
+## Select an Xcode host
+
+Each MCP session starts on the server's terminal-default Xcode. Call
+`XcodeMCPKitListHosts` to list existing hosts and installed Xcode candidates.
+The result identifies the default and selected hosts and reports the native PID
+when a host is running. Listing does not start every candidate.
+
+Pass a returned identifier to `XcodeMCPKitSelectHost`:
+
+```json
+{
+  "hostIdentifier": "host-from-the-list"
+}
+```
+
+The server starts an available candidate when needed and changes only the
+calling MCP session. Its next `tools/list` returns the selected Xcode's tools.
+Requests already admitted before the change finish on their original host.
+
+To use the same Xcode installation in another independent host, add
+`"createsNewHost": true`. Select an existing host identifier to return to a
+previous host. Hosts can share an installation while keeping workspace models,
+schemes, destinations, and test-plan selections separate. Build storage and
+compilation caches retain Xcode's existing sharing behavior. Builds targeting the
+same build database can encounter Xcode's native lock, including when a GUI
+Xcode build is using it.
+
+Workspace and device-session identifiers belong to the host that returned them.
+Select that host before reusing its identifiers. Absolute workspace paths resolve
+inside the selected host. Tool results identify their host under
+`_meta["com.lynnswap.xcode-mcpkit/hostIdentifier"]`.
+
+Selection lasts for the MCP session. Clients that pool one MCP session across
+several conversations share that selection. A new or recovered client session
+starts on the default host; select the previous host again if needed. Closing a client
+session leaves registered hosts and their shared workspace models available.
 
 ## Select a workspace
 

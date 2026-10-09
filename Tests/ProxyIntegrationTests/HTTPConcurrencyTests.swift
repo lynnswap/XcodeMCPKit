@@ -188,8 +188,8 @@ struct HTTPConcurrencyTests {
         onQueued.withLockedValue { action in
             action = {
                 _ = service.handle(
-                    bodyData: cancellationData, headerSessionID: "cancel-session",
-                    headerSessionExists: true, prefersEventStream: false, eventLoop: loop
+                    request: .init(data: cancellationData, headerSessionExists: true, prefersEventStream: false),
+                    headerSessionID: "cancel-session", eventLoop: loop
                 )
             }
         }
@@ -303,9 +303,9 @@ struct HTTPConcurrencyTests {
         sessionID: String = "cancel-session", requestTimeoutOverride: TimeAmount? = nil
     ) throws -> ClientMCPRequestExecutor.Operation {
         service.handle(
-            bodyData: try JSONSerialization.data(withJSONObject: payload),
-            headerSessionID: sessionID, headerSessionExists: true,
-            prefersEventStream: false, eventLoop: loop,
+            request: .init(data: try JSONSerialization.data(withJSONObject: payload),
+                headerSessionExists: true, prefersEventStream: false),
+            headerSessionID: sessionID, eventLoop: loop,
             requestTimeoutOverride: requestTimeoutOverride
         )
     }

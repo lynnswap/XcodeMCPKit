@@ -988,6 +988,7 @@ extension RuntimeCoordinator {
         healthTransition.timeout?.cancel()
         testHooks.upstreamInitialized?(upstreamIndex)
         noteUpstreamInitializationSucceeded()
+        catalogChangedSink?()
     }
 
     func warmUpSecondaryUpstreams(excluding primaryUpstreamIndex: Int? = nil) {

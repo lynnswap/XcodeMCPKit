@@ -1479,8 +1479,8 @@ struct RuntimeCoordinatorSchedulingTests {
             let data = try JSONSerialization.data(withJSONObject: toolsCallObject(
                 id: 1, name: "XcodeListNavigatorIssues", arguments: ["workspaceIdentifier": "/Work/SendBarrier.xcodeproj"]))
             let operation = executor.handle(
-                bodyData: data, headerSessionID: sessionID, headerSessionExists: true,
-                prefersEventStream: false, eventLoop: fixture.eventLoop,
+                request: .init(data: data, headerSessionExists: true, prefersEventStream: false),
+                headerSessionID: sessionID, eventLoop: fixture.eventLoop,
                 requestTimeoutOverride: trigger == .timeout ? .milliseconds(20) : .seconds(300),
                 parentCancellationHandle: parentCancellationHandle
             )
@@ -1570,8 +1570,8 @@ struct RuntimeCoordinatorSchedulingTests {
             let data = try JSONSerialization.data(withJSONObject: toolsCallObject(
                 id: 1, name: "XcodeListNavigatorIssues", arguments: ["workspaceIdentifier": "/Work/UnsentCancellation.xcodeproj"]))
             let operation = executor.handle(
-                bodyData: data, headerSessionID: sessionID, headerSessionExists: true,
-                prefersEventStream: false, eventLoop: fixture.eventLoop,
+                request: .init(data: data, headerSessionExists: true, prefersEventStream: false),
+                headerSessionID: sessionID, eventLoop: fixture.eventLoop,
                 requestTimeoutOverride: trigger == .timeout
                     ? .milliseconds(20)
                     : .seconds(300),

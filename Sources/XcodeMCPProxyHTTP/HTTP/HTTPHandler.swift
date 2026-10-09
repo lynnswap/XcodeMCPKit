@@ -431,7 +431,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let parsedRequestJSON = try? JSONSerialization.jsonObject(with: bodyData, options: [])
+        var request = ProxyRuntimeRequest(data: bodyData, headerSessionExists: false, prefersEventStream: prefersEventStream)
+        let parsedRequestJSON = request.decodedJSON?.foundationObject
         if parsedRequestJSON is [Any] {
             _ = sendPlain(
                 on: context.channel,
@@ -478,12 +479,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let keepAlive = head.isKeepAlive
         let channel = context.channel
         let eventLoop = context.eventLoop
+        request.headerSessionExists = headerSessionExists
         guard let operation = controlService.beginRequest(
-            ProxyRuntimeRequest(
-                data: bodyData,
-                headerSessionExists: headerSessionExists,
-                prefersEventStream: prefersEventStream
-            ),
+            request,
             sessionID: effectiveSessionID.map(ProxySessionID.init(rawValue:))
         ) else {
             _ = sendPlain(

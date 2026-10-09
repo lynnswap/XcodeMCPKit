@@ -14,12 +14,16 @@ package struct ProxySessionID: Hashable, Sendable {
 package enum ProxyRuntimeEvent: Sendable {
     case sessionOpened(sessionID: ProxySessionID)
     case notification(sessionID: ProxySessionID, data: Data)
+    /// Native tool availability or the cached catalog changed.
+    case catalogChanged
     case sessionClosed(sessionID: ProxySessionID)
 }
 
 package struct ProxyRuntimeRequest: Sendable {
     package let data: Data
-    package let headerSessionExists: Bool
+    package let decodedJSON: JSONValue?
+    package var deadline: Date?
+    package var headerSessionExists: Bool
     package let prefersEventStream: Bool
 
     package init(
@@ -28,6 +32,14 @@ package struct ProxyRuntimeRequest: Sendable {
         prefersEventStream: Bool
     ) {
         self.data = data
+        self.decodedJSON = (try? JSONSerialization.jsonObject(with: data)).flatMap(JSONValue.init(any:))
+        self.headerSessionExists = headerSessionExists
+        self.prefersEventStream = prefersEventStream
+    }
+
+    package init(json: JSONValue, headerSessionExists: Bool, prefersEventStream: Bool) throws {
+        self.data = try JSONSerialization.data(withJSONObject: json.foundationObject)
+        self.decodedJSON = json
         self.headerSessionExists = headerSessionExists
         self.prefersEventStream = prefersEventStream
     }
@@ -65,6 +77,8 @@ package enum ProxyRuntimeFailureKind: Sendable {
 package enum ProxyRuntimeCancellationReason: String, Sendable {
     case channelInactive
     case responseWriteFailure
+    case clientNotification
+    case requestDeadline
 }
 
 package enum ProxyRuntimeSessionState: Sendable, Equatable {
@@ -93,14 +107,16 @@ package struct ProxyRuntimeSnapshot: Sendable {
     package let catalogAvailable: Bool
     package let queuedRequestCount: Int
     package let upstreams: [Upstream]
+    package let originMetadata: JSONValue?
 
     package init(generatedAt: Date, proxyInitialized: Bool, catalogAvailable: Bool,
-                 queuedRequestCount: Int, upstreams: [Upstream]) {
+                 queuedRequestCount: Int, upstreams: [Upstream], originMetadata: JSONValue? = nil) {
         self.generatedAt = generatedAt
         self.proxyInitialized = proxyInitialized
         self.catalogAvailable = catalogAvailable
         self.queuedRequestCount = queuedRequestCount
         self.upstreams = upstreams
+        self.originMetadata = originMetadata
     }
 }
 

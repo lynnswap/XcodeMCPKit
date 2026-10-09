@@ -92,12 +92,16 @@ final class ProxyRuntimeRequestOperation: ProxyRuntimeRequestOperating, Sendable
 
     package func cancel(reason: ProxyRuntimeCancellationReason) {
         guard let handle = operation.cancellationHandle else { return }
-        executor.cancel(
-            handle,
-            source: reason == .channelInactive
-                ? .channelInactive
-                : .responseWriteFailure
-        )
+        let source: ClientMCPRequestExecutor.CancellationSource
+        switch reason {
+        case .channelInactive: source = .channelInactive
+        case .responseWriteFailure: source = .responseWriteFailure
+        case .clientNotification: source = .clientNotification
+        case .requestDeadline:
+            _ = handle.timeOut(using: executor.sessionManager)
+            return
+        }
+        executor.cancel(handle, source: source)
     }
 
     private static func reply(
@@ -208,6 +212,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
                     .sessionClosed(sessionID: ProxySessionID(rawValue: sessionID))
                 )
             },
+            catalogChangedSink: { eventSource.emit(.catalogChanged) },
             startImmediately: false
         )
         self.init(
@@ -225,7 +230,8 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
             @Sendable (
                 _ eventLoop: EventLoop,
                 _ notificationSink: @escaping @Sendable (String, Data) -> Void,
-                _ sessionClosedSink: @escaping @Sendable (String) -> Void
+                _ sessionClosedSink: @escaping @Sendable (String) -> Void,
+                _ catalogChangedSink: @escaping @Sendable () -> Void
             ) -> any RuntimeCoordinating
     ) -> ProxyRuntime {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -245,7 +251,8 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
                 eventSource.emit(
                     .sessionClosed(sessionID: ProxySessionID(rawValue: sessionID))
                 )
-            }
+            },
+            { eventSource.emit(.catalogChanged) }
         )
         return ProxyRuntime(
             config: config,
@@ -304,10 +311,8 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
         return ProxyRuntimeRequestOperation(
             executor: requestExecutor,
             operation: requestExecutor.handle(
-                bodyData: message.data,
+                request: message,
                 headerSessionID: sessionID?.rawValue,
-                headerSessionExists: message.headerSessionExists,
-                prefersEventStream: message.prefersEventStream,
                 eventLoop: eventLoop
             )
         )
@@ -356,7 +361,12 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
                     isInitialized: $0.isInitialized,
                     activeRequestCount: $0.activeCorrelatedRequestCount
                 )
-            }
+            },
+            originMetadata: {
+                guard case .object(let result)? = coordinator.cachedToolsListResult(),
+                      case .object(let metadata)? = result["_meta"] else { return nil }
+                return metadata["com.lynnswap.xcode-mcpkit/origin"]
+            }()
         )
     }
 

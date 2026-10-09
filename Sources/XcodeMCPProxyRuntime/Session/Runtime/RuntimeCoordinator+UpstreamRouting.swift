@@ -101,6 +101,7 @@ extension RuntimeCoordinator {
             if case .notification("notifications/tools/list_changed") =
                 JSONRPC.Message.Inspector.kind(of: object) {
                 let transition = toolsCatalog.invalidate(sourceProof: proof)
+                catalogChangedSink?()
                 // The upstream notification is forwarded below.
                 for handle in transition.cancelledRPCs { handle.cancel() }
             }

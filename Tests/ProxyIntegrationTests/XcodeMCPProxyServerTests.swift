@@ -741,13 +741,15 @@ private func makeServerTestRuntime(
     ProxyRuntime.testing(configuration: config) {
         eventLoop,
         notificationSink,
-        sessionClosedSink in
+        sessionClosedSink,
+        catalogChangedSink in
         let coordinator = RuntimeCoordinator(
             config: config,
             eventLoop: eventLoop,
             upstreams: [upstream],
             notificationSink: notificationSink,
             sessionClosedSink: sessionClosedSink,
+            catalogChangedSink: catalogChangedSink,
             startImmediately: false
         )
         runtimeReference?.value = coordinator
