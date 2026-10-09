@@ -703,12 +703,11 @@ struct RuntimeCoordinatorRecoveryTests {
 )
         let sentCount = await upstream.sentCount()
         let operation = try executor.handle(
-            bodyData: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
+            request: .init(data: JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
                 id: 81, method: kind == "catalog" ? "tools/list" : "tools/call",
                 params: kind == "catalog" ? nil : .object(["name": .string("Echo"), "arguments": .object([:])])
-            )),
-            headerSessionID: sessionID, headerSessionExists: true,
-            prefersEventStream: false, eventLoop: fixture.eventLoop
+            )), headerSessionExists: true, prefersEventStream: false),
+            headerSessionID: sessionID, eventLoop: fixture.eventLoop
         )
         let request = try await sentValue(from: upstream, at: sentCount, timeout: .seconds(2))
         let requestID = try #require(JSONRPC.ID(any: extractUpstreamID(from: request)))

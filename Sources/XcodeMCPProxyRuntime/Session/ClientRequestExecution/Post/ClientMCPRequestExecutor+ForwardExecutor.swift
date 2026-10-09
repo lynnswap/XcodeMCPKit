@@ -15,7 +15,7 @@ extension ClientMCPRequestExecutor {
         requestTimeoutOverride: TimeAmount?,
     ) -> EventLoopFuture<ClientMCPRequestExecutor.Resolution> {
         let bodyData = forwardedRequest.bodyData
-        guard let requestObject = try? JSONRPC.Wire.object(fromData: bodyData)
+        guard let requestObject = forwardedRequest.decodedJSON.foundationObject as? [String: Any]
         else {
             return makeImmediateLeaseResolution(
                 .mcpError(
