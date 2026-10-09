@@ -113,7 +113,9 @@ private enum NativeHostMain {
                 }
                 terminate(application, failure: false)
             }
-            application.run()
+            withExtendedLifetime(bootstrap) {
+                application.run()
+            }
         } catch {
             report("Native host startup failed: \(error)")
             exit(1)
