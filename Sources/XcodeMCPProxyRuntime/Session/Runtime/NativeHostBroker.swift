@@ -18,12 +18,14 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         var backendBindings: [ProxySessionID: Binding] = [:]
         var closing: [UUID: Task<Void, Never>] = [:]
         var stopped = false
+        var resetsInProgress = 0
     }
     private let state = NIOLockedValueBox(State())
     private let eventSource = ProxyRuntimeEventSource()
     private let configuration: ProxyRuntimeConfiguration
     private let inventory: XcodeHostInventory
     private let factory: RuntimeFactory
+    private let clock: ClockClient
     static let defaultHostIdentifier = "host-default"
     static let listTool = "XcodeMCPKitListHosts"
     static let selectTool = "XcodeMCPKitSelectHost"
@@ -36,10 +38,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     init(configuration: ProxyRuntimeConfiguration, inventory: XcodeHostInventory,
-         factory: @escaping RuntimeFactory) throws {
+         clock: ClockClient = .liveValue, factory: @escaping RuntimeFactory) throws {
         self.configuration = configuration
         self.inventory = inventory
         self.factory = factory
+        self.clock = clock
         _ = try register(installation: inventory.defaultInstallation, identifier: Self.defaultHostIdentifier)
     }
 
@@ -75,18 +78,25 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         -> (any ProxyRuntimeRequestOperating)? {
         let object = message.decodedJSON?.foundationObject as? [String: Any]
         let requestID = object.flatMap { JSONRPC.Message.Inspector.requestID(from: $0) }
+        var message = message
+        if let object, case .request(let method, _) = JSONRPC.Message.Inspector.kind(of: object),
+           let timeout = MCP.MethodDispatcher.timeoutForMethod(method, defaultSeconds: configuration.requestTimeout) {
+            let deadline = clock.now().addingTimeInterval(Double(timeout.nanoseconds) / 1_000_000_000)
+            message.deadline = message.deadline.map { min($0, deadline) } ?? deadline
+        }
         let cancelled = ProxyRuntimeReply.mcpError(id: requestID, code: -32800,
             message: "request cancelled", sessionID: sessionID, prefersEventStream: message.prefersEventStream)
         guard let sessionID else {
+            let stream = message.prefersEventStream
             return NativeHostBrokerOperation(cancelledReply: cancelled) { _ in
                 .mcpError(id: requestID, code: -32600, message: "invalid request",
-                          sessionID: nil, prefersEventStream: message.prefersEventStream)
+                          sessionID: nil, prefersEventStream: stream)
             }
         }
         let creates = !message.headerSessionExists
         if creates {
             guard let object, case .request("initialize", _) = JSONRPC.Message.Inspector.kind(of: object),
-                  !state.withLockedValue({ $0.stopped }) else { return nil }
+                  !state.withLockedValue({ $0.stopped || $0.resetsInProgress > 0 }) else { return nil }
             eventSource.emit(.sessionOpened(sessionID: sessionID))
             let parameters: JSONValue
             if case .object(let values)? = message.decodedJSON {
@@ -95,7 +105,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             let session = NativeBrokerSession(identifier: sessionID, defaultHost: Self.defaultHostIdentifier,
                                                initializeParameters: parameters)
             let registered = state.withLockedValue { storage in
-                guard !storage.stopped else { return false }
+                guard !storage.stopped, storage.resetsInProgress == 0 else { return false }
                 storage.sessions[sessionID] = session
                 return true
             }
@@ -104,7 +114,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 return nil
             }
         }
-        guard let session = state.withLockedValue({ $0.sessions[sessionID] }) else { return nil }
+        guard let session = state.withLockedValue({ $0.resetsInProgress == 0 ? $0.sessions[sessionID] : nil }) else { return nil }
         let admission = session.state.withLockedValue { storage -> (String, UInt64)? in
             guard !storage.closed else { return nil }
             storage.activeRequests += 1
@@ -114,8 +124,19 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         }
         guard let admission else { return nil }
         let key = UUID()
-        let operation = NativeHostBrokerOperation(cancelledReply: cancelled, requestIDKey: requestID?.key) { [self] cancellation in
-            await process(message, in: session, hostIdentifier: admission.0,
+        let admittedMessage = message
+        var timeoutReply = ProxyRuntimeReply.mcpError(id: requestID, code: -32000,
+            message: "upstream timeout", sessionID: sessionID, prefersEventStream: message.prefersEventStream)
+        if let object, case .request("tools/list", _) = JSONRPC.Message.Inspector.kind(of: object),
+           (object["params"] as? [String: Any])?["cursor"] == nil {
+            timeoutReply = (try? Self.response(id: requestID, result: .object([
+                "tools": .array(Self.managementTools),
+                "_meta": .object(["com.lynnswap.xcode-mcpkit/nativeCatalogError": .string("upstream timeout")]),
+            ]), session: sessionID, eventStream: message.prefersEventStream)) ?? timeoutReply
+        }
+        let operation = NativeHostBrokerOperation(cancelledReply: cancelled, requestIDKey: requestID?.key,
+            deadline: message.deadline, clock: clock, timeoutReply: timeoutReply) { [self] cancellation in
+            await process(admittedMessage, in: session, hostIdentifier: admission.0,
                           selectionRevision: admission.1, cancellation: cancellation)
         }
         let retained = session.state.withLockedValue { storage in
@@ -179,6 +200,8 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                         throw NativeHostBrokerError("Native catalog is not an object")
                     }
                     catalog = value
+                } catch let error as NativeHostBrokerRPCError where error.isInputError {
+                    return error.reply
                 } catch {
                     try Task.checkCancellation()
                     catalog = ["tools": .array([]), "_meta": .object([
@@ -206,7 +229,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                             result = .object(["hosts": .array(hosts().map { descriptor($0, for: session) })])
                         } else {
                             result = try await select(parameters["arguments"] as? [String: Any] ?? [:],
-                                session: session, revision: selectionRevision)
+                                session: session, revision: selectionRevision, deadline: request.deadline)
                         }
                         return try Self.response(id: id, result: Self.toolResult(result),
                             session: session.identifier, eventStream: request.prefersEventStream)
@@ -234,7 +257,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     private func select(_ arguments: [String: Any], session: NativeBrokerSession,
-                        revision: UInt64) async throws -> JSONValue {
+                        revision: UInt64, deadline: Date?) async throws -> JSONValue {
         guard let id = arguments["hostIdentifier"] as? String,
               var host = state.withLockedValue({ $0.hosts[id] }) else {
             throw NativeHostBrokerError("Choose a hostIdentifier returned by XcodeMCPKitListHosts")
@@ -248,10 +271,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         } else { createsNew = false }
         if createsNew { host = try register(installation: host.installation, independent: true) }
         let channel = try await channel(for: host, session: session)
-        let catalog = try ProxyRuntimeRequest(json: .object([
+        var catalog = try ProxyRuntimeRequest(json: .object([
             "jsonrpc": .string("2.0"), "id": .string("broker-catalog"),
             "method": .string("tools/list"),
         ]), headerSessionExists: true, prefersEventStream: false)
+        catalog.deadline = deadline
         _ = try Self.result(in: await channel.execute(catalog, cancellation: NativeHostBrokerCancellation()))
         try Task.checkCancellation()
         let applied = session.state.withLockedValue { storage in
@@ -322,13 +346,24 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     private func receive(_ event: ProxyRuntimeEvent, from hostIdentifier: String) {
+        if case .catalogChanged = event {
+            let sessions = state.withLockedValue { Array($0.sessions.values) }
+            guard let data = try? JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(
+                method: "notifications/tools/list_changed"
+            )) else { return }
+            for session in sessions where session.state.withLockedValue({
+                !$0.closed && $0.protocolVersion != nil && $0.selectedHost == hostIdentifier
+            }) {
+                eventSource.emit(.notification(sessionID: session.identifier, data: data))
+            }
+            return
+        }
         guard case .notification(let backendID, let data) = event,
               let binding = state.withLockedValue({ $0.backendBindings[backendID] }),
               !binding.session.state.withLockedValue({ $0.closed }) else { return }
         do {
             var object = try JSONRPC.Wire.object(fromData: data)
-            if object["method"] as? String == "notifications/tools/list_changed",
-               binding.session.state.withLockedValue({ $0.selectedHost }) != hostIdentifier { return }
+            if object["method"] as? String == "notifications/tools/list_changed" { return }
             if case .request(_, let id) = JSONRPC.Message.Inspector.kind(of: object) {
                 let value = try JSONSerialization.data(withJSONObject: id.value.foundationObject,
                                                        options: [.fragmentsAllowed])
@@ -482,6 +517,12 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         return try? JSONSerialization.data(withJSONObject: ["hosts": values], options: [.sortedKeys])
     }
     package func reset() async {
+        let sessions = state.withLockedValue { storage in
+            storage.resetsInProgress += 1
+            return Array(storage.sessions.keys)
+        }
+        defer { state.withLockedValue { $0.resetsInProgress -= 1 } }
+        for id in sessions { removeSession(id) }
         for host in hosts() { if let runtime = host.runtimeIfStarted { await runtime.reset() } }
     }
 }

@@ -58,6 +58,13 @@ final class ClientMCPRequestExecutor: Sendable {
         parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle? = nil
     ) -> ClientMCPRequestExecutor.Operation {
         let bodyData = request.data
+        var requestTimeoutOverride = requestTimeoutOverride
+        if let deadline = request.deadline {
+            let remaining = max(0, deadline.timeIntervalSince(deadlineClock.now()))
+            requestTimeoutOverride = Self.minimumRequestTimeout(
+                requestTimeoutOverride, .nanoseconds(Int64((remaining * 1_000_000_000).rounded(.up)))
+            )
+        }
         let headerSessionExists = request.headerSessionExists
         let prefersEventStream = request.prefersEventStream
         guard let decodedJSON = request.decodedJSON else {

@@ -2,6 +2,14 @@ import Foundation
 import XcodeMCPCore
 import XcodeMCPProxyRuntimeContract
 
+struct NativeHostBrokerRPCError: Error, CustomStringConvertible {
+    let code: Int
+    let description: String
+    let reply: ProxyRuntimeReply
+
+    var isInputError: Bool { [-32700, -32600, -32601, -32602].contains(code) }
+}
+
 extension NativeHostBroker {
     static var managementTools: [JSONValue] {
         [
@@ -61,14 +69,16 @@ extension NativeHostBroker {
         case .response(let data, _, _):
             let object = try JSONRPC.Wire.object(fromData: data)
             if let error = object["error"] as? [String: Any] {
-                throw NativeHostBrokerError("Native request failed: \(error)")
+                throw NativeHostBrokerRPCError(code: (error["code"] as? NSNumber)?.intValue ?? -32000,
+                    description: "Native request failed: \(error)", reply: reply)
             }
             guard let value = object["result"], let result = JSONValue(any: value) else {
                 throw NativeHostBrokerError("Native reply has no result")
             }
             return result
         case .mcpError(_, let code, let message, _, _):
-            throw NativeHostBrokerError("Native request failed (\(code)): \(message)")
+            throw NativeHostBrokerRPCError(code: code,
+                description: "Native request failed (\(code)): \(message)", reply: reply)
         case .failure(_, let message, _):
             throw NativeHostBrokerError(message)
         case .accepted:

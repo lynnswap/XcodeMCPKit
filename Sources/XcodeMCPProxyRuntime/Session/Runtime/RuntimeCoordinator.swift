@@ -404,6 +404,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     let sessionRegistry: SessionRegistry
+    let catalogChangedSink: (@Sendable () -> Void)?
     let initializeManager: InitializeManager
     let upstreamEventTasks = AsyncTaskSupervisor()
     let upstreamRetirementTasks = AsyncTaskSupervisor()
@@ -452,6 +453,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         upstreamReadinessGate: UpstreamReadinessGate? = nil,
         notificationSink: (@Sendable (_ sessionID: String, _ data: Data) -> Void)? = nil,
         sessionClosedSink: (@Sendable (_ sessionID: String) -> Void)? = nil,
+        catalogChangedSink: (@Sendable () -> Void)? = nil,
         startImmediately: Bool = true
     ) {
         let bridgeRuntimeConfig = config.nativeHostRuntimeConfiguration
@@ -466,6 +468,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
             nativeUpstreamFactory: nativeUpstreamFactory,
             notificationSink: notificationSink,
             sessionClosedSink: sessionClosedSink,
+            catalogChangedSink: catalogChangedSink,
             startImmediately: startImmediately
         )
     }
@@ -484,6 +487,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         nativeUpstreamFactory: NativeUpstreamFactory? = nil,
         notificationSink: (@Sendable (_ sessionID: String, _ data: Data) -> Void)? = nil,
         sessionClosedSink: (@Sendable (_ sessionID: String) -> Void)? = nil,
+        catalogChangedSink: (@Sendable () -> Void)? = nil,
         testHooks: RuntimeCoordinatorTestHooks = RuntimeCoordinatorTestHooks(),
         startImmediately: Bool = true,
         runtimeBox providedRuntimeBox: WeakRuntimeCoordinatorBox? = nil
@@ -506,6 +510,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
                 )
             }
         self.config = config
+        self.catalogChangedSink = catalogChangedSink
         self.eventLoop = eventLoop
         let upstreamTopology = UpstreamTopologyAuthority(upstreams)
         self.upstreamTopology = upstreamTopology
@@ -878,6 +883,7 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
     }
 
     func publishToolsListChangedNotification() {
+        catalogChangedSink?()
         let notification = JSONRPC.Wire.notificationObject(method: "notifications/tools/list_changed")
         guard let data = try? JSONRPC.Wire.data(from: notification) else { return }
         for target in sessionRegistry.initializedNotificationTargets() {

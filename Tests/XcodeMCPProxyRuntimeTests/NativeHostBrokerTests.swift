@@ -206,6 +206,101 @@ struct NativeHostBrokerTests {
         #expect(!fixture.broker.clientEventStreamOpened(session))
     }
 
+    @Test func resetInvalidatesExternalSessionsAndAllowsAReconnectedClient() async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("client-a")
+        _ = try await fixture.echo(a)
+        await fixture.broker.reset()
+        #expect(fixture.broker.sessionState(a) == .missing)
+        let reconnected = try await fixture.initialize("client-reconnected")
+        #expect(try await fixture.echo(reconnected) == .number(.int(1)))
+        #expect(fixture.factory.transports.withLockedValue { $0.count } == 1)
+    }
+
+    @Test func unissuedCursorRemainsAnInputError() async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("client-a")
+        _ = try await fixture.echo(a)
+        do {
+            _ = try await fixture.request(a, method: "tools/list",
+                                          parameters: .object(["cursor": .string("unissued-cursor")]))
+            Issue.record("unissued cursor was accepted")
+        } catch let error as NativeHostBrokerRPCError {
+            #expect(error.code == -32602)
+        }
+    }
+
+    @Test func initialConnectionFailureStillReceivesCatalogRecovery() async throws {
+        let fixture = try BrokerFixture(holdsInitialization: true)
+        let a = try await fixture.initialize("client-a")
+        let catalog = Task { try await fixture.request(a, method: "tools/list") }
+        try await fixture.factory.created.wait(description: "native runtime created")
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        try await transport.initializationStarted.wait(description: "native initialization started")
+        try transport.failInitialization()
+        let partial = try await catalog.value
+        guard case .object(let result) = partial, case .array(let tools)? = result["tools"] else {
+            Issue.record("missing partial catalog"); return
+        }
+        #expect(tools.count == 2)
+        fixture.factory.holdsInitialization.withLockedValue { $0 = false }
+        for transport in fixture.factory.transports.withLockedValue({ $0 }) {
+            try transport.releaseInitialization()
+        }
+        try await fixture.catalogChangedDelivered.wait(timeout: .seconds(10),
+                                                       description: "recovered catalog notified without a backend session")
+        #expect(try await fixture.echo(a) == .number(.int(1)))
+    }
+
+    @Test func toolsListTimeoutKeepsManagementToolsAvailable() async throws {
+        let clocks = makeRuntimeCoordinatorDeterministicClocks()
+        let fixture = try BrokerFixture(clock: clocks.clock, holdsInitialization: true)
+        let a = try await fixture.initialize("client-a")
+        let pending = Task { try await fixture.request(a, method: "tools/list") }
+        try await fixture.factory.created.wait(description: "native runtime created")
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        try await transport.initializationStarted.wait(description: "catalog waits for initialization")
+        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
+        clocks.uptimeClock.advance(by: .seconds(5))
+        clocks.timeoutClock.advance(by: .seconds(5))
+        guard case .object(let catalog) = try await pending.value,
+              case .array(let tools)? = catalog["tools"] else {
+            Issue.record("missing management catalog"); return
+        }
+        #expect(tools.count == 2)
+        #expect(catalog["_meta"] != nil)
+    }
+
+    @Test func requestDeadlineIncludesWaitingForTheInitialConnection() async throws {
+        let timerClock = TestClock()
+        let uptimeClock = TestUptimeClock()
+        let base = Date()
+        let clock = ClockClient(now: {
+            base.addingTimeInterval(Double(uptimeClock.now()) / 1_000_000_000)
+        }, uptimeNanoseconds: uptimeClock.now, sleep: { duration in
+            try? await timerClock.sleep(for: duration)
+        }, sleepForTimeInterval: { _ in })
+        let fixture = try BrokerFixture(clock: clock, holdsInitialization: true)
+        let a = try await fixture.initialize("client-a")
+        let pending = Task { try await fixture.reply(a, method: "tools/call", parameters: .object([
+            "name": .string("Wait"), "arguments": .object([:]),
+        ]), id: 89) }
+        try await fixture.factory.created.wait(description: "native runtime created")
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        try await transport.initializationStarted.wait(description: "request waits for initialization")
+        try await waitForSuspendedSleepers(on: timerClock)
+        uptimeClock.advance(by: .seconds(4))
+        timerClock.advance(by: .seconds(4))
+        try transport.releaseInitialization()
+        try await transport.waiting.wait(description: "tool execution started after initialization")
+        uptimeClock.advance(by: .seconds(1))
+        timerClock.advance(by: .seconds(1))
+        guard case .mcpError(_, -32000, "upstream timeout", _, _) = try await pending.value else {
+            Issue.record("initialization time was excluded from the deadline"); return
+        }
+        try await transport.cancelled.wait(description: "expired request cancelled on its native host")
+    }
+
     @Test func failureKeepsThePreviousSelectionAndManagementToolsRemainAvailable() async throws {
         let fixture = try BrokerFixture()
         let a = try await fixture.initialize("client-a")
@@ -229,14 +324,17 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
     let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
     let waiting = TestSignal()
+    let initializationStarted = TestSignal()
+    private let initialization = NIOLockedValueBox((held: false, pending: [JSONRPC.ID]()))
     let cancelled = TestSignal()
     let serverResponseReceived = TestSignal()
     let serverResponseIDs = NIOLockedValueBox<[JSONValue]>([])
     let index: Int64
     private let pending = NIOLockedValueBox<[JSONRPC.ID]>([])
 
-    init(index: Int64) {
+    init(index: Int64, holdsInitialization: Bool) {
         self.index = index
+        initialization.withLockedValue { $0.held = holdsInitialization }
         let pair = AsyncStream<Upstream.Event>.makeStream()
         events = pair.stream
         continuation = pair.continuation
@@ -258,9 +356,14 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
             let result: JSONValue
             switch method {
             case "initialize":
-                result = .object(["protocolVersion": .string(MCPProtocolVersion.current),
-                    "capabilities": .object(["tools": .object([:])]),
-                    "serverInfo": .object(["name": .string("Native-\(index)"), "version": .string("1")])])
+                let held = initialization.withLockedValue { state in
+                    guard state.held else { return false }
+                    state.pending.append(id)
+                    return true
+                }
+                initializationStarted.signal()
+                if held { return .accepted }
+                result = initializeResult
             case "tools/list":
                 result = .object(["tools": .array(["Echo-\(index)", "Wait"].map { name in
                     .object(["name": .string(name), "description": .string(name),
@@ -281,6 +384,37 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
             continuation.yield(.message(try JSONRPC.Wire.resultResponseData(id: id, result: result)))
         } catch { Issue.record(error) }
         return .accepted
+    }
+
+    private var initializeResult: JSONValue {
+        .object(["protocolVersion": .string(MCPProtocolVersion.current),
+            "capabilities": .object(["tools": .object([:])]),
+            "serverInfo": .object(["name": .string("Native-\(index)"), "version": .string("1")])])
+    }
+
+    func failInitialization() throws {
+        let ids = initialization.withLockedValue { state in
+            let ids = state.pending
+            state.pending.removeAll()
+            return ids
+        }
+        for id in ids {
+            continuation.yield(.message(try JSONRPC.Wire.errorResponseData(
+                id: id, code: -32000, message: "fixture initialization failed"
+            )))
+        }
+    }
+
+    func releaseInitialization() throws {
+        let ids = initialization.withLockedValue { state in
+            state.held = false
+            let ids = state.pending
+            state.pending.removeAll()
+            return ids
+        }
+        for id in ids {
+            continuation.yield(.message(try JSONRPC.Wire.resultResponseData(id: id, result: initializeResult)))
+        }
     }
 
     func emitServerRequest() throws {
@@ -305,16 +439,26 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
 private final class BrokerRuntimeFactory: Sendable {
     let transports = NIOLockedValueBox<[BrokerTransport]>([])
     let failNewHosts = NIOLockedValueBox(false)
+    let holdsInitialization = NIOLockedValueBox(false)
+    let created = TestSignal()
     func make(_ configuration: ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing {
         if failNewHosts.withLockedValue({ $0 }) { throw NativeHostBrokerError("fixture startup failed") }
         let upstream = transports.withLockedValue { values in
-            let transport = BrokerTransport(index: Int64(values.count + 1))
+            let transport = BrokerTransport(index: Int64(values.count + 1),
+                                            holdsInitialization: holdsInitialization.withLockedValue { $0 })
             values.append(transport)
             return transport
         }
-        return ProxyRuntime.testing(configuration: configuration) { eventLoop, notification, closed in
+        created.signal()
+        return ProxyRuntime.testing(configuration: configuration) { eventLoop, notification, closed, catalogChanged in
             RuntimeCoordinator(config: configuration, eventLoop: eventLoop, upstreams: [upstream],
-                notificationSink: notification, sessionClosedSink: closed, startImmediately: false)
+                nativeUpstreamFactory: { [self] in
+                    let replacement = BrokerTransport(index: upstream.index,
+                        holdsInitialization: holdsInitialization.withLockedValue { $0 })
+                    transports.withLockedValue { $0.append(replacement) }
+                    return replacement
+                }, notificationSink: notification, sessionClosedSink: closed,
+                catalogChangedSink: catalogChanged, startImmediately: false)
         }
     }
 }
@@ -324,24 +468,32 @@ private final class BrokerFixture: Sendable {
     let factory = BrokerRuntimeFactory()
     let events = NIOLockedValueBox<[ProxyRuntimeEvent]>([])
     let serverRequestDelivered = TestSignal()
+    let catalogChangedDelivered = TestSignal()
     let defaultInstallation = XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Default.app"))
 
-    init() throws {
+    init(clock: ClockClient = .liveValue, holdsInitialization: Bool = false) throws {
         let factory = factory
+        factory.holdsInitialization.withLockedValue { $0 = holdsInitialization }
         let events = events
         let defaultInstallation = defaultInstallation
         let inventory = XcodeHostInventory(defaultInstallation: defaultInstallation) {
             [defaultInstallation, XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Other.app"))]
         }
         broker = try NativeHostBroker(configuration: makeConfig(requestTimeout: 5),
-                                  inventory: inventory, factory: factory.make)
+                                  inventory: inventory, clock: clock, factory: factory.make)
         let delivered = serverRequestDelivered
+        let catalogChanged = catalogChangedDelivered
         let cancel = broker.subscribeToEvents { event in
             events.withLockedValue { $0.append(event) }
             if case .notification(_, let data) = event,
                let object = try? JSONRPC.Wire.object(fromData: data),
                case .request("sampling/createMessage", _) = JSONRPC.Message.Inspector.kind(of: object) {
                 delivered.signal()
+            }
+            if case .notification(_, let data) = event,
+               let object = try? JSONRPC.Wire.object(fromData: data),
+               object["method"] as? String == "notifications/tools/list_changed" {
+                catalogChanged.signal()
             }
         }
         let broker = broker

@@ -14,12 +14,15 @@ package struct ProxySessionID: Hashable, Sendable {
 package enum ProxyRuntimeEvent: Sendable {
     case sessionOpened(sessionID: ProxySessionID)
     case notification(sessionID: ProxySessionID, data: Data)
+    /// Native tool availability or the cached catalog changed.
+    case catalogChanged
     case sessionClosed(sessionID: ProxySessionID)
 }
 
 package struct ProxyRuntimeRequest: Sendable {
     package let data: Data
     package let decodedJSON: JSONValue?
+    package var deadline: Date?
     package var headerSessionExists: Bool
     package let prefersEventStream: Bool
 
@@ -75,6 +78,7 @@ package enum ProxyRuntimeCancellationReason: String, Sendable {
     case channelInactive
     case responseWriteFailure
     case clientNotification
+    case requestDeadline
 }
 
 package enum ProxyRuntimeSessionState: Sendable, Equatable {

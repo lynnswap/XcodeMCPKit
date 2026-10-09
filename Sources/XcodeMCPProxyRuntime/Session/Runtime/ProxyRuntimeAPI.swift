@@ -97,6 +97,9 @@ final class ProxyRuntimeRequestOperation: ProxyRuntimeRequestOperating, Sendable
         case .channelInactive: source = .channelInactive
         case .responseWriteFailure: source = .responseWriteFailure
         case .clientNotification: source = .clientNotification
+        case .requestDeadline:
+            _ = handle.timeOut(using: executor.sessionManager)
+            return
         }
         executor.cancel(handle, source: source)
     }
@@ -209,6 +212,7 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
                     .sessionClosed(sessionID: ProxySessionID(rawValue: sessionID))
                 )
             },
+            catalogChangedSink: { eventSource.emit(.catalogChanged) },
             startImmediately: false
         )
         self.init(
@@ -226,7 +230,8 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
             @Sendable (
                 _ eventLoop: EventLoop,
                 _ notificationSink: @escaping @Sendable (String, Data) -> Void,
-                _ sessionClosedSink: @escaping @Sendable (String) -> Void
+                _ sessionClosedSink: @escaping @Sendable (String) -> Void,
+                _ catalogChangedSink: @escaping @Sendable () -> Void
             ) -> any RuntimeCoordinating
     ) -> ProxyRuntime {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -246,7 +251,8 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
                 eventSource.emit(
                     .sessionClosed(sessionID: ProxySessionID(rawValue: sessionID))
                 )
-            }
+            },
+            { eventSource.emit(.catalogChanged) }
         )
         return ProxyRuntime(
             config: config,

@@ -1,5 +1,6 @@
 import Foundation
 import NIOConcurrencyHelpers
+import XcodeMCPCore
 import XcodeMCPProxyRuntimeContract
 
 final class NativeHostBrokerCancellation: Sendable {
@@ -39,6 +40,7 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
         var result: Result<ProxyRuntimeReply, any Error>?
         var callbacks: [@Sendable (Result<ProxyRuntimeReply, any Error>) -> Void] = []
         var task: Task<Void, Never>?
+        var timer: Task<Void, Never>?
     }
 
     private let state = NIOLockedValueBox(State())
@@ -49,6 +51,9 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
     init(
         cancelledReply: ProxyRuntimeReply,
         requestIDKey: String? = nil,
+        deadline: Date? = nil,
+        clock: ClockClient = .liveValue,
+        timeoutReply: ProxyRuntimeReply? = nil,
         work: @escaping @Sendable (NativeHostBrokerCancellation) async -> ProxyRuntimeReply
     ) {
         self.cancelledReply = cancelledReply
@@ -57,9 +62,21 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
             let reply = await work(cancellation)
             finish(.success(reply))
         }
-        state.withLockedValue { state in
-            if state.result == nil { state.task = task }
+        let timer = deadline.flatMap { deadline -> Task<Void, Never>? in
+            guard let timeoutReply else { return nil }
+            return Task { [weak self] in
+                await clock.sleep(.seconds(max(0, deadline.timeIntervalSince(clock.now()))))
+                guard !Task.isCancelled else { return }
+                self?.interrupt(with: timeoutReply, reason: .requestDeadline)
+            }
         }
+        let retained = state.withLockedValue { state in
+            guard state.result == nil else { return false }
+            state.task = task
+            state.timer = timer
+            return true
+        }
+        if !retained { task.cancel(); timer?.cancel() }
     }
 
     func whenComplete(_ completion: @escaping @Sendable (Result<ProxyRuntimeReply, any Error>) -> Void) {
@@ -72,22 +89,34 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
     }
 
     func cancel(reason: ProxyRuntimeCancellationReason) {
+        interrupt(with: cancelledReply, reason: reason)
+    }
+
+    private func interrupt(with reply: ProxyRuntimeReply, reason: ProxyRuntimeCancellationReason) {
         let task = state.withLockedValue { $0.task }
-        finish(.success(cancelledReply))
+        guard finish(.success(reply)) else { return }
         cancellation.cancel(reason: reason)
         task?.cancel()
     }
 
-    private func finish(_ result: Result<ProxyRuntimeReply, any Error>) {
-        let callbacks = state.withLockedValue { state in
-            guard state.result == nil else { return [@Sendable (Result<ProxyRuntimeReply, any Error>) -> Void]() }
+    @discardableResult
+    private func finish(_ result: Result<ProxyRuntimeReply, any Error>) -> Bool {
+        let resources = state.withLockedValue { state -> (
+            [@Sendable (Result<ProxyRuntimeReply, any Error>) -> Void], Task<Void, Never>?
+        )? in
+            guard state.result == nil else { return nil }
             state.result = result
             state.task = nil
             let callbacks = state.callbacks
+            let timer = state.timer
             state.callbacks.removeAll()
-            return callbacks
+            state.timer = nil
+            return (callbacks, timer)
         }
-        for callback in callbacks { callback(result) }
+        guard let resources else { return false }
+        resources.1?.cancel()
+        for callback in resources.0 { callback(result) }
+        return true
     }
 }
 
