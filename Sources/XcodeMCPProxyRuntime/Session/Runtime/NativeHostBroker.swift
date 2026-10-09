@@ -145,7 +145,9 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             return true
         }
         if !retained { operation.cancel(reason: .channelInactive) }
-        operation.whenComplete { _ in session.state.withLockedValue { $0.operations.removeValue(forKey: key) } }
+        operation.whenComplete { _ in
+            _ = session.state.withLockedValue { $0.operations.removeValue(forKey: key) }
+        }
         return operation
     }
 
@@ -302,7 +304,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 storage.backendBindings[backendID] = Binding(session: session, hostIdentifier: host.identifier)
             }
         }, unregister: { [self] backendID in
-            state.withLockedValue { $0.backendBindings.removeValue(forKey: backendID) }
+            _ = state.withLockedValue { $0.backendBindings.removeValue(forKey: backendID) }
         })
     }
 
@@ -464,7 +466,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         state.withLockedValue { storage in
             storage.closing[key] = Task { [self] in
                 await closing.value
-                state.withLockedValue { $0.closing.removeValue(forKey: key) }
+                _ = state.withLockedValue { $0.closing.removeValue(forKey: key) }
             }
         }
         eventSource.emit(.sessionClosed(sessionID: session.identifier))

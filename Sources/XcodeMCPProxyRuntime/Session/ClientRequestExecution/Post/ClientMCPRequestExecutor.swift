@@ -310,7 +310,6 @@ final class ClientMCPRequestExecutor: Sendable {
         admittedHandle: CancellationHandle? = nil,
         requestDeadline: Date?
     ) -> ClientMCPRequestExecutor.Operation {
-        let forwardedBodyData = forwardedRequest.bodyData
         guard let forwardedRequestJSON = forwardedRequest.decodedJSON.foundationObject as? [String: Any] else {
             return immediate(
                 .mcpError(
