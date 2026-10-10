@@ -5,7 +5,7 @@ The server runs tools in owned headless hosts.
 
 ## Select an Xcode host
 
-Each MCP session starts on the server's terminal-default Xcode. Call
+Each MCP session starts on the server's selected default Xcode. Call
 `XcodeMCPKitListHosts` to list existing hosts and installed Xcode candidates.
 The result identifies the default and selected hosts and reports the native PID
 when a host is running. Listing does not start every candidate.

@@ -60,7 +60,9 @@ private extension ProxyServerCommand {
         return XcodeMCPProxyServerConfiguration(
             bindAddress: .init(host: listenAddress.host, port: listenAddress.port),
             nativeHostBundleURL: environment["XCODE_MCP_NATIVE_HOST_BUNDLE"].map { URL(fileURLWithPath: $0) },
-            developerDirectoryURL: environment["DEVELOPER_DIR"].map { URL(fileURLWithPath: $0) },
+            developerDirectoryURL: environment["DEVELOPER_DIR"].flatMap { value in
+                value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : URL(fileURLWithPath: value)
+            },
             maxBodyBytes: maxBodyBytes ?? 1_048_576,
             requestTimeout: timeout > 0 ? .seconds(timeout) : nil,
             discovery: .file(ProxyFilesystemLocations.discoveryFileURL(environment: environment))

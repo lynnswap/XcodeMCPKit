@@ -7,7 +7,7 @@ Baseline: `7fd4d71086b585345550895c8b05d8e128a13f45`.
 
 Keep one HTTP MCP endpoint while allowing a client to list Xcode hosts and change its selected host during a conversation. Each host has its own native process, Xcode installation, saved workspace models, tool catalog, and operation settings. Several hosts may use the same installation. Build storage and compilation caches retain Xcode's existing sharing and locking behavior; the broker does not assign host-specific DerivedData directories.
 
-A new client starts on the server's terminal-default Xcode. Resolve the explicit embedding configuration first, then the server's inherited `DEVELOPER_DIR`, then `xcode-select -p`. Capture the resulting developer directory when registering the default host so restarting that host cannot silently change its installation.
+A new client starts on the server's default Xcode. Try the explicit embedding configuration first, then the server's inherited `DEVELOPER_DIR`, then `xcode-select -p`. If those selections are unavailable, discover installed Xcode applications as described in [configuration](configuration.md#xcode-compatibility). The proxy and standalone native helper share installation discovery and path normalization. Capture the resulting developer directory when registering the default host so restarting that host cannot silently change its installation.
 
 Keep existing HTTP, STDIO-adapter, and Swift-client entry points. GUI buffers and GUI scheme/destination selection remain outside the headless contract.
 

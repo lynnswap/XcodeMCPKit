@@ -64,13 +64,13 @@ struct ServerCommandTests {
         #expect(config.developerDirectoryURL?.path == "/Applications/Selected Xcode.app")
     }
 
-    @Test func emptyNativeEnvironmentValuesRemainExplicitOverrides() throws {
+    @Test func emptyDeveloperDirectoryUsesAutomaticXcodeSelection() throws {
         let config = try resolvedConfiguration(environment: [
             "DEVELOPER_DIR": "",
             "XCODE_MCP_NATIVE_HOST_BUNDLE": "",
         ])
         #expect(config.nativeHostBundleURL != nil)
-        #expect(config.developerDirectoryURL != nil)
+        #expect(config.developerDirectoryURL == nil)
     }
 
     @Test func removedConfigurationEnvironmentDoesNotAffectTheServer() throws {

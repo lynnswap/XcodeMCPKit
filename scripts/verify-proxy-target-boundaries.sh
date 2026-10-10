@@ -56,9 +56,9 @@ reject_matches \
     Sources Tests Package.swift
 
 reject_matches \
-    "native host and wire modules must not import NIO or the proxy/client runtime" \
+    "native host, installation, and wire modules must not import NIO or the proxy/client runtime" \
     '^[[:space:]]*([[:alnum:]_@()]+[[:space:]]+)*import[[:space:]]+((class|enum|func|let|protocol|struct|typealias|var)[[:space:]]+)?(NIO[[:alnum:]_]*|CNIO[[:alnum:]_]*|_NIO[[:alnum:]_]*|XcodeMCPCore|XcodeMCPKit|XcodeMCPProxy[[:alnum:]_]*)([[:space:].;]|$)' \
-    Sources/XcodeMCPNativeHost Sources/XcodeMCPNativeRuntime Sources/XcodeMCPWire
+    Sources/XcodeMCPNativeHost Sources/XcodeMCPNativeRuntime Sources/XcodeMCPInstallation Sources/XcodeMCPWire
 
 package_description="$(swift package describe --type json)"
 if ! jq -e '
@@ -73,7 +73,11 @@ if ! jq -e '
         dependencies($target) | all(test("^(NIO|CNIO|_NIO|XcodeMCPCore$|XcodeMCPKit$|XcodeMCPProxy)") | not);
     hasOnlyNativeDependencies("XcodeMCPNativeHost") and
     hasOnlyNativeDependencies("XcodeMCPNativeRuntime") and
+    ($graph["XcodeMCPInstallation"] == []) and
     ($graph["XcodeMCPWire"] == []) and
+    directlyUses("XcodeMCPNativeHost"; "XcodeMCPInstallation") and
+    directlyUses("XcodeMCPNativeRuntime"; "XcodeMCPInstallation") and
+    directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPInstallation") and
     directlyUses("XcodeMCPNativeHost"; "XcodeMCPNativeRuntime") and
     directlyUses("XcodeMCPNativeHost"; "XcodeMCPWire") and
     directlyUses("XcodeMCPNativeRuntime"; "XcodeMCPWire") and

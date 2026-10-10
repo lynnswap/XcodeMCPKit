@@ -15,10 +15,25 @@ installations need their own validation. Catalog discovery does not establish
 that every tool works: previews, device operations, and account-dependent tools
 can require permissions or services beyond those used by build and test.
 
-The default host uses the server's explicitly configured developer directory,
-then its inherited `DEVELOPER_DIR`, then `xcode-select -p`. That installation is
-captured at server startup and retained when the host restarts. The standard
-`DEVELOPER_DIR` environment variable can select the terminal default:
+The default host first tries the server's explicitly configured developer
+directory, its inherited `DEVELOPER_DIR`, and `xcode-select -p`, in that order.
+Unavailable selections, including Command Line Tools and removed Xcode copies,
+produce a diagnostic and do not prevent discovery of installed Xcode apps.
+
+Automatic discovery combines macOS's registered application inventory, Spotlight,
+and the system and user Applications directories, including subdirectories.
+It accepts renamed apps and nonstandard locations, resolves symbolic links,
+and skips stale registrations, missing native frameworks, and installations
+that require a newer macOS. When several candidates remain, it selects the
+highest `CFBundleShortVersionString`, with the app path breaking ties.
+
+The selected installation is logged at startup and retained when the host
+restarts. A registered host whose installation has been removed reports that
+failure instead of changing its installation. The standalone helper's
+`--developer-dir` also selects an exact installation; omit it for automatic
+discovery. Native initialization still checks the selected Xcode's API contracts;
+a failure after selection does not switch a running host to another installation.
+The standard `DEVELOPER_DIR` environment variable can prefer an installation:
 
 ```bash
 DEVELOPER_DIR=/Applications/Xcode_27.0.app/Contents/Developer xcode-mcp-proxy-server

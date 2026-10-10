@@ -2,6 +2,7 @@ import AppKit
 import Darwin
 import Dispatch
 import Foundation
+import XcodeMCPInstallation
 import XcodeMCPNativeRuntime
 import XcodeMCPWire
 
@@ -123,19 +124,10 @@ private enum NativeHostMain {
     }
 
     private static func selectedDeveloperDirectory(_ arguments: HostArguments) throws -> URL {
-        if let path = arguments.developerDirectory ?? ProcessInfo.processInfo.environment["DEVELOPER_DIR"] {
-            return URL(fileURLWithPath: path, isDirectory: true)
-        }
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
-        process.arguments = ["-p"]
-        process.standardOutput = output
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw NativeRuntimeError.unavailable("xcode-select could not locate Xcode") }
-        return URL(fileURLWithPath: String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines), isDirectory: true)
+        try XcodeInstallationDiscovery.live.resolve(
+            required: arguments.developerDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) },
+            report: { report($0) }
+        ).developerDirectory
     }
 
     private static func prepareLoaderEnvironment(_ installation: NativeXcodeInstallation) throws {

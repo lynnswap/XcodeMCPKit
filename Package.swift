@@ -56,14 +56,20 @@ let package = Package(
     ],
     targets: [
         .target(name: "XcodeMCPWire", swiftSettings: strictSwiftSettings),
+        .target(name: "XcodeMCPInstallation", swiftSettings: strictSwiftSettings),
+        .testTarget(
+            name: "XcodeMCPInstallationTests",
+            dependencies: ["XcodeMCPInstallation"],
+            swiftSettings: strictSwiftSettings
+        ),
         .target(
             name: "XcodeMCPNativeRuntime",
-            dependencies: ["XcodeMCPWire", .product(name: "ABIBridge", package: "ABIBridge")],
+            dependencies: ["XcodeMCPInstallation", "XcodeMCPWire", .product(name: "ABIBridge", package: "ABIBridge")],
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
             name: "XcodeMCPNativeHost",
-            dependencies: ["XcodeMCPNativeRuntime", "XcodeMCPWire"],
+            dependencies: ["XcodeMCPInstallation", "XcodeMCPNativeRuntime", "XcodeMCPWire"],
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(
@@ -106,6 +112,7 @@ let package = Package(
         .target(
             name: "XcodeMCPProxyRuntime",
             dependencies: [
+                "XcodeMCPInstallation",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
                 .product(name: "Logging", package: "swift-log"),

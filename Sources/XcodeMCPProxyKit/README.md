@@ -55,7 +55,7 @@ may be incomplete, even though the server lifecycle has stopped.
 
 - `bindAddress`: host and port; port `0` requests an ephemeral port.
 - `nativeHostBundleURL`: signed native helper app bundle, or `nil` for automatic lookup.
-- `developerDirectoryURL`: selected Xcode app/developer directory, or `nil` for the selected installation.
+- `developerDirectoryURL`: preferred Xcode app/developer directory. Unavailable selections fall through to installed-Xcode discovery.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
 - `initializeHandshake`: typed upstream initialization for embedding.
