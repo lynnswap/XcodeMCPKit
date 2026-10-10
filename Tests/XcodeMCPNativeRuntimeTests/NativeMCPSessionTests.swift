@@ -241,6 +241,51 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test func presentedErrorsPreservePartialOutputAndAllowTheNextRequest() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            let error = NSError(domain: "com.apple.dt.PBXProject", code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "Failed to save removed project"])
+            harness.backend.beforeExecute = { NativeErrorPresentation.report(error) }
+            try harness.call("Save", id: "save-error")
+            let output: JSONValue = .object(["filesWritten": .number(.int(1))])
+            try await harness.backend.nextExecution().complete(output)
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "result", "isError") == .bool(true))
+            #expect(try nativeTestField(response, "result", "structuredContent") == output)
+            guard case .array(let content) = try nativeTestField(response, "result", "content") else {
+                Issue.record("Tool result has no content")
+                return
+            }
+            #expect(content.last == .object(["type": .string("text"), "text": .string(error.description)]))
+
+            harness.backend.beforeExecute = nil
+            try harness.call("OpenOtherWorkspace", id: "after-save-error")
+            try await harness.backend.nextExecution().complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "result", "isError") == .bool(false))
+        }
+    }
+
+    @Test func presentedErrorsRemainScopedToConcurrentRequests() async throws {
+        try await withNativeSession { failed in
+            try await withNativeSession { unaffected in
+                _ = try await failed.initialize()
+                _ = try await unaffected.initialize()
+                failed.backend.beforeExecute = {
+                    NativeErrorPresentation.report(NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileWriteNoPermission.rawValue))
+                }
+                try failed.call("Save", id: "failed")
+                let first = try await failed.backend.nextExecution()
+                try unaffected.call("ReadOtherWorkspace", id: "unaffected")
+                let second = try await unaffected.backend.nextExecution()
+                try second.complete(.string("Read successfully"))
+                #expect(try nativeTestField(await unaffected.nextMessage(), "result", "isError") == .bool(false))
+                try first.complete(.object([:]))
+                #expect(try nativeTestField(await failed.nextMessage(), "result", "isError") == .bool(true))
+            }
+        }
+    }
+
     @Test func completedOutputDoesNotChangeTheMeaningOfAnErrorField() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()

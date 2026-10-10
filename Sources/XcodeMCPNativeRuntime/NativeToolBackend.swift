@@ -78,6 +78,11 @@ package final class NativeXcodeBackend: NativeToolBackend {
         guard let tool = tools[name], let action = unsafe actions[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
+        try await NativeErrorPresentation.$capture.withValue(nil) {
+            do { try await workspaces.closeRemovedWorkspaces() }
+            catch { NativeErrorPresentation.reportBackground("Native workspace cleanup failed: \(error)") }
+            try Task.checkCancellation()
+        }
         var arguments = arguments
         if tool.acceptsWorkspaceIdentifier, case .string(let selector) = arguments["workspaceIdentifier"] {
             arguments["workspaceIdentifier"] = .string(try await workspaces.resolve(selector, opensIfMissing: name != "XcodeCloseWorkspace"))

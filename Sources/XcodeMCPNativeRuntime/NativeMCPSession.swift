@@ -120,61 +120,68 @@ package final class NativeMCPSession {
             let tools = try await backend.listTools()
             return withOrigin(["tools": .array(tools.map(\.descriptor))])
         case "tools/call":
-            guard case .object(let fields) = params, case .string(let name) = fields["name"] else {
-                throw NativeRuntimeError.invalidRequest("tools/call requires a tool name")
+            let capture = NativeErrorPresentation.Capture()
+            return try await NativeErrorPresentation.$capture.withValue(capture) {
+                capture.addingDiagnostics(to: try await performTool(params: params))
             }
-            var arguments: [String: JSONValue] = [:]
-            if let value = fields["arguments"] {
-                guard case .object(let object) = value else {
-                    throw NativeRuntimeError.invalidRequest("Tool arguments must be an object")
-                }
-                arguments = object
-            }
-            let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID)
-            let updates: AsyncStream<Data>
-            do {
-                updates = try await backend.execute(name, arguments: arguments, context: context)
-            } catch let error as NativeToolExecutionError {
-                try Task.checkCancellation()
-                return try toolResult(.string(error.message), isError: true)
-            }
-            var completed: JSONValue?
-            for await data in updates {
-                guard let event = JSONValue(any: try JSONSerialization.jsonObject(with: data)),
-                      case .object(let fields) = event, case .string(let type) = fields["type"] else {
-                    throw NativeRuntimeError.unsupportedContract("Native action emitted an unsupported event")
-                }
-                try Task.checkCancellation()
-                switch type {
-                case "update":
-                    if case .object(let metadata) = fieldsForMetadata(params), let token = metadata["progressToken"],
-                       requestID(token.foundationObject) != nil,
-                       case .object(var progress) = fields["data"] {
-                        progress["progressToken"] = token
-                        try send(.object([
-                            "jsonrpc": .string("2.0"), "method": .string("notifications/progress"),
-                            "params": .object(progress),
-                        ]))
-                    }
-                case "completed":
-                    guard let result = fields["data"] else {
-                        throw NativeRuntimeError.unsupportedContract("Native completion has no output")
-                    }
-                    completed = try toolResult(result, isError: false)
-                case "error":
-                    completed = try toolResult(fields["data"] ?? .string("Native tool failed"), isError: true)
-                default:
-                    throw NativeRuntimeError.unsupportedContract("Unsupported native event '\(type)'")
-                }
-            }
-            try Task.checkCancellation()
-            guard let completed else { throw NativeRuntimeError.invocation("Native action ended without a completion result") }
-            return completed
         default:
             throw NativeRuntimeError.methodNotFound("Unsupported MCP method '\(method)'")
         }
+    }
+
+    private func performTool(params: JSONValue?) async throws -> JSONValue {
+        guard case .object(let fields) = params, case .string(let name) = fields["name"] else {
+            throw NativeRuntimeError.invalidRequest("tools/call requires a tool name")
+        }
+        var arguments: [String: JSONValue] = [:]
+        if let value = fields["arguments"] {
+            guard case .object(let object) = value else {
+                throw NativeRuntimeError.invalidRequest("Tool arguments must be an object")
+            }
+            arguments = object
+        }
+        let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID)
+        let updates: AsyncStream<Data>
+        do {
+            updates = try await backend.execute(name, arguments: arguments, context: context)
+        } catch let error as NativeToolExecutionError {
+            try Task.checkCancellation()
+            return try toolResult(.string(error.message), isError: true)
+        }
+        var completed: JSONValue?
+        for await data in updates {
+            guard let event = JSONValue(any: try JSONSerialization.jsonObject(with: data)),
+                  case .object(let fields) = event, case .string(let type) = fields["type"] else {
+                throw NativeRuntimeError.unsupportedContract("Native action emitted an unsupported event")
+            }
+            try Task.checkCancellation()
+            switch type {
+            case "update":
+                if case .object(let metadata) = fieldsForMetadata(params), let token = metadata["progressToken"],
+                   requestID(token.foundationObject) != nil,
+                   case .object(var progress) = fields["data"] {
+                    progress["progressToken"] = token
+                    try send(.object([
+                        "jsonrpc": .string("2.0"), "method": .string("notifications/progress"),
+                        "params": .object(progress),
+                    ]))
+                }
+            case "completed":
+                guard let result = fields["data"] else {
+                    throw NativeRuntimeError.unsupportedContract("Native completion has no output")
+                }
+                completed = try toolResult(result, isError: false)
+            case "error":
+                completed = try toolResult(fields["data"] ?? .string("Native tool failed"), isError: true)
+            default:
+                throw NativeRuntimeError.unsupportedContract("Unsupported native event '\(type)'")
+            }
+        }
+        try Task.checkCancellation()
+        guard let completed else { throw NativeRuntimeError.invocation("Native action ended without a completion result") }
+        return completed
     }
 
     private func withOrigin(_ fields: [String: JSONValue]) -> JSONValue {

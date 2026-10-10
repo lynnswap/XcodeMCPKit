@@ -42,6 +42,7 @@ package final class NativeApplicationBootstrap {
         let createController = try runtime.object(controllerClass as AnyObject).method(selector: "new", as: (() -> AnyObject).self)
         documentController = try unsafe createController.unsafeInvoke()
         application.setActivationPolicy(.prohibited)
+        try NativeErrorPresentation.install(on: application)
         workspaceOpenConfirmation = NativeWorkspaceOpenConfirmation(application: application)
         return application
     }

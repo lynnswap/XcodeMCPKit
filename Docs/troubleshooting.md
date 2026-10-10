@@ -31,6 +31,12 @@ Native tool failures keep their MCP `isError` result; transport and protocol
 failures remain request errors. Headless startup does not require agent-access
 approval or changes to Xcode's permission store.
 
+If a native error was suppressed, inspect `Native error presentation suppressed`
+in the host's stderr or the failed tool result for its domain, code, and context.
+The host closes removed saved workspaces before subsequent tool execution. A
+remaining cleanup failure is reported as `Native workspace cleanup failed`;
+inspect that failure before retrying an operation against the removed workspace.
+
 ## CoreSimulator service connection becomes invalid
 
 When CoreSimulator declares that Simulator services are no longer available to
