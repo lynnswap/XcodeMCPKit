@@ -10,10 +10,16 @@ For a custom layout, use `XCODE_MCP_NATIVE_HOST_BUNDLE`. Embedding code can set
 `nativeHostBundleURL`. The server reports a missing executable before binding
 its endpoint.
 
-Check the selected installation with `xcode-select -p`. `DEVELOPER_DIR` and
-the embedding `developerDirectoryURL` can select another
-Xcode app or developer directory. The host normalizes that selection and
-reports missing required frameworks or native API contracts. Xcode 27 / Swift
+Check the `Selected Xcode` startup log for the installation actually used.
+The server tries the embedding `developerDirectoryURL`, `DEVELOPER_DIR`, and
+`xcode-select -p` before discovering installed apps. A Command Line Tools
+selection, a removed app, or another unavailable selection produces a diagnostic
+and falls through to discovery. With no available Xcode, startup reports an
+installation error instead of repeatedly launching Command Line Tools.
+
+Set `DEVELOPER_DIR` or `developerDirectoryURL` to prefer another Xcode app or
+developer directory. The host reports missing native API contracts after
+selection. Xcode 27 / Swift
 6.4 is the verified packaging environment; other versions are not rejected by
 a manufactured-version allowlist.
 

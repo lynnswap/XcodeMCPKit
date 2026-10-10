@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPInstallation
 import XcodeMCPWire
 
 package struct NativeXcodeInstallation: Sendable {
@@ -6,11 +7,9 @@ package struct NativeXcodeInstallation: Sendable {
     package let contentsDirectory: URL
 
     package init(developerDirectory: URL) throws {
-        var directory = developerDirectory.standardizedFileURL.resolvingSymlinksInPath()
-        if directory.pathExtension == "app" {
-            directory.appendPathComponent("Contents/Developer", isDirectory: true)
-        }
-        let contents = directory.deletingLastPathComponent()
+        let installation = XcodeInstallation(developerDirectory: developerDirectory)
+        let directory = installation.developerDirectory
+        let contents = installation.contentsDirectory
         guard FileManager.default.fileExists(atPath: contents.appendingPathComponent("Frameworks/IDEFoundation.framework").path) else {
             throw NativeRuntimeError.unavailable("Selected developer directory does not contain Xcode IDEFoundation: \(directory.path)")
         }

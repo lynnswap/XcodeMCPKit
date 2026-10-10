@@ -17,7 +17,9 @@ scope is recorded in [issue #276](https://github.com/lynnswap/XcodeMCPKit/issues
 
 The package retains its public products and existing HTTP, STDIO, and Swift
 client APIs. `XcodeMCPNativeHost` and `XcodeMCPNativeRuntime` use ABIBridge,
-Foundation/AppKit, and the shared wire target without linking NIO. Apple
+Foundation/AppKit, and the shared wire target without linking NIO. The internal
+`XcodeMCPInstallation` target shares installation discovery and path normalization
+with the proxy without importing its networking runtime or ABIBridge. Apple
 frameworks are loaded from the selected installation and are not redistributed.
 
 | Resource | Owner |

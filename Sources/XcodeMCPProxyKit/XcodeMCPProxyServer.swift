@@ -92,7 +92,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Native helper application bundle. `nil` uses the installed helper.
     public var nativeHostBundleURL: URL?
 
-    /// Xcode developer directory. `nil` uses the selected Xcode installation.
+    /// Preferred Xcode app or developer directory. Unavailable selections use discovery.
     public var developerDirectoryURL: URL?
 
     /// Maximum accepted HTTP request body size in bytes.
@@ -115,7 +115,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// - Parameters:
     ///   - bindAddress: HTTP bind address.
     ///   - nativeHostBundleURL: Native helper application bundle, or `nil` to use the installed helper.
-    ///   - developerDirectoryURL: Xcode developer directory, or `nil` to use the selected installation.
+    ///   - developerDirectoryURL: Preferred Xcode app or developer directory.
+    ///     Unavailable selections fall through to installed-Xcode discovery.
     ///   - maxBodyBytes: Maximum accepted HTTP request body size.
     ///   - requestTimeout: Request timeout, or `nil` to disable it.
     ///   - discovery: Endpoint discovery policy.
