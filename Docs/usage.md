@@ -61,6 +61,18 @@ owned model; host shutdown closes its remaining models. These operations do not
 manage windows in a separate Xcode application. Host restart invalidates native
 identifiers, so use the absolute project path to load it again.
 
+Before executing a tool, the host closes models whose saved workspace or project
+directories have been removed. Other loaded workspaces remain available. Cleanup
+failures are reported on the host's stderr and do not fail a request for another
+workspace.
+
+Native errors are reported without presenting a modal error panel. Errors raised
+in a tool request set its MCP `isError` result and retain any partial output and
+the native error details. Errors raised outside a request are recorded on stderr.
+The host continues accepting requests without waiting for a GUI response or an
+unlocked desktop. This does not replay a failed operation or confirm that its
+effects were rolled back.
+
 ## Saved files and operation settings
 
 The host reads saved project and source files. Save editor changes before an MCP

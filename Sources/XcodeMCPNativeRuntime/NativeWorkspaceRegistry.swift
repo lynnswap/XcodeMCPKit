@@ -51,6 +51,34 @@ final class NativeWorkspaceRegistry {
         _ = try unsafe manager.unsafeInvoke()
     }
 
+    func closeRemovedWorkspaces() async throws {
+        let close = try await runtime.object(registry).method(
+            named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self
+        )
+        let snapshot = try await entries()
+        var failures: [String] = []
+        for entry in snapshot {
+            guard let path = entry.path else { continue }
+            do {
+                _ = try URL(filePath: path).resourceValues(forKeys: [.isDirectoryKey])
+                continue
+            } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                // The saved model has disappeared; close it through its owner.
+            } catch {
+                failures.append("Cannot inspect native workspace '\(path)': \(error)")
+                continue
+            }
+            do {
+                try unsafe close.unsafeInvoke(entry.identifier)
+            } catch {
+                failures.append("Cannot close removed native workspace '\(path)': \(error)")
+            }
+        }
+        if !failures.isEmpty {
+            throw NativeRuntimeError.invocation(failures.joined(separator: "; "))
+        }
+    }
+
     // This registry belongs to the headless host process. Its native snapshot
     // also includes opens whose completion event a cancelled caller did not see.
     func closeAllWorkspaces() async throws {
