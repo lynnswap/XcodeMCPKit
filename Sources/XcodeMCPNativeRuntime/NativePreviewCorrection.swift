@@ -127,7 +127,12 @@ final class NativePreviewCorrection {
             _ = try await process.xcrun(["simctl", "boot", simulator.identifier])
             _ = try await process.xcrun(["simctl", "bootstatus", simulator.identifier, "-b"])
             _ = try await process.xcrun(["simctl", "install", simulator.identifier, app.path])
-            _ = try await process.xcrun(["simctl", "launch", simulator.identifier, simulator.bundleIdentifier])
+            var launch = ["simctl", "launch", simulator.identifier, simulator.bundleIdentifier]
+            if let locale = input.localization {
+                let languages = try PropertyListSerialization.data(fromPropertyList: [locale], format: .xml, options: 0)
+                launch += ["-AppleLanguages", String(decoding: languages, as: UTF8.self), "-AppleLocale", locale]
+            }
+            _ = try await process.xcrun(launch)
             let container = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, simulator.bundleIdentifier, "data"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let documents = URL(filePath: container, directoryHint: .isDirectory).appendingPathComponent("Documents")
@@ -146,6 +151,7 @@ final class NativePreviewCorrection {
             var fields: [String: JSONValue] = [
                 "previewSnapshotPath": .string(snapshotURL.path), "errors": .array([]),
                 "renderedDestination": .object(simulator.destination),
+                "supportedLocalizations": .array(try await supportedLocalizations(in: workspace).map(JSONValue.string)),
             ]
             if let name = response.displayName { fields["displayName"] = .string(name) }
             if let line = response.sourceLineNumber { fields["sourceLineNumber"] = .number(.int(Int64(line))) }
@@ -162,6 +168,28 @@ final class NativePreviewCorrection {
         }
         if let failure { throw failure }
         return result!
+    }
+
+    private func supportedLocalizations(in workspace: AnyObject) async throws -> [String] {
+        let runtime = ABIRuntime.shared
+        let getLocalizations = try await runtime.object(workspace).resolveGetter(
+            named: "(extension in PreviewsXcode):__C.IDEWorkspace.supportedLocalizations.getter : [PreviewsXcode.Locale]",
+            as: (() -> NativeSwiftValue).self)
+        let localizations = try unsafe getLocalizations.unsafeInvoke()
+        let type = try await runtime.resolveSwiftType(named: "PreviewsXcode.Locale",
+            in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
+        let getLocale = try await type.resolveGetter(named: "locale.getter : __C.DVTLocale", as: (() -> AnyObject).self,
+            receiverABI: .opaque(named: type.name))
+        return try localizations.withCopy { value in
+            guard let values = value as? [Any] else {
+                throw NativeRuntimeError.unsupportedContract("Native supported localizations are not an array")
+            }
+            return try values.map { value in
+                let locale = try unsafe getLocale.unsafeInvoke(on: value)
+                let identifier = try runtime.object(locale).resolveMethodAndWait(selector: "localeIdentifier", as: (() -> String).self)
+                return try unsafe identifier.unsafeInvoke()
+            }
+        }
     }
 
     private func workspace(_ identifier: String?) async throws -> AnyObject {

@@ -148,7 +148,9 @@ definition from the built `PreviewRegistry` metadata, and extracts its view with
 ABIBridge. A public `UIHostingController` renders the view and captures the image.
 This route does not contact `previewsd` or require its Apple-restricted entitlement.
 It supports the preview's device, fixed-size, or size-that-fits layout and a locale
-override. The image captures the rectangular hosting view; hardware display
+override. Locale overrides set the renderer's launch language preferences and
+SwiftUI environment. The response's `supportedLocalizations` comes from Xcode's
+workspace. The image captures the rectangular hosting view; hardware display
 cutout masks are not applied.
 
 Each render creates a Simulator matching the selected destination's device type
