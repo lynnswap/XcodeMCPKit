@@ -36,5 +36,14 @@ struct NativePreviewDiscoveryTests {
         let expected = [preview, rootDylib, executable, frameworkPreview, dylib, nestedDylib]
             .map { $0.resolvingSymlinksInPath().path }
         #expect(Set(libraries.map(\.path)) == Set(expected))
+
+        let frameworkPaths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [preview],
+            registryLibraries: libraries, sourceOutput: app.deletingLastPathComponent()
+                .appendingPathComponent("FixtureKit.framework/FixtureImplementation"))
+        #expect(frameworkPaths == ["FixtureApp.debug.dylib", "Frameworks/FixtureKit.framework/FixtureImplementation"])
+
+        let staticPaths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [preview],
+            registryLibraries: libraries, sourceOutput: app.deletingLastPathComponent().appendingPathComponent("FixturePackage.o"))
+        #expect(staticPaths == ["FixtureApp.debug.dylib"])
     }
 }

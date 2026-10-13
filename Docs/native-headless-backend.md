@@ -150,6 +150,8 @@ ABIBridge. A public `UIHostingController` renders the view and captures the imag
 Framework and library sources use an application that embeds their runtime image
 or links their object/archive product, including linker file lists. Application
 target ordering does not determine the host.
+The renderer loads the source's embedded runtime image by its bundle-relative
+path, including images that the application's debug dylib does not load itself.
 This route does not contact `previewsd` or require its Apple-restricted entitlement.
 The renderer sets `XCODE_RUNNING_FOR_PREVIEWS` before loading the target's code
 and signals SwiftUI when the preview code is ready, so preview-specific data is

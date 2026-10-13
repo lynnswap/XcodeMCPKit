@@ -191,7 +191,8 @@ final class NativePreviewCorrection {
         let location = prepared.location
         let destination = prepared.destination
         let build = try await builder.build(workspace: workspace, destination: destination)
-        let target = try Self.selectTarget(build.targets, source: source)
+        let selection = try Self.selectTarget(build.targets, source: source)
+        let target = selection.host
         guard target.architecture == "arm64", target.sdkRoot.contains("iphonesimulator"), target.debugDylibEnabled else {
             throw NativePipelineRequired()
         }
@@ -219,10 +220,12 @@ final class NativePreviewCorrection {
         }
         let libraries = try previewLibraries(in: app)
         let registryLibraries = try Self.registryLibraries(in: app, previewLibraries: libraries)
+        let libraryPaths = try Self.libraryPaths(in: app, previewLibraries: libraries,
+            registryLibraries: registryLibraries, sourceOutput: selection.source.outputURL)
         let symbols = try await process.xcrun(["nm", "-arch", "arm64", "-j"] + registryLibraries.map(\.path))
         let names = Self.registryNames(in: symbols)
-        let request = PreviewRendererRequest(libraryNames: libraries.map(\.lastPathComponent), registryNames: names,
-            fileName: source.lastPathComponent, moduleName: target.moduleName, lineNumber: location.line, columnNumber: location.column,
+        let request = PreviewRendererRequest(libraryNames: libraryPaths, registryNames: names,
+            fileName: source.lastPathComponent, moduleName: selection.source.moduleName, lineNumber: location.line, columnNumber: location.column,
             definitionIndex: input.index, localization: input.localization)
         try JSONEncoder().encode(request).write(to: app.appendingPathComponent("PreviewRequest.json"))
         var signing = ["--force", "--sign", "-"]
@@ -333,12 +336,19 @@ final class NativePreviewCorrection {
         return try unsafe await resolve.unsafeInvoke(path, workspace).value
     }
 
-    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL) throws -> NativePreviewBuild.Target {
+    struct Selection {
+        let source: NativePreviewBuild.Target
+        let host: NativePreviewBuild.Target
+    }
+
+    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL) throws -> Selection {
         let sourcePath = source.resolvingSymlinksInPath().path
         guard let target = targets.first(where: { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }) else {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
         }
-        if target.outputURL.map({ $0.path.contains(".app/") || $0.path.contains(".appex/") }) == true { return target }
+        if target.outputURL.map({ $0.path.contains(".app/") || $0.path.contains(".appex/") }) == true {
+            return Selection(source: target, host: target)
+        }
         let objectPaths = Set(target.objectFiles.map { $0.resolvingSymlinksInPath().path })
         let sourceOutput = target.outputURL
         let frameworkName = sourceOutput?.pathComponents.last(where: { $0.hasSuffix(".framework") })
@@ -365,10 +375,7 @@ final class NativePreviewCorrection {
         guard let host else {
             throw NativePipelineRequired()
         }
-        return NativePreviewBuild.Target(moduleName: target.moduleName, buildableName: host.buildableName,
-            sdkRoot: host.sdkRoot, sdkVariant: host.sdkVariant, architecture: host.architecture,
-            linkCommandLine: host.linkCommandLine, linkerWorkingDirectory: host.linkerWorkingDirectory,
-            objectFiles: host.objectFiles, sourceFiles: target.sourceFiles, debugDylibEnabled: host.debugDylibEnabled)
+        return Selection(source: target, host: host)
     }
 
     private func registryLocation(source: URL, index: Int) async throws -> (line: Int, column: Int) {
@@ -499,6 +506,29 @@ final class NativePreviewCorrection {
             }
         }
         return Array(Set(libraries.map { $0.resolvingSymlinksInPath() })).sorted { $0.path < $1.path }
+    }
+
+    static func libraryPaths(in app: URL, previewLibraries: [URL], registryLibraries: [URL], sourceOutput: URL?) throws -> [String] {
+        var libraries = previewLibraries
+        if let sourceOutput, !sourceOutput.path.contains(".app/"), !sourceOutput.path.contains(".appex/") {
+            let frameworkName = sourceOutput.pathComponents.last(where: { $0.hasSuffix(".framework") })
+            if frameworkName != nil || sourceOutput.pathExtension == "dylib" {
+                guard let sourceLibrary = registryLibraries.first(where: { library in
+                    library.lastPathComponent == sourceOutput.lastPathComponent
+                        && (frameworkName.map { library.pathComponents.contains($0) } ?? true)
+                }) else { throw NativePipelineRequired() }
+                libraries.append(sourceLibrary)
+            }
+        }
+        let root = app.resolvingSymlinksInPath().path + "/"
+        var paths: [String] = []
+        for library in libraries {
+            let path = library.resolvingSymlinksInPath().path
+            guard path.hasPrefix(root) else { throw NativePipelineRequired() }
+            let relative = String(path.dropFirst(root.count))
+            if !paths.contains(relative) { paths.append(relative) }
+        }
+        return paths
     }
 
     static func registryNames(in symbols: String) -> [String] {

@@ -28,7 +28,9 @@ struct NativePreviewCorrectionTests {
             try Data().write(to: binary)
         }
         let selected = try NativePreviewCorrection.selectTarget(hosts + [feature], source: source)
-        #expect(selected.outputURL == hosts[1].outputURL)
+        #expect(selected.host.outputURL == hosts[1].outputURL)
+        #expect(selected.source.outputURL == feature.outputURL)
+        #expect(selected.source.moduleName == feature.moduleName)
     }
 
     @Test(arguments: [true, false])
@@ -52,7 +54,9 @@ struct NativePreviewCorrectionTests {
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data().write(to: binary)
             let selected = try NativePreviewCorrection.selectTarget(hosts + [framework], source: source)
-            #expect(selected.outputURL == hosts[1].outputURL)
+            #expect(selected.host.outputURL == hosts[1].outputURL)
+            #expect(selected.source.outputURL == framework.outputURL)
+            #expect(selected.source.moduleName == framework.moduleName)
         } else {
             #expect(throws: NativePipelineRequired.self) {
                 try NativePreviewCorrection.selectTarget(hosts + [framework], source: source)
@@ -79,7 +83,9 @@ struct NativePreviewCorrectionTests {
             linkCommandLine: ["-o", archive.path],
             linkerWorkingDirectory: nil, objectFiles: [object], sourceFiles: [source], debugDylibEnabled: false)
         let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source)
-        #expect(selected.outputURL == hosts[1].outputURL)
+        #expect(selected.host.outputURL == hosts[1].outputURL)
+        #expect(selected.source.outputURL == package.outputURL)
+        #expect(selected.source.moduleName == package.moduleName)
     }
 
     @Test func staticProductInLinkFileList() throws {
@@ -102,7 +108,9 @@ struct NativePreviewCorrectionTests {
             linkerWorkingDirectory: nil, objectFiles: [root.appendingPathComponent("PackageContent.o")],
             sourceFiles: [source], debugDylibEnabled: false)
         let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source)
-        #expect(selected.outputURL == hosts[1].outputURL)
+        #expect(selected.host.outputURL == hosts[1].outputURL)
+        #expect(selected.source.outputURL == package.outputURL)
+        #expect(selected.source.moduleName == package.moduleName)
     }
 
     @Test(arguments: [false, true])
