@@ -154,6 +154,10 @@ precedence. When that runnable is not a compatible host, a unique compatible
 application can be used; ambiguous candidates use the native pipeline.
 Application target ordering does not determine the host. This selection does not
 recreate Xcode's complete source-specific preview dependency graph.
+Source and host records are restricted to arm64 iOS Simulator variants before
+checking for ambiguity. App extensions, including products nested inside an
+application, use the native pipeline; their containing application's dependencies
+are not recreated by the direct renderer.
 Embedded runtime images are matched to the built source's arm64 build UUID,
 with exact byte comparison when UUIDs are absent. A shared filename alone
 does not establish that an application contains the source binary.
@@ -185,8 +189,7 @@ The renderer starts its own application and scene lifecycle. Its executable,
 package type, scene manifest, principal class, main storyboard, and extension
 settings are replaced together, including platform- and device-qualified keys.
 It retains the host's bundle resources and capabilities but does not run the
-original `App.init`,
-application delegate, or extension lifecycle. Preview bodies must supply their
+original `App.init` or application delegate. Preview bodies must supply their
 required dependencies. Existing Simulator application data, App Group contents,
 and Keychain entries are not copied to the temporary device.
 Before replacing the main executable, the correction reads its signed entitlements

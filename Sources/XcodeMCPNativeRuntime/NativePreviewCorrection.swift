@@ -205,7 +205,7 @@ final class NativePreviewCorrection {
         let build = try await builder.build(workspace: workspace, destination: destination)
         let selection = try Self.selectTarget(build.targets, source: source)
         let target = selection.host
-        guard target.architecture == "arm64", target.sdkRoot.contains("iphonesimulator"), target.debugDylibEnabled else {
+        guard target.debugDylibEnabled else {
             throw NativePipelineRequired()
         }
         guard let version = build.systemVersion, version.compare("18.4", options: .numeric) != .orderedAscending else {
@@ -214,7 +214,9 @@ final class NativePreviewCorrection {
         guard let output = target.outputURL else {
             throw NativeRuntimeError.unsupportedContract("The preview target has no linked product")
         }
-        let product = try Self.productBundle(containing: output)
+        guard let product = Self.productBundle(containing: output) else {
+            throw NativePipelineRequired()
+        }
         let entitlements = try NativePreviewEntitlements.read(from: product)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/iphonesimulator-arm64")
         try prepareApp(product: product, helper: helper, app: app)
@@ -355,28 +357,32 @@ final class NativePreviewCorrection {
 
     static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL) throws -> Selection {
         let sourcePath = source.resolvingSymlinksInPath().path
-        let sources = targets.filter { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }
-        guard !sources.isEmpty else {
+        guard targets.contains(where: { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }) else {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
         }
+        let supportedTargets = targets.filter { $0.architecture == "arm64" && $0.sdkRoot.contains("iphonesimulator") }
+        let sources = supportedTargets.filter { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }
+        guard !sources.isEmpty else { throw NativePipelineRequired() }
         var selections: [Selection] = []
         for target in sources {
-            if target.outputURL.map({ $0.path.contains(".app/") || $0.path.contains(".appex/") }) == true {
-                selections.append(Selection(source: target, host: target))
+            if let output = target.outputURL, let product = productBundle(containing: output) {
+                if product.pathExtension == "app" {
+                    selections.append(Selection(source: target, host: target))
+                }
                 continue
             }
             let objectPaths = Set(target.objectFiles.map { $0.resolvingSymlinksInPath().path })
             let sourceOutput = target.outputURL
             let frameworkName = sourceOutput?.pathComponents.last(where: { $0.hasSuffix(".framework") })
-            let hosts = try targets.filter { candidate in
-                guard let output = candidate.outputURL, output.path.contains(".app/") else { return false }
+            let hosts = try supportedTargets.filter { candidate in
+                guard let output = candidate.outputURL, let app = productBundle(containing: output),
+                      app.pathExtension == "app" else { return false }
                 if candidate.objectFiles.contains(where: { objectPaths.contains($0.resolvingSymlinksInPath().path) }) {
                     return true
                 }
                 guard let sourceOutput else { return false }
                 if ["a", "o", "dylib"].contains(sourceOutput.pathExtension), try candidate.linksProduct(at: sourceOutput) { return true }
                 guard frameworkName != nil || sourceOutput.pathExtension == "dylib" else { return false }
-                let app = try productBundle(containing: output)
                 let rootLibrary = app.appendingPathComponent(sourceOutput.lastPathComponent)
                 if frameworkName == nil, FileManager.default.fileExists(atPath: rootLibrary.path),
                    try NativePreviewBinary.matches(sourceOutput, rootLibrary) {
@@ -467,13 +473,13 @@ final class NativePreviewCorrection {
         return text[..<index].utf8.count + 1
     }
 
-    private static func productBundle(containing output: URL) throws -> URL {
+    private static func productBundle(containing output: URL) -> URL? {
         var url = output.deletingLastPathComponent()
         while url.path != "/" {
             if ["app", "appex"].contains(url.pathExtension) { return url }
             url.deleteLastPathComponent()
         }
-        throw NativeRuntimeError.unsupportedContract("The linked preview product is not an application or app extension")
+        return nil
     }
 
     private func prepareApp(product: URL, helper: URL, app: URL) throws {
@@ -485,12 +491,6 @@ final class NativePreviewCorrection {
             .write(to: app.appendingPathComponent("Info.plist"))
         let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
         try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
-        if product.pathExtension == "appex" {
-            let parentFrameworks = product.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Frameworks")
-            if FileManager.default.fileExists(atPath: parentFrameworks.path) {
-                try copyContents(parentFrameworks, to: frameworks)
-            }
-        }
         try copyContents(helper.appendingPathComponent("Frameworks"), to: frameworks)
     }
 
@@ -544,7 +544,7 @@ final class NativePreviewCorrection {
 
     static func libraryPaths(in app: URL, previewLibraries: [URL], registryLibraries: [URL], sourceOutput: URL?) throws -> [String] {
         var libraries = previewLibraries
-        if let sourceOutput, !sourceOutput.path.contains(".app/"), !sourceOutput.path.contains(".appex/") {
+        if let sourceOutput, Self.productBundle(containing: sourceOutput) == nil {
             let frameworkName = sourceOutput.pathComponents.last(where: { $0.hasSuffix(".framework") })
             if frameworkName != nil || sourceOutput.pathExtension == "dylib" {
                 guard let sourceLibrary = try registryLibraries.first(where: { library in

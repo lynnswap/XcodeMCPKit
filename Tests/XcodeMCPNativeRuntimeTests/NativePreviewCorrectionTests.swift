@@ -42,6 +42,28 @@ struct NativePreviewCorrectionTests {
         }
     }
 
+    @Test func sharedLibraryVariantsUseSupportedArchitecture() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("PackageView.swift")
+        let product = root.appendingPathComponent("FixturePackage.o")
+        let targets = ["arm64", "x86_64"].flatMap { architecture in
+            [NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
+                sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: architecture,
+                linkCommandLine: ["-o", product.path], linkerWorkingDirectory: nil, objectFiles: [],
+                sourceFiles: [source], debugDylibEnabled: false, isRunnable: false),
+             NativePreviewBuild.Target(moduleName: "FixtureHost", buildableName: "FixtureHost.app",
+                sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: architecture,
+                linkCommandLine: ["-o", root.appendingPathComponent("FixtureHost.app/FixtureHost.debug.dylib").path, product.path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)]
+        }
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        #expect(selected.source.architecture == "arm64")
+        #expect(selected.host.architecture == "arm64")
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget(targets.filter { $0.architecture == "x86_64" }, source: source)
+        }
+    }
+
     @Test(arguments: [true, false])
     func dylibSourceUsesLinkedOrEmbeddedAppHost(embedded: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -193,6 +215,28 @@ struct NativePreviewCorrectionTests {
 
         #expect(throws: NativePipelineRequired.self) {
             try NativePreviewCorrection.selectTarget([target], source: source)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func extensionPreviewsRequireNativePipeline(linkedLibrary: Bool) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("ExtensionView.swift")
+        let library = root.appendingPathComponent("ExtensionPreview.o")
+        let extensionPath = linkedLibrary ? "Host.app/PlugIns/Extension.appex" : "Extension.appex"
+        let target = NativePreviewBuild.Target(moduleName: "Extension", buildableName: "Extension.appex",
+            sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
+            linkCommandLine: ["-o", root.appendingPathComponent("\(extensionPath)/Extension.debug.dylib").path]
+                + (linkedLibrary ? [library.path] : []),
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: linkedLibrary ? [] : [source],
+            debugDylibEnabled: true, isRunnable: true)
+        let targets = [target] + (linkedLibrary ? [NativePreviewBuild.Target(moduleName: "ExtensionPreview",
+            buildableName: "ExtensionPreview.o", sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
+            linkCommandLine: ["-o", library.path], linkerWorkingDirectory: nil, objectFiles: [],
+            sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)] : [])
+
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget(targets, source: source)
         }
     }
 
