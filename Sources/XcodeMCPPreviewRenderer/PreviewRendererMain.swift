@@ -86,7 +86,9 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             size = CGSize(width: width, height: height)
         case .sizeThatFits:
             controller.safeAreaRegions = []
-            size = controller.sizeThatFits(in: window.bounds.size)
+            // Intrinsic sizing asks SwiftUI for its ideal size with an unspecified proposal.
+            controller.sizingOptions = .intrinsicContentSize
+            size = controller.view.intrinsicContentSize
         default: throw NativePreviewPipelineRequired()
         }
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
@@ -98,6 +100,12 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         controller.view.setNeedsLayout()
         controller.view.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
+        if case .sizeThatFits = layout {
+            size = controller.view.intrinsicContentSize
+            guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
+                throw PreviewRendererError("The preview has no drawable area: \(size)")
+            }
+        }
         controller.view.frame = CGRect(origin: .zero, size: size)
         controller.view.layoutIfNeeded()
         let format = UIGraphicsImageRendererFormat()

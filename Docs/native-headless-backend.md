@@ -144,7 +144,8 @@ retrieval does not establish online/account-dependent retrieval.
 `#Preview` definitions in an arm64 Simulator application built with a debug dylib,
 on iOS 18.4 or later.
 The host builds the active scheme through Xcode's build engine, selects the
-definition from the built `PreviewRegistry` metadata, and extracts its view with
+definition from the built `PreviewRegistry` metadata, including linked embedded
+frameworks and libraries, and extracts its view with
 ABIBridge. A public `UIHostingController` renders the view and captures the image.
 This route does not contact `previewsd` or require its Apple-restricted entitlement.
 The renderer sets `XCODE_RUNNING_FOR_PREVIEWS` before loading the target's code
@@ -155,6 +156,7 @@ override. Locale overrides set the renderer's launch language preferences and
 SwiftUI environment. The response's `supportedLocalizations` comes from Xcode's
 workspace. The image captures the rectangular hosting view; hardware display
 cutout masks are not applied.
+Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
 
 Each render creates a Simulator matching the selected destination's device type
 and runtime. Without a destination override, it retains the workspace's active
@@ -165,6 +167,8 @@ cancellation, and reports cleanup failures. The correction does not boot, instal
 to, or delete existing Simulator devices or change the workspace's active run
 destination. Framework diagnostics and
 subprocess logs remain in the request's artifacts directory.
+The staged application bundle is removed after rendering or failure; snapshots
+and diagnostics remain available.
 Source and destination resolution and initial ABI binding precede the timeout;
 the timeout covers the native build and rendering, including a late switch to
 the native preview pipeline. Cleanup failures after timeout are reported with the

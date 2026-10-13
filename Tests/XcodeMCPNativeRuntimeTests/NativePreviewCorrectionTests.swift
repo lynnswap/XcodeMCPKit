@@ -5,6 +5,36 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewCorrectionTests {
+    @Test(arguments: [false, true])
+    func stagedAppCleanupPreservesArtifacts(fails: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = root.appendingPathComponent("preview.png")
+        let log = root.appendingPathComponent("process.log")
+        try Data("snapshot".utf8).write(to: snapshot)
+        try Data("diagnostic".utf8).write(to: log)
+        var stagedApp: URL?
+        do {
+            let value = try await NativePreviewCorrection.withStagedApp(in: root) { app in
+                stagedApp = app
+                try FileManager.default.createDirectory(at: app, withIntermediateDirectories: false)
+                try Data("application".utf8).write(to: app.appendingPathComponent("Executable"))
+                if fails { throw NativePipelineRequired() }
+                return "rendered"
+            }
+            #expect(!fails)
+            #expect(value == "rendered")
+        } catch {
+            #expect(fails)
+            #expect(error is NativePipelineRequired)
+        }
+        let app = try #require(stagedApp)
+        #expect(!FileManager.default.fileExists(atPath: app.deletingLastPathComponent().path))
+        #expect(try Data(contentsOf: snapshot) == Data("snapshot".utf8))
+        #expect(try Data(contentsOf: log) == Data("diagnostic".utf8))
+    }
+
     @Test func frameworkWithoutAppHostRequiresNativePipeline() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = root.appendingPathComponent("FixtureView.swift")

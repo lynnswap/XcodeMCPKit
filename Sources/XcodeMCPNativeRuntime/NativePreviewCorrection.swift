@@ -75,15 +75,16 @@ final class NativePreviewCorrection {
             try await relayNative(native, continuation: continuation)
             return
         }
-        try await Self.withTimeout(seconds: input.timeout) {
+        let result: JSONValue? = try await Self.withTimeout(seconds: input.timeout) {
             do {
-                let result = try await self.render(input, prepared: prepared)
-                try Task.checkCancellation()
-                continuation.yield(try self.event("completed", result))
+                return try await self.render(input, prepared: prepared)
             } catch is NativePipelineRequired {
                 try await self.relayNative(native, continuation: continuation)
+                return nil
             }
         }
+        try Task.checkCancellation()
+        if let result { continuation.yield(try event("completed", result)) }
     }
 
     private func relayNative(_ native: @MainActor @Sendable () async throws -> AsyncStream<Data>,
@@ -96,17 +97,16 @@ final class NativePreviewCorrection {
         }
     }
 
-    private enum TimedResult: Sendable {
-        case operation(Result<Void, any Error>)
+    private enum TimedResult<Output: Sendable>: Sendable {
+        case operation(Result<Output, any Error>)
         case timer(any Error)
     }
 
-    static func withTimeout(seconds: Int, operation: @escaping @MainActor @Sendable () async throws -> Void) async throws {
-        let result = await withTaskGroup(of: TimedResult.self, returning: Result<Void, any Error>.self) { group in
+    static func withTimeout<Output: Sendable>(seconds: Int, operation: @escaping @MainActor @Sendable () async throws -> Output) async throws -> Output {
+        let result = await withTaskGroup(of: TimedResult<Output>.self, returning: Result<Output, any Error>.self) { group in
             group.addTask {
                 do {
-                    try await operation()
-                    return .operation(.success(()))
+                    return .operation(.success(try await operation()))
                 } catch { return .operation(.failure(error)) }
             }
             group.addTask {
@@ -131,7 +131,7 @@ final class NativePreviewCorrection {
                 return .failure(error)
             }
         }
-        try result.get()
+        return try result.get()
     }
 
     @MainActor
@@ -158,6 +158,32 @@ final class NativePreviewCorrection {
     }
 
     private func render(_ input: Input, prepared: Prepared) async throws -> JSONValue {
+        try await Self.withStagedApp(in: URL(filePath: input.artifacts, directoryHint: .isDirectory)) { app in
+            try await renderApp(input, prepared: prepared, app: app)
+        }
+    }
+
+    static func withStagedApp<Output>(in artifacts: URL, operation: @MainActor (URL) async throws -> Output) async throws -> Output {
+        let directory = artifacts.appendingPathComponent("Preview-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let app = directory.appendingPathComponent("Preview.app", isDirectory: true)
+        let result: Result<Output, any Error>
+        do { result = .success(try await operation(app)) }
+        catch { result = .failure(error) }
+        // FileManager cleanup is synchronous and still runs in a cancelled task.
+        do { try FileManager.default.removeItem(at: directory) }
+        catch {
+            let outcome: String
+            switch result {
+            case .success: outcome = "Preview rendered"
+            case .failure(let failure): outcome = String(describing: failure)
+            }
+            throw NativeRuntimeError.invocation("\(outcome); failed to remove staged preview app \(app.path): \(error)")
+        }
+        return try result.get()
+    }
+
+    private func renderApp(_ input: Input, prepared: Prepared, app: URL) async throws -> JSONValue {
         let artifacts = URL(filePath: input.artifacts, directoryHint: .isDirectory)
         let process = NativePreviewProcess(installation: installation, artifacts: artifacts)
         let workspace = prepared.workspace
@@ -177,11 +203,11 @@ final class NativePreviewCorrection {
         }
         let product = try productBundle(containing: output)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/iphonesimulator-arm64")
-        let app = artifacts.appendingPathComponent("Preview.app", isDirectory: true)
         try prepareApp(product: product, helper: helper, app: app)
         let libraries = try previewLibraries(in: app)
-        let symbols = try await process.xcrun(["nm", "-arch", "arm64", "-j"] + libraries.map(\.path))
-        let names = registryNames(in: symbols)
+        let registryLibraries = try Self.registryLibraries(in: app, previewLibraries: libraries)
+        let symbols = try await process.xcrun(["nm", "-arch", "arm64", "-j"] + registryLibraries.map(\.path))
+        let names = Self.registryNames(in: symbols)
         let request = PreviewRendererRequest(libraryNames: libraries.map(\.lastPathComponent), registryNames: names,
             fileName: source.lastPathComponent, moduleName: target.moduleName, lineNumber: location.line, columnNumber: location.column,
             definitionIndex: input.index, localization: input.localization)
@@ -191,7 +217,7 @@ final class NativePreviewCorrection {
         // Keep allocation alive through cancellation so its created identifier
         // is always available to the cleanup owner below.
         let allocation = Task { @MainActor in
-            try await createSimulator(input: input, build: build, process: process)
+            try await createSimulator(app: app, build: build, process: process)
         }
         let simulator = try await allocation.value
         var result: JSONValue?
@@ -417,10 +443,25 @@ final class NativePreviewCorrection {
         return libraries
     }
 
-    func registryNames(in symbols: String) -> [String] {
+    static func registryLibraries(in app: URL, previewLibraries: [URL]) throws -> [URL] {
+        var libraries = previewLibraries
+        let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
+        for subpath in try FileManager.default.subpathsOfDirectory(atPath: frameworks.path) {
+            let item = frameworks.appendingPathComponent(subpath)
+            if item.pathExtension == "framework" {
+                if let executable = Bundle(url: item)?.executableURL { libraries.append(executable) }
+            } else if item.pathExtension == "dylib" {
+                libraries.append(item)
+            }
+        }
+        return Array(Set(libraries)).sorted { $0.path < $1.path }
+    }
+
+    static func registryNames(in symbols: String) -> [String] {
         Set(symbols.split(whereSeparator: \.isNewline).compactMap { line -> String? in
             let symbol = String(line)
-            guard symbol.hasPrefix("_$s"), symbol.hasSuffix("VMn"), symbol.contains("PreviewRegistry") else { return nil }
+            // Names may use mangling substitutions. The renderer checks PreviewRegistry conformance.
+            guard symbol.hasPrefix("_$s"), symbol.hasSuffix("VMn"), symbol.contains("fMu_") else { return nil }
             return String(symbol.dropFirst(3).dropLast(2))
         }).sorted()
     }
@@ -431,7 +472,7 @@ final class NativePreviewCorrection {
         let destination: [String: JSONValue]
     }
 
-    private func createSimulator(input: Input, build: NativePreviewBuild.Result, process: NativePreviewProcess) async throws -> Simulator {
+    private func createSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess) async throws -> Simulator {
         let inventoryData = Data(try await process.xcrun(["simctl", "list", "--json"]).utf8)
         guard let inventory = try JSONSerialization.jsonObject(with: inventoryData) as? [String: Any] else {
             throw NativeRuntimeError.unsupportedContract("Simulator inventory is not a JSON object")
@@ -443,7 +484,7 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.unavailable("The selected Simulator \(build.destinationIdentifier) is no longer installed")
         }
         let runtimeID = selected.0
-        let info = try bundleInfo(at: URL(filePath: input.artifacts).appendingPathComponent("Preview.app"))
+        let info = try bundleInfo(at: app)
         guard let bundleIdentifier = info["CFBundleIdentifier"] as? String else {
             throw NativeRuntimeError.unsupportedContract("The built preview product has no bundle identifier")
         }
