@@ -1,0 +1,368 @@
+import Foundation
+import Testing
+@testable import XcodeMCPNativeRuntime
+
+@Suite
+@MainActor
+struct NativePreviewCorrectionTests {
+    @Test(arguments: [true, false])
+    func sharedSourceUsesRunnableHost(sharedLibrary: Bool) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("SharedView.swift")
+        let library = root.appendingPathComponent("SharedPreview.o")
+        let hosts = ["FirstApp", "RunnableApp"].map { (name: String) in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path]
+                    + (sharedLibrary ? [library.path] : []),
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: sharedLibrary ? [] : [source],
+                debugDylibEnabled: true, isRunnable: name == "RunnableApp")
+        }
+        let targets = hosts + (sharedLibrary ? [NativePreviewBuild.Target(moduleName: "SharedPreview",
+            buildableName: "SharedPreview.o", sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
+            linkCommandLine: ["-o", library.path], linkerWorkingDirectory: nil, objectFiles: [],
+            sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)] : [])
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        #expect(selected.host.moduleName == "RunnableApp")
+        #expect(selected.source.moduleName == (sharedLibrary ? "SharedPreview" : "RunnableApp"))
+    }
+
+    @Test func ambiguousHostsRequireNativePipeline() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("SharedView.swift")
+        let targets = ["FirstApp", "SecondApp"].map { (name: String) in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source],
+                debugDylibEnabled: true, isRunnable: false)
+        }
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget(targets, source: source)
+        }
+    }
+
+    @Test func sharedLibraryVariantsUseSupportedArchitecture() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("PackageView.swift")
+        let product = root.appendingPathComponent("FixturePackage.o")
+        let targets = ["arm64", "x86_64"].flatMap { architecture in
+            [NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
+                sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: architecture,
+                linkCommandLine: ["-o", product.path], linkerWorkingDirectory: nil, objectFiles: [],
+                sourceFiles: [source], debugDylibEnabled: false, isRunnable: false),
+             NativePreviewBuild.Target(moduleName: "FixtureHost", buildableName: "FixtureHost.app",
+                sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: architecture,
+                linkCommandLine: ["-o", root.appendingPathComponent("FixtureHost.app/FixtureHost.debug.dylib").path, product.path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)]
+        }
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        #expect(selected.source.architecture == "arm64")
+        #expect(selected.host.architecture == "arm64")
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget(targets.filter { $0.architecture == "x86_64" }, source: source)
+        }
+    }
+
+    @Test(arguments: [true, false])
+    func dylibSourceUsesLinkedOrEmbeddedAppHost(embedded: Bool) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("FeaturePreview.swift")
+        let dylib = root.appendingPathComponent("libFeature.dylib")
+        try compilePreviewLibrary(at: dylib)
+        let hosts = ["Unrelated", "Linked"].map { (name: String) in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path]
+                    + (!embedded && name == "Linked" ? [dylib.path] : []),
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
+        }
+        let feature = NativePreviewBuild.Target(moduleName: "Feature", buildableName: "libFeature.dylib",
+            sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", dylib.path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
+        if embedded {
+            let binary = root.appendingPathComponent("Linked.app/Frameworks/libFeature.dylib")
+            try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: dylib, to: binary)
+        }
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [feature], source: source)
+        #expect(selected.host.outputURL == hosts[1].outputURL)
+        #expect(selected.source.outputURL == feature.outputURL)
+        #expect(selected.source.moduleName == feature.moduleName)
+    }
+
+    @Test(arguments: [true, false])
+    func frameworkHostMustEmbedSourceBinary(embedded: Bool) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("FrameworkView.swift")
+        let frameworkBinary = root.appendingPathComponent("FixtureKit.framework/FixtureKit")
+        try compilePreviewLibrary(at: frameworkBinary)
+        try compilePreviewLibrary(at: root.appendingPathComponent("Unrelated.app/Frameworks/FixtureKit.framework/FixtureKit"), value: 1)
+        let hosts = ["Unrelated", "Linked"].map { (name: String) in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: name == "Unrelated")
+        }
+        let framework = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
+            sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", frameworkBinary.path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
+        if embedded {
+            let binary = root.appendingPathComponent("Linked.app/Frameworks/FixtureKit.framework/FixtureKit")
+            try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: frameworkBinary, to: binary)
+            let selected = try NativePreviewCorrection.selectTarget(hosts + [framework], source: source)
+            #expect(selected.host.outputURL == hosts[1].outputURL)
+            #expect(selected.source.outputURL == framework.outputURL)
+            #expect(selected.source.moduleName == framework.moduleName)
+        } else {
+            #expect(throws: NativePipelineRequired.self) {
+                try NativePreviewCorrection.selectTarget(hosts + [framework], source: source)
+            }
+        }
+    }
+
+    @Test(arguments: [true, false])
+    func staticSourceUsesLinkedAppHost(linksObjects: Bool) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("PackageView.swift")
+        let object = root.appendingPathComponent("PackageView.o")
+        let archive = root.appendingPathComponent("FixturePackage.a")
+        let hosts = ["Unrelated", "Linked"].map { (name: String) in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path]
+                    + (!linksObjects && name == "Linked" ? [archive.path] : []),
+                linkerWorkingDirectory: nil, objectFiles: linksObjects && name == "Linked" ? [object] : [],
+                sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
+        }
+        let package = NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.a",
+            sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
+            linkCommandLine: ["-o", archive.path],
+            linkerWorkingDirectory: nil, objectFiles: [object], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source)
+        #expect(selected.host.outputURL == hosts[1].outputURL)
+        #expect(selected.source.outputURL == package.outputURL)
+        #expect(selected.source.moduleName == package.moduleName)
+    }
+
+    @Test func staticProductInLinkFileList() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("OwnApp.o\nFixturePackage.o\n".utf8).write(to: root.appendingPathComponent("Host.LinkFileList"))
+        let source = root.appendingPathComponent("PackageView.swift")
+        let product = root.appendingPathComponent("FixturePackage.o")
+        let hosts = ["Unrelated", "Linked"].map { (name: String) in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path]
+                    + (name == "Linked" ? ["-filelist", "Host.LinkFileList"] : []),
+                linkerWorkingDirectory: root.path, objectFiles: [root.appendingPathComponent("OwnApp.o")],
+                sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
+        }
+        let package = NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
+            sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", product.path],
+            linkerWorkingDirectory: nil, objectFiles: [root.appendingPathComponent("PackageContent.o")],
+            sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source)
+        #expect(selected.host.outputURL == hosts[1].outputURL)
+        #expect(selected.source.outputURL == package.outputURL)
+        #expect(selected.source.moduleName == package.moduleName)
+    }
+
+    @Test(arguments: [false, true])
+    func stagedAppCleanupPreservesArtifacts(fails: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = root.appendingPathComponent("preview.png")
+        let log = root.appendingPathComponent("process.log")
+        try Data("snapshot".utf8).write(to: snapshot)
+        try Data("diagnostic".utf8).write(to: log)
+        var stagedApp: URL?
+        do {
+            let value = try await NativePreviewCorrection.withStagedApp(in: root) { app in
+                stagedApp = app
+                try FileManager.default.createDirectory(at: app, withIntermediateDirectories: false)
+                try Data("application".utf8).write(to: app.appendingPathComponent("Executable"))
+                if fails { throw NativePipelineRequired() }
+                return "rendered"
+            }
+            #expect(!fails)
+            #expect(value == "rendered")
+        } catch {
+            #expect(fails)
+            #expect(error is NativePipelineRequired)
+        }
+        let app = try #require(stagedApp)
+        #expect(!FileManager.default.fileExists(atPath: app.deletingLastPathComponent().path))
+        #expect(try Data(contentsOf: snapshot) == Data("snapshot".utf8))
+        #expect(try Data(contentsOf: log) == Data("diagnostic".utf8))
+    }
+
+    @Test func frameworkWithoutAppHostRequiresNativePipeline() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("FixtureView.swift")
+        let target = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
+            sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
+            linkCommandLine: ["-o", root.appendingPathComponent("FixtureKit.framework/FixtureKit").path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
+
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget([target], source: source)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func extensionPreviewsRequireNativePipeline(linkedLibrary: Bool) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("ExtensionView.swift")
+        let library = root.appendingPathComponent("ExtensionPreview.o")
+        let extensionPath = linkedLibrary ? "Host.app/PlugIns/Extension.appex" : "Extension.appex"
+        let target = NativePreviewBuild.Target(moduleName: "Extension", buildableName: "Extension.appex",
+            sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
+            linkCommandLine: ["-o", root.appendingPathComponent("\(extensionPath)/Extension.debug.dylib").path]
+                + (linkedLibrary ? [library.path] : []),
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: linkedLibrary ? [] : [source],
+            debugDylibEnabled: true, isRunnable: true)
+        let targets = [target] + (linkedLibrary ? [NativePreviewBuild.Target(moduleName: "ExtensionPreview",
+            buildableName: "ExtensionPreview.o", sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
+            linkCommandLine: ["-o", library.path], linkerWorkingDirectory: nil, objectFiles: [],
+            sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)] : [])
+
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget(targets, source: source)
+        }
+    }
+
+    @Test func preparingAppReplacesCollidingRendererExecutable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let product = root.appendingPathComponent("Original.app", isDirectory: true)
+        let helper = root.appendingPathComponent("Helper", isDirectory: true)
+        let app = root.appendingPathComponent("Preview.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: product.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: helper.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let originalExecutable = Data("original executable".utf8)
+        let rendererExecutable = Data("renderer executable".utf8)
+        let originalFramework = Data("original framework".utf8)
+        let rendererFramework = Data("renderer framework".utf8)
+        let resource = Data("source resource".utf8)
+        try originalExecutable.write(to: product.appendingPathComponent("XcodeMCPPreviewRenderer"))
+        try rendererExecutable.write(to: helper.appendingPathComponent("XcodeMCPPreviewRenderer"))
+        try originalFramework.write(to: product.appendingPathComponent("Frameworks/libPreviewRuntime.dylib"))
+        try rendererFramework.write(to: helper.appendingPathComponent("Frameworks/libPreviewRuntime.dylib"))
+        try resource.write(to: product.appendingPathComponent("Assets.car"))
+        let info = ["CFBundleIdentifier": "dev.lynnswap.Original", "CFBundleExecutable": "XcodeMCPPreviewRenderer",
+                    "CFBundlePackageType": "APPL", "MinimumOSVersion": "27.0"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+            .write(to: product.appendingPathComponent("Info.plist"))
+
+        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app)
+
+        #expect(try Data(contentsOf: app.appendingPathComponent("XcodeMCPPreviewRenderer")) == rendererExecutable)
+        #expect(try Data(contentsOf: app.appendingPathComponent("Frameworks/libPreviewRuntime.dylib")) == rendererFramework)
+        #expect(try Data(contentsOf: app.appendingPathComponent("Assets.car")) == resource)
+        let rawInfo = try unsafe PropertyListSerialization.propertyList(from: Data(contentsOf: app.appendingPathComponent("Info.plist")), format: nil)
+        let stagedInfo = try #require(rawInfo as? [String: Any])
+        #expect(stagedInfo["CFBundleIdentifier"] as? String == "dev.lynnswap.Original")
+        #expect(stagedInfo["CFBundleExecutable"] as? String == "XcodeMCPPreviewRenderer")
+        #expect(try Data(contentsOf: product.appendingPathComponent("XcodeMCPPreviewRenderer")) == originalExecutable)
+        #expect(try Data(contentsOf: helper.appendingPathComponent("XcodeMCPPreviewRenderer")) == rendererExecutable)
+        #expect(try Data(contentsOf: product.appendingPathComponent("Frameworks/libPreviewRuntime.dylib")) == originalFramework)
+    }
+
+    @Test func rendererStartupOverridesQualifiedSettingsAndPreservesResources() throws {
+        let originalScene: [String: Any] = ["UIApplicationSupportsMultipleScenes": true,
+            "UISceneConfigurations": ["UIWindowSceneSessionRoleApplication": [["UISceneDelegateClassName": "Original.Scene"]]]]
+        let input: [String: Any] = [
+            "CFBundleIdentifier": "dev.lynnswap.Original",
+            "CFBundleExecutable": "Original",
+            "CFBundleExecutable-iphonesimulator~ipad": "OriginalTablet",
+            "CFBundlePackageType": "FMWK",
+            "CFBundlePackageType~ipad": "FMWK",
+            "NSPrincipalClass": "Original.Application",
+            "NSPrincipalClass-iphonesimulator": "Original.SimulatorApplication",
+            "UIMainStoryboardFile": "Main",
+            "UIMainStoryboardFile~ipad": "TabletMain",
+            "UIApplicationSceneManifest": originalScene,
+            "UIApplicationSceneManifest-iphonesimulator~ipad": originalScene,
+            "NSExtension~ipad": ["NSExtensionPrincipalClass": "Original.Extension"],
+            "MinimumOSVersion": "27.0",
+            "CFBundleLocalizations": ["en", "ja"],
+            "UIAppFonts": ["FixtureFont.otf"],
+            "FixtureCustom": ["environment": "staging"],
+        ]
+        let output = NativePreviewCorrection.rendererInfo(input)
+
+        #expect(output["CFBundleExecutable"] as? String == "XcodeMCPPreviewRenderer")
+        #expect(output["CFBundlePackageType"] as? String == "APPL")
+        #expect(output["CFBundleExecutable-iphonesimulator~ipad"] == nil)
+        #expect(output["CFBundlePackageType~ipad"] == nil)
+        #expect(output["NSPrincipalClass"] == nil)
+        #expect(output["NSPrincipalClass-iphonesimulator"] == nil)
+        #expect(output["UIMainStoryboardFile"] == nil)
+        #expect(output["UIMainStoryboardFile~ipad"] == nil)
+        #expect(output["UIApplicationSceneManifest-iphonesimulator~ipad"] == nil)
+        #expect(output["NSExtension~ipad"] == nil)
+        let manifest = try #require(output["UIApplicationSceneManifest"] as? [String: Any])
+        let configurations = try #require(manifest["UISceneConfigurations"] as? [String: [[String: String]]])
+        #expect(manifest["UIApplicationSupportsMultipleScenes"] as? Bool == false)
+        #expect(configurations["UIWindowSceneSessionRoleApplication"]?.first?["UISceneDelegateClassName"]
+            == "XcodeMCPPreviewRenderer.PreviewRendererScene")
+        #expect(output["MinimumOSVersion"] as? String == "27.0")
+        #expect(output["CFBundleIdentifier"] as? String == "dev.lynnswap.Original")
+        #expect(output["CFBundleLocalizations"] as? [String] == ["en", "ja"])
+        #expect(output["UIAppFonts"] as? [String] == ["FixtureFont.otf"])
+        #expect(output["FixtureCustom"] as? [String: String] == ["environment": "staging"])
+    }
+
+    @Test func timeoutPreservesCleanupFailure() async {
+        let identifier = UUID().uuidString
+        do {
+            try await NativePreviewCorrection.withTimeout(seconds: 0) {
+                do {
+                    try await Task.sleep(for: .seconds(60))
+                } catch is CancellationError {
+                    throw NativeRuntimeError.invocation("failed to delete preview Simulator \(identifier): cleanup failed")
+                }
+            }
+            Issue.record("Expected a rendering timeout")
+        } catch {
+            let description = String(describing: error)
+            #expect(description.contains("Preview rendering exceeded 0 seconds"))
+            #expect(description.contains("cleanup failed"))
+            #expect(description.contains(identifier))
+        }
+    }
+
+    @Test func unavailableInputContractPreservesNativeEvents() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let app = root.appendingPathComponent("Xcode.app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"),
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let correction = NativePreviewCorrection(installation: try NativeXcodeInstallation(developerDirectory: app))
+        let input = try JSONEncoder().encode(PreviewInput(temporaryArtifactsPath: root.path, sourceFilePath: "ContentView.swift"))
+        let nativeEvent = Data(#"{"type":"completed","data":{"native":true}}"#.utf8)
+        let stream = try await correction.execute(inputType: PreviewInput.self, input: input) {
+            AsyncStream { continuation in
+                continuation.yield(nativeEvent)
+                continuation.finish()
+            }
+        }
+        var events: [Data] = []
+        for await event in stream { events.append(event) }
+        #expect(events == [nativeEvent])
+    }
+}
+
+private struct PreviewInput: Codable {
+    let temporaryArtifactsPath: String
+    let sourceFilePath: String
+}

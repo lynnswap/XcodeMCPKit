@@ -21,9 +21,9 @@ final class NativeActionBridge {
         guard let type = NSClassFromString("DVTFoundation.DVTStatelessActionManager") else {
             throw NativeRuntimeError.unavailable("Xcode's native action registry is unavailable")
         }
-        let getter = try runtime.object(type as AnyObject).method(selector: "shared", as: (() -> AnyObject).self)
+        let getter = try runtime.object(type as AnyObject).resolveMethodAndWait(selector: "shared", as: (() -> AnyObject).self)
         let manager = try unsafe getter.unsafeInvoke()
-        let actions = try runtime.object(manager).method(selector: "allActionMetadata", as: (() -> NSDictionary).self)
+        let actions = try runtime.object(manager).resolveMethodAndWait(selector: "allActionMetadata", as: (() -> NSDictionary).self)
         guard let values = try unsafe actions.unsafeInvoke() as? [String: AnyObject] else {
             throw NativeRuntimeError.unsupportedContract("Native action registry has an unsupported representation")
         }
@@ -31,7 +31,7 @@ final class NativeActionBridge {
     }
 
     func actionClass(for metadata: AnyObject) async throws -> NativeActionClass {
-        let getter = try unsafe await runtime.object(metadata).getter(
+        let getter = try unsafe await runtime.object(metadata).resolveGetter(
             named: "actionClass.getter : DVTFoundation.DVTStatelessAction.Type", as: (() -> NativeActionClass).self
         )
         return try unsafe getter.unsafeInvoke()
@@ -39,7 +39,7 @@ final class NativeActionBridge {
 
     func schema(action: NativeActionClass) async throws -> Data {
         let messaging = installation.framework("IDEIntelligenceMessaging", in: "PlugIns")
-        _ = try await runtime.swiftType(named: "IDEIntelligenceMessaging.ToolSchema", in: .path(messaging))
+        _ = try await runtime.resolveSwiftType(named: "IDEIntelligenceMessaging.ToolSchema", in: .path(messaging))
         guard let schemaType = _typeByName("24IDEIntelligenceMessaging10ToolSchemaV") as? any Encodable.Type else {
             throw NativeRuntimeError.unsupportedContract("Native ToolSchema does not expose its Encodable contract")
         }

@@ -31,6 +31,7 @@ frameworks are loaded from the selected installation and are not redistributed.
 | Action streams and native cancellation | Native runtime using Apple's executor |
 | Per-request artifacts and conversation context | Native runtime |
 | Build engine | Native host and its Swift Build child |
+| Direct SwiftUI preview build, rendering, and temporary Simulator cleanup | Native preview correction |
 
 The separate process isolates AppKit state, loaded native libraries, and
 termination handlers from the HTTP server. The broker owns logical host
@@ -70,7 +71,7 @@ workspace context through the registry. Each request has its own artifacts
 directory within a conversation. Origin metadata records the selected installation
 and `toolCancellation: "task"`.
 
-Execution uses `DVTStatelessAction.executeStream(inputJSON:)` with concrete ABI
+Most actions use `DVTStatelessAction.executeStream(inputJSON:)` with concrete ABI
 metadata and conformance handles. JSON decoding, action behavior, output encoding,
 and native errors remain Apple's implementation. Images and values stay alive
 for the action stream. Progress and completion become MCP notifications/results;
@@ -138,6 +139,92 @@ platform's product and empty cache. The correction does not reorder global
 inventory or alter caches. It remains separate from generic action execution and
 can be removed when the affected native contract is fixed. Cached report
 retrieval does not establish online/account-dependent retrieval.
+
+`RenderPreview` uses a packaged iOS Simulator renderer for individual SwiftUI
+`#Preview` definitions in an arm64 Simulator application built with a debug dylib,
+on iOS 18.4 or later.
+The host builds the active scheme through Xcode's build engine, selects the
+definition from the built `PreviewRegistry` metadata, including linked embedded
+frameworks and libraries, and extracts its view with
+ABIBridge. A public `UIHostingController` renders the view and captures the image.
+Source and host selection retain the native buildable's identity. Among applications
+that compile the source, embed its runtime image, or link its object/archive product
+(including linker file lists), the active scheme's runnable application takes
+precedence. When that runnable is not a compatible host, a unique compatible
+application can be used; ambiguous candidates use the native pipeline.
+Application target ordering does not determine the host. This selection does not
+recreate Xcode's complete source-specific preview dependency graph.
+Source and host records are restricted to arm64 iOS Simulator variants before
+checking for ambiguity. App extensions, including products nested inside an
+application, use the native pipeline; their containing application's dependencies
+are not recreated by the direct renderer.
+Embedded runtime images are matched to the built source's arm64 build UUID,
+with exact byte comparison when UUIDs are absent. A shared filename alone
+does not establish that an application contains the source binary.
+The renderer loads the source's embedded runtime image by its bundle-relative
+path, including images that the application's debug dylib does not load itself.
+This route does not contact `previewsd` or require its Apple-restricted entitlement.
+The renderer sets `XCODE_RUNNING_FOR_PREVIEWS` before loading the target's code
+and signals SwiftUI when the preview code is ready, so preview-specific data is
+available without leaving SwiftUI's graph waiting for injection.
+It supports the preview's device, fixed-size, or size-that-fits layout and a locale
+override. Locale overrides set the renderer's launch language preferences and
+SwiftUI environment. The response's `supportedLocalizations` comes from Xcode's
+workspace. The image captures the rectangular hosting view; hardware display
+cutout masks are not applied.
+Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
+
+Each render creates a Simulator matching the selected destination's device type
+and runtime. Without a destination override, it retains the workspace's active
+destination; unsupported destinations use the native pipeline. The returned
+`renderedDestination.identifier` identifies that selected destination for reuse.
+The correction deletes its temporary Simulator after success, failure, timeout, or
+cancellation, and reports cleanup failures. The correction does not boot, install
+to, or delete existing Simulator devices or change the workspace's active run
+destination. Framework diagnostics and
+subprocess logs remain in the request's artifacts directory.
+The staged application bundle is removed after rendering or failure; snapshots
+and diagnostics remain available.
+The renderer starts its own application and scene lifecycle. Its executable,
+package type, scene manifest, principal class, main storyboard, and extension
+settings are replaced together, including platform- and device-qualified keys.
+It retains the host's bundle resources and capabilities but does not run the
+original `App.init` or application delegate. Preview bodies must supply their
+required dependencies. Existing Simulator application data, App Group contents,
+and Keychain entries are not copied to the temporary device.
+Before replacing the main executable, the correction reads its signed entitlements
+and its separate Simulator `__TEXT,__entitlements` section. The packaged renderer
+archive is relinked with the original section when present, and the original signed
+entitlements are applied to the final application signature. This preserves App
+Group and Keychain access without putting Simulator-only entitlements into the
+real signature, where AMFI can reject them. Unsigned products remain supported.
+Source and destination resolution and initial ABI binding precede the timeout;
+the timeout covers the native build and rendering, including a late switch to
+the native preview pipeline. Cleanup failures after timeout are reported with the
+timeout error. The build method binding is
+cached for subsequent requests. Initial binding can make the first request take
+longer than the rendering timeout.
+
+Targets without an application host or with its debug dylib disabled, other
+platforms, `PreviewProvider` definitions, grouped previews, WidgetKit
+previews, orientation and modifier traits, variant overrides, and canvas controls
+continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
+requirements, including the limitation tracked in
+[issue #302](https://github.com/lynnswap/XcodeMCPKit/issues/302). WidgetKit's
+container background requires a protocol-extension call that ABIBridge 0.9.0
+cannot bind to a concrete view; the renderer does not return a partial widget.
+
+The direct route depends on private `DeveloperToolsSupport`/SwiftUI source
+contracts, SwiftUI's underscored `__previewThunksHaveFinishedLoading()` readiness
+signal, and Xcode's private build interfaces. The trait list is inspected with
+Swift reflection because `Preview` has no exported getter for it; traits other
+than layout use the native pipeline. The renderer resolves its view contracts from
+the selected Xcode and installed Simulator runtime. Unsupported input contracts
+use the native pipeline; other contract changes produce diagnostics.
+Build failures are reported before rendering so stale products are not captured.
+`scripts/build-native-host.sh` builds and bundles the Simulator renderer using
+the selected developer directory. Apple frameworks are supplied by the installed
+runtime.
 
 ## Standalone host
 

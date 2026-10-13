@@ -72,7 +72,7 @@ enum NativeErrorPresentation {
                         report(error)
                         guard let delegate, let selector else { return }
                         do {
-                            let completion = try unsafe ABIRuntime.shared.object(delegate).method(
+                            let completion = try unsafe ABIRuntime.shared.object(delegate).resolveMethodAndWait(
                                 selector: NSStringFromSelector(selector),
                                 as: ((Bool, UnsafeMutableRawPointer?) -> Void).self
                             )
