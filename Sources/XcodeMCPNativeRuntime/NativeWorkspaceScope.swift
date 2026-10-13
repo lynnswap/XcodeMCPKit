@@ -62,7 +62,7 @@ final class NativeWorkspaceScope {
 
     func isWorkspaceScoped(_ action: NativeActionClass) async throws -> Bool {
         let input = unsafe unsafeBitCast(try inputType(for: action), to: UnsafeRawPointer.self)
-        let conforms = try unsafe await runtime.cFunction(named: "swift_conformsToProtocol", as: ((UnsafeRawPointer, UnsafeRawPointer) -> UnsafeRawPointer?).self)
+        let conforms = try unsafe await runtime.resolveCFunction(named: "swift_conformsToProtocol", as: ((UnsafeRawPointer, UnsafeRawPointer) -> UnsafeRawPointer?).self)
         for descriptor in protocols {
             if try unsafe descriptor.withUnsafeAddress({ try unsafe conforms.unsafeInvoke(input, $0) }) != nil {
                 return true

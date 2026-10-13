@@ -7,8 +7,8 @@ final class NativeWorkspaceRegistry {
     private let registry: AnyObject
 
     init(installation: NativeXcodeInstallation) async throws {
-        let type = try await runtime.swiftType(named: "IDEFoundation.IDEWorkspaceRegistry", in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
-        let shared = try await type.staticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)
+        let type = try await runtime.resolveSwiftType(named: "IDEFoundation.IDEWorkspaceRegistry", in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
+        let shared = try await type.resolveStaticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)
         registry = try unsafe shared.unsafeInvoke()
     }
 
@@ -27,7 +27,7 @@ final class NativeWorkspaceRegistry {
             guard opensIfMissing else {
                 throw NativeRuntimeError.invalidRequest("No open native workspace matches '\(selector)'")
             }
-            let open = try await runtime.object(registry).method(named: "open(path: Swift.String) async throws -> __C.IDEWorkspace", as: (@concurrent (String) async throws -> AnyObject).self)
+            let open = try await runtime.object(registry).resolveMethod(named: "open(path: Swift.String) async throws -> __C.IDEWorkspace", as: (@concurrent (String) async throws -> AnyObject).self)
             try Task.checkCancellation()
             let workspace: AnyObject
             do {
@@ -36,7 +36,7 @@ final class NativeWorkspaceRegistry {
                 if error.withUnderlyingError({ $0 is CancellationError }) { throw CancellationError() }
                 throw NativeToolExecutionError(message: error.description)
             }
-            let getter = try await runtime.object(workspace).getter(named: "workspaceIdentifier", as: (() -> String).self)
+            let getter = try await runtime.object(workspace).resolveGetter(named: "workspaceIdentifier", as: (() -> String).self)
             let identifier = try unsafe getter.unsafeInvoke()
             return identifier
         }
@@ -44,15 +44,15 @@ final class NativeWorkspaceRegistry {
     }
 
     func prepareDebugger(for identifier: String) async throws {
-        let lookup = try await runtime.object(registry).method(named: "workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)
+        let lookup = try await runtime.object(registry).resolveMethod(named: "workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)
         try Task.checkCancellation()
         guard let workspace = try unsafe lookup.unsafeInvoke(identifier) else { return }
-        let manager = try runtime.object(workspace).method(selector: "breakpointManager", as: (() -> AnyObject?).self)
+        let manager = try runtime.object(workspace).resolveMethodAndWait(selector: "breakpointManager", as: (() -> AnyObject?).self)
         _ = try unsafe manager.unsafeInvoke()
     }
 
     func closeRemovedWorkspaces() async throws {
-        let close = try await runtime.object(registry).method(
+        let close = try await runtime.object(registry).resolveMethod(
             named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self
         )
         let snapshot = try await entries()
@@ -83,7 +83,7 @@ final class NativeWorkspaceRegistry {
     // also includes opens whose completion event a cancelled caller did not see.
     func closeAllWorkspaces() async throws {
         let identifiers = Set(try await entries().map(\.identifier))
-        let close = try await runtime.object(registry).method(named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self)
+        let close = try await runtime.object(registry).resolveMethod(named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self)
         var failures: [String] = []
         for identifier in identifiers.sorted() {
             do {
@@ -98,7 +98,7 @@ final class NativeWorkspaceRegistry {
     }
 
     private func entries() async throws -> [(identifier: String, path: String?)] {
-        let list = try await runtime.object(registry).method(
+        let list = try await runtime.object(registry).resolveMethod(
             named: "list() -> Swift.Array<IDEFoundation.IDEWorkspaceRegistry.WorkspaceInfo>",
             as: (() -> NativeSwiftValue).self)
         let snapshot = try unsafe list.unsafeInvoke()
