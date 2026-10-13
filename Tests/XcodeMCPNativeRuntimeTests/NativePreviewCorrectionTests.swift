@@ -49,6 +49,7 @@ struct NativePreviewCorrectionTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("FeaturePreview.swift")
         let dylib = root.appendingPathComponent("libFeature.dylib")
+        try compilePreviewLibrary(at: dylib)
         let hosts = ["Unrelated", "Linked"].map { (name: String) in
             NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
                 sdkVariant: nil, architecture: "arm64",
@@ -62,7 +63,7 @@ struct NativePreviewCorrectionTests {
         if embedded {
             let binary = root.appendingPathComponent("Linked.app/Frameworks/libFeature.dylib")
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Data().write(to: binary)
+            try FileManager.default.copyItem(at: dylib, to: binary)
         }
         let selected = try NativePreviewCorrection.selectTarget(hosts + [feature], source: source)
         #expect(selected.host.outputURL == hosts[1].outputURL)
@@ -71,17 +72,19 @@ struct NativePreviewCorrectionTests {
     }
 
     @Test(arguments: [true, false])
-    func frameworkHostMustEmbedSourceFramework(embedded: Bool) throws {
+    func frameworkHostMustEmbedSourceBinary(embedded: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("FrameworkView.swift")
         let frameworkBinary = root.appendingPathComponent("FixtureKit.framework/FixtureKit")
+        try compilePreviewLibrary(at: frameworkBinary)
+        try compilePreviewLibrary(at: root.appendingPathComponent("Unrelated.app/Frameworks/FixtureKit.framework/FixtureKit"), value: 1)
         let hosts = ["Unrelated", "Linked"].map { (name: String) in
             NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
                 sdkVariant: nil, architecture: "arm64",
                 linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path],
-                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: name == "Unrelated")
         }
         let framework = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", frameworkBinary.path],
@@ -89,7 +92,7 @@ struct NativePreviewCorrectionTests {
         if embedded {
             let binary = root.appendingPathComponent("Linked.app/Frameworks/FixtureKit.framework/FixtureKit")
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Data().write(to: binary)
+            try FileManager.default.copyItem(at: frameworkBinary, to: binary)
             let selected = try NativePreviewCorrection.selectTarget(hosts + [framework], source: source)
             #expect(selected.host.outputURL == hosts[1].outputURL)
             #expect(selected.source.outputURL == framework.outputURL)

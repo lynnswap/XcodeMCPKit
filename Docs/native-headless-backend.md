@@ -154,6 +154,9 @@ precedence. When that runnable is not a compatible host, a unique compatible
 application can be used; ambiguous candidates use the native pipeline.
 Application target ordering does not determine the host. This selection does not
 recreate Xcode's complete source-specific preview dependency graph.
+Embedded runtime images are matched to the built source's arm64 build UUID,
+with exact byte comparison when UUIDs are absent. A shared filename alone
+does not establish that an application contains the source binary.
 The renderer loads the source's embedded runtime image by its bundle-relative
 path, including images that the application's debug dylib does not load itself.
 This route does not contact `previewsd` or require its Apple-restricted entitlement.
@@ -178,7 +181,8 @@ destination. Framework diagnostics and
 subprocess logs remain in the request's artifacts directory.
 The staged application bundle is removed after rendering or failure; snapshots
 and diagnostics remain available.
-The renderer starts its own application and scene lifecycle. It retains the host's
+The renderer starts its own application and scene lifecycle, removing inherited
+principal-class and main-storyboard startup settings. It retains the host's
 bundle resources and capabilities but does not run the original `App.init`,
 application delegate, or extension lifecycle. Preview bodies must supply their
 required dependencies. Existing Simulator application data, App Group contents,

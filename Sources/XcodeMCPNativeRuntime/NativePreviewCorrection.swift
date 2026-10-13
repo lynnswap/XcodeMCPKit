@@ -377,15 +377,18 @@ final class NativePreviewCorrection {
                 if ["a", "o", "dylib"].contains(sourceOutput.pathExtension), try candidate.linksProduct(at: sourceOutput) { return true }
                 guard frameworkName != nil || sourceOutput.pathExtension == "dylib" else { return false }
                 let app = try productBundle(containing: output)
-                if frameworkName == nil, FileManager.default.fileExists(atPath: app.appendingPathComponent(sourceOutput.lastPathComponent).path) {
+                let rootLibrary = app.appendingPathComponent(sourceOutput.lastPathComponent)
+                if frameworkName == nil, FileManager.default.fileExists(atPath: rootLibrary.path),
+                   try NativePreviewBinary.matches(sourceOutput, rootLibrary) {
                     return true
                 }
                 let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
                 guard FileManager.default.fileExists(atPath: frameworks.path) else { return false }
                 return try FileManager.default.subpathsOfDirectory(atPath: frameworks.path).contains { subpath in
                     let library = frameworks.appendingPathComponent(subpath)
-                    return library.lastPathComponent == sourceOutput.lastPathComponent
-                        && (frameworkName.map { library.pathComponents.contains($0) } ?? true)
+                    guard library.lastPathComponent == sourceOutput.lastPathComponent,
+                          frameworkName.map({ library.pathComponents.contains($0) }) ?? true else { return false }
+                    return try NativePreviewBinary.matches(sourceOutput, library)
                 }
             }
             selections += hosts.map { Selection(source: target, host: $0) }
@@ -480,6 +483,9 @@ final class NativePreviewCorrection {
         var info = try bundleInfo(at: app)
         info["CFBundleExecutable"] = "XcodeMCPPreviewRenderer"
         info["CFBundlePackageType"] = "APPL"
+        // The renderer owns UIKit startup before the original code is loaded.
+        info["NSPrincipalClass"] = nil
+        info["UIMainStoryboardFile"] = nil
         if (info["MinimumOSVersion"] as? String ?? "").compare("18.4", options: .numeric) == .orderedAscending {
             info["MinimumOSVersion"] = "18.4"
         }
@@ -535,9 +541,10 @@ final class NativePreviewCorrection {
         if let sourceOutput, !sourceOutput.path.contains(".app/"), !sourceOutput.path.contains(".appex/") {
             let frameworkName = sourceOutput.pathComponents.last(where: { $0.hasSuffix(".framework") })
             if frameworkName != nil || sourceOutput.pathExtension == "dylib" {
-                guard let sourceLibrary = registryLibraries.first(where: { library in
-                    library.lastPathComponent == sourceOutput.lastPathComponent
-                        && (frameworkName.map { library.pathComponents.contains($0) } ?? true)
+                guard let sourceLibrary = try registryLibraries.first(where: { library in
+                    guard library.lastPathComponent == sourceOutput.lastPathComponent,
+                          frameworkName.map({ library.pathComponents.contains($0) }) ?? true else { return false }
+                    return try NativePreviewBinary.matches(sourceOutput, library)
                 }) else { throw NativePipelineRequired() }
                 libraries.append(sourceLibrary)
             }
