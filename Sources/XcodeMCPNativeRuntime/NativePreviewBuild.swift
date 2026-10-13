@@ -25,6 +25,7 @@ final class NativePreviewBuild {
         let objectFiles: [URL]
         let sourceFiles: Set<URL>
         let debugDylibEnabled: Bool
+        let isRunnable: Bool
 
         var outputURL: URL? {
             guard let index = linkCommandLine.lastIndex(of: "-o"),
@@ -113,6 +114,17 @@ final class NativePreviewBuild {
         return bound.method
     }
 
+    func runnableBuildable(in scheme: AnyObject) throws -> AnyObject? {
+        guard let action = try object(scheme, selector: "launchSchemeAction"),
+              let runnable = try object(action, selector: "runnable") else { return nil }
+        return try object(runnable, selector: "buildableProduct")
+    }
+
+    static func isRunnable(_ buildable: NSObject, runnable: AnyObject?) -> Bool {
+        guard let runnable else { return false }
+        return buildable.isEqual(runnable)
+    }
+
     func build(workspace: AnyObject, destination requestedDestination: AnyObject? = nil) async throws -> Result {
         try Task.checkCancellation()
         guard let manager = try object(workspace, selector: "runContextManager"),
@@ -121,6 +133,7 @@ final class NativePreviewBuild {
               let environment = try object(workspace, selector: "executionEnvironment") else {
             throw NativeRuntimeError.invalidRequest("The workspace has no active scheme, run destination, or execution environment")
         }
+        let runnable = try runnableBuildable(in: scheme)
         let image = installation.framework("PreviewsIDEAPI", in: "PlugIns")
         let clientType = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.BuildOperationClient", in: .path(image))
         let initialize = try await clientType.resolveInitializer(named: "init() -> PreviewsIDEAPI.BuildOperationClient", as: (() -> AnyObject).self)
@@ -156,7 +169,7 @@ final class NativePreviewBuild {
             as: (@concurrent (AnyObject, AnyObject, NativeSwiftValue) async throws -> NativeSwiftValue).self)
         let descriptions = try unsafe await describe.unsafeInvoke(workspace, priorBuild, selectedBuildables)
         try Task.checkCancellation()
-        let records = try await targets(descriptions, image: image)
+        let records = try await targets(descriptions, image: image, runnable: runnable)
         let info = try destinationInfo(destination)
         return Result(targets: records, destinationIdentifier: info.identifier,
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
@@ -225,7 +238,7 @@ final class NativePreviewBuild {
         return try unsafe subsections.unsafeInvoke().flatMap { try buildErrors(in: $0 as AnyObject) }
     }
 
-    private func targets(_ descriptions: NativeSwiftValue, image: URL) async throws -> [Target] {
+    private func targets(_ descriptions: NativeSwiftValue, image: URL, runnable: AnyObject?) async throws -> [Target] {
         let type = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.IDEBuiltTargetDescription", in: .path(image))
         let receiver = try NativeType.opaque(named: type.name)
         let module = try await type.resolveGetter(named: "productModuleName", as: (() -> String?).self, receiverABI: receiver)
@@ -247,9 +260,11 @@ final class NativePreviewBuild {
                 throw NativeRuntimeError.unsupportedContract("Native built target descriptions are not an array")
             }
             return try entries.flatMap { entry -> [Target] in
-                guard let (_, records) = entry as? (AnyObject, [Any]) else {
+                guard let (buildable, records) = entry as? (NSObject, [Any]) else {
                     throw NativeRuntimeError.unsupportedContract("Native built target description has an unsupported tuple")
                 }
+                // The native build service groups these variants by target PIF GUID.
+                let isRunnable = Self.isRunnable(buildable, runnable: runnable)
                 return try records.map { record in
                     let nativeFiles = try unsafe files.unsafeInvoke(on: record)
                     let objectFiles = try nativeFiles.withCopy { values -> [(URL, Set<URL>)] in
@@ -263,7 +278,7 @@ final class NativePreviewBuild {
                         sdkVariant: variant.unsafeInvoke(on: record), architecture: architecture.unsafeInvoke(on: record),
                         linkCommandLine: command.unsafeInvoke(on: record), linkerWorkingDirectory: directory.unsafeInvoke(on: record),
                         objectFiles: objectFiles.map(\.0), sourceFiles: Set(objectFiles.flatMap(\.1)),
-                        debugDylibEnabled: dylib.unsafeInvoke(on: record))
+                        debugDylibEnabled: dylib.unsafeInvoke(on: record), isRunnable: isRunnable)
                 }
             }
         }

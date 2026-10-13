@@ -67,7 +67,8 @@ package final class NativeXcodeBackend: NativeToolBackend {
             let workspaceScoped = try unsafe await scope.isWorkspaceScoped(action)
             let schema = try unsafe await bridge.schema(action: action)
             unsafe (nextActions[name] = action)
-            nextTools[name] = try NativeSchemaConverter.tool(from: schema, workspaceScoped: workspaceScoped)
+            let tool = try NativeSchemaConverter.tool(from: schema, workspaceScoped: workspaceScoped)
+            nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
         }
         unsafe (actions = nextActions)
         tools = nextTools

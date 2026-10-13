@@ -6,6 +6,43 @@ import Testing
 @MainActor
 struct NativePreviewCorrectionTests {
     @Test(arguments: [true, false])
+    func sharedSourceUsesRunnableHost(sharedLibrary: Bool) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("SharedView.swift")
+        let library = root.appendingPathComponent("SharedPreview.o")
+        let hosts = ["FirstApp", "RunnableApp"].map { (name: String) in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path]
+                    + (sharedLibrary ? [library.path] : []),
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: sharedLibrary ? [] : [source],
+                debugDylibEnabled: true, isRunnable: name == "RunnableApp")
+        }
+        let targets = hosts + (sharedLibrary ? [NativePreviewBuild.Target(moduleName: "SharedPreview",
+            buildableName: "SharedPreview.o", sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
+            linkCommandLine: ["-o", library.path], linkerWorkingDirectory: nil, objectFiles: [],
+            sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)] : [])
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        #expect(selected.host.moduleName == "RunnableApp")
+        #expect(selected.source.moduleName == (sharedLibrary ? "SharedPreview" : "RunnableApp"))
+    }
+
+    @Test func ambiguousHostsRequireNativePipeline() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("SharedView.swift")
+        let targets = ["FirstApp", "SecondApp"].map { (name: String) in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source],
+                debugDylibEnabled: true, isRunnable: false)
+        }
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget(targets, source: source)
+        }
+    }
+
+    @Test(arguments: [true, false])
     func dylibSourceUsesLinkedOrEmbeddedAppHost(embedded: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
@@ -17,11 +54,11 @@ struct NativePreviewCorrectionTests {
                 sdkVariant: nil, architecture: "arm64",
                 linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path]
                     + (!embedded && name == "Linked" ? [dylib.path] : []),
-                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true)
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
         }
         let feature = NativePreviewBuild.Target(moduleName: "Feature", buildableName: "libFeature.dylib",
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", dylib.path],
-            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false)
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
         if embedded {
             let binary = root.appendingPathComponent("Linked.app/Frameworks/libFeature.dylib")
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -44,11 +81,11 @@ struct NativePreviewCorrectionTests {
             NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
                 sdkVariant: nil, architecture: "arm64",
                 linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path],
-                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true)
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
         }
         let framework = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", frameworkBinary.path],
-            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false)
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
         if embedded {
             let binary = root.appendingPathComponent("Linked.app/Frameworks/FixtureKit.framework/FixtureKit")
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -76,12 +113,12 @@ struct NativePreviewCorrectionTests {
                 linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path]
                     + (!linksObjects && name == "Linked" ? [archive.path] : []),
                 linkerWorkingDirectory: nil, objectFiles: linksObjects && name == "Linked" ? [object] : [],
-                sourceFiles: [], debugDylibEnabled: true)
+                sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
         }
         let package = NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.a",
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
             linkCommandLine: ["-o", archive.path],
-            linkerWorkingDirectory: nil, objectFiles: [object], sourceFiles: [source], debugDylibEnabled: false)
+            linkerWorkingDirectory: nil, objectFiles: [object], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
         let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source)
         #expect(selected.host.outputURL == hosts[1].outputURL)
         #expect(selected.source.outputURL == package.outputURL)
@@ -101,12 +138,12 @@ struct NativePreviewCorrectionTests {
                 linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path]
                     + (name == "Linked" ? ["-filelist", "Host.LinkFileList"] : []),
                 linkerWorkingDirectory: root.path, objectFiles: [root.appendingPathComponent("OwnApp.o")],
-                sourceFiles: [], debugDylibEnabled: true)
+                sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
         }
         let package = NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", product.path],
             linkerWorkingDirectory: nil, objectFiles: [root.appendingPathComponent("PackageContent.o")],
-            sourceFiles: [source], debugDylibEnabled: false)
+            sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
         let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source)
         #expect(selected.host.outputURL == hosts[1].outputURL)
         #expect(selected.source.outputURL == package.outputURL)
@@ -149,7 +186,7 @@ struct NativePreviewCorrectionTests {
         let target = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
             linkCommandLine: ["-o", root.appendingPathComponent("FixtureKit.framework/FixtureKit").path],
-            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false)
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
 
         #expect(throws: NativePipelineRequired.self) {
             try NativePreviewCorrection.selectTarget([target], source: source)

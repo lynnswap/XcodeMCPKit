@@ -21,6 +21,30 @@ struct NativePreviewBuildTests {
         #expect(try builder.selectDestination(workspace: workspace) == nil)
         #expect(try builder.selectDestination(workspace: workspace, preferred: ["identifier": ios.targetDevice.identifier]) === ios)
     }
+
+    @Test func resolvesRunnableAndUsesNativeBuildableEquality() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let app = root.appendingPathComponent("Xcode.app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"),
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let builder = NativePreviewBuild(installation: try NativeXcodeInstallation(developerDirectory: app))
+        let product = PreviewBuildBuildable(identity: "Selected")
+        let equivalent = PreviewBuildBuildable(identity: "Selected")
+        let unrelated = PreviewBuildBuildable(identity: "Unrelated")
+        let scheme = PreviewBuildScheme(destinations: [], runnable: PreviewBuildRunnable(product: product))
+        let resolved = try builder.runnableBuildable(in: scheme)
+        let runnable = try #require(resolved)
+
+        #expect(equivalent !== product)
+        #expect(NativePreviewBuild.isRunnable(equivalent, runnable: runnable))
+        #expect(!NativePreviewBuild.isRunnable(unrelated, runnable: runnable))
+
+        let pathScheme = PreviewBuildScheme(destinations: [], runnable: PreviewBuildRunnable(product: nil))
+        let absent = try builder.runnableBuildable(in: pathScheme)
+        #expect(absent == nil)
+        #expect(!NativePreviewBuild.isRunnable(equivalent, runnable: absent))
+    }
 }
 
 private final class PreviewBuildWorkspace: NSObject {
@@ -39,7 +63,30 @@ private final class PreviewBuildRunContextManager: NSObject {
 
 private final class PreviewBuildScheme: NSObject {
     @objc let availableRunDestinations: NSArray
-    init(destinations: [PreviewBuildDestination]) { availableRunDestinations = NSArray(array: destinations) }
+    @objc let launchSchemeAction: PreviewBuildLaunchAction
+    init(destinations: [PreviewBuildDestination], runnable: PreviewBuildRunnable? = nil) {
+        availableRunDestinations = NSArray(array: destinations)
+        launchSchemeAction = PreviewBuildLaunchAction(runnable: runnable)
+    }
+}
+
+private final class PreviewBuildLaunchAction: NSObject {
+    @objc let runnable: PreviewBuildRunnable?
+    init(runnable: PreviewBuildRunnable?) { self.runnable = runnable }
+}
+
+private final class PreviewBuildRunnable: NSObject {
+    @objc let buildableProduct: PreviewBuildBuildable?
+    init(product: PreviewBuildBuildable?) { buildableProduct = product }
+}
+
+private final class PreviewBuildBuildable: NSObject {
+    let identity: String
+    init(identity: String) { self.identity = identity }
+    override func isEqual(_ object: Any?) -> Bool {
+        (object as? PreviewBuildBuildable)?.identity == identity
+    }
+    override var hash: Int { identity.hashValue }
 }
 
 private final class PreviewBuildDestination: NSObject {

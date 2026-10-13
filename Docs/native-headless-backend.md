@@ -147,9 +147,13 @@ The host builds the active scheme through Xcode's build engine, selects the
 definition from the built `PreviewRegistry` metadata, including linked embedded
 frameworks and libraries, and extracts its view with
 ABIBridge. A public `UIHostingController` renders the view and captures the image.
-Framework and library sources use an application that embeds their runtime image
-or links their object/archive product, including linker file lists. Application
-target ordering does not determine the host.
+Source and host selection retain the native buildable's identity. Among applications
+that compile the source, embed its runtime image, or link its object/archive product
+(including linker file lists), the active scheme's runnable application takes
+precedence. When that runnable is not a compatible host, a unique compatible
+application can be used; ambiguous candidates use the native pipeline.
+Application target ordering does not determine the host. This selection does not
+recreate Xcode's complete source-specific preview dependency graph.
 The renderer loads the source's embedded runtime image by its bundle-relative
 path, including images that the application's debug dylib does not load itself.
 This route does not contact `previewsd` or require its Apple-restricted entitlement.
@@ -174,6 +178,11 @@ destination. Framework diagnostics and
 subprocess logs remain in the request's artifacts directory.
 The staged application bundle is removed after rendering or failure; snapshots
 and diagnostics remain available.
+The renderer starts its own application and scene lifecycle. It retains the host's
+bundle resources and capabilities but does not run the original `App.init`,
+application delegate, or extension lifecycle. Preview bodies must supply their
+required dependencies. Existing Simulator application data, App Group contents,
+and Keychain entries are not copied to the temporary device.
 Before replacing the main executable, the correction reads its signed entitlements
 and its separate Simulator `__TEXT,__entitlements` section. The packaged renderer
 archive is relinked with the original section when present, and the original signed

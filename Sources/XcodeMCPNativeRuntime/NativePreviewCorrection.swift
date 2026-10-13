@@ -18,6 +18,18 @@ final class NativePreviewCorrection {
         return String(reflecting: type) == "PreviewsXcode.RenderPreviewAction"
     }
 
+    static func describe(_ tool: NativeTool) -> NativeTool {
+        guard case .object(var fields) = tool.descriptor,
+              case .object(var output) = fields["outputSchema"],
+              case .object(var properties) = output["properties"],
+              case .object(var snapshot) = properties["previewSnapshotPath"] else { return tool }
+        snapshot["description"] = .string("The full path to the preview snapshot. Direct SwiftUI previews capture the rectangular hosting view without hardware display cutout masks. Other previews use Xcode's native snapshot format.")
+        properties["previewSnapshotPath"] = .object(snapshot)
+        output["properties"] = .object(properties)
+        fields["outputSchema"] = .object(output)
+        return NativeTool(name: tool.name, descriptor: .object(fields), workspaceScoped: tool.workspaceScoped)
+    }
+
     func execute(inputType: Any.Type, input: Data,
                  native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws -> AsyncStream<Data> {
         guard let inputType = inputType as? any Decodable.Type else {
@@ -138,7 +150,7 @@ final class NativePreviewCorrection {
     private struct Prepared {
         let workspace: AnyObject
         let source: URL
-        let location: (line: Int, column: Int)
+        let location: (line: Int, column: Int, displayName: String)
         let destination: AnyObject
     }
 
@@ -274,7 +286,7 @@ final class NativePreviewCorrection {
                 "renderedDestination": .object(simulator.destination),
                 "supportedLocalizations": .array(try await supportedLocalizations(in: workspace).map(JSONValue.string)),
             ]
-            if let name = response.displayName { fields["displayName"] = .string(name) }
+            fields["displayName"] = .string(response.displayName ?? location.displayName)
             if let line = response.sourceLineNumber { fields["sourceLineNumber"] = .number(.int(Int64(line))) }
             result = .object(fields)
         } catch { failure = error }
@@ -343,42 +355,48 @@ final class NativePreviewCorrection {
 
     static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL) throws -> Selection {
         let sourcePath = source.resolvingSymlinksInPath().path
-        guard let target = targets.first(where: { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }) else {
+        let sources = targets.filter { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }
+        guard !sources.isEmpty else {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
         }
-        if target.outputURL.map({ $0.path.contains(".app/") || $0.path.contains(".appex/") }) == true {
-            return Selection(source: target, host: target)
-        }
-        let objectPaths = Set(target.objectFiles.map { $0.resolvingSymlinksInPath().path })
-        let sourceOutput = target.outputURL
-        let frameworkName = sourceOutput?.pathComponents.last(where: { $0.hasSuffix(".framework") })
-        let host = try targets.first { candidate in
-            guard let output = candidate.outputURL, output.path.contains(".app/") else { return false }
-            if candidate.objectFiles.contains(where: { objectPaths.contains($0.resolvingSymlinksInPath().path) }) {
-                return true
+        var selections: [Selection] = []
+        for target in sources {
+            if target.outputURL.map({ $0.path.contains(".app/") || $0.path.contains(".appex/") }) == true {
+                selections.append(Selection(source: target, host: target))
+                continue
             }
-            guard let sourceOutput else { return false }
-            if ["a", "o", "dylib"].contains(sourceOutput.pathExtension), try candidate.linksProduct(at: sourceOutput) { return true }
-            guard frameworkName != nil || sourceOutput.pathExtension == "dylib" else { return false }
-            let app = try productBundle(containing: output)
-            if frameworkName == nil, FileManager.default.fileExists(atPath: app.appendingPathComponent(sourceOutput.lastPathComponent).path) {
-                return true
+            let objectPaths = Set(target.objectFiles.map { $0.resolvingSymlinksInPath().path })
+            let sourceOutput = target.outputURL
+            let frameworkName = sourceOutput?.pathComponents.last(where: { $0.hasSuffix(".framework") })
+            let hosts = try targets.filter { candidate in
+                guard let output = candidate.outputURL, output.path.contains(".app/") else { return false }
+                if candidate.objectFiles.contains(where: { objectPaths.contains($0.resolvingSymlinksInPath().path) }) {
+                    return true
+                }
+                guard let sourceOutput else { return false }
+                if ["a", "o", "dylib"].contains(sourceOutput.pathExtension), try candidate.linksProduct(at: sourceOutput) { return true }
+                guard frameworkName != nil || sourceOutput.pathExtension == "dylib" else { return false }
+                let app = try productBundle(containing: output)
+                if frameworkName == nil, FileManager.default.fileExists(atPath: app.appendingPathComponent(sourceOutput.lastPathComponent).path) {
+                    return true
+                }
+                let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
+                guard FileManager.default.fileExists(atPath: frameworks.path) else { return false }
+                return try FileManager.default.subpathsOfDirectory(atPath: frameworks.path).contains { subpath in
+                    let library = frameworks.appendingPathComponent(subpath)
+                    return library.lastPathComponent == sourceOutput.lastPathComponent
+                        && (frameworkName.map { library.pathComponents.contains($0) } ?? true)
+                }
             }
-            let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
-            guard FileManager.default.fileExists(atPath: frameworks.path) else { return false }
-            return try FileManager.default.subpathsOfDirectory(atPath: frameworks.path).contains { subpath in
-                let library = frameworks.appendingPathComponent(subpath)
-                return library.lastPathComponent == sourceOutput.lastPathComponent
-                    && (frameworkName.map { library.pathComponents.contains($0) } ?? true)
-            }
+            selections += hosts.map { Selection(source: target, host: $0) }
         }
-        guard let host else {
-            throw NativePipelineRequired()
-        }
-        return Selection(source: target, host: host)
+        let runnable = selections.filter { $0.host.isRunnable }
+        let candidates = runnable.isEmpty ? selections : runnable
+        guard candidates.count == 1 else { throw NativePipelineRequired() }
+        return candidates[0]
     }
 
-    private func registryLocation(source: URL, index: Int) async throws -> (line: Int, column: Int) {
+    private func registryLocation(source: URL, index: Int) async throws -> (line: Int, column: Int, displayName: String) {
         let runtime = ABIRuntime.shared
         let action = try await runtime.resolveSwiftType(named: "PreviewsXcode.RenderPreviewAction",
             in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
@@ -412,6 +430,10 @@ final class NativePreviewCorrection {
         let getLine = try await registry.type.resolveGetter(named: "lineNumber", as: (() -> Int).self,
             receiverABI: .opaque(named: registry.type.name))
         let line = try unsafe getLine.unsafeInvoke(on: registry)
+        let getDisplayName = try await registry.type.resolveGetter(
+            named: "(extension in PreviewsPipeline):PreviewsModel.RegistryDefinition.defaultDisplayName.getter : Swift.String",
+            as: (() -> String).self, receiverABI: .opaque(named: registry.type.name))
+        let displayName = try unsafe getDisplayName.unsafeInvoke(on: registry)
         let model = ImageSelector.path(installation.framework("PreviewsModel", in: "SharedFrameworks"))
         let locationType = try await runtime.resolveSwiftType(named: "PreviewsModel.SourceLocation", in: model)
         let boundType = try await runtime.resolveSwiftType(named: "PreviewsModel.SourceLocation.Bound", in: model)
@@ -424,7 +446,7 @@ final class NativePreviewCorrection {
         let getColumn = try await bound.type.resolveGetter(named: "column", as: (() -> Int).self,
             receiverABI: .opaque(named: bound.type.name))
         let column = try unsafe getColumn.unsafeInvoke(on: bound)
-        return try (line, Self.registryColumn(in: String(contentsOf: source, encoding: .utf8), line: line, utf16Column: column))
+        return try (line, Self.registryColumn(in: String(contentsOf: source, encoding: .utf8), line: line, utf16Column: column), displayName)
     }
 
     static func registryColumn(in source: String, line: Int, utf16Column: Int) throws -> Int {
