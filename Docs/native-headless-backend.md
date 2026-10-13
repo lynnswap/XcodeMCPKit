@@ -154,7 +154,10 @@ workspace. The image captures the rectangular hosting view; hardware display
 cutout masks are not applied.
 
 Each render creates a Simulator matching the selected destination's device type
-and runtime. The correction deletes it after success, failure, timeout, or
+and runtime. Without a destination override, it retains the workspace's active
+destination; unsupported destinations use the native pipeline. The returned
+`renderedDestination.identifier` identifies that selected destination for reuse.
+The correction deletes its temporary Simulator after success, failure, timeout, or
 cancellation, and reports cleanup failures. The correction does not boot, install
 to, or delete existing Simulator devices or change the workspace's active run
 destination. Framework diagnostics and
@@ -172,8 +175,9 @@ The direct route depends on private `DeveloperToolsSupport`/SwiftUI source
 contracts and Xcode's private build interfaces. The trait list is inspected with
 Swift reflection because `Preview` has no exported getter for it; traits other
 than layout use the native pipeline. The renderer resolves its view contracts from
-the selected Xcode and installed Simulator runtime. Contract changes produce diagnostics;
-build failures are reported before rendering so stale products are not captured.
+the selected Xcode and installed Simulator runtime. Unsupported input contracts
+use the native pipeline; other contract changes produce diagnostics.
+Build failures are reported before rendering so stale products are not captured.
 `scripts/build-native-host.sh` builds and bundles the Simulator renderer using
 the selected developer directory. Apple frameworks are supplied by the installed
 runtime.

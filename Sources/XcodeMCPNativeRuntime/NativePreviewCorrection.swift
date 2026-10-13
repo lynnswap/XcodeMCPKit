@@ -19,13 +19,17 @@ final class NativePreviewCorrection {
     }
 
     func execute(inputType: Any.Type, input: Data,
-                 native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) throws -> AsyncStream<Data> {
+                 native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws -> AsyncStream<Data> {
         guard let inputType = inputType as? any Decodable.Type else {
-            throw NativeRuntimeError.unsupportedContract("Native preview input has no Decodable contract")
+            return try await native()
         }
         let parameters: Input
         do { parameters = try decode(inputType, data: input) }
         catch let error as DecodingError { throw NativeRuntimeError.invalidRequest(String(describing: error)) }
+        // Some Xcode versions inline these getters. Keep their native action
+        // available when the direct renderer cannot bind its input contract.
+        catch is ABIResolutionError { return try await native() }
+        catch NativeRuntimeError.unsupportedContract { return try await native() }
         let identifier = UUID()
         let stream = AsyncStream<Data>.makeStream()
         let task = Task { @MainActor in
@@ -377,7 +381,8 @@ final class NativePreviewCorrection {
         let identifier = try await process.xcrun(["simctl", "create", "XcodeMCPPreview-\(UUID().uuidString)", deviceID, runtimeID])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return Simulator(identifier: identifier, bundleIdentifier: bundleIdentifier,
-            destination: ["platformName": .string(build.platformName ?? "iOS"),
+            destination: ["identifier": .string(build.destinationIdentifier),
+                "platformName": .string(build.platformName ?? "iOS"),
                 "deviceModelName": .string(build.deviceModelName ?? selected.1["name"] as? String ?? deviceID),
                 "systemVersion": .string(build.systemVersion ?? runtimeID)])
     }

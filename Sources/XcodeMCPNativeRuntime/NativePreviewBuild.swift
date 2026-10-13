@@ -50,6 +50,12 @@ final class NativePreviewBuild {
               let scheme = try object(manager, selector: "activeRunContext") else {
             throw NativeRuntimeError.invalidRequest("The workspace has no active scheme")
         }
+        if preferred.isEmpty {
+            guard let active = try object(manager, selector: "activeRunDestination") else { return nil }
+            let destination = try destinationInfo(active)
+            return destination.platformIdentifier == "com.apple.platform.iphonesimulator"
+                && UUID(uuidString: destination.identifier) != nil ? active : nil
+        }
         let available = try runtime.object(scheme).resolveMethodAndWait(
             selector: "availableRunDestinations", as: (() -> NSArray).self)
         let candidates = try unsafe available.unsafeInvoke().compactMap { value -> Destination? in
