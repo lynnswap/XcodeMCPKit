@@ -72,6 +72,15 @@ let package = Package(
             dependencies: ["XcodeMCPInstallation", "XcodeMCPNativeRuntime", "XcodeMCPWire"],
             swiftSettings: strictSwiftSettings
         ),
+        .executableTarget(
+            name: "XcodeMCPPreviewRenderer",
+            dependencies: [
+                "XcodeMCPWire",
+                .product(name: "ABIBridge", package: "ABIBridge"),
+                .product(name: "ABIBridgeSwiftUI", package: "ABIBridge"),
+            ],
+            swiftSettings: strictSwiftSettings
+        ),
         .testTarget(
             name: "XcodeMCPNativeRuntimeTests",
             dependencies: ["XcodeMCPNativeRuntime", "XcodeMCPWire", .product(name: "ABIBridge", package: "ABIBridge")],
