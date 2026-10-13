@@ -39,6 +39,9 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
     private func render(in window: UIWindow) async throws {
         let requestURL = Bundle.main.bundleURL.appendingPathComponent("PreviewRequest.json")
         let request = try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: requestURL))
+        guard unsafe setenv("XCODE_RUNNING_FOR_PREVIEWS", "1", 1) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
         for name in request.libraryNames {
             let path = Bundle.main.bundleURL.appendingPathComponent(name).path
             // The request owns this process; keep code and Swift metadata loaded
@@ -70,6 +73,8 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             throw NativePreviewPipelineRequired()
         }
         var view = try await makeViewPreview(source: source)
+        // Preview mode defers SwiftUI graph creation until its code is ready.
+        __previewThunksHaveFinishedLoading()
         var size = window.bounds.size
         let layout = try await viewPreviewLayout(value)
         if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }

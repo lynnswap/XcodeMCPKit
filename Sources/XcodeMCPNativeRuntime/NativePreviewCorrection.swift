@@ -41,15 +41,7 @@ final class NativePreviewCorrection {
                 stream.continuation.yield(try event("update", .object([
                     "message": .string("Building the preview target..."), "progress": .number(.int(10)), "total": .number(.int(100)),
                 ])))
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask { try await self.produce(parameters, continuation: stream.continuation, native: native) }
-                    group.addTask {
-                        try await Task.sleep(for: .seconds(parameters.timeout))
-                        throw NativeRuntimeError.invocation("Preview rendering exceeded \(parameters.timeout) seconds")
-                    }
-                    defer { group.cancelAll() }
-                    try await group.next()
-                }
+                try await produce(parameters, continuation: stream.continuation, native: native)
             } catch {
                 if !Task.isCancelled {
                     stream.continuation.yield(errorEvent(error))
@@ -75,7 +67,17 @@ final class NativePreviewCorrection {
                          native: @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws {
         do {
             guard !input.requiresNativePipeline else { throw NativePipelineRequired() }
-            continuation.yield(try event("completed", await render(input)))
+            let prepared = try await prepare(input)
+            let result = try await withThrowingTaskGroup(of: JSONValue.self) { group in
+                group.addTask { try await self.render(input, prepared: prepared) }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(input.timeout))
+                    throw NativeRuntimeError.invocation("Preview rendering exceeded \(input.timeout) seconds")
+                }
+                defer { group.cancelAll() }
+                return try await group.next()!
+            }
+            continuation.yield(try event("completed", result))
         } catch is NativePipelineRequired {
             try Task.checkCancellation()
             let stream = try await native()
@@ -86,15 +88,36 @@ final class NativePreviewCorrection {
         }
     }
 
-    private func render(_ input: Input) async throws -> JSONValue {
-        let artifacts = URL(filePath: input.artifacts, directoryHint: .isDirectory)
-        let process = NativePreviewProcess(installation: installation, artifacts: artifacts)
+    @MainActor
+    private struct Prepared {
+        let workspace: AnyObject
+        let source: URL
+        let location: (line: Int, column: Int)
+        let destination: AnyObject
+    }
+
+    private func prepare(_ input: Input) async throws -> Prepared {
+        try Task.checkCancellation()
         let workspace = try await workspace(input.workspaceIdentifier)
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
         let location = try await registryLocation(source: source, index: input.index)
         guard let destination = try builder.selectDestination(workspace: workspace, preferred: input.destination) else {
             throw NativePipelineRequired()
         }
+        // Native rendering starts its timeout after resolving the source and
+        // destination. Binding the adapter must not consume the build budget.
+        _ = try await builder.prepare(workspace: workspace)
+        try Task.checkCancellation()
+        return Prepared(workspace: workspace, source: source, location: location, destination: destination)
+    }
+
+    private func render(_ input: Input, prepared: Prepared) async throws -> JSONValue {
+        let artifacts = URL(filePath: input.artifacts, directoryHint: .isDirectory)
+        let process = NativePreviewProcess(installation: installation, artifacts: artifacts)
+        let workspace = prepared.workspace
+        let source = prepared.source
+        let location = prepared.location
+        let destination = prepared.destination
         let build = try await builder.build(workspace: workspace, destination: destination)
         let target = try selectTarget(build.targets, source: source)
         guard target.architecture == "arm64", target.sdkRoot.contains("iphonesimulator") else {

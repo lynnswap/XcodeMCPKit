@@ -147,6 +147,9 @@ The host builds the active scheme through Xcode's build engine, selects the
 definition from the built `PreviewRegistry` metadata, and extracts its view with
 ABIBridge. A public `UIHostingController` renders the view and captures the image.
 This route does not contact `previewsd` or require its Apple-restricted entitlement.
+The renderer sets `XCODE_RUNNING_FOR_PREVIEWS` before loading the target's code
+and signals SwiftUI when the preview code is ready, so preview-specific data is
+available without leaving SwiftUI's graph waiting for injection.
 It supports the preview's device, fixed-size, or size-that-fits layout and a locale
 override. Locale overrides set the renderer's launch language preferences and
 SwiftUI environment. The response's `supportedLocalizations` comes from Xcode's
@@ -162,6 +165,10 @@ cancellation, and reports cleanup failures. The correction does not boot, instal
 to, or delete existing Simulator devices or change the workspace's active run
 destination. Framework diagnostics and
 subprocess logs remain in the request's artifacts directory.
+Source and destination resolution and initial ABI binding precede the timeout;
+the timeout covers the native build and rendering. The build method binding is
+cached for subsequent requests. Initial binding can make the first request take
+longer than the rendering timeout.
 
 Other platforms, `PreviewProvider` definitions, grouped previews, WidgetKit
 previews, orientation and modifier traits, variant overrides, and canvas controls
@@ -172,7 +179,8 @@ container background requires a protocol-extension call that ABIBridge 0.9.0
 cannot bind to a concrete view; the renderer does not return a partial widget.
 
 The direct route depends on private `DeveloperToolsSupport`/SwiftUI source
-contracts and Xcode's private build interfaces. The trait list is inspected with
+contracts, SwiftUI's underscored `__previewThunksHaveFinishedLoading()` readiness
+signal, and Xcode's private build interfaces. The trait list is inspected with
 Swift reflection because `Preview` has no exported getter for it; traits other
 than layout use the native pipeline. The renderer resolves its view contracts from
 the selected Xcode and installed Simulator runtime. Unsupported input contracts

@@ -40,6 +40,7 @@ final class NativePreviewBuild {
     private let runtime = ABIRuntime.shared
     private let installation: NativeXcodeInstallation
     private var clients: [UUID: Cancellation] = [:]
+    private var performMethod: NativeSwiftMethod<@concurrent (AnyObject, AnyObject) async throws -> AnyObject>?
 
     init(installation: NativeXcodeInstallation) {
         self.installation = installation
@@ -84,6 +85,15 @@ final class NativePreviewBuild {
         }[0].element.value
     }
 
+    func prepare(workspace: AnyObject) async throws -> NativeSwiftMethod<@concurrent (AnyObject, AnyObject) async throws -> AnyObject> {
+        if let performMethod { return performMethod }
+        let bound = try await runtime.object(workspace).resolveMethod(
+            named: "(extension in PreviewsIDEAPI):__C.IDEWorkspace.performTask(on: __C.IDEScheme, for: __C.IDESchemeOperationParameters) async throws -> __C.DVTOperation",
+            as: (@concurrent (AnyObject, AnyObject) async throws -> AnyObject).self)
+        performMethod = bound.method
+        return bound.method
+    }
+
     func build(workspace: AnyObject, destination requestedDestination: AnyObject? = nil) async throws -> Result {
         try Task.checkCancellation()
         guard let manager = try object(workspace, selector: "runContextManager"),
@@ -103,12 +113,10 @@ final class NativePreviewBuild {
         defer { clients[identifier] = nil }
 
         let parameters = try operationParameters(environment: environment, destination: destination, client: client)
-        let perform = try await runtime.object(workspace).resolveMethod(
-            named: "(extension in PreviewsIDEAPI):__C.IDEWorkspace.performTask(on: __C.IDEScheme, for: __C.IDESchemeOperationParameters) async throws -> __C.DVTOperation",
-            as: (@concurrent (AnyObject, AnyObject) async throws -> AnyObject).self)
+        let perform = try await prepare(workspace: workspace)
         let operation: AnyObject = try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            return try unsafe await perform.unsafeInvoke(scheme, parameters)
+            return try unsafe await perform.unsafeInvoke(on: workspace, scheme, parameters)
         } onCancel: {
             Task { @MainActor in cancellation.cancel() }
         }
