@@ -480,18 +480,7 @@ final class NativePreviewCorrection {
         try FileManager.default.copyItem(at: product, to: app)
         let executable = helper.appendingPathComponent("XcodeMCPPreviewRenderer")
         try FileManager.default.copyItem(at: executable, to: app.appendingPathComponent("XcodeMCPPreviewRenderer"))
-        var info = try bundleInfo(at: app)
-        info["CFBundleExecutable"] = "XcodeMCPPreviewRenderer"
-        info["CFBundlePackageType"] = "APPL"
-        // The renderer owns UIKit startup before the original code is loaded.
-        info["NSPrincipalClass"] = nil
-        info["UIMainStoryboardFile"] = nil
-        if (info["MinimumOSVersion"] as? String ?? "").compare("18.4", options: .numeric) == .orderedAscending {
-            info["MinimumOSVersion"] = "18.4"
-        }
-        info["NSExtension"] = nil
-        info["UIApplicationSceneManifest"] = ["UIApplicationSupportsMultipleScenes": false,
-            "UISceneConfigurations": ["UIWindowSceneSessionRoleApplication": [["UISceneConfigurationName": "Preview", "UISceneDelegateClassName": "XcodeMCPPreviewRenderer.PreviewRendererScene"]]]]
+        let info = Self.rendererInfo(try bundleInfo(at: app))
         try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
             .write(to: app.appendingPathComponent("Info.plist"))
         let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
@@ -503,6 +492,23 @@ final class NativePreviewCorrection {
             }
         }
         try copyContents(helper.appendingPathComponent("Frameworks"), to: frameworks)
+    }
+
+    static func rendererInfo(_ original: [String: Any]) -> [String: Any] {
+        let startupKeys = ["CFBundleExecutable", "CFBundlePackageType", "NSPrincipalClass", "UIMainStoryboardFile",
+                           "UIApplicationSceneManifest", "NSExtension"]
+        // Bundle lookup gives platform/device-qualified keys precedence over base keys.
+        var info = original.filter { key, _ in
+            !startupKeys.contains { key == $0 || key.hasPrefix($0 + "-") || key.hasPrefix($0 + "~") }
+        }
+        info["CFBundleExecutable"] = "XcodeMCPPreviewRenderer"
+        info["CFBundlePackageType"] = "APPL"
+        if (info["MinimumOSVersion"] as? String ?? "").compare("18.4", options: .numeric) == .orderedAscending {
+            info["MinimumOSVersion"] = "18.4"
+        }
+        info["UIApplicationSceneManifest"] = ["UIApplicationSupportsMultipleScenes": false,
+            "UISceneConfigurations": ["UIWindowSceneSessionRoleApplication": [["UISceneConfigurationName": "Preview", "UISceneDelegateClassName": "XcodeMCPPreviewRenderer.PreviewRendererScene"]]]]
+        return info
     }
 
     private func copyContents(_ source: URL, to destination: URL) throws {

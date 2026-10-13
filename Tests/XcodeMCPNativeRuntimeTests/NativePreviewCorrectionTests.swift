@@ -196,6 +196,51 @@ struct NativePreviewCorrectionTests {
         }
     }
 
+    @Test func rendererStartupOverridesQualifiedSettingsAndPreservesResources() throws {
+        let originalScene: [String: Any] = ["UIApplicationSupportsMultipleScenes": true,
+            "UISceneConfigurations": ["UIWindowSceneSessionRoleApplication": [["UISceneDelegateClassName": "Original.Scene"]]]]
+        let input: [String: Any] = [
+            "CFBundleIdentifier": "dev.lynnswap.Original",
+            "CFBundleExecutable": "Original",
+            "CFBundleExecutable-iphonesimulator~ipad": "OriginalTablet",
+            "CFBundlePackageType": "FMWK",
+            "CFBundlePackageType~ipad": "FMWK",
+            "NSPrincipalClass": "Original.Application",
+            "NSPrincipalClass-iphonesimulator": "Original.SimulatorApplication",
+            "UIMainStoryboardFile": "Main",
+            "UIMainStoryboardFile~ipad": "TabletMain",
+            "UIApplicationSceneManifest": originalScene,
+            "UIApplicationSceneManifest-iphonesimulator~ipad": originalScene,
+            "NSExtension~ipad": ["NSExtensionPrincipalClass": "Original.Extension"],
+            "MinimumOSVersion": "27.0",
+            "CFBundleLocalizations": ["en", "ja"],
+            "UIAppFonts": ["FixtureFont.otf"],
+            "FixtureCustom": ["environment": "staging"],
+        ]
+        let output = NativePreviewCorrection.rendererInfo(input)
+
+        #expect(output["CFBundleExecutable"] as? String == "XcodeMCPPreviewRenderer")
+        #expect(output["CFBundlePackageType"] as? String == "APPL")
+        #expect(output["CFBundleExecutable-iphonesimulator~ipad"] == nil)
+        #expect(output["CFBundlePackageType~ipad"] == nil)
+        #expect(output["NSPrincipalClass"] == nil)
+        #expect(output["NSPrincipalClass-iphonesimulator"] == nil)
+        #expect(output["UIMainStoryboardFile"] == nil)
+        #expect(output["UIMainStoryboardFile~ipad"] == nil)
+        #expect(output["UIApplicationSceneManifest-iphonesimulator~ipad"] == nil)
+        #expect(output["NSExtension~ipad"] == nil)
+        let manifest = try #require(output["UIApplicationSceneManifest"] as? [String: Any])
+        let configurations = try #require(manifest["UISceneConfigurations"] as? [String: [[String: String]]])
+        #expect(manifest["UIApplicationSupportsMultipleScenes"] as? Bool == false)
+        #expect(configurations["UIWindowSceneSessionRoleApplication"]?.first?["UISceneDelegateClassName"]
+            == "XcodeMCPPreviewRenderer.PreviewRendererScene")
+        #expect(output["MinimumOSVersion"] as? String == "27.0")
+        #expect(output["CFBundleIdentifier"] as? String == "dev.lynnswap.Original")
+        #expect(output["CFBundleLocalizations"] as? [String] == ["en", "ja"])
+        #expect(output["UIAppFonts"] as? [String] == ["FixtureFont.otf"])
+        #expect(output["FixtureCustom"] as? [String: String] == ["environment": "staging"])
+    }
+
     @Test func timeoutPreservesCleanupFailure() async {
         let identifier = UUID().uuidString
         do {

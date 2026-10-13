@@ -181,9 +181,11 @@ destination. Framework diagnostics and
 subprocess logs remain in the request's artifacts directory.
 The staged application bundle is removed after rendering or failure; snapshots
 and diagnostics remain available.
-The renderer starts its own application and scene lifecycle, removing inherited
-principal-class and main-storyboard startup settings. It retains the host's
-bundle resources and capabilities but does not run the original `App.init`,
+The renderer starts its own application and scene lifecycle. Its executable,
+package type, scene manifest, principal class, main storyboard, and extension
+settings are replaced together, including platform- and device-qualified keys.
+It retains the host's bundle resources and capabilities but does not run the
+original `App.init`,
 application delegate, or extension lifecycle. Preview bodies must supply their
 required dependencies. Existing Simulator application data, App Group contents,
 and Keychain entries are not copied to the temporary device.
