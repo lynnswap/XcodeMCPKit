@@ -219,7 +219,7 @@ final class NativePreviewCorrection {
         }
         let entitlements = try NativePreviewEntitlements.read(from: product)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/iphonesimulator-arm64")
-        try prepareApp(product: product, helper: helper, app: app)
+        try Self.prepareApp(product: product, helper: helper, app: app)
         if let simulatorEntitlements = entitlements.simulator {
             let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
             try simulatorEntitlements.write(to: section)
@@ -482,10 +482,10 @@ final class NativePreviewCorrection {
         return nil
     }
 
-    private func prepareApp(product: URL, helper: URL, app: URL) throws {
+    static func prepareApp(product: URL, helper: URL, app: URL) throws {
         try FileManager.default.copyItem(at: product, to: app)
         let executable = helper.appendingPathComponent("XcodeMCPPreviewRenderer")
-        try FileManager.default.copyItem(at: executable, to: app.appendingPathComponent("XcodeMCPPreviewRenderer"))
+        try copyReplacingItem(executable, to: app.appendingPathComponent("XcodeMCPPreviewRenderer"))
         let info = Self.rendererInfo(try bundleInfo(at: app))
         try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
             .write(to: app.appendingPathComponent("Info.plist"))
@@ -511,12 +511,15 @@ final class NativePreviewCorrection {
         return info
     }
 
-    private func copyContents(_ source: URL, to destination: URL) throws {
+    private static func copyContents(_ source: URL, to destination: URL) throws {
         for item in try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
-            let output = destination.appendingPathComponent(item.lastPathComponent)
-            if FileManager.default.fileExists(atPath: output.path) { try FileManager.default.removeItem(at: output) }
-            try FileManager.default.copyItem(at: item, to: output)
+            try copyReplacingItem(item, to: destination.appendingPathComponent(item.lastPathComponent))
         }
+    }
+
+    private static func copyReplacingItem(_ source: URL, to destination: URL) throws {
+        if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
+        try FileManager.default.copyItem(at: source, to: destination)
     }
 
     private func previewLibraries(in app: URL) throws -> [URL] {
@@ -593,7 +596,7 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.unavailable("The selected Simulator \(build.destinationIdentifier) is no longer installed")
         }
         let runtimeID = selected.0
-        let info = try bundleInfo(at: app)
+        let info = try Self.bundleInfo(at: app)
         guard let bundleIdentifier = info["CFBundleIdentifier"] as? String else {
             throw NativeRuntimeError.unsupportedContract("The built preview product has no bundle identifier")
         }
@@ -606,7 +609,7 @@ final class NativePreviewCorrection {
                 "systemVersion": .string(build.systemVersion ?? runtimeID)])
     }
 
-    private func bundleInfo(at bundle: URL) throws -> [String: Any] {
+    private static func bundleInfo(at bundle: URL) throws -> [String: Any] {
         let data = try Data(contentsOf: bundle.appendingPathComponent("Info.plist"))
         guard let info = try unsafe PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
             throw NativeRuntimeError.unsupportedContract("The built preview product has an unsupported Info.plist")

@@ -240,6 +240,43 @@ struct NativePreviewCorrectionTests {
         }
     }
 
+    @Test func preparingAppReplacesCollidingRendererExecutable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let product = root.appendingPathComponent("Original.app", isDirectory: true)
+        let helper = root.appendingPathComponent("Helper", isDirectory: true)
+        let app = root.appendingPathComponent("Preview.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: product.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: helper.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let originalExecutable = Data("original executable".utf8)
+        let rendererExecutable = Data("renderer executable".utf8)
+        let originalFramework = Data("original framework".utf8)
+        let rendererFramework = Data("renderer framework".utf8)
+        let resource = Data("source resource".utf8)
+        try originalExecutable.write(to: product.appendingPathComponent("XcodeMCPPreviewRenderer"))
+        try rendererExecutable.write(to: helper.appendingPathComponent("XcodeMCPPreviewRenderer"))
+        try originalFramework.write(to: product.appendingPathComponent("Frameworks/libPreviewRuntime.dylib"))
+        try rendererFramework.write(to: helper.appendingPathComponent("Frameworks/libPreviewRuntime.dylib"))
+        try resource.write(to: product.appendingPathComponent("Assets.car"))
+        let info = ["CFBundleIdentifier": "dev.lynnswap.Original", "CFBundleExecutable": "XcodeMCPPreviewRenderer",
+                    "CFBundlePackageType": "APPL", "MinimumOSVersion": "27.0"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+            .write(to: product.appendingPathComponent("Info.plist"))
+
+        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app)
+
+        #expect(try Data(contentsOf: app.appendingPathComponent("XcodeMCPPreviewRenderer")) == rendererExecutable)
+        #expect(try Data(contentsOf: app.appendingPathComponent("Frameworks/libPreviewRuntime.dylib")) == rendererFramework)
+        #expect(try Data(contentsOf: app.appendingPathComponent("Assets.car")) == resource)
+        let rawInfo = try unsafe PropertyListSerialization.propertyList(from: Data(contentsOf: app.appendingPathComponent("Info.plist")), format: nil)
+        let stagedInfo = try #require(rawInfo as? [String: Any])
+        #expect(stagedInfo["CFBundleIdentifier"] as? String == "dev.lynnswap.Original")
+        #expect(stagedInfo["CFBundleExecutable"] as? String == "XcodeMCPPreviewRenderer")
+        #expect(try Data(contentsOf: product.appendingPathComponent("XcodeMCPPreviewRenderer")) == originalExecutable)
+        #expect(try Data(contentsOf: helper.appendingPathComponent("XcodeMCPPreviewRenderer")) == rendererExecutable)
+        #expect(try Data(contentsOf: product.appendingPathComponent("Frameworks/libPreviewRuntime.dylib")) == originalFramework)
+    }
+
     @Test func rendererStartupOverridesQualifiedSettingsAndPreservesResources() throws {
         let originalScene: [String: Any] = ["UIApplicationSupportsMultipleScenes": true,
             "UISceneConfigurations": ["UIWindowSceneSessionRoleApplication": [["UISceneDelegateClassName": "Original.Scene"]]]]
