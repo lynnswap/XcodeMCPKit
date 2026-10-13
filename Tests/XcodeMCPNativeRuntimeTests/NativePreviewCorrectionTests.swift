@@ -6,6 +6,32 @@ import Testing
 @MainActor
 struct NativePreviewCorrectionTests {
     @Test(arguments: [true, false])
+    func dylibSourceUsesLinkedOrEmbeddedAppHost(embedded: Bool) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("FeaturePreview.swift")
+        let dylib = root.appendingPathComponent("libFeature.dylib")
+        let hosts = ["Unrelated", "Linked"].map { (name: String) in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path]
+                    + (!embedded && name == "Linked" ? [dylib.path] : []),
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true)
+        }
+        let feature = NativePreviewBuild.Target(moduleName: "Feature", buildableName: "libFeature.dylib",
+            sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", dylib.path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false)
+        if embedded {
+            let binary = root.appendingPathComponent("Linked.app/Frameworks/libFeature.dylib")
+            try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: binary)
+        }
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [feature], source: source)
+        #expect(selected.outputURL == hosts[1].outputURL)
+    }
+
+    @Test(arguments: [true, false])
     func frameworkHostMustEmbedSourceFramework(embedded: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

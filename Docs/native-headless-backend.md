@@ -147,6 +147,9 @@ The host builds the active scheme through Xcode's build engine, selects the
 definition from the built `PreviewRegistry` metadata, including linked embedded
 frameworks and libraries, and extracts its view with
 ABIBridge. A public `UIHostingController` renders the view and captures the image.
+Framework and library sources use an application that embeds their runtime image
+or links their object/archive product, including linker file lists. Application
+target ordering does not determine the host.
 This route does not contact `previewsd` or require its Apple-restricted entitlement.
 The renderer sets `XCODE_RUNNING_FOR_PREVIEWS` before loading the target's code
 and signals SwiftUI when the preview code is ready, so preview-specific data is
@@ -169,6 +172,12 @@ destination. Framework diagnostics and
 subprocess logs remain in the request's artifacts directory.
 The staged application bundle is removed after rendering or failure; snapshots
 and diagnostics remain available.
+Before replacing the main executable, the correction reads its signed entitlements
+and its separate Simulator `__TEXT,__entitlements` section. The packaged renderer
+archive is relinked with the original section when present, and the original signed
+entitlements are applied to the final application signature. This preserves App
+Group and Keychain access without putting Simulator-only entitlements into the
+real signature, where AMFI can reject them. Unsigned products remain supported.
 Source and destination resolution and initial ABI binding precede the timeout;
 the timeout covers the native build and rendering, including a late switch to
 the native preview pipeline. Cleanup failures after timeout are reported with the

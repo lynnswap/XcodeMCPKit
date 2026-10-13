@@ -39,12 +39,16 @@ DEVELOPER_DIR="$developer_dir" "$swift_executable" build -c "$configuration" --d
 bin_path="$(DEVELOPER_DIR="$developer_dir" "$swift_executable" build -c "$configuration" \
   --scratch-path "$scratch_path" --triple "$triple" --sdk "$sdk" --show-bin-path --force-resolved-versions)"
 mkdir -p "$output/Frameworks"
-cp "$bin_path/XcodeMCPPreviewRenderer" "$output/XcodeMCPPreviewRenderer"
+archive="$output/libXcodeMCPPreviewRenderer.a"
+cp "$bin_path/libXcodeMCPPreviewRenderer.a" "$archive"
+DEVELOPER_DIR="$developer_dir" xcrun --sdk iphonesimulator swiftc \
+  -target "$triple" -sdk "$sdk" "$archive" -lc++ \
+  -Xlinker -force_load -Xlinker "$archive" \
+  -Xlinker -rpath -Xlinker '@executable_path/Frameworks' \
+  -o "$output/XcodeMCPPreviewRenderer"
 chmod +x "$output/XcodeMCPPreviewRenderer"
 DEVELOPER_DIR="$developer_dir" xcrun swift-stdlib-tool --copy --platform iphonesimulator \
   --scan-executable "$output/XcodeMCPPreviewRenderer" --destination "$output/Frameworks"
-DEVELOPER_DIR="$developer_dir" xcrun install_name_tool -add_rpath '@executable_path/Frameworks' \
-  "$output/XcodeMCPPreviewRenderer"
 for library in "$output/Frameworks/"*.dylib; do
   [[ -f "$library" ]] || continue
   /usr/bin/codesign --force --sign - "$library"

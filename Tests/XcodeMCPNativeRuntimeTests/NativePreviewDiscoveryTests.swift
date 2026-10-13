@@ -19,11 +19,12 @@ struct NativePreviewDiscoveryTests {
         defer { try? FileManager.default.removeItem(at: app) }
 
         let preview = app.appendingPathComponent("FixtureApp.debug.dylib")
+        let rootDylib = app.appendingPathComponent("libRootPreview.dylib")
         let executable = framework.appendingPathComponent("FixtureImplementation")
         let frameworkPreview = framework.appendingPathComponent("FixtureImplementation.debug.dylib")
         let dylib = app.appendingPathComponent("Frameworks/LinkedPreview.dylib")
         let nestedDylib = nestedFrameworks.appendingPathComponent("NestedPreview.dylib")
-        for library in [preview, executable, frameworkPreview, dylib, nestedDylib] {
+        for library in [preview, rootDylib, executable, frameworkPreview, dylib, nestedDylib] {
             try Data().write(to: library)
         }
         let info = ["CFBundleExecutable": "FixtureImplementation", "CFBundlePackageType": "FMWK",
@@ -32,6 +33,8 @@ struct NativePreviewDiscoveryTests {
             .write(to: framework.appendingPathComponent("Info.plist"))
 
         let libraries = try NativePreviewCorrection.registryLibraries(in: app, previewLibraries: [preview])
-        #expect(Set(libraries.map(\.path)) == Set([preview, executable, frameworkPreview, dylib, nestedDylib].map(\.path)))
+        let expected = [preview, rootDylib, executable, frameworkPreview, dylib, nestedDylib]
+            .map { $0.resolvingSymlinksInPath().path }
+        #expect(Set(libraries.map(\.path)) == Set(expected))
     }
 }

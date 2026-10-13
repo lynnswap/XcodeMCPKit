@@ -202,8 +202,21 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.unsupportedContract("The preview target has no linked product")
         }
         let product = try Self.productBundle(containing: output)
+        let entitlements = try NativePreviewEntitlements.read(from: product)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/iphonesimulator-arm64")
         try prepareApp(product: product, helper: helper, app: app)
+        if let simulatorEntitlements = entitlements.simulator {
+            let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
+            try simulatorEntitlements.write(to: section)
+            let archive = helper.appendingPathComponent("libXcodeMCPPreviewRenderer.a").path
+            let sdk = try await process.xcrun(["--sdk", "iphonesimulator", "--show-sdk-path"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            _ = try await process.xcrun(["--sdk", "iphonesimulator", "swiftc", "-target", "arm64-apple-ios18.4-simulator",
+                "-sdk", sdk, archive, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive,
+                "-Xlinker", "-rpath", "-Xlinker", "@executable_path/Frameworks",
+                "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__entitlements", "-Xlinker", section.path,
+                "-o", app.appendingPathComponent("XcodeMCPPreviewRenderer").path])
+        }
         let libraries = try previewLibraries(in: app)
         let registryLibraries = try Self.registryLibraries(in: app, previewLibraries: libraries)
         let symbols = try await process.xcrun(["nm", "-arch", "arm64", "-j"] + registryLibraries.map(\.path))
@@ -212,7 +225,13 @@ final class NativePreviewCorrection {
             fileName: source.lastPathComponent, moduleName: target.moduleName, lineNumber: location.line, columnNumber: location.column,
             definitionIndex: input.index, localization: input.localization)
         try JSONEncoder().encode(request).write(to: app.appendingPathComponent("PreviewRequest.json"))
-        _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", "--deep", app.path])
+        var signing = ["--force", "--sign", "-"]
+        if let signedEntitlements = entitlements.signed {
+            let plist = app.deletingLastPathComponent().appendingPathComponent("signed-entitlements.plist")
+            try signedEntitlements.write(to: plist)
+            signing += ["--entitlements", plist.path]
+        }
+        _ = try await process.run("/usr/bin/codesign", signing + [app.path])
         try Task.checkCancellation()
         // Keep allocation alive through cancellation so its created identifier
         // is always available to the cleanup owner below.
@@ -329,15 +348,18 @@ final class NativePreviewCorrection {
                 return true
             }
             guard let sourceOutput else { return false }
-            if ["a", "o"].contains(sourceOutput.pathExtension), try candidate.linksProduct(at: sourceOutput) { return true }
-            guard let frameworkName else { return false }
+            if ["a", "o", "dylib"].contains(sourceOutput.pathExtension), try candidate.linksProduct(at: sourceOutput) { return true }
+            guard frameworkName != nil || sourceOutput.pathExtension == "dylib" else { return false }
             let app = try productBundle(containing: output)
+            if frameworkName == nil, FileManager.default.fileExists(atPath: app.appendingPathComponent(sourceOutput.lastPathComponent).path) {
+                return true
+            }
             let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
             guard FileManager.default.fileExists(atPath: frameworks.path) else { return false }
             return try FileManager.default.subpathsOfDirectory(atPath: frameworks.path).contains { subpath in
                 let library = frameworks.appendingPathComponent(subpath)
                 return library.lastPathComponent == sourceOutput.lastPathComponent
-                    && library.pathComponents.contains(frameworkName)
+                    && (frameworkName.map { library.pathComponents.contains($0) } ?? true)
             }
         }
         guard let host else {
@@ -465,6 +487,8 @@ final class NativePreviewCorrection {
 
     static func registryLibraries(in app: URL, previewLibraries: [URL]) throws -> [URL] {
         var libraries = previewLibraries
+        libraries += try FileManager.default.contentsOfDirectory(at: app, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "dylib" }
         let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
         for subpath in try FileManager.default.subpathsOfDirectory(atPath: frameworks.path) {
             let item = frameworks.appendingPathComponent(subpath)
@@ -474,7 +498,7 @@ final class NativePreviewCorrection {
                 libraries.append(item)
             }
         }
-        return Array(Set(libraries)).sorted { $0.path < $1.path }
+        return Array(Set(libraries.map { $0.resolvingSymlinksInPath() })).sorted { $0.path < $1.path }
     }
 
     static func registryNames(in symbols: String) -> [String] {
