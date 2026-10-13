@@ -35,6 +35,25 @@ final class NativePreviewBuild {
             return URL(filePath: path, relativeTo: URL(filePath: linkerWorkingDirectory, directoryHint: .isDirectory))
                 .absoluteURL
         }
+
+        func linksProduct(at product: URL) throws -> Bool {
+            func url(for path: String) -> URL? {
+                if path.hasPrefix("/") { return URL(filePath: path) }
+                guard let linkerWorkingDirectory else { return nil }
+                return URL(filePath: path, relativeTo: URL(filePath: linkerWorkingDirectory, directoryHint: .isDirectory))
+                    .absoluteURL
+            }
+            let productPath = product.resolvingSymlinksInPath().path
+            if linkCommandLine.contains(where: { url(for: $0)?.resolvingSymlinksInPath().path == productPath }) {
+                return true
+            }
+            for index in linkCommandLine.indices where linkCommandLine[index] == "-filelist" {
+                guard linkCommandLine.indices.contains(index + 1), let fileList = url(for: linkCommandLine[index + 1]) else { continue }
+                let paths = try String(contentsOf: fileList, encoding: .utf8).split(whereSeparator: \.isNewline)
+                if paths.contains(where: { url(for: String($0))?.resolvingSymlinksInPath().path == productPath }) { return true }
+            }
+            return false
+        }
     }
 
     private let runtime = ABIRuntime.shared

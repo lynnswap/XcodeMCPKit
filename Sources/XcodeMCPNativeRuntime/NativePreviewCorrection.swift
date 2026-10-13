@@ -201,7 +201,7 @@ final class NativePreviewCorrection {
         guard let output = target.outputURL else {
             throw NativeRuntimeError.unsupportedContract("The preview target has no linked product")
         }
-        let product = try productBundle(containing: output)
+        let product = try Self.productBundle(containing: output)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/iphonesimulator-arm64")
         try prepareApp(product: product, helper: helper, app: app)
         let libraries = try previewLibraries(in: app)
@@ -320,7 +320,27 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
         }
         if target.outputURL.map({ $0.path.contains(".app/") || $0.path.contains(".appex/") }) == true { return target }
-        guard let host = targets.first(where: { $0.outputURL?.path.contains(".app/") == true }) else {
+        let objectPaths = Set(target.objectFiles.map { $0.resolvingSymlinksInPath().path })
+        let sourceOutput = target.outputURL
+        let frameworkName = sourceOutput?.pathComponents.last(where: { $0.hasSuffix(".framework") })
+        let host = try targets.first { candidate in
+            guard let output = candidate.outputURL, output.path.contains(".app/") else { return false }
+            if candidate.objectFiles.contains(where: { objectPaths.contains($0.resolvingSymlinksInPath().path) }) {
+                return true
+            }
+            guard let sourceOutput else { return false }
+            if ["a", "o"].contains(sourceOutput.pathExtension), try candidate.linksProduct(at: sourceOutput) { return true }
+            guard let frameworkName else { return false }
+            let app = try productBundle(containing: output)
+            let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
+            guard FileManager.default.fileExists(atPath: frameworks.path) else { return false }
+            return try FileManager.default.subpathsOfDirectory(atPath: frameworks.path).contains { subpath in
+                let library = frameworks.appendingPathComponent(subpath)
+                return library.lastPathComponent == sourceOutput.lastPathComponent
+                    && library.pathComponents.contains(frameworkName)
+            }
+        }
+        guard let host else {
             throw NativePipelineRequired()
         }
         return NativePreviewBuild.Target(moduleName: target.moduleName, buildableName: host.buildableName,
@@ -393,7 +413,7 @@ final class NativePreviewCorrection {
         return text[..<index].utf8.count + 1
     }
 
-    private func productBundle(containing output: URL) throws -> URL {
+    private static func productBundle(containing output: URL) throws -> URL {
         var url = output.deletingLastPathComponent()
         while url.path != "/" {
             if ["app", "appex"].contains(url.pathExtension) { return url }
