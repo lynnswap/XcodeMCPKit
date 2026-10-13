@@ -166,7 +166,9 @@ to, or delete existing Simulator devices or change the workspace's active run
 destination. Framework diagnostics and
 subprocess logs remain in the request's artifacts directory.
 Source and destination resolution and initial ABI binding precede the timeout;
-the timeout covers the native build and rendering. The build method binding is
+the timeout covers the native build and rendering, including a late switch to
+the native preview pipeline. Cleanup failures after timeout are reported with the
+timeout error. The build method binding is
 cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 

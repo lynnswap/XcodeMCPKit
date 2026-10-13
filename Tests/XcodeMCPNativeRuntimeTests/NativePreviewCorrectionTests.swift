@@ -5,6 +5,25 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewCorrectionTests {
+    @Test func timeoutPreservesCleanupFailure() async {
+        let identifier = UUID().uuidString
+        do {
+            try await NativePreviewCorrection.withTimeout(seconds: 0) {
+                do {
+                    try await Task.sleep(for: .seconds(60))
+                } catch is CancellationError {
+                    throw NativeRuntimeError.invocation("failed to delete preview Simulator \(identifier): cleanup failed")
+                }
+            }
+            Issue.record("Expected a rendering timeout")
+        } catch {
+            let description = String(describing: error)
+            #expect(description.contains("Preview rendering exceeded 0 seconds"))
+            #expect(description.contains("cleanup failed"))
+            #expect(description.contains(identifier))
+        }
+    }
+
     @Test func unavailableInputContractPreservesNativeEvents() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let app = root.appendingPathComponent("Xcode.app")

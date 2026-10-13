@@ -45,6 +45,8 @@ final class NativePreviewCorrection {
             } catch {
                 if !Task.isCancelled {
                     stream.continuation.yield(errorEvent(error))
+                } else if !(error is CancellationError) {
+                    try? FileHandle.standardError.write(contentsOf: Data("Native preview cancellation failed: \(error)\n".utf8))
                 }
             }
         }
@@ -64,28 +66,72 @@ final class NativePreviewCorrection {
     }
 
     private func produce(_ input: Input, continuation: AsyncStream<Data>.Continuation,
-                         native: @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws {
+                         native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws {
+        let prepared: Prepared
         do {
             guard !input.requiresNativePipeline else { throw NativePipelineRequired() }
-            let prepared = try await prepare(input)
-            let result = try await withThrowingTaskGroup(of: JSONValue.self) { group in
-                group.addTask { try await self.render(input, prepared: prepared) }
-                group.addTask {
-                    try await Task.sleep(for: .seconds(input.timeout))
-                    throw NativeRuntimeError.invocation("Preview rendering exceeded \(input.timeout) seconds")
-                }
-                defer { group.cancelAll() }
-                return try await group.next()!
-            }
-            continuation.yield(try event("completed", result))
+            prepared = try await prepare(input)
         } catch is NativePipelineRequired {
-            try Task.checkCancellation()
-            let stream = try await native()
-            for await event in stream {
+            try await relayNative(native, continuation: continuation)
+            return
+        }
+        try await Self.withTimeout(seconds: input.timeout) {
+            do {
+                let result = try await self.render(input, prepared: prepared)
                 try Task.checkCancellation()
-                continuation.yield(event)
+                continuation.yield(try self.event("completed", result))
+            } catch is NativePipelineRequired {
+                try await self.relayNative(native, continuation: continuation)
             }
         }
+    }
+
+    private func relayNative(_ native: @MainActor @Sendable () async throws -> AsyncStream<Data>,
+                             continuation: AsyncStream<Data>.Continuation) async throws {
+        try Task.checkCancellation()
+        let stream = try await native()
+        for await event in stream {
+            try Task.checkCancellation()
+            continuation.yield(event)
+        }
+    }
+
+    private enum TimedResult: Sendable {
+        case operation(Result<Void, any Error>)
+        case timer(any Error)
+    }
+
+    static func withTimeout(seconds: Int, operation: @escaping @MainActor @Sendable () async throws -> Void) async throws {
+        let result = await withTaskGroup(of: TimedResult.self, returning: Result<Void, any Error>.self) { group in
+            group.addTask {
+                do {
+                    try await operation()
+                    return .operation(.success(()))
+                } catch { return .operation(.failure(error)) }
+            }
+            group.addTask {
+                do {
+                    try await Task.sleep(for: .seconds(seconds))
+                    return .timer(NativeRuntimeError.invocation("Preview rendering exceeded \(seconds) seconds"))
+                } catch { return .timer(error) }
+            }
+            defer { group.cancelAll() }
+            switch await group.next()! {
+            case .operation(let result):
+                return result
+            case .timer(let error):
+                group.cancelAll()
+                // Drain rendering explicitly: TaskGroup otherwise discards a
+                // cleanup failure raised after the timer won the race.
+                for await outcome in group {
+                    if case .operation(.failure(let failure)) = outcome, !(failure is CancellationError) {
+                        return .failure(NativeRuntimeError.invocation("\(error); \(failure)"))
+                    }
+                }
+                return .failure(error)
+            }
+        }
+        try result.get()
     }
 
     @MainActor
