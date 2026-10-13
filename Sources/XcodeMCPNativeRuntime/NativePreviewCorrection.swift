@@ -165,8 +165,8 @@ final class NativePreviewCorrection {
         let location = prepared.location
         let destination = prepared.destination
         let build = try await builder.build(workspace: workspace, destination: destination)
-        let target = try selectTarget(build.targets, source: source)
-        guard target.architecture == "arm64", target.sdkRoot.contains("iphonesimulator") else {
+        let target = try Self.selectTarget(build.targets, source: source)
+        guard target.architecture == "arm64", target.sdkRoot.contains("iphonesimulator"), target.debugDylibEnabled else {
             throw NativePipelineRequired()
         }
         guard let version = build.systemVersion, version.compare("18.4", options: .numeric) != .orderedAscending else {
@@ -288,14 +288,14 @@ final class NativePreviewCorrection {
         return try unsafe await resolve.unsafeInvoke(path, workspace).value
     }
 
-    private func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL) throws -> NativePreviewBuild.Target {
+    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL) throws -> NativePreviewBuild.Target {
         let sourcePath = source.resolvingSymlinksInPath().path
         guard let target = targets.first(where: { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }) else {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
         }
         if target.outputURL.map({ $0.path.contains(".app/") || $0.path.contains(".appex/") }) == true { return target }
         guard let host = targets.first(where: { $0.outputURL?.path.contains(".app/") == true }) else {
-            throw NativeRuntimeError.unsupportedContract("The preview source requires a built application host")
+            throw NativePipelineRequired()
         }
         return NativePreviewBuild.Target(moduleName: target.moduleName, buildableName: host.buildableName,
             sdkRoot: host.sdkRoot, sdkVariant: host.sdkVariant, architecture: host.architecture,
@@ -521,7 +521,7 @@ final class NativePreviewCorrection {
     }
 }
 
-private struct NativePipelineRequired: Error {}
+struct NativePipelineRequired: Error {}
 
 // Generic calls supply the native enum's indirect ABI and retained ownership.
 @inline(never)

@@ -5,6 +5,19 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewCorrectionTests {
+    @Test func frameworkWithoutAppHostRequiresNativePipeline() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("FixtureView.swift")
+        let target = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
+            sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
+            linkCommandLine: ["-o", root.appendingPathComponent("FixtureKit.framework/FixtureKit").path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false)
+
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget([target], source: source)
+        }
+    }
+
     @Test func timeoutPreservesCleanupFailure() async {
         let identifier = UUID().uuidString
         do {

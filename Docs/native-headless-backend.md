@@ -172,7 +172,8 @@ timeout error. The build method binding is
 cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 
-Other platforms, `PreviewProvider` definitions, grouped previews, WidgetKit
+Targets without an application host or with its debug dylib disabled, other
+platforms, `PreviewProvider` definitions, grouped previews, WidgetKit
 previews, orientation and modifier traits, variant overrides, and canvas controls
 continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
 requirements, including the limitation tracked in
