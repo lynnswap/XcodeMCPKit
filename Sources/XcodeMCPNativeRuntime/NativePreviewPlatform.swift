@@ -16,6 +16,17 @@ enum NativePreviewPlatform: String, CaseIterable {
         } else { return nil }
     }
 
+    init?(platformIdentifier: String?, isMacCatalyst: Bool) {
+        switch platformIdentifier {
+        case "com.apple.platform.iphonesimulator": self = .iOS
+        case "com.apple.platform.appletvsimulator": self = .tvOS
+        case "com.apple.platform.xrsimulator": self = .visionOS
+        case "com.apple.platform.watchsimulator": self = .watchOS
+        case "com.apple.platform.macosx": self = isMacCatalyst ? .catalyst : .macOS
+        default: return nil
+        }
+    }
+
     var isSimulator: Bool { self != .macOS && self != .catalyst }
     var helperDirectory: String { rawValue + "-arm64" }
     var sdk: String { self == .catalyst ? "macosx" : rawValue }

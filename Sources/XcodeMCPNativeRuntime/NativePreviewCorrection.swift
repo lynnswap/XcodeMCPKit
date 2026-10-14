@@ -220,13 +220,13 @@ final class NativePreviewCorrection {
         let location = prepared.location
         let destination = prepared.destination
         let build = try await builder.build(workspace: workspace, destination: destination)
-        let selection = try Self.selectTarget(build.targets, source: source)
+        guard let platform = build.previewPlatform else { throw NativePipelineRequired() }
+        let selection = try Self.selectTarget(build.targets, source: source, platform: platform)
         let target = selection.host
         guard target.debugDylibEnabled else {
             throw NativePipelineRequired()
         }
-        guard let platform = NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant),
-              let version = build.systemVersion, version.compare(platform.minimumVersion, options: .numeric) != .orderedAscending else {
+        guard let version = build.systemVersion, version.compare(platform.minimumVersion, options: .numeric) != .orderedAscending else {
             throw NativePipelineRequired()
         }
         guard let output = target.outputURL else {
@@ -304,7 +304,8 @@ final class NativePreviewCorrection {
             deviceType = rendered.deviceType
             destinationFields = rendered.destination
         } else {
-            let text = try await process.run(platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path, [])
+            let text = try await process.run(platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path,
+                Self.rendererArguments(localization: input.localization))
             guard let record = text.split(whereSeparator: \.isNewline).last(where: { $0.hasPrefix("XcodeMCPPreviewResult:") }) else {
                 throw NativeRuntimeError.invocation("The preview process returned no result; see its process log")
             }
@@ -375,11 +376,8 @@ final class NativePreviewCorrection {
             _ = try await process.xcrun(["simctl", "boot", simulator.identifier])
             _ = try await process.xcrun(["simctl", "bootstatus", simulator.identifier, "-b"])
             _ = try await process.xcrun(["simctl", "install", simulator.identifier, app.path])
-            var launch = ["simctl", "launch", simulator.identifier, simulator.bundleIdentifier]
-            if let locale = localization {
-                let languages = try PropertyListSerialization.data(fromPropertyList: [locale], format: .xml, options: 0)
-                launch += ["-AppleLanguages", String(decoding: languages, as: UTF8.self), "-AppleLocale", locale]
-            }
+            let launch = ["simctl", "launch", simulator.identifier, simulator.bundleIdentifier]
+                + (try Self.rendererArguments(localization: localization))
             _ = try await process.xcrun(launch)
             let container = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, simulator.bundleIdentifier, "data"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -459,17 +457,24 @@ final class NativePreviewCorrection {
         let host: NativePreviewBuild.Target
     }
 
-    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL) throws -> Selection {
+    static func rendererArguments(localization: String?) throws -> [String] {
+        guard let localization else { return [] }
+        let languages = try PropertyListSerialization.data(fromPropertyList: [localization], format: .xml, options: 0)
+        return ["-AppleLanguages", String(decoding: languages, as: UTF8.self), "-AppleLocale", localization]
+    }
+
+    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL, platform: NativePreviewPlatform) throws -> Selection {
         let sourcePath = source.resolvingSymlinksInPath().path
         guard targets.contains(where: { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }) else {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
         }
-        let supportedTargets = targets.filter { $0.architecture == "arm64" && NativePreviewPlatform(sdkRoot: $0.sdkRoot, sdkVariant: $0.sdkVariant) != nil }
+        let supportedTargets = targets.filter {
+            $0.architecture == "arm64" && NativePreviewPlatform(sdkRoot: $0.sdkRoot, sdkVariant: $0.sdkVariant) == platform
+        }
         let sources = supportedTargets.filter { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }
         guard !sources.isEmpty else { throw NativePipelineRequired() }
         var selections: [Selection] = []
         for target in sources {
-            let platform = NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant)
             if let output = target.outputURL, productBundle(containing: output) != nil {
                 selections.append(Selection(source: target, host: target))
                 continue

@@ -188,8 +188,11 @@ UIKit size-that-fits uses the hosting view's intrinsic size without a screen-siz
 cap. watchOS uses its hosting controller's `sizeThatFits(in:)` with the selected
 watch's screen bounds. Device layout preserves WatchKit's safe-area layout;
 fixed-size and size-that-fits layouts disable it, matching the native hosts.
-macOS measures the hosting view after attaching it to its window, including the
-titlebar safe area for device layout.
+macOS uses the native caller's 600-by-400-point proposal. Device layout keeps that
+proposal; size-that-fits uses `NSHostingController.sizeThatFits(in:)` with it.
+Fixed-size layout uses the source dimensions. AppKit's normal hosting constraints
+can resize the attached window; the renderer does not overwrite the result with
+the view's `fittingSize`.
 
 On macOS, `PreviewsInjection.MacOSPreviewHostingWindow` supplies active key/main
 appearance without activating the renderer application. Device layout uses

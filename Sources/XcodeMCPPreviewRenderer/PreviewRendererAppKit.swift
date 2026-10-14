@@ -23,10 +23,13 @@ struct PreviewRendererAppKit {
         let request = try loadPreviewRequest()
         let content = try await makeGeneralPreview(request)
         let controller = NSHostingController(rootView: content.view)
-        var size: CGSize
+        let proposal = CGSize(width: 600, height: 400)
+        let size: CGSize
         switch content.layout {
-        case .device, .sizeThatFits:
-            size = controller.view.fittingSize
+        case .device:
+            size = proposal
+        case .sizeThatFits:
+            size = controller.sizeThatFits(in: proposal)
         case .fixed(let width, let height):
             size = CGSize(width: width, height: height)
         default: throw NativePreviewPipelineRequired()
@@ -47,14 +50,10 @@ struct PreviewRendererAppKit {
         controller.view.frame = NSRect(origin: .zero, size: size)
         window.contentViewController = controller
         window.setContentSize(size)
-        window.makeKey()
+        window.makeKeyAndOrderFront(nil)
         window.layoutIfNeeded()
         controller.view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
-        switch content.layout {
-        case .device, .sizeThatFits: window.setContentSize(controller.view.fittingSize)
-        default: break
-        }
         window.layoutIfNeeded()
         controller.view.layoutSubtreeIfNeeded()
         let image = try await captureAppKitPreview(window: window)

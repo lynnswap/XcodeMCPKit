@@ -11,6 +11,7 @@ final class NativePreviewBuild {
         let destinationIdentifier: String
         let previewDestinationIdentifier: String
         let platformIdentifier: String?
+        let previewPlatform: NativePreviewPlatform?
         let platformName: String?
         let deviceModelName: String?
         let systemVersion: String?
@@ -176,7 +177,7 @@ final class NativePreviewBuild {
         try Task.checkCancellation()
         let records = try await targets(descriptions, image: image, runnable: runnable)
         return Result(targets: records, destinationIdentifier: info.identifier, previewDestinationIdentifier: info.previewIdentifier,
-                      platformIdentifier: info.platformIdentifier,
+                      platformIdentifier: info.platformIdentifier, previewPlatform: info.previewPlatform,
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion,
                       availableDestinations: selection.available)
     }
@@ -488,6 +489,11 @@ final class NativePreviewBuild {
             throw NativeRuntimeError.unsupportedContract("The native run destination has no identifier")
         }
         let platformIdentifier = try optionalString(platform, selector: "identifier")
+        let isMacCatalyst: Bool
+        if platformIdentifier == "com.apple.platform.macosx" {
+            let getter = try runtime.object(destination).resolveMethodAndWait(selector: "isMacCatalyst", as: (() -> Bool).self)
+            isMacCatalyst = try unsafe getter.unsafeInvoke()
+        } else { isMacCatalyst = false }
         let properties = try unsafe prepared.properties.unsafeInvoke(on: recipe)
         let nativePlatform = try unsafe prepared.platform.unsafeInvoke(on: properties)
         let nativeIdentifier = try unsafe prepared.identifier.unsafeInvoke(on: properties)
@@ -499,6 +505,7 @@ final class NativePreviewBuild {
         let systemVersion = try unsafe prepared.versionString.unsafeInvoke(on: version)
         return Destination(value: destination, identifier: identifier, previewIdentifier: previewIdentifier,
                            platformIdentifier: platformIdentifier,
+                           previewPlatform: NativePreviewPlatform(platformIdentifier: platformIdentifier, isMacCatalyst: isMacCatalyst),
                            platformName: platformName,
                            deviceModelName: model, systemVersion: systemVersion)
     }
@@ -513,6 +520,7 @@ final class NativePreviewBuild {
         let identifier: String
         let previewIdentifier: String
         let platformIdentifier: String?
+        let previewPlatform: NativePreviewPlatform?
         let platformName: String?
         let deviceModelName: String?
         let systemVersion: String?
