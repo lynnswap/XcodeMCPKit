@@ -25,6 +25,28 @@ struct NativePreviewBuildTests {
         #expect(try builder.selectDestination(workspace: workspace, preferred: ["identifier": ios.targetDevice.identifier]) === ios)
     }
 
+    @Test(arguments: [["identifier": "dvtdevice-local-computer:localhost"], ["platformName": "Mac Catalyst"]])
+    func retainsActiveSDKVariantWhenMacDestinationsShareADeviceIdentifier(preferred: [String: String]) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let app = root.appendingPathComponent("Xcode.app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"),
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let builder = NativePreviewBuild(installation: try NativeXcodeInstallation(developerDirectory: app))
+        let identifier = "Mac"
+        let mac = PreviewBuildDestination(identifier: identifier, platform: "com.apple.platform.macosx")
+        let catalyst = PreviewBuildDestination(identifier: identifier, platform: "com.apple.platform.macosx", variant: "iosmac")
+        let active = PreviewBuildDestination(identifier: identifier, platform: "com.apple.platform.macosx", variant: "iosmac")
+        for destination in [mac, catalyst, active] {
+            destination.targetDevice.deviceLocation = NSURL(string: "dvtdevice-local-computer:localhost")
+        }
+        let scheme = PreviewBuildScheme(destinations: [mac, catalyst])
+        let workspace = PreviewBuildWorkspace(manager: PreviewBuildRunContextManager(scheme: scheme, destination: active))
+
+        #expect(active !== catalyst)
+        #expect(try builder.selectDestination(workspace: workspace, preferred: preferred) === catalyst)
+    }
+
     @Test func resolvesRunnableAndUsesNativeBuildableEquality() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let app = root.appendingPathComponent("Xcode.app")
@@ -96,10 +118,19 @@ private final class PreviewBuildDestination: NSObject {
     @objc let targetDevice: PreviewBuildDevice
     @objc let targetSDK: PreviewBuildSDK
     @objc let effectiveOperatingSystemVersion: NSString = "27.1"
-    init(identifier: String, platform: String) {
+    let variant: String?
+    @objc var isMacCatalyst: Bool { variant == "iosmac" }
+    init(identifier: String, platform: String, variant: String? = nil) {
         targetDevice = PreviewBuildDevice(identifier: identifier)
         targetSDK = PreviewBuildSDK(platform: platform)
+        self.variant = variant
     }
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let other = object as? PreviewBuildDestination else { return false }
+        return targetDevice.identifier == other.targetDevice.identifier
+            && targetSDK.platform.identifier == other.targetSDK.platform.identifier && variant == other.variant
+    }
+    override var hash: Int { targetDevice.identifier.hashValue ^ targetSDK.platform.identifier.hashValue ^ (variant?.hashValue ?? 0) }
 }
 
 private final class PreviewBuildDevice: NSObject {
