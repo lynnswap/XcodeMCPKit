@@ -15,7 +15,6 @@ final class NativePreviewBuild {
         let platformName: String?
         let deviceModelName: String?
         let systemVersion: String?
-        let availableRenderDestinations: JSONValue?
 
         var productURLs: [URL] { targets.compactMap(\.outputURL) }
     }
@@ -147,8 +146,7 @@ final class NativePreviewBuild {
         let records = try await targets(descriptions, image: image, runnable: runnable)
         return Result(targets: records, destinationIdentifier: info.identifier, previewDestinationIdentifier: info.previewIdentifier,
                       platformIdentifier: info.platformIdentifier, previewPlatform: info.previewPlatform,
-                      platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion,
-                      availableRenderDestinations: selection.available)
+                      platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
     }
 
     func cancelPendingOperations() {
