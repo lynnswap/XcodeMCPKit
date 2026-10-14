@@ -69,16 +69,28 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         try requireSupportedTraits(preview)
         let value = try await ownedPreview(preview)
         let source = try await previewSource(value)
-        guard source.type.name == "DeveloperToolsSupport.DefaultPreviewSource<SwiftUI.ViewPreviewBody>" else {
-            throw NativePreviewPipelineRequired()
-        }
-        var view = try await makeViewPreview(source: source)
         // Preview mode defers SwiftUI graph creation until its code is ready.
         __previewThunksHaveFinishedLoading()
+        let widget: WidgetPreview?
+        var view: AnyView
+        let layout: DeveloperToolsSupport.PreviewLayout
+        switch source.type.name {
+        case "DeveloperToolsSupport.DefaultPreviewSource<SwiftUI.ViewPreviewBody>":
+            guard request.widgetFamily == nil, request.timelineIndex == nil else { throw NativePreviewPipelineRequired() }
+            widget = nil
+            view = try await makeViewPreview(source: source)
+            layout = try await viewPreviewLayout(value)
+        case "WidgetKit.TimelineEntryPreviewSource", "WidgetKit.TimelineProviderPreviewSource":
+            let result = try await makeWidgetPreview(source: source, family: request.widgetFamily, timelineEntryIndex: request.timelineIndex)
+            widget = result
+            view = AnyView(result.view.clipShape(RoundedRectangle(cornerRadius: result.cornerRadius, style: .continuous)))
+            layout = .fixed(width: result.size.width, height: result.size.height)
+        default: throw NativePreviewPipelineRequired()
+        }
         var size = window.bounds.size
-        let layout = try await viewPreviewLayout(value)
         if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }
         let controller = UIHostingController(rootView: view)
+        if widget != nil { controller.view.backgroundColor = .clear }
         switch layout {
         case .device: break
         case .fixed(let width, let height):
@@ -110,17 +122,19 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         controller.view.layoutIfNeeded()
         let format = UIGraphicsImageRendererFormat()
         format.scale = window.screen.scale
+        if widget != nil { format.opaque = false }
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
         var drawn = false
         let image = renderer.image { _ in
             drawn = controller.view.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: true)
         }
         guard drawn, let data = image.pngData() else { throw PreviewRendererError("The preview host could not capture its rendered view") }
+        try widget?.validate()
         try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
         let displayGetter = try await value.type.resolveGetter(named: "displayName", as: (() -> String?).self,
             receiverABI: .opaque(named: value.type.name))
         write(PreviewRendererResult(snapshotName: "Preview.png", displayName: try unsafe displayGetter.unsafeInvoke(on: value),
-            sourceLineNumber: registry.line))
+            sourceLineNumber: registry.line, timelineIndexes: widget?.timelineIndexes, widgetFamilies: widget?.supportedFamilies))
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }

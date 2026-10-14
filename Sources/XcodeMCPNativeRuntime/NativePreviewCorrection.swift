@@ -23,7 +23,7 @@ final class NativePreviewCorrection {
               case .object(var output) = fields["outputSchema"],
               case .object(var properties) = output["properties"],
               case .object(var snapshot) = properties["previewSnapshotPath"] else { return tool }
-        snapshot["description"] = .string("The full path to the preview snapshot. Direct SwiftUI previews capture the rectangular hosting view without hardware display cutout masks. Other previews use Xcode's native snapshot format.")
+        snapshot["description"] = .string("The full path to the preview snapshot. Direct SwiftUI previews capture the hosting view without hardware display cutout masks; WidgetKit previews use the widget's size and rounded corners. Other previews use Xcode's native snapshot format.")
         properties["previewSnapshotPath"] = .object(snapshot)
         output["properties"] = .object(properties)
         fields["outputSchema"] = .object(output)
@@ -219,7 +219,8 @@ final class NativePreviewCorrection {
         }
         let entitlements = try NativePreviewEntitlements.read(from: product)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/iphonesimulator-arm64")
-        try Self.prepareApp(product: product, helper: helper, app: app)
+        let containingApp = try Self.containingApp(for: output, targets: build.targets)
+        try Self.prepareApp(product: product, helper: helper, app: app, containingApp: containingApp)
         if let simulatorEntitlements = entitlements.simulator {
             let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
             try simulatorEntitlements.write(to: section)
@@ -240,7 +241,7 @@ final class NativePreviewCorrection {
         let names = Self.registryNames(in: symbols)
         let request = PreviewRendererRequest(libraryNames: libraryPaths, registryNames: names,
             fileName: source.lastPathComponent, moduleName: selection.source.moduleName, lineNumber: location.line, columnNumber: location.column,
-            definitionIndex: input.index, localization: input.localization)
+            definitionIndex: input.index, localization: input.localization, widgetFamily: input.widgetFamily, timelineIndex: input.timelineIndex)
         try JSONEncoder().encode(request).write(to: app.appendingPathComponent("PreviewRequest.json"))
         var signing = ["--force", "--sign", "-"]
         if let signedEntitlements = entitlements.signed {
@@ -290,6 +291,16 @@ final class NativePreviewCorrection {
             ]
             fields["displayName"] = .string(response.displayName ?? location.displayName)
             if let line = response.sourceLineNumber { fields["sourceLineNumber"] = .number(.int(Int64(line))) }
+            if let indexes = response.timelineIndexes {
+                fields["supportedCanvasControlOverrides"] = .object([
+                    "timelineIndexes": .array(indexes.map { .number(.int(Int64($0))) }),
+                ])
+            }
+            if let families = response.widgetFamilies {
+                fields["supportedPreviewVariantOverrides"] = .object([
+                    "Widget Family": .array(families.map(JSONValue.string)),
+                ])
+            }
             result = .object(fields)
         } catch { failure = error }
         // Cleanup is outside the cancelled task so it can delete the device even
@@ -365,18 +376,15 @@ final class NativePreviewCorrection {
         guard !sources.isEmpty else { throw NativePipelineRequired() }
         var selections: [Selection] = []
         for target in sources {
-            if let output = target.outputURL, let product = productBundle(containing: output) {
-                if product.pathExtension == "app" {
-                    selections.append(Selection(source: target, host: target))
-                }
+            if let output = target.outputURL, productBundle(containing: output) != nil {
+                selections.append(Selection(source: target, host: target))
                 continue
             }
             let objectPaths = Set(target.objectFiles.map { $0.resolvingSymlinksInPath().path })
             let sourceOutput = target.outputURL
             let frameworkName = sourceOutput?.pathComponents.last(where: { $0.hasSuffix(".framework") })
             let hosts = try supportedTargets.filter { candidate in
-                guard let output = candidate.outputURL, let app = productBundle(containing: output),
-                      app.pathExtension == "app" else { return false }
+                guard let output = candidate.outputURL, let app = productBundle(containing: output) else { return false }
                 if candidate.objectFiles.contains(where: { objectPaths.contains($0.resolvingSymlinksInPath().path) }) {
                     return true
                 }
@@ -482,7 +490,28 @@ final class NativePreviewCorrection {
         return nil
     }
 
-    static func prepareApp(product: URL, helper: URL, app: URL) throws {
+    static func containingApp(for extensionOutput: URL, targets: [NativePreviewBuild.Target]) throws -> URL? {
+        guard let product = productBundle(containing: extensionOutput), product.pathExtension == "appex" else { return nil }
+        let relativeBinary = String(extensionOutput.path.dropFirst(product.path.count + 1))
+        let candidates = try targets.compactMap { target -> (app: URL, isRunnable: Bool)? in
+            guard target.architecture == "arm64", target.sdkRoot.contains("iphonesimulator"),
+                  let output = target.outputURL, let app = productBundle(containing: output),
+                  app.pathExtension == "app" else { return nil }
+            let embedded = app.appendingPathComponent("PlugIns", isDirectory: true)
+                .appendingPathComponent(product.lastPathComponent, isDirectory: true)
+                .appendingPathComponent(relativeBinary)
+            guard FileManager.default.fileExists(atPath: embedded.path),
+                  try NativePreviewBinary.matches(extensionOutput, embedded) else { return nil }
+            return (app, target.isRunnable)
+        }
+        guard !candidates.isEmpty else { return nil }
+        let runnable = candidates.filter(\.isRunnable)
+        let matches = runnable.isEmpty ? candidates : runnable
+        guard matches.count == 1 else { throw NativePipelineRequired() }
+        return matches[0].app
+    }
+
+    static func prepareApp(product: URL, helper: URL, app: URL, containingApp: URL? = nil) throws {
         try FileManager.default.copyItem(at: product, to: app)
         let executable = helper.appendingPathComponent("XcodeMCPPreviewRenderer")
         try copyReplacingItem(executable, to: app.appendingPathComponent("XcodeMCPPreviewRenderer"))
@@ -491,6 +520,16 @@ final class NativePreviewCorrection {
             .write(to: app.appendingPathComponent("Info.plist"))
         let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
         try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
+        if let shared = containingApp?.appendingPathComponent("Frameworks", isDirectory: true),
+           FileManager.default.fileExists(atPath: shared.path) {
+            // Extensions search their own Frameworks before their containing app's.
+            for item in try FileManager.default.contentsOfDirectory(at: shared, includingPropertiesForKeys: nil) {
+                let destination = frameworks.appendingPathComponent(item.lastPathComponent)
+                if !FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.copyItem(at: item, to: destination)
+                }
+            }
+        }
         try copyContents(helper.appendingPathComponent("Frameworks"), to: frameworks)
     }
 
@@ -625,6 +664,8 @@ final class NativePreviewCorrection {
         let localization: String?
         let destination: [String: String]
         let timeout: Int
+        let widgetFamily: String?
+        let timelineIndex: Int?
         let requiresNativePipeline: Bool
     }
 
@@ -649,7 +690,7 @@ final class NativePreviewCorrection {
         let timeout = try unsafe timeoutGetter.unsafeInvoke(on: value)
         let controls = fields["previewCanvasControlOverrides"].flatMap { Mirror(reflecting: $0).children.first?.value }
         let controlFields = controls.map { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap { field in field.label.map { ($0, field.value) } }) } ?? [:]
-        let requiresNativePipeline = !variants.isEmpty || controlFields.values.contains { Mirror(reflecting: $0).children.first != nil }
+        let options = Self.directOptions(variants: variants, controls: controlFields)
         let requestedDestination = fields["preferredRenderDestination"].flatMap { Mirror(reflecting: $0).children.first?.value }
         let destination = requestedDestination.map { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap { field -> (String, String)? in
             guard let label = field.label, let value = field.value as? String? ?? nil else { return nil }
@@ -658,7 +699,21 @@ final class NativePreviewCorrection {
         return Input(workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
             index: index, localization: fields["previewLocalizationOverride"] as? String? ?? nil,
             destination: destination, timeout: timeout,
-            requiresNativePipeline: requiresNativePipeline)
+            widgetFamily: options.widgetFamily, timelineIndex: options.timelineIndex,
+            requiresNativePipeline: options.requiresNativePipeline)
+    }
+
+    static func directOptions(variants: [String: String], controls: [String: Any]) ->
+        (widgetFamily: String?, timelineIndex: Int?, requiresNativePipeline: Bool) {
+        let family = variants["Widget Family"]
+        let timeline = controls["timelineIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
+        let unsupportedVariant = variants.contains { key, value in
+            key != "Widget Family" || !["Small", "Medium"].contains(value)
+        }
+        let unsupportedControl = controls.contains { key, value in
+            key != "timelineIndex" && Mirror(reflecting: value).children.first != nil
+        }
+        return (family, timeline, unsupportedVariant || unsupportedControl)
     }
 
     private func event(_ type: String, _ value: JSONValue) throws -> Data {
