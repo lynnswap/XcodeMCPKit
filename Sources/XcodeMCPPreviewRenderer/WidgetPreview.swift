@@ -29,6 +29,7 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, presentation: 
     try applyDisplayVariants(to: &publicEnvironment, variants: variants)
     if let localization { publicEnvironment.locale = Locale(identifier: localization) }
     let requestedFamily = try await applyWidgetEffects(effects, to: &publicEnvironment)
+    try await applyWidgetDisplayProperties(to: &publicEnvironment, screen: screen)
     let makeGetter = try await source.type.resolveGetter(named: "makeWidget",
         as: (() -> NativeSwiftClosure<() -> NativeSwiftValue>).self, receiverABI: .opaque(named: source.type.name))
     let make = try unsafe makeGetter.unsafeInvoke(on: source)
@@ -65,17 +66,6 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, presentation: 
     let (providedWidget, providedMetrics) = try await widgetIdentity(kind: descriptor.kind, family: rawFamily, screen: screen)
 
     let swiftEnvironment = try await widgetValue(publicEnvironment)
-    let configurationGetter = try await ABIRuntime.shared.object(screen).resolveMethod(selector: "displayConfiguration",
-        as: (() -> AnyObject).self)
-    let displayConfiguration = try unsafe configurationGetter.unsafeInvoke()
-    let allocatedProperties = try await widgetObject("CHSWidgetDisplayProperties", framework: "ChronoServices")
-    let displayInit = try await ABIRuntime.shared.object(allocatedProperties).resolveMethod(selector: "initWithDisplayConfiguration:",
-        as: ((AnyObject) -> AnyObject).self)
-    let displayProperties = try unsafe displayInit.unsafeInvoke(displayConfiguration)
-    let displaySetter = try await swiftEnvironment.type.resolveSetter(
-        named: "(extension in WidgetKit):SwiftUI.EnvironmentValues._widgetDisplayProperties.setter : __C.CHSWidgetDisplayProperties",
-        as: AnyObject.self, receiverABI: .opaque(named: swiftEnvironment.type.name))
-    try unsafe displaySetter.unsafeInvoke(on: swiftEnvironment, displayProperties)
     let widgetSetter = try await swiftEnvironment.type.resolveSetter(
         named: "(extension in WidgetKit):SwiftUI.EnvironmentValues.widget.setter : Swift.Optional<__C.CHSWidget>",
         as: (AnyObject?).self, receiverABI: .opaque(named: swiftEnvironment.type.name))

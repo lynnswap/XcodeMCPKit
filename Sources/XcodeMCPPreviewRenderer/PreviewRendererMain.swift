@@ -149,7 +149,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                     throw NativePreviewPipelineRequired()
                 }
                 var environment = EnvironmentValues()
-                try await applyActivityDisplayProperties(to: &environment, screen: window.screen)
+                try await applyWidgetDisplayProperties(to: &environment, screen: window.screen)
                 try applyDisplayVariants(to: &environment, variants: variants)
                 if let localization = request.localization { environment.locale = Locale(identifier: localization) }
                 let result = try await makeActivityPreview(source: source, timelineIndex: request.timelineIndex,
