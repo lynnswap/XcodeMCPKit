@@ -11,6 +11,40 @@ struct NativePreviewDiscoveryTests {
         #expect(NativePreviewCorrection.registryNames(in: symbol) == [name])
     }
 
+    @Test func discoversProgramRootsFromCompilerMainSymbols() {
+        let widgetRoot = "28OriginalWidgetProbeExtension0abC6BundleV"
+        let appRoot = "10FixtureApp0B0V"
+        let symbols = [
+            "_$s\(widgetRoot)5$mainyyFZ",
+            "_$s\(appRoot)5$mainyyFZ",
+            "_$s\(widgetRoot)5$mainyyFZ",
+            "_$s\(widgetRoot)4bodyQrvg",
+            "_$s\(widgetRoot)VMn",
+            "_main",
+        ].joined(separator: "\n")
+        #expect(NativePreviewCorrection.programRootNames(in: symbols) == [appRoot, widgetRoot])
+        #expect(NativePreviewCorrection.programRootNames(in: "_$s\(widgetRoot)VMn") == [])
+    }
+
+    @Test func programLibrariesMatchTheBuiltHostImage() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let app = root.appendingPathComponent("Fixture.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let output = root.appendingPathComponent("Built/Original.debug.dylib")
+        let otherOutput = root.appendingPathComponent("Built/Other.debug.dylib")
+        try compilePreviewLibrary(at: output)
+        try compilePreviewLibrary(at: otherOutput, value: 1)
+        let stagedHost = app.appendingPathComponent("RenamedHost.debug.dylib")
+        let otherLibrary = app.appendingPathComponent("Original.debug.dylib")
+        try FileManager.default.copyItem(at: output, to: stagedHost)
+        try FileManager.default.copyItem(at: otherOutput, to: otherLibrary)
+
+        #expect(try NativePreviewCorrection.programLibraries(previewLibraries: [otherLibrary, stagedHost], output: output) == [stagedHost])
+        #expect(try NativePreviewCorrection.programLibraries(previewLibraries: [otherLibrary], output: output) == [])
+    }
+
     @Test func includesEmbeddedFrameworkExecutablesAndDebugLibraries() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let app = root.appendingPathComponent("Fixture.app", isDirectory: true)

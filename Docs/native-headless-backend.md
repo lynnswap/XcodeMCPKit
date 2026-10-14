@@ -225,8 +225,14 @@ providers remain unavailable with Xcode 27.1, whose native RenderPreview also
 reports `preview provider not found` for those definitions.
 `PreviewModifier` calls `makeSharedContext()` once per concrete modifier type in
 each render and applies the native modifier wrappers in their original order.
-Provider contexts, device overrides, and other display traits, variants, or controls
-still use the native pipeline.
+Activity `PreviewProvider` contexts use the original Widget or WidgetBundle
+program root to find the Activity configuration whose native attributes type
+matches the context. The root is discovered from compiler main symbols in the
+built host's debug library, identified by its Mach-O UUID. WidgetBundle descriptor
+preferences retain the original configuration modifiers. If the root or private
+host/preference contract is unavailable, the request uses the native pipeline.
+Widget provider contexts, device overrides, and other display traits, variants,
+or controls still use the native pipeline.
 
 On iOS Simulator, Widget previews support `StaticConfiguration`, `IntentConfiguration`, and
 `AppIntentConfiguration`. Previews can provide explicit `timeline:` entries or a
@@ -257,9 +263,13 @@ Live Activity previews use WidgetKit's archived activity views and native
 WidgetRenderer controllers. `previewVariantOverrides` selects `View Style`,
 `Activity View Context`, `Color Scheme`, and `Dynamic Type`; the response lists
 their supported values. `previewCanvasControlOverrides.timelineIndex` selects
-a content state. `toggleState` adds stale states after each fresh state, while
-the Stale activity context renders every state as stale. An unsupported timeline
-index renders the first state and returns the native warning in `errors`.
+a content state. For `#Preview`, `toggleState` adds stale states after each fresh
+state, while the Stale activity context renders every state as stale. An unsupported
+timeline index renders the first state and returns the native warning in `errors`.
+An Activity `PreviewProvider` context supplies one attributes/state payload and
+reports timeline index `0`. It retains the context's `isStale` and view kind unless
+`Activity View Context` or `View Style` overrides them. Its toggle catalog matches
+native RenderPreview, but toggling does not add states to this single payload.
 The renderer keeps the selected style's orientation and preferred content size.
 Activity archives receive the selected family and compact layout through
 WidgetKit's canonical environment key paths. Dynamic Island styles use Dark

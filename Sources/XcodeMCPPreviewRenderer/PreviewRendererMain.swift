@@ -65,28 +65,50 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         var variants = request.displayVariantOverrides
         var errors: [String] = []
         if let typeName = request.providerTypeName {
-            guard request.widgetFamily == nil, request.widgetPresentation == nil, request.timelineIndex == nil,
-                  request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil else {
-                throw NativePreviewPipelineRequired()
-            }
             let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
-            guard preview.context == nil, preview.device == nil else {
-                throw NativePreviewPipelineRequired()
-            }
-            widget = nil
-            activity = nil
-            view = preview.content
+            guard preview.device == nil else { throw NativePreviewPipelineRequired() }
             if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
                 variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"
             }
-            switch preview.interfaceOrientation {
-            case .portrait: sourceOrientation = .portrait
-            case .portraitUpsideDown: sourceOrientation = .portraitUpsideDown
-            case .landscapeLeft: sourceOrientation = .landscapeLeft
-            case .landscapeRight: sourceOrientation = .landscapeRight
-            default: throw NativePreviewPipelineRequired()
+            if let context = preview.context {
+                guard request.widgetFamily == nil, request.widgetPresentation == nil,
+                      variants.keys.allSatisfy({ ["Color Scheme", "Dynamic Type"].contains($0) }) else {
+                    throw NativePreviewPipelineRequired()
+                }
+                var environment = EnvironmentValues()
+                try await applyWidgetDisplayProperties(to: &environment, screen: window.screen)
+                try applyDisplayVariants(to: &environment, variants: variants)
+                if let localization = request.localization { environment.locale = Locale(identifier: localization) }
+                let result = try await makeLegacyActivityPreview(context: context,
+                    programRootNames: request.programRootNames ?? [], timelineIndex: request.timelineIndex,
+                    viewStyle: request.activityViewStyle, viewContext: request.activityViewContext,
+                    environment: environment,
+                    appName: request.appName ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                        ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "",
+                    payloadID: UUID().uuidString)
+                widget = nil
+                activity = result
+                view = nil
+                layout = .device
+                sourceOrientation = result.interfaceOrientation
+                errors = result.errors
+            } else {
+                guard request.widgetFamily == nil, request.widgetPresentation == nil, request.timelineIndex == nil,
+                      request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil else {
+                    throw NativePreviewPipelineRequired()
+                }
+                widget = nil
+                activity = nil
+                view = preview.content
+                switch preview.interfaceOrientation {
+                case .portrait: sourceOrientation = .portrait
+                case .portraitUpsideDown: sourceOrientation = .portraitUpsideDown
+                case .landscapeLeft: sourceOrientation = .landscapeLeft
+                case .landscapeRight: sourceOrientation = .landscapeRight
+                default: throw NativePreviewPipelineRequired()
+                }
+                layout = preview.layout
             }
-            layout = preview.layout
             displayName = preview.displayName
             sourceLineNumber = request.lineNumber
             groupItems = nil
