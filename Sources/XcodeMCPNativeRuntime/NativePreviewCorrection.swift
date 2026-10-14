@@ -325,11 +325,11 @@ final class NativePreviewCorrection {
             usesDeviceLayout: response.usesDeviceLayout == true, orientation: response.interfaceOrientation, exclusion: exclusionData)
         var fields: [String: JSONValue] = [
             "previewSnapshotPath": .string(snapshotURL.path),
-            "errors": .array((response.errors ?? []).map { .object(["message": .string($0)]) }),
+            "errors": .array((destination.errors + (response.errors ?? [])).map { .object(["message": .string($0)]) }),
             "renderedDestination": .object(destinationFields),
-            "availableRenderDestinations": .array(build.availableDestinations.map { .object($0.renderFields) }),
             "supportedLocalizations": .array(try await supportedLocalizations(in: workspace).map(JSONValue.string)),
         ]
+        fields["availableRenderDestinations"] = build.availableRenderDestinations
         fields["displayName"] = .string(response.displayName ?? location.displayName)
         if let line = response.sourceLineNumber { fields["sourceLineNumber"] = .number(.int(Int64(line))) }
         if let indexes = response.timelineIndexes {
@@ -518,6 +518,7 @@ final class NativePreviewCorrection {
         let column: Int
         let displayName: String
         let providerPath: NativeSwiftValue?
+        let source: NativePreviewBuild.Source
     }
 
     private func previewDefinition(source: URL, index: Int) async throws -> Definition {
@@ -530,6 +531,7 @@ final class NativePreviewCorrection {
             named: "(parseTranslationUnit in _FEA7E13ECD12FBA8521281D73C9764CE)(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.(RenderPreviewType in _FEA7E13ECD12FBA8521281D73C9764CE)])",
             as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])
         let parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
+        let translationUnit = try parsed.copyTupleElement(at: 0)
         let array = try parsed.copyTupleElement(at: 1)
         let previews = try array.withCopy { value -> [Any] in
             guard let values = value as? [Any] else {
@@ -593,7 +595,8 @@ final class NativePreviewCorrection {
                 receiverABI: .opaque(named: bound.type.name))
             let column = try unsafe getColumn.unsafeInvoke(on: bound)
             definitions.append(Definition(line: line, column: try Self.registryColumn(in: contents, line: line, utf16Column: column),
-                displayName: displayName, providerPath: providerPath))
+                displayName: displayName, providerPath: providerPath,
+                source: .init(translationUnit: translationUnit, definition: definition)))
         }
         // The parser returns providers and registries in separate batches. The
         // native tool selects definitions in source order, including mixed files.
@@ -850,7 +853,9 @@ final class NativePreviewCorrection {
         return info
     }
 
-    private struct Input: Sendable {
+    @MainActor
+    private struct Input {
+        let nativeValue: NativeSwiftValue
         let workspaceIdentifier: String?
         let artifacts: String
         let sourcePath: String
@@ -871,6 +876,9 @@ final class NativePreviewCorrection {
 
     private func decode<T: Decodable>(_ type: T.Type, data: Data) throws -> Input {
         let value = try JSONDecoder().decode(type, from: data)
+        let identity = try ABIRuntime.shared.resolveSwiftFunctionAndWait(named: "XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A",
+            as: ((T) -> NativeSwiftValue).self, genericArguments: [.type(type)])
+        let nativeValue = try unsafe identity.unsafeInvoke(value)
         let fields = Dictionary(uniqueKeysWithValues: Mirror(reflecting: value).children.compactMap { field in field.label.map { ($0, field.value) } })
         guard let artifacts = fields["temporaryArtifactsPath"] as? String,
               let path = fields["sourceFilePath"] as? String else {
@@ -896,7 +904,7 @@ final class NativePreviewCorrection {
             guard let label = field.label, let value = field.value as? String? ?? nil else { return nil }
             return (label, value)
         }) } ?? [:]
-        return Input(workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
+        return Input(nativeValue: nativeValue, workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
             index: index, localization: fields["previewLocalizationOverride"] as? String? ?? nil,
             destination: destination, timeout: timeout,
             widgetFamily: options.widgetFamily, widgetPresentation: options.widgetPresentation,
