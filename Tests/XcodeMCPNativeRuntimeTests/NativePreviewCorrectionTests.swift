@@ -350,7 +350,8 @@ struct NativePreviewCorrectionTests {
         #expect(try NativePreviewCorrection.containingApp(for: output, targets: [hosts[0]]) == nil)
     }
 
-    @Test func preparingExtensionPreservesItsResourcesAndSharedFrameworks() throws {
+    @Test(arguments: [false, true])
+    func preparingExtensionPreservesItsResourcesAndSharedFrameworks(nativeClient: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let containing = root.appendingPathComponent("Host.app", isDirectory: true)
         let product = containing.appendingPathComponent("PlugIns/Extension.appex", isDirectory: true)
@@ -372,21 +373,24 @@ struct NativePreviewCorrectionTests {
         let info: [String: Any] = ["CFBundleIdentifier": "dev.lynnswap.Host.Extension", "CFBundleExecutable": "Extension",
             "CFBundlePackageType": "XPC!", "MinimumOSVersion": "27.0",
             "NSExtension": ["NSExtensionPointIdentifier": "com.apple.widgetkit-extension"]]
-        try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
-            .write(to: product.appendingPathComponent("Info.plist"))
+        let originalInfo = try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+        try originalInfo.write(to: product.appendingPathComponent("Info.plist"))
 
-        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app, containingApp: containing)
+        let clientIdentifier = nativeClient ? "dev.lynnswap.PreviewClient" : nil
+        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app, containingApp: containing,
+            clientIdentifier: clientIdentifier)
 
         #expect(try Data(contentsOf: app.appendingPathComponent("Assets.car")) == resource)
         #expect(try Data(contentsOf: app.appendingPathComponent("Frameworks/libLocal.dylib")) == localFramework)
         #expect(try Data(contentsOf: app.appendingPathComponent("Frameworks/libShared.dylib")) == sharedFramework)
         let rawInfo = try unsafe PropertyListSerialization.propertyList(from: Data(contentsOf: app.appendingPathComponent("Info.plist")), format: nil)
         let stagedInfo = try #require(rawInfo as? [String: Any])
-        #expect(stagedInfo["CFBundleIdentifier"] as? String == "dev.lynnswap.Host.Extension")
+        #expect(stagedInfo["CFBundleIdentifier"] as? String == (clientIdentifier ?? "dev.lynnswap.Host.Extension"))
         #expect(stagedInfo["CFBundlePackageType"] as? String == "APPL")
         #expect(stagedInfo["NSExtension"] == nil)
         #expect(try Data(contentsOf: product.appendingPathComponent("Frameworks/libLocal.dylib")) == localFramework)
         #expect(try Data(contentsOf: containing.appendingPathComponent("Frameworks/libLocal.dylib")) == sharedFramework)
+        #expect(try Data(contentsOf: product.appendingPathComponent("Info.plist")) == originalInfo)
     }
 
     @Test(arguments: [true, false])

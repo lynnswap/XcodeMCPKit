@@ -1,5 +1,17 @@
 import Foundation
 
+package struct PreviewRendererNativeSource: Codable, Sendable {
+    package var extensionIdentifier: String
+    package var specification: Data
+    package var variantOverrides: [String: String]
+
+    package init(extensionIdentifier: String, specification: Data, variantOverrides: [String: String]) {
+        self.extensionIdentifier = extensionIdentifier
+        self.specification = specification
+        self.variantOverrides = variantOverrides
+    }
+}
+
 package struct PreviewRendererRequest: Codable, Sendable {
     package static let displayVariantValues: [String: [String]] = [
         "Color Scheme": ["Light Appearance", "Dark Appearance"],
@@ -32,6 +44,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var activityViewContext: String?
     package var activityToggleState: Bool?
     package var appName: String?
+    package var nativeSource: PreviewRendererNativeSource?
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
@@ -40,7 +53,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
                  programRootNames: [String]? = nil,
                  displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
                  activityViewContext: String? = nil, activityToggleState: Bool? = nil,
-                 appName: String? = nil) {
+                 appName: String? = nil, nativeSource: PreviewRendererNativeSource? = nil) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
         self.fileName = fileName
@@ -60,6 +73,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.activityViewContext = activityViewContext
         self.activityToggleState = activityToggleState
         self.appName = appName
+        self.nativeSource = nativeSource
     }
 
     package var unsupportedGeneralPreviewOptions: [String] {
@@ -86,6 +100,7 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var sourceLineNumber: Int?
     package var error: String?
     package var requiresNativePipeline: Bool?
+    package var requiresViewRenderer: Bool?
     package var timelineIndexes: [Int]?
     package var groupItems: [String?]?
     package var errors: [String]?
@@ -99,7 +114,7 @@ package struct PreviewRendererResult: Codable, Sendable {
 
     package init(snapshotName: String? = nil, snapshotData: Data? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
-                 requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil,
+                 requiresNativePipeline: Bool? = nil, requiresViewRenderer: Bool? = nil, timelineIndexes: [Int]? = nil,
                  groupItems: [String?]? = nil, errors: [String]? = nil,
                  toggleStates: [Bool]? = nil, activityViewStyles: [String]? = nil,
                  activityViewContexts: [String]? = nil,
@@ -111,6 +126,7 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.sourceLineNumber = sourceLineNumber
         self.error = error
         self.requiresNativePipeline = requiresNativePipeline
+        self.requiresViewRenderer = requiresViewRenderer
         self.timelineIndexes = timelineIndexes
         self.groupItems = groupItems
         self.errors = errors
