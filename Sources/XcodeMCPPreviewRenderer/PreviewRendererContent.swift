@@ -74,7 +74,7 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
         let value = try await ownedPreview(preview)
         let source = try await previewSource(value)
         let content = try await makeViewPreview(source: source, groupItemIndex: request.groupItemIndex)
-        view = try await applyPreviewModifiers(content.view, preview: value)
+        view = try await applyViewPreviewTraits(content.view, preview: value)
         layout = try await viewPreviewLayout(value)
         let getter = try await value.type.resolveGetter(named: "displayName", as: (() -> String?).self,
             receiverABI: .opaque(named: value.type.name))

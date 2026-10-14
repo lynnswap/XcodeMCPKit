@@ -224,6 +224,14 @@ remain on the native pipeline pending a native static-preview contract.
 `supportedPreviewVariantOverrides` returns their native display names and values.
 Color scheme, contrast, and Dynamic Type reach both the SwiftUI environment and
 UIKit hosting traits. Control Borders uses SwiftUI's button-shapes environment.
+On iOS 26 and later, SwiftUI previews also apply `.assistiveAccess` through the
+native `clarityUIIdiom()` transform after user preview modifiers. The effective
+value comes from `Preview.value(for:)`, preserving native trait combination.
+The transform uses ABIBridge 0.10.0 to resolve its opaque view result; unavailable
+private bindings use the native pipeline. It preserves the native preview's
+read-only `accessibilityAssistiveAccessEnabled` value. The trait has no effect on
+other platforms, as documented by
+[`PreviewTrait.assistiveAccess`](https://developer.apple.com/documentation/developertoolssupport/previewtrait/assistiveaccess).
 Portrait, upside-down portrait, and landscape source traits use the native
 counterrotation controller and a dedicated preview window scene. Orientation
 overrides use the same scene. The renderer creates a local FrontBoard pseudo scene
