@@ -6,45 +6,47 @@ import Testing
 @MainActor
 struct NativePreviewBuildTests {
     @Test func respectsActiveDestinationAcrossPlatforms() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let app = root.appendingPathComponent("Xcode.app")
-        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"),
-                                                withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let builder = NativePreviewBuild(installation: try NativeXcodeInstallation(developerDirectory: app))
         let mac = PreviewBuildDestination(identifier: "Mac", platform: "com.apple.platform.macosx")
-        mac.targetDevice.deviceLocation = NSURL(string: "dvtdevice-local-computer:localhost")
         let ios = PreviewBuildDestination(identifier: UUID().uuidString, platform: "com.apple.platform.iphonesimulator")
-        let scheme = PreviewBuildScheme(destinations: [mac, ios])
-        let manager = PreviewBuildRunContextManager(scheme: scheme, destination: mac)
-        let workspace = PreviewBuildWorkspace(manager: manager)
-
-        #expect(try builder.selectDestination(workspace: workspace) === mac)
-        #expect(try builder.selectDestination(workspace: workspace,
-            preferred: ["identifier": "dvtdevice-local-computer:localhost"]) === mac)
-        #expect(try builder.selectDestination(workspace: workspace, preferred: ["identifier": ios.targetDevice.identifier]) === ios)
+        let candidates = [destination(mac, platformName: "macOS", previewIdentifier: "dvtdevice-local-computer:localhost"),
+                          destination(ios, platformName: "iOS")]
+        #expect(NativePreviewBuild.selectDestination(candidates: candidates, active: mac, preferred: [:])?.value === mac)
+        #expect(NativePreviewBuild.selectDestination(candidates: candidates, active: mac,
+            preferred: ["identifier": "dvtdevice-local-computer:localhost"])?.value === mac)
+        #expect(NativePreviewBuild.selectDestination(candidates: candidates, active: mac,
+            preferred: ["identifier": ios.targetDevice.identifier])?.value === ios)
     }
 
     @Test(arguments: [["identifier": "dvtdevice-local-computer:localhost"], ["platformName": "Mac Catalyst"]])
     func retainsActiveSDKVariantWhenMacDestinationsShareADeviceIdentifier(preferred: [String: String]) throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let app = root.appendingPathComponent("Xcode.app")
-        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"),
-                                                withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let builder = NativePreviewBuild(installation: try NativeXcodeInstallation(developerDirectory: app))
         let identifier = "Mac"
         let mac = PreviewBuildDestination(identifier: identifier, platform: "com.apple.platform.macosx")
         let catalyst = PreviewBuildDestination(identifier: identifier, platform: "com.apple.platform.macosx", variant: "iosmac")
         let active = PreviewBuildDestination(identifier: identifier, platform: "com.apple.platform.macosx", variant: "iosmac")
-        for destination in [mac, catalyst, active] {
-            destination.targetDevice.deviceLocation = NSURL(string: "dvtdevice-local-computer:localhost")
-        }
-        let scheme = PreviewBuildScheme(destinations: [mac, catalyst])
-        let workspace = PreviewBuildWorkspace(manager: PreviewBuildRunContextManager(scheme: scheme, destination: active))
+        let candidates = [destination(mac, platformName: "macOS", previewIdentifier: "dvtdevice-local-computer:localhost"),
+                          destination(catalyst, platformName: "Mac Catalyst", previewIdentifier: "dvtdevice-local-computer:localhost")]
 
         #expect(active !== catalyst)
-        #expect(try builder.selectDestination(workspace: workspace, preferred: preferred) === catalyst)
+        #expect(NativePreviewBuild.selectDestination(candidates: candidates, active: active, preferred: preferred)?.value === catalyst)
+    }
+
+    @Test func selectsTheFirstNativeRecipeWithoutReorderingItsVersion() {
+        let first = PreviewBuildDestination(identifier: UUID().uuidString, platform: "com.apple.platform.iphonesimulator")
+        let last = PreviewBuildDestination(identifier: UUID().uuidString, platform: "com.apple.platform.iphonesimulator")
+        let candidates = [destination(first, platformName: "iOS", version: "26.6"), destination(last, platformName: "iOS", version: "27.2")]
+        #expect(NativePreviewBuild.selectDestination(candidates: candidates, active: nil,
+            preferred: ["platformName": "iOS"])?.value === first)
+        #expect(NativePreviewBuild.selectDestination(candidates: candidates, active: first,
+            preferred: ["platformName": "iOS", "systemVersion": "27.2"])?.value === last)
+        #expect(NativePreviewBuild.selectDestination(candidates: candidates, active: first,
+            preferred: ["platformName": "macOS"]) == nil)
+    }
+
+    private func destination(_ value: PreviewBuildDestination, platformName: String, previewIdentifier: String? = nil,
+                             version: String = "27.1") -> NativePreviewBuild.Destination {
+        .init(value: value, identifier: value.targetDevice.identifier, previewIdentifier: previewIdentifier ?? value.targetDevice.identifier,
+              platformIdentifier: value.targetSDK.platform.identifier, platformName: platformName,
+              deviceModelName: "Preview device", systemVersion: version)
     }
 
     @Test func resolvesRunnableAndUsesNativeBuildableEquality() throws {
@@ -69,20 +71,6 @@ struct NativePreviewBuildTests {
         let absent = try builder.runnableBuildable(in: pathScheme)
         #expect(absent == nil)
         #expect(!NativePreviewBuild.isRunnable(equivalent, runnable: absent))
-    }
-}
-
-private final class PreviewBuildWorkspace: NSObject {
-    @objc let runContextManager: PreviewBuildRunContextManager
-    init(manager: PreviewBuildRunContextManager) { runContextManager = manager }
-}
-
-private final class PreviewBuildRunContextManager: NSObject {
-    @objc let activeRunContext: PreviewBuildScheme
-    @objc let activeRunDestination: PreviewBuildDestination
-    init(scheme: PreviewBuildScheme, destination: PreviewBuildDestination) {
-        activeRunContext = scheme
-        activeRunDestination = destination
     }
 }
 

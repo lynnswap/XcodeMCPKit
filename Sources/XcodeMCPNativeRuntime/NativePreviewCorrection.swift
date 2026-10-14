@@ -168,7 +168,7 @@ final class NativePreviewCorrection {
         let workspace: AnyObject
         let source: URL
         let location: Definition
-        let destination: AnyObject
+        let destination: NativePreviewBuild.DestinationSelection
     }
 
     private func prepare(_ input: Input) async throws -> Prepared {
@@ -176,7 +176,7 @@ final class NativePreviewCorrection {
         let workspace = try await workspace(input.workspaceIdentifier)
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
         let location = try await previewDefinition(source: source, index: input.index)
-        guard let destination = try builder.selectDestination(workspace: workspace, preferred: input.destination) else {
+        guard let destination = try await builder.selectDestination(workspace: workspace, preferred: input.destination) else {
             throw NativePipelineRequired()
         }
         // Native rendering starts its timeout after resolving the source and
@@ -314,6 +314,7 @@ final class NativePreviewCorrection {
             "previewSnapshotPath": .string(snapshotURL.path),
             "errors": .array((response.errors ?? []).map { .object(["message": .string($0)]) }),
             "renderedDestination": .object(destinationFields),
+            "availableRenderDestinations": .array(build.availableDestinations.map { .object($0.renderFields) }),
             "supportedLocalizations": .array(try await supportedLocalizations(in: workspace).map(JSONValue.string)),
         ]
         fields["displayName"] = .string(response.displayName ?? location.displayName)
