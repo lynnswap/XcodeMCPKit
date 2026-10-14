@@ -33,13 +33,15 @@ private struct NativeWidgetPreview {
         let makeIdentifier = try await identifierType.resolveInitializer(
             named: "init(rawValue: Swift.String) -> PreviewsMessagingOS.ContentIdentifier",
             as: ((String) -> NativeSwiftValue).self, valueABIs: [identifierType: .opaque(named: identifierType.name)])
-        let identifier = try unsafe makeIdentifier.unsafeInvoke(UUID().uuidString)
+        // The runtime caches entry points by ContentIdentifier. Discovery and
+        // rendering own separate entry points even when they share a source.
+        let preflightIdentifier = try unsafe makeIdentifier.unsafeInvoke(UUID().uuidString)
         let categoryType = try await service.messagingType("ContentCategory")
         let preflightCategory = try await categoryType.resolveStaticGetter(named: "previewPreflight",
             as: (() -> NativeSwiftValue).self, valueABIs: [categoryType: .opaque(named: categoryType.name)])
         let category = try unsafe preflightCategory.unsafeInvoke()
         let encodedSpecification = try await service.encode(specification)
-        let preflight = try await update(pid: pid, identifier: identifier, category: category,
+        let preflight = try await update(pid: pid, identifier: preflightIdentifier, category: category,
             content: encodedSpecification, controls: nil)
         let preflightReply = try await service.sendUpdate(preflight)
         let metadata = try await preflightMetadata(preflightReply)
@@ -71,6 +73,7 @@ private struct NativeWidgetPreview {
                         payloadType: .opaque(named: payloadType.name)])
         let payload = try unsafe makePayload.unsafeInvoke(specification, effects)
         let encoded = try await service.encode(payload)
+        let identifier = try unsafe makeIdentifier.unsafeInvoke(UUID().uuidString)
         let initialUpdate = try await update(pid: pid, identifier: identifier,
             category: previewCategory, content: encoded.copy(), controls: nil)
         let initialReply = try await service.sendUpdate(initialUpdate)
@@ -134,15 +137,16 @@ private struct NativeWidgetPreview {
         let lookup = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.RuntimeLookup",
             in: .framework(named: "PreviewsMessagingOS"), genericArguments: [.type(flavor)])
         let decoder = try await lookup.resolveInitializer(
-            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.RuntimeLookup<PreviewsMessagingOS.PreviewFlavor>",
+            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.RuntimeLookup<A>",
             as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
             valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name), lookup: .opaque(named: lookup.name)])
         let value = try unsafe decoder.unsafeInvoke(payload)
         guard let available = try await value.resolveEnumPayload(forCase: "available"),
-              let metadata = try await available.resolveEnumPayload(forCase: "preview") else {
+              let preview = try await available.resolveEnumPayload(forCase: "preview") else {
             throw PreviewRendererError(try value.withCopy { String(describing: $0) })
         }
-        return metadata
+        // The named associated value retains its one-element tuple representation.
+        return try preview.copyTupleElement(at: 0)
     }
 
     private func variantCatalog(category: NativeSwiftValue) async throws -> WidgetVariantCatalog {
