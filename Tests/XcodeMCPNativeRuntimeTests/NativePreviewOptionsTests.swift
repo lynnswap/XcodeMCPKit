@@ -56,4 +56,12 @@ struct NativePreviewOptionsTests {
         ], controls: [:])
         #expect(!options.requiresNativePipeline)
     }
+
+    @Test func displayVariantsWithWidgetOptionsKeepNativeRendering() {
+        #expect(NativePreviewCorrection.directOptions(variants: [
+            "Widget Family": "Medium", "Color Scheme": "Dark Appearance",
+        ], controls: [:]).requiresNativePipeline)
+        #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Dark Appearance"],
+            controls: ["timelineIndex": Optional(1) as Any]).requiresNativePipeline)
+    }
 }

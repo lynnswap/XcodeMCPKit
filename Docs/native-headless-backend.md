@@ -190,8 +190,12 @@ Control Borders, and Orientation overrides in `previewVariantOverrides`.
 `supportedPreviewVariantOverrides` returns their native display names and values.
 Color scheme, contrast, and Dynamic Type reach both the SwiftUI environment and
 UIKit hosting traits. Control Borders uses SwiftUI's button-shapes environment.
-Source orientation traits and orientation overrides use the native counterrotation
-controller and the window scene's orientation, retaining device safe-area insets.
+Portrait and landscape source traits and orientation overrides use the native
+counterrotation controller and the window scene's orientation. Upside-down portrait
+retains the native pipeline: UIKit rejects that geometry on the iPhone host even
+when its app and controller support all orientations. Its preview-specific scene
+geometry is tracked with the remaining safe-area work in
+[the snapshot parity issue](https://github.com/lynnswap/XcodeMCPKit/issues/311).
 
 UIKit previews retain their actual `UIView` or `UIViewController` in standard
 SwiftUI representables. An `arguments:` group uses its native group closure and

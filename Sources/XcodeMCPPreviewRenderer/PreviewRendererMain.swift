@@ -137,6 +137,9 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }
         view = try applyDisplayVariants(to: view, variants: variants)
         let orientation = try interfaceOrientation(variant: variants["Orientation"], source: sourceOrientation)
+        // UIKit rejects upside-down geometry on the iPhone preview host. Keep
+        // the existing native route until its preview-specific scene geometry is supported.
+        if orientation == .portraitUpsideDown { throw NativePreviewPipelineRequired() }
         let controller = UIHostingController(rootView: view)
         applyDisplayVariants(to: controller, variants: variants)
         if widget != nil { controller.view.backgroundColor = .clear }

@@ -88,7 +88,7 @@ extension NativePreviewCorrection {
             source = merged
         } else { source = image }
         let scale = min(1, maximumDimension / CGFloat(max(image.width, image.height)))
-        let size = CGSize(width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
+        let size = CGSize(width: max(1, CGFloat(image.width) * scale), height: max(1, CGFloat(image.height) * scale))
         guard let context = unsafe CGContext(data: nil, width: Int(size.width), height: Int(size.height),
             bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }

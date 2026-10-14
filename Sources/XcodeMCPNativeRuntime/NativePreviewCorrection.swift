@@ -810,7 +810,9 @@ final class NativePreviewCorrection {
         let unsupportedControl = controls.contains { key, value in
             key != "timelineIndex" && key != "groupItemIndex" && Mirror(reflecting: value).children.first != nil
         }
-        return (family, timeline, groupItem, unsupportedVariant || unsupportedControl)
+        let widgetDisplayVariants = (family != nil || timeline != nil)
+            && variants.keys.contains { PreviewRendererRequest.displayVariantValues[$0] != nil }
+        return (family, timeline, groupItem, unsupportedVariant || unsupportedControl || widgetDisplayVariants)
     }
 
     private func event(_ type: String, _ value: JSONValue) throws -> Data {
