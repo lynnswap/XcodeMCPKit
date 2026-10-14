@@ -37,9 +37,7 @@ struct PreviewRendererAppKit {
         let usesDeviceLayout: Bool
         if case .device = content.layout { usesDeviceLayout = true }
         else { usesDeviceLayout = false }
-        let style: NSWindow.StyleMask = usesDeviceLayout ? [.titled, .closable, .miniaturizable, .resizable] : [.borderless]
-        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size),
-            styleMask: style, backing: .buffered, defer: false)
+        let window = try makeAppKitPreviewWindow(size: size, usesDeviceLayout: usesDeviceLayout)
         if let color = content.variants["Color Scheme"] {
             window.appearance = NSAppearance(named: color == "Dark Appearance" ? .darkAqua : .aqua)
         }
@@ -53,14 +51,13 @@ struct PreviewRendererAppKit {
         window.layoutIfNeeded()
         controller.view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
-        if case .sizeThatFits = content.layout { window.setContentSize(controller.view.fittingSize) }
+        switch content.layout {
+        case .device, .sizeThatFits: window.setContentSize(controller.view.fittingSize)
+        default: break
+        }
         window.layoutIfNeeded()
         controller.view.layoutSubtreeIfNeeded()
-        let snapshotView = unsafe usesDeviceLayout ? (window.contentView?.superview ?? controller.view) : controller.view
-        guard let image = snapshotView.bitmapImageRepForCachingDisplay(in: snapshotView.bounds) else {
-            throw PreviewRendererError("The preview host could not create a bitmap representation")
-        }
-        snapshotView.cacheDisplay(in: snapshotView.bounds, to: image)
+        let image = try await captureAppKitPreview(window: window)
         guard let png = image.representation(using: .png, properties: [:]) else {
             throw PreviewRendererError("The preview host could not encode its snapshot")
         }

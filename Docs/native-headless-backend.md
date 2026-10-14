@@ -150,7 +150,7 @@ definition in source order, including files that mix providers and registries.
 It resolves registry metadata or a provider's type in the built image, including linked embedded
 frameworks and libraries, and extracts its view with
 ABIBridge. UIKit hosts use `UIHostingController`, macOS uses `NSHostingController`,
-and watchOS attaches SwiftUI's underscored hosting view to the running watch app.
+and watchOS attaches SwiftUI's underscored WatchKit hosting controller to the running watch app.
 These hosts capture a live view hierarchy, including view lifecycle work.
 Source and host selection retain the native buildable's identity. Among applications and extensions
 that compile the source, embed its runtime image, or link its object/archive product
@@ -184,9 +184,32 @@ transparent portrait overlay. Snapshot composition rotates that overlay with the
 native content orientation before downsampling. Fixed-size and size-that-fits snapshots retain their rectangular
 hosting view. The longest image dimension is capped at 1500 pixels without
 upscaling smaller images.
-Remaining platform chrome and geometry outside the iOS scene host remain tracked in
-[the snapshot parity issue](https://github.com/lynnswap/XcodeMCPKit/issues/311).
-Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
+UIKit size-that-fits uses the hosting view's intrinsic size without a screen-size
+cap. watchOS uses its hosting controller's `sizeThatFits(in:)` with the selected
+watch's screen bounds. macOS measures the hosting view after attaching it to its
+window, including the titlebar safe area for device layout.
+
+On macOS, `PreviewsInjection.MacOSPreviewHostingWindow` supplies active key/main
+appearance without activating the renderer application. Device layout uses
+full-size content so AppKit computes the titlebar safe area. Fixed-size layout
+retains the hosting controller's normal sizing constraints.
+`NSView.cacheDisplay` omits the window backdrop and WindowServer corner clipping,
+so the renderer captures its own window through QuartzCore's
+`CARenderServerSnapshot`. The context list contains only that window's
+`layerHostingContextID`; the display name comes from `CADisplay.mainDisplay.name`.
+The capture destination is a BGRA8 IOSurface tagged sRGB. The window's color space
+remains at its system value, preserving native compositing and material colors.
+The captured bitmap includes window corners; no radius or color correction is
+applied. The window is made transparent before registration and ordered out after
+capture, failure, or cancellation. It is closed before publishing a result.
+
+This macOS path was verified with macOS 26.6.2 and Xcode 27.1 using ABIBridge 0.9.0.
+Its private C call uses the observed 32-bit port, dictionary pointer, and normalized
+0/1 return-register contract; the public SDK has no declaration for that function.
+Snapshot option keys and the include-context-list mode are read from the exported
+NSString objects, because QuartzCore compares the mode by object identity.
+Unavailable private bindings use the native preview pipeline. Surface allocation,
+capture, and image-conversion failures are reported as rendering errors.
 
 On iOS, ordinary SwiftUI and UIKit previews accept Color Scheme, Contrast, Dynamic
 Type, Control Borders, and Orientation overrides in `previewVariantOverrides`.
