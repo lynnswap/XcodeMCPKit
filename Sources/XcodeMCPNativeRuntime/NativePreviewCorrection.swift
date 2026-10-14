@@ -317,35 +317,32 @@ final class NativePreviewCorrection {
         var destination = prepared.destination
         var build = try await builder.build(workspace: workspace, destination: destination)
         guard var platform = build.previewPlatform else { throw NativePipelineRequired() }
-        let needsMetadata = location.providerPath == nil || platform == .macOS || platform == .iOS
         var renderer = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
-            platform: platform, process: process, metadataOnly: needsMetadata ? true : nil)
-        if needsMetadata {
-            let response: PreviewRendererResult
-            if platform.isSimulator {
-                response = try await renderSimulator(app: app, build: build, process: process, localization: input.localization).response
-            } else {
-                response = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
-            }
-            guard let metadata = response.nativeMetadata else {
-                throw NativeRuntimeError.invocation("The preview process returned no native metadata")
-            }
-            guard let evaluated = try await builder.selectDestination(workspace: workspace, source: location.source,
-                input: input.nativeValue, metadata: metadata,
-                providerDescription: response.nativeProviderPreviewDescription) else { throw NativePipelineRequired() }
-            let unchanged = (destination.selected.value as? NSObject)?.isEqual(evaluated.selected.value) == true
-            destination = evaluated
-            if unchanged {
-                renderer.request.metadataOnly = nil
-                try await writeRendererRequest(renderer.request, app: app, platform: platform, signing: renderer.signing, process: process)
-            } else {
-                build = try await builder.build(workspace: workspace, destination: destination)
-                guard let selectedPlatform = build.previewPlatform else { throw NativePipelineRequired() }
-                platform = selectedPlatform
-                try FileManager.default.removeItem(at: app)
-                _ = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
-                    platform: platform, process: process)
-            }
+            platform: platform, process: process, metadataOnly: true)
+        let metadataResponse: PreviewRendererResult
+        if platform.isSimulator {
+            metadataResponse = try await renderSimulator(app: app, build: build, process: process, localization: input.localization).response
+        } else {
+            metadataResponse = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
+        }
+        guard let metadata = metadataResponse.nativeMetadata else {
+            throw NativeRuntimeError.invocation("The preview process returned no native metadata")
+        }
+        guard let evaluated = try await builder.selectDestination(workspace: workspace, source: location.source,
+            input: input.nativeValue, metadata: metadata,
+            providerDescription: metadataResponse.nativeProviderPreviewDescription) else { throw NativePipelineRequired() }
+        let unchanged = (destination.selected.value as? NSObject)?.isEqual(evaluated.selected.value) == true
+        destination = evaluated
+        if unchanged {
+            renderer.request.metadataOnly = nil
+            try await writeRendererRequest(renderer.request, app: app, platform: platform, signing: renderer.signing, process: process)
+        } else {
+            build = try await builder.build(workspace: workspace, destination: destination)
+            guard let selectedPlatform = build.previewPlatform else { throw NativePipelineRequired() }
+            platform = selectedPlatform
+            try FileManager.default.removeItem(at: app)
+            _ = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
+                platform: platform, process: process)
         }
         let response: PreviewRendererResult
         let snapshotData: Data

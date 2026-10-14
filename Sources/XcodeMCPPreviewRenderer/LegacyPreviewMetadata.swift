@@ -1,9 +1,12 @@
-#if os(macOS) || (os(iOS) && targetEnvironment(simulator))
+#if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
 import ABIBridge
 import CoreGraphics
 import DeveloperToolsSupport
 import Foundation
 import SwiftUI
+#if os(watchOS)
+import _ClockKit_SwiftUI
+#endif
 
 @MainActor
 func nativeLegacyPreviewMetadata(typeName: String) async throws -> (metadata: Data, providerDescription: Data?) {
@@ -16,36 +19,42 @@ func nativeLegacyPreviewMetadata(typeName: String) async throws -> (metadata: Da
         let domainType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewContentDomain", in: image)
         let sourceCategoryType = try await runtime.resolveSwiftType(named: "DeveloperToolsSupport.PreviewSourceContentCategory",
             in: .framework(named: "DeveloperToolsSupport"))
-        let domain: NativeSwiftValue
-        let sourceCategory: NativeSwiftValue
-        let onDevice: Bool
+        var domain = try domainType.makeEnumCase(named: "view")
+        let categoryGetter = try await sourceCategoryType.resolveStaticGetter(
+            named: "static (extension in SwiftUI):DeveloperToolsSupport.PreviewSourceContentCategory.swiftUIView.getter : DeveloperToolsSupport.PreviewSourceContentCategory",
+            as: (() -> NativeSwiftValue).self,
+            valueABIs: [sourceCategoryType: .opaque(named: sourceCategoryType.name)])
+        var sourceCategory = try unsafe categoryGetter.unsafeInvoke()
+        var onDevice = true
+        #if os(watchOS)
+        if let context = preview.context {
+            // This key's Value is nonoptional. Native optional chaining tests
+            // context presence, after evaluating its subscript.
+            withExtendedLifetime(context[_ComplicationPreviewContextKey.self]) {}
+            domain = try domainType.makeEnumCase(named: "complication")
+            sourceCategory = try await legacyComplicationCategory(sourceCategoryType)
+            onDevice = false
+        }
+        #endif
+        #if !os(tvOS)
         if let context = preview.context, let category = try await legacyWidgetCategory(context) {
             domain = try domainType.makeEnumCase(named: "widget")
             sourceCategory = category
-            #if os(macOS)
-            onDevice = true
-            #else
+            #if os(iOS) && targetEnvironment(simulator)
             onDevice = false
             #endif
-        } else {
-            domain = try domainType.makeEnumCase(named: "view")
-            let categoryGetter = try await sourceCategoryType.resolveStaticGetter(
-                named: "static (extension in SwiftUI):DeveloperToolsSupport.PreviewSourceContentCategory.swiftUIView.getter : DeveloperToolsSupport.PreviewSourceContentCategory",
-                as: (() -> NativeSwiftValue).self,
-                valueABIs: [sourceCategoryType: .opaque(named: sourceCategoryType.name)])
-            sourceCategory = try unsafe categoryGetter.unsafeInvoke()
-            onDevice = true
         }
+        #endif
         let categoryType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.ContentCategory", in: image)
         let categoryDeclaration = "(extension in PreviewsOSSupportUI):DeveloperToolsSupport.PreviewSourceContentCategory.contentCategory.getter : PreviewsMessagingOS.ContentCategory"
         let support = try await runtime.resolve(.init(name: categoryDeclaration, language: .swift),
             in: .framework(named: "PreviewsOSSupportUI"))
-        let categoryGetter = try await sourceCategory.type.resolveGetter(named: categoryDeclaration,
+        let nativeCategoryGetter = try await sourceCategory.type.resolveGetter(named: categoryDeclaration,
             as: (() -> NativeSwiftValue).self, valueABIs: [categoryType: .opaque(named: categoryType.name)],
             receiverABI: .opaque(named: sourceCategory.type.name))
-        let category = try withExtendedLifetime(support) { try unsafe categoryGetter.unsafeInvoke(on: sourceCategory) }
+        let category = try withExtendedLifetime(support) { try unsafe nativeCategoryGetter.unsafeInvoke(on: sourceCategory) }
         let layout = try await legacyPreviewLayout(preview.layout)
-        let orientation = try await legacyPreviewOrientation(preview.interfaceOrientation)
+        let orientation = try await legacyPreviewOrientation(preview)
         let descriptionType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewDescription", in: image)
         let initialize = try await descriptionType.resolveInitializer(
             named: "init(index: Swift.Int, contentType: Swift.String, device: Swift.String?, displayName: Swift.String?, layout: PreviewsMessagingOS.PreviewTraits.Layout, contentDomain: PreviewsMessagingOS.PreviewContentDomain, supportsLive: Swift.Bool, supportsOnDevice: Swift.Bool, interfaceOrientation: PreviewsMessagingOS.PreviewTraits.Orientation, contentCategory: PreviewsMessagingOS.ContentCategory) -> PreviewsMessagingOS.PreviewDescription",
@@ -81,15 +90,15 @@ private func legacyPreviewLayout(_ layout: DeveloperToolsSupport.PreviewLayout) 
 }
 
 @MainActor
-private func legacyPreviewOrientation(_ orientation: SwiftUI.InterfaceOrientation) async throws -> NativeSwiftValue {
+private func legacyPreviewOrientation(_ preview: SwiftUI._Preview) async throws -> NativeSwiftValue {
     let type = try await ABIRuntime.shared.resolveSwiftType(named: "PreviewsMessagingOS.PreviewTraits.Orientation",
         in: .framework(named: "PreviewsMessagingOS"))
-    #if os(macOS)
-    // macOS's provider-description producer supplies portrait; iOS converts
-    // the actual source orientation through PreviewsOSSupportUI.
+    #if os(macOS) || os(tvOS) || os(watchOS)
+    // These native provider producers supply portrait rather than converting
+    // the source orientation.
     return try type.makeEnumCase(named: "portrait")
     #else
-    let source = try await ownedPreviewValue(orientation)
+    let source = try await ownedPreviewValue(preview.interfaceOrientation)
     let declaration = "(extension in PreviewsOSSupportUI):SwiftUI.InterfaceOrientation.previewOrientation.getter : PreviewsMessagingOS.PreviewTraits.Orientation"
     let support = try await ABIRuntime.shared.resolve(.init(name: declaration, language: .swift),
         in: .framework(named: "PreviewsOSSupportUI"))
@@ -99,8 +108,30 @@ private func legacyPreviewOrientation(_ orientation: SwiftUI.InterfaceOrientatio
     #endif
 }
 
+#if os(watchOS)
+@MainActor
+private func legacyComplicationCategory(_ sourceCategoryType: NativeSwiftType) async throws -> NativeSwiftValue {
+    let runtime = ABIRuntime.shared
+    let type = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.ContentCategory",
+        in: .framework(named: "PreviewsMessagingOS"))
+    let getter = try await type.resolveStaticGetter(named: "complicationPreviewInstance.getter : PreviewsMessagingOS.ContentCategory",
+        as: (() -> NativeSwiftValue).self, valueABIs: [type: .opaque(named: type.name)])
+    let category = try unsafe getter.unsafeInvoke()
+    let rawValue = try await type.resolveGetter(named: "rawValue.getter : Swift.String", as: (() -> String).self,
+        receiverABI: .opaque(named: type.name))
+    let initialize = try await sourceCategoryType.resolveInitializer(
+        named: "init(stringLiteral: Swift.String) -> DeveloperToolsSupport.PreviewSourceContentCategory",
+        as: ((String) -> NativeSwiftValue).self,
+        valueABIs: [sourceCategoryType: .opaque(named: sourceCategoryType.name)])
+    return try unsafe initialize.unsafeInvoke(rawValue.unsafeInvoke(on: category))
+}
+#endif
+
 @MainActor
 private func legacyWidgetCategory(_ context: any PreviewContext) async throws -> NativeSwiftValue? {
+    // Native PreviewsInjection loads WidgetKit even for non-Widget contexts.
+    _ = try await ABIRuntime.shared.resolveSwiftType(named: "WidgetKit.WidgetPreviewContextKey",
+        in: .framework(named: "WidgetKit"))
     guard let key = _typeByName("9WidgetKit0A17PreviewContextKeyV") as? any PreviewContextKey.Type else {
         throw NativePreviewPipelineRequired()
     }
