@@ -237,12 +237,23 @@ struct NativeHostBrokerTests {
         try await fixture.factory.created.wait(description: "native runtime created")
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
         try await transport.initializationStarted.wait(description: "native initialization started")
+        let initializeManager = try #require(fixture.factory.initializeManagers.withLockedValue { $0.first })
+        try await waitWithTimeout("backend initialize waiter registered") {
+            while initializeManager.pendingInitializes().isEmpty {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
         try transport.failInitialization()
         let partial = try await catalog.value
-        guard case .object(let result) = partial, case .array(let tools)? = result["tools"] else {
+        guard case .object(let result) = partial, case .array(let tools)? = result["tools"],
+            case .object(let metadata)? = result["_meta"],
+            case .string(let nativeError)? = metadata["com.lynnswap.xcode-mcpkit/nativeCatalogError"]
+        else {
             Issue.record("missing partial catalog"); return
         }
         #expect(tools.count == 2)
+        #expect(nativeError.contains("fixture initialization failed"))
         fixture.factory.holdsInitialization.withLockedValue { $0 = false }
         for transport in fixture.factory.transports.withLockedValue({ $0 }) {
             try transport.releaseInitialization()
@@ -438,6 +449,7 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
 
 private final class BrokerRuntimeFactory: Sendable {
     let transports = NIOLockedValueBox<[BrokerTransport]>([])
+    let initializeManagers = NIOLockedValueBox<[InitializeManager]>([])
     let failNewHosts = NIOLockedValueBox(false)
     let holdsInitialization = NIOLockedValueBox(false)
     let created = TestSignal()
@@ -451,7 +463,8 @@ private final class BrokerRuntimeFactory: Sendable {
         }
         created.signal()
         return ProxyRuntime.testing(configuration: configuration) { eventLoop, notification, closed, catalogChanged in
-            RuntimeCoordinator(config: configuration, eventLoop: eventLoop, upstreams: [upstream],
+            let coordinator = RuntimeCoordinator(
+                config: configuration, eventLoop: eventLoop, upstreams: [upstream],
                 nativeUpstreamFactory: { [self] in
                     let replacement = BrokerTransport(index: upstream.index,
                         holdsInitialization: holdsInitialization.withLockedValue { $0 })
@@ -459,6 +472,8 @@ private final class BrokerRuntimeFactory: Sendable {
                     return replacement
                 }, notificationSink: notification, sessionClosedSink: closed,
                 catalogChangedSink: catalogChanged, startImmediately: false)
+            initializeManagers.withLockedValue { $0.append(coordinator.initializeManager) }
+            return coordinator
         }
     }
 }
