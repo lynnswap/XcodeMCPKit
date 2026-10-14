@@ -185,10 +185,16 @@ private func previewGroupItems(_ metadata: NativeSwiftValue) async throws -> [(s
     for (sectionIndex, section) in sections.enumerated() {
         let countGetter = try await section.type.resolveGetter(named: "previewCount", as: (() -> Int).self,
             receiverABI: .opaque(named: section.type.name))
-        let descriptionsGetter = try await section.type.resolveGetter(named: "itemDescriptions", as: (() -> [String?]).self,
-            receiverABI: .opaque(named: section.type.name))
         let count = try unsafe countGetter.unsafeInvoke(on: section)
-        let descriptions = try unsafe descriptionsGetter.unsafeInvoke(on: section)
+        let descriptions: [String?]
+        do {
+            let getter = try await section.type.resolveGetter(named: "itemDescriptions", as: (() -> [String?]).self,
+                receiverABI: .opaque(named: section.type.name))
+            descriptions = try unsafe getter.unsafeInvoke(on: section)
+        } catch ABIResolutionError.declarationNotFound {
+            // Earlier runtimes provide the count but no per-item descriptions.
+            descriptions = []
+        }
         for previewIndex in 0..<count {
             items.append((sectionIndex, previewIndex, descriptions.indices.contains(previewIndex) ? descriptions[previewIndex] : nil))
         }
