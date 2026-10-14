@@ -23,7 +23,9 @@ func requireSupportedTraits(_ preview: Preview) throws {
     }
     guard traits.allSatisfy({ trait in
         let name = String(reflecting: type(of: trait))
-        return name == "DeveloperToolsSupport.PreviewLayoutTrait" || name == "SwiftUI.PreviewModifierTrait"
+        return name == "DeveloperToolsSupport.PreviewLayoutTrait"
+            || name == "DeveloperToolsSupport.PreviewInterfaceOrientationTrait"
+            || name == "SwiftUI.PreviewModifierTrait"
     }) else {
         throw NativePreviewPipelineRequired()
     }
@@ -35,7 +37,7 @@ func ownedPreview(_ preview: Preview) async throws -> NativeSwiftValue {
 }
 
 @MainActor
-private func ownedPreviewValue<Value>(_ value: Value) async throws -> NativeSwiftValue {
+func ownedPreviewValue<Value>(_ value: Value) async throws -> NativeSwiftValue {
     let identity = try await ABIRuntime.shared.resolveSwiftFunction(
         named: "XcodeMCPPreviewRenderer.previewValue<A>(A) -> A",
         as: ((Value) -> NativeSwiftValue).self, genericArguments: [.type(Value.self)])
@@ -347,21 +349,24 @@ private final class PreviewNSViewContainer: NSView {
 
 @MainActor
 func viewPreviewLayout(_ preview: NativeSwiftValue) async throws -> DeveloperToolsSupport.PreviewLayout {
-    guard let metatype = _typeByName("21DeveloperToolsSupport18PreviewLayoutTraitV") else {
-        throw PreviewRendererError("The installed preview layout trait is unavailable")
+    let layout = try await previewTraitValue(preview, named: "21DeveloperToolsSupport18PreviewLayoutTraitV")
+    return try layout.withCopy {
+        guard let value = $0 as? DeveloperToolsSupport.PreviewLayout else {
+            throw PreviewRendererError("The installed preview layout has an unsupported type")
+        }
+        return value
     }
-    func read<T>(_ trait: T.Type) async throws -> DeveloperToolsSupport.PreviewLayout {
+}
+
+@MainActor
+func previewTraitValue(_ preview: NativeSwiftValue, named mangledName: String) async throws -> NativeSwiftValue {
+    guard let metatype = _typeByName(mangledName) else { throw NativePreviewPipelineRequired() }
+    func read<T>(_ trait: T.Type) async throws -> NativeSwiftValue {
         let value = try await preview.type.resolveMethod(
             named: "value<A where A: DeveloperToolsSupport.PreviewTraitProtocol>(for: A.Type) -> A.Value",
             as: ((T.Type) -> NativeSwiftValue).self, genericArguments: [.type(T.self)],
             receiverABI: .opaque(named: preview.type.name))
-        let layout = try unsafe value.unsafeInvoke(on: preview, trait)
-        return try layout.withCopy {
-            guard let value = $0 as? DeveloperToolsSupport.PreviewLayout else {
-                throw PreviewRendererError("The installed preview layout has an unsupported type")
-            }
-            return value
-        }
+        return try unsafe value.unsafeInvoke(on: preview, trait)
     }
     return try await _openExistential(metatype, do: read)
 }
