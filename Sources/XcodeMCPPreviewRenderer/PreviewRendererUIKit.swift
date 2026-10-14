@@ -1,4 +1,5 @@
 #if (os(iOS) && targetEnvironment(macCatalyst)) || ((os(tvOS) || os(visionOS)) && targetEnvironment(simulator))
+import ABIBridge
 import DeveloperToolsSupport
 import Foundation
 import SwiftUI
@@ -12,6 +13,9 @@ final class PreviewRendererApp: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        #if os(tvOS)
+        if let snapshot = PreviewSnapshotWindow.configuration(for: session) { return snapshot }
+        #endif
         let configuration = UISceneConfiguration(name: "Preview", sessionRole: session.role)
         configuration.delegateClass = PreviewRendererScene.self
         return configuration
@@ -37,11 +41,21 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         let content = try await makeGeneralPreview(loadPreviewRequest())
         let controller = UIHostingController(rootView: content.view)
         applyDisplayVariants(to: controller, variants: content.variants)
+        #if os(tvOS)
+        do {
+            // Native IOSHostingParadigm sets this color on TV; its Swift API is unavailable there.
+            let background = try await ABIRuntime.shared.object(UIColor.self as AnyObject).resolveMethod(
+                selector: "systemBackgroundColor", as: (() -> UIColor).self)
+            controller.view.backgroundColor = try unsafe background.unsafeInvoke()
+        } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
+        #endif
         var size = window.bounds.size
         switch content.layout {
         case .device: break
         case .fixed(let width, let height):
+            #if !os(tvOS)
             controller.safeAreaRegions = []
+            #endif
             size = CGSize(width: width, height: height)
         case .sizeThatFits:
             controller.safeAreaRegions = []
@@ -49,12 +63,31 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             size = controller.view.intrinsicContentSize
         default: throw NativePreviewPipelineRequired()
         }
+        #if os(tvOS)
+        if case .fixed = content.layout {
+            let result = try await PreviewSnapshotWindow.withWindow(from: window, size: size) { window in
+                try await capture(in: window, controller: controller, layout: content.layout,
+                                  size: size, result: content.result)
+            }
+            write(result)
+            return
+        }
+        #endif
+        let result = try await capture(in: window, controller: controller, layout: content.layout,
+                                       size: size, result: content.result)
+        write(result)
+    }
+
+    private func capture(in window: UIWindow, controller: UIHostingController<AnyView>,
+                         layout: DeveloperToolsSupport.PreviewLayout, size initialSize: CGSize,
+                         result initialResult: PreviewRendererResult) async throws -> PreviewRendererResult {
+        var size = initialSize
         window.rootViewController = controller
         window.makeKeyAndVisible()
         controller.view.frame = CGRect(origin: .zero, size: size)
         controller.view.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
-        if case .sizeThatFits = content.layout { size = controller.view.intrinsicContentSize }
+        if case .sizeThatFits = layout { size = controller.view.intrinsicContentSize }
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
             throw PreviewRendererError("The preview has no drawable area: \(size)")
         }
@@ -71,14 +104,14 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         }
         guard drawn, let data = image.pngData() else { throw PreviewRendererError("The preview host could not capture its rendered view") }
         #endif
-        var result = content.result
+        var result = initialResult
         #if targetEnvironment(macCatalyst)
         result.snapshotData = data
         #else
         try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
         result.snapshotName = "Preview.png"
         #endif
-        write(result)
+        return result
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }

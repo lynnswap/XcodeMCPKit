@@ -231,6 +231,18 @@ bounds apply the requested orientation. This path was verified on iOS 27.2 with
 Xcode 27.1 and uses ABIBridge 0.9.0's existing Objective-C APIs. Unavailable private
 scene APIs use the native pipeline.
 
+On tvOS, fixed-size previews use the same scene owner with the source's requested
+frame and the original scene's display and orientation settings. The hosting
+controller retains its native safe-area regions, so overscan applies to all sides
+of the preview frame. Its background comes from UIKit's native
+`systemBackgroundColor` selector, which the public tvOS color API does not expose.
+This scene and background path was verified on tvOS 27.0 with Xcode 27.1.
+Unavailable private scene or color bindings use the native pipeline.
+
+Static iOS and tvOS snapshots allocate integer pixel dimensions with the native
+FBS snapshot's unsigned conversion and use a standard 8-bit renderer. The view's
+point frame and drawing rectangle are retained, including fractional dimensions.
+
 Each render owns a fresh, nonpersistent scene session with a passive delegate.
 It disconnects the window scene, removes its session, and invalidates the native
 scene on its call-out queue after capture, failure, or cancellation. The original

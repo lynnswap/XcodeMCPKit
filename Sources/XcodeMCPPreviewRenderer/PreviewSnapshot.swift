@@ -13,6 +13,7 @@ func staticPreviewSnapshot(of view: UIView, size: CGSize, scale: CGFloat) throws
     let format = UIGraphicsImageRendererFormat()
     format.scale = 1
     format.opaque = false
+    format.preferredRange = .standard
     var drawn = false
     let image = UIGraphicsImageRenderer(size: pixels, format: format).image { context in
         context.cgContext.scaleBy(x: scale, y: scale)
