@@ -264,6 +264,7 @@ final class NativePreviewCorrection {
         let request = PreviewRendererRequest(libraryNames: libraryPaths, registryNames: names,
             fileName: source.lastPathComponent, moduleName: selection.source.moduleName, lineNumber: location.line, columnNumber: location.column,
             definitionIndex: input.index, localization: input.localization, widgetFamily: input.widgetFamily,
+            widgetPresentation: input.widgetPresentation,
             timelineIndex: input.timelineIndex, groupItemIndex: input.groupItemIndex,
             providerTypeName: providerName, displayVariantOverrides: input.displayVariants,
             activityViewStyle: input.activityViewStyle, activityViewContext: input.activityViewContext,
@@ -336,11 +337,6 @@ final class NativePreviewCorrection {
                         if let title { item["title"] = .string(title) }
                         return .object(item)
                     }),
-                ])
-            }
-            if let families = response.widgetFamilies {
-                fields["supportedPreviewVariantOverrides"] = .object([
-                    "Widget Family": .array(families.map(JSONValue.string)),
                 ])
             }
             if let variants = response.supportedDisplayVariants {
@@ -784,6 +780,7 @@ final class NativePreviewCorrection {
         let destination: [String: String]
         let timeout: Int
         let widgetFamily: String?
+        let widgetPresentation: String?
         let timelineIndex: Int?
         let groupItemIndex: Int?
         let displayVariants: [String: String]
@@ -823,23 +820,26 @@ final class NativePreviewCorrection {
         return Input(workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
             index: index, localization: fields["previewLocalizationOverride"] as? String? ?? nil,
             destination: destination, timeout: timeout,
-            widgetFamily: options.widgetFamily, timelineIndex: options.timelineIndex, groupItemIndex: options.groupItemIndex,
+            widgetFamily: options.widgetFamily, widgetPresentation: options.widgetPresentation,
+            timelineIndex: options.timelineIndex, groupItemIndex: options.groupItemIndex,
             displayVariants: options.displayVariants, activityViewStyle: options.activityViewStyle,
             activityViewContext: options.activityViewContext, activityToggleState: options.activityToggleState,
             requiresNativePipeline: options.requiresNativePipeline)
     }
 
     static func directOptions(variants: [String: String], controls: [String: Any]) ->
-        (widgetFamily: String?, timelineIndex: Int?, groupItemIndex: Int?, displayVariants: [String: String],
-         activityViewStyle: String?, activityViewContext: String?, activityToggleState: Bool?, requiresNativePipeline: Bool) {
+        (widgetFamily: String?, widgetPresentation: String?, timelineIndex: Int?, groupItemIndex: Int?,
+         displayVariants: [String: String], activityViewStyle: String?, activityViewContext: String?,
+         activityToggleState: Bool?, requiresNativePipeline: Bool) {
         let family = variants["Widget Family"]
+        let presentation = variants["Presentation"]
         let timeline = controls["timelineIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
         let groupItem = controls["groupItemIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
         let toggle = controls["toggleState"].flatMap { Mirror(reflecting: $0).children.first?.value as? Bool }
         let displayVariants = variants.filter { PreviewRendererRequest.displayVariantValues[$0.key] != nil }
         let unsupportedVariant = variants.contains { key, value in
             switch key {
-            case "Widget Family": return !["Small", "Medium"].contains(value)
+            case "Widget Family", "Presentation": return false
             case "View Style": return !PreviewRendererRequest.activityViewStyles.contains(value)
             case "Activity View Context": return !PreviewRendererRequest.activityViewContexts.contains(value)
             default: return PreviewRendererRequest.displayVariantValues[key]?.contains(value) != true
@@ -848,9 +848,8 @@ final class NativePreviewCorrection {
         let unsupportedControl = controls.contains { key, value in
             key != "timelineIndex" && key != "groupItemIndex" && key != "toggleState" && Mirror(reflecting: value).children.first != nil
         }
-        let widgetDisplayVariants = family != nil && !displayVariants.isEmpty
-        return (family, timeline, groupItem, displayVariants, variants["View Style"], variants["Activity View Context"], toggle,
-                unsupportedVariant || unsupportedControl || widgetDisplayVariants)
+        return (family, presentation, timeline, groupItem, displayVariants, variants["View Style"], variants["Activity View Context"], toggle,
+                unsupportedVariant || unsupportedControl)
     }
 
     private func event(_ type: String, _ value: JSONValue) throws -> Data {

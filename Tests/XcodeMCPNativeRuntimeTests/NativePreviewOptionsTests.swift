@@ -6,11 +6,15 @@ import XcodeMCPWire
 @Suite
 @MainActor
 struct NativePreviewOptionsTests {
-    @Test func widgetFamilyAndTimelineUseDirectRenderer() {
-        let options = NativePreviewCorrection.directOptions(variants: ["Widget Family": "Medium"],
+    @Test func widgetFamilyPresentationAndTimelineUseDirectRenderer() {
+        let options = NativePreviewCorrection.directOptions(variants: [
+            "Widget Family": "Large", "Presentation": "Placeholder", "Color Scheme": "Dark Appearance",
+        ],
             controls: ["timelineIndex": Optional(1) as Any, "toggleState": Optional<Bool>.none as Any])
-        #expect(options.widgetFamily == "Medium")
+        #expect(options.widgetFamily == "Large")
+        #expect(options.widgetPresentation == "Placeholder")
         #expect(options.timelineIndex == 1)
+        #expect(options.displayVariants == ["Color Scheme": "Dark Appearance"])
         #expect(!options.requiresNativePipeline)
     }
 
@@ -54,7 +58,6 @@ struct NativePreviewOptionsTests {
     }
 
     @Test func otherVariantsAndControlsKeepNativeRendering() {
-        #expect(NativePreviewCorrection.directOptions(variants: ["Widget Family": "Large"], controls: [:]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: ["View Style": "Unknown Style"], controls: [:]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Unknown Appearance"], controls: [:]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: [:],
@@ -69,9 +72,9 @@ struct NativePreviewOptionsTests {
         #expect(!options.requiresNativePipeline)
     }
 
-    @Test func displayVariantsWithWidgetOptionsKeepNativeRendering() {
-        #expect(NativePreviewCorrection.directOptions(variants: [
-            "Widget Family": "Medium", "Color Scheme": "Dark Appearance",
+    @Test func displayVariantsWithWidgetOptionsUseDirectRenderer() {
+        #expect(!NativePreviewCorrection.directOptions(variants: [
+            "Widget Family": "Medium", "Color Scheme": "Dark Appearance", "Dynamic Type": "AX 1",
         ], controls: [:]).requiresNativePipeline)
     }
 

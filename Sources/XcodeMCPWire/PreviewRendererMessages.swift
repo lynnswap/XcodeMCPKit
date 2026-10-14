@@ -22,6 +22,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var definitionIndex: Int
     package var localization: String?
     package var widgetFamily: String?
+    package var widgetPresentation: String?
     package var timelineIndex: Int?
     package var groupItemIndex: Int?
     package var providerTypeName: String?
@@ -33,8 +34,8 @@ package struct PreviewRendererRequest: Codable, Sendable {
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
-                 localization: String?, widgetFamily: String? = nil, timelineIndex: Int? = nil,
-                 groupItemIndex: Int? = nil, providerTypeName: String? = nil,
+                 localization: String?, widgetFamily: String? = nil, widgetPresentation: String? = nil,
+                 timelineIndex: Int? = nil, groupItemIndex: Int? = nil, providerTypeName: String? = nil,
                  displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
                  activityViewContext: String? = nil, activityToggleState: Bool? = nil,
                  appName: String? = nil) {
@@ -47,6 +48,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.definitionIndex = definitionIndex
         self.localization = localization
         self.widgetFamily = widgetFamily
+        self.widgetPresentation = widgetPresentation
         self.timelineIndex = timelineIndex
         self.groupItemIndex = groupItemIndex
         self.providerTypeName = providerTypeName
@@ -65,7 +67,6 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var error: String?
     package var requiresNativePipeline: Bool?
     package var timelineIndexes: [Int]?
-    package var widgetFamilies: [String]?
     package var groupItems: [String?]?
     package var errors: [String]?
     package var toggleStates: [Bool]?
@@ -78,7 +79,7 @@ package struct PreviewRendererResult: Codable, Sendable {
 
     package init(snapshotName: String? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
-                 requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil, widgetFamilies: [String]? = nil,
+                 requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil,
                  groupItems: [String?]? = nil, errors: [String]? = nil,
                  toggleStates: [Bool]? = nil, activityViewStyles: [String]? = nil,
                  activityViewContexts: [String]? = nil,
@@ -90,7 +91,6 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.error = error
         self.requiresNativePipeline = requiresNativePipeline
         self.timelineIndexes = timelineIndexes
-        self.widgetFamilies = widgetFamilies
         self.groupItems = groupItems
         self.errors = errors
         self.toggleStates = toggleStates
