@@ -222,22 +222,26 @@ each render and applies the native modifier wrappers in their original order.
 Provider contexts, device overrides, and other display traits, variants, or controls
 still use the native pipeline.
 
-Widget previews support `StaticConfiguration` and `AppIntentConfiguration` in the
-Small and Medium families. Previews can provide explicit `timeline:` entries or a
-`timelineProvider:`. AppIntent provider previews retain the `using:` intent
-supplied by the preview, including its default parameter values. The renderer obtains
-the configuration's descriptor from `WidgetConfiguration.body` and applies its
+Widget previews support `StaticConfiguration`, `IntentConfiguration`, and
+`AppIntentConfiguration`. Previews can provide explicit `timeline:` entries or a
+`timelineProvider:`. Intent and AppIntent provider previews retain the `using:`
+intent supplied by the preview, including its default parameter values. The renderer
+obtains the configuration's descriptor from `WidgetConfiguration.body` and applies its
 descriptor preference transforms in their original order. It uses WidgetKit's
-timeline provider context with `isPreview` enabled, the selected family, and
-SpringBoard's metrics for the selected device. WidgetKit supplies the timeline's
-actual `AnyView`, which is hosted with its common widget environment and
+timeline provider context with `isPreview: false`, matching native RenderPreview,
+the selected family, and native metrics for the selected device. WidgetKit supplies
+the timeline's actual `AnyView`, which is hosted with its common widget environment and
 `.containerBackground(for: .widget)` content. The snapshot has the widget's
 size and rounded corners, with transparency outside them.
 `supportedCanvasControlOverrides.timelineIndexes` lists the available entries;
 `previewCanvasControlOverrides.timelineIndex` selects an entry, defaulting to
-the first. `supportedPreviewVariantOverrides["Widget Family"]` lists the
-configuration's supported Small/Medium families, which can be selected through
-`previewVariantOverrides`. Widget previews with disabled content margins or
+the first. `supportedPreviewVariantOverrides` returns the installed Widget preview
+plugin's catalog for `Widget Family`, `Presentation`, `Color Scheme`, and
+`Dynamic Type`. These values can be selected together through
+`previewVariantOverrides`; the renderer checks family and presentation selections
+against this catalog. Presentation applies the native redaction effects to the same timeline
+entries for normal, placeholder, privacy, and low-luminance rendering.
+Widget previews with disabled content margins or
 changes to their descriptor's background style use the native pipeline.
 
 Live Activity previews use WidgetKit's archived activity views and native
@@ -254,8 +258,7 @@ appearance regardless of the Color Scheme override, as native RenderPreview does
 StandBy and reduced-luminance content also use Dark appearance.
 Activity labels use the containing application's localized name when that
 application is available, falling back to the extension's name.
-Other display controls retain the native pipeline for Live Activity previews;
-ordinary Widget previews with display controls also retain that pipeline.
+Other display controls retain the native pipeline for Live Activity previews.
 
 Each render creates a Simulator matching the selected destination's device type
 and runtime. Without a destination override, it retains the workspace's active

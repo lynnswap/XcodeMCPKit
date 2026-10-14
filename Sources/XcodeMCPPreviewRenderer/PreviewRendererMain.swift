@@ -65,7 +65,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         var variants = request.displayVariantOverrides
         var errors: [String] = []
         if let typeName = request.providerTypeName {
-            guard request.widgetFamily == nil, request.timelineIndex == nil,
+            guard request.widgetFamily == nil, request.widgetPresentation == nil, request.timelineIndex == nil,
                   request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil else {
                 throw NativePreviewPipelineRequired()
             }
@@ -116,7 +116,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             case "DeveloperToolsSupport.DefaultPreviewSource<SwiftUI.ViewPreviewBody>",
                  "DeveloperToolsSupport.DefaultPreviewSource<__C.UIView>",
                  "DeveloperToolsSupport.DefaultPreviewSource<__C.UIViewController>":
-                guard request.widgetFamily == nil, request.timelineIndex == nil,
+                guard request.widgetFamily == nil, request.widgetPresentation == nil, request.timelineIndex == nil,
                       request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil else {
                     throw NativePreviewPipelineRequired()
                 }
@@ -131,8 +131,12 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             case "WidgetKit.TimelineEntryPreviewSource", "WidgetKit.TimelineProviderPreviewSource":
                 guard request.groupItemIndex == nil, request.activityViewStyle == nil,
                       request.activityViewContext == nil, request.activityToggleState == nil,
-                      variants.isEmpty else { throw NativePreviewPipelineRequired() }
-                let result = try await makeWidgetPreview(source: source, family: request.widgetFamily, timelineEntryIndex: request.timelineIndex)
+                      variants.keys.allSatisfy({ ["Color Scheme", "Dynamic Type"].contains($0) }) else {
+                    throw NativePreviewPipelineRequired()
+                }
+                let result = try await makeWidgetPreview(source: source, family: request.widgetFamily,
+                    presentation: request.widgetPresentation, timelineEntryIndex: request.timelineIndex,
+                    variants: variants, localization: request.localization, screen: window.screen)
                 widget = result
                 activity = nil
                 view = AnyView(result.view.clipShape(RoundedRectangle(cornerRadius: result.cornerRadius, style: .continuous)))
@@ -140,7 +144,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 layout = .fixed(width: result.size.width, height: result.size.height)
                 sourceOrientation = .portrait
             case "WidgetKit.ActivityPreviewSource":
-                guard request.widgetFamily == nil,
+                guard request.widgetFamily == nil, request.widgetPresentation == nil,
                       variants.keys.allSatisfy({ ["Color Scheme", "Dynamic Type"].contains($0) }) else {
                     throw NativePreviewPipelineRequired()
                 }
@@ -255,11 +259,11 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             }
             return PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
                 sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes ?? activity?.stateIndexes,
-                widgetFamilies: widget?.supportedFamilies, groupItems: groupItems, errors: errors,
+                groupItems: groupItems, errors: errors,
                 toggleStates: activity == nil ? nil : [true, false],
                 activityViewStyles: activity == nil ? nil : PreviewRendererRequest.activityViewStyles,
                 activityViewContexts: activity == nil ? nil : PreviewRendererRequest.activityViewContexts,
-                supportedDisplayVariants: widget == nil && activity == nil ? PreviewRendererRequest.displayVariantValues : nil,
+                supportedDisplayVariants: widget?.supportedVariants ?? (activity == nil ? PreviewRendererRequest.displayVariantValues : nil),
                 usesDeviceLayout: deviceLayout, interfaceOrientation: try interfaceOrientationName(orientation),
                 exclusionSnapshotName: exclusionSnapshotName)
         }

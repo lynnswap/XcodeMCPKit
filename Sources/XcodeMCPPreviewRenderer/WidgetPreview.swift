@@ -11,14 +11,24 @@ struct WidgetPreview {
     let size: CGSize
     let cornerRadius: CGFloat
     let timelineIndexes: [Int]
-    let supportedFamilies: [String]
+    let supportedVariants: [String: [String]]
     fileprivate let background: WidgetBackground
 
     func validate() throws { try background.validate() }
 }
 
 @MainActor
-func makeWidgetPreview(source: NativeSwiftValue, family: String?, timelineEntryIndex: Int?) async throws -> WidgetPreview {
+func makeWidgetPreview(source: NativeSwiftValue, family: String?, presentation: String?, timelineEntryIndex: Int?,
+                       variants: [String: String], localization: String?, screen: UIScreen) async throws -> WidgetPreview {
+    let catalog = try await widgetVariantCatalog(source: source)
+    var selections = variants
+    if let family { selections["Widget Family"] = family }
+    if let presentation { selections["Presentation"] = presentation }
+    let effects = try await catalog.effects(for: selections)
+    var publicEnvironment = EnvironmentValues()
+    try applyDisplayVariants(to: &publicEnvironment, variants: variants)
+    if let localization { publicEnvironment.locale = Locale(identifier: localization) }
+    let requestedFamily = try await applyWidgetEffects(effects, to: &publicEnvironment)
     let makeGetter = try await source.type.resolveGetter(named: "makeWidget",
         as: (() -> NativeSwiftClosure<() -> NativeSwiftValue>).self, receiverABI: .opaque(named: source.type.name))
     let make = try unsafe makeGetter.unsafeInvoke(on: source)
@@ -37,23 +47,12 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, timelineEntryI
 
     let publicFamilyType = try await widgetType("WidgetKit.WidgetFamily")
     let familyValue: NativeSwiftValue
-    if let family {
-        switch family {
-        case "Small": familyValue = try await widgetValue(WidgetFamily.systemSmall)
-        case "Medium": familyValue = try await widgetValue(WidgetFamily.systemMedium)
-        default: throw NativePreviewPipelineRequired()
-        }
+    if let requestedFamily {
+        familyValue = try await widgetValue(requestedFamily)
     } else {
         let getter = try await source.type.resolveGetter(named: "family", as: (() -> NativeSwiftValue).self,
             valueABIs: [publicFamilyType: .opaque(named: publicFamilyType.name)], receiverABI: .opaque(named: source.type.name))
         familyValue = try unsafe getter.unsafeInvoke(on: source)
-    }
-    let selectedFamily = try familyValue.withCopy { value in
-        guard let family = value as? WidgetFamily else { throw NativePreviewPipelineRequired() }
-        return family
-    }
-    guard [.systemSmall, .systemMedium].contains(selectedFamily) else {
-        throw NativePreviewPipelineRequired()
     }
     let internalType = try await widgetType("WidgetKit.InternalWidgetFamily")
     let familyInit = try await internalType.resolveInitializer(named: "init(WidgetKit.WidgetFamily) -> WidgetKit.InternalWidgetFamily",
@@ -63,10 +62,20 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, timelineEntryI
     let familyGetter = try await internalType.resolveGetter(named: "chsWidgetFamily.getter : __C.CHSWidgetFamily",
         as: (() -> Int).self, receiverABI: .opaque(named: internalType.name))
     let rawFamily = try unsafe familyGetter.unsafeInvoke(on: internalFamily)
-    guard descriptor.families.contains(rawFamily) else { throw NativePreviewPipelineRequired() }
-    let (providedWidget, providedMetrics) = try await widgetIdentity(kind: descriptor.kind, family: rawFamily)
+    let (providedWidget, providedMetrics) = try await widgetIdentity(kind: descriptor.kind, family: rawFamily, screen: screen)
 
-    let swiftEnvironment = try await widgetValue(EnvironmentValues())
+    let swiftEnvironment = try await widgetValue(publicEnvironment)
+    let configurationGetter = try await ABIRuntime.shared.object(screen).resolveMethod(selector: "displayConfiguration",
+        as: (() -> AnyObject).self)
+    let displayConfiguration = try unsafe configurationGetter.unsafeInvoke()
+    let allocatedProperties = try await widgetObject("CHSWidgetDisplayProperties", framework: "ChronoServices")
+    let displayInit = try await ABIRuntime.shared.object(allocatedProperties).resolveMethod(selector: "initWithDisplayConfiguration:",
+        as: ((AnyObject) -> AnyObject).self)
+    let displayProperties = try unsafe displayInit.unsafeInvoke(displayConfiguration)
+    let displaySetter = try await swiftEnvironment.type.resolveSetter(
+        named: "(extension in WidgetKit):SwiftUI.EnvironmentValues._widgetDisplayProperties.setter : __C.CHSWidgetDisplayProperties",
+        as: AnyObject.self, receiverABI: .opaque(named: swiftEnvironment.type.name))
+    try unsafe displaySetter.unsafeInvoke(on: swiftEnvironment, displayProperties)
     let widgetSetter = try await swiftEnvironment.type.resolveSetter(
         named: "(extension in WidgetKit):SwiftUI.EnvironmentValues.widget.setter : Swift.Optional<__C.CHSWidget>",
         as: (AnyObject?).self, receiverABI: .opaque(named: swiftEnvironment.type.name))
@@ -96,7 +105,7 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, timelineEntryI
         as: ((NativeSwiftValue, NativeSwiftValue, Bool, String?) -> NativeSwiftValue).self,
         valueABIs: [variantsType: .opaque(named: variantsType.name), internalType: .opaque(named: internalType.name),
                     contextType: .opaque(named: contextType.name)])
-    let context = try unsafe contextInit.unsafeInvoke(variants, internalFamily, true, nil)
+    let context = try unsafe contextInit.unsafeInvoke(variants, internalFamily, false, nil)
     let collection = try await widgetTimeline(configuration: configuration, source: source, context: context)
     guard let sequence = try collection.withCopy({ $0 as? any Sequence }) else { throw NativePreviewPipelineRequired() }
     func entries<S: Sequence>(_ sequence: S) -> [Any] { sequence.map { $0 as Any } }
@@ -137,26 +146,19 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, timelineEntryI
     let modified = _openExistential(modifier, do: apply)
     let background = WidgetBackground()
     let hosted = try widgetBackground(AnyView(modified.frame(width: size.width, height: size.height)), state: background)
-    var supported: [String] = []
-    for (name, publicFamily) in [("Small", WidgetFamily.systemSmall), ("Medium", WidgetFamily.systemMedium)] {
-        let value = try await widgetValue(publicFamily)
-        let internalValue = try unsafe familyInit.unsafeInvoke(value)
-        let raw = try unsafe familyGetter.unsafeInvoke(on: internalValue)
-        if descriptor.families.contains(raw) { supported.append(name) }
-    }
     return WidgetPreview(view: hosted, size: size, cornerRadius: CGFloat(radius),
-        timelineIndexes: Array(values.indices), supportedFamilies: supported, background: background)
+        timelineIndexes: Array(values.indices), supportedVariants: catalog.supported, background: background)
 }
 
 @MainActor
-private func widgetValue<Value>(_ value: Value) async throws -> NativeSwiftValue {
+func widgetValue<Value>(_ value: Value) async throws -> NativeSwiftValue {
     let identity = try await ABIRuntime.shared.resolveSwiftFunction(named: "XcodeMCPPreviewRenderer.previewValue<A>(A) -> A",
         as: ((Value) -> NativeSwiftValue).self, genericArguments: [.type(Value.self)])
     return try unsafe identity.unsafeInvoke(value)
 }
 
 @MainActor
-private func widgetAnyValue(_ value: Any) async throws -> NativeSwiftValue {
+func widgetAnyValue(_ value: Any) async throws -> NativeSwiftValue {
     func open<Value>(_ value: Value) async throws -> NativeSwiftValue { try await widgetValue(value) }
     return try await _openExistential(value, do: open)
 }
@@ -184,9 +186,8 @@ private func widgetObject(_ name: String, framework: String) async throws -> Any
 }
 
 @MainActor
-private func widgetIdentity(kind: String, family: Int) async throws -> (AnyObject, AnyObject) {
-    guard let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen,
-          let bundleIdentifier = Bundle.main.bundleIdentifier else { throw NativePreviewPipelineRequired() }
+private func widgetIdentity(kind: String, family: Int, screen: UIScreen) async throws -> (AnyObject, AnyObject) {
+    guard let bundleIdentifier = Bundle.main.bundleIdentifier else { throw NativePreviewPipelineRequired() }
     let allocatedProvider = try await widgetObject("SBHWidgetMetricsProvider", framework: "SpringBoardHome")
     let screenType = try await ABIRuntime.shared.object(screen).resolveMethod(selector: "sbh_screenType", as: (() -> UInt64).self)
     let providerInit = try await ABIRuntime.shared.object(allocatedProvider).resolveMethod(selector: "initWithScreenType:",
@@ -305,7 +306,6 @@ private func widgetBackground(_ view: AnyView, state: WidgetBackground) throws -
 @MainActor
 private struct WidgetConfigurationDescriptor {
     let kind: String
-    let families: [Int]
 }
 
 @MainActor
@@ -322,7 +322,7 @@ private func widgetConfigurationDescriptor(_ configuration: NativeSwiftValue) as
     }
     let unwrapped = try configuration.withCopy { try unwrap($0) }
     let configurationType = String(reflecting: type(of: unwrapped.base))
-    guard configurationType.hasPrefix("WidgetKit.StaticConfiguration<") || configurationType.hasPrefix("WidgetKit.AppIntentConfiguration<"),
+    guard configurationType.hasPrefix("WidgetKit.StaticConfiguration<") || configurationType.hasPrefix("WidgetKit.IntentConfiguration<") || configurationType.hasPrefix("WidgetKit.AppIntentConfiguration<"),
           let base = unwrapped.base as? any WidgetConfiguration else { throw NativePreviewPipelineRequired() }
     func seed<Configuration: WidgetConfiguration>(_ configuration: Configuration) throws -> Any {
         guard let descriptor = Mirror(reflecting: configuration.body).children.first(where: { $0.label == "descriptor" })?.value,
@@ -348,30 +348,15 @@ private func widgetConfigurationDescriptor(_ configuration: NativeSwiftValue) as
         guard let source = fields.first(where: { $0.label == "source" })?.value,
               let timeline = Mirror(reflecting: source).children.first(where: { $0.label == "timeline" })?.value,
               let kind = Mirror(reflecting: timeline).children.first(where: { $0.label == "kind" })?.value as? String,
-              let families = fields.first(where: { $0.label == "supportedFamilies" })?.value,
               let marginsDisabled = fields.first(where: { $0.label == "contentMarginsDisabled" })?.value as? Bool,
               !marginsDisabled else { throw NativePreviewPipelineRequired() }
         // Descriptor-driven background styles require the native widget host.
         guard let originalStyle = originalFields.first(where: { $0.label == "preferredBackgroundStyle" })?.value as? AnyHashable,
               let modifiedStyle = fields.first(where: { $0.label == "preferredBackgroundStyle" })?.value as? AnyHashable,
               originalStyle == modifiedStyle else { throw NativePreviewPipelineRequired() }
-        let rawFamilies = try Mirror(reflecting: families).children.map { try widgetRawInteger($0.value) }
-        return WidgetConfigurationDescriptor(kind: kind, families: rawFamilies)
+        return WidgetConfigurationDescriptor(kind: kind)
     }
     return try _openExistential(keyType, do: apply)
-}
-
-private func widgetRawInteger(_ value: Any) throws -> Int {
-    guard let value = value as? any RawRepresentable else { throw NativePreviewPipelineRequired() }
-    func raw<Value: RawRepresentable>(_ value: Value) throws -> Int {
-        guard let number = value.rawValue as? any BinaryInteger else { throw NativePreviewPipelineRequired() }
-        func integer<Number: BinaryInteger>(_ value: Number) throws -> Int {
-            guard let value = Int(exactly: value) else { throw NativePreviewPipelineRequired() }
-            return value
-        }
-        return try _openExistential(number, do: integer)
-    }
-    return try _openExistential(value, do: raw)
 }
 
 #endif
