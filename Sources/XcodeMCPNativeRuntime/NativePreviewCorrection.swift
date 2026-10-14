@@ -261,12 +261,23 @@ final class NativePreviewCorrection {
             guard let moduleName = selection.source.moduleName else { throw NativePipelineRequired() }
             providerName = try await providerTypeName(path: path, moduleName: moduleName)
         } else { providerName = nil }
+        let programRootNames: [String]?
+        if providerName != nil {
+            let programLibraries = try Self.programLibraries(previewLibraries: libraries, output: output)
+            if programLibraries.isEmpty {
+                programRootNames = []
+            } else {
+                let symbols = try await process.xcrun(["nm", "-arch", "arm64", "-j", "-U"] + programLibraries.map(\.path))
+                programRootNames = Self.programRootNames(in: symbols)
+            }
+        } else { programRootNames = nil }
         let request = PreviewRendererRequest(libraryNames: libraryPaths, registryNames: names,
             fileName: source.lastPathComponent, moduleName: selection.source.moduleName, lineNumber: location.line, columnNumber: location.column,
             definitionIndex: input.index, localization: input.localization, widgetFamily: input.widgetFamily,
             widgetPresentation: input.widgetPresentation,
             timelineIndex: input.timelineIndex, groupItemIndex: input.groupItemIndex,
-            providerTypeName: providerName, displayVariantOverrides: input.displayVariants,
+            providerTypeName: providerName, programRootNames: programRootNames,
+            displayVariantOverrides: input.displayVariants,
             activityViewStyle: input.activityViewStyle, activityViewContext: input.activityViewContext,
             activityToggleState: input.activityToggleState,
             appName: try Self.appName(product: product, containingApp: containingApp, localization: input.localization))
@@ -679,6 +690,10 @@ final class NativePreviewCorrection {
         return libraries
     }
 
+    static func programLibraries(previewLibraries: [URL], output: URL) throws -> [URL] {
+        try previewLibraries.filter { try NativePreviewBinary.matches(output, $0) }
+    }
+
     static func registryLibraries(in app: URL, previewLibraries: [URL]) throws -> [URL] {
         var libraries = previewLibraries
         libraries += try FileManager.default.contentsOfDirectory(at: app, includingPropertiesForKeys: nil)
@@ -725,6 +740,16 @@ final class NativePreviewCorrection {
             // Names may use mangling substitutions. The renderer checks PreviewRegistry conformance.
             guard symbol.hasPrefix("_$s"), symbol.hasSuffix("VMn"), symbol.contains("fMu_") else { return nil }
             return String(symbol.dropFirst(3).dropLast(2))
+        }).sorted()
+    }
+
+    static func programRootNames(in symbols: String) -> [String] {
+        let suffix = "5$mainyyFZ"
+        return Set(symbols.split(whereSeparator: \.isNewline).compactMap { line -> String? in
+            let symbol = String(line)
+            // The renderer checks Widget/WidgetBundle conformance before initializing the program root.
+            guard symbol.hasPrefix("_$s"), symbol.hasSuffix(suffix) else { return nil }
+            return String(symbol.dropFirst(3).dropLast(suffix.count))
         }).sorted()
     }
 

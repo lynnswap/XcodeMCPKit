@@ -26,6 +26,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var timelineIndex: Int?
     package var groupItemIndex: Int?
     package var providerTypeName: String?
+    package var programRootNames: [String]?
     package var displayVariantOverrides: [String: String]
     package var activityViewStyle: String?
     package var activityViewContext: String?
@@ -36,6 +37,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
                  localization: String?, widgetFamily: String? = nil, widgetPresentation: String? = nil,
                  timelineIndex: Int? = nil, groupItemIndex: Int? = nil, providerTypeName: String? = nil,
+                 programRootNames: [String]? = nil,
                  displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
                  activityViewContext: String? = nil, activityToggleState: Bool? = nil,
                  appName: String? = nil) {
@@ -52,6 +54,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.timelineIndex = timelineIndex
         self.groupItemIndex = groupItemIndex
         self.providerTypeName = providerTypeName
+        self.programRootNames = programRootNames
         self.displayVariantOverrides = displayVariantOverrides
         self.activityViewStyle = activityViewStyle
         self.activityViewContext = activityViewContext
