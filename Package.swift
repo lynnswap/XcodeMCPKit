@@ -65,8 +65,12 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
+            name: "XcodeMCPNativeSwiftABI",
+            swiftSettings: [.swiftLanguageMode(.v5), .defaultIsolation(nil), .strictMemorySafety()]
+        ),
+        .target(
             name: "XcodeMCPNativeRuntime",
-            dependencies: ["XcodeMCPInstallation", "XcodeMCPWire", .product(name: "ABIBridge", package: "ABIBridge"),
+            dependencies: ["XcodeMCPInstallation", "XcodeMCPWire", "XcodeMCPNativeSwiftABI", .product(name: "ABIBridge", package: "ABIBridge"),
                            .product(name: "MachOKit", package: "MachOKit")],
             swiftSettings: strictSwiftSettings
         ),
