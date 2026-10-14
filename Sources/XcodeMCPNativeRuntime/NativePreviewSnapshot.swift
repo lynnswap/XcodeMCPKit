@@ -6,20 +6,29 @@ import ImageIO
 
 extension NativePreviewCorrection {
     func writeSnapshot(from source: Data, to destination: URL, deviceType: URL?,
-                       usesDeviceLayout: Bool, orientation: String?) async throws {
+                       usesDeviceLayout: Bool, orientation: String?, exclusion: Data? = nil) async throws {
         guard let imageSource = CGImageSourceCreateWithData(source as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
             throw NativeRuntimeError.invocation("The preview snapshot could not be decoded")
         }
         let mask = try usesDeviceLayout ? deviceType.flatMap(Self.framebufferMask) : nil
+        let exclusionImage: CGImage?
+        if usesDeviceLayout, let exclusion {
+            guard let source = CGImageSourceCreateWithData(exclusion as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                throw NativeRuntimeError.invocation("The preview display exclusion could not be decoded")
+            }
+            exclusionImage = image
+        } else { exclusionImage = nil }
         let degrees: Double?
-        if mask != nil {
+        if mask != nil || exclusionImage != nil {
             guard let orientation else { throw NativePipelineRequired() }
             do { degrees = try await snapshotRotationDegrees(orientation) }
             catch is ABIResolutionError { throw NativePipelineRequired() }
         } else { degrees = nil }
         guard let thumbnail = Self.thumbnail(from: image, maximumDimension: 1500, framebufferMask: mask,
-            rotationDegrees: degrees, swapsAxes: orientation == "landscapeLeft" || orientation == "landscapeRight"),
+            rotationDegrees: degrees, swapsAxes: orientation == "landscapeLeft" || orientation == "landscapeRight",
+            exclusionImage: exclusionImage),
               let output = CGImageDestinationCreateWithURL(destination as CFURL, "public.png" as CFString, 1, nil) else {
             throw NativeRuntimeError.invocation("The preview thumbnail could not be created")
         }
@@ -62,14 +71,29 @@ extension NativePreviewCorrection {
     }
 
     static func thumbnail(from image: CGImage, maximumDimension: CGFloat, framebufferMask: NSImage?,
-                          rotationDegrees: Double?, swapsAxes: Bool) -> CGImage? {
+                          rotationDegrees: Double?, swapsAxes: Bool, exclusionImage: CGImage? = nil) -> CGImage? {
+        let source: CGImage
+        if let exclusionImage, let rotationDegrees {
+            let size = CGSize(width: image.width, height: image.height)
+            guard let composite = unsafe CGContext(data: nil, width: image.width, height: image.height,
+                bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            composite.draw(image, in: CGRect(origin: .zero, size: size))
+            let rotatedSize = swapsAxes ? CGSize(width: size.height, height: size.width) : size
+            composite.translateBy(x: size.width / 2, y: size.height / 2)
+            composite.rotate(by: -rotationDegrees * .pi / 180)
+            composite.draw(exclusionImage, in: CGRect(x: -rotatedSize.width / 2, y: -rotatedSize.height / 2,
+                width: rotatedSize.width, height: rotatedSize.height))
+            guard let merged = composite.makeImage() else { return nil }
+            source = merged
+        } else { source = image }
         let scale = min(1, maximumDimension / CGFloat(max(image.width, image.height)))
         let size = CGSize(width: max(1, CGFloat(image.width) * scale), height: max(1, CGFloat(image.height) * scale))
         guard let context = unsafe CGContext(data: nil, width: Int(size.width), height: Int(size.height),
             bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         context.interpolationQuality = .high
-        context.draw(image, in: CGRect(origin: .zero, size: size))
+        context.draw(source, in: CGRect(origin: .zero, size: size))
         if let framebufferMask, let rotationDegrees {
             var proposed = CGRect(origin: .zero, size: size)
             guard let mask = unsafe framebufferMask.cgImage(forProposedRect: &proposed, context: nil, hints: nil) else { return nil }

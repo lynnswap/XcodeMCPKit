@@ -278,12 +278,14 @@ final class NativePreviewCorrection {
         try Task.checkCancellation()
         let response: PreviewRendererResult
         let snapshotData: Data
+        let exclusionData: Data?
         let deviceType: URL?
         let destinationFields: [String: JSONValue]
         if platform.isSimulator {
             let rendered = try await renderSimulator(app: app, build: build, process: process, localization: input.localization)
             response = rendered.response
             snapshotData = rendered.snapshot
+            exclusionData = rendered.exclusion
             deviceType = rendered.deviceType
             destinationFields = rendered.destination
         } else {
@@ -296,6 +298,7 @@ final class NativePreviewCorrection {
             if let error = response.error { throw NativeRuntimeError.invocation(error) }
             guard let data = response.snapshotData else { throw NativeRuntimeError.invocation("The preview process returned no snapshot") }
             snapshotData = data
+            exclusionData = nil
             deviceType = nil
             destinationFields = ["identifier": .string(build.previewDestinationIdentifier), "platformName": .string(build.platformName ?? "macOS")]
                 .merging(build.deviceModelName.map { ["deviceModelName": .string($0)] } ?? [:], uniquingKeysWith: { _, new in new })
@@ -303,7 +306,7 @@ final class NativePreviewCorrection {
         }
         let snapshotURL = artifacts.appendingPathComponent("preview.png")
         try await writeSnapshot(from: snapshotData, to: snapshotURL, deviceType: deviceType,
-            usesDeviceLayout: response.usesDeviceLayout == true, orientation: response.interfaceOrientation)
+            usesDeviceLayout: response.usesDeviceLayout == true, orientation: response.interfaceOrientation, exclusion: exclusionData)
         var fields: [String: JSONValue] = [
             "previewSnapshotPath": .string(snapshotURL.path),
             "errors": .array((response.errors ?? []).map { .object(["message": .string($0)]) }),
@@ -338,14 +341,14 @@ final class NativePreviewCorrection {
     }
 
     private func renderSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess, localization: String?) async throws ->
-        (response: PreviewRendererResult, snapshot: Data, destination: [String: JSONValue], deviceType: URL) {
+        (response: PreviewRendererResult, snapshot: Data, destination: [String: JSONValue], deviceType: URL, exclusion: Data?) {
         // Keep allocation alive through cancellation so its created identifier
         // is always available to the cleanup owner below.
         let allocation = Task { @MainActor in
             try await createSimulator(app: app, build: build, process: process)
         }
         let simulator = try await allocation.value
-        var rendered: (PreviewRendererResult, Data)?
+        var rendered: (PreviewRendererResult, Data, Data?)?
         var failure: (any Error)?
         do {
             _ = try await process.xcrun(["simctl", "boot", simulator.identifier])
@@ -368,7 +371,8 @@ final class NativePreviewCorrection {
             if response.requiresNativePipeline == true { throw NativePipelineRequired() }
             if let error = response.error { throw NativeRuntimeError.invocation(error) }
             guard let name = response.snapshotName else { throw NativeRuntimeError.invocation("The preview renderer returned no snapshot") }
-            rendered = (response, try Data(contentsOf: documents.appendingPathComponent(name)))
+            let exclusion = try response.exclusionSnapshotName.map { try Data(contentsOf: documents.appendingPathComponent($0)) }
+            rendered = (response, try Data(contentsOf: documents.appendingPathComponent(name)), exclusion)
         } catch { failure = error }
         // Cleanup is outside the cancelled task so it can delete the device even
         // when the caller has cancelled rendering or the request timed out.
@@ -381,7 +385,7 @@ final class NativePreviewCorrection {
         }
         if let failure { throw failure }
         guard let rendered else { throw NativeRuntimeError.invocation("The preview renderer returned no result") }
-        return (rendered.0, rendered.1, simulator.destination, simulator.deviceType)
+        return (rendered.0, rendered.1, simulator.destination, simulator.deviceType, rendered.2)
     }
 
     private func supportedLocalizations(in workspace: AnyObject) async throws -> [String] {

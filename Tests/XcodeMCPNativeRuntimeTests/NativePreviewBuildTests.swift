@@ -13,12 +13,15 @@ struct NativePreviewBuildTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let builder = NativePreviewBuild(installation: try NativeXcodeInstallation(developerDirectory: app))
         let mac = PreviewBuildDestination(identifier: "Mac", platform: "com.apple.platform.macosx")
+        mac.targetDevice.deviceLocation = NSURL(string: "dvtdevice-local-computer:localhost")
         let ios = PreviewBuildDestination(identifier: UUID().uuidString, platform: "com.apple.platform.iphonesimulator")
         let scheme = PreviewBuildScheme(destinations: [mac, ios])
         let manager = PreviewBuildRunContextManager(scheme: scheme, destination: mac)
         let workspace = PreviewBuildWorkspace(manager: manager)
 
         #expect(try builder.selectDestination(workspace: workspace) === mac)
+        #expect(try builder.selectDestination(workspace: workspace,
+            preferred: ["identifier": "dvtdevice-local-computer:localhost"]) === mac)
         #expect(try builder.selectDestination(workspace: workspace, preferred: ["identifier": ios.targetDevice.identifier]) === ios)
     }
 
@@ -101,6 +104,7 @@ private final class PreviewBuildDestination: NSObject {
 
 private final class PreviewBuildDevice: NSObject {
     @objc let identifier: String
+    @objc var deviceLocation: NSURL?
     @objc let modelName = "Preview device"
     init(identifier: String) { self.identifier = identifier }
 }
