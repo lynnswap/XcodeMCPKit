@@ -58,13 +58,14 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var supportedDisplayVariants: [String: [String]]?
     package var usesDeviceLayout: Bool?
     package var interfaceOrientation: String?
+    package var exclusionSnapshotName: String?
 
     package init(snapshotName: String? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
                  requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil, widgetFamilies: [String]? = nil,
                  groupItems: [String?]? = nil, errors: [String]? = nil,
                  supportedDisplayVariants: [String: [String]]? = nil, usesDeviceLayout: Bool? = nil,
-                 interfaceOrientation: String? = nil) {
+                 interfaceOrientation: String? = nil, exclusionSnapshotName: String? = nil) {
         self.snapshotName = snapshotName
         self.displayName = displayName
         self.sourceLineNumber = sourceLineNumber
@@ -77,5 +78,6 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.supportedDisplayVariants = supportedDisplayVariants
         self.usesDeviceLayout = usesDeviceLayout
         self.interfaceOrientation = interfaceOrientation
+        self.exclusionSnapshotName = exclusionSnapshotName
     }
 }

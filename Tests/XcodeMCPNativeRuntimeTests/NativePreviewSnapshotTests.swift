@@ -38,6 +38,26 @@ struct NativePreviewSnapshotTests {
         #expect(rightBitmap.colorAt(x: 70, y: 20)?.alphaComponent == 1)
     }
 
+    @Test func displayExclusionRotatesAndRetainsContentOutsideIt() throws {
+        let context = try #require(unsafe CGContext(data: nil, width: 40, height: 80, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 10, y: 70, width: 20, height: 10))
+        let overlay = try #require(context.makeImage())
+        let source = try image(width: 80, height: 40)
+        let left = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
+            framebufferMask: nil, rotationDegrees: 90, swapsAxes: true, exclusionImage: overlay))
+        let right = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
+            framebufferMask: nil, rotationDegrees: 270, swapsAxes: true, exclusionImage: overlay))
+        let leftBitmap = NSBitmapImageRep(cgImage: left)
+        let rightBitmap = NSBitmapImageRep(cgImage: right)
+        #expect(leftBitmap.colorAt(x: 75, y: 20)?.redComponent == 0)
+        #expect(leftBitmap.colorAt(x: 5, y: 20)?.redComponent == 1)
+        #expect(rightBitmap.colorAt(x: 5, y: 20)?.redComponent == 0)
+        #expect(rightBitmap.colorAt(x: 75, y: 20)?.redComponent == 1)
+        #expect(leftBitmap.colorAt(x: 40, y: 20)?.alphaComponent == 1)
+    }
+
     private func image(width: Int, height: Int) throws -> CGImage {
         let context = try #require(unsafe CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
             bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))

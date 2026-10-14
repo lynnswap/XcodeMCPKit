@@ -175,10 +175,13 @@ It supports the preview's device, fixed-size, or size-that-fits layout and a loc
 override. Locale overrides set the renderer's launch language preferences and
 SwiftUI environment. The response's `supportedLocalizations` comes from Xcode's
 workspace. Device-layout snapshots apply the selected Simulator device's
-framebuffer mask; fixed-size and size-that-fits snapshots retain their rectangular
+framebuffer mask and its enabled display exclusion area. The exclusion uses UIKit's
+native rectangle and PreviewShell's corner radius and curve, rendered into a
+transparent portrait overlay. Snapshot composition rotates that overlay with the
+native content orientation before downsampling. Fixed-size and size-that-fits snapshots retain their rectangular
 hosting view. The longest image dimension is capped at 1500 pixels without
 upscaling smaller images.
-Camera cutouts and exact native safe-area geometry remain tracked in
+Exact native safe-area geometry and remaining platform chrome remain tracked in
 [the snapshot parity issue](https://github.com/lynnswap/XcodeMCPKit/issues/311).
 Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
 
@@ -273,7 +276,8 @@ use the native pipeline; other contract changes produce diagnostics.
 Build failures are reported before rendering so stale products are not captured.
 `scripts/build-native-host.sh` builds and bundles the Simulator renderer using
 the selected developer directory. Apple frameworks are supplied by the installed
-runtime.
+runtime. Device exclusion rendering also reads UIKit's display shape and the
+SpringBoardServices/MobileGestalt enable conditions used by PreviewShell.
 
 ## Standalone host
 
