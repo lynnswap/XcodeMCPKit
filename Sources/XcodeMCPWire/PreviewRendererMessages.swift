@@ -11,10 +11,13 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var localization: String?
     package var widgetFamily: String?
     package var timelineIndex: Int?
+    package var groupItemIndex: Int?
+    package var providerTypeName: String?
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
-                 localization: String?, widgetFamily: String? = nil, timelineIndex: Int? = nil) {
+                 localization: String?, widgetFamily: String? = nil, timelineIndex: Int? = nil,
+                 groupItemIndex: Int? = nil, providerTypeName: String? = nil) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
         self.fileName = fileName
@@ -25,6 +28,8 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.localization = localization
         self.widgetFamily = widgetFamily
         self.timelineIndex = timelineIndex
+        self.groupItemIndex = groupItemIndex
+        self.providerTypeName = providerTypeName
     }
 }
 
@@ -36,10 +41,13 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var requiresNativePipeline: Bool?
     package var timelineIndexes: [Int]?
     package var widgetFamilies: [String]?
+    package var groupItems: [String?]?
+    package var errors: [String]?
 
     package init(snapshotName: String? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
-                 requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil, widgetFamilies: [String]? = nil) {
+                 requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil, widgetFamilies: [String]? = nil,
+                 groupItems: [String?]? = nil, errors: [String]? = nil) {
         self.snapshotName = snapshotName
         self.displayName = displayName
         self.sourceLineNumber = sourceLineNumber
@@ -47,5 +55,7 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.requiresNativePipeline = requiresNativePipeline
         self.timelineIndexes = timelineIndexes
         self.widgetFamilies = widgetFamilies
+        self.groupItems = groupItems
+        self.errors = errors
     }
 }

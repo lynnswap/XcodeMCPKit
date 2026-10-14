@@ -19,6 +19,14 @@ struct NativePreviewOptionsTests {
         #expect(!options.requiresNativePipeline)
     }
 
+    @Test func groupItemSelectionUsesDirectRenderer() {
+        let options = NativePreviewCorrection.directOptions(variants: [:],
+            controls: ["groupItemIndex": Optional(1) as Any, "timelineIndex": Optional<Int>.none as Any])
+        #expect(options.groupItemIndex == 1)
+        #expect(options.timelineIndex == nil)
+        #expect(!options.requiresNativePipeline)
+    }
+
     @Test func otherVariantsAndControlsKeepNativeRendering() {
         #expect(NativePreviewCorrection.directOptions(variants: ["Widget Family": "Large"], controls: [:]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Dark Appearance"], controls: [:]).requiresNativePipeline)
