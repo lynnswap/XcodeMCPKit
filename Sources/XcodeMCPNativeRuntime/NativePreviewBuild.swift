@@ -96,9 +96,7 @@ final class NativePreviewBuild {
         }
         guard !matches.isEmpty else { return nil }
         if let active = try object(manager, selector: "activeRunDestination"),
-           let device = try object(active, selector: "targetDevice"),
-           let identifier = try optionalString(device, selector: "identifier"),
-           let match = matches.first(where: { $0.identifier == identifier }) {
+           let match = matches.first(where: { ($0.value as? NSObject)?.isEqual(active) == true }) {
             return match.value
         }
         return matches.enumerated().sorted { first, second in
@@ -310,6 +308,9 @@ final class NativePreviewBuild {
         }
         let version = try object(destination, selector: "effectiveOperatingSystemVersion")
         let platformIdentifier = try optionalString(platform, selector: "identifier")
+        let catalyst = try runtime.object(destination).resolveMethodAndWait(selector: "isMacCatalyst", as: (() -> Bool).self)
+        let isCatalyst = try unsafe catalyst.unsafeInvoke()
+        let platformName = try isCatalyst ? "Mac Catalyst" : optionalString(platform, selector: "userDescription")
         let previewIdentifier: String
         if platformIdentifier == "com.apple.platform.macosx", let device {
             // Native macOS recipes identify the local computer by its device location URL.
@@ -318,7 +319,7 @@ final class NativePreviewBuild {
         } else { previewIdentifier = identifier }
         return Destination(value: destination, identifier: identifier, previewIdentifier: previewIdentifier,
                            platformIdentifier: platformIdentifier,
-                           platformName: try optionalString(platform, selector: "userDescription"),
+                           platformName: platformName,
                            deviceModelName: try optionalString(device, selector: "modelName"),
                            systemVersion: try optionalString(version, selector: "description"))
     }
