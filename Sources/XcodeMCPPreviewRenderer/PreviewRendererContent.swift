@@ -91,7 +91,7 @@ func writeDesktopPreviewResult(_ result: PreviewRendererResult) -> Never {
         let data = try JSONEncoder().encode(result)
         // Inherited stdout also works with the source app's sandbox entitlements;
         // it avoids writing into the user's Documents or the source app container.
-        try FileHandle.standardOutput.write(contentsOf: Data("XcodeMCPPreviewResult:".utf8) + data + Data("\n".utf8))
+        try FileHandle.standardOutput.write(contentsOf: Data("\nXcodeMCPPreviewResult:".utf8) + data + Data("\n".utf8))
         exit(0)
     } catch {
         try? FileHandle.standardError.write(contentsOf: Data("Preview result could not be written: \(error)\n".utf8))
