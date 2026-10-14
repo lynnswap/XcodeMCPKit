@@ -317,16 +317,22 @@ final class NativePreviewCorrection {
         var destination = prepared.destination
         var build = try await builder.build(workspace: workspace, destination: destination)
         guard var platform = build.previewPlatform else { throw NativePipelineRequired() }
-        let needsMetadata = platform == .macOS && location.providerPath == nil
+        let needsMetadata = platform == .macOS || platform == .iOS
         var renderer = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
             platform: platform, process: process, metadataOnly: needsMetadata ? true : nil)
         if needsMetadata {
-            let response = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
+            let response: PreviewRendererResult
+            if platform.isSimulator {
+                response = try await renderSimulator(app: app, build: build, process: process, localization: input.localization).response
+            } else {
+                response = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
+            }
             guard let metadata = response.nativeMetadata else {
                 throw NativeRuntimeError.invocation("The preview process returned no native metadata")
             }
             guard let evaluated = try await builder.selectDestination(workspace: workspace, source: location.source,
-                input: input.nativeValue, metadata: metadata) else { throw NativePipelineRequired() }
+                input: input.nativeValue, metadata: metadata,
+                providerDescription: response.nativeProviderPreviewDescription) else { throw NativePipelineRequired() }
             let unchanged = (destination.selected.value as? NSObject)?.isEqual(evaluated.selected.value) == true
             destination = evaluated
             if unchanged {
@@ -349,7 +355,8 @@ final class NativePreviewCorrection {
         if platform.isSimulator {
             let rendered = try await renderSimulator(app: app, build: build, process: process, localization: input.localization)
             response = rendered.response
-            snapshotData = rendered.snapshot
+            guard let snapshot = rendered.snapshot else { throw NativeRuntimeError.unsupportedContract("The preview renderer returned no snapshot") }
+            snapshotData = snapshot
             exclusionData = rendered.exclusion
             deviceType = rendered.deviceType
             destinationFields = rendered.destination
@@ -406,14 +413,14 @@ final class NativePreviewCorrection {
     }
 
     private func renderSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess, localization: String?) async throws ->
-        (response: PreviewRendererResult, snapshot: Data, destination: [String: JSONValue], deviceType: URL, exclusion: Data?) {
+        (response: PreviewRendererResult, snapshot: Data?, destination: [String: JSONValue], deviceType: URL, exclusion: Data?) {
         // Keep allocation alive through cancellation so its created identifier
         // is always available to the cleanup owner below.
         let allocation = Task { @MainActor in
             try await createSimulator(app: app, build: build, process: process)
         }
         let simulator = try await allocation.value
-        var rendered: (PreviewRendererResult, Data, Data?)?
+        var rendered: (PreviewRendererResult, Data?, Data?)?
         var failure: (any Error)?
         do {
             _ = try await process.xcrun(["simctl", "boot", simulator.identifier])
@@ -432,9 +439,9 @@ final class NativePreviewCorrection {
             let response = try JSONDecoder().decode(PreviewRendererResult.self, from: Data(contentsOf: responseURL))
             if response.requiresNativePipeline == true { throw NativePipelineRequired() }
             if let error = response.error { throw NativeRuntimeError.invocation(error) }
-            guard let name = response.snapshotName else { throw NativeRuntimeError.unsupportedContract("The preview renderer returned no snapshot") }
+            let snapshot = try response.snapshotName.map { try Data(contentsOf: documents.appendingPathComponent($0)) }
             let exclusion = try response.exclusionSnapshotName.map { try Data(contentsOf: documents.appendingPathComponent($0)) }
-            rendered = (response, try Data(contentsOf: documents.appendingPathComponent(name)), exclusion)
+            rendered = (response, snapshot, exclusion)
         } catch { failure = error }
         // Cleanup is outside the cancelled task so it can delete the device even
         // when the caller has cancelled rendering or the request timed out.

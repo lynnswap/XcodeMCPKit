@@ -349,16 +349,19 @@ returned. The correction preserves that setting, the native destination fields,
 and any unmatched-preference warning. `renderedDestination` describes the native
 plan's chosen destination. Destinations unsupported by the direct renderer retain
 the native pipeline.
-For macOS registry previews, a first renderer process evaluates the preview
+For macOS and iOS previews, a first renderer process evaluates the preview
 declaration and traits, then returns native preview metadata without invoking the
-deferred view body. The host decodes its native property list and plans again with
+deferred view body. Providers also return the selected child's native preview
+description, which supplies evaluated source-device preferences. The host decodes
+these native property lists and plans again with
 the evaluated content domain and effective destination preferences. Nonempty
 operation preferences take precedence over source preferences. These RenderPreview
 requests use the native Location's `none` requirements. The final renderer
 evaluates the declaration again and renders its body. When the native destination
 is unchanged, the host reuses the build and staged product; otherwise it builds
-and stages the selected destination. Providers and other platforms keep their
-preflight destination selection and existing native fallback behavior.
+and stages the selected destination. Other platforms keep their preflight
+destination selection. Preview forms unsupported by the direct renderer retain
+their existing native fallback behavior.
 The correction deletes its temporary Simulator after success, failure, timeout, or
 cancellation, and reports cleanup failures. The correction does not boot, install
 to, or delete existing Simulator devices or change the workspace's active run
