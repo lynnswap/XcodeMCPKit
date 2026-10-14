@@ -10,9 +10,6 @@ import XcodeMCPWire
 func loadPreviewRequest() throws -> PreviewRendererRequest {
     let url = Bundle.main.resourceURL!.appendingPathComponent("PreviewRequest.json")
     let request = try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: url))
-    #if !os(macOS)
-    if request.metadataOnly == true { throw NativePreviewPipelineRequired() }
-    #endif
     guard unsafe setenv("XCODE_RUNNING_FOR_PREVIEWS", "1", 1) == 0 else {
         throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
@@ -57,9 +54,14 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     var result: PreviewRendererResult
     if let typeName = request.providerTypeName {
         let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
-        guard preview.context == nil, preview.device == nil, preview.interfaceOrientation == .portrait else {
+        guard preview.context == nil else {
             throw NativePreviewPipelineRequired()
         }
+        #if !os(macOS)
+        guard preview.device == nil, preview.interfaceOrientation == .portrait else {
+            throw NativePreviewPipelineRequired()
+        }
+        #endif
         view = preview.content
         if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
             variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"

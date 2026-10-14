@@ -1,4 +1,4 @@
-#if os(macOS) || (os(iOS) && targetEnvironment(simulator))
+#if os(macOS) || os(iOS) || os(tvOS) || os(visionOS) || os(watchOS)
 import ABIBridge
 import ABIBridgeCore
 import CoreGraphics
@@ -10,7 +10,11 @@ import XcodeMCPWire
 @MainActor
 func nativePreviewMetadata(_ request: PreviewRendererRequest) async throws -> (metadata: Data, providerDescription: Data?) {
     if let provider = request.providerTypeName {
+        #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
         return try await nativeLegacyPreviewMetadata(typeName: provider)
+        #else
+        throw NativePreviewPipelineRequired()
+        #endif
     }
     let registry = try previewRegistry(for: request)
     let preview = try await ownedPreview(registry.makePreview())
@@ -109,8 +113,8 @@ private func nativePreviewTraits(_ preview: NativeSwiftValue) async throws -> Na
     default: throw NativePreviewPipelineRequired()
     }
     let orientationType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewTraits.Orientation", in: image)
-    #if os(macOS)
-    // The macOS metadata producer supplies portrait independently of view traits.
+    #if os(macOS) || os(tvOS) || os(watchOS)
+    // These native metadata producers supply portrait independently of view traits.
     let orientation = try orientationType.makeEnumCase(named: "portrait")
     #else
     let sourceOrientation = try await previewTraitValue(preview,

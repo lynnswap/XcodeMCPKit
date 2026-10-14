@@ -316,7 +316,7 @@ final class NativePreviewCorrection {
         var destination = prepared.destination
         var build = try await builder.build(workspace: workspace, destination: destination)
         guard var platform = build.previewPlatform else { throw NativePipelineRequired() }
-        let needsMetadata = platform == .macOS || platform == .iOS
+        let needsMetadata = location.providerPath == nil || platform == .macOS || platform == .iOS
         var renderer = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
             platform: platform, process: process, metadataOnly: needsMetadata ? true : nil)
         var sourceMetadata: Data?

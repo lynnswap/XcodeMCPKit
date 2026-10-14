@@ -54,7 +54,7 @@ func nativeLegacyPreviewMetadata(typeName: String) async throws -> (metadata: Da
                 orientation.type: .opaque(named: orientation.type.name), categoryType: .opaque(named: categoryType.name),
                 descriptionType: .opaque(named: descriptionType.name)])
         let description = try unsafe initialize.unsafeInvoke(preview.id, preview.contentType,
-            preview.device?.rawValue, preview.displayName, layout, domain, true, onDevice, orientation, category)
+            preview.device?.rawValue, preview.displayName, layout, domain.copy(), true, onDevice, orientation, category.copy())
         let traitsType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewTraits", in: image)
         let traitsGetter = try await descriptionType.resolveGetter(named: "previewTraits", as: (() -> NativeSwiftValue).self,
             valueABIs: [traitsType: .opaque(named: traitsType.name)], receiverABI: .opaque(named: descriptionType.name))
