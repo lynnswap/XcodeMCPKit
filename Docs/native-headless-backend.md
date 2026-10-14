@@ -269,6 +269,23 @@ configuration's supported Small/Medium families, which can be selected through
 `previewVariantOverrides`. Widget previews with disabled content margins or
 changes to their descriptor's background style use the native pipeline.
 
+Live Activity previews use WidgetKit's archived activity views and native
+WidgetRenderer controllers. `previewVariantOverrides` selects `View Style`,
+`Activity View Context`, `Color Scheme`, and `Dynamic Type`; the response lists
+their supported values. `previewCanvasControlOverrides.timelineIndex` selects
+a content state. `toggleState` adds stale states after each fresh state, while
+the Stale activity context renders every state as stale. An unsupported timeline
+index renders the first state and returns the native warning in `errors`.
+The renderer keeps the selected style's orientation and preferred content size.
+Activity archives receive the selected family and compact layout through
+WidgetKit's canonical environment key paths. Dynamic Island styles use Dark
+appearance regardless of the Color Scheme override, as native RenderPreview does.
+StandBy and reduced-luminance content also use Dark appearance.
+Activity labels use the containing application's localized name when that
+application is available, falling back to the extension's name.
+Other display controls retain the native pipeline for Live Activity previews;
+ordinary Widget previews with display controls also retain that pipeline.
+
 Each Simulator render creates a device matching the selected destination's device
 type and runtime. macOS and Mac Catalyst launch a staged application process and
 return its snapshot through inherited stdout, including when the app is sandboxed.
@@ -312,7 +329,8 @@ requirements, including the limitation tracked in
 
 The direct route depends on private `DeveloperToolsSupport`/SwiftUI/WidgetKit source
 contracts, SwiftUI's underscored `__previewThunksHaveFinishedLoading()` readiness
-signal, SpringBoardHome/ChronoServices widget metrics, and Xcode's private build interfaces. The trait list is inspected with
+signal, SpringBoardHome/ChronoServices widget metrics, WidgetRenderer activity
+archive and controller contracts, and Xcode's private build interfaces. The trait list is inspected with
 Swift reflection because `Preview` has no exported getter for it; traits without
 a direct implementation use the native pipeline. Widget descriptor and container background
 fields are also read with Swift reflection because they have no exported getters.

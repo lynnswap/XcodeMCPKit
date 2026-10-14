@@ -9,6 +9,9 @@ package struct PreviewRendererRequest: Codable, Sendable {
                          "AX 1", "AX 2", "AX 3", "AX 4", "AX 5"],
         "Orientation": ["Portrait", "Landscape Left", "Landscape Right"],
     ]
+    package static let activityViewStyles = ["Compact", "Compact (Landscape)", "Minimal", "Minimal (Landscape)",
+        "Expanded", "Content (Lock Screen)", "Content (StandBy)", "Content (Smart Stack)"]
+    package static let activityViewContexts = ["Normal", "Stale"]
 
     package var libraryNames: [String]
     package var registryNames: [String]
@@ -23,12 +26,18 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var groupItemIndex: Int?
     package var providerTypeName: String?
     package var displayVariantOverrides: [String: String]
+    package var activityViewStyle: String?
+    package var activityViewContext: String?
+    package var activityToggleState: Bool?
+    package var appName: String?
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
                  localization: String?, widgetFamily: String? = nil, timelineIndex: Int? = nil,
                  groupItemIndex: Int? = nil, providerTypeName: String? = nil,
-                 displayVariantOverrides: [String: String] = [:]) {
+                 displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
+                 activityViewContext: String? = nil, activityToggleState: Bool? = nil,
+                 appName: String? = nil) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
         self.fileName = fileName
@@ -42,6 +51,10 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.groupItemIndex = groupItemIndex
         self.providerTypeName = providerTypeName
         self.displayVariantOverrides = displayVariantOverrides
+        self.activityViewStyle = activityViewStyle
+        self.activityViewContext = activityViewContext
+        self.activityToggleState = activityToggleState
+        self.appName = appName
     }
 }
 
@@ -56,6 +69,9 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var widgetFamilies: [String]?
     package var groupItems: [String?]?
     package var errors: [String]?
+    package var toggleStates: [Bool]?
+    package var activityViewStyles: [String]?
+    package var activityViewContexts: [String]?
     package var supportedDisplayVariants: [String: [String]]?
     package var usesDeviceLayout: Bool?
     package var interfaceOrientation: String?
@@ -65,6 +81,8 @@ package struct PreviewRendererResult: Codable, Sendable {
                  sourceLineNumber: Int? = nil, error: String? = nil,
                  requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil, widgetFamilies: [String]? = nil,
                  groupItems: [String?]? = nil, errors: [String]? = nil,
+                 toggleStates: [Bool]? = nil, activityViewStyles: [String]? = nil,
+                 activityViewContexts: [String]? = nil,
                  supportedDisplayVariants: [String: [String]]? = nil, usesDeviceLayout: Bool? = nil,
                  interfaceOrientation: String? = nil, exclusionSnapshotName: String? = nil) {
         self.snapshotName = snapshotName
@@ -77,6 +95,9 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.widgetFamilies = widgetFamilies
         self.groupItems = groupItems
         self.errors = errors
+        self.toggleStates = toggleStates
+        self.activityViewStyles = activityViewStyles
+        self.activityViewContexts = activityViewContexts
         self.supportedDisplayVariants = supportedDisplayVariants
         self.usesDeviceLayout = usesDeviceLayout
         self.interfaceOrientation = interfaceOrientation

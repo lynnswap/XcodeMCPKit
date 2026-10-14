@@ -359,6 +359,35 @@ struct NativePreviewCorrectionTests {
         #expect(try Data(contentsOf: containing.appendingPathComponent("Frameworks/libLocal.dylib")) == sharedFramework)
     }
 
+    @Test(arguments: [true, false])
+    func activityNameUsesLocalizedContainingAppWithExtensionFallback(hasContainingApp: Bool) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let parent = root.appendingPathComponent("Host.app", isDirectory: true)
+        let product = parent.appendingPathComponent("PlugIns/Widget.appex", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for (bundle, identifier, info, localized) in [
+            (parent, "dev.lynnswap.Host", ["CFBundleName": "Parent fallback", "CFBundleDisplayName": "Parent"],
+             ["CFBundleDisplayName": "Parent JA"]),
+            (product, "dev.lynnswap.Host.Widget", ["CFBundleName": "Extension"], ["CFBundleName": "Extension JA"]),
+        ] {
+            let localization = bundle.appendingPathComponent("ja.lproj", isDirectory: true)
+            try FileManager.default.createDirectory(at: localization, withIntermediateDirectories: true)
+            var propertyList = info
+            propertyList["CFBundleIdentifier"] = identifier
+            propertyList["CFBundleExecutable"] = "Fixture"
+            propertyList["CFBundlePackageType"] = "APPL"
+            propertyList["CFBundleDevelopmentRegion"] = "ja"
+            try PropertyListSerialization.data(fromPropertyList: propertyList, format: .binary, options: 0)
+                .write(to: bundle.appendingPathComponent("Info.plist"))
+            try PropertyListSerialization.data(fromPropertyList: localized, format: .xml, options: 0)
+                .write(to: localization.appendingPathComponent("InfoPlist.strings"))
+        }
+
+        let name = try NativePreviewCorrection.appName(product: product, containingApp: hasContainingApp ? parent : nil,
+            localization: "ja-JP")
+        #expect(name == (hasContainingApp ? "Parent JA" : "Extension JA"))
+    }
+
     @Test func preparingAppReplacesCollidingRendererExecutable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let product = root.appendingPathComponent("Original.app", isDirectory: true)
