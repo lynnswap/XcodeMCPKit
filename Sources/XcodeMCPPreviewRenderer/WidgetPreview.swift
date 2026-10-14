@@ -321,7 +321,8 @@ private func widgetConfigurationDescriptor(_ configuration: NativeSwiftValue) as
         return (inner.base, inner.modifiers + [modifier])
     }
     let unwrapped = try configuration.withCopy { try unwrap($0) }
-    guard String(reflecting: type(of: unwrapped.base)).hasPrefix("WidgetKit.StaticConfiguration<"),
+    let configurationType = String(reflecting: type(of: unwrapped.base))
+    guard configurationType.hasPrefix("WidgetKit.StaticConfiguration<") || configurationType.hasPrefix("WidgetKit.AppIntentConfiguration<"),
           let base = unwrapped.base as? any WidgetConfiguration else { throw NativePreviewPipelineRequired() }
     func seed<Configuration: WidgetConfiguration>(_ configuration: Configuration) throws -> Any {
         guard let descriptor = Mirror(reflecting: configuration.body).children.first(where: { $0.label == "descriptor" })?.value,

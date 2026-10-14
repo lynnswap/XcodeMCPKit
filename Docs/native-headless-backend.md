@@ -176,8 +176,10 @@ workspace. The image captures the rectangular hosting view; hardware display
 cutout masks are not applied.
 Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
 
-Widget previews support `StaticConfiguration` with either an explicit `timeline:`
-or a `timelineProvider:` and the Small and Medium families. The renderer obtains
+Widget previews support `StaticConfiguration` and `AppIntentConfiguration` in the
+Small and Medium families. Previews can provide explicit `timeline:` entries or a
+`timelineProvider:`. AppIntent provider previews retain the `using:` intent
+supplied by the preview, including its default parameter values. The renderer obtains
 the configuration's descriptor from `WidgetConfiguration.body` and applies its
 descriptor preference transforms in their original order. It uses WidgetKit's
 timeline provider context with `isPreview` enabled, the selected family, and
@@ -224,7 +226,7 @@ cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 
 Targets without an application or extension host or with its debug dylib disabled, other
-platforms, `PreviewProvider` definitions, grouped previews, Intent/AppIntent and
+platforms, `PreviewProvider` definitions, grouped previews, Intent and
 Live Activity configurations, other widget families, orientation and modifier
 traits, and variant overrides or canvas controls beyond the widget options above
 continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
