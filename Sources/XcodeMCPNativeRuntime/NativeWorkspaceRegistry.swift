@@ -5,6 +5,7 @@ import Foundation
 final class NativeWorkspaceRegistry {
     private let runtime = ABIRuntime.shared
     private let registry: AnyObject
+    private var documents: [String: NativeWorkspaceDocument] = [:]
 
     init(installation: NativeXcodeInstallation) async throws {
         let type = try await runtime.resolveSwiftType(named: "IDEFoundation.IDEWorkspaceRegistry", in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
@@ -22,6 +23,7 @@ final class NativeWorkspaceRegistry {
                 guard matches.count == 1 else {
                     throw NativeRuntimeError.invalidRequest("Multiple native workspaces match '\(selector)'; select a workspaceIdentifier: " + matches.map(\.identifier).sorted().joined(separator: ", "))
                 }
+                if opensIfMissing { try await prepareDocument(for: match.identifier) }
                 return match.identifier
             }
             guard opensIfMissing else {
@@ -38,17 +40,47 @@ final class NativeWorkspaceRegistry {
             }
             let getter = try await runtime.object(workspace).resolveGetter(named: "workspaceIdentifier", as: (() -> String).self)
             let identifier = try unsafe getter.unsafeInvoke()
+            try prepareDocument(workspace: workspace, identifier: identifier)
             return identifier
         }
+        if opensIfMissing { try await prepareDocument(for: selector) }
         return selector
     }
 
     func prepareDebugger(for identifier: String) async throws {
-        let lookup = try await runtime.object(registry).resolveMethod(named: "workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)
-        try Task.checkCancellation()
-        guard let workspace = try unsafe lookup.unsafeInvoke(identifier) else { return }
+        guard let workspace = try await workspace(with: identifier) else { return }
         let manager = try runtime.object(workspace).resolveMethodAndWait(selector: "breakpointManager", as: (() -> AnyObject?).self)
         _ = try unsafe manager.unsafeInvoke()
+    }
+
+    func closeDocument(for identifier: String) throws {
+        guard let document = documents[identifier] else { return }
+        try document.close()
+        documents.removeValue(forKey: identifier)
+    }
+
+    private func workspace(with identifier: String) async throws -> AnyObject? {
+        let lookup = try await runtime.object(registry).resolveMethod(named: "workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)
+        try Task.checkCancellation()
+        return try unsafe lookup.unsafeInvoke(identifier)
+    }
+
+    private func prepareDocument(for identifier: String) async throws {
+        if let document = documents[identifier] {
+            try document.checkFailure()
+            return
+        }
+        if let workspace = try await workspace(with: identifier) {
+            try prepareDocument(workspace: workspace, identifier: identifier)
+        }
+    }
+
+    private func prepareDocument(workspace: AnyObject, identifier: String) throws {
+        if let document = documents[identifier] {
+            try document.checkFailure()
+            return
+        }
+        documents[identifier] = try NativeWorkspaceDocument.open(workspace: workspace)
     }
 
     func closeRemovedWorkspaces() async throws {
@@ -57,6 +89,11 @@ final class NativeWorkspaceRegistry {
         )
         let snapshot = try await entries()
         var failures: [String] = []
+        let registered = Set(snapshot.map(\.identifier))
+        for identifier in documents.keys.sorted() where !registered.contains(identifier) {
+            do { try closeDocument(for: identifier) }
+            catch { failures.append("Cannot close workspace document '\(identifier)': \(error)") }
+        }
         for entry in snapshot {
             guard let path = entry.path else { continue }
             do {
@@ -68,6 +105,8 @@ final class NativeWorkspaceRegistry {
                 failures.append("Cannot inspect native workspace '\(path)': \(error)")
                 continue
             }
+            do { try closeDocument(for: entry.identifier) }
+            catch { failures.append("Cannot close removed workspace document '\(path)': \(error)") }
             do {
                 try unsafe close.unsafeInvoke(entry.identifier)
             } catch {
@@ -85,7 +124,10 @@ final class NativeWorkspaceRegistry {
         let identifiers = Set(try await entries().map(\.identifier))
         let close = try await runtime.object(registry).resolveMethod(named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self)
         var failures: [String] = []
-        for identifier in identifiers.sorted() {
+        for identifier in identifiers.union(documents.keys).sorted() {
+            do { try closeDocument(for: identifier) }
+            catch { failures.append("\(identifier) document: \(error)") }
+            guard identifiers.contains(identifier) else { continue }
             do {
                 try unsafe close.unsafeInvoke(identifier)
             } catch {
