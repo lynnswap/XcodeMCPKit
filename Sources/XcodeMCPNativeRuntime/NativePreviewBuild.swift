@@ -7,6 +7,7 @@ final class NativePreviewBuild {
     struct Result {
         let targets: [Target]
         let destinationIdentifier: String
+        let previewDestinationIdentifier: String
         let platformIdentifier: String?
         let platformName: String?
         let deviceModelName: String?
@@ -89,7 +90,9 @@ final class NativePreviewBuild {
                           "platformName": destination.platformName,
                           "deviceModelName": destination.deviceModelName,
                           "systemVersion": destination.systemVersion]
-            return preferred.allSatisfy { key, value in fields[key] == value }
+            return preferred.allSatisfy { key, value in
+                fields[key] == value || (key == "identifier" && destination.previewIdentifier == value)
+            }
         }
         guard !matches.isEmpty else { return nil }
         if let active = try object(manager, selector: "activeRunDestination"),
@@ -170,7 +173,8 @@ final class NativePreviewBuild {
         try Task.checkCancellation()
         let records = try await targets(descriptions, image: image, runnable: runnable)
         let info = try destinationInfo(destination)
-        return Result(targets: records, destinationIdentifier: info.identifier, platformIdentifier: info.platformIdentifier,
+        return Result(targets: records, destinationIdentifier: info.identifier, previewDestinationIdentifier: info.previewIdentifier,
+                      platformIdentifier: info.platformIdentifier,
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
     }
 
@@ -305,8 +309,15 @@ final class NativePreviewBuild {
             throw NativeRuntimeError.unsupportedContract("The native run destination has no identifier")
         }
         let version = try object(destination, selector: "effectiveOperatingSystemVersion")
-        return Destination(value: destination, identifier: identifier,
-                           platformIdentifier: try optionalString(platform, selector: "identifier"),
+        let platformIdentifier = try optionalString(platform, selector: "identifier")
+        let previewIdentifier: String
+        if platformIdentifier == "com.apple.platform.macosx", let device {
+            // Native macOS recipes identify the local computer by its device location URL.
+            let location = try object(device, selector: "deviceLocation")
+            previewIdentifier = try optionalString(location, selector: "absoluteString") ?? identifier
+        } else { previewIdentifier = identifier }
+        return Destination(value: destination, identifier: identifier, previewIdentifier: previewIdentifier,
+                           platformIdentifier: platformIdentifier,
                            platformName: try optionalString(platform, selector: "userDescription"),
                            deviceModelName: try optionalString(device, selector: "modelName"),
                            systemVersion: try optionalString(version, selector: "description"))
@@ -315,6 +326,7 @@ final class NativePreviewBuild {
     private struct Destination {
         let value: AnyObject
         let identifier: String
+        let previewIdentifier: String
         let platformIdentifier: String?
         let platformName: String?
         let deviceModelName: String?

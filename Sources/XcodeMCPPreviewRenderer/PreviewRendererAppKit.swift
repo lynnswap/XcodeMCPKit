@@ -53,7 +53,7 @@ struct PreviewRendererAppKit {
         if case .sizeThatFits = content.layout { window.setContentSize(controller.view.fittingSize) }
         window.layoutIfNeeded()
         controller.view.layoutSubtreeIfNeeded()
-        let snapshotView = usesDeviceLayout ? (window.contentView?.superview ?? controller.view) : controller.view
+        let snapshotView = unsafe usesDeviceLayout ? (window.contentView?.superview ?? controller.view) : controller.view
         guard let image = snapshotView.bitmapImageRepForCachingDisplay(in: snapshotView.bounds) else {
             throw PreviewRendererError("The preview host could not create a bitmap representation")
         }

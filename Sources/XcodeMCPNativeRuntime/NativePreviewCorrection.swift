@@ -297,7 +297,7 @@ final class NativePreviewCorrection {
             guard let data = response.snapshotData else { throw NativeRuntimeError.invocation("The preview process returned no snapshot") }
             snapshotData = data
             deviceType = nil
-            destinationFields = ["identifier": .string(build.destinationIdentifier), "platformName": .string(build.platformName ?? "macOS")]
+            destinationFields = ["identifier": .string(build.previewDestinationIdentifier), "platformName": .string(build.platformName ?? "macOS")]
                 .merging(build.deviceModelName.map { ["deviceModelName": .string($0)] } ?? [:], uniquingKeysWith: { _, new in new })
                 .merging(build.systemVersion.map { ["systemVersion": .string($0)] } ?? [:], uniquingKeysWith: { _, new in new })
         }
