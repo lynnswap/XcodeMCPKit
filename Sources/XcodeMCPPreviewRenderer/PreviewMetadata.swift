@@ -1,4 +1,4 @@
-#if os(macOS)
+#if os(macOS) || (os(iOS) && targetEnvironment(simulator))
 import ABIBridge
 import ABIBridgeCore
 import CoreGraphics
@@ -8,8 +8,10 @@ import SwiftUI
 import XcodeMCPWire
 
 @MainActor
-func nativePreviewMetadata(_ request: PreviewRendererRequest) async throws -> Data {
-    guard request.providerTypeName == nil else { throw NativePreviewPipelineRequired() }
+func nativePreviewMetadata(_ request: PreviewRendererRequest) async throws -> (metadata: Data, providerDescription: Data?) {
+    if let provider = request.providerTypeName {
+        return try await nativeLegacyPreviewMetadata(typeName: provider)
+    }
     let registry = try previewRegistry(for: request)
     let preview = try await ownedPreview(registry.makePreview())
     let source = try await previewSource(preview)
@@ -45,26 +47,41 @@ func nativePreviewMetadata(_ request: PreviewRendererRequest) async throws -> Da
     let displayNameGetter = try await preview.type.resolveGetter(named: "displayName", as: (() -> String?).self,
         receiverABI: .opaque(named: preview.type.name))
     let displayName = try unsafe displayNameGetter.unsafeInvoke(on: preview)
-    let metadataType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewMetadata", in: messaging)
+    let metadata = try await makeNativePreviewMetadata(domain: domain, category: category,
+        onDevice: onDevice, interactive: interactive, traits: traits, group: group, displayName: displayName)
+    return (try await nativePreviewPropertyListData(metadata), nil)
+}
+
+@MainActor
+func makeNativePreviewMetadata(domain: NativeSwiftValue, category: NativeSwiftValue,
+    onDevice: Bool, interactive: Bool, traits: NativeSwiftValue, group: Bool,
+    displayName: String?) async throws -> NativeSwiftValue {
+    let metadataType = try await ABIRuntime.shared.resolveSwiftType(named: "PreviewsMessagingOS.PreviewMetadata",
+        in: .framework(named: "PreviewsMessagingOS"))
     let makeMetadata = try await metadataType.resolveInitializer(
         named: "init(contentDomain: PreviewsMessagingOS.PreviewContentDomain, contentCategory: PreviewsMessagingOS.ContentCategory, supportsOnDevice: Swift.Bool, supportsInteractive: Swift.Bool, requestedTraits: PreviewsMessagingOS.PreviewTraits, isPreviewGroup: Swift.Bool, displayName: Swift.String?) -> PreviewsMessagingOS.PreviewMetadata",
         as: ((NativeSwiftValue, NativeSwiftValue, Bool, Bool, NativeSwiftValue, Bool, String?) -> NativeSwiftValue).self,
-        valueABIs: [domainType: .opaque(named: domainType.name), categoryType: .opaque(named: categoryType.name),
+        valueABIs: [domain.type: .opaque(named: domain.type.name), category.type: .opaque(named: category.type.name),
             traits.type: .opaque(named: traits.type.name), metadataType: .opaque(named: metadataType.name)])
-    let metadata = try unsafe makeMetadata.unsafeInvoke(domain, category, onDevice, interactive, traits, group, displayName)
+    return try unsafe makeMetadata.unsafeInvoke(domain, category, onDevice, interactive, traits, group, displayName)
+}
+
+@MainActor
+func nativePreviewPropertyListData(_ value: NativeSwiftValue) async throws -> Data {
+    let runtime = ABIRuntime.shared
     let propertyListType = try await runtime.resolveSwiftType(named: "PreviewsFoundationOS.PropertyList",
         in: .framework(named: "PreviewsFoundationOS"))
-    let encode = try await metadataType.resolveGetter(named: "propertyListValue", as: (() -> NativeSwiftValue).self,
-        valueABIs: [propertyListType: .opaque(named: propertyListType.name)], receiverABI: .opaque(named: metadataType.name))
-    let propertyList = try unsafe encode.unsafeInvoke(on: metadata)
+    let encode = try await value.type.resolveGetter(named: "propertyListValue", as: (() -> NativeSwiftValue).self,
+        valueABIs: [propertyListType: .opaque(named: propertyListType.name)], receiverABI: .opaque(named: value.type.name))
+    let propertyList = try unsafe encode.unsafeInvoke(on: value)
     let dictionaryType = try await runtime.resolveSwiftType(named: "Swift.Dictionary",
         genericArguments: [.type(String.self), .type(Any.self)])
     let dictionaryGetter = try await propertyListType.resolveGetter(named: "serializableDictionary", as: (() -> NativeSwiftValue).self,
         valueABIs: [dictionaryType: .pointer], receiverABI: .opaque(named: propertyListType.name))
-    let value = try unsafe dictionaryGetter.unsafeInvoke(on: propertyList)
-    return try value.withCopy {
+    let dictionary = try unsafe dictionaryGetter.unsafeInvoke(on: propertyList)
+    return try dictionary.withCopy {
         guard let dictionary = $0 as? [String: Any] else {
-            throw PreviewRendererError("Native preview metadata is not a serializable dictionary")
+            throw PreviewRendererError("The native preview property list is not a serializable dictionary")
         }
         return try PropertyListSerialization.data(fromPropertyList: dictionary, format: .binary, options: 0)
     }
@@ -91,9 +108,21 @@ private func nativePreviewTraits(_ preview: NativeSwiftValue) async throws -> Na
         layout = try await layoutType.makeEnumCase(named: "fixed", payload: ownedPreviewValue((width: width, height: height)))
     default: throw NativePreviewPipelineRequired()
     }
-    // The macOS metadata producer supplies portrait independently of view traits.
     let orientationType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewTraits.Orientation", in: image)
+    #if os(macOS)
+    // The macOS metadata producer supplies portrait independently of view traits.
     let orientation = try orientationType.makeEnumCase(named: "portrait")
+    #else
+    let sourceOrientation = try await previewTraitValue(preview,
+        named: "21DeveloperToolsSupport32PreviewInterfaceOrientationTraitV")
+    let declaration = "(extension in PreviewsOSSupportUI):DeveloperToolsSupport.PreviewInterfaceOrientation.previewOrientation.getter : PreviewsMessagingOS.PreviewTraits.Orientation"
+    let support = try await runtime.resolve(.init(name: declaration, language: .swift),
+        in: .framework(named: "PreviewsOSSupportUI"))
+    let getter = try await sourceOrientation.type.resolveGetter(named: declaration, as: (() -> NativeSwiftValue).self,
+        valueABIs: [orientationType: .opaque(named: orientationType.name)],
+        receiverABI: .opaque(named: sourceOrientation.type.name))
+    let orientation = try withExtendedLifetime(support) { try unsafe getter.unsafeInvoke(on: sourceOrientation) }
+    #endif
     let traitsType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewTraits", in: image)
     let makeTraits = try await traitsType.resolveInitializer(
         named: "init(layout: PreviewsMessagingOS.PreviewTraits.Layout, orientation: PreviewsMessagingOS.PreviewTraits.Orientation) -> PreviewsMessagingOS.PreviewTraits",
