@@ -57,8 +57,8 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
         guard preview.context == nil else {
             throw NativePreviewPipelineRequired()
         }
-        #if !os(macOS)
-        guard preview.device == nil, preview.interfaceOrientation == .portrait else {
+        #if targetEnvironment(macCatalyst) || os(visionOS)
+        guard preview.interfaceOrientation == .portrait else {
             throw NativePreviewPipelineRequired()
         }
         #endif

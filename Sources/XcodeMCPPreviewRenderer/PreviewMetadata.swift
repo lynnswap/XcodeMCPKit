@@ -10,11 +10,7 @@ import XcodeMCPWire
 @MainActor
 func nativePreviewMetadata(_ request: PreviewRendererRequest) async throws -> (metadata: Data, providerDescription: Data?) {
     if let provider = request.providerTypeName {
-        #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
         return try await nativeLegacyPreviewMetadata(typeName: provider)
-        #else
-        throw NativePreviewPipelineRequired()
-        #endif
     }
     let registry = try previewRegistry(for: request)
     let preview = try await ownedPreview(registry.makePreview())
