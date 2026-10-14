@@ -614,6 +614,14 @@ extension NativePreviewBuild {
         let definition: NativeSwiftValue
     }
 
+    private struct SourcePlan {
+        let value: NativeSwiftValue
+        let recordType: NativeSwiftType
+        let agentType: NativeSwiftType
+        let packRecordType: NativeSwiftType
+        let referenceType: NativeSwiftType
+    }
+
     func withSourceSelection<Output>(workspace: AnyObject,
                                     operation: @MainActor () async throws -> Output) async throws -> Output {
         let workspaceID = ObjectIdentifier(workspace)
@@ -677,27 +685,25 @@ extension NativePreviewBuild {
             }
             guard let pack = try await preflightPack(source: source, preferences: preferences) else { return nil }
             let plan = try await sourcePlan(workspace: workspace, host: host, source: source, pack: pack)
-            let records = try await sourcePlanRecords(plan)
+            let record = try await sourcePlanRecord(plan, pack: pack)
             let prepared = try await prepareDestinations()
-            var selected: [Destination] = []
-            for record in records {
-                let recipe: NativeSwiftValue = try await sourceGetter(record, "destination.getter : PreviewsPipeline.AnyRunDestinationRecipe")
-                let representation: NativeSwiftValue = try await sourceGetter(record, "destinationRepresentation.getter : C")
-                guard let destination = try representation.withCopy({
-                    Mirror(reflecting: $0).children.first { $0.label == "runDestination" }?.value as? NSObject
-                }) else { throw NativeRuntimeError.unsupportedContract("Native preview plan has no IDERunDestination representation") }
-                selected.append(try destinationInfo(destination, recipe: recipe, prepared: prepared))
-            }
-            guard let first = selected.first,
-                  selected.allSatisfy({ ($0.value as? NSObject)?.isEqual(first.value) == true }),
-                  NativePreviewPlatform.supportsDestination(platformIdentifier: first.platformIdentifier, identifier: first.identifier) else { return nil }
-            return DestinationSelection(selected: first, available: availableJSON == .null ? nil : availableJSON, errors: errors)
+            let recipeType = try await runtime.resolveSwiftType(named: "PreviewsPipeline.AnyRunDestinationRecipe",
+                in: .path(installation.framework("PreviewsPipeline", in: "SharedFrameworks")))
+            let recipe = try await sourceGetter(record, "destination.getter : PreviewsPipeline.AnyRunDestinationRecipe", resultType: recipeType)
+            let representation = try await sourceGetter(record, "destinationRepresentation.getter : C", resultType: plan.referenceType)
+            guard let destination = try representation.withCopy({
+                Mirror(reflecting: $0).children.first { $0.label == "runDestination" }?.value as? NSObject
+            }) else { throw NativeRuntimeError.unsupportedContract("Native preview plan has no IDERunDestination representation") }
+            let selected = try destinationInfo(destination, recipe: recipe, prepared: prepared)
+            guard NativePreviewPlatform.supportsDestination(platformIdentifier: selected.platformIdentifier, identifier: selected.identifier) else { return nil }
+            return DestinationSelection(selected: selected, available: availableJSON == .null ? nil : availableJSON, errors: errors)
         }
     }
 
-    private func sourceGetter<Value>(_ value: NativeSwiftValue, _ name: String) async throws -> Value {
-        let getter = try await value.type.resolveGetter(named: name, as: (() -> Value).self,
-            receiverABI: .opaque(named: value.type.name))
+    private func sourceGetter(_ value: NativeSwiftValue, _ name: String, resultType: NativeSwiftType,
+                              resultABI: NativeType? = nil) async throws -> NativeSwiftValue {
+        let getter = try await value.type.resolveGetter(named: name, as: (() -> NativeSwiftValue).self,
+            valueABIs: [resultType: try resultABI ?? .opaque(named: resultType.name)], receiverABI: .opaque(named: value.type.name))
         return try unsafe getter.unsafeInvoke(on: value)
     }
 
@@ -760,7 +766,7 @@ extension NativePreviewBuild {
         return try unsafe cast.unsafeInvoke(copies)
     }
 
-    private func sourcePlan(workspace: AnyObject, host: AnyObject, source: Source, pack: NativeSwiftValue) async throws -> NativeSwiftValue {
+    private func sourcePlan(workspace: AnyObject, host: AnyObject, source: Source, pack: NativeSwiftValue) async throws -> SourcePlan {
         let previews = ImageSelector.path(installation.framework("PreviewsXcode", in: "PlugIns"))
         let pipeline = ImageSelector.path(installation.framework("PreviewsPipeline", in: "SharedFrameworks"))
         let foundation = ImageSelector.path(installation.framework("PreviewsFoundationHost", in: "SharedFrameworks"))
@@ -817,7 +823,7 @@ extension NativePreviewBuild {
             as: ((NativeSwiftClosure<@MainActor () -> NativeSwiftValue>) -> NativeSwiftValue).self,
             valueABIs: [tokenType: .opaque(named: tokenType.name)])
         let token = try unsafe register.unsafeInvoke(on: host, callback)
-        let outcome: Swift.Result<NativeSwiftValue, any Error>
+        let outcome: Swift.Result<SourcePlan, any Error>
         do {
             try unsafe setter.unsafeInvoke(on: scene, unit)
             try unsafe invalidate.unsafeInvoke(on: coalescer)
@@ -842,7 +848,7 @@ extension NativePreviewBuild {
         return try outcome.get()
     }
 
-    private func makeSourcePlan(host: AnyObject, source: Source, pack: NativeSwiftValue) async throws -> NativeSwiftValue {
+    private func makeSourcePlan(host: AnyObject, source: Source, pack: NativeSwiftValue) async throws -> SourcePlan {
         let pipeline = ImageSelector.path(installation.framework("PreviewsPipeline", in: "SharedFrameworks"))
         let foundation = ImageSelector.path(installation.framework("PreviewsFoundationHost", in: "SharedFrameworks"))
         let previews = ImageSelector.path(installation.framework("PreviewsXcode", in: "PlugIns"))
@@ -885,8 +891,15 @@ extension NativePreviewBuild {
         let buildIdentifier = try await runtime.resolveSwiftType(named: "PreviewsXcode.XcodeWorkspaceBuilder.BuildIdentifier", in: previews,
             genericArguments: [.type(platform), .type(destinationClass), .type(components)])
         let reference = try await runtime.resolveSwiftType(named: "PreviewsXcode.XcodeRunDestinationReference", in: previews)
+        let arguments: [NativeSwiftGenericArgument] = [.type(graphSource), .type(buildIdentifier), .type(reference)]
         let planType = try await runtime.resolveSwiftType(named: "PreviewsPipeline.PreviewUpdatePlan", in: pipeline,
-            genericArguments: [.type(graphSource), .type(buildIdentifier), .type(reference)])
+            genericArguments: arguments)
+        let recordType = try await runtime.resolveSwiftType(named: "PreviewsPipeline.PreviewUpdatePlan.UpdateRecord", in: pipeline,
+            genericArguments: arguments)
+        let agentType = try await runtime.resolveSwiftType(named: "PreviewsPipeline.PreviewUpdatePlan.AgentRecord", in: pipeline,
+            genericArguments: arguments)
+        let packRecordType = try await runtime.resolveSwiftType(named: "PreviewsPipeline.PreviewUpdatePlan.AgentRecord.PackRecord", in: pipeline,
+            genericArguments: arguments)
         let futureType = try await runtime.resolveSwiftType(named: "PreviewsFoundationHost.Future", in: foundation, genericArguments: [.type(planType)])
         let queryGetter = try await hostType.resolveGetter(named: "queryManager.getter : PreviewsFoundationHost.QueryManager", as: (() -> AnyObject).self)
         let query = try unsafe queryGetter.unsafeInvoke(on: host)
@@ -899,13 +912,47 @@ extension NativePreviewBuild {
         let future = try unsafe plan.unsafeInvoke(graphValue, queryValue, builderValue)
         let awaitValue = try await futureType.resolveGetter(named: "(extension in PreviewsFoundationHost):PreviewsFoundationHost.Future<A where A: Swift.Sendable>.value.getter : A",
             as: (@concurrent () async throws -> NativeSwiftValue).self, declaredAs: "() async throws -> A", valueABIs: [planType: .opaque(named: planType.name)])
-        return try unsafe await awaitValue.unsafeInvoke(on: future)
+        return try unsafe await SourcePlan(value: awaitValue.unsafeInvoke(on: future), recordType: recordType,
+            agentType: agentType, packRecordType: packRecordType, referenceType: reference)
     }
 
-    private func sourcePlanRecords(_ plan: NativeSwiftValue) async throws -> [NativeSwiftValue] {
-        let records: NativeSwiftValue = try await sourceGetter(plan, "updateRecords")
-        let predicated: NativeSwiftValue = try await sourceGetter(records, "predicated")
-        let values: NativeSwiftValue = try await sourceGetter(predicated, "value")
+    private func sourcePlanRecord(_ plan: SourcePlan, pack: NativeSwiftValue) async throws -> NativeSwiftValue {
+        let foundation = ImageSelector.path(installation.framework("PreviewsFoundationHost", in: "SharedFrameworks"))
+        let setType = try await runtime.resolveSwiftType(named: "PreviewsFoundationHost.OrderedIdentifiedSet", in: foundation,
+            genericArguments: [.type(plan.packRecordType)])
+        let inhabitedType = try await runtime.resolveSwiftType(named: "PreviewsFoundationHost.Inhabited", in: foundation,
+            genericArguments: [.type(setType)])
+        let optionalType = try await runtime.resolveSwiftType(named: "Swift.Optional", genericArguments: [.type(plan.packRecordType)])
+        let lookup = try await setType.resolveMethod(
+            named: "PreviewsFoundationHost.OrderedIdentifiedSet.subscript.getter : (A.ID) -> A?",
+            as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+            valueABIs: [pack.type: .opaque(named: pack.type.name), optionalType: .opaque(named: optionalType.name)],
+            receiverABI: .opaque(named: setType.name))
+        for record in try await sourcePlanRecords(plan) {
+            let agent = try await sourceGetter(record, "agentRecord", resultType: plan.agentType)
+            let packs = try await sourceGetter(agent, "executionPointPacks", resultType: inhabitedType)
+            let values = try await sourceGetter(packs,
+                "(extension in PreviewsFoundationHost):PreviewsFoundationHost.PredicatedWrapper.value.getter : A.Predicate.Value", resultType: setType)
+            let match = try unsafe lookup.unsafeInvoke(on: values, pack.copy())
+            if try await match.resolveEnumPayload(forCase: "some", valueABIs: [plan.packRecordType: .opaque(named: plan.packRecordType.name)]) != nil {
+                return record
+            }
+        }
+        throw NativeRuntimeError.invocation("Could not find update record in native update plan for the selected execution point pack")
+    }
+
+    private func sourcePlanRecords(_ plan: SourcePlan) async throws -> [NativeSwiftValue] {
+        let foundation = ImageSelector.path(installation.framework("PreviewsFoundationHost", in: "SharedFrameworks"))
+        let arrayType = try await runtime.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(plan.recordType)])
+        let inhabitedType = try await runtime.resolveSwiftType(named: "PreviewsFoundationHost.Inhabited", in: foundation,
+            genericArguments: [.type(arrayType)])
+        let headType = try await runtime.resolveSwiftType(named: "PreviewsFoundationHost.HasHead", in: foundation,
+            genericArguments: [.type(arrayType)])
+        let predicatedType = try await runtime.resolveSwiftType(named: "PreviewsFoundationHost.Predicated", in: foundation,
+            genericArguments: [.type(headType)])
+        let records = try await sourceGetter(plan.value, "updateRecords", resultType: inhabitedType)
+        let predicated = try await sourceGetter(records, "predicated", resultType: predicatedType)
+        let values = try await sourceGetter(predicated, "value", resultType: arrayType, resultABI: .pointer)
         guard let raw = try values.withCopy({ $0 as? [Any] }) else {
             throw NativeRuntimeError.unsupportedContract("Native preview update plan records are not an array")
         }
