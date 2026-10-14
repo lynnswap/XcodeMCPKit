@@ -138,7 +138,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 widget = nil
                 activity = nil
                 let result = try await makeViewPreview(source: source, groupItemIndex: request.groupItemIndex)
-                view = try await applyPreviewModifiers(result.view, preview: value)
+                view = try await applyViewPreviewTraits(result.view, preview: value)
                 groupItems = result.groupItems
                 errors = result.errors + request.unsupportedGeneralPreviewOptions
                 layout = try await viewPreviewLayout(value)
