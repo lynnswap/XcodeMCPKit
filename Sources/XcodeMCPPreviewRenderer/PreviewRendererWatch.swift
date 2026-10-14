@@ -33,6 +33,8 @@ struct PreviewRendererWatch: App {
         try (data as Data).write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
         var result = content.result
         result.snapshotName = "Preview.png"
+        if case .device = content.layout { result.usesDeviceLayout = true }
+        result.interfaceOrientation = "portrait"
         write(result)
     }
 
