@@ -328,10 +328,16 @@ Other display controls retain the native pipeline for Live Activity previews.
 Each Simulator render creates a device matching the selected destination's device
 type and runtime. macOS and Mac Catalyst launch a staged application process and
 return its snapshot through inherited stdout, including when the app is sandboxed.
-Desktop destinations accept both Xcode's device identifier and its native preview
-identifier, and return the latter (`dvtdevice-local-computer:localhost` for My Mac). Without a destination override, it retains the workspace's active
-destination; unsupported destinations use the native pipeline. The returned
-`renderedDestination.identifier` identifies that selected destination for reuse.
+Destination selection retains the decoded native RenderPreview input and the
+selected source's translation unit. Xcode's source graph and update plan choose
+the destination; the correction consumes the first native update record whose
+execution-point pack matches the selected source's complete preflight pack.
+Xcode's render-destination-choice setting controls whether
+`preferredRenderDestination` is considered and `availableRenderDestinations` is
+returned. The correction preserves that setting, the native destination fields,
+and any unmatched-preference warning. `renderedDestination` describes the native
+plan's chosen destination. Destinations unsupported by the direct renderer retain
+the native pipeline.
 The correction deletes its temporary Simulator after success, failure, timeout, or
 cancellation, and reports cleanup failures. The correction does not boot, install
 to, or delete existing Simulator devices or change the workspace's active run

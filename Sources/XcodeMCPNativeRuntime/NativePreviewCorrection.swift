@@ -176,7 +176,7 @@ final class NativePreviewCorrection {
         let workspace = try await workspace(input.workspaceIdentifier)
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
         let location = try await previewDefinition(source: source, index: input.index)
-        guard let destination = try await builder.selectDestination(workspace: workspace, preferred: input.destination) else {
+        guard let destination = try await builder.selectDestination(workspace: workspace, source: location.source, input: input.nativeValue) else {
             throw NativePipelineRequired()
         }
         // Native rendering starts its timeout after resolving the source and
@@ -861,7 +861,6 @@ final class NativePreviewCorrection {
         let sourcePath: String
         let index: Int
         let localization: String?
-        let destination: [String: String]
         let timeout: Int
         let widgetFamily: String?
         let widgetPresentation: String?
@@ -899,14 +898,9 @@ final class NativePreviewCorrection {
         let controls = fields["previewCanvasControlOverrides"].flatMap { Mirror(reflecting: $0).children.first?.value }
         let controlFields = controls.map { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap { field in field.label.map { ($0, field.value) } }) } ?? [:]
         let options = Self.directOptions(variants: variants, controls: controlFields)
-        let requestedDestination = fields["preferredRenderDestination"].flatMap { Mirror(reflecting: $0).children.first?.value }
-        let destination = requestedDestination.map { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap { field -> (String, String)? in
-            guard let label = field.label, let value = field.value as? String? ?? nil else { return nil }
-            return (label, value)
-        }) } ?? [:]
         return Input(nativeValue: nativeValue, workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
             index: index, localization: fields["previewLocalizationOverride"] as? String? ?? nil,
-            destination: destination, timeout: timeout,
+            timeout: timeout,
             widgetFamily: options.widgetFamily, widgetPresentation: options.widgetPresentation,
             timelineIndex: options.timelineIndex, groupItemIndex: options.groupItemIndex,
             displayVariants: options.displayVariants, activityViewStyle: options.activityViewStyle,
