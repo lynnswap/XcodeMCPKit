@@ -168,7 +168,7 @@ final class NativePreviewCorrection {
         let workspace: AnyObject
         let source: URL
         let location: Definition
-        let destination: AnyObject
+        let destination: NativePreviewBuild.DestinationSelection
     }
 
     private func prepare(_ input: Input) async throws -> Prepared {
@@ -176,7 +176,7 @@ final class NativePreviewCorrection {
         let workspace = try await workspace(input.workspaceIdentifier)
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
         let location = try await previewDefinition(source: source, index: input.index)
-        guard let destination = try builder.selectDestination(workspace: workspace, preferred: input.destination) else {
+        guard let destination = try await builder.selectDestination(workspace: workspace, preferred: input.destination) else {
             throw NativePipelineRequired()
         }
         // Native rendering starts its timeout after resolving the source and
@@ -220,12 +220,13 @@ final class NativePreviewCorrection {
         let location = prepared.location
         let destination = prepared.destination
         let build = try await builder.build(workspace: workspace, destination: destination)
-        let selection = try Self.selectTarget(build.targets, source: source)
+        guard let platform = build.previewPlatform else { throw NativePipelineRequired() }
+        let selection = try Self.selectTarget(build.targets, source: source, platform: platform)
         let target = selection.host
         guard target.debugDylibEnabled else {
             throw NativePipelineRequired()
         }
-        guard let version = build.systemVersion, version.compare("18.4", options: .numeric) != .orderedAscending else {
+        guard let version = build.systemVersion, version.compare(platform.minimumVersion, options: .numeric) != .orderedAscending else {
             throw NativePipelineRequired()
         }
         guard let output = target.outputURL else {
@@ -235,22 +236,22 @@ final class NativePreviewCorrection {
             throw NativePipelineRequired()
         }
         let entitlements = try NativePreviewEntitlements.read(from: product)
-        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/iphonesimulator-arm64")
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
         let containingApp = try Self.containingApp(for: output, targets: build.targets)
-        try Self.prepareApp(product: product, helper: helper, app: app, containingApp: containingApp)
+        try Self.prepareApp(product: product, helper: helper, app: app, containingApp: containingApp, platform: platform)
         if let simulatorEntitlements = entitlements.simulator {
             let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
             try simulatorEntitlements.write(to: section)
             let archive = helper.appendingPathComponent("libXcodeMCPPreviewRenderer.a").path
-            let sdk = try await process.xcrun(["--sdk", "iphonesimulator", "--show-sdk-path"])
+            let sdk = try await process.xcrun(["--sdk", platform.sdk, "--show-sdk-path"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            _ = try await process.xcrun(["--sdk", "iphonesimulator", "swiftc", "-target", "arm64-apple-ios18.4-simulator",
+            _ = try await process.xcrun(["--sdk", platform.sdk, "swiftc", "-target", platform.triple,
                 "-sdk", sdk, archive, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive,
                 "-Xlinker", "-rpath", "-Xlinker", "@executable_path/Frameworks",
                 "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__entitlements", "-Xlinker", section.path,
-                "-o", app.appendingPathComponent("XcodeMCPPreviewRenderer").path])
+                "-o", platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path])
         }
-        let libraries = try previewLibraries(in: app)
+        let libraries = try previewLibraries(in: app, platform: platform)
         let registryLibraries = try Self.registryLibraries(in: app, previewLibraries: libraries)
         let libraryPaths = try Self.libraryPaths(in: app, previewLibraries: libraries,
             registryLibraries: registryLibraries, sourceOutput: selection.source.outputURL)
@@ -281,7 +282,7 @@ final class NativePreviewCorrection {
             activityViewStyle: input.activityViewStyle, activityViewContext: input.activityViewContext,
             activityToggleState: input.activityToggleState,
             appName: try Self.appName(product: product, containingApp: containingApp, localization: input.localization))
-        try JSONEncoder().encode(request).write(to: app.appendingPathComponent("PreviewRequest.json"))
+        try JSONEncoder().encode(request).write(to: platform.resourcesDirectory(in: app).appendingPathComponent("PreviewRequest.json"))
         var signing = ["--force", "--sign", "-"]
         if let signedEntitlements = entitlements.signed {
             let plist = app.deletingLastPathComponent().appendingPathComponent("signed-entitlements.plist")
@@ -290,23 +291,93 @@ final class NativePreviewCorrection {
         }
         _ = try await process.run("/usr/bin/codesign", signing + [app.path])
         try Task.checkCancellation()
+        let response: PreviewRendererResult
+        let snapshotData: Data
+        let exclusionData: Data?
+        let deviceType: URL?
+        let destinationFields: [String: JSONValue]
+        if platform.isSimulator {
+            let rendered = try await renderSimulator(app: app, build: build, process: process, localization: input.localization)
+            response = rendered.response
+            snapshotData = rendered.snapshot
+            exclusionData = rendered.exclusion
+            deviceType = rendered.deviceType
+            destinationFields = rendered.destination
+        } else {
+            let text = try await process.run(platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path,
+                Self.rendererArguments(localization: input.localization))
+            guard let record = text.split(whereSeparator: \.isNewline).last(where: { $0.hasPrefix("XcodeMCPPreviewResult:") }) else {
+                throw NativeRuntimeError.invocation("The preview process returned no result; see its process log")
+            }
+            response = try JSONDecoder().decode(PreviewRendererResult.self, from: Data(record.dropFirst("XcodeMCPPreviewResult:".count).utf8))
+            if response.requiresNativePipeline == true { throw NativePipelineRequired() }
+            if let error = response.error { throw NativeRuntimeError.invocation(error) }
+            guard let data = response.snapshotData else { throw NativeRuntimeError.invocation("The preview process returned no snapshot") }
+            snapshotData = data
+            exclusionData = nil
+            deviceType = nil
+            destinationFields = ["identifier": .string(build.previewDestinationIdentifier), "platformName": .string(build.platformName ?? "macOS")]
+                .merging(build.deviceModelName.map { ["deviceModelName": .string($0)] } ?? [:], uniquingKeysWith: { _, new in new })
+                .merging(build.systemVersion.map { ["systemVersion": .string($0)] } ?? [:], uniquingKeysWith: { _, new in new })
+        }
+        let snapshotURL = artifacts.appendingPathComponent("preview.png")
+        try await writeSnapshot(from: snapshotData, to: snapshotURL, deviceType: deviceType,
+            usesDeviceLayout: response.usesDeviceLayout == true, orientation: response.interfaceOrientation, exclusion: exclusionData)
+        var fields: [String: JSONValue] = [
+            "previewSnapshotPath": .string(snapshotURL.path),
+            "errors": .array((response.errors ?? []).map { .object(["message": .string($0)]) }),
+            "renderedDestination": .object(destinationFields),
+            "availableRenderDestinations": .array(build.availableDestinations.map { .object($0.renderFields) }),
+            "supportedLocalizations": .array(try await supportedLocalizations(in: workspace).map(JSONValue.string)),
+        ]
+        fields["displayName"] = .string(response.displayName ?? location.displayName)
+        if let line = response.sourceLineNumber { fields["sourceLineNumber"] = .number(.int(Int64(line))) }
+        if let indexes = response.timelineIndexes {
+            var controls: [String: JSONValue] = [
+                "timelineIndexes": .array(indexes.map { .number(.int(Int64($0))) }),
+            ]
+            if let states = response.toggleStates { controls["toggleStates"] = .array(states.map(JSONValue.bool)) }
+            fields["supportedCanvasControlOverrides"] = .object(controls)
+        }
+        if let items = response.groupItems {
+            fields["supportedCanvasControlOverrides"] = .object([
+                "groupItems": .array(items.enumerated().map { index, title in
+                    var item: [String: JSONValue] = ["index": .number(.int(Int64(index)))]
+                    if let title { item["title"] = .string(title) }
+                    return .object(item)
+                }),
+            ])
+        }
+        if let variants = response.supportedDisplayVariants {
+            fields["supportedPreviewVariantOverrides"] = .object(variants.mapValues { .array($0.map(JSONValue.string)) })
+        }
+        if let styles = response.activityViewStyles, let contexts = response.activityViewContexts {
+            fields["supportedPreviewVariantOverrides"] = .object([
+                "View Style": .array(styles.map(JSONValue.string)),
+                "Activity View Context": .array(contexts.map(JSONValue.string)),
+                "Color Scheme": .array(PreviewRendererRequest.displayVariantValues["Color Scheme", default: []].map(JSONValue.string)),
+                "Dynamic Type": .array(PreviewRendererRequest.displayVariantValues["Dynamic Type", default: []].map(JSONValue.string)),
+            ])
+        }
+        return .object(fields)
+    }
+
+    private func renderSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess, localization: String?) async throws ->
+        (response: PreviewRendererResult, snapshot: Data, destination: [String: JSONValue], deviceType: URL, exclusion: Data?) {
         // Keep allocation alive through cancellation so its created identifier
         // is always available to the cleanup owner below.
         let allocation = Task { @MainActor in
             try await createSimulator(app: app, build: build, process: process)
         }
         let simulator = try await allocation.value
-        var result: JSONValue?
+        var rendered: (PreviewRendererResult, Data, Data?)?
         var failure: (any Error)?
         do {
             _ = try await process.xcrun(["simctl", "boot", simulator.identifier])
             _ = try await process.xcrun(["simctl", "bootstatus", simulator.identifier, "-b"])
             _ = try await process.xcrun(["simctl", "install", simulator.identifier, app.path])
-            var launch = ["simctl", "launch", simulator.identifier, simulator.bundleIdentifier]
-            if let locale = input.localization {
-                let languages = try PropertyListSerialization.data(fromPropertyList: [locale], format: .xml, options: 0)
-                launch += ["-AppleLanguages", String(decoding: languages, as: UTF8.self), "-AppleLocale", locale]
-            }
+            let launch = ["simctl", "launch", simulator.identifier, simulator.bundleIdentifier]
+                + (try Self.rendererArguments(localization: localization))
             _ = try await process.xcrun(launch)
             let container = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, simulator.bundleIdentifier, "data"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -318,50 +389,9 @@ final class NativePreviewCorrection {
             let response = try JSONDecoder().decode(PreviewRendererResult.self, from: Data(contentsOf: responseURL))
             if response.requiresNativePipeline == true { throw NativePipelineRequired() }
             if let error = response.error { throw NativeRuntimeError.invocation(error) }
-            guard let snapshot = response.snapshotName else {
-                throw NativeRuntimeError.unsupportedContract("The preview renderer returned no snapshot")
-            }
-            let snapshotURL = artifacts.appendingPathComponent("preview.png")
-            try await writeSnapshot(from: documents.appendingPathComponent(snapshot), to: snapshotURL,
-                deviceType: simulator.deviceType, usesDeviceLayout: response.usesDeviceLayout == true,
-                orientation: response.interfaceOrientation,
-                exclusion: response.exclusionSnapshotName.map { documents.appendingPathComponent($0) })
-            var fields: [String: JSONValue] = [
-                "previewSnapshotPath": .string(snapshotURL.path),
-                "errors": .array((response.errors ?? []).map { .object(["message": .string($0)]) }),
-                "renderedDestination": .object(simulator.destination),
-                "supportedLocalizations": .array(try await supportedLocalizations(in: workspace).map(JSONValue.string)),
-            ]
-            fields["displayName"] = .string(response.displayName ?? location.displayName)
-            if let line = response.sourceLineNumber { fields["sourceLineNumber"] = .number(.int(Int64(line))) }
-            if let indexes = response.timelineIndexes {
-                var controls: [String: JSONValue] = [
-                    "timelineIndexes": .array(indexes.map { .number(.int(Int64($0))) }),
-                ]
-                if let states = response.toggleStates { controls["toggleStates"] = .array(states.map(JSONValue.bool)) }
-                fields["supportedCanvasControlOverrides"] = .object(controls)
-            }
-            if let items = response.groupItems {
-                fields["supportedCanvasControlOverrides"] = .object([
-                    "groupItems": .array(items.enumerated().map { index, title in
-                        var item: [String: JSONValue] = ["index": .number(.int(Int64(index)))]
-                        if let title { item["title"] = .string(title) }
-                        return .object(item)
-                    }),
-                ])
-            }
-            if let variants = response.supportedDisplayVariants {
-                fields["supportedPreviewVariantOverrides"] = .object(variants.mapValues { .array($0.map(JSONValue.string)) })
-            }
-            if let styles = response.activityViewStyles, let contexts = response.activityViewContexts {
-                fields["supportedPreviewVariantOverrides"] = .object([
-                    "View Style": .array(styles.map(JSONValue.string)),
-                    "Activity View Context": .array(contexts.map(JSONValue.string)),
-                    "Color Scheme": .array(PreviewRendererRequest.displayVariantValues["Color Scheme", default: []].map(JSONValue.string)),
-                    "Dynamic Type": .array(PreviewRendererRequest.displayVariantValues["Dynamic Type", default: []].map(JSONValue.string)),
-                ])
-            }
-            result = .object(fields)
+            guard let name = response.snapshotName else { throw NativeRuntimeError.unsupportedContract("The preview renderer returned no snapshot") }
+            let exclusion = try response.exclusionSnapshotName.map { try Data(contentsOf: documents.appendingPathComponent($0)) }
+            rendered = (response, try Data(contentsOf: documents.appendingPathComponent(name)), exclusion)
         } catch { failure = error }
         // Cleanup is outside the cancelled task so it can delete the device even
         // when the caller has cancelled rendering or the request timed out.
@@ -373,7 +403,8 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.invocation("\(failure.map(String.init(describing:)) ?? "Preview rendered"); failed to delete preview Simulator \(simulator.identifier): \(error)")
         }
         if let failure { throw failure }
-        return result!
+        guard let rendered else { throw NativeRuntimeError.invocation("The preview renderer returned no result") }
+        return (rendered.0, rendered.1, simulator.destination, simulator.deviceType, rendered.2)
     }
 
     private func supportedLocalizations(in workspace: AnyObject) async throws -> [String] {
@@ -426,12 +457,20 @@ final class NativePreviewCorrection {
         let host: NativePreviewBuild.Target
     }
 
-    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL) throws -> Selection {
+    static func rendererArguments(localization: String?) throws -> [String] {
+        guard let localization else { return [] }
+        let languages = try PropertyListSerialization.data(fromPropertyList: [localization], format: .xml, options: 0)
+        return ["-AppleLanguages", String(decoding: languages, as: UTF8.self), "-AppleLocale", localization]
+    }
+
+    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL, platform: NativePreviewPlatform) throws -> Selection {
         let sourcePath = source.resolvingSymlinksInPath().path
         guard targets.contains(where: { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }) else {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
         }
-        let supportedTargets = targets.filter { $0.architecture == "arm64" && $0.sdkRoot.contains("iphonesimulator") }
+        let supportedTargets = targets.filter {
+            $0.architecture == "arm64" && NativePreviewPlatform(sdkRoot: $0.sdkRoot, sdkVariant: $0.sdkVariant) == platform
+        }
         let sources = supportedTargets.filter { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }
         guard !sources.isEmpty else { throw NativePipelineRequired() }
         var selections: [Selection] = []
@@ -444,7 +483,8 @@ final class NativePreviewCorrection {
             let sourceOutput = target.outputURL
             let frameworkName = sourceOutput?.pathComponents.last(where: { $0.hasSuffix(".framework") })
             let hosts = try supportedTargets.filter { candidate in
-                guard let output = candidate.outputURL, let app = productBundle(containing: output) else { return false }
+                guard NativePreviewPlatform(sdkRoot: candidate.sdkRoot, sdkVariant: candidate.sdkVariant) == platform,
+                      let output = candidate.outputURL, let app = productBundle(containing: output) else { return false }
                 if candidate.objectFiles.contains(where: { objectPaths.contains($0.resolvingSymlinksInPath().path) }) {
                     return true
                 }
@@ -456,7 +496,7 @@ final class NativePreviewCorrection {
                    try NativePreviewBinary.matches(sourceOutput, rootLibrary) {
                     return true
                 }
-                let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
+                let frameworks = Bundle(url: app)?.privateFrameworksURL ?? app.appendingPathComponent("Frameworks", isDirectory: true)
                 guard FileManager.default.fileExists(atPath: frameworks.path) else { return false }
                 return try FileManager.default.subpathsOfDirectory(atPath: frameworks.path).contains { subpath in
                     let library = frameworks.appendingPathComponent(subpath)
@@ -600,10 +640,10 @@ final class NativePreviewCorrection {
         guard let product = productBundle(containing: extensionOutput), product.pathExtension == "appex" else { return nil }
         let relativeBinary = String(extensionOutput.path.dropFirst(product.path.count + 1))
         let candidates = try targets.compactMap { target -> (app: URL, isRunnable: Bool)? in
-            guard target.architecture == "arm64", target.sdkRoot.contains("iphonesimulator"),
+            guard target.architecture == "arm64", NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) != nil,
                   let output = target.outputURL, let app = productBundle(containing: output),
                   app.pathExtension == "app" else { return nil }
-            let embedded = app.appendingPathComponent("PlugIns", isDirectory: true)
+            let embedded = (Bundle(url: app)?.builtInPlugInsURL ?? app.appendingPathComponent("PlugIns", isDirectory: true))
                 .appendingPathComponent(product.lastPathComponent, isDirectory: true)
                 .appendingPathComponent(relativeBinary)
             guard FileManager.default.fileExists(atPath: embedded.path),
@@ -617,16 +657,17 @@ final class NativePreviewCorrection {
         return matches[0].app
     }
 
-    static func prepareApp(product: URL, helper: URL, app: URL, containingApp: URL? = nil) throws {
+    static func prepareApp(product: URL, helper: URL, app: URL, containingApp: URL? = nil, platform: NativePreviewPlatform = .iOS) throws {
         try FileManager.default.copyItem(at: product, to: app)
         let executable = helper.appendingPathComponent("XcodeMCPPreviewRenderer")
-        try copyReplacingItem(executable, to: app.appendingPathComponent("XcodeMCPPreviewRenderer"))
-        let info = Self.rendererInfo(try bundleInfo(at: app))
+        try copyReplacingItem(executable, to: platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer"))
+        let info = Self.rendererInfo(try bundleInfo(at: app), platform: platform)
         try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
-            .write(to: app.appendingPathComponent("Info.plist"))
-        let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
+            .write(to: platform.infoURL(in: app))
+        let frameworks = platform.frameworksDirectory(in: app)
+        try FileManager.default.createDirectory(at: platform.resourcesDirectory(in: app), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
-        if let shared = containingApp?.appendingPathComponent("Frameworks", isDirectory: true),
+        if let shared = containingApp.map({ platform.frameworksDirectory(in: $0) }),
            FileManager.default.fileExists(atPath: shared.path) {
             // Extensions search their own Frameworks before their containing app's.
             for item in try FileManager.default.contentsOfDirectory(at: shared, includingPropertiesForKeys: nil) {
@@ -653,22 +694,33 @@ final class NativePreviewCorrection {
             ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? ""
     }
 
-    static func rendererInfo(_ original: [String: Any]) -> [String: Any] {
+    static func rendererInfo(_ original: [String: Any], platform: NativePreviewPlatform = .iOS) -> [String: Any] {
         let startupKeys = ["CFBundleExecutable", "CFBundlePackageType", "NSPrincipalClass", "UIMainStoryboardFile",
-                           "UIApplicationSceneManifest", "NSExtension", "UISupportedInterfaceOrientations"]
+                           "UIApplicationSceneManifest", "NSExtension", "NSMainNibFile", "NSMainStoryboardFile",
+                           "UISupportedInterfaceOrientations"]
         // Bundle lookup gives platform/device-qualified keys precedence over base keys.
         var info = original.filter { key, _ in
             !startupKeys.contains { key == $0 || key.hasPrefix($0 + "-") || key.hasPrefix($0 + "~") }
         }
         info["CFBundleExecutable"] = "XcodeMCPPreviewRenderer"
         info["CFBundlePackageType"] = "APPL"
-        info["UISupportedInterfaceOrientations"] = ["UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown",
-                                                    "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]
-        if (info["MinimumOSVersion"] as? String ?? "").compare("18.4", options: .numeric) == .orderedAscending {
-            info["MinimumOSVersion"] = "18.4"
+        let minimumKey = platform.isSimulator ? "MinimumOSVersion" : "LSMinimumSystemVersion"
+        if (info[minimumKey] as? String ?? "").compare(platform.minimumVersion, options: .numeric) == .orderedAscending {
+            info[minimumKey] = platform.minimumVersion
         }
-        info["UIApplicationSceneManifest"] = ["UIApplicationSupportsMultipleScenes": false,
+        if platform != .macOS && platform != .watchOS {
+            info["UISupportedInterfaceOrientations"] = ["UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown",
+                                                        "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]
+            info["UIApplicationSceneManifest"] = ["UIApplicationSupportsMultipleScenes": false,
             "UISceneConfigurations": ["UIWindowSceneSessionRoleApplication": [["UISceneConfigurationName": "Preview", "UISceneDelegateClassName": "XcodeMCPPreviewRenderer.PreviewRendererScene"]]]]
+        }
+        if platform == .macOS { info["NSPrincipalClass"] = "NSApplication" }
+        if platform == .watchOS {
+            info["WKApplication"] = true
+            info["WKWatchOnly"] = true
+            info["WKRunsIndependentlyOfCompanionApp"] = nil
+            info["WKCompanionAppBundleIdentifier"] = nil
+        }
         return info
     }
 
@@ -683,8 +735,8 @@ final class NativePreviewCorrection {
         try FileManager.default.copyItem(at: source, to: destination)
     }
 
-    private func previewLibraries(in app: URL) throws -> [URL] {
-        let libraries = try FileManager.default.contentsOfDirectory(at: app, includingPropertiesForKeys: nil)
+    private func previewLibraries(in app: URL, platform: NativePreviewPlatform) throws -> [URL] {
+        let libraries = try FileManager.default.contentsOfDirectory(at: platform.executableDirectory(in: app), includingPropertiesForKeys: nil)
             .filter { $0.lastPathComponent.hasSuffix(".debug.dylib") }
         guard !libraries.isEmpty else { throw NativePipelineRequired() }
         return libraries
@@ -696,9 +748,9 @@ final class NativePreviewCorrection {
 
     static func registryLibraries(in app: URL, previewLibraries: [URL]) throws -> [URL] {
         var libraries = previewLibraries
-        libraries += try FileManager.default.contentsOfDirectory(at: app, includingPropertiesForKeys: nil)
+        libraries += try FileManager.default.contentsOfDirectory(at: Bundle(url: app)?.executableURL?.deletingLastPathComponent() ?? app, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "dylib" }
-        let frameworks = app.appendingPathComponent("Frameworks", isDirectory: true)
+        let frameworks = Bundle(url: app)?.privateFrameworksURL ?? app.appendingPathComponent("Frameworks", isDirectory: true)
         for subpath in try FileManager.default.subpathsOfDirectory(atPath: frameworks.path) {
             let item = frameworks.appendingPathComponent(subpath)
             if item.pathExtension == "framework" {
@@ -789,7 +841,9 @@ final class NativePreviewCorrection {
     }
 
     private static func bundleInfo(at bundle: URL) throws -> [String: Any] {
-        let data = try Data(contentsOf: bundle.appendingPathComponent("Info.plist"))
+        let rootInfo = bundle.appendingPathComponent("Info.plist")
+        let infoURL = FileManager.default.fileExists(atPath: rootInfo.path) ? rootInfo : bundle.appendingPathComponent("Contents/Info.plist")
+        let data = try Data(contentsOf: infoURL)
         guard let info = try unsafe PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
             throw NativeRuntimeError.unsupportedContract("The built preview product has an unsupported Info.plist")
         }

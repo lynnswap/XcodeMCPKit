@@ -5,6 +5,48 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewProcessTests {
+    @Test func localizedRendererUsesRequestedBundleResourcesAndLocale() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let app = fixture.root.appendingPathComponent("Localized.app")
+        let executable = app.appendingPathComponent("Contents/MacOS/Localized")
+        let resources = app.appendingPathComponent("Contents/Resources")
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        for (language, text) in [("en", "Hello"), ("ja", "こんにちは")] {
+            let directory = resources.appendingPathComponent("\(language).lproj")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data("\"Greeting\" = \"\(text)\";\n".utf8).write(to: directory.appendingPathComponent("Localizable.strings"))
+        }
+        let info = ["CFBundleExecutable": "Localized", "CFBundleIdentifier": "dev.lynnswap.LocalizationFixture",
+                    "CFBundleDevelopmentRegion": "en", "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: app.appendingPathComponent("Contents/Info.plist"))
+        let source = fixture.root.appendingPathComponent("Localized.m")
+        try Data(#"""
+        #import <Foundation/Foundation.h>
+        int main(void) {
+            @autoreleasepool {
+                puts([[NSBundle mainBundle] localizedStringForKey:@"Greeting" value:@"missing" table:nil].UTF8String);
+                puts([NSLocale currentLocale].localeIdentifier.UTF8String);
+            }
+        }
+        """#.utf8).write(to: source)
+        let compile = Process()
+        compile.executableURL = URL(filePath: "/usr/bin/xcrun")
+        compile.arguments = ["--sdk", "macosx", "clang", "-framework", "Foundation", source.path, "-o", executable.path]
+        let diagnostics = Pipe()
+        compile.standardOutput = diagnostics
+        compile.standardError = diagnostics
+        try compile.run()
+        let output = diagnostics.fileHandleForReading.readDataToEndOfFile()
+        compile.waitUntilExit()
+        #expect(compile.terminationStatus == 0, "\(String(decoding: output, as: UTF8.self))")
+        for (locale, greeting) in [("ja_JP", "こんにちは"), ("en_US", "Hello")] {
+            let output = try await fixture.process.run(executable.path, NativePreviewCorrection.rendererArguments(localization: locale))
+            #expect(output == "\(greeting)\n\(locale)\n")
+        }
+    }
+
     @Test func diagnosticsDoNotCorruptCommandOutput() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

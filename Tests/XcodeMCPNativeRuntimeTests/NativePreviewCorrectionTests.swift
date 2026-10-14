@@ -5,6 +5,36 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewCorrectionTests {
+    @Test(arguments: [NativePreviewPlatform.iOS, .catalyst])
+    func sharedSourceUsesTheSelectedDestinationPlatform(platform: NativePreviewPlatform) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("SharedView.swift")
+        let targets = [NativePreviewPlatform.watchOS, .macOS, .iOS, .catalyst].map { candidate -> NativePreviewBuild.Target in
+            let output = root.appendingPathComponent("\(candidate.rawValue).app/Preview.debug.dylib")
+            let sdkVariant: String? = candidate == .catalyst ? "iosmac" : nil
+            let isRunnable = candidate == .watchOS || candidate == .macOS
+            return NativePreviewBuild.Target(moduleName: candidate.rawValue, buildableName: "\(candidate.rawValue).app",
+                sdkRoot: candidate.sdk, sdkVariant: sdkVariant, architecture: "arm64",
+                linkCommandLine: ["-o", output.path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: true,
+                isRunnable: isRunnable)
+        }
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: platform)
+        #expect(selected.source.moduleName == platform.rawValue)
+        #expect(selected.host.moduleName == platform.rawValue)
+    }
+
+    @Test func watchOnlySourceRequiresNativePipelineForAnIPhoneDestination() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("WatchView.swift")
+        let watch = NativePreviewBuild.Target(moduleName: "Watch", buildableName: "Watch.app", sdkRoot: "watchsimulator",
+            sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", root.appendingPathComponent("Watch.app/Watch.debug.dylib").path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: true, isRunnable: true)
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget([watch], source: source, platform: .iOS)
+        }
+    }
+
     @Test(arguments: [true, false])
     func sharedSourceUsesRunnableHost(sharedLibrary: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -22,9 +52,49 @@ struct NativePreviewCorrectionTests {
             buildableName: "SharedPreview.o", sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
             linkCommandLine: ["-o", library.path], linkerWorkingDirectory: nil, objectFiles: [],
             sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)] : [])
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
         #expect(selected.host.moduleName == "RunnableApp")
         #expect(selected.source.moduleName == (sharedLibrary ? "SharedPreview" : "RunnableApp"))
+    }
+
+    @Test func stagesMacProductInItsContentsLayout() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let product = root.appendingPathComponent("Original.app")
+        let helper = root.appendingPathComponent("Helper")
+        let app = root.appendingPathComponent("Preview.app")
+        for directory in [product.appendingPathComponent("Contents/MacOS"), product.appendingPathComponent("Contents/Resources"),
+                          product.appendingPathComponent("Contents/Frameworks"), helper.appendingPathComponent("Frameworks")] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let original: [String: Any] = ["CFBundleIdentifier": "dev.lynnswap.MacFixture", "CFBundleExecutable": "Original",
+            "CFBundlePackageType": "APPL", "NSMainStoryboardFile": "Original", "LSMinimumSystemVersion": "15.0"]
+        try PropertyListSerialization.data(fromPropertyList: original, format: .binary, options: 0)
+            .write(to: product.appendingPathComponent("Contents/Info.plist"))
+        try Data("original".utf8).write(to: product.appendingPathComponent("Contents/MacOS/Original"))
+        try Data("resource".utf8).write(to: product.appendingPathComponent("Contents/Resources/Marker.txt"))
+        try Data("renderer".utf8).write(to: helper.appendingPathComponent("XcodeMCPPreviewRenderer"))
+        try Data("library".utf8).write(to: helper.appendingPathComponent("Frameworks/libPreview.dylib"))
+        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app, platform: .macOS)
+        let info = try #require(Bundle(url: app)?.infoDictionary)
+        #expect(info["CFBundleIdentifier"] as? String == "dev.lynnswap.MacFixture")
+        #expect(info["NSMainStoryboardFile"] == nil)
+        #expect(info["UIApplicationSceneManifest"] == nil)
+        #expect(info["LSMinimumSystemVersion"] as? String == "15.4")
+        #expect(try Data(contentsOf: app.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer")) == Data("renderer".utf8))
+        #expect(try Data(contentsOf: app.appendingPathComponent("Contents/Frameworks/libPreview.dylib")) == Data("library".utf8))
+        #expect(try Data(contentsOf: app.appendingPathComponent("Contents/Resources/Marker.txt")) == Data("resource".utf8))
+    }
+
+    @Test func watchRendererRunsWithoutACompanionApp() {
+        let original: [String: Any] = ["CFBundleIdentifier": "dev.lynnswap.WatchFixture",
+            "WKCompanionAppBundleIdentifier": "dev.lynnswap.Companion", "WKRunsIndependentlyOfCompanionApp": true]
+        let info = NativePreviewCorrection.rendererInfo(original, platform: .watchOS)
+        #expect(info["WKApplication"] as? Bool == true)
+        #expect(info["WKWatchOnly"] as? Bool == true)
+        #expect(info["WKCompanionAppBundleIdentifier"] == nil)
+        #expect(info["WKRunsIndependentlyOfCompanionApp"] == nil)
+        #expect(info["CFBundleIdentifier"] as? String == "dev.lynnswap.WatchFixture")
     }
 
     @Test func ambiguousHostsRequireNativePipeline() {
@@ -38,7 +108,7 @@ struct NativePreviewCorrectionTests {
                 debugDylibEnabled: true, isRunnable: false)
         }
         #expect(throws: NativePipelineRequired.self) {
-            try NativePreviewCorrection.selectTarget(targets, source: source)
+            try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
         }
     }
 
@@ -56,11 +126,11 @@ struct NativePreviewCorrectionTests {
                 linkCommandLine: ["-o", root.appendingPathComponent("FixtureHost.app/FixtureHost.debug.dylib").path, product.path],
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)]
         }
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
         #expect(selected.source.architecture == "arm64")
         #expect(selected.host.architecture == "arm64")
         #expect(throws: NativePipelineRequired.self) {
-            try NativePreviewCorrection.selectTarget(targets.filter { $0.architecture == "x86_64" }, source: source)
+            try NativePreviewCorrection.selectTarget(targets.filter { $0.architecture == "x86_64" }, source: source, platform: .iOS)
         }
     }
 
@@ -87,7 +157,7 @@ struct NativePreviewCorrectionTests {
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: dylib, to: binary)
         }
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [feature], source: source)
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [feature], source: source, platform: .iOS)
         #expect(selected.host.outputURL == hosts[1].outputURL)
         #expect(selected.source.outputURL == feature.outputURL)
         #expect(selected.source.moduleName == feature.moduleName)
@@ -115,13 +185,13 @@ struct NativePreviewCorrectionTests {
             let binary = root.appendingPathComponent("Linked.app/Frameworks/FixtureKit.framework/FixtureKit")
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: frameworkBinary, to: binary)
-            let selected = try NativePreviewCorrection.selectTarget(hosts + [framework], source: source)
+            let selected = try NativePreviewCorrection.selectTarget(hosts + [framework], source: source, platform: .iOS)
             #expect(selected.host.outputURL == hosts[1].outputURL)
             #expect(selected.source.outputURL == framework.outputURL)
             #expect(selected.source.moduleName == framework.moduleName)
         } else {
             #expect(throws: NativePipelineRequired.self) {
-                try NativePreviewCorrection.selectTarget(hosts + [framework], source: source)
+                try NativePreviewCorrection.selectTarget(hosts + [framework], source: source, platform: .iOS)
             }
         }
     }
@@ -144,7 +214,7 @@ struct NativePreviewCorrectionTests {
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
             linkCommandLine: ["-o", archive.path],
             linkerWorkingDirectory: nil, objectFiles: [object], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source)
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source, platform: .iOS)
         #expect(selected.host.outputURL == hosts[1].outputURL)
         #expect(selected.source.outputURL == package.outputURL)
         #expect(selected.source.moduleName == package.moduleName)
@@ -169,7 +239,7 @@ struct NativePreviewCorrectionTests {
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", product.path],
             linkerWorkingDirectory: nil, objectFiles: [root.appendingPathComponent("PackageContent.o")],
             sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source)
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source, platform: .iOS)
         #expect(selected.host.outputURL == hosts[1].outputURL)
         #expect(selected.source.outputURL == package.outputURL)
         #expect(selected.source.moduleName == package.moduleName)
@@ -214,7 +284,7 @@ struct NativePreviewCorrectionTests {
             linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
 
         #expect(throws: NativePipelineRequired.self) {
-            try NativePreviewCorrection.selectTarget([target], source: source)
+            try NativePreviewCorrection.selectTarget([target], source: source, platform: .iOS)
         }
     }
 
@@ -235,7 +305,7 @@ struct NativePreviewCorrectionTests {
             linkCommandLine: ["-o", library.path], linkerWorkingDirectory: nil, objectFiles: [],
             sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)] : [])
 
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
         #expect(selected.host.outputURL == target.outputURL)
         #expect(selected.source.moduleName == (linkedLibrary ? "ExtensionPreview" : "Extension"))
     }
@@ -250,7 +320,7 @@ struct NativePreviewCorrectionTests {
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source],
                 debugDylibEnabled: true, isRunnable: product == "Host.app")
         }
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
         #expect(selected.host.outputURL == targets[1].outputURL)
         #expect(selected.source.outputURL == targets[1].outputURL)
     }

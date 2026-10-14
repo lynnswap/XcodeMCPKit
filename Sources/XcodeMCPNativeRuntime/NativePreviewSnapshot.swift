@@ -5,16 +5,16 @@ import Foundation
 import ImageIO
 
 extension NativePreviewCorrection {
-    func writeSnapshot(from source: URL, to destination: URL, deviceType: URL?,
-                       usesDeviceLayout: Bool, orientation: String?, exclusion: URL? = nil) async throws {
-        guard let imageSource = CGImageSourceCreateWithURL(source as CFURL, nil),
+    func writeSnapshot(from source: Data, to destination: URL, deviceType: URL?,
+                       usesDeviceLayout: Bool, orientation: String?, exclusion: Data? = nil) async throws {
+        guard let imageSource = CGImageSourceCreateWithData(source as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
             throw NativeRuntimeError.invocation("The preview snapshot could not be decoded")
         }
         let mask = try usesDeviceLayout ? deviceType.flatMap(Self.framebufferMask) : nil
         let exclusionImage: CGImage?
         if usesDeviceLayout, let exclusion {
-            guard let source = CGImageSourceCreateWithURL(exclusion as CFURL, nil),
+            guard let source = CGImageSourceCreateWithData(exclusion as CFData, nil),
                   let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                 throw NativeRuntimeError.invocation("The preview display exclusion could not be decoded")
             }

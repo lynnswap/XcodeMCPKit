@@ -140,15 +140,18 @@ inventory or alter caches. It remains separate from generic action execution and
 can be removed when the affected native contract is fixed. Cached report
 retrieval does not establish online/account-dependent retrieval.
 
-`RenderPreview` uses a packaged iOS Simulator renderer for SwiftUI and UIKit
-`#Preview` definitions, SwiftUI `PreviewProvider` definitions, and WidgetKit previews
-in an arm64 Simulator application or app extension built with a debug dylib,
-on iOS 18.4 or later.
+`RenderPreview` uses packaged platform renderers for SwiftUI, UIKit, and AppKit
+`#Preview` definitions, SwiftUI `PreviewProvider` definitions, and iOS WidgetKit previews
+in an arm64 application or app extension built with a debug dylib. The packaged
+hosts cover iOS 18.4+, tvOS 18.4+, visionOS 2.4+, and watchOS 11.4+ Simulators,
+plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
 The host builds the active scheme through Xcode's build engine, selects the
 definition in source order, including files that mix providers and registries.
 It resolves registry metadata or a provider's type in the built image, including linked embedded
 frameworks and libraries, and extracts its view with
-ABIBridge. A public `UIHostingController` renders the view and captures the image.
+ABIBridge. UIKit hosts use `UIHostingController`, macOS uses `NSHostingController`,
+and watchOS attaches SwiftUI's underscored hosting view to the running watch app.
+These hosts capture a live view hierarchy, including view lifecycle work.
 Source and host selection retain the native buildable's identity. Among applications and extensions
 that compile the source, embed its runtime image, or link its object/archive product
 (including linker file lists), the active scheme's runnable application takes
@@ -156,8 +159,8 @@ precedence. When that runnable is not a compatible host, a unique compatible
 host can be used; ambiguous candidates use the native pipeline.
 Application target ordering does not determine the host. This selection does not
 recreate Xcode's complete source-specific preview dependency graph.
-Source and host records are restricted to arm64 iOS Simulator variants before
-checking for ambiguity. An extension's own bundle supplies its resources,
+Source and host records must use the same supported platform and arm64 architecture
+before checking for ambiguity. An extension's own bundle supplies its resources,
 identifier, and entitlements. A containing application's shared Frameworks are
 copied when its embedded extension binary matches the source's build UUID;
 the extension's own Frameworks take precedence. The containing application's
@@ -185,8 +188,11 @@ Remaining platform chrome and geometry outside the iOS scene host remain tracked
 [the snapshot parity issue](https://github.com/lynnswap/XcodeMCPKit/issues/311).
 Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
 
-Ordinary SwiftUI and UIKit previews accept Color Scheme, Contrast, Dynamic Type,
-Control Borders, and Orientation overrides in `previewVariantOverrides`.
+On iOS, ordinary SwiftUI and UIKit previews accept Color Scheme, Contrast, Dynamic
+Type, Control Borders, and Orientation overrides in `previewVariantOverrides`.
+macOS and Mac Catalyst expose Color Scheme; tvOS exposes Color Scheme, Contrast,
+and Control Borders; watchOS exposes Dynamic Type. visionOS display overrides
+remain on the native pipeline pending a native static-preview contract.
 `supportedPreviewVariantOverrides` returns their native display names and values.
 Color scheme, contrast, and Dynamic Type reach both the SwiftUI environment and
 UIKit hosting traits. Control Borders uses SwiftUI's button-shapes environment.
@@ -228,7 +234,7 @@ host/preference contract is unavailable, the request uses the native pipeline.
 Widget provider contexts, device overrides, and other display traits, variants,
 or controls still use the native pipeline.
 
-Widget previews support `StaticConfiguration`, `IntentConfiguration`, and
+On iOS Simulator, Widget previews support `StaticConfiguration`, `IntentConfiguration`, and
 `AppIntentConfiguration`. Previews can provide explicit `timeline:` entries or a
 `timelineProvider:`. Intent and AppIntent provider previews retain the `using:`
 intent supplied by the preview, including its default parameter values. The renderer
@@ -273,8 +279,11 @@ Activity labels use the containing application's localized name when that
 application is available, falling back to the extension's name.
 Other display controls retain the native pipeline for Live Activity previews.
 
-Each render creates a Simulator matching the selected destination's device type
-and runtime. Without a destination override, it retains the workspace's active
+Each Simulator render creates a device matching the selected destination's device
+type and runtime. macOS and Mac Catalyst launch a staged application process and
+return its snapshot through inherited stdout, including when the app is sandboxed.
+Desktop destinations accept both Xcode's device identifier and its native preview
+identifier, and return the latter (`dvtdevice-local-computer:localhost` for My Mac). Without a destination override, it retains the workspace's active
 destination; unsupported destinations use the native pipeline. The returned
 `renderedDestination.identifier` identifies that selected destination for reuse.
 The correction deletes its temporary Simulator after success, failure, timeout, or
@@ -282,7 +291,8 @@ cancellation, and reports cleanup failures. The correction does not boot, instal
 to, or delete existing Simulator devices or change the workspace's active run
 destination. Framework diagnostics and
 subprocess logs remain in the request's artifacts directory.
-The staged application bundle is removed after rendering or failure; snapshots
+The owned desktop process is stopped on cancellation or timeout. The staged
+application bundle is removed after rendering or failure; snapshots
 and diagnostics remain available.
 The renderer starts its own application and scene lifecycle. Its executable,
 package type, scene manifest, principal class, main storyboard, and extension
@@ -304,8 +314,8 @@ timeout error. The build method binding is
 cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 
-Targets without an application or extension host or with its debug dylib disabled, other
-platforms, and source or display contracts beyond the direct capabilities described above
+Targets without an application or extension host or with its debug dylib disabled,
+unsupported platform/architecture combinations, and source or display contracts beyond the direct capabilities described above
 continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
 requirements, including the limitation tracked in
 [issue #302](https://github.com/lynnswap/XcodeMCPKit/issues/302).
@@ -322,8 +332,8 @@ native pipeline instead of returning a partial widget. The renderer resolves its
 the selected Xcode and installed Simulator runtime. Unsupported input contracts
 use the native pipeline; other contract changes produce diagnostics.
 Build failures are reported before rendering so stale products are not captured.
-`scripts/build-native-host.sh` builds and bundles the Simulator renderer using
-the selected developer directory. Apple frameworks are supplied by the installed
+`scripts/build-native-host.sh` builds and bundles separate renderers for all six
+platforms using the selected developer directory. Apple frameworks are supplied by the installed
 runtime. Device exclusion rendering also reads UIKit's display shape and the
 SpringBoardServices/MobileGestalt enable conditions used by PreviewShell.
 

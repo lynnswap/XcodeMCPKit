@@ -1,9 +1,13 @@
-#if os(iOS) && targetEnvironment(simulator)
+#if os(iOS) || os(tvOS) || os(visionOS) || os(macOS) || os(watchOS)
 import ABIBridge
 import ABIBridgeSwiftUI
 import DeveloperToolsSupport
 import SwiftUI
+#if os(macOS)
+import AppKit
+#elseif !os(watchOS)
 import UIKit
+#endif
 
 // A generic declaration preserves the native argument's formal indirect ABI.
 @inline(never)
@@ -75,6 +79,7 @@ func makeViewPreview(source: NativeSwiftValue, groupItemIndex: Int? = nil) async
             let existential = try unsafe getter.unsafeInvoke(on: body)
             return try AnyView(NativeSwiftView(existential.copyUnderlyingValue()))
         }
+    #if !os(macOS) && !os(watchOS)
     case "DeveloperToolsSupport.DefaultPreviewSource<__C.UIView>":
         bodyArgument = .type(UIView.self)
         makeView = { body in
@@ -91,6 +96,24 @@ func makeViewPreview(source: NativeSwiftValue, groupItemIndex: Int? = nil) async
             }
             return AnyView(PreviewUIViewController(controller: controller))
         }
+    #elseif os(macOS)
+    case "DeveloperToolsSupport.DefaultPreviewSource<__C.NSView>":
+        bodyArgument = .type(NSView.self)
+        makeView = { body in
+            guard let view = try body.withCopy({ $0 as? NSView }) else { throw PreviewRendererError("The installed preview body is not an NSView") }
+            return AnyView(PreviewNSView(view: view).ignoresSafeArea(.all, edges: .all)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .controlBackgroundColor)))
+        }
+    case "DeveloperToolsSupport.DefaultPreviewSource<__C.NSViewController>":
+        bodyArgument = .type(NSViewController.self)
+        makeView = { body in
+            guard let controller = try body.withCopy({ $0 as? NSViewController }) else { throw PreviewRendererError("The installed preview body is not an NSViewController") }
+            return AnyView(PreviewNSViewController(controller: controller).ignoresSafeArea(.all, edges: .all)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .controlBackgroundColor)))
+        }
+    #endif
     default: throw NativePreviewPipelineRequired()
     }
     let result = try await previewBody(source: source, bodyArgument: bodyArgument, groupItemIndex: groupItemIndex)
@@ -261,6 +284,7 @@ func makeLegacyViewPreview(typeName: String, index: Int) throws -> SwiftUI._Prev
     return previews[index]
 }
 
+#if !os(macOS) && !os(watchOS)
 private struct PreviewUIView: UIViewRepresentable {
     let view: UIView
     func makeUIView(context: Context) -> UIView { view }
@@ -272,6 +296,54 @@ private struct PreviewUIViewController: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIViewController { controller }
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
 }
+
+#elseif os(macOS)
+private struct PreviewNSView: NSViewControllerRepresentable {
+    let view: NSView
+    func makeNSViewController(context: Context) -> NSViewController {
+        let container = NSViewController()
+        containPreviewView(view, in: container.view)
+        return container
+    }
+    func updateNSViewController(_ nsViewController: NSViewController, context: Context) {}
+}
+
+private struct PreviewNSViewController: NSViewControllerRepresentable {
+    let controller: NSViewController
+    func makeNSViewController(context: Context) -> NSViewController {
+        let container = NSViewController()
+        container.addChild(controller)
+        containPreviewView(controller.view, in: container.view)
+        return container
+    }
+    func updateNSViewController(_ nsViewController: NSViewController, context: Context) {}
+}
+
+// Containment preserves the AppKit body's control styling instead of letting
+// SwiftUI's representable adapter restyle a leaf control.
+@MainActor
+private func containPreviewView(_ content: NSView, in container: NSView) {
+    container.addSubview(content)
+    content.translatesAutoresizingMaskIntoConstraints = false
+    let edges = [
+        content.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+        content.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        content.topAnchor.constraint(equalTo: container.topAnchor),
+        content.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+    ]
+    // Weak edge equalities preserve intrinsic control sizes while allowing
+    // content without an intrinsic size to use SwiftUI's available proposal.
+    for constraint in edges { constraint.priority = NSLayoutConstraint.Priority(1) }
+    NSLayoutConstraint.activate(edges + [
+        content.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor),
+        content.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+        content.topAnchor.constraint(greaterThanOrEqualTo: container.topAnchor),
+        content.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor),
+        content.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+        content.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+    ])
+}
+#endif
 
 @MainActor
 func viewPreviewLayout(_ preview: NativeSwiftValue) async throws -> DeveloperToolsSupport.PreviewLayout {
