@@ -184,7 +184,7 @@ transparent portrait overlay. Snapshot composition rotates that overlay with the
 native content orientation before downsampling. Fixed-size and size-that-fits snapshots retain their rectangular
 hosting view. The longest image dimension is capped at 1500 pixels without
 upscaling smaller images.
-Exact native safe-area geometry and remaining platform chrome remain tracked in
+Remaining platform chrome and geometry outside the iOS scene host remain tracked in
 [the snapshot parity issue](https://github.com/lynnswap/XcodeMCPKit/issues/311).
 Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
 
@@ -196,12 +196,22 @@ remain on the native pipeline pending a native static-preview contract.
 `supportedPreviewVariantOverrides` returns their native display names and values.
 Color scheme, contrast, and Dynamic Type reach both the SwiftUI environment and
 UIKit hosting traits. Control Borders uses SwiftUI's button-shapes environment.
-Portrait and landscape source traits and orientation overrides use the native
-counterrotation controller and the window scene's orientation. Upside-down portrait
-retains the native pipeline: UIKit rejects that geometry on the iPhone host even
-when its app and controller support all orientations. Its preview-specific scene
-geometry is tracked with the remaining safe-area work in
-[the snapshot parity issue](https://github.com/lynnswap/XcodeMCPKit/issues/311).
+Portrait, upside-down portrait, and landscape source traits use the native
+counterrotation controller and a dedicated preview window scene. Orientation
+overrides use the same scene. The renderer creates a local FrontBoard pseudo scene
+with the device's display configuration and native display-edge settings, so UIKit
+computes preview safe areas without the original app scene's populated resolver.
+Its reference frame stays in the display's fixed coordinate space; native scene
+bounds apply the requested orientation. This path was verified on iOS 27.2 with
+Xcode 27.1 and uses ABIBridge 0.9.0's existing Objective-C APIs. Unavailable private
+scene APIs use the native pipeline.
+
+Each render owns a fresh, nonpersistent scene session with a passive delegate.
+It disconnects the window scene, removes its session, and invalidates the native
+scene on its call-out queue after capture, failure, or cancellation. The original
+scene and session remain connected. A cleanup failure is returned with the render
+failure; a successful result is published after cleanup completes. Widget snapshots
+retain their existing hosting path.
 
 UIKit previews retain their actual `UIView` or `UIViewController` in standard
 SwiftUI representables. An `arguments:` group uses its native group closure and
