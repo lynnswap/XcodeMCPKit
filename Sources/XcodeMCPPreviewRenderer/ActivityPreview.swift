@@ -23,6 +23,23 @@ struct ActivityPreview {
 }
 
 @MainActor
+struct ActivityPreviewConfiguration {
+    let attributesType: NativeSwiftValue
+    let viewSource: NativeSwiftValue
+    let families: NativeSwiftValue
+    let layouts: NativeSwiftValue
+    let supportedFamilies: [ActivityFamily]
+}
+
+@MainActor
+struct ActivityPreviewContent {
+    let configuration: ActivityPreviewConfiguration
+    let attributes: Data
+    let states: [(contentState: Data, isStale: Bool)]
+    let viewKind: ActivityPreviewViewKind
+}
+
+@MainActor
 func makeActivityPreview(source: NativeSwiftValue, timelineIndex: Int?, viewStyle: String?,
                          isStale: Bool, addStaleEntries: Bool,
                          environment: EnvironmentValues, appName: String,
@@ -53,18 +70,7 @@ private func activityPreview<Attributes: ActivityAttributes>(source: NativeSwift
     @MainActor func body<W: Widget>(_ widget: W) async throws -> NativeSwiftValue { try await activityValue(widget.body) }
     let configuration = try await _openExistential(typedWidget, do: body)
     let descriptor = try await activityDescriptor(configuration)
-    let descriptorFields = Mirror(reflecting: descriptor).children
-    guard let viewSourceEnum = descriptorFields.first(where: { $0.label == "source" })?.value,
-          let activitySource = Mirror(reflecting: viewSourceEnum).children.first(where: { $0.label == "activity" })?.value,
-          let activityType = Mirror(reflecting: activitySource).children.first(where: { $0.label == ".0" })?.value,
-          let viewSource = Mirror(reflecting: activitySource).children.first(where: { $0.label == ".1" })?.value,
-          let families = descriptorFields.first(where: { $0.label == "supportedActivityFamilies" })?.value,
-          let layouts = descriptorFields.first(where: { $0.label == "supportedDynamicIslandCompactLayouts" })?.value
-    else { throw NativePreviewPipelineRequired() }
-    let nativeActivityType = try await activityAnyValue(activityType)
-    let nativeViewSource = try await activityAnyValue(viewSource)
-    let nativeFamilies = try await activityAnyValue(families)
-    let nativeLayouts = try await activityAnyValue(layouts)
+    let previewConfiguration = try await activityPreviewConfiguration(descriptor)
 
     let makeContent = try await source.type.resolveMethod(named: "makeContent(for:)",
         as: ((Attributes.Type) async throws -> NativeSwiftValue).self,
@@ -85,31 +91,59 @@ private func activityPreview<Attributes: ActivityAttributes>(source: NativeSwift
     let entries = states.indices.flatMap { index in
         isStale ? [(index, true)] : addStaleEntries ? [(index, false), (index, true)] : [(index, false)]
     }
-    guard !entries.isEmpty else { throw PreviewRendererError("The Live Activity preview has no content states") }
-    let requested = stateIndex ?? 0
-    let selected = entries.indices.contains(requested) ? requested : 0
-    let errors = entries.indices.contains(requested) ? [] : [
-        "Unsupported timeline index \(requested); see the `supportedCanvasControlOverrides` field of the result for the list of supported indexes for rendering this preview in the currently active scheme."
-    ]
     let kindType = try await activityTypeNamed("WidgetKit.ActivityPreviewViewKind")
     let kindGetter = try await source.type.resolveGetter(named: "viewKind", as: (() -> NativeSwiftValue).self,
         valueABIs: [kindType: .opaque(named: kindType.name)], receiverABI: .opaque(named: source.type.name))
     let sourceKind = try unsafe kindGetter.unsafeInvoke(on: source).take(as: ActivityPreviewViewKind.self)
-    let style = try await activityStyle(viewStyle, defaultKind: sourceKind, environment: environment)
-    if style.metrics == "small" {
-        guard let families = families as? [ActivityFamily], families.contains(.small) else {
-            throw PreviewRendererError("SmallActivityFamilyAbsentError: To display your Live Activity in Smart Stack, add .supplementalActivityFamilies([.small]) to ActivityConfiguration and adapt the layout with @Environment(\\.activityFamily).")
-        }
+    let input = ActivityPreviewContent(configuration: previewConfiguration,
+        attributes: try JSONEncoder().encode(attributes),
+        states: try entries.map { (try JSONEncoder().encode(states[$0.0]), $0.1) },
+        viewKind: sourceKind)
+    return try await makeActivityPreview(content: input, timelineIndex: stateIndex, viewStyle: viewStyle,
+        environment: environment, appName: appName, payloadID: payloadID)
+}
+
+@MainActor
+func activityPreviewConfiguration(_ descriptor: Any) async throws -> ActivityPreviewConfiguration {
+    let fields = Array(Mirror(reflecting: descriptor).children)
+    guard let source = fields.first(where: { $0.label == "source" })?.value,
+          let activity = Mirror(reflecting: source).children.first(where: { $0.label == "activity" })?.value else {
+        throw NativePreviewPipelineRequired()
+    }
+    let payload = Array(Mirror(reflecting: activity).children)
+    guard let attributesType = payload.first(where: { $0.label == ".0" })?.value,
+          let viewSource = payload.first(where: { $0.label == ".1" })?.value,
+          let families = fields.first(where: { $0.label == "supportedActivityFamilies" })?.value as? [ActivityFamily],
+          let layouts = fields.first(where: { $0.label == "supportedDynamicIslandCompactLayouts" })?.value else {
+        throw NativePreviewPipelineRequired()
+    }
+    return ActivityPreviewConfiguration(attributesType: try await activityAnyValue(attributesType),
+        viewSource: try await activityAnyValue(viewSource), families: try await activityValue(families),
+        layouts: try await activityAnyValue(layouts), supportedFamilies: families)
+}
+
+@MainActor
+func makeActivityPreview(content: ActivityPreviewContent, timelineIndex: Int?, viewStyle: String?,
+                         environment: EnvironmentValues, appName: String, payloadID: String) async throws -> ActivityPreview {
+    guard !content.states.isEmpty else { throw PreviewRendererError("The Live Activity preview has no content states") }
+    let requested = timelineIndex ?? 0
+    let selected = content.states.indices.contains(requested) ? requested : 0
+    let errors = content.states.indices.contains(requested) ? [] : [
+        "Unsupported timeline index \(requested); see the `supportedCanvasControlOverrides` field of the result for the list of supported indexes for rendering this preview in the currently active scheme."
+    ]
+    let style = try await activityStyle(viewStyle, defaultKind: content.viewKind, environment: environment)
+    let configuration = content.configuration
+    if style.metrics == "small", !configuration.supportedFamilies.contains(.small) {
+        throw PreviewRendererError("SmallActivityFamilyAbsentError: To display your Live Activity in Smart Stack, add .supplementalActivityFamilies([.small]) to ActivityConfiguration and adapt the layout with @Environment(\\.activityFamily).")
     }
     let metrics = try await activitySystemMetrics(style: style.metrics)
-    let attributesData = try JSONEncoder().encode(attributes)
     let archiveEnvironment = try await activityArchiveEnvironment(style.environment)
     var collections: [NativeSwiftValue] = []
-    for entry in entries {
-        collections.append(try await activityArchive(attributesType: nativeActivityType, viewSource: nativeViewSource,
-            attributes: attributesData, state: JSONEncoder().encode(states[entry.0]), isStale: entry.1,
-            environment: archiveEnvironment.copy(), metrics: metrics.definition, families: nativeFamilies,
-            layouts: nativeLayouts, payloadID: payloadID))
+    for state in content.states {
+        collections.append(try await activityArchive(attributesType: configuration.attributesType,
+            viewSource: configuration.viewSource, attributes: content.attributes, state: state.contentState,
+            isStale: state.isStale, environment: archiveEnvironment.copy(), metrics: metrics.definition,
+            families: configuration.families, layouts: configuration.layouts, payloadID: payloadID))
     }
     let controller = try await activityController(collections: collections, selectedIndex: selected,
         locationDescription: style.location, environment: style.environment, kind: style.kind,
@@ -118,8 +152,8 @@ private func activityPreview<Attributes: ActivityAttributes>(source: NativeSwift
     controller.view.layer.cornerRadius = radius
     controller.view.layer.cornerCurve = .continuous
     controller.view.layer.masksToBounds = true
-    return ActivityPreview(controller: controller, stateIndexes: Array(entries.indices),
-        selectedStateIndex: selected, isStale: entries[selected].1, viewKind: style.kind,
+    return ActivityPreview(controller: controller, stateIndexes: Array(content.states.indices),
+        selectedStateIndex: selected, isStale: content.states[selected].isStale, viewKind: style.kind,
         interfaceOrientation: style.orientation, cornerRadius: radius, errors: errors)
 }
 
@@ -244,7 +278,7 @@ private func activityStyleEnvironment(_ environment: EnvironmentValues, kind: Ac
 }
 
 @MainActor
-private func activityDescriptor(_ configuration: NativeSwiftValue) async throws -> Any {
+func activityDescriptor(_ configuration: NativeSwiftValue) async throws -> Any {
     func unwrap(_ value: Any) throws -> (base: Any, modifiers: [Any]) {
         guard String(reflecting: type(of: value)).hasPrefix("SwiftUI.ModifiedContent<") else { return (value, []) }
         let fields = Mirror(reflecting: value).children
@@ -464,7 +498,7 @@ private func activityValue<Value>(_ value: Value) async throws -> NativeSwiftVal
 }
 
 @MainActor
-private func activityAnyValue(_ value: Any) async throws -> NativeSwiftValue {
+func activityAnyValue(_ value: Any) async throws -> NativeSwiftValue {
     @MainActor func open<Value>(_ value: Value) async throws -> NativeSwiftValue { try await activityValue(value) }
     return try await _openExistential(value, do: open)
 }
