@@ -1,6 +1,18 @@
 import Foundation
 
 package struct PreviewRendererRequest: Codable, Sendable {
+    package static let displayVariantValues: [String: [String]] = [
+        "Color Scheme": ["Light Appearance", "Dark Appearance"],
+        "Contrast": ["Standard Contrast", "Increased Contrast"],
+        "Control Borders": ["Hidden", "Shown"],
+        "Dynamic Type": ["X Small", "Small", "Medium", "Large", "X Large", "XX Large", "XXX Large",
+                         "AX 1", "AX 2", "AX 3", "AX 4", "AX 5"],
+        "Orientation": ["Portrait", "Landscape Left", "Landscape Right"],
+    ]
+    package static let activityViewStyles = ["Compact", "Compact (Landscape)", "Minimal", "Minimal (Landscape)",
+        "Expanded", "Content (Lock Screen)", "Content (StandBy)", "Content (Smart Stack)"]
+    package static let activityViewContexts = ["Normal", "Stale"]
+
     package var libraryNames: [String]
     package var registryNames: [String]
     package var fileName: String
@@ -13,11 +25,19 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var timelineIndex: Int?
     package var groupItemIndex: Int?
     package var providerTypeName: String?
+    package var displayVariantOverrides: [String: String]
+    package var activityViewStyle: String?
+    package var activityViewContext: String?
+    package var activityToggleState: Bool?
+    package var appName: String?
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
                  localization: String?, widgetFamily: String? = nil, timelineIndex: Int? = nil,
-                 groupItemIndex: Int? = nil, providerTypeName: String? = nil) {
+                 groupItemIndex: Int? = nil, providerTypeName: String? = nil,
+                 displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
+                 activityViewContext: String? = nil, activityToggleState: Bool? = nil,
+                 appName: String? = nil) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
         self.fileName = fileName
@@ -30,6 +50,11 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.timelineIndex = timelineIndex
         self.groupItemIndex = groupItemIndex
         self.providerTypeName = providerTypeName
+        self.displayVariantOverrides = displayVariantOverrides
+        self.activityViewStyle = activityViewStyle
+        self.activityViewContext = activityViewContext
+        self.activityToggleState = activityToggleState
+        self.appName = appName
     }
 }
 
@@ -43,11 +68,16 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var widgetFamilies: [String]?
     package var groupItems: [String?]?
     package var errors: [String]?
+    package var toggleStates: [Bool]?
+    package var activityViewStyles: [String]?
+    package var activityViewContexts: [String]?
 
     package init(snapshotName: String? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
                  requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil, widgetFamilies: [String]? = nil,
-                 groupItems: [String?]? = nil, errors: [String]? = nil) {
+                 groupItems: [String?]? = nil, errors: [String]? = nil,
+                 toggleStates: [Bool]? = nil, activityViewStyles: [String]? = nil,
+                 activityViewContexts: [String]? = nil) {
         self.snapshotName = snapshotName
         self.displayName = displayName
         self.sourceLineNumber = sourceLineNumber
@@ -57,5 +87,8 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.widgetFamilies = widgetFamilies
         self.groupItems = groupItems
         self.errors = errors
+        self.toggleStates = toggleStates
+        self.activityViewStyles = activityViewStyles
+        self.activityViewContexts = activityViewContexts
     }
 }
