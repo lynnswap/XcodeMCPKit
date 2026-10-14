@@ -25,6 +25,7 @@ func requireSupportedTraits(_ preview: Preview) throws {
         let name = String(reflecting: type(of: trait))
         return name == "DeveloperToolsSupport.PreviewLayoutTrait"
             || name == "DeveloperToolsSupport.PreviewInterfaceOrientationTrait"
+            || name == "DeveloperToolsSupport.AssistiveAccessTrait"
             || name == "SwiftUI.PreviewModifierTrait"
     }) else {
         throw NativePreviewPipelineRequired()
@@ -228,7 +229,7 @@ private func previewGroupItems(_ metadata: NativeSwiftValue) async throws -> [(s
 }
 
 @MainActor
-func applyPreviewModifiers(_ view: AnyView, preview: NativeSwiftValue) async throws -> AnyView {
+func applyViewPreviewTraits(_ view: AnyView, preview: NativeSwiftValue) async throws -> AnyView {
     guard let metadata = _typeByName("7SwiftUI20PreviewModifierTraitV") else {
         throw PreviewRendererError("The installed preview modifier trait is unavailable")
     }
@@ -271,6 +272,29 @@ func applyPreviewModifiers(_ view: AnyView, preview: NativeSwiftValue) async thr
         }
         content = try await _openExistential(modifier, do: apply)
     }
+    #if os(iOS) && !targetEnvironment(macCatalyst)
+    if #available(iOS 26.0, *) {
+        do {
+            let value = try await previewTraitValue(preview, named: "21DeveloperToolsSupport20AssistiveAccessTraitV")
+            guard let enabled = try value.withCopy({ $0 as? Bool }) else {
+                throw NativePreviewPipelineRequired()
+            }
+            if enabled {
+                let receiver = try await ownedPreviewValue(content)
+                // Injection consumes the effective trait through this native
+                // factory, rather than setting the public accessibility Bool.
+                let factory = try await receiver.type.resolveMethod(
+                    named: "(extension in SwiftUI):SwiftUI.View.clarityUIIdiom() -> some",
+                    as: (() -> NativeSwiftValue).self, receiverABI: .opaque(named: receiver.type.name))
+                let result = try unsafe factory.unsafeInvoke(on: receiver)
+                guard let view = try result.withCopy({ $0 as? any View }) else {
+                    throw NativePreviewPipelineRequired()
+                }
+                content = AnyView(view)
+            }
+        } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
+    }
+    #endif
     return content
 }
 
