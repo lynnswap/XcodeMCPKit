@@ -1,3 +1,31 @@
+#if (os(iOS) || os(tvOS)) && targetEnvironment(simulator)
+import Foundation
+import UIKit
+
+@MainActor
+func staticPreviewSnapshot(of view: UIView, size: CGSize, scale: CGFloat) throws -> Data {
+    // The native static FBS snapshot allocates pixels with NSNumber.unsignedIntValue.
+    let pixels = CGSize(width: CGFloat(NSNumber(value: Double(size.width * scale)).uint32Value),
+                        height: CGFloat(NSNumber(value: Double(size.height * scale)).uint32Value))
+    guard pixels.width > 0, pixels.height > 0 else {
+        throw PreviewRendererError("The preview has no drawable bitmap area: \(size)")
+    }
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = false
+    format.preferredRange = .standard
+    var drawn = false
+    let image = UIGraphicsImageRenderer(size: pixels, format: format).image { context in
+        context.cgContext.scaleBy(x: scale, y: scale)
+        drawn = view.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: true)
+    }
+    guard drawn, let data = image.pngData() else {
+        throw PreviewRendererError("The preview host could not capture its rendered view")
+    }
+    return data
+}
+#endif
+
 #if os(iOS) && targetEnvironment(simulator)
 import ABIBridge
 import CoreFoundation

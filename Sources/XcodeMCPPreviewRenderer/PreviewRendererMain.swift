@@ -264,15 +264,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             }
             layoutController.view.frame = CGRect(origin: .zero, size: size)
             layoutController.view.layoutIfNeeded()
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = window.screen.scale
-            if widget != nil || activity != nil { format.opaque = false }
-            let renderer = UIGraphicsImageRenderer(size: size, format: format)
-            var drawn = false
-            let image = renderer.image { _ in
-                drawn = controller.view.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: true)
-            }
-            guard drawn, let data = image.pngData() else { throw PreviewRendererError("The preview host could not capture its rendered view") }
+            let data = try staticPreviewSnapshot(of: controller.view, size: size, scale: window.screen.scale)
             try widget?.validate()
             try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
             let deviceLayout: Bool
