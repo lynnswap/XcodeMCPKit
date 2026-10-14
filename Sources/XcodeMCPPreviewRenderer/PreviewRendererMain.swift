@@ -60,20 +60,31 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         let displayName: String?
         let sourceLineNumber: Int?
         let groupItems: [String?]?
+        let sourceOrientation: UIInterfaceOrientation
+        var variants = request.displayVariantOverrides
         var errors: [String] = []
         if let typeName = request.providerTypeName {
             guard request.widgetFamily == nil, request.timelineIndex == nil,
-                  request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil,
-                  request.displayVariantOverrides.isEmpty else { throw NativePreviewPipelineRequired() }
+                  request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil else {
+                throw NativePreviewPipelineRequired()
+            }
             let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
-            guard preview.context == nil, preview.device == nil, preview.interfaceOrientation == .portrait else {
+            guard preview.context == nil, preview.device == nil else {
                 throw NativePreviewPipelineRequired()
             }
             widget = nil
             activity = nil
-            var content = preview.content
-            if let colorScheme = preview.colorScheme { content = AnyView(content.environment(\.colorScheme, colorScheme)) }
-            view = content
+            view = preview.content
+            if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
+                variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"
+            }
+            switch preview.interfaceOrientation {
+            case .portrait: sourceOrientation = .portrait
+            case .portraitUpsideDown: sourceOrientation = .portraitUpsideDown
+            case .landscapeLeft: sourceOrientation = .landscapeLeft
+            case .landscapeRight: sourceOrientation = .landscapeRight
+            default: throw NativePreviewPipelineRequired()
+            }
             layout = preview.layout
             displayName = preview.displayName
             sourceLineNumber = request.lineNumber
@@ -105,8 +116,9 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                  "DeveloperToolsSupport.DefaultPreviewSource<__C.UIView>",
                  "DeveloperToolsSupport.DefaultPreviewSource<__C.UIViewController>":
                 guard request.widgetFamily == nil, request.timelineIndex == nil,
-                      request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil,
-                      request.displayVariantOverrides.isEmpty else { throw NativePreviewPipelineRequired() }
+                      request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil else {
+                    throw NativePreviewPipelineRequired()
+                }
                 widget = nil
                 activity = nil
                 let result = try await makeViewPreview(source: source, groupItemIndex: request.groupItemIndex)
@@ -114,23 +126,25 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 groupItems = result.groupItems
                 errors = result.errors
                 layout = try await viewPreviewLayout(value)
+                sourceOrientation = try await viewPreviewOrientation(value)
             case "WidgetKit.TimelineEntryPreviewSource", "WidgetKit.TimelineProviderPreviewSource":
                 guard request.groupItemIndex == nil, request.activityViewStyle == nil,
                       request.activityViewContext == nil, request.activityToggleState == nil,
-                      request.displayVariantOverrides.isEmpty else { throw NativePreviewPipelineRequired() }
+                      variants.isEmpty else { throw NativePreviewPipelineRequired() }
                 let result = try await makeWidgetPreview(source: source, family: request.widgetFamily, timelineEntryIndex: request.timelineIndex)
                 widget = result
                 activity = nil
                 view = AnyView(result.view.clipShape(RoundedRectangle(cornerRadius: result.cornerRadius, style: .continuous)))
                 groupItems = nil
                 layout = .fixed(width: result.size.width, height: result.size.height)
+                sourceOrientation = .portrait
             case "WidgetKit.ActivityPreviewSource":
                 guard request.widgetFamily == nil,
-                      request.displayVariantOverrides.keys.allSatisfy({ ["Color Scheme", "Dynamic Type"].contains($0) }) else {
+                      variants.keys.allSatisfy({ ["Color Scheme", "Dynamic Type"].contains($0) }) else {
                     throw NativePreviewPipelineRequired()
                 }
                 var environment = EnvironmentValues()
-                try applyDisplayVariants(to: &environment, variants: request.displayVariantOverrides)
+                try applyDisplayVariants(to: &environment, variants: variants)
                 if let localization = request.localization { environment.locale = Locale(identifier: localization) }
                 let result = try await makeActivityPreview(source: source, timelineIndex: request.timelineIndex,
                     viewStyle: request.activityViewStyle, isStale: request.activityViewContext == "Stale",
@@ -143,6 +157,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 view = nil
                 groupItems = nil
                 layout = .device
+                sourceOrientation = result.interfaceOrientation
                 errors = result.errors
                 if let index = request.groupItemIndex { errors.append(unsupportedPreviewGroupItemMessage(index, supportsGroups: false)) }
             default: throw NativePreviewPipelineRequired()
@@ -153,20 +168,21 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             sourceLineNumber = registry.line
         }
         var size = window.bounds.size
+        let orientation = try interfaceOrientation(variant: variants["Orientation"], source: sourceOrientation)
+        // UIKit rejects upside-down geometry on the iPhone preview host. Keep
+        // the existing native route until its preview-specific scene geometry is supported.
+        if orientation == .portraitUpsideDown { throw NativePreviewPipelineRequired() }
         let controller: UIViewController
+        let rootController: UIViewController
         if let activity {
             controller = activity.controller
-            window.rootViewController = PreviewOrientationController(content: controller)
-            window.makeKeyAndVisible()
-            guard let scene = window.windowScene else { throw NativePreviewPipelineRequired() }
-            try await requestPreviewOrientation(activity.interfaceOrientation, in: scene)
-            window.layoutIfNeeded()
-            controller.view.layoutIfNeeded()
-            size = window.bounds.size
+            rootController = PreviewOrientationController(content: controller)
         } else {
             guard var view else { throw NativePreviewPipelineRequired() }
             if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }
+            view = try applyDisplayVariants(to: view, variants: variants)
             let hosting = UIHostingController(rootView: view)
+            applyDisplayVariants(to: hosting, variants: variants)
             if widget != nil { hosting.view.backgroundColor = .clear }
             switch layout {
             case .device: break
@@ -181,15 +197,27 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             default: throw NativePreviewPipelineRequired()
             }
             controller = hosting
-            window.rootViewController = controller
-            window.makeKeyAndVisible()
+            if orientation == .portrait { rootController = hosting }
+            else { rootController = try await makeCounterRotationController(content: hosting, orientation: orientation) }
         }
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
             throw PreviewRendererError("The preview has no drawable area: \(size)")
         }
-        controller.view.frame = CGRect(origin: .zero, size: size)
-        controller.view.setNeedsLayout()
-        controller.view.layoutIfNeeded()
+        window.rootViewController = rootController
+        window.makeKeyAndVisible()
+        if orientation != .portrait {
+            guard let scene = window.windowScene else { throw NativePreviewPipelineRequired() }
+            try await requestPreviewOrientation(orientation, in: scene)
+        }
+        if activity != nil {
+            window.layoutIfNeeded()
+            controller.view.layoutIfNeeded()
+        }
+        if case .device = layout { size = window.bounds.size }
+        let layoutController = activity == nil ? rootController : controller
+        layoutController.view.frame = CGRect(origin: .zero, size: size)
+        layoutController.view.setNeedsLayout()
+        layoutController.view.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
         if let activity {
             size = activity.preferredContentSize
@@ -202,8 +230,8 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 throw PreviewRendererError("The preview has no drawable area: \(size)")
             }
         }
-        controller.view.frame = CGRect(origin: .zero, size: size)
-        controller.view.layoutIfNeeded()
+        layoutController.view.frame = CGRect(origin: .zero, size: size)
+        layoutController.view.layoutIfNeeded()
         let format = UIGraphicsImageRendererFormat()
         format.scale = window.screen.scale
         if widget != nil || activity != nil { format.opaque = false }
@@ -215,12 +243,17 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         guard drawn, let data = image.pngData() else { throw PreviewRendererError("The preview host could not capture its rendered view") }
         try widget?.validate()
         try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
+        let deviceLayout: Bool
+        if case .device = layout { deviceLayout = true } else { deviceLayout = false }
         write(PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
             sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes ?? activity?.stateIndexes,
             widgetFamilies: widget?.supportedFamilies,
-            groupItems: groupItems, errors: errors, toggleStates: activity == nil ? nil : [true, false],
+            groupItems: groupItems, errors: errors,
+            toggleStates: activity == nil ? nil : [true, false],
             activityViewStyles: activity == nil ? nil : PreviewRendererRequest.activityViewStyles,
-            activityViewContexts: activity == nil ? nil : PreviewRendererRequest.activityViewContexts))
+            activityViewContexts: activity == nil ? nil : PreviewRendererRequest.activityViewContexts,
+            supportedDisplayVariants: widget == nil && activity == nil ? PreviewRendererRequest.displayVariantValues : nil,
+            usesDeviceLayout: deviceLayout && activity == nil, interfaceOrientation: try interfaceOrientationName(orientation)))
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }

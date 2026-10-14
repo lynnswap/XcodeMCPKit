@@ -56,7 +56,31 @@ struct NativePreviewOptionsTests {
     @Test func otherVariantsAndControlsKeepNativeRendering() {
         #expect(NativePreviewCorrection.directOptions(variants: ["Widget Family": "Large"], controls: [:]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: ["View Style": "Unknown Style"], controls: [:]).requiresNativePipeline)
+        #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Unknown Appearance"], controls: [:]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: [:],
             controls: ["futureControl": Optional(1) as Any]).requiresNativePipeline)
+    }
+
+    @Test func displayVariantsUseDirectRenderer() {
+        let options = NativePreviewCorrection.directOptions(variants: [
+            "Color Scheme": "Dark Appearance", "Contrast": "Increased Contrast",
+            "Dynamic Type": "AX 1", "Control Borders": "Shown", "Orientation": "Landscape Left",
+        ], controls: [:])
+        #expect(!options.requiresNativePipeline)
+    }
+
+    @Test func displayVariantsWithWidgetOptionsKeepNativeRendering() {
+        #expect(NativePreviewCorrection.directOptions(variants: [
+            "Widget Family": "Medium", "Color Scheme": "Dark Appearance",
+        ], controls: [:]).requiresNativePipeline)
+    }
+
+    @Test func activityDefaultStylePreservesTimelineAndAppearance() {
+        let options = NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Dark Appearance"],
+            controls: ["timelineIndex": Optional(1) as Any])
+        #expect(options.timelineIndex == 1)
+        #expect(options.displayVariants == ["Color Scheme": "Dark Appearance"])
+        #expect(options.activityViewStyle == nil)
+        #expect(!options.requiresNativePipeline)
     }
 }

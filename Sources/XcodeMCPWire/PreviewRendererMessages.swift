@@ -71,13 +71,18 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var toggleStates: [Bool]?
     package var activityViewStyles: [String]?
     package var activityViewContexts: [String]?
+    package var supportedDisplayVariants: [String: [String]]?
+    package var usesDeviceLayout: Bool?
+    package var interfaceOrientation: String?
 
     package init(snapshotName: String? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
                  requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil, widgetFamilies: [String]? = nil,
                  groupItems: [String?]? = nil, errors: [String]? = nil,
                  toggleStates: [Bool]? = nil, activityViewStyles: [String]? = nil,
-                 activityViewContexts: [String]? = nil) {
+                 activityViewContexts: [String]? = nil,
+                 supportedDisplayVariants: [String: [String]]? = nil, usesDeviceLayout: Bool? = nil,
+                 interfaceOrientation: String? = nil) {
         self.snapshotName = snapshotName
         self.displayName = displayName
         self.sourceLineNumber = sourceLineNumber
@@ -90,5 +95,8 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.toggleStates = toggleStates
         self.activityViewStyles = activityViewStyles
         self.activityViewContexts = activityViewContexts
+        self.supportedDisplayVariants = supportedDisplayVariants
+        self.usesDeviceLayout = usesDeviceLayout
+        self.interfaceOrientation = interfaceOrientation
     }
 }
