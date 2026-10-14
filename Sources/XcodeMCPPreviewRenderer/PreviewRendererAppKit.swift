@@ -23,11 +23,13 @@ struct PreviewRendererAppKit {
         let request = try loadPreviewRequest()
         let content = try await makeGeneralPreview(request)
         let controller = NSHostingController(rootView: content.view)
-        var size: CGSize
+        let proposal = CGSize(width: 600, height: 400)
+        let size: CGSize
         switch content.layout {
-        case .device, .sizeThatFits:
-            controller.view.layoutSubtreeIfNeeded()
-            size = controller.view.fittingSize
+        case .device:
+            size = proposal
+        case .sizeThatFits:
+            size = controller.sizeThatFits(in: proposal)
         case .fixed(let width, let height):
             size = CGSize(width: width, height: height)
         default: throw NativePreviewPipelineRequired()
@@ -38,7 +40,7 @@ struct PreviewRendererAppKit {
         let usesDeviceLayout: Bool
         if case .device = content.layout { usesDeviceLayout = true }
         else { usesDeviceLayout = false }
-        let style: NSWindow.StyleMask = usesDeviceLayout ? [.titled, .closable, .miniaturizable, .resizable] : [.borderless]
+        let style: NSWindow.StyleMask = usesDeviceLayout ? [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView] : [.borderless]
         let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size),
             styleMask: style, backing: .buffered, defer: false)
         if let color = content.variants["Color Scheme"] {
@@ -54,7 +56,6 @@ struct PreviewRendererAppKit {
         window.layoutIfNeeded()
         controller.view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
-        if case .sizeThatFits = content.layout { window.setContentSize(controller.view.fittingSize) }
         window.layoutIfNeeded()
         controller.view.layoutSubtreeIfNeeded()
         let snapshotView = unsafe usesDeviceLayout ? (window.contentView?.superview ?? controller.view) : controller.view
