@@ -1,6 +1,15 @@
 import Foundation
 
 package struct PreviewRendererRequest: Codable, Sendable {
+    package static let displayVariantValues: [String: [String]] = [
+        "Color Scheme": ["Light Appearance", "Dark Appearance"],
+        "Contrast": ["Standard Contrast", "Increased Contrast"],
+        "Control Borders": ["Hidden", "Shown"],
+        "Dynamic Type": ["X Small", "Small", "Medium", "Large", "X Large", "XX Large", "XXX Large",
+                         "AX 1", "AX 2", "AX 3", "AX 4", "AX 5"],
+        "Orientation": ["Portrait", "Landscape Left", "Landscape Right"],
+    ]
+
     package var libraryNames: [String]
     package var registryNames: [String]
     package var fileName: String
@@ -13,11 +22,13 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var timelineIndex: Int?
     package var groupItemIndex: Int?
     package var providerTypeName: String?
+    package var displayVariantOverrides: [String: String]
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
                  localization: String?, widgetFamily: String? = nil, timelineIndex: Int? = nil,
-                 groupItemIndex: Int? = nil, providerTypeName: String? = nil) {
+                 groupItemIndex: Int? = nil, providerTypeName: String? = nil,
+                 displayVariantOverrides: [String: String] = [:]) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
         self.fileName = fileName
@@ -30,6 +41,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.timelineIndex = timelineIndex
         self.groupItemIndex = groupItemIndex
         self.providerTypeName = providerTypeName
+        self.displayVariantOverrides = displayVariantOverrides
     }
 }
 
@@ -43,11 +55,16 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var widgetFamilies: [String]?
     package var groupItems: [String?]?
     package var errors: [String]?
+    package var supportedDisplayVariants: [String: [String]]?
+    package var usesDeviceLayout: Bool?
+    package var interfaceOrientation: String?
 
     package init(snapshotName: String? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
                  requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil, widgetFamilies: [String]? = nil,
-                 groupItems: [String?]? = nil, errors: [String]? = nil) {
+                 groupItems: [String?]? = nil, errors: [String]? = nil,
+                 supportedDisplayVariants: [String: [String]]? = nil, usesDeviceLayout: Bool? = nil,
+                 interfaceOrientation: String? = nil) {
         self.snapshotName = snapshotName
         self.displayName = displayName
         self.sourceLineNumber = sourceLineNumber
@@ -57,5 +74,8 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.widgetFamilies = widgetFamilies
         self.groupItems = groupItems
         self.errors = errors
+        self.supportedDisplayVariants = supportedDisplayVariants
+        self.usesDeviceLayout = usesDeviceLayout
+        self.interfaceOrientation = interfaceOrientation
     }
 }

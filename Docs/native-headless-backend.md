@@ -174,9 +174,25 @@ available without leaving SwiftUI's graph waiting for injection.
 It supports the preview's device, fixed-size, or size-that-fits layout and a locale
 override. Locale overrides set the renderer's launch language preferences and
 SwiftUI environment. The response's `supportedLocalizations` comes from Xcode's
-workspace. The image captures the rectangular hosting view; hardware display
-cutout masks are not applied.
+workspace. Device-layout snapshots apply the selected Simulator device's
+framebuffer mask; fixed-size and size-that-fits snapshots retain their rectangular
+hosting view. The longest image dimension is capped at 1500 pixels without
+upscaling smaller images.
+Camera cutouts and exact native safe-area geometry remain tracked in
+[the snapshot parity issue](https://github.com/lynnswap/XcodeMCPKit/issues/311).
 Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
+
+Ordinary SwiftUI and UIKit previews accept Color Scheme, Contrast, Dynamic Type,
+Control Borders, and Orientation overrides in `previewVariantOverrides`.
+`supportedPreviewVariantOverrides` returns their native display names and values.
+Color scheme, contrast, and Dynamic Type reach both the SwiftUI environment and
+UIKit hosting traits. Control Borders uses SwiftUI's button-shapes environment.
+Portrait and landscape source traits and orientation overrides use the native
+counterrotation controller and the window scene's orientation. Upside-down portrait
+retains the native pipeline: UIKit rejects that geometry on the iPhone host even
+when its app and controller support all orientations. Its preview-specific scene
+geometry is tracked with the remaining safe-area work in
+[the snapshot parity issue](https://github.com/lynnswap/XcodeMCPKit/issues/311).
 
 UIKit previews retain their actual `UIView` or `UIViewController` in standard
 SwiftUI representables. An `arguments:` group uses its native group closure and
@@ -190,9 +206,8 @@ providers remain unavailable with Xcode 27.1, whose native RenderPreview also
 reports `preview provider not found` for those definitions.
 `PreviewModifier` calls `makeSharedContext()` once per concrete modifier type in
 each render and applies the native modifier wrappers in their original order.
-Provider contexts, device overrides, and non-portrait orientations still use
-the native pipeline, along with display traits and variants beyond the layouts
-and localization described above.
+Provider contexts, device overrides, and other display traits, variants, or controls
+still use the native pipeline.
 
 Widget previews support `StaticConfiguration` and `AppIntentConfiguration` in the
 Small and Medium families. Previews can provide explicit `timeline:` entries or a

@@ -42,10 +42,26 @@ struct NativePreviewOptionsTests {
 
     @Test func otherVariantsAndControlsKeepNativeRendering() {
         #expect(NativePreviewCorrection.directOptions(variants: ["Widget Family": "Large"], controls: [:]).requiresNativePipeline)
-        #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Dark Appearance"], controls: [:]).requiresNativePipeline)
+        #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Unknown Appearance"], controls: [:]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: [:],
             controls: ["toggleState": Optional(false) as Any]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: [:],
             controls: ["futureControl": Optional(1) as Any]).requiresNativePipeline)
+    }
+
+    @Test func displayVariantsUseDirectRenderer() {
+        let options = NativePreviewCorrection.directOptions(variants: [
+            "Color Scheme": "Dark Appearance", "Contrast": "Increased Contrast",
+            "Dynamic Type": "AX 1", "Control Borders": "Shown", "Orientation": "Landscape Left",
+        ], controls: [:])
+        #expect(!options.requiresNativePipeline)
+    }
+
+    @Test func displayVariantsWithWidgetOptionsKeepNativeRendering() {
+        #expect(NativePreviewCorrection.directOptions(variants: [
+            "Widget Family": "Medium", "Color Scheme": "Dark Appearance",
+        ], controls: [:]).requiresNativePipeline)
+        #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Dark Appearance"],
+            controls: ["timelineIndex": Optional(1) as Any]).requiresNativePipeline)
     }
 }
