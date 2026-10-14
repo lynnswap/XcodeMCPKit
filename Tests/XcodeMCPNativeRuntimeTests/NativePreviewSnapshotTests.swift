@@ -39,11 +39,12 @@ struct NativePreviewSnapshotTests {
     }
 
     @Test func thinPreviewRetainsADrawableThumbnail() throws {
-        let source = try image(width: 3, height: 6000)
+        let source = try image(width: 1, height: 6000)
         let thumbnail = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
             framebufferMask: nil, rotationDegrees: nil, swapsAxes: false))
         #expect(thumbnail.width == 1)
         #expect(thumbnail.height == 1500)
+        #expect(NSBitmapImageRep(cgImage: thumbnail).colorAt(x: 0, y: 750)?.alphaComponent == 1)
     }
 
     private func image(width: Int, height: Int) throws -> CGImage {
