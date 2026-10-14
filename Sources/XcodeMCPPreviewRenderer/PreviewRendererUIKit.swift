@@ -50,6 +50,9 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
         #endif
         var size = window.bounds.size
+        #if os(tvOS)
+        size = window.screen.bounds.size
+        #endif
         switch content.layout {
         case .device: break
         case .fixed(let width, let height):
@@ -58,39 +61,50 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             #endif
             size = CGSize(width: width, height: height)
         case .sizeThatFits:
+            #if !os(tvOS)
             controller.safeAreaRegions = []
             controller.sizingOptions = .intrinsicContentSize
             size = controller.view.intrinsicContentSize
+            #endif
         default: throw NativePreviewPipelineRequired()
         }
         #if os(tvOS)
-        if case .fixed = content.layout {
-            let result = try await PreviewSnapshotWindow.withWindow(from: window, size: size) { window in
-                try await capture(in: window, controller: controller, layout: content.layout,
-                                  size: size, result: content.result)
-            }
-            write(result)
-            return
+        let result = try await PreviewSnapshotWindow.withWindow(from: window, size: size) { snapshot in
+            try await capture(in: snapshot.window, controller: controller, layout: content.layout,
+                              size: size, result: content.result, resizeWindow: { size in try await snapshot.resize(to: size) })
         }
-        #endif
+        #else
         let result = try await capture(in: window, controller: controller, layout: content.layout,
                                        size: size, result: content.result)
+        #endif
         write(result)
     }
 
     private func capture(in window: UIWindow, controller: UIHostingController<AnyView>,
                          layout: DeveloperToolsSupport.PreviewLayout, size initialSize: CGSize,
-                         result initialResult: PreviewRendererResult) async throws -> PreviewRendererResult {
+                         result initialResult: PreviewRendererResult,
+                         resizeWindow: ((CGSize) async throws -> Void)? = nil) async throws -> PreviewRendererResult {
         var size = initialSize
         window.rootViewController = controller
         window.makeKeyAndVisible()
+        #if os(tvOS)
+        if case .sizeThatFits = layout {} else { controller.view.frame = CGRect(origin: .zero, size: size) }
+        #else
         controller.view.frame = CGRect(origin: .zero, size: size)
+        #endif
         controller.view.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
-        if case .sizeThatFits = layout { size = controller.view.intrinsicContentSize }
+        if case .sizeThatFits = layout {
+            #if os(tvOS)
+            size = controller.sizeThatFits(in: window.screen.bounds.size)
+            #else
+            size = controller.view.intrinsicContentSize
+            #endif
+        }
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
             throw PreviewRendererError("The preview has no drawable area: \(size)")
         }
+        if case .sizeThatFits = layout { try await resizeWindow?(size) }
         controller.view.frame = CGRect(origin: .zero, size: size)
         controller.view.layoutIfNeeded()
         #if os(tvOS)

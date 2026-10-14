@@ -231,12 +231,14 @@ bounds apply the requested orientation. This path was verified on iOS 27.2 with
 Xcode 27.1 and uses ABIBridge 0.9.0's existing Objective-C APIs. Unavailable private
 scene APIs use the native pipeline.
 
-On tvOS, fixed-size previews use the same scene owner with the source's requested
-frame and the original scene's display and orientation settings. The hosting
-controller retains its native safe-area regions, so overscan applies to all sides
-of the preview frame. Its background comes from UIKit's native
+On tvOS, previews use the same scene owner with the original scene's display and
+orientation settings. Fixed-size previews use the source's requested frame;
+device previews use the display bounds. `sizeThatFits` measures with the finite
+display size and resizes the scene to the result. The hosting controller retains
+its default sizing options and native safe-area regions, so overscan applies to
+all sides of the preview frame. Its background comes from UIKit's native
 `systemBackgroundColor` selector, which the public tvOS color API does not expose.
-This scene and background path was verified on tvOS 27.0 with Xcode 27.1.
+All three layouts were verified on tvOS 27.0 with Xcode 27.1.
 Unavailable private scene or color bindings use the native pipeline.
 
 Static iOS and tvOS snapshots allocate integer pixel dimensions with the native
@@ -244,6 +246,10 @@ FBS snapshot's unsigned conversion and use a standard 8-bit renderer. The view's
 point frame and drawing rectangle are retained, including fractional dimensions.
 
 Each render owns a fresh, nonpersistent scene session with a passive delegate.
+After UIKit connects, the owner sends the workspace's initial nil-diff settings
+notification to the scene delegate and waits for its commit response. This lets
+UIKit retain its previous settings before later frame updates. The response can
+arrive on a Core Animation queue, so the completion only resumes the caller.
 It disconnects the window scene, removes its session, and invalidates the native
 scene on its call-out queue after capture, failure, or cancellation. The original
 scene and session remain connected. A cleanup failure is returned with the render

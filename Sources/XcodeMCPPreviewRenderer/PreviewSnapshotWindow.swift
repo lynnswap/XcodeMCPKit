@@ -40,22 +40,46 @@ final class PreviewSnapshotWindow {
     #if os(iOS)
     static func withWindow<Output>(from original: UIWindow, orientation: UIInterfaceOrientation,
                                   perform operation: (UIWindow) async throws -> Output) async throws -> Output {
-        try await withWindow(from: original, geometry: .display(orientation: orientation), perform: operation)
+        try await withWindow(from: original, geometry: .display(orientation: orientation)) { owner in
+            try await operation(owner.window)
+        }
     }
     #else
     static func withWindow<Output>(from original: UIWindow, size: CGSize,
-                                  perform operation: (UIWindow) async throws -> Output) async throws -> Output {
+                                  perform operation: (PreviewSnapshotWindow) async throws -> Output) async throws -> Output {
         try await withWindow(from: original, geometry: .custom(size: size), perform: operation)
+    }
+
+    func resize(to size: CGSize) async throws {
+        do {
+            guard let scene = window.windowScene,
+                  let native = try await Self.object(scene, "_FBSScene"),
+                  let settings = try await Self.object(native, "settings"),
+                  let mutable = try await Self.object(settings, "mutableCopy") else { throw NativePreviewPipelineRequired() }
+            let runtime = ABIRuntime.shared
+            let frame = try await runtime.resolveObjCMethod(on: type(of: mutable), selector: "setFrame:", as: ((CGRect) -> Void).self)
+            typealias SettingsAction = @convention(block) (AnyObject, AnyObject) -> Void
+            let update = try await runtime.object(native).resolveMethod(selector: "updateSettings:", as: ((@escaping SettingsAction) -> Void).self)
+            var updateError: (any Error)?
+            let configure: SettingsAction = { settings, _ in
+                MainActor.assumeIsolated {
+                    do { try unsafe frame.unsafeInvoke(on: settings, CGRect(origin: .zero, size: size)) }
+                    catch { updateError = error }
+                }
+            }
+            try unsafe update.unsafeInvoke(configure)
+            if let updateError { throw updateError }
+        } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
     }
     #endif
 
     private static func withWindow<Output>(from original: UIWindow, geometry: Geometry,
-                                          perform operation: (UIWindow) async throws -> Output) async throws -> Output {
+                                          perform operation: (PreviewSnapshotWindow) async throws -> Output) async throws -> Output {
         let owner: PreviewSnapshotWindow
         do { owner = try await connect(from: original, geometry: geometry) }
         catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
         let output: Output
-        do { output = try await operation(owner.window) }
+        do { output = try await operation(owner) }
         catch {
             let operationError = error
             do { try await owner.close() }
@@ -191,6 +215,7 @@ final class PreviewSnapshotWindow {
             if let updateError { throw updateError }
             guard let scene = try unsafe connect.unsafeInvoke(nativeScene, transition) as? UIWindowScene else { throw NativePreviewPipelineRequired() }
             connectedScene = scene
+            try await synchronizeInitialSettings(of: nativeScene, transitionContext: transition)
             let window = UIWindow(windowScene: scene)
             let session = scene.session
             let owner = PreviewSnapshotWindow(window: window,
@@ -212,6 +237,26 @@ final class PreviewSnapshotWindow {
                     invalidateNativeScene: invalidateNative)
             } catch { throw PreviewRendererError("\(operationError); snapshot scene cleanup also failed: \(error)") }
             throw operationError
+        }
+    }
+
+    private static func synchronizeInitialSettings(of nativeScene: AnyObject, transitionContext: AnyObject?) async throws {
+        guard let settings = try await object(nativeScene, "settings"),
+              let delegate = try await object(nativeScene, "delegate") else { throw NativePreviewPipelineRequired() }
+        let runtime = ABIRuntime.shared
+        let isUISettings = try await runtime.object(settings).resolveMethod(selector: "isUISubclass", as: (() -> Bool).self)
+        guard try unsafe isUISettings.unsafeInvoke() else { throw NativePreviewPipelineRequired() }
+        typealias Completion = @convention(block) @Sendable (AnyObject?) -> Void
+        let initialize = try await runtime.object(delegate).resolveMethod(
+            selector: "scene:didUpdateWithDiff:transitionContext:completion:",
+            as: ((AnyObject, AnyObject?, AnyObject?, @escaping Completion) -> Void).self)
+        // UIApplication's workspace connection sends this nil-diff notification
+        // after _connect. It primes UIKit's previous settings before a resize.
+        // The commit-response completion may arrive off the main executor.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            let completion: Completion = { _ in continuation.resume() }
+            do { try unsafe initialize.unsafeInvoke(nativeScene, nil, transitionContext, completion) }
+            catch { continuation.resume(throwing: error) }
         }
     }
 
