@@ -23,17 +23,7 @@ struct PreviewRendererWatch: App {
     @MainActor
     private func render() async throws {
         let content = try await makeGeneralPreview(loadPreviewRequest())
-        let size: CGSize?
-        switch content.layout {
-        case .device: size = WKInterfaceDevice.current().screenBounds.size
-        case .fixed(let width, let height): size = CGSize(width: width, height: height)
-        case .sizeThatFits: size = nil
-        default: throw NativePreviewPipelineRequired()
-        }
-        let renderer = ImageRenderer(content: content.view)
-        if let size { renderer.proposedSize = ProposedViewSize(size) }
-        renderer.scale = WKInterfaceDevice.current().screenScale
-        guard let image = renderer.cgImage else { throw PreviewRendererError("The preview host could not capture its rendered view") }
+        let image = try await captureWatchPreview(view: content.view, layout: content.layout)
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
             throw PreviewRendererError("The preview host could not create a PNG destination")

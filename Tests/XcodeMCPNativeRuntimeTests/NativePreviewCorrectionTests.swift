@@ -56,6 +56,17 @@ struct NativePreviewCorrectionTests {
         #expect(try Data(contentsOf: app.appendingPathComponent("Contents/Resources/Marker.txt")) == Data("resource".utf8))
     }
 
+    @Test func watchRendererRunsWithoutACompanionApp() {
+        let original: [String: Any] = ["CFBundleIdentifier": "dev.lynnswap.WatchFixture",
+            "WKCompanionAppBundleIdentifier": "dev.lynnswap.Companion", "WKRunsIndependentlyOfCompanionApp": true]
+        let info = NativePreviewCorrection.rendererInfo(original, platform: .watchOS)
+        #expect(info["WKApplication"] as? Bool == true)
+        #expect(info["WKWatchOnly"] as? Bool == true)
+        #expect(info["WKCompanionAppBundleIdentifier"] == nil)
+        #expect(info["WKRunsIndependentlyOfCompanionApp"] == nil)
+        #expect(info["CFBundleIdentifier"] as? String == "dev.lynnswap.WatchFixture")
+    }
+
     @Test func ambiguousHostsRequireNativePipeline() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = root.appendingPathComponent("SharedView.swift")

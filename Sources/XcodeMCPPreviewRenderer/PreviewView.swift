@@ -99,13 +99,15 @@ func makeViewPreview(source: NativeSwiftValue, groupItemIndex: Int? = nil) async
         bodyArgument = .type(NSView.self)
         makeView = { body in
             guard let view = try body.withCopy({ $0 as? NSView }) else { throw PreviewRendererError("The installed preview body is not an NSView") }
-            return AnyView(PreviewNSView(view: view))
+            return AnyView(PreviewNSView(view: view).frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .controlBackgroundColor)))
         }
     case "DeveloperToolsSupport.DefaultPreviewSource<__C.NSViewController>":
         bodyArgument = .type(NSViewController.self)
         makeView = { body in
             guard let controller = try body.withCopy({ $0 as? NSViewController }) else { throw PreviewRendererError("The installed preview body is not an NSViewController") }
-            return AnyView(PreviewNSViewController(controller: controller))
+            return AnyView(PreviewNSViewController(controller: controller).frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .controlBackgroundColor)))
         }
     #endif
     default: throw NativePreviewPipelineRequired()
@@ -294,14 +296,52 @@ private struct PreviewUIViewController: UIViewControllerRepresentable {
 #elseif os(macOS)
 private struct PreviewNSView: NSViewRepresentable {
     let view: NSView
-    func makeNSView(context: Context) -> NSView { view }
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func makeNSView(context: Context) -> PreviewNSViewContainer { PreviewNSViewContainer(content: view) }
+    func updateNSView(_ nsView: PreviewNSViewContainer, context: Context) {}
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: PreviewNSViewContainer, context: Context) -> CGSize? {
+        nsView.fittingSize
+    }
 }
 
 private struct PreviewNSViewController: NSViewControllerRepresentable {
     let controller: NSViewController
-    func makeNSViewController(context: Context) -> NSViewController { controller }
+    func makeNSViewController(context: Context) -> NSViewController {
+        let container = NSViewController()
+        container.addChild(controller)
+        container.view = PreviewNSViewContainer(content: controller.view)
+        return container
+    }
     func updateNSViewController(_ nsViewController: NSViewController, context: Context) {}
+    func sizeThatFits(_ proposal: ProposedViewSize, nsViewController: NSViewController, context: Context) -> CGSize? {
+        nsViewController.view.fittingSize
+    }
+}
+
+// Containment preserves the AppKit body's control styling instead of letting
+// SwiftUI's representable adapter restyle a leaf control.
+private final class PreviewNSViewContainer: NSView {
+    let content: NSView
+
+    init(content: NSView) {
+        self.content = content
+        super.init(frame: .zero)
+        addSubview(content)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var fittingSize: NSSize {
+        let size = content.fittingSize
+        return NSSize(width: size.width > 0 ? size.width : content.frame.width,
+                      height: size.height > 0 ? size.height : content.frame.height)
+    }
+
+    override func layout() {
+        super.layout()
+        let size = fittingSize
+        content.frame = NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
+                               width: size.width, height: size.height)
+    }
 }
 #endif
 

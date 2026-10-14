@@ -11,7 +11,6 @@ struct PreviewRendererAppKit {
     static func main() {
         let application = NSApplication.shared
         application.setActivationPolicy(.prohibited)
-        application.appearance = NSAppearance(named: .aqua)
         Task { @MainActor in
             do { writeDesktopPreviewResult(try await render()) }
             catch is NativePreviewPipelineRequired { writeDesktopPreviewResult(PreviewRendererResult(requiresNativePipeline: true)) }

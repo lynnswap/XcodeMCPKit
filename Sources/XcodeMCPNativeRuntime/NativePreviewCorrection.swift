@@ -665,6 +665,7 @@ final class NativePreviewCorrection {
             info["WKApplication"] = true
             info["WKWatchOnly"] = true
             info["WKRunsIndependentlyOfCompanionApp"] = nil
+            info["WKCompanionAppBundleIdentifier"] = nil
         }
         return info
     }
