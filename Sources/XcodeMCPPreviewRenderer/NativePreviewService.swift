@@ -1,4 +1,4 @@
-#if os(iOS) && targetEnvironment(simulator)
+#if (os(iOS) || os(watchOS)) && targetEnvironment(simulator)
 import ABIBridge
 import Darwin
 import Foundation

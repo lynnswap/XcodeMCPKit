@@ -1,4 +1,4 @@
-#if os(iOS) && targetEnvironment(simulator)
+#if (os(iOS) || os(watchOS)) && targetEnvironment(simulator)
 import ABIBridge
 import ABIBridgeCore
 import Darwin
@@ -56,7 +56,8 @@ struct WidgetVariantCatalog {
                 return value
             }
         }
-        return try await widgetAnyValue(_openExistential(example, do: array))
+        let values = try _openExistential(example, do: array)
+        return try await _openExistential(values, do: ownedPreviewValue)
     }
 }
 
@@ -151,6 +152,7 @@ private func widgetVariantField(_ value: Any, _ name: String) throws -> Any {
     return value
 }
 
+#if os(iOS)
 @MainActor
 func applyWidgetEffects(_ effects: NativeSwiftValue, to environment: inout EnvironmentValues) async throws -> WidgetFamily? {
     let runtime = ABIRuntime.shared
@@ -173,6 +175,7 @@ func applyWidgetEffects(_ effects: NativeSwiftValue, to environment: inout Envir
     environment.isLuminanceReduced = try unsafe luminance.unsafeInvoke(on: effects)
     return family
 }
+#endif
 
 @MainActor @safe
 private final class WidgetVariantABI {

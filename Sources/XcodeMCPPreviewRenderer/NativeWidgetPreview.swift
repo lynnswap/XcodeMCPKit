@@ -1,7 +1,13 @@
-#if os(iOS) && targetEnvironment(simulator)
+#if (os(iOS) || os(watchOS)) && targetEnvironment(simulator)
 import ABIBridge
 import Foundation
+#if os(iOS)
 import UIKit
+#else
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
+#endif
 import XcodeMCPWire
 
 @MainActor
@@ -253,8 +259,20 @@ private struct NativeWidgetPreview {
         let makeImage = try await bitmapType.resolveMethod(named: "makeImage() throws -> __C.CGImageRef",
             as: (() throws -> CGImage).self, receiverABI: .opaque(named: bitmapType.name))
         let image = try unsafe makeImage.unsafeInvoke(on: bitmap)
+        #if os(iOS)
         guard let data = UIImage(cgImage: image).pngData() else { throw PreviewRendererError("The native preview bitmap could not encode as PNG") }
         return data
+        #else
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
+            throw PreviewRendererError("The native preview bitmap could not create a PNG destination")
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw PreviewRendererError("The native preview bitmap could not encode as PNG")
+        }
+        return data as Data
+        #endif
     }
 }
 #endif

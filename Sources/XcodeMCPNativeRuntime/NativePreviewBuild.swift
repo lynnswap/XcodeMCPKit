@@ -532,7 +532,7 @@ extension NativePreviewBuild {
         }
     }
 
-    private func decodePreviewValue(_ data: Data, named name: String) async throws -> NativeSwiftValue {
+    func decodePreviewValue(_ data: Data, named name: String) async throws -> NativeSwiftValue {
         guard let dictionary = try unsafe PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
             throw NativeRuntimeError.invocation("The preview metadata is not a serializable dictionary")
         }

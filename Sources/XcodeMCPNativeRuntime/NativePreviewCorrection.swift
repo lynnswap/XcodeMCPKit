@@ -320,6 +320,7 @@ final class NativePreviewCorrection {
         var renderer = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
             platform: platform, process: process, metadataOnly: needsMetadata ? true : nil)
         var sourceMetadata: Data?
+        var sourceProviderDescription: Data?
         if needsMetadata {
             let response: PreviewRendererResult
             if platform.isSimulator {
@@ -331,6 +332,7 @@ final class NativePreviewCorrection {
                 throw NativeRuntimeError.invocation("The preview process returned no native metadata")
             }
             sourceMetadata = metadata
+            sourceProviderDescription = response.nativeProviderPreviewDescription
             guard let evaluated = try await builder.selectDestination(workspace: workspace, source: location.source,
                 input: input.nativeValue, metadata: metadata,
                 providerDescription: response.nativeProviderPreviewDescription) else { throw NativePipelineRequired() }
@@ -349,15 +351,20 @@ final class NativePreviewCorrection {
             }
         }
         let nativeContainingApp: URL?
-        if platform == .iOS, let metadata = sourceMetadata,
+        if (platform == .iOS || platform == .watchOS), let metadata = sourceMetadata,
            try await builder.isWidgetPreview(metadata: metadata),
            renderer.product.pathExtension == "appex", let containingApp = renderer.containingApp,
-           let registry = location.registry, let moduleName = renderer.request.moduleName,
            let extensionIdentifier = try Self.bundleInfo(at: renderer.product)["CFBundleIdentifier"] as? String {
             let info = try Self.bundleInfo(at: renderer.product)
             guard (info["NSExtension"] as? [String: Any])?["NSExtensionPointIdentifier"] as? String == "com.apple.widgetkit-extension" else {
                 throw NativePipelineRequired()
             }
+            let specification: Data
+            if let registry = location.registry, let moduleName = renderer.request.moduleName {
+                specification = try await registrySpecification(registry: registry, moduleName: moduleName)
+            } else if let providerName = renderer.request.providerTypeName, let sourceProviderDescription {
+                specification = try await providerSpecification(name: providerName, description: sourceProviderDescription)
+            } else { throw NativePipelineRequired() }
             let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
             try FileManager.default.removeItem(at: app)
             try Self.prepareApp(product: renderer.product, helper: helper, app: app, containingApp: containingApp, platform: platform,
@@ -365,7 +372,7 @@ final class NativePreviewCorrection {
             renderer.request.libraryNames = []
             renderer.request.registryNames = []
             renderer.request.nativeSource = PreviewRendererNativeSource(extensionIdentifier: extensionIdentifier,
-                specification: try await registrySpecification(registry: registry, moduleName: moduleName),
+                specification: specification,
                 metadata: metadata, variantOverrides: input.variantOverrides)
             try await writeRendererRequest(renderer.request, app: app, platform: platform, signing: ["--force", "--sign", "-"], process: process)
             nativeContainingApp = containingApp
@@ -693,7 +700,6 @@ final class NativePreviewCorrection {
         let runtime = ABIRuntime.shared
         let model = ImageSelector.path(installation.framework("PreviewsModel", in: "SharedFrameworks"))
         let messaging = ImageSelector.path(installation.framework("PreviewsMessagingHost", in: "SharedFrameworks"))
-        let foundation = ImageSelector.path(installation.framework("PreviewsFoundationHost", in: "SharedFrameworks"))
         let optionalUUID = try await runtime.resolveSwiftType(named: "Swift.Optional", genericArguments: [.type(UUID.self)])
         let getSidecar = try await registry.type.resolveGetter(
             named: "sidecarIdentifier.getter : Swift.Optional<Foundation.UUID>", as: (() -> NativeSwiftValue).self,
@@ -723,11 +729,38 @@ final class NativePreviewCorrection {
             valueABIs: [idType: .opaque(named: idType.name), locationType: .opaque(named: locationType.name),
                         specificationType: .opaque(named: specificationType.name)])
         let specification = try unsafe makeSpecification.unsafeInvoke(id, location)
+        return try await previewSpecificationData(specification)
+    }
+
+    private func providerSpecification(name: String, description: Data) async throws -> Data {
+        let runtime = ABIRuntime.shared
+        let messaging = ImageSelector.path(installation.framework("PreviewsMessagingHost", in: "SharedFrameworks"))
+        let providerType = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.ProviderPayload", in: messaging)
+        let makeProvider = try await providerType.resolveInitializer(
+            named: "init(providerName: Swift.String) -> PreviewsMessagingHost.ProviderPayload",
+            as: ((String) -> NativeSwiftValue).self, valueABIs: [providerType: .opaque(named: providerType.name)])
+        let provider = try unsafe makeProvider.unsafeInvoke(name)
+        let description = try await builder.decodePreviewValue(description, named: "PreviewDescription")
+        let getIndex = try await description.type.resolveGetter(named: "index.getter : Swift.Int",
+            as: (() -> Int).self, receiverABI: .opaque(named: description.type.name))
+        let index = try unsafe getIndex.unsafeInvoke(on: description)
+        let specificationType = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.PreviewSpecification", in: messaging)
+        let makeSpecification = try await specificationType.resolveStaticMethod(
+            named: "providerPreview(provider: PreviewsMessagingHost.ProviderPayload, indexInProvider: Swift.Int) -> PreviewsMessagingHost.PreviewSpecification",
+            as: ((NativeSwiftValue, Int) -> NativeSwiftValue).self,
+            valueABIs: [providerType: .opaque(named: providerType.name), specificationType: .opaque(named: specificationType.name)])
+        let specification = try unsafe makeSpecification.unsafeInvoke(provider, index)
+        return try await previewSpecificationData(specification)
+    }
+
+    private func previewSpecificationData(_ specification: NativeSwiftValue) async throws -> Data {
+        let runtime = ABIRuntime.shared
+        let foundation = ImageSelector.path(installation.framework("PreviewsFoundationHost", in: "SharedFrameworks"))
         let propertyListType = try await runtime.resolveSwiftType(named: "PreviewsFoundationHost.PropertyList", in: foundation)
-        let encode = try await specificationType.resolveGetter(
+        let encode = try await specification.type.resolveGetter(
             named: "propertyListValue.getter : PreviewsFoundationHost.PropertyList", as: (() -> NativeSwiftValue).self,
             valueABIs: [propertyListType: .opaque(named: propertyListType.name)],
-            receiverABI: .opaque(named: specificationType.name))
+            receiverABI: .opaque(named: specification.type.name))
         let propertyList = try unsafe encode.unsafeInvoke(on: specification)
         let dictionaryType = try await runtime.resolveSwiftType(named: "Swift.Dictionary",
             genericArguments: [.type(String.self), .type(Any.self)])
