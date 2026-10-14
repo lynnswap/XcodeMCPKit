@@ -265,7 +265,10 @@ final class NativePreviewCorrection {
             fileName: source.lastPathComponent, moduleName: selection.source.moduleName, lineNumber: location.line, columnNumber: location.column,
             definitionIndex: input.index, localization: input.localization, widgetFamily: input.widgetFamily,
             timelineIndex: input.timelineIndex, groupItemIndex: input.groupItemIndex,
-            providerTypeName: providerName, displayVariantOverrides: input.displayVariants)
+            providerTypeName: providerName, displayVariantOverrides: input.displayVariants,
+            activityViewStyle: input.activityViewStyle, activityViewContext: input.activityViewContext,
+            activityToggleState: input.activityToggleState,
+            appName: try Self.appName(product: product, containingApp: containingApp, localization: input.localization))
         try JSONEncoder().encode(request).write(to: app.appendingPathComponent("PreviewRequest.json"))
         var signing = ["--force", "--sign", "-"]
         if let signedEntitlements = entitlements.signed {
@@ -320,9 +323,11 @@ final class NativePreviewCorrection {
             fields["displayName"] = .string(response.displayName ?? location.displayName)
             if let line = response.sourceLineNumber { fields["sourceLineNumber"] = .number(.int(Int64(line))) }
             if let indexes = response.timelineIndexes {
-                fields["supportedCanvasControlOverrides"] = .object([
+                var controls: [String: JSONValue] = [
                     "timelineIndexes": .array(indexes.map { .number(.int(Int64($0))) }),
-                ])
+                ]
+                if let states = response.toggleStates { controls["toggleStates"] = .array(states.map(JSONValue.bool)) }
+                fields["supportedCanvasControlOverrides"] = .object(controls)
             }
             if let items = response.groupItems {
                 fields["supportedCanvasControlOverrides"] = .object([
@@ -340,6 +345,14 @@ final class NativePreviewCorrection {
             }
             if let variants = response.supportedDisplayVariants {
                 fields["supportedPreviewVariantOverrides"] = .object(variants.mapValues { .array($0.map(JSONValue.string)) })
+            }
+            if let styles = response.activityViewStyles, let contexts = response.activityViewContexts {
+                fields["supportedPreviewVariantOverrides"] = .object([
+                    "View Style": .array(styles.map(JSONValue.string)),
+                    "Activity View Context": .array(contexts.map(JSONValue.string)),
+                    "Color Scheme": .array(PreviewRendererRequest.displayVariantValues["Color Scheme", default: []].map(JSONValue.string)),
+                    "Dynamic Type": .array(PreviewRendererRequest.displayVariantValues["Dynamic Type", default: []].map(JSONValue.string)),
+                ])
             }
             result = .object(fields)
         } catch { failure = error }
@@ -619,6 +632,20 @@ final class NativePreviewCorrection {
         try copyContents(helper.appendingPathComponent("Frameworks"), to: frameworks)
     }
 
+    static func appName(product: URL, containingApp: URL?, localization: String?) throws -> String {
+        let owner = containingApp ?? product
+        guard let bundle = Bundle(url: owner) else { throw NativePipelineRequired() }
+        if let localization {
+            let info = try bundleInfo(at: owner)
+            let key = info["CFBundleDisplayName"] is String ? "CFBundleDisplayName" : "CFBundleName"
+            guard let name = info[key] as? String else { return "" }
+            return bundle.localizedString(forKey: key, value: name, table: "InfoPlist",
+                localizations: [Locale.Language(identifier: localization)])
+        }
+        return bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String ?? ""
+    }
+
     static func rendererInfo(_ original: [String: Any]) -> [String: Any] {
         let startupKeys = ["CFBundleExecutable", "CFBundlePackageType", "NSPrincipalClass", "UIMainStoryboardFile",
                            "UIApplicationSceneManifest", "NSExtension", "UISupportedInterfaceOrientations"]
@@ -759,8 +786,11 @@ final class NativePreviewCorrection {
         let widgetFamily: String?
         let timelineIndex: Int?
         let groupItemIndex: Int?
-        let requiresNativePipeline: Bool
         let displayVariants: [String: String]
+        let activityViewStyle: String?
+        let activityViewContext: String?
+        let activityToggleState: Bool?
+        let requiresNativePipeline: Bool
     }
 
     private func decode<T: Decodable>(_ type: T.Type, data: Data) throws -> Input {
@@ -794,25 +824,33 @@ final class NativePreviewCorrection {
             index: index, localization: fields["previewLocalizationOverride"] as? String? ?? nil,
             destination: destination, timeout: timeout,
             widgetFamily: options.widgetFamily, timelineIndex: options.timelineIndex, groupItemIndex: options.groupItemIndex,
-            requiresNativePipeline: options.requiresNativePipeline,
-            displayVariants: variants.filter { PreviewRendererRequest.displayVariantValues[$0.key] != nil })
+            displayVariants: options.displayVariants, activityViewStyle: options.activityViewStyle,
+            activityViewContext: options.activityViewContext, activityToggleState: options.activityToggleState,
+            requiresNativePipeline: options.requiresNativePipeline)
     }
 
     static func directOptions(variants: [String: String], controls: [String: Any]) ->
-        (widgetFamily: String?, timelineIndex: Int?, groupItemIndex: Int?, requiresNativePipeline: Bool) {
+        (widgetFamily: String?, timelineIndex: Int?, groupItemIndex: Int?, displayVariants: [String: String],
+         activityViewStyle: String?, activityViewContext: String?, activityToggleState: Bool?, requiresNativePipeline: Bool) {
         let family = variants["Widget Family"]
         let timeline = controls["timelineIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
         let groupItem = controls["groupItemIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
+        let toggle = controls["toggleState"].flatMap { Mirror(reflecting: $0).children.first?.value as? Bool }
+        let displayVariants = variants.filter { PreviewRendererRequest.displayVariantValues[$0.key] != nil }
         let unsupportedVariant = variants.contains { key, value in
-            if key == "Widget Family" { return !["Small", "Medium"].contains(value) }
-            return PreviewRendererRequest.displayVariantValues[key]?.contains(value) != true
+            switch key {
+            case "Widget Family": return !["Small", "Medium"].contains(value)
+            case "View Style": return !PreviewRendererRequest.activityViewStyles.contains(value)
+            case "Activity View Context": return !PreviewRendererRequest.activityViewContexts.contains(value)
+            default: return PreviewRendererRequest.displayVariantValues[key]?.contains(value) != true
+            }
         }
         let unsupportedControl = controls.contains { key, value in
-            key != "timelineIndex" && key != "groupItemIndex" && Mirror(reflecting: value).children.first != nil
+            key != "timelineIndex" && key != "groupItemIndex" && key != "toggleState" && Mirror(reflecting: value).children.first != nil
         }
-        let widgetDisplayVariants = (family != nil || timeline != nil)
-            && variants.keys.contains { PreviewRendererRequest.displayVariantValues[$0] != nil }
-        return (family, timeline, groupItem, unsupportedVariant || unsupportedControl || widgetDisplayVariants)
+        let widgetDisplayVariants = family != nil && !displayVariants.isEmpty
+        return (family, timeline, groupItem, displayVariants, variants["View Style"], variants["Activity View Context"], toggle,
+                unsupportedVariant || unsupportedControl || widgetDisplayVariants)
     }
 
     private func event(_ type: String, _ value: JSONValue) throws -> Data {
