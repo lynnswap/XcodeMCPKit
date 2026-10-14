@@ -244,9 +244,7 @@ cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 
 Targets without an application or extension host or with its debug dylib disabled, other
-platforms, `PreviewProvider` definitions, grouped previews, Intent and
-Live Activity configurations, other widget families, orientation and modifier
-traits, and variant overrides or canvas controls beyond the widget options above
+platforms, and source or display contracts beyond the direct capabilities described above
 continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
 requirements, including the limitation tracked in
 [issue #302](https://github.com/lynnswap/XcodeMCPKit/issues/302).
@@ -254,10 +252,10 @@ requirements, including the limitation tracked in
 The direct route depends on private `DeveloperToolsSupport`/SwiftUI/WidgetKit source
 contracts, SwiftUI's underscored `__previewThunksHaveFinishedLoading()` readiness
 signal, SpringBoardHome/ChronoServices widget metrics, and Xcode's private build interfaces. The trait list is inspected with
-Swift reflection because `Preview` has no exported getter for it; traits other
-than layout use the native pipeline. Widget descriptor and container background
+Swift reflection because `Preview` has no exported getter for it; traits without
+a direct implementation use the native pipeline. Widget descriptor and container background
 fields are also read with Swift reflection because they have no exported getters.
-Unknown widget configurations, modifiers, or reflected representations use the
+Unknown widget configurations, descriptor transforms, or reflected representations use the
 native pipeline instead of returning a partial widget. The renderer resolves its view contracts from
 the selected Xcode and installed Simulator runtime. Unsupported input contracts
 use the native pipeline; other contract changes produce diagnostics.

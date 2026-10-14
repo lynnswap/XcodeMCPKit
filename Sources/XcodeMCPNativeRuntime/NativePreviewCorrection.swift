@@ -25,6 +25,23 @@ final class NativePreviewCorrection {
               case .object(var snapshot) = properties["previewSnapshotPath"] else { return tool }
         snapshot["description"] = .string("The full path to the preview snapshot. Direct SwiftUI and UIKit previews capture the hosting view without hardware display cutout masks; WidgetKit previews use the widget's size and rounded corners. Other previews use Xcode's native snapshot format.")
         properties["previewSnapshotPath"] = .object(snapshot)
+        if case .object(var controls) = properties["supportedCanvasControlOverrides"],
+           case .object(var controlProperties) = controls["properties"],
+           case .object(var groups) = controlProperties["groupItems"],
+           case .object(let item) = groups["items"], item["type"] == .string("integer") {
+            // Xcode 27.1 declares integer items but returns index/title objects.
+            groups["items"] = .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "index": .object(["type": .string("integer")]),
+                    "title": .object(["type": .string("string")]),
+                ]),
+                "required": .array([.string("index")]),
+            ])
+            controlProperties["groupItems"] = .object(groups)
+            controls["properties"] = .object(controlProperties)
+            properties["supportedCanvasControlOverrides"] = .object(controls)
+        }
         output["properties"] = .object(properties)
         fields["outputSchema"] = .object(output)
         return NativeTool(name: tool.name, descriptor: .object(fields), workspaceScoped: tool.workspaceScoped)
