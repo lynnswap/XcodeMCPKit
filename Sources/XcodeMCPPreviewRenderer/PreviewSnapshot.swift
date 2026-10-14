@@ -43,7 +43,7 @@ func previewExclusionImage(in window: UIWindow) async throws -> UIImage? {
 private func drawsLegacySystemAperture(using runtime: ABIRuntime) async throws -> Bool {
     let copy = try unsafe await runtime.resolveCFunction(named: "MGCopyAnswer",
         as: ((Unmanaged<CFString>, UnsafeRawPointer?) -> Unmanaged<CFDictionary>?).self,
-        in: .framework(named: "MobileGestalt"))
+        in: .installName("/usr/lib/libMobileGestalt.dylib"))
     let key = "ArtworkTraits" as CFString
     guard let answer = try unsafe copy.unsafeInvoke(.passUnretained(key), nil)?.takeRetainedValue() else { return false }
     let subtype = (answer as NSDictionary)["ArtworkDeviceSubType"] as? NSNumber
