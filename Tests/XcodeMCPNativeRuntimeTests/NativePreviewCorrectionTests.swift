@@ -27,6 +27,35 @@ struct NativePreviewCorrectionTests {
         #expect(selected.source.moduleName == (sharedLibrary ? "SharedPreview" : "RunnableApp"))
     }
 
+    @Test func stagesMacProductInItsContentsLayout() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let product = root.appendingPathComponent("Original.app")
+        let helper = root.appendingPathComponent("Helper")
+        let app = root.appendingPathComponent("Preview.app")
+        for directory in [product.appendingPathComponent("Contents/MacOS"), product.appendingPathComponent("Contents/Resources"),
+                          product.appendingPathComponent("Contents/Frameworks"), helper.appendingPathComponent("Frameworks")] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let original: [String: Any] = ["CFBundleIdentifier": "dev.lynnswap.MacFixture", "CFBundleExecutable": "Original",
+            "CFBundlePackageType": "APPL", "NSMainStoryboardFile": "Original", "LSMinimumSystemVersion": "15.0"]
+        try PropertyListSerialization.data(fromPropertyList: original, format: .binary, options: 0)
+            .write(to: product.appendingPathComponent("Contents/Info.plist"))
+        try Data("original".utf8).write(to: product.appendingPathComponent("Contents/MacOS/Original"))
+        try Data("resource".utf8).write(to: product.appendingPathComponent("Contents/Resources/Marker.txt"))
+        try Data("renderer".utf8).write(to: helper.appendingPathComponent("XcodeMCPPreviewRenderer"))
+        try Data("library".utf8).write(to: helper.appendingPathComponent("Frameworks/libPreview.dylib"))
+        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app, platform: .macOS)
+        let info = try #require(Bundle(url: app)?.infoDictionary)
+        #expect(info["CFBundleIdentifier"] as? String == "dev.lynnswap.MacFixture")
+        #expect(info["NSMainStoryboardFile"] == nil)
+        #expect(info["UIApplicationSceneManifest"] == nil)
+        #expect(info["LSMinimumSystemVersion"] as? String == "15.4")
+        #expect(try Data(contentsOf: app.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer")) == Data("renderer".utf8))
+        #expect(try Data(contentsOf: app.appendingPathComponent("Contents/Frameworks/libPreview.dylib")) == Data("library".utf8))
+        #expect(try Data(contentsOf: app.appendingPathComponent("Contents/Resources/Marker.txt")) == Data("resource".utf8))
+    }
+
     @Test func ambiguousHostsRequireNativePipeline() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = root.appendingPathComponent("SharedView.swift")

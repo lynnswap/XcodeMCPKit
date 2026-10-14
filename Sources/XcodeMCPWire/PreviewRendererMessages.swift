@@ -35,6 +35,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
 
 package struct PreviewRendererResult: Codable, Sendable {
     package var snapshotName: String?
+    package var snapshotData: Data?
     package var displayName: String?
     package var sourceLineNumber: Int?
     package var error: String?
@@ -44,11 +45,12 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var groupItems: [String?]?
     package var errors: [String]?
 
-    package init(snapshotName: String? = nil, displayName: String? = nil,
+    package init(snapshotName: String? = nil, snapshotData: Data? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
                  requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil, widgetFamilies: [String]? = nil,
                  groupItems: [String?]? = nil, errors: [String]? = nil) {
         self.snapshotName = snapshotName
+        self.snapshotData = snapshotData
         self.displayName = displayName
         self.sourceLineNumber = sourceLineNumber
         self.error = error

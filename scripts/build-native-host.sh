@@ -42,8 +42,10 @@ for library in "$output/Contents/Frameworks/"*.dylib; do
   [[ -f "$library" ]] || continue
   /usr/bin/codesign --force --sign - "$library"
 done
-"$repo_root/scripts/build-preview-renderer.sh" --configuration "$configuration" \
-  --output "$output/Contents/Resources/PreviewRenderer/iphonesimulator-arm64" --developer-dir "$developer_dir"
+for platform in iphonesimulator appletvsimulator xrsimulator watchsimulator macosx maccatalyst; do
+  "$repo_root/scripts/build-preview-renderer.sh" --configuration "$configuration" --platform "$platform" \
+    --output "$output/Contents/Resources/PreviewRenderer/$platform-arm64" --developer-dir "$developer_dir"
+done
 python3 - "$output/Contents/Info.plist" <<'PY'
 import pathlib, plistlib, sys
 pathlib.Path(sys.argv[1]).write_bytes(plistlib.dumps({

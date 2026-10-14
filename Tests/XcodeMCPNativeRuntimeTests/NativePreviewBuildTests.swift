@@ -5,7 +5,7 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewBuildTests {
-    @Test func respectsActivePlatformUnlessAnExplicitDestinationIsRequested() throws {
+    @Test func respectsActiveDestinationAcrossPlatforms() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let app = root.appendingPathComponent("Xcode.app")
         try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"),
@@ -18,7 +18,7 @@ struct NativePreviewBuildTests {
         let manager = PreviewBuildRunContextManager(scheme: scheme, destination: mac)
         let workspace = PreviewBuildWorkspace(manager: manager)
 
-        #expect(try builder.selectDestination(workspace: workspace) == nil)
+        #expect(try builder.selectDestination(workspace: workspace) === mac)
         #expect(try builder.selectDestination(workspace: workspace, preferred: ["identifier": ios.targetDevice.identifier]) === ios)
     }
 

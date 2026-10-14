@@ -179,7 +179,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         }
     }
 }
-#else
+#elseif !os(macOS) && !os(watchOS) && !os(tvOS) && !os(visionOS) && !targetEnvironment(macCatalyst)
 @main
 enum PreviewRendererMain {
     static func main() throws {

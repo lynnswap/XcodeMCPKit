@@ -7,6 +7,7 @@ final class NativePreviewBuild {
     struct Result {
         let targets: [Target]
         let destinationIdentifier: String
+        let platformIdentifier: String?
         let platformName: String?
         let deviceModelName: String?
         let systemVersion: String?
@@ -74,15 +75,13 @@ final class NativePreviewBuild {
         if preferred.isEmpty {
             guard let active = try object(manager, selector: "activeRunDestination") else { return nil }
             let destination = try destinationInfo(active)
-            return destination.platformIdentifier == "com.apple.platform.iphonesimulator"
-                && UUID(uuidString: destination.identifier) != nil ? active : nil
+            return NativePreviewPlatform.supportsDestination(platformIdentifier: destination.platformIdentifier, identifier: destination.identifier) ? active : nil
         }
         let available = try runtime.object(scheme).resolveMethodAndWait(
             selector: "availableRunDestinations", as: (() -> NSArray).self)
         let candidates = try unsafe available.unsafeInvoke().compactMap { value -> Destination? in
             let destination = try destinationInfo(value as AnyObject)
-            guard destination.platformIdentifier == "com.apple.platform.iphonesimulator",
-                  UUID(uuidString: destination.identifier) != nil else { return nil }
+            guard NativePreviewPlatform.supportsDestination(platformIdentifier: destination.platformIdentifier, identifier: destination.identifier) else { return nil }
             return destination
         }
         let matches = candidates.filter { destination in
@@ -171,7 +170,7 @@ final class NativePreviewBuild {
         try Task.checkCancellation()
         let records = try await targets(descriptions, image: image, runnable: runnable)
         let info = try destinationInfo(destination)
-        return Result(targets: records, destinationIdentifier: info.identifier,
+        return Result(targets: records, destinationIdentifier: info.identifier, platformIdentifier: info.platformIdentifier,
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
     }
 

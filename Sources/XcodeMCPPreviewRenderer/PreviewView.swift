@@ -1,9 +1,13 @@
-#if os(iOS) && targetEnvironment(simulator)
+#if os(iOS) || os(tvOS) || os(visionOS) || os(macOS) || os(watchOS)
 import ABIBridge
 import ABIBridgeSwiftUI
 import DeveloperToolsSupport
 import SwiftUI
+#if os(macOS)
+import AppKit
+#elseif !os(watchOS)
 import UIKit
+#endif
 
 // A generic declaration preserves the native argument's formal indirect ABI.
 @inline(never)
@@ -73,6 +77,7 @@ func makeViewPreview(source: NativeSwiftValue, groupItemIndex: Int? = nil) async
             let existential = try unsafe getter.unsafeInvoke(on: body)
             return try AnyView(NativeSwiftView(existential.copyUnderlyingValue()))
         }
+    #if !os(macOS) && !os(watchOS)
     case "DeveloperToolsSupport.DefaultPreviewSource<__C.UIView>":
         bodyArgument = .type(UIView.self)
         makeView = { body in
@@ -89,6 +94,20 @@ func makeViewPreview(source: NativeSwiftValue, groupItemIndex: Int? = nil) async
             }
             return AnyView(PreviewUIViewController(controller: controller))
         }
+    #elseif os(macOS)
+    case "DeveloperToolsSupport.DefaultPreviewSource<__C.NSView>":
+        bodyArgument = .type(NSView.self)
+        makeView = { body in
+            guard let view = try body.withCopy({ $0 as? NSView }) else { throw PreviewRendererError("The installed preview body is not an NSView") }
+            return AnyView(PreviewNSView(view: view))
+        }
+    case "DeveloperToolsSupport.DefaultPreviewSource<__C.NSViewController>":
+        bodyArgument = .type(NSViewController.self)
+        makeView = { body in
+            guard let controller = try body.withCopy({ $0 as? NSViewController }) else { throw PreviewRendererError("The installed preview body is not an NSViewController") }
+            return AnyView(PreviewNSViewController(controller: controller))
+        }
+    #endif
     default: throw NativePreviewPipelineRequired()
     }
     let result = try await previewBody(source: source, bodyArgument: bodyArgument, groupItemIndex: groupItemIndex)
@@ -259,6 +278,7 @@ func makeLegacyViewPreview(typeName: String, index: Int) throws -> SwiftUI._Prev
     return previews[index]
 }
 
+#if !os(macOS) && !os(watchOS)
 private struct PreviewUIView: UIViewRepresentable {
     let view: UIView
     func makeUIView(context: Context) -> UIView { view }
@@ -270,6 +290,20 @@ private struct PreviewUIViewController: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIViewController { controller }
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
 }
+
+#elseif os(macOS)
+private struct PreviewNSView: NSViewRepresentable {
+    let view: NSView
+    func makeNSView(context: Context) -> NSView { view }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private struct PreviewNSViewController: NSViewControllerRepresentable {
+    let controller: NSViewController
+    func makeNSViewController(context: Context) -> NSViewController { controller }
+    func updateNSViewController(_ nsViewController: NSViewController, context: Context) {}
+}
+#endif
 
 @MainActor
 func viewPreviewLayout(_ preview: NativeSwiftValue) async throws -> DeveloperToolsSupport.PreviewLayout {
