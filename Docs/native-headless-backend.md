@@ -243,6 +243,9 @@ against this catalog. Presentation applies the native redaction effects to the s
 entries for normal, placeholder, privacy, and low-luminance rendering.
 Widget previews with disabled content margins or
 changes to their descriptor's background style use the native pipeline.
+The current common widget host can differ from native content margins. Native
+widget hosting and watchOS Relevance previews remain tracked in
+[#326](https://github.com/lynnswap/XcodeMCPKit/issues/326).
 
 Live Activity previews use WidgetKit's archived activity views and native
 WidgetRenderer controllers. `previewVariantOverrides` selects `View Style`,
