@@ -60,6 +60,9 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         }
         controller.view.frame = CGRect(origin: .zero, size: size)
         controller.view.layoutIfNeeded()
+        #if os(tvOS)
+        let data = try staticPreviewSnapshot(of: controller.view, size: size, scale: window.traitCollection.displayScale)
+        #else
         let format = UIGraphicsImageRendererFormat()
         format.scale = window.traitCollection.displayScale
         var drawn = false
@@ -67,6 +70,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             drawn = controller.view.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: true)
         }
         guard drawn, let data = image.pngData() else { throw PreviewRendererError("The preview host could not capture its rendered view") }
+        #endif
         var result = content.result
         #if targetEnvironment(macCatalyst)
         result.snapshotData = data
