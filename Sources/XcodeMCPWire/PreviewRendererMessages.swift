@@ -99,6 +99,7 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var interfaceOrientation: String?
     package var exclusionSnapshotName: String?
     package var nativeMetadata: Data?
+    package var nativeProviderPreviewDescription: Data?
 
     package init(snapshotName: String? = nil, snapshotData: Data? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
@@ -108,7 +109,7 @@ package struct PreviewRendererResult: Codable, Sendable {
                  activityViewContexts: [String]? = nil,
                  supportedDisplayVariants: [String: [String]]? = nil, usesDeviceLayout: Bool? = nil,
                  interfaceOrientation: String? = nil, exclusionSnapshotName: String? = nil,
-                 nativeMetadata: Data? = nil) {
+                 nativeMetadata: Data? = nil, nativeProviderPreviewDescription: Data? = nil) {
         self.snapshotName = snapshotName
         self.snapshotData = snapshotData
         self.displayName = displayName
@@ -126,5 +127,6 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.interfaceOrientation = interfaceOrientation
         self.exclusionSnapshotName = exclusionSnapshotName
         self.nativeMetadata = nativeMetadata
+        self.nativeProviderPreviewDescription = nativeProviderPreviewDescription
     }
 }
