@@ -503,14 +503,24 @@ private func activityController(collections values: [NativeSwiftValue], selected
         in: .framework(named: "WidgetRenderer"))
     let prefix = "_$s14WidgetRenderer36ActivityPreviewHostingViewControllerC15viewCollections17currentStateIndex14widgetLocation11environment0H4Kind21apertureTopEdgeMetric10islandSize14metricsRequest"
     let suffix = "7appNameACSay0A3Kit0c8ArchivedF10CollectionVG_SiSo09CHSWidgetN0V7SwiftUI17EnvironmentValuesVAN0cdfP0O12CoreGraphics7CGFloatVSo6CGSizeVSgSo020ACUISActivityMetricsX0CSgSbSStcfC"
-    let selected: (symbol: ResolvedSymbol, flag: Bool)
-    do {
-        selected = (try await runtime.resolve(.init(machOName: prefix + "30renderBoxRendersAsynchronously" + suffix,
-            language: .swift), in: .framework(named: "WidgetRenderer")), false)
-    } catch ABIResolutionError.declarationNotFound {
-        selected = (try await runtime.resolve(.init(machOName: prefix + "11forSnapshot" + suffix,
-            language: .swift), in: .framework(named: "WidgetRenderer")), true)
+    let withoutMetrics = "_$s14WidgetRenderer36ActivityPreviewHostingViewControllerC15viewCollections17currentStateIndex14widgetLocation11environment0H4Kind21apertureTopEdgeMetric10islandSize30renderBoxRendersAsynchronously7appNameACSay0A3Kit0c8ArchivedF10CollectionVG_SiSo09CHSWidgetN0V7SwiftUI17EnvironmentValuesVAM0cdfP0O12CoreGraphics7CGFloatVSo6CGSizeVSgSbSStcfC"
+    let candidates = [
+        (name: prefix + "30renderBoxRendersAsynchronously" + suffix, metricsRequest: true, flag: false),
+        (name: prefix + "11forSnapshot" + suffix, metricsRequest: true, flag: true),
+        (name: withoutMetrics, metricsRequest: false, flag: false),
+    ]
+    var selected: (symbol: ResolvedSymbol, metricsRequest: Bool, flag: Bool)?
+    for candidate in candidates {
+        do {
+            let symbol = try await runtime.resolve(.init(machOName: candidate.name,
+                language: .swift), in: .framework(named: "WidgetRenderer"))
+            selected = (symbol, candidate.metricsRequest, candidate.flag)
+            break
+        } catch ABIResolutionError.declarationNotFound {
+            continue
+        }
     }
+    guard let selected else { throw NativePreviewPipelineRequired() }
     guard let controllerClass = NSClassFromString("WidgetRenderer.ActivityPreviewHostingViewController") else {
         throw NativePreviewPipelineRequired()
     }
@@ -535,7 +545,9 @@ private func activityController(collections values: [NativeSwiftValue], selected
     arguments.append(try abi.indirectArgument(kind))
     arguments.append(try unsafe abi.argument(metrics.apertureTopMargin, components: [double]))
     arguments.append(try unsafe abi.argument(metrics.islandSize, components: [word, word, byte]))
-    arguments.append(try unsafe abi.argument(Optional<AnyObject>.some(metrics.request), components: [pointer]))
+    if selected.metricsRequest {
+        arguments.append(try unsafe abi.argument(Optional<AnyObject>.some(metrics.request), components: [pointer]))
+    }
     arguments.append(try unsafe abi.argument(selected.flag, components: [byte]))
     arguments.append(try unsafe abi.argument(appName, components: [word, word]))
     let call = try unsafe abi.call(result: pointer, parameters: unsafe arguments.map { unsafe $0.type })
