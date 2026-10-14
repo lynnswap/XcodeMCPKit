@@ -49,7 +49,7 @@ struct PreviewRendererAppKit {
         controller.view.frame = NSRect(origin: .zero, size: size)
         window.contentViewController = controller
         window.setContentSize(size)
-        window.makeKey()
+        window.makeKeyAndOrderFront(nil)
         window.layoutIfNeeded()
         controller.view.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(500))

@@ -38,6 +38,21 @@ struct NativePreviewSnapshotTests {
         #expect(rightBitmap.colorAt(x: 70, y: 20)?.alphaComponent == 1)
     }
 
+    @Test func portraitDeviceMaskClipsCornersAndPreservesContent() throws {
+        let mask = NSImage(size: NSSize(width: 80, height: 100), flipped: false) { _ in
+            NSColor.white.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 80, height: 100), xRadius: 20, yRadius: 20).fill()
+            return true
+        }
+        let source = try image(width: 80, height: 100)
+        let thumbnail = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
+            framebufferMask: mask, rotationDegrees: 0, swapsAxes: false))
+        let bitmap = NSBitmapImageRep(cgImage: thumbnail)
+        #expect(bitmap.colorAt(x: 0, y: 0)?.alphaComponent == 0)
+        #expect(bitmap.colorAt(x: 79, y: 99)?.alphaComponent == 0)
+        #expect(bitmap.colorAt(x: 40, y: 50)?.alphaComponent == 1)
+    }
+
     @Test func displayExclusionRotatesAndRetainsContentOutsideIt() throws {
         let context = try #require(unsafe CGContext(data: nil, width: 40, height: 80, bitsPerComponent: 8,
             bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
