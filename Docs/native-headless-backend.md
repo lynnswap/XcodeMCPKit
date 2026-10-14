@@ -140,24 +140,26 @@ inventory or alter caches. It remains separate from generic action execution and
 can be removed when the affected native contract is fixed. Cached report
 retrieval does not establish online/account-dependent retrieval.
 
-`RenderPreview` uses a packaged iOS Simulator renderer for individual SwiftUI
-`#Preview` definitions in an arm64 Simulator application built with a debug dylib,
+`RenderPreview` uses a packaged iOS Simulator renderer for individual SwiftUI and
+WidgetKit `#Preview` definitions in an arm64 Simulator application or app extension built with a debug dylib,
 on iOS 18.4 or later.
 The host builds the active scheme through Xcode's build engine, selects the
 definition from the built `PreviewRegistry` metadata, including linked embedded
 frameworks and libraries, and extracts its view with
 ABIBridge. A public `UIHostingController` renders the view and captures the image.
-Source and host selection retain the native buildable's identity. Among applications
+Source and host selection retain the native buildable's identity. Among applications and extensions
 that compile the source, embed its runtime image, or link its object/archive product
 (including linker file lists), the active scheme's runnable application takes
 precedence. When that runnable is not a compatible host, a unique compatible
-application can be used; ambiguous candidates use the native pipeline.
+host can be used; ambiguous candidates use the native pipeline.
 Application target ordering does not determine the host. This selection does not
 recreate Xcode's complete source-specific preview dependency graph.
 Source and host records are restricted to arm64 iOS Simulator variants before
-checking for ambiguity. App extensions, including products nested inside an
-application, use the native pipeline; their containing application's dependencies
-are not recreated by the direct renderer.
+checking for ambiguity. An extension's own bundle supplies its resources,
+identifier, and entitlements. A containing application's shared Frameworks are
+copied when its embedded extension binary matches the source's build UUID;
+the extension's own Frameworks take precedence. The containing application's
+root resources and application lifecycle are not used.
 Embedded runtime images are matched to the built source's arm64 build UUID,
 with exact byte comparison when UUIDs are absent. A shared filename alone
 does not establish that an application contains the source binary.
@@ -173,6 +175,22 @@ SwiftUI environment. The response's `supportedLocalizations` comes from Xcode's
 workspace. The image captures the rectangular hosting view; hardware display
 cutout masks are not applied.
 Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
+
+Widget previews support `StaticConfiguration` with either an explicit `timeline:`
+or a `timelineProvider:` and the Small and Medium families. The renderer obtains
+the configuration's descriptor from `WidgetConfiguration.body` and applies its
+descriptor preference transforms in their original order. It uses WidgetKit's
+timeline provider context with `isPreview` enabled, the selected family, and
+SpringBoard's metrics for the selected device. WidgetKit supplies the timeline's
+actual `AnyView`, which is hosted with its common widget environment and
+`.containerBackground(for: .widget)` content. The snapshot has the widget's
+size and rounded corners, with transparency outside them.
+`supportedCanvasControlOverrides.timelineIndexes` lists the available entries;
+`previewCanvasControlOverrides.timelineIndex` selects an entry, defaulting to
+the first. `supportedPreviewVariantOverrides["Widget Family"]` lists the
+configuration's supported Small/Medium families, which can be selected through
+`previewVariantOverrides`. Widget previews with disabled content margins or
+changes to their descriptor's background style use the native pipeline.
 
 Each render creates a Simulator matching the selected destination's device type
 and runtime. Without a destination override, it retains the workspace's active
@@ -205,20 +223,22 @@ timeout error. The build method binding is
 cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 
-Targets without an application host or with its debug dylib disabled, other
-platforms, `PreviewProvider` definitions, grouped previews, WidgetKit
-previews, orientation and modifier traits, variant overrides, and canvas controls
+Targets without an application or extension host or with its debug dylib disabled, other
+platforms, `PreviewProvider` definitions, grouped previews, Intent/AppIntent and
+Live Activity configurations, other widget families, orientation and modifier
+traits, and variant overrides or canvas controls beyond the widget options above
 continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
 requirements, including the limitation tracked in
-[issue #302](https://github.com/lynnswap/XcodeMCPKit/issues/302). WidgetKit's
-container background requires a protocol-extension call that ABIBridge 0.9.0
-cannot bind to a concrete view; the renderer does not return a partial widget.
+[issue #302](https://github.com/lynnswap/XcodeMCPKit/issues/302).
 
-The direct route depends on private `DeveloperToolsSupport`/SwiftUI source
+The direct route depends on private `DeveloperToolsSupport`/SwiftUI/WidgetKit source
 contracts, SwiftUI's underscored `__previewThunksHaveFinishedLoading()` readiness
-signal, and Xcode's private build interfaces. The trait list is inspected with
+signal, SpringBoardHome/ChronoServices widget metrics, and Xcode's private build interfaces. The trait list is inspected with
 Swift reflection because `Preview` has no exported getter for it; traits other
-than layout use the native pipeline. The renderer resolves its view contracts from
+than layout use the native pipeline. Widget descriptor and container background
+fields are also read with Swift reflection because they have no exported getters.
+Unknown widget configurations, modifiers, or reflected representations use the
+native pipeline instead of returning a partial widget. The renderer resolves its view contracts from
 the selected Xcode and installed Simulator runtime. Unsupported input contracts
 use the native pipeline; other contract changes produce diagnostics.
 Build failures are reported before rendering so stale products are not captured.

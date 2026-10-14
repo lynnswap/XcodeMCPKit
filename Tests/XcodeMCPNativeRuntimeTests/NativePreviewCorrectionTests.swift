@@ -219,7 +219,7 @@ struct NativePreviewCorrectionTests {
     }
 
     @Test(arguments: [false, true])
-    func extensionPreviewsRequireNativePipeline(linkedLibrary: Bool) {
+    func extensionPreviewsUseTheirOwnBundle(linkedLibrary: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = root.appendingPathComponent("ExtensionView.swift")
         let library = root.appendingPathComponent("ExtensionPreview.o")
@@ -235,9 +235,88 @@ struct NativePreviewCorrectionTests {
             linkCommandLine: ["-o", library.path], linkerWorkingDirectory: nil, objectFiles: [],
             sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)] : [])
 
-        #expect(throws: NativePipelineRequired.self) {
-            try NativePreviewCorrection.selectTarget(targets, source: source)
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        #expect(selected.host.outputURL == target.outputURL)
+        #expect(selected.source.moduleName == (linkedLibrary ? "ExtensionPreview" : "Extension"))
+    }
+
+    @Test func sharedAppAndExtensionSourceUsesRunnable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("SharedView.swift")
+        let targets = ["Extension.appex", "Host.app"].map { product in
+            NativePreviewBuild.Target(moduleName: product, buildableName: product, sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(product)/Preview.debug.dylib").path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source],
+                debugDylibEnabled: true, isRunnable: product == "Host.app")
         }
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source)
+        #expect(selected.host.outputURL == targets[1].outputURL)
+        #expect(selected.source.outputURL == targets[1].outputURL)
+    }
+
+    @Test func extensionContainingAppMustEmbedTheSourceBinary() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let output = root.appendingPathComponent("Extension.appex/Extension.debug.dylib")
+        try compilePreviewLibrary(at: output)
+        let wrong = root.appendingPathComponent("Wrong.app/PlugIns/Extension.appex/Extension.debug.dylib")
+        let matching = root.appendingPathComponent("Matching.app/PlugIns/Extension.appex/Extension.debug.dylib")
+        let unselected = root.appendingPathComponent("Unselected.app/PlugIns/Extension.appex/Extension.debug.dylib")
+        try compilePreviewLibrary(at: wrong, value: 1)
+        for embedded in [matching, unselected] {
+            try FileManager.default.createDirectory(at: embedded.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: output, to: embedded)
+        }
+        let hosts = ["Wrong", "Unselected", "Matching"].map { name in
+            NativePreviewBuild.Target(moduleName: name, buildableName: "\(name).app", sdkRoot: "iphonesimulator",
+                sdkVariant: nil, architecture: "arm64",
+                linkCommandLine: ["-o", root.appendingPathComponent("\(name).app/\(name).debug.dylib").path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [],
+                debugDylibEnabled: true, isRunnable: name != "Unselected")
+        }
+        #expect(try NativePreviewCorrection.containingApp(for: output, targets: hosts)?.path
+            == root.appendingPathComponent("Matching.app").path)
+        #expect(try NativePreviewCorrection.containingApp(for: output, targets: [hosts[0]]) == nil)
+    }
+
+    @Test func preparingExtensionPreservesItsResourcesAndSharedFrameworks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let containing = root.appendingPathComponent("Host.app", isDirectory: true)
+        let product = containing.appendingPathComponent("PlugIns/Extension.appex", isDirectory: true)
+        let helper = root.appendingPathComponent("Helper", isDirectory: true)
+        let app = root.appendingPathComponent("Preview.app", isDirectory: true)
+        for directory in [product.appendingPathComponent("Frameworks"), containing.appendingPathComponent("Frameworks"),
+                          helper.appendingPathComponent("Frameworks")] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let resource = Data("extension resource".utf8)
+        let localFramework = Data("extension framework".utf8)
+        let sharedFramework = Data("shared framework".utf8)
+        try resource.write(to: product.appendingPathComponent("Assets.car"))
+        try localFramework.write(to: product.appendingPathComponent("Frameworks/libLocal.dylib"))
+        try sharedFramework.write(to: containing.appendingPathComponent("Frameworks/libLocal.dylib"))
+        try sharedFramework.write(to: containing.appendingPathComponent("Frameworks/libShared.dylib"))
+        try Data("renderer".utf8).write(to: helper.appendingPathComponent("XcodeMCPPreviewRenderer"))
+        let info: [String: Any] = ["CFBundleIdentifier": "dev.lynnswap.Host.Extension", "CFBundleExecutable": "Extension",
+            "CFBundlePackageType": "XPC!", "MinimumOSVersion": "27.0",
+            "NSExtension": ["NSExtensionPointIdentifier": "com.apple.widgetkit-extension"]]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+            .write(to: product.appendingPathComponent("Info.plist"))
+
+        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app, containingApp: containing)
+
+        #expect(try Data(contentsOf: app.appendingPathComponent("Assets.car")) == resource)
+        #expect(try Data(contentsOf: app.appendingPathComponent("Frameworks/libLocal.dylib")) == localFramework)
+        #expect(try Data(contentsOf: app.appendingPathComponent("Frameworks/libShared.dylib")) == sharedFramework)
+        let rawInfo = try unsafe PropertyListSerialization.propertyList(from: Data(contentsOf: app.appendingPathComponent("Info.plist")), format: nil)
+        let stagedInfo = try #require(rawInfo as? [String: Any])
+        #expect(stagedInfo["CFBundleIdentifier"] as? String == "dev.lynnswap.Host.Extension")
+        #expect(stagedInfo["CFBundlePackageType"] as? String == "APPL")
+        #expect(stagedInfo["NSExtension"] == nil)
+        #expect(try Data(contentsOf: product.appendingPathComponent("Frameworks/libLocal.dylib")) == localFramework)
+        #expect(try Data(contentsOf: containing.appendingPathComponent("Frameworks/libLocal.dylib")) == sharedFramework)
     }
 
     @Test func preparingAppReplacesCollidingRendererExecutable() throws {
