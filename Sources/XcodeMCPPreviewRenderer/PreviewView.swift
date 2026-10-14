@@ -101,14 +101,16 @@ func makeViewPreview(source: NativeSwiftValue, groupItemIndex: Int? = nil) async
         bodyArgument = .type(NSView.self)
         makeView = { body in
             guard let view = try body.withCopy({ $0 as? NSView }) else { throw PreviewRendererError("The installed preview body is not an NSView") }
-            return AnyView(PreviewNSView(view: view).frame(maxWidth: .infinity, maxHeight: .infinity)
+            return AnyView(PreviewNSView(view: view).ignoresSafeArea(.all, edges: .all)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(nsColor: .controlBackgroundColor)))
         }
     case "DeveloperToolsSupport.DefaultPreviewSource<__C.NSViewController>":
         bodyArgument = .type(NSViewController.self)
         makeView = { body in
             guard let controller = try body.withCopy({ $0 as? NSViewController }) else { throw PreviewRendererError("The installed preview body is not an NSViewController") }
-            return AnyView(PreviewNSViewController(controller: controller).frame(maxWidth: .infinity, maxHeight: .infinity)
+            return AnyView(PreviewNSViewController(controller: controller).ignoresSafeArea(.all, edges: .all)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(nsColor: .controlBackgroundColor)))
         }
     #endif
@@ -296,13 +298,14 @@ private struct PreviewUIViewController: UIViewControllerRepresentable {
 }
 
 #elseif os(macOS)
-private struct PreviewNSView: NSViewRepresentable {
+private struct PreviewNSView: NSViewControllerRepresentable {
     let view: NSView
-    func makeNSView(context: Context) -> PreviewNSViewContainer { PreviewNSViewContainer(content: view) }
-    func updateNSView(_ nsView: PreviewNSViewContainer, context: Context) {}
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: PreviewNSViewContainer, context: Context) -> CGSize? {
-        nsView.fittingSize
+    func makeNSViewController(context: Context) -> NSViewController {
+        let container = NSViewController()
+        containPreviewView(view, in: container.view)
+        return container
     }
+    func updateNSViewController(_ nsViewController: NSViewController, context: Context) {}
 }
 
 private struct PreviewNSViewController: NSViewControllerRepresentable {
@@ -310,40 +313,35 @@ private struct PreviewNSViewController: NSViewControllerRepresentable {
     func makeNSViewController(context: Context) -> NSViewController {
         let container = NSViewController()
         container.addChild(controller)
-        container.view = PreviewNSViewContainer(content: controller.view)
+        containPreviewView(controller.view, in: container.view)
         return container
     }
     func updateNSViewController(_ nsViewController: NSViewController, context: Context) {}
-    func sizeThatFits(_ proposal: ProposedViewSize, nsViewController: NSViewController, context: Context) -> CGSize? {
-        nsViewController.view.fittingSize
-    }
 }
 
 // Containment preserves the AppKit body's control styling instead of letting
 // SwiftUI's representable adapter restyle a leaf control.
-private final class PreviewNSViewContainer: NSView {
-    let content: NSView
-
-    init(content: NSView) {
-        self.content = content
-        super.init(frame: .zero)
-        addSubview(content)
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    override var fittingSize: NSSize {
-        let size = content.fittingSize
-        return NSSize(width: size.width > 0 ? size.width : content.frame.width,
-                      height: size.height > 0 ? size.height : content.frame.height)
-    }
-
-    override func layout() {
-        super.layout()
-        let size = fittingSize
-        content.frame = NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
-                               width: size.width, height: size.height)
-    }
+@MainActor
+private func containPreviewView(_ content: NSView, in container: NSView) {
+    container.addSubview(content)
+    content.translatesAutoresizingMaskIntoConstraints = false
+    let edges = [
+        content.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+        content.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        content.topAnchor.constraint(equalTo: container.topAnchor),
+        content.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+    ]
+    // Weak edge equalities preserve intrinsic control sizes while allowing
+    // content without an intrinsic size to use SwiftUI's available proposal.
+    for constraint in edges { constraint.priority = NSLayoutConstraint.Priority(1) }
+    NSLayoutConstraint.activate(edges + [
+        content.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor),
+        content.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+        content.topAnchor.constraint(greaterThanOrEqualTo: container.topAnchor),
+        content.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor),
+        content.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+        content.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+    ])
 }
 #endif
 
