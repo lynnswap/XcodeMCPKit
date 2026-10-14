@@ -10,7 +10,12 @@ import WatchKit
 func captureWatchPreview(view: AnyView, layout: DeveloperToolsSupport.PreviewLayout) async throws -> CGImage {
     let runtime = ABIRuntime.shared
     let controller = _makeWatchKitUIHostingController(AnyView(view._statusBar(hidden: true)))
-    controller._disableSafeArea = true
+    // The native device entry point keeps WatchKit's safe-area layout active;
+    // fixed and fitting previews use the unconstrained hosting layout.
+    switch layout {
+    case .device: controller._disableSafeArea = false
+    default: controller._disableSafeArea = true
+    }
     // watchOS exposes SwiftUI's host protocol but marks UIKit controllers
     // unavailable. Use the existing ABI bridge for standard view containment.
     let applicationSymbol = try await runtime.resolve(
