@@ -26,6 +26,7 @@ struct PreviewRendererAppKit {
         var size: CGSize
         switch content.layout {
         case .device, .sizeThatFits:
+            controller.view.layoutSubtreeIfNeeded()
             size = controller.view.fittingSize
         case .fixed(let width, let height):
             size = CGSize(width: width, height: height)
