@@ -21,6 +21,9 @@ struct PreviewRendererAppKit {
 
     private static func render() async throws -> PreviewRendererResult {
         let request = try loadPreviewRequest()
+        if request.metadataOnly == true {
+            return PreviewRendererResult(nativeMetadata: try await nativePreviewMetadata(request))
+        }
         let content = try await makeGeneralPreview(request)
         let controller = NSHostingController(rootView: content.view)
         let proposal = CGSize(width: 600, height: 400)

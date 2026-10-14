@@ -332,6 +332,9 @@ Destination selection retains the decoded native RenderPreview input and the
 selected source's translation unit. Xcode's source graph and update plan choose
 the destination; the correction consumes the first native update record whose
 execution-point pack matches the selected source's complete preflight pack.
+This source-plan producer uses ABIBridge's enum-payload and protocol-member APIs
+from main revision `2d75421a2c6796787f8deb4598505c4b8589395f`; ABIBridge 0.10.0
+does not include the required enum-payload construction API.
 Xcode's render-destination-choice setting controls whether
 `preferredRenderDestination` is considered and `availableRenderDestinations` is
 returned. The correction preserves that setting, the native destination fields,

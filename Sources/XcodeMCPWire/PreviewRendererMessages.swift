@@ -32,6 +32,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var activityViewContext: String?
     package var activityToggleState: Bool?
     package var appName: String?
+    package var metadataOnly: Bool?
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
@@ -40,7 +41,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
                  programRootNames: [String]? = nil,
                  displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
                  activityViewContext: String? = nil, activityToggleState: Bool? = nil,
-                 appName: String? = nil) {
+                 appName: String? = nil, metadataOnly: Bool? = nil) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
         self.fileName = fileName
@@ -60,6 +61,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.activityViewContext = activityViewContext
         self.activityToggleState = activityToggleState
         self.appName = appName
+        self.metadataOnly = metadataOnly
     }
 
     package var unsupportedGeneralPreviewOptions: [String] {
@@ -96,6 +98,7 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var usesDeviceLayout: Bool?
     package var interfaceOrientation: String?
     package var exclusionSnapshotName: String?
+    package var nativeMetadata: Data?
 
     package init(snapshotName: String? = nil, snapshotData: Data? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
@@ -104,7 +107,8 @@ package struct PreviewRendererResult: Codable, Sendable {
                  toggleStates: [Bool]? = nil, activityViewStyles: [String]? = nil,
                  activityViewContexts: [String]? = nil,
                  supportedDisplayVariants: [String: [String]]? = nil, usesDeviceLayout: Bool? = nil,
-                 interfaceOrientation: String? = nil, exclusionSnapshotName: String? = nil) {
+                 interfaceOrientation: String? = nil, exclusionSnapshotName: String? = nil,
+                 nativeMetadata: Data? = nil) {
         self.snapshotName = snapshotName
         self.snapshotData = snapshotData
         self.displayName = displayName
@@ -121,5 +125,6 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.usesDeviceLayout = usesDeviceLayout
         self.interfaceOrientation = interfaceOrientation
         self.exclusionSnapshotName = exclusionSnapshotName
+        self.nativeMetadata = nativeMetadata
     }
 }

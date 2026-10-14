@@ -40,6 +40,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
     private func render(in window: UIWindow) async throws {
         let requestURL = Bundle.main.bundleURL.appendingPathComponent("PreviewRequest.json")
         let request = try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: requestURL))
+        if request.metadataOnly == true { throw NativePreviewPipelineRequired() }
         guard unsafe setenv("XCODE_RUNNING_FOR_PREVIEWS", "1", 1) == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
