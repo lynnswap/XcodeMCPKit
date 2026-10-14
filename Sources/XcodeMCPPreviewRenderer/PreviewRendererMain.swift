@@ -244,7 +244,15 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         try widget?.validate()
         try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
         let deviceLayout: Bool
-        if case .device = layout { deviceLayout = true } else { deviceLayout = false }
+        if case .device = layout { deviceLayout = activity == nil } else { deviceLayout = false }
+        var exclusionSnapshotName: String?
+        if deviceLayout, let exclusion = try await previewExclusionImage(in: window) {
+            guard let exclusionData = exclusion.pngData() else {
+                throw PreviewRendererError("The preview display exclusion could not be encoded")
+            }
+            exclusionSnapshotName = "PreviewExclusion.png"
+            try exclusionData.write(to: documents.appendingPathComponent("PreviewExclusion.png"), options: .atomic)
+        }
         write(PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
             sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes ?? activity?.stateIndexes,
             widgetFamilies: widget?.supportedFamilies,
@@ -253,7 +261,8 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             activityViewStyles: activity == nil ? nil : PreviewRendererRequest.activityViewStyles,
             activityViewContexts: activity == nil ? nil : PreviewRendererRequest.activityViewContexts,
             supportedDisplayVariants: widget == nil && activity == nil ? PreviewRendererRequest.displayVariantValues : nil,
-            usesDeviceLayout: deviceLayout && activity == nil, interfaceOrientation: try interfaceOrientationName(orientation)))
+            usesDeviceLayout: deviceLayout, interfaceOrientation: try interfaceOrientationName(orientation),
+            exclusionSnapshotName: exclusionSnapshotName))
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
