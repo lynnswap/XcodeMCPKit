@@ -186,8 +186,10 @@ hosting view. The longest image dimension is capped at 1500 pixels without
 upscaling smaller images.
 UIKit size-that-fits uses the hosting view's intrinsic size without a screen-size
 cap. watchOS uses its hosting controller's `sizeThatFits(in:)` with the selected
-watch's screen bounds. macOS measures the hosting view after attaching it to its
-window, including the titlebar safe area for device layout.
+watch's screen bounds. Device layout preserves WatchKit's safe-area layout;
+fixed-size and size-that-fits layouts disable it, matching the native hosts.
+macOS measures the hosting view after attaching it to its window, including the
+titlebar safe area for device layout.
 
 On macOS, `PreviewsInjection.MacOSPreviewHostingWindow` supplies active key/main
 appearance without activating the renderer application. Device layout uses
