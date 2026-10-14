@@ -150,7 +150,7 @@ definition in source order, including files that mix providers and registries.
 It resolves registry metadata or a provider's type in the built image, including linked embedded
 frameworks and libraries, and extracts its view with
 ABIBridge. UIKit hosts use `UIHostingController`, macOS uses `NSHostingController`,
-and watchOS attaches SwiftUI's underscored hosting view to the running watch app.
+and watchOS attaches SwiftUI's underscored WatchKit hosting controller to the running watch app.
 These hosts capture a live view hierarchy, including view lifecycle work.
 Source and host selection retain the native buildable's identity. Among applications and extensions
 that compile the source, embed its runtime image, or link its object/archive product
@@ -184,9 +184,37 @@ transparent portrait overlay. Snapshot composition rotates that overlay with the
 native content orientation before downsampling. Fixed-size and size-that-fits snapshots retain their rectangular
 hosting view. The longest image dimension is capped at 1500 pixels without
 upscaling smaller images.
-Remaining platform chrome and geometry outside the iOS scene host remain tracked in
-[the snapshot parity issue](https://github.com/lynnswap/XcodeMCPKit/issues/311).
-Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
+UIKit size-that-fits uses the hosting view's intrinsic size without a screen-size
+cap. watchOS uses its hosting controller's `sizeThatFits(in:)` with the selected
+watch's screen bounds. Device layout preserves WatchKit's safe-area layout;
+fixed-size and size-that-fits layouts disable it, matching the native hosts.
+macOS uses the native caller's 600-by-400-point proposal. Device layout keeps that
+proposal; size-that-fits uses `NSHostingController.sizeThatFits(in:)` with it.
+Fixed-size layout uses the source dimensions. AppKit's normal hosting constraints
+can resize the attached window; the renderer does not overwrite the result with
+the view's `fittingSize`.
+
+On macOS, `PreviewsInjection.MacOSPreviewHostingWindow` supplies active key/main
+appearance without activating the renderer application. Device layout uses
+full-size content so AppKit computes the titlebar safe area. Fixed-size layout
+retains the hosting controller's normal sizing constraints.
+`NSView.cacheDisplay` omits the window backdrop and WindowServer corner clipping,
+so the renderer captures its own window through QuartzCore's
+`CARenderServerSnapshot`. The context list contains only that window's
+`layerHostingContextID`; the display name comes from `CADisplay.mainDisplay.name`.
+The capture destination is a BGRA8 IOSurface tagged sRGB. The window's color space
+remains at its system value, preserving native compositing and material colors.
+The captured bitmap includes window corners; no radius or color correction is
+applied. The window is made transparent before registration and ordered out after
+capture, failure, or cancellation. It is closed before publishing a result.
+
+This macOS path was verified with macOS 26.6.2 and Xcode 27.1 using ABIBridge 0.9.0.
+Its private C call uses the observed 32-bit port, dictionary pointer, and normalized
+0/1 return-register contract; the public SDK has no declaration for that function.
+Snapshot option keys and the include-context-list mode are read from the exported
+NSString objects, because QuartzCore compares the mode by object identity.
+Unavailable private bindings use the native preview pipeline. Surface allocation,
+capture, and image-conversion failures are reported as rendering errors.
 
 On iOS, ordinary SwiftUI and UIKit previews accept Color Scheme, Contrast, Dynamic
 Type, Control Borders, and Orientation overrides in `previewVariantOverrides`.
@@ -206,7 +234,25 @@ bounds apply the requested orientation. This path was verified on iOS 27.2 with
 Xcode 27.1 and uses ABIBridge 0.9.0's existing Objective-C APIs. Unavailable private
 scene APIs use the native pipeline.
 
+On tvOS, previews use the same scene owner with the original scene's display and
+orientation settings. Fixed-size previews use the source's requested frame;
+device previews use the display bounds. `sizeThatFits` measures with the finite
+display size and resizes the scene to the result. The hosting controller retains
+its default sizing options and native safe-area regions, so overscan applies to
+all sides of the preview frame. Its background comes from UIKit's native
+`systemBackgroundColor` selector, which the public tvOS color API does not expose.
+All three layouts were verified on tvOS 27.0 with Xcode 27.1.
+Unavailable private scene or color bindings use the native pipeline.
+
+Static iOS and tvOS snapshots allocate integer pixel dimensions with the native
+FBS snapshot's unsigned conversion and use a standard 8-bit renderer. The view's
+point frame and drawing rectangle are retained, including fractional dimensions.
+
 Each render owns a fresh, nonpersistent scene session with a passive delegate.
+After UIKit connects, the owner sends the workspace's initial nil-diff settings
+notification to the scene delegate and waits for its commit response. This lets
+UIKit retain its previous settings before later frame updates. The response can
+arrive on a Core Animation queue, so the completion only resumes the caller.
 It disconnects the window scene, removes its session, and invalidates the native
 scene on its call-out queue after capture, failure, or cancellation. The original
 scene and session remain connected. A cleanup failure is returned with the render

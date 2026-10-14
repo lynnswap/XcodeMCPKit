@@ -1,4 +1,5 @@
 #if (os(iOS) && targetEnvironment(macCatalyst)) || ((os(tvOS) || os(visionOS)) && targetEnvironment(simulator))
+import ABIBridge
 import DeveloperToolsSupport
 import Foundation
 import SwiftUI
@@ -12,6 +13,9 @@ final class PreviewRendererApp: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        #if os(tvOS)
+        if let snapshot = PreviewSnapshotWindow.configuration(for: session) { return snapshot }
+        #endif
         let configuration = UISceneConfiguration(name: "Preview", sessionRole: session.role)
         configuration.delegateClass = PreviewRendererScene.self
         return configuration
@@ -37,29 +41,75 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         let content = try await makeGeneralPreview(loadPreviewRequest())
         let controller = UIHostingController(rootView: content.view)
         applyDisplayVariants(to: controller, variants: content.variants)
+        #if os(tvOS)
+        do {
+            // Native IOSHostingParadigm sets this color on TV; its Swift API is unavailable there.
+            let background = try await ABIRuntime.shared.object(UIColor.self as AnyObject).resolveMethod(
+                selector: "systemBackgroundColor", as: (() -> UIColor).self)
+            controller.view.backgroundColor = try unsafe background.unsafeInvoke()
+        } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
+        #endif
         var size = window.bounds.size
+        #if os(tvOS)
+        size = window.screen.bounds.size
+        #endif
         switch content.layout {
         case .device: break
         case .fixed(let width, let height):
+            #if !os(tvOS)
             controller.safeAreaRegions = []
+            #endif
             size = CGSize(width: width, height: height)
         case .sizeThatFits:
+            #if !os(tvOS)
             controller.safeAreaRegions = []
             controller.sizingOptions = .intrinsicContentSize
             size = controller.view.intrinsicContentSize
+            #endif
         default: throw NativePreviewPipelineRequired()
         }
+        #if os(tvOS)
+        let result = try await PreviewSnapshotWindow.withWindow(from: window, size: size) { snapshot in
+            try await capture(in: snapshot.window, controller: controller, layout: content.layout,
+                              size: size, result: content.result, resizeWindow: { size in try await snapshot.resize(to: size) })
+        }
+        #else
+        let result = try await capture(in: window, controller: controller, layout: content.layout,
+                                       size: size, result: content.result)
+        #endif
+        write(result)
+    }
+
+    private func capture(in window: UIWindow, controller: UIHostingController<AnyView>,
+                         layout: DeveloperToolsSupport.PreviewLayout, size initialSize: CGSize,
+                         result initialResult: PreviewRendererResult,
+                         resizeWindow: ((CGSize) async throws -> Void)? = nil) async throws -> PreviewRendererResult {
+        var size = initialSize
         window.rootViewController = controller
         window.makeKeyAndVisible()
+        #if os(tvOS)
+        if case .sizeThatFits = layout {} else { controller.view.frame = CGRect(origin: .zero, size: size) }
+        #else
         controller.view.frame = CGRect(origin: .zero, size: size)
+        #endif
         controller.view.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
-        if case .sizeThatFits = content.layout { size = controller.view.intrinsicContentSize }
+        if case .sizeThatFits = layout {
+            #if os(tvOS)
+            size = controller.sizeThatFits(in: window.screen.bounds.size)
+            #else
+            size = controller.view.intrinsicContentSize
+            #endif
+        }
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
             throw PreviewRendererError("The preview has no drawable area: \(size)")
         }
+        if case .sizeThatFits = layout { try await resizeWindow?(size) }
         controller.view.frame = CGRect(origin: .zero, size: size)
         controller.view.layoutIfNeeded()
+        #if os(tvOS)
+        let data = try staticPreviewSnapshot(of: controller.view, size: size, scale: window.traitCollection.displayScale)
+        #else
         let format = UIGraphicsImageRendererFormat()
         format.scale = window.traitCollection.displayScale
         var drawn = false
@@ -67,14 +117,15 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             drawn = controller.view.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: true)
         }
         guard drawn, let data = image.pngData() else { throw PreviewRendererError("The preview host could not capture its rendered view") }
-        var result = content.result
+        #endif
+        var result = initialResult
         #if targetEnvironment(macCatalyst)
         result.snapshotData = data
         #else
         try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
         result.snapshotName = "Preview.png"
         #endif
-        write(result)
+        return result
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
