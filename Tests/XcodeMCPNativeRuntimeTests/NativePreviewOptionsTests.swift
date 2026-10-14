@@ -29,6 +29,19 @@ struct NativePreviewOptionsTests {
         #expect(!options.requiresNativePipeline)
     }
 
+    @Test func activityControlsPreserveStaleSelectionAndDisabledToggle() {
+        let options = NativePreviewCorrection.directOptions(
+            variants: ["View Style": "Content (Smart Stack)", "Activity View Context": "Stale",
+                       "Color Scheme": "Dark Appearance"],
+            controls: ["timelineIndex": Optional(1) as Any, "toggleState": Optional(false) as Any])
+        #expect(options.activityViewStyle == "Content (Smart Stack)")
+        #expect(options.activityViewContext == "Stale")
+        #expect(options.activityToggleState == false)
+        #expect(options.timelineIndex == 1)
+        #expect(options.displayVariants == ["Color Scheme": "Dark Appearance"])
+        #expect(!options.requiresNativePipeline)
+    }
+
     @Test func advertisesGroupItemObjectsMatchingNativeOutput() throws {
         let native = #"{"name":"RenderPreview","inputSchema":{"properties":[]},"outputSchema":{"properties":[{"name":"previewSnapshotPath","isRequired":false,"type":{"string":{}}},{"name":"supportedCanvasControlOverrides","isRequired":false,"type":{"object":{"schema":{"properties":[{"name":"groupItems","isRequired":false,"type":{"array":{"itemType":{"integer":{}}}}}]}}}}]}}"#
         let tool = try NativeSchemaConverter.tool(from: Data(native.utf8), workspaceScoped: true)
@@ -42,9 +55,8 @@ struct NativePreviewOptionsTests {
 
     @Test func otherVariantsAndControlsKeepNativeRendering() {
         #expect(NativePreviewCorrection.directOptions(variants: ["Widget Family": "Large"], controls: [:]).requiresNativePipeline)
+        #expect(NativePreviewCorrection.directOptions(variants: ["View Style": "Unknown Style"], controls: [:]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Unknown Appearance"], controls: [:]).requiresNativePipeline)
-        #expect(NativePreviewCorrection.directOptions(variants: [:],
-            controls: ["toggleState": Optional(false) as Any]).requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: [:],
             controls: ["futureControl": Optional(1) as Any]).requiresNativePipeline)
     }
@@ -61,7 +73,14 @@ struct NativePreviewOptionsTests {
         #expect(NativePreviewCorrection.directOptions(variants: [
             "Widget Family": "Medium", "Color Scheme": "Dark Appearance",
         ], controls: [:]).requiresNativePipeline)
-        #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Dark Appearance"],
-            controls: ["timelineIndex": Optional(1) as Any]).requiresNativePipeline)
+    }
+
+    @Test func activityDefaultStylePreservesTimelineAndAppearance() {
+        let options = NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Dark Appearance"],
+            controls: ["timelineIndex": Optional(1) as Any])
+        #expect(options.timelineIndex == 1)
+        #expect(options.displayVariants == ["Color Scheme": "Dark Appearance"])
+        #expect(options.activityViewStyle == nil)
+        #expect(!options.requiresNativePipeline)
     }
 }
