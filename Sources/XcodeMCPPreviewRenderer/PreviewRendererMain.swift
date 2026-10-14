@@ -72,7 +72,6 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         var errors: [String] = []
         if let typeName = request.providerTypeName {
             let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
-            guard preview.device == nil else { throw NativePreviewPipelineRequired() }
             if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
                 variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"
             }
