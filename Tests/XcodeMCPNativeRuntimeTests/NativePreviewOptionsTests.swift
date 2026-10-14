@@ -6,6 +6,27 @@ import XcodeMCPWire
 @Suite
 @MainActor
 struct NativePreviewOptionsTests {
+    @Test func generalPreviewReportsUnsupportedControlsAndVariantGroups() {
+        let request = PreviewRendererRequest(libraryNames: [], registryNames: [], fileName: "View.swift",
+            moduleName: nil, lineNumber: nil, columnNumber: nil, definitionIndex: 0, localization: nil,
+            widgetPresentation: "Placeholder", timelineIndex: 42, displayVariantOverrides: ["Color Scheme": "Dark Appearance"],
+            activityViewStyle: "Compact", activityViewContext: "Stale", activityToggleState: false)
+        #expect(request.unsupportedGeneralPreviewOptions == [
+            "Unsupported timeline index 42; the specified preview doesn't support timeline indexes in the currently active scheme.",
+            "Unsupported toggle state false; the specified preview doesn't support a toggle control in the currently active scheme.",
+            "Unsupported variant group ‘Activity View Context’; see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.",
+            "Unsupported variant group ‘Presentation’; see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.",
+            "Unsupported variant group ‘View Style’; see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.",
+        ])
+        var supported = request
+        supported.widgetPresentation = nil
+        supported.timelineIndex = nil
+        supported.activityViewStyle = nil
+        supported.activityViewContext = nil
+        supported.activityToggleState = nil
+        #expect(supported.unsupportedGeneralPreviewOptions.isEmpty)
+    }
+
     @Test func widgetFamilyPresentationAndTimelineUseDirectRenderer() {
         let options = NativePreviewCorrection.directOptions(variants: [
             "Widget Family": "Large", "Presentation": "Placeholder", "Color Scheme": "Dark Appearance",

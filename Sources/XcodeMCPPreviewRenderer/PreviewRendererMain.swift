@@ -93,13 +93,10 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 sourceOrientation = result.interfaceOrientation
                 errors = result.errors
             } else {
-                guard request.widgetFamily == nil, request.widgetPresentation == nil, request.timelineIndex == nil,
-                      request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil else {
-                    throw NativePreviewPipelineRequired()
-                }
                 widget = nil
                 activity = nil
                 view = preview.content
+                errors = request.unsupportedGeneralPreviewOptions
                 switch preview.interfaceOrientation {
                 case .portrait: sourceOrientation = .portrait
                 case .portraitUpsideDown: sourceOrientation = .portraitUpsideDown
@@ -138,16 +135,12 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             case "DeveloperToolsSupport.DefaultPreviewSource<SwiftUI.ViewPreviewBody>",
                  "DeveloperToolsSupport.DefaultPreviewSource<__C.UIView>",
                  "DeveloperToolsSupport.DefaultPreviewSource<__C.UIViewController>":
-                guard request.widgetFamily == nil, request.widgetPresentation == nil, request.timelineIndex == nil,
-                      request.activityViewStyle == nil, request.activityViewContext == nil, request.activityToggleState == nil else {
-                    throw NativePreviewPipelineRequired()
-                }
                 widget = nil
                 activity = nil
                 let result = try await makeViewPreview(source: source, groupItemIndex: request.groupItemIndex)
                 view = try await applyPreviewModifiers(result.view, preview: value)
                 groupItems = result.groupItems
-                errors = result.errors
+                errors = result.errors + request.unsupportedGeneralPreviewOptions
                 layout = try await viewPreviewLayout(value)
                 sourceOrientation = try await viewPreviewOrientation(value)
             case "WidgetKit.TimelineEntryPreviewSource", "WidgetKit.TimelineProviderPreviewSource":

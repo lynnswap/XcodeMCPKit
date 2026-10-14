@@ -45,7 +45,9 @@ struct NativePreviewBuildTests {
     private func destination(_ value: PreviewBuildDestination, platformName: String, previewIdentifier: String? = nil,
                              version: String = "27.1") -> NativePreviewBuild.Destination {
         .init(value: value, identifier: value.targetDevice.identifier, previewIdentifier: previewIdentifier ?? value.targetDevice.identifier,
-              platformIdentifier: value.targetSDK.platform.identifier, platformName: platformName,
+              platformIdentifier: value.targetSDK.platform.identifier,
+              previewPlatform: NativePreviewPlatform(platformIdentifier: value.targetSDK.platform.identifier, isMacCatalyst: value.isMacCatalyst),
+              platformName: platformName,
               deviceModelName: "Preview device", systemVersion: version)
     }
 
