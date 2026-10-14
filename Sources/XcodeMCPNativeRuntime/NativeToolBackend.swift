@@ -95,10 +95,6 @@ package final class NativeXcodeBackend: NativeToolBackend {
             }
         }
         try Task.checkCancellation()
-        if name == "XcodeCloseWorkspace", case .string(let identifier) = arguments["workspaceIdentifier"] {
-            do { try workspaces.closeDocument(for: identifier) }
-            catch { NativeErrorPresentation.report(error as NSError) }
-        }
         arguments["temporaryArtifactsPath"] = .string(context.artifactsDirectory.path)
         arguments["conversationID"] = .string(context.conversationID)
         let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))

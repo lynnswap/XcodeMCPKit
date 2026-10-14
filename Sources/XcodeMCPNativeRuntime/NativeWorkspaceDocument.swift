@@ -7,7 +7,6 @@ import ObjectiveC
 final class NativeWorkspaceDocument: NSObject {
     private let document: AnyObject
     private let collectState: NativeBoundObjCMethod<Void>
-    private let setDelegate: NativeBoundObjCMethod<Void, AnyObject?>
     private let closeDocument: NativeBoundObjCMethod<Void>
     private var failure: (any Error)?
 
@@ -17,7 +16,7 @@ final class NativeWorkspaceDocument: NSObject {
         let getter = try runtime.object(document).resolveMethodAndWait(selector: "stateRepository", as: (() -> AnyObject).self)
         let repository = try unsafe getter.unsafeInvoke()
         collectState = try runtime.object(repository).resolveMethodAndWait(selector: "collectStateFromRegisteredObjects", as: (() -> Void).self)
-        setDelegate = try runtime.object(repository).resolveMethodAndWait(selector: "setDelegate:", as: ((AnyObject?) -> Void).self)
+        let setDelegate = try runtime.object(repository).resolveMethodAndWait(selector: "setDelegate:", as: ((AnyObject?) -> Void).self)
         closeDocument = try runtime.object(document).resolveMethodAndWait(selector: "close", as: (() -> Void).self)
         super.init()
         try unsafe setDelegate.unsafeInvoke(self)
@@ -71,14 +70,13 @@ final class NativeWorkspaceDocument: NSObject {
     }
 
     func close() throws {
-        var failures: [any Error] = []
-        do { try unsafe setDelegate.unsafeInvoke(nil) }
-        catch { failures.append(error) }
-        do { try unsafe closeDocument.unsafeInvoke() }
-        catch { failures.append(error) }
-        if failures.count == 1 { throw failures[0] }
-        if !failures.isEmpty {
-            throw NativeRuntimeError.invocation(failures.map { String(describing: $0) }.joined(separator: "; "))
+        do {
+            // Native document invalidation detaches its state repository. Keep
+            // its owner connected until that operation has completed.
+            try unsafe closeDocument.unsafeInvoke()
+        } catch {
+            failure = error
+            throw error
         }
     }
 }

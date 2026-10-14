@@ -45,7 +45,10 @@ struct NativeWorkspaceDocumentTests {
 private final class WorkspaceDocumentFixture: NSObject {
     @objc let stateRepository = WorkspaceStateRepositoryFixture()
     private(set) var closed = false
-    @objc func close() { closed = true }
+    @objc func close() {
+        stateRepository.delegate = nil
+        closed = true
+    }
 }
 
 private final class WorkspaceStateRepositoryFixture: NSObject {
