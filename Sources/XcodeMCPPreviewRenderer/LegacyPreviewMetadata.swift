@@ -75,7 +75,7 @@ private func legacyPreviewLayout(_ layout: DeveloperToolsSupport.PreviewLayout) 
     case .device: return try type.makeEnumCase(named: "device")
     case .sizeThatFits: return try type.makeEnumCase(named: "sizeThatFits")
     case .fixed(let width, let height):
-        return try await type.makeEnumCase(named: "fixed", payload: ownedPreviewValue((CGFloat(width), CGFloat(height))))
+        return try await type.makeEnumCase(named: "fixed", payload: ownedPreviewValue((width: CGFloat(width), height: CGFloat(height))))
     default: throw NativePreviewPipelineRequired()
     }
 }
