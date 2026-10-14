@@ -1,9 +1,28 @@
-#if os(iOS) && targetEnvironment(simulator)
+#if os(iOS) || os(tvOS) || os(visionOS) || os(macOS) || os(watchOS)
 import ABIBridge
 import DeveloperToolsSupport
 import SwiftUI
+#if canImport(UIKit) && !os(watchOS)
 import UIKit
+#endif
 import XcodeMCPWire
+
+let supportedPreviewDisplayVariants: [String: [String]] = {
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    let keys = ["Color Scheme"]
+    #elseif os(tvOS)
+    let keys = ["Color Scheme", "Contrast", "Control Borders"]
+    #elseif os(watchOS)
+    let keys = ["Dynamic Type"]
+    #elseif os(visionOS)
+    let keys: [String] = []
+    #else
+    return PreviewRendererRequest.displayVariantValues
+    #endif
+    #if !os(iOS) || targetEnvironment(macCatalyst)
+    return PreviewRendererRequest.displayVariantValues.filter { keys.contains($0.key) }
+    #endif
+}()
 
 private let dynamicTypeSizes: [String: DynamicTypeSize] = [
     "X Small": .xSmall, "Small": .small, "Medium": .medium, "Large": .large,
@@ -12,6 +31,7 @@ private let dynamicTypeSizes: [String: DynamicTypeSize] = [
     "AX 4": .accessibility4, "AX 5": .accessibility5,
 ]
 
+#if canImport(UIKit) && !os(watchOS)
 @MainActor
 private let contentSizeCategories: [String: UIContentSizeCategory] = [
     "X Small": .extraSmall, "Small": .small, "Medium": .medium, "Large": .large,
@@ -19,6 +39,8 @@ private let contentSizeCategories: [String: UIContentSizeCategory] = [
     "AX 1": .accessibilityMedium, "AX 2": .accessibilityLarge, "AX 3": .accessibilityExtraLarge,
     "AX 4": .accessibilityExtraExtraLarge, "AX 5": .accessibilityExtraExtraExtraLarge,
 ]
+
+#endif
 
 @MainActor
 func applyDisplayVariants(to content: AnyView, variants: [String: String]) throws -> AnyView {
@@ -44,6 +66,7 @@ func applyDisplayVariants(to content: AnyView, variants: [String: String]) throw
     return view
 }
 
+#if canImport(UIKit) && !os(watchOS)
 @MainActor
 func applyDisplayVariants(to controller: UIViewController, variants: [String: String]) {
     if let style = variants["Color Scheme"] {
@@ -57,6 +80,9 @@ func applyDisplayVariants(to controller: UIViewController, variants: [String: St
     }
 }
 
+#endif
+
+#if os(iOS) && targetEnvironment(simulator)
 @MainActor
 func viewPreviewOrientation(_ preview: NativeSwiftValue) async throws -> UIInterfaceOrientation {
     do {
@@ -146,4 +172,5 @@ func requestPreviewOrientation(_ target: UIInterfaceOrientation, in scene: UIWin
     }
     if let failure { throw failure }
 }
+#endif
 #endif

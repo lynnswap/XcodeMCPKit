@@ -36,6 +36,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
     private func render(in window: UIWindow) async throws {
         let content = try await makeGeneralPreview(loadPreviewRequest())
         let controller = UIHostingController(rootView: content.view)
+        applyDisplayVariants(to: controller, variants: content.variants)
         var size = window.bounds.size
         switch content.layout {
         case .device: break

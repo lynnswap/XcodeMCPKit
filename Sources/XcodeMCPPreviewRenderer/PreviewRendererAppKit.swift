@@ -40,6 +40,9 @@ struct PreviewRendererAppKit {
         let style: NSWindow.StyleMask = usesDeviceLayout ? [.titled, .closable, .miniaturizable, .resizable] : [.borderless]
         let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size),
             styleMask: style, backing: .buffered, defer: false)
+        if let color = content.variants["Color Scheme"] {
+            window.appearance = NSAppearance(named: color == "Dark Appearance" ? .darkAqua : .aqua)
+        }
         window.isReleasedWhenClosed = false
         defer { window.close() }
         window.title = content.result.displayName ?? "Preview"

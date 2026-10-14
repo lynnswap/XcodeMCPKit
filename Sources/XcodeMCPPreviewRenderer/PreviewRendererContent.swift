@@ -44,8 +44,12 @@ func previewRegistry(for request: PreviewRendererRequest) throws -> any PreviewR
 
 @MainActor
 func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
-    (view: AnyView, layout: DeveloperToolsSupport.PreviewLayout, result: PreviewRendererResult) {
+    (view: AnyView, layout: DeveloperToolsSupport.PreviewLayout, variants: [String: String], result: PreviewRendererResult) {
     guard request.widgetFamily == nil, request.timelineIndex == nil else { throw NativePreviewPipelineRequired() }
+    guard request.displayVariantOverrides.allSatisfy({ supportedPreviewDisplayVariants[$0.key]?.contains($0.value) == true }) else {
+        throw NativePreviewPipelineRequired()
+    }
+    var variants = request.displayVariantOverrides
     var view: AnyView
     let layout: DeveloperToolsSupport.PreviewLayout
     var result: PreviewRendererResult
@@ -55,7 +59,9 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
             throw NativePreviewPipelineRequired()
         }
         view = preview.content
-        if let colorScheme = preview.colorScheme { view = AnyView(view.environment(\.colorScheme, colorScheme)) }
+        if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
+            variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"
+        }
         layout = preview.layout
         result = PreviewRendererResult(displayName: preview.displayName, sourceLineNumber: request.lineNumber,
             errors: request.groupItemIndex.map { [unsupportedPreviewGroupItemMessage($0, supportsGroups: false)] } ?? [])
@@ -74,7 +80,9 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
             groupItems: content.groupItems, errors: content.errors)
     }
     if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }
-    return (view, layout, result)
+    view = try applyDisplayVariants(to: view, variants: variants)
+    result.supportedDisplayVariants = supportedPreviewDisplayVariants
+    return (view, layout, variants, result)
 }
 
 @MainActor
