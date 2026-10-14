@@ -3,11 +3,13 @@ import Foundation
 package struct PreviewRendererNativeSource: Codable, Sendable {
     package var extensionIdentifier: String
     package var specification: Data
+    package var metadata: Data
     package var variantOverrides: [String: String]
 
-    package init(extensionIdentifier: String, specification: Data, variantOverrides: [String: String]) {
+    package init(extensionIdentifier: String, specification: Data, metadata: Data, variantOverrides: [String: String]) {
         self.extensionIdentifier = extensionIdentifier
         self.specification = specification
+        self.metadata = metadata
         self.variantOverrides = variantOverrides
     }
 }
@@ -45,6 +47,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var activityToggleState: Bool?
     package var appName: String?
     package var nativeSource: PreviewRendererNativeSource?
+    package var metadataOnly: Bool?
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
@@ -53,7 +56,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
                  programRootNames: [String]? = nil,
                  displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
                  activityViewContext: String? = nil, activityToggleState: Bool? = nil,
-                 appName: String? = nil, nativeSource: PreviewRendererNativeSource? = nil) {
+                 appName: String? = nil, nativeSource: PreviewRendererNativeSource? = nil, metadataOnly: Bool? = nil) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
         self.fileName = fileName
@@ -74,6 +77,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.activityToggleState = activityToggleState
         self.appName = appName
         self.nativeSource = nativeSource
+        self.metadataOnly = metadataOnly
     }
 
     package var unsupportedGeneralPreviewOptions: [String] {
@@ -100,7 +104,6 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var sourceLineNumber: Int?
     package var error: String?
     package var requiresNativePipeline: Bool?
-    package var requiresViewRenderer: Bool?
     package var timelineIndexes: [Int]?
     package var groupItems: [String?]?
     package var errors: [String]?
@@ -111,22 +114,24 @@ package struct PreviewRendererResult: Codable, Sendable {
     package var usesDeviceLayout: Bool?
     package var interfaceOrientation: String?
     package var exclusionSnapshotName: String?
+    package var nativeMetadata: Data?
+    package var nativeProviderPreviewDescription: Data?
 
     package init(snapshotName: String? = nil, snapshotData: Data? = nil, displayName: String? = nil,
                  sourceLineNumber: Int? = nil, error: String? = nil,
-                 requiresNativePipeline: Bool? = nil, requiresViewRenderer: Bool? = nil, timelineIndexes: [Int]? = nil,
+                 requiresNativePipeline: Bool? = nil, timelineIndexes: [Int]? = nil,
                  groupItems: [String?]? = nil, errors: [String]? = nil,
                  toggleStates: [Bool]? = nil, activityViewStyles: [String]? = nil,
                  activityViewContexts: [String]? = nil,
                  supportedDisplayVariants: [String: [String]]? = nil, usesDeviceLayout: Bool? = nil,
-                 interfaceOrientation: String? = nil, exclusionSnapshotName: String? = nil) {
+                 interfaceOrientation: String? = nil, exclusionSnapshotName: String? = nil,
+                 nativeMetadata: Data? = nil, nativeProviderPreviewDescription: Data? = nil) {
         self.snapshotName = snapshotName
         self.snapshotData = snapshotData
         self.displayName = displayName
         self.sourceLineNumber = sourceLineNumber
         self.error = error
         self.requiresNativePipeline = requiresNativePipeline
-        self.requiresViewRenderer = requiresViewRenderer
         self.timelineIndexes = timelineIndexes
         self.groupItems = groupItems
         self.errors = errors
@@ -137,5 +142,7 @@ package struct PreviewRendererResult: Codable, Sendable {
         self.usesDeviceLayout = usesDeviceLayout
         self.interfaceOrientation = interfaceOrientation
         self.exclusionSnapshotName = exclusionSnapshotName
+        self.nativeMetadata = nativeMetadata
+        self.nativeProviderPreviewDescription = nativeProviderPreviewDescription
     }
 }

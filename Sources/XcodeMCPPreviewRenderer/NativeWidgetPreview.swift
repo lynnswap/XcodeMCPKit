@@ -9,7 +9,6 @@ func renderNativeWidgetPreview(_ request: PreviewRendererRequest) async throws -
     guard let source = request.nativeSource else { throw NativePreviewPipelineRequired() }
     return try await NativePreviewService.withService { service in
         let renderer = NativeWidgetPreview(service: service, request: request)
-        let pid = try await service.relaunch(extensionIdentifier: source.extensionIdentifier, localization: request.localization)
         let specificationType = try await service.messagingType("PreviewSpecification")
         let decoder = try await specificationType.resolveInitializer(
             named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewSpecification",
@@ -18,7 +17,17 @@ func renderNativeWidgetPreview(_ request: PreviewRendererRequest) async throws -
                         specificationType: .opaque(named: specificationType.name)])
         let encodedSpecification = try await service.propertyList(source.specification)
         let specification = try unsafe decoder.unsafeInvoke(encodedSpecification)
-        return try await renderer.render(pid: pid, specification: specification, variants: source.variantOverrides)
+        let metadataType = try await service.messagingType("PreviewMetadata")
+        let metadataDecoder = try await metadataType.resolveInitializer(
+            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewMetadata",
+            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+            valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name),
+                        metadataType: .opaque(named: metadataType.name)])
+        let encodedMetadata = try await service.propertyList(source.metadata)
+        let metadata = try unsafe metadataDecoder.unsafeInvoke(encodedMetadata)
+        let pid = try await service.relaunch(extensionIdentifier: source.extensionIdentifier, localization: request.localization)
+        return try await renderer.render(pid: pid, specification: specification,
+                                         metadata: metadata, variants: source.variantOverrides)
     }
 }
 
@@ -28,29 +37,13 @@ private struct NativeWidgetPreview {
     let request: PreviewRendererRequest
     private var runtime: ABIRuntime { .shared }
 
-    func render(pid: Int32, specification: NativeSwiftValue, variants: [String: String]) async throws -> PreviewRendererResult {
+    func render(pid: Int32, specification: NativeSwiftValue, metadata: NativeSwiftValue,
+                variants: [String: String]) async throws -> PreviewRendererResult {
         let identifierType = try await service.messagingType("ContentIdentifier")
         let makeIdentifier = try await identifierType.resolveInitializer(
             named: "init(rawValue: Swift.String) -> PreviewsMessagingOS.ContentIdentifier",
             as: ((String) -> NativeSwiftValue).self, valueABIs: [identifierType: .opaque(named: identifierType.name)])
-        // The runtime caches entry points by ContentIdentifier. Discovery and
-        // rendering own separate entry points even when they share a source.
-        let preflightIdentifier = try unsafe makeIdentifier.unsafeInvoke(UUID().uuidString)
         let categoryType = try await service.messagingType("ContentCategory")
-        let preflightCategory = try await categoryType.resolveStaticGetter(named: "previewPreflight",
-            as: (() -> NativeSwiftValue).self, valueABIs: [categoryType: .opaque(named: categoryType.name)])
-        let category = try unsafe preflightCategory.unsafeInvoke()
-        let encodedSpecification = try await service.encode(specification)
-        let preflight = try await update(pid: pid, identifier: preflightIdentifier, category: category,
-            content: encodedSpecification, controls: nil)
-        let preflightReply = try await service.sendUpdate(preflight)
-        let metadata = try await preflightMetadata(preflightReply)
-        let domainType = try await service.messagingType("PreviewContentDomain")
-        let domainGetter = try await metadata.type.resolveGetter(named: "contentDomain", as: (() -> NativeSwiftValue).self,
-            valueABIs: [domainType: .opaque(named: domainType.name)], receiverABI: .opaque(named: metadata.type.name))
-        let domain = try unsafe domainGetter.unsafeInvoke(on: metadata)
-        if try matches(domain, case: "view") { return PreviewRendererResult(requiresViewRenderer: true) }
-        guard try matches(domain, case: "widget") else { throw NativePreviewPipelineRequired() }
         let categoryGetter = try await metadata.type.resolveGetter(named: "contentCategory", as: (() -> NativeSwiftValue).self,
             valueABIs: [categoryType: .opaque(named: categoryType.name)], receiverABI: .opaque(named: metadata.type.name))
         let previewCategory = try unsafe categoryGetter.unsafeInvoke(on: metadata)
@@ -109,44 +102,6 @@ private struct NativeWidgetPreview {
             sourceLineNumber: request.lineNumber, timelineIndexes: indexes, errors: errors,
             toggleStates: descriptions.contains(where: { ($0["controlType"] as? [String: Any])?["discriminant"] as? String == "toggle" }) ? [true, false] : nil,
             supportedDisplayVariants: catalog.supported, usesDeviceLayout: false)
-    }
-
-    private func matches(_ value: NativeSwiftValue, case name: String) throws -> Bool {
-        let expected = try value.type.makeEnumCase(named: name)
-        return try value.withCopy { value in
-            guard let value = value as? any Equatable else { throw NativePreviewPipelineRequired() }
-            func compare<Value: Equatable>(_ value: Value) throws -> Bool {
-                try expected.withCopy { expected in
-                    guard let expected = expected as? Value else { return false }
-                    return expected == value
-                }
-            }
-            return try _openExistential(value, do: compare)
-        }
-    }
-
-    private func preflightMetadata(_ reply: NativeSwiftValue) async throws -> NativeSwiftValue {
-        // NonUIUpdateOutput uses the same native envelope keys. The native
-        // StaticPreviewReply decoder supplies defaults for omitted chrome/controls.
-        let envelope = try await staticReply(reply)
-        let payloadGetter = try await envelope.type.resolveGetter(named: "contentPayload", as: (() -> NativeSwiftValue).self,
-            valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name)],
-            receiverABI: .opaque(named: envelope.type.name))
-        let payload = try unsafe payloadGetter.unsafeInvoke(on: envelope)
-        let flavor = try await service.messagingType("PreviewFlavor")
-        let lookup = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.RuntimeLookup",
-            in: .framework(named: "PreviewsMessagingOS"), genericArguments: [.type(flavor)])
-        let decoder = try await lookup.resolveInitializer(
-            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.RuntimeLookup<A>",
-            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
-            valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name), lookup: .opaque(named: lookup.name)])
-        let value = try unsafe decoder.unsafeInvoke(payload)
-        guard let available = try await value.resolveEnumPayload(forCase: "available"),
-              let preview = try await available.resolveEnumPayload(forCase: "preview") else {
-            throw PreviewRendererError(try value.withCopy { String(describing: $0) })
-        }
-        // The named associated value retains its one-element tuple representation.
-        return try preview.copyTupleElement(at: 0)
     }
 
     private func variantCatalog(category: NativeSwiftValue) async throws -> WidgetVariantCatalog {

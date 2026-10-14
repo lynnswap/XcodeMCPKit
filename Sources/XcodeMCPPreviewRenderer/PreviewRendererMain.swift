@@ -66,6 +66,12 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         }
         // Preview mode defers SwiftUI graph creation until its code is ready.
         __previewThunksHaveFinishedLoading()
+        if request.metadataOnly == true {
+            let value = try await nativePreviewMetadata(request)
+            write(PreviewRendererResult(nativeMetadata: value.metadata,
+                nativeProviderPreviewDescription: value.providerDescription))
+            return
+        }
         let widget: WidgetPreview?
         let activity: ActivityPreview?
         var view: AnyView?
@@ -150,7 +156,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 widget = nil
                 activity = nil
                 let result = try await makeViewPreview(source: source, groupItemIndex: request.groupItemIndex)
-                view = try await applyPreviewModifiers(result.view, preview: value)
+                view = try await applyViewPreviewTraits(result.view, preview: value)
                 groupItems = result.groupItems
                 errors = result.errors + request.unsupportedGeneralPreviewOptions
                 layout = try await viewPreviewLayout(value)

@@ -10,6 +10,9 @@ import XcodeMCPWire
 func loadPreviewRequest() throws -> PreviewRendererRequest {
     let url = Bundle.main.resourceURL!.appendingPathComponent("PreviewRequest.json")
     let request = try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: url))
+    #if !os(macOS)
+    if request.metadataOnly == true { throw NativePreviewPipelineRequired() }
+    #endif
     guard unsafe setenv("XCODE_RUNNING_FOR_PREVIEWS", "1", 1) == 0 else {
         throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
@@ -71,7 +74,7 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
         let value = try await ownedPreview(preview)
         let source = try await previewSource(value)
         let content = try await makeViewPreview(source: source, groupItemIndex: request.groupItemIndex)
-        view = try await applyPreviewModifiers(content.view, preview: value)
+        view = try await applyViewPreviewTraits(content.view, preview: value)
         layout = try await viewPreviewLayout(value)
         let getter = try await value.type.resolveGetter(named: "displayName", as: (() -> String?).self,
             receiverABI: .opaque(named: value.type.name))
