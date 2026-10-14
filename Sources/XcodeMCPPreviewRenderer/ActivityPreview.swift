@@ -103,11 +103,12 @@ private func activityPreview<Attributes: ActivityAttributes>(source: NativeSwift
     }
     let metrics = try await activitySystemMetrics(style: style.metrics)
     let attributesData = try JSONEncoder().encode(attributes)
+    let archiveEnvironment = try await activityArchiveEnvironment(style.environment)
     var collections: [NativeSwiftValue] = []
     for entry in entries {
         collections.append(try await activityArchive(attributesType: nativeActivityType, viewSource: nativeViewSource,
             attributes: attributesData, state: JSONEncoder().encode(states[entry.0]), isStale: entry.1,
-            environment: style.environment, metrics: metrics.definition, families: nativeFamilies,
+            environment: archiveEnvironment.copy(), metrics: metrics.definition, families: nativeFamilies,
             layouts: nativeLayouts, payloadID: payloadID))
     }
     let controller = try await activityController(collections: collections, selectedIndex: selected,
@@ -157,7 +158,7 @@ private struct ActivityStyle {
 private func activityStyle(_ name: String?, defaultKind: ActivityPreviewViewKind,
                            environment: EnvironmentValues) async throws -> ActivityStyle {
     guard let name else {
-        return ActivityStyle(kind: defaultKind, environment: environment, orientation: .portrait,
+        return ActivityStyle(kind: defaultKind, environment: try activityStyleEnvironment(environment, kind: defaultKind, standBy: false), orientation: .portrait,
             metrics: "default", location: "lockScreen")
     }
     let factories = ["Compact": "dynamicIslandCompact", "Compact (Landscape)": "dynamicIslandCompactLandscape",
@@ -221,9 +222,25 @@ private func activityStyle(_ name: String?, defaultKind: ActivityPreviewViewKind
         try unsafe setter.unsafeInvoke(on: values, layout)
         environment = try values.take(as: EnvironmentValues.self)
     }
-    return ActivityStyle(kind: kind, environment: environment, orientation: orientation,
+    return ActivityStyle(kind: kind, environment: try activityStyleEnvironment(environment, kind: kind, standBy: standBy), orientation: orientation,
         metrics: standBy ? "standBy" : small ? "small" : "default",
         location: standBy ? "ambient" : "lockScreen")
+}
+
+@MainActor
+private func activityStyleEnvironment(_ environment: EnvironmentValues, kind: ActivityPreviewViewKind,
+                                      standBy: Bool) throws -> EnvironmentValues {
+    var environment = environment
+    switch kind {
+    case .content:
+        if standBy || environment.isLuminanceReduced { environment.colorScheme = .dark }
+    case .dynamicIsland:
+        // The native extension agent forces Dark appearance for Dynamic Island
+        // archives, including when the canvas requests Light appearance.
+        environment.colorScheme = .dark
+    @unknown default: throw NativePreviewPipelineRequired()
+    }
+    return environment
 }
 
 @MainActor
@@ -263,18 +280,11 @@ private func activityDescriptor(_ configuration: NativeSwiftValue) async throws 
 
 @MainActor
 private func activityArchive(attributesType: NativeSwiftValue, viewSource: NativeSwiftValue,
-    attributes: Data, state: Data, isStale: Bool, environment: EnvironmentValues, metrics: NativeSwiftValue,
+    attributes: Data, state: Data, isStale: Bool, environment: NativeSwiftValue, metrics: NativeSwiftValue,
     families: NativeSwiftValue, layouts: NativeSwiftValue, payloadID: String) async throws -> NativeSwiftValue {
     let nativeAttributes = try await activityValue(attributes)
     let nativeState = try await activityValue(state)
-    let nativeEnvironmentValues = try await activityValue(environment)
     let environmentType = try await activityTypeNamed("WidgetKit.WidgetEnvironment")
-    let initializeEnvironment = try await environmentType.resolveInitializer(named: "init(from: SwiftUI.EnvironmentValues) -> WidgetKit.WidgetEnvironment",
-        as: ((NativeSwiftValue) -> NativeSwiftValue).self,
-        valueABIs: [nativeEnvironmentValues.type: .opaque(named: nativeEnvironmentValues.type.name),
-                    environmentType: .opaque(named: environmentType.name)])
-    let initialEnvironment = try unsafe initializeEnvironment.unsafeInvoke(nativeEnvironmentValues)
-    let nativeEnvironment = try await activityArchiveFamilyEnvironment(initialEnvironment, family: environment.activityFamily)
     let tagType = try await activityTypeNamed("WidgetKit.ActivityViewTag")
     let tagsType = try await ABIRuntime.shared.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(tagType)])
     let allCases = try await tagType.resolveStaticGetter(named: "allCases", as: (() -> NativeSwiftValue).self,
@@ -291,7 +301,7 @@ private func activityArchive(attributesType: NativeSwiftValue, viewSource: Nativ
                     environmentType: .opaque(named: environmentType.name), families.type: .pointer,
                     layouts.type: .pointer, tagsType: .pointer])
     let data = try unsafe archive.unsafeInvoke(attributesType, nativeAttributes, nativeState, isStale,
-        viewSource, metrics, nativeEnvironment, payloadID, families, layouts, tags, false)
+        viewSource, metrics, environment, payloadID, families, layouts, tags, false)
     let collectionType = try await activityTypeNamed("WidgetKit.ActivityArchivedViewCollection")
     let collection = try await collectionType.resolveInitializer(named: "init(contentsOf: Foundation.Data) throws -> WidgetKit.ActivityArchivedViewCollection",
         as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
@@ -639,8 +649,8 @@ private final class ActivityControllerABI {
 
 
 @MainActor
-private func activityArchiveFamilyEnvironment(_ environment: NativeSwiftValue,
-    family: ActivityFamily) async throws -> NativeSwiftValue {
+private func activityArchiveEnvironmentValue<Value>(_ environment: NativeSwiftValue,
+    value: Value, keyPath: WritableKeyPath<EnvironmentValues, Value>) async throws -> NativeSwiftValue {
     let symbol = try await ABIRuntime.shared.resolve(.init(machOName:
         "_$s9WidgetKit0A11EnvironmentV13dynamicMemberSayxGSgs15WritableKeyPathCy7SwiftUI0C6ValuesVxG_tcluis",
         language: .swift), in: .framework(named: "WidgetKit"))
@@ -655,8 +665,8 @@ private func activityArchiveFamilyEnvironment(_ environment: NativeSwiftValue,
         // and WritableKeyPath copies and mutates self inout. KeyPath metadata
         // provides Value metadata; there is no extra generic argument register.
         let arguments = [
-            try unsafe abi.argument(Optional([family]), components: [word]),
-            try unsafe abi.argument(\EnvironmentValues.activityFamily, components: [pointer])
+            try unsafe abi.argument(Optional([value]), components: [word]),
+            try unsafe abi.argument(keyPath, components: [pointer])
         ]
         let interface = try unsafe abi.call(result: void, parameters: unsafe arguments.map { unsafe $0.type })
         var failure: OpaquePointer?
@@ -676,5 +686,81 @@ private func activityArchiveFamilyEnvironment(_ environment: NativeSwiftValue,
         return try await activityValue(modified)
     }
     return try await _openExistential(original, do: opened)
+}
+
+@MainActor
+private func activityArchiveEnvironment(_ values: EnvironmentValues) async throws -> NativeSwiftValue {
+    let nativeValues = try await activityValue(values)
+    let environmentType = try await activityTypeNamed("WidgetKit.WidgetEnvironment")
+    let initialize = try await environmentType.resolveInitializer(named: "init(from: SwiftUI.EnvironmentValues) -> WidgetKit.WidgetEnvironment",
+        as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+        valueABIs: [nativeValues.type: .opaque(named: nativeValues.type.name),
+                    environmentType: .opaque(named: environmentType.name)])
+    let initial = try unsafe initialize.unsafeInvoke(nativeValues.copy())
+    let family = try await activityArchiveEnvironmentValue(initial, value: values.activityFamily,
+        keyPath: \EnvironmentValues.activityFamily)
+    let environment = try await activityArchiveEnvironmentValue(family, value: values.colorScheme,
+        keyPath: \EnvironmentValues.colorScheme)
+    let root = nativeValues.type
+    let layoutType = try await activityTypeNamed("WidgetKit.DynamicIslandCompactLayout")
+    let property = "(extension in WidgetKit):SwiftUI.EnvironmentValues.dynamicIslandCompactLayout"
+    let keyPath = try await root.resolveWritableKeyPath(named: property, valueType: layoutType)
+    let path = try keyPath.withCopy { value in
+        guard let path = value as? AnyKeyPath else { throw NativePreviewPipelineRequired() }
+        return path
+    }
+    let getter = try await root.resolveGetter(named: property + ".getter : WidgetKit.DynamicIslandCompactLayout",
+        as: (() -> NativeSwiftValue).self, valueABIs: [layoutType: .opaque(named: layoutType.name)],
+        receiverABI: .opaque(named: root.name))
+    let layout = try unsafe getter.unsafeInvoke(on: nativeValues)
+    let value = try layout.withCopy { $0 }
+    @MainActor func opened<Value>(_ value: Value) async throws -> NativeSwiftValue {
+        guard let path = path as? WritableKeyPath<EnvironmentValues, Value> else { throw NativePreviewPipelineRequired() }
+        // init(from:) omits these widget archive keys. The canonical property
+        // key path makes the selected layout visible to WidgetEnvironment.
+        return try await activityArchiveEnvironmentValue(environment, value: value, keyPath: path)
+    }
+    return try await _openExistential(value, do: opened)
+}
+
+@MainActor
+func requestActivityPreviewOrientation(_ target: UIInterfaceOrientation, in scene: UIWindowScene) async throws {
+    let mask: UIInterfaceOrientationMask
+    switch target {
+    case .portrait: mask = .portrait
+    case .portraitUpsideDown: mask = .portraitUpsideDown
+    case .landscapeLeft: mask = .landscapeLeft
+    case .landscapeRight: mask = .landscapeRight
+    default: throw NativePreviewPipelineRequired()
+    }
+    var failure: (any Error)?
+    scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { failure = $0 }
+    while scene.effectiveGeometry.interfaceOrientation != target {
+        if let failure { throw failure }
+        try await Task.sleep(for: .milliseconds(16))
+    }
+    if let failure { throw failure }
+}
+
+@MainActor
+final class ActivityOrientationController: UIViewController {
+    private let content: UIViewController
+
+    init(content: UIViewController) {
+        self.content = content
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .all }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        addChild(content)
+        content.view.frame = view.bounds
+        content.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(content.view)
+        content.didMove(toParent: self)
+    }
 }
 #endif

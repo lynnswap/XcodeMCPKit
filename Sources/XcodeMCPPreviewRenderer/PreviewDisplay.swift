@@ -147,44 +147,4 @@ func makeCounterRotationController(content: UIHostingController<AnyView>, orient
     } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
 }
 
-@MainActor
-func requestPreviewOrientation(_ target: UIInterfaceOrientation, in scene: UIWindowScene) async throws {
-    let mask: UIInterfaceOrientationMask
-    switch target {
-    case .portrait: mask = .portrait
-    case .portraitUpsideDown: mask = .portraitUpsideDown
-    case .landscapeLeft: mask = .landscapeLeft
-    case .landscapeRight: mask = .landscapeRight
-    default: throw NativePreviewPipelineRequired()
-    }
-    var failure: (any Error)?
-    scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { failure = $0 }
-    while scene.effectiveGeometry.interfaceOrientation != target {
-        if let failure { throw failure }
-        try await Task.sleep(for: .milliseconds(16))
-    }
-    if let failure { throw failure }
-}
-
-@MainActor
-final class PreviewOrientationController: UIViewController {
-    private let content: UIViewController
-
-    init(content: UIViewController) {
-        self.content = content
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    required init?(coder: NSCoder) { nil }
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .all }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        addChild(content)
-        content.view.frame = view.bounds
-        content.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        view.addSubview(content.view)
-        content.didMove(toParent: self)
-    }
-}
 #endif

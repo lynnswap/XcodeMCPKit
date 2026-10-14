@@ -15,6 +15,7 @@ final class PreviewRendererApp: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        if let snapshot = PreviewSnapshotWindow.configuration(for: session) { return snapshot }
         let configuration = UISceneConfiguration(name: "Preview", sessionRole: session.role)
         configuration.delegateClass = PreviewRendererScene.self
         return configuration
@@ -167,102 +168,109 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             displayName = try unsafe displayGetter.unsafeInvoke(on: value)
             sourceLineNumber = registry.line
         }
-        var size = window.bounds.size
         let orientation = try interfaceOrientation(variant: variants["Orientation"], source: sourceOrientation)
-        // UIKit rejects upside-down geometry on the iPhone preview host. Keep
-        // the existing native route until its preview-specific scene geometry is supported.
-        if orientation == .portraitUpsideDown { throw NativePreviewPipelineRequired() }
-        let controller: UIViewController
-        let rootController: UIViewController
-        if let activity {
-            controller = activity.controller
-            rootController = PreviewOrientationController(content: controller)
+
+        @MainActor func capture(in window: UIWindow) async throws -> PreviewRendererResult {
+            var size = window.bounds.size
+            let controller: UIViewController
+            let rootController: UIViewController
+            if let activity {
+                controller = activity.controller
+                rootController = ActivityOrientationController(content: controller)
+            } else {
+                guard var view else { throw NativePreviewPipelineRequired() }
+                if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }
+                view = try applyDisplayVariants(to: view, variants: variants)
+                let hosting = UIHostingController(rootView: view)
+                applyDisplayVariants(to: hosting, variants: variants)
+                if widget != nil { hosting.view.backgroundColor = .clear }
+                switch layout {
+                case .device: break
+                case .fixed(let width, let height):
+                    hosting.safeAreaRegions = []
+                    size = CGSize(width: width, height: height)
+                case .sizeThatFits:
+                    hosting.safeAreaRegions = []
+                    // Intrinsic sizing asks SwiftUI for its ideal size with an unspecified proposal.
+                    hosting.sizingOptions = .intrinsicContentSize
+                    size = hosting.view.intrinsicContentSize
+                default: throw NativePreviewPipelineRequired()
+                }
+                controller = hosting
+                if orientation == .portrait { rootController = hosting }
+                else { rootController = try await makeCounterRotationController(content: hosting, orientation: orientation) }
+            }
+            guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
+                throw PreviewRendererError("The preview has no drawable area: \(size)")
+            }
+            window.rootViewController = rootController
+            window.makeKeyAndVisible()
+            if activity != nil, orientation != .portrait {
+                guard let scene = window.windowScene else { throw NativePreviewPipelineRequired() }
+                try await requestActivityPreviewOrientation(orientation, in: scene)
+            }
+            if activity != nil {
+                window.layoutIfNeeded()
+                controller.view.layoutIfNeeded()
+            }
+            if case .device = layout { size = window.bounds.size }
+            let layoutController = activity == nil ? rootController : controller
+            layoutController.view.frame = CGRect(origin: .zero, size: size)
+            layoutController.view.setNeedsLayout()
+            layoutController.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(500))
+            if let activity {
+                size = activity.preferredContentSize
+                guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
+                    throw PreviewRendererError("The preview has no drawable area: \(size)")
+                }
+            } else if case .sizeThatFits = layout {
+                size = controller.view.intrinsicContentSize
+                guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
+                    throw PreviewRendererError("The preview has no drawable area: \(size)")
+                }
+            }
+            layoutController.view.frame = CGRect(origin: .zero, size: size)
+            layoutController.view.layoutIfNeeded()
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = window.screen.scale
+            if widget != nil || activity != nil { format.opaque = false }
+            let renderer = UIGraphicsImageRenderer(size: size, format: format)
+            var drawn = false
+            let image = renderer.image { _ in
+                drawn = controller.view.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: true)
+            }
+            guard drawn, let data = image.pngData() else { throw PreviewRendererError("The preview host could not capture its rendered view") }
+            try widget?.validate()
+            try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
+            let deviceLayout: Bool
+            if case .device = layout { deviceLayout = activity == nil } else { deviceLayout = false }
+            var exclusionSnapshotName: String?
+            if deviceLayout, let exclusion = try await previewExclusionImage(in: window) {
+                guard let exclusionData = exclusion.pngData() else {
+                    throw PreviewRendererError("The preview display exclusion could not be encoded")
+                }
+                exclusionSnapshotName = "PreviewExclusion.png"
+                try exclusionData.write(to: documents.appendingPathComponent("PreviewExclusion.png"), options: .atomic)
+            }
+            return PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
+                sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes ?? activity?.stateIndexes,
+                widgetFamilies: widget?.supportedFamilies, groupItems: groupItems, errors: errors,
+                toggleStates: activity == nil ? nil : [true, false],
+                activityViewStyles: activity == nil ? nil : PreviewRendererRequest.activityViewStyles,
+                activityViewContexts: activity == nil ? nil : PreviewRendererRequest.activityViewContexts,
+                supportedDisplayVariants: widget == nil && activity == nil ? PreviewRendererRequest.displayVariantValues : nil,
+                usesDeviceLayout: deviceLayout, interfaceOrientation: try interfaceOrientationName(orientation),
+                exclusionSnapshotName: exclusionSnapshotName)
+        }
+
+        let result: PreviewRendererResult
+        if widget == nil && activity == nil {
+            result = try await PreviewSnapshotWindow.withWindow(from: window, orientation: orientation, perform: capture)
         } else {
-            guard var view else { throw NativePreviewPipelineRequired() }
-            if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }
-            view = try applyDisplayVariants(to: view, variants: variants)
-            let hosting = UIHostingController(rootView: view)
-            applyDisplayVariants(to: hosting, variants: variants)
-            if widget != nil { hosting.view.backgroundColor = .clear }
-            switch layout {
-            case .device: break
-            case .fixed(let width, let height):
-                hosting.safeAreaRegions = []
-                size = CGSize(width: width, height: height)
-            case .sizeThatFits:
-                hosting.safeAreaRegions = []
-                // Intrinsic sizing asks SwiftUI for its ideal size with an unspecified proposal.
-                hosting.sizingOptions = .intrinsicContentSize
-                size = hosting.view.intrinsicContentSize
-            default: throw NativePreviewPipelineRequired()
-            }
-            controller = hosting
-            if orientation == .portrait { rootController = hosting }
-            else { rootController = try await makeCounterRotationController(content: hosting, orientation: orientation) }
+            result = try await capture(in: window)
         }
-        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
-            throw PreviewRendererError("The preview has no drawable area: \(size)")
-        }
-        window.rootViewController = rootController
-        window.makeKeyAndVisible()
-        if orientation != .portrait {
-            guard let scene = window.windowScene else { throw NativePreviewPipelineRequired() }
-            try await requestPreviewOrientation(orientation, in: scene)
-        }
-        if activity != nil {
-            window.layoutIfNeeded()
-            controller.view.layoutIfNeeded()
-        }
-        if case .device = layout { size = window.bounds.size }
-        let layoutController = activity == nil ? rootController : controller
-        layoutController.view.frame = CGRect(origin: .zero, size: size)
-        layoutController.view.setNeedsLayout()
-        layoutController.view.layoutIfNeeded()
-        try await Task.sleep(for: .milliseconds(500))
-        if let activity {
-            size = activity.preferredContentSize
-            guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
-                throw PreviewRendererError("The preview has no drawable area: \(size)")
-            }
-        } else if case .sizeThatFits = layout {
-            size = controller.view.intrinsicContentSize
-            guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
-                throw PreviewRendererError("The preview has no drawable area: \(size)")
-            }
-        }
-        layoutController.view.frame = CGRect(origin: .zero, size: size)
-        layoutController.view.layoutIfNeeded()
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = window.screen.scale
-        if widget != nil || activity != nil { format.opaque = false }
-        let renderer = UIGraphicsImageRenderer(size: size, format: format)
-        var drawn = false
-        let image = renderer.image { _ in
-            drawn = controller.view.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: true)
-        }
-        guard drawn, let data = image.pngData() else { throw PreviewRendererError("The preview host could not capture its rendered view") }
-        try widget?.validate()
-        try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
-        let deviceLayout: Bool
-        if case .device = layout { deviceLayout = activity == nil } else { deviceLayout = false }
-        var exclusionSnapshotName: String?
-        if deviceLayout, let exclusion = try await previewExclusionImage(in: window) {
-            guard let exclusionData = exclusion.pngData() else {
-                throw PreviewRendererError("The preview display exclusion could not be encoded")
-            }
-            exclusionSnapshotName = "PreviewExclusion.png"
-            try exclusionData.write(to: documents.appendingPathComponent("PreviewExclusion.png"), options: .atomic)
-        }
-        write(PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
-            sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes ?? activity?.stateIndexes,
-            widgetFamilies: widget?.supportedFamilies,
-            groupItems: groupItems, errors: errors,
-            toggleStates: activity == nil ? nil : [true, false],
-            activityViewStyles: activity == nil ? nil : PreviewRendererRequest.activityViewStyles,
-            activityViewContexts: activity == nil ? nil : PreviewRendererRequest.activityViewContexts,
-            supportedDisplayVariants: widget == nil && activity == nil ? PreviewRendererRequest.displayVariantValues : nil,
-            usesDeviceLayout: deviceLayout, interfaceOrientation: try interfaceOrientationName(orientation),
-            exclusionSnapshotName: exclusionSnapshotName))
+        write(result)
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
