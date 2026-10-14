@@ -23,7 +23,7 @@ final class NativePreviewCorrection {
               case .object(var output) = fields["outputSchema"],
               case .object(var properties) = output["properties"],
               case .object(var snapshot) = properties["previewSnapshotPath"] else { return tool }
-        snapshot["description"] = .string("The full path to the preview snapshot. Direct SwiftUI and UIKit previews capture the hosting view without hardware display cutout masks; WidgetKit previews use the widget's size and rounded corners. Other previews use Xcode's native snapshot format.")
+        snapshot["description"] = .string("The full path to the preview snapshot. Direct previews make areas outside the selected device's display transparent for device layouts. Fixed-size previews retain their rectangular layout; WidgetKit previews use the widget's size and rounded corners. Direct snapshots are downsampled to at most 1500 pixels per dimension. Other previews use Xcode's native snapshot format.")
         properties["previewSnapshotPath"] = .object(snapshot)
         if case .object(var controls) = properties["supportedCanvasControlOverrides"],
            case .object(var controlProperties) = controls["properties"],
@@ -265,7 +265,7 @@ final class NativePreviewCorrection {
             fileName: source.lastPathComponent, moduleName: selection.source.moduleName, lineNumber: location.line, columnNumber: location.column,
             definitionIndex: input.index, localization: input.localization, widgetFamily: input.widgetFamily,
             timelineIndex: input.timelineIndex, groupItemIndex: input.groupItemIndex,
-            providerTypeName: providerName)
+            providerTypeName: providerName, displayVariantOverrides: input.displayVariants)
         try JSONEncoder().encode(request).write(to: app.appendingPathComponent("PreviewRequest.json"))
         var signing = ["--force", "--sign", "-"]
         if let signedEntitlements = entitlements.signed {
@@ -307,7 +307,9 @@ final class NativePreviewCorrection {
                 throw NativeRuntimeError.unsupportedContract("The preview renderer returned no snapshot")
             }
             let snapshotURL = artifacts.appendingPathComponent("preview.png")
-            try FileManager.default.copyItem(at: documents.appendingPathComponent(snapshot), to: snapshotURL)
+            try await writeSnapshot(from: documents.appendingPathComponent(snapshot), to: snapshotURL,
+                deviceType: simulator.deviceType, usesDeviceLayout: response.usesDeviceLayout == true,
+                orientation: response.interfaceOrientation)
             var fields: [String: JSONValue] = [
                 "previewSnapshotPath": .string(snapshotURL.path),
                 "errors": .array((response.errors ?? []).map { .object(["message": .string($0)]) }),
@@ -334,6 +336,9 @@ final class NativePreviewCorrection {
                 fields["supportedPreviewVariantOverrides"] = .object([
                     "Widget Family": .array(families.map(JSONValue.string)),
                 ])
+            }
+            if let variants = response.supportedDisplayVariants {
+                fields["supportedPreviewVariantOverrides"] = .object(variants.mapValues { .array($0.map(JSONValue.string)) })
             }
             result = .object(fields)
         } catch { failure = error }
@@ -615,13 +620,15 @@ final class NativePreviewCorrection {
 
     static func rendererInfo(_ original: [String: Any]) -> [String: Any] {
         let startupKeys = ["CFBundleExecutable", "CFBundlePackageType", "NSPrincipalClass", "UIMainStoryboardFile",
-                           "UIApplicationSceneManifest", "NSExtension"]
+                           "UIApplicationSceneManifest", "NSExtension", "UISupportedInterfaceOrientations"]
         // Bundle lookup gives platform/device-qualified keys precedence over base keys.
         var info = original.filter { key, _ in
             !startupKeys.contains { key == $0 || key.hasPrefix($0 + "-") || key.hasPrefix($0 + "~") }
         }
         info["CFBundleExecutable"] = "XcodeMCPPreviewRenderer"
         info["CFBundlePackageType"] = "APPL"
+        info["UISupportedInterfaceOrientations"] = ["UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown",
+                                                    "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]
         if (info["MinimumOSVersion"] as? String ?? "").compare("18.4", options: .numeric) == .orderedAscending {
             info["MinimumOSVersion"] = "18.4"
         }
@@ -701,6 +708,7 @@ final class NativePreviewCorrection {
         let identifier: String
         let bundleIdentifier: String
         let destination: [String: JSONValue]
+        let deviceType: URL
     }
 
     private func createSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess) async throws -> Simulator {
@@ -715,6 +723,9 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.unavailable("The selected Simulator \(build.destinationIdentifier) is no longer installed")
         }
         let runtimeID = selected.0
+        let type = (inventory["devicetypes"] as? [[String: Any]])?.first { $0["identifier"] as? String == deviceID }
+        guard let path = type?["bundlePath"] as? String else { throw NativePipelineRequired() }
+        let deviceType = URL(filePath: path, directoryHint: .isDirectory)
         let info = try Self.bundleInfo(at: app)
         guard let bundleIdentifier = info["CFBundleIdentifier"] as? String else {
             throw NativeRuntimeError.unsupportedContract("The built preview product has no bundle identifier")
@@ -725,7 +736,7 @@ final class NativePreviewCorrection {
             destination: ["identifier": .string(build.destinationIdentifier),
                 "platformName": .string(build.platformName ?? "iOS"),
                 "deviceModelName": .string(build.deviceModelName ?? selected.1["name"] as? String ?? deviceID),
-                "systemVersion": .string(build.systemVersion ?? runtimeID)])
+                "systemVersion": .string(build.systemVersion ?? runtimeID)], deviceType: deviceType)
     }
 
     private static func bundleInfo(at bundle: URL) throws -> [String: Any] {
@@ -748,6 +759,7 @@ final class NativePreviewCorrection {
         let timelineIndex: Int?
         let groupItemIndex: Int?
         let requiresNativePipeline: Bool
+        let displayVariants: [String: String]
     }
 
     private func decode<T: Decodable>(_ type: T.Type, data: Data) throws -> Input {
@@ -781,7 +793,8 @@ final class NativePreviewCorrection {
             index: index, localization: fields["previewLocalizationOverride"] as? String? ?? nil,
             destination: destination, timeout: timeout,
             widgetFamily: options.widgetFamily, timelineIndex: options.timelineIndex, groupItemIndex: options.groupItemIndex,
-            requiresNativePipeline: options.requiresNativePipeline)
+            requiresNativePipeline: options.requiresNativePipeline,
+            displayVariants: variants.filter { PreviewRendererRequest.displayVariantValues[$0.key] != nil })
     }
 
     static func directOptions(variants: [String: String], controls: [String: Any]) ->
@@ -790,7 +803,8 @@ final class NativePreviewCorrection {
         let timeline = controls["timelineIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
         let groupItem = controls["groupItemIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
         let unsupportedVariant = variants.contains { key, value in
-            key != "Widget Family" || !["Small", "Medium"].contains(value)
+            if key == "Widget Family" { return !["Small", "Medium"].contains(value) }
+            return PreviewRendererRequest.displayVariantValues[key]?.contains(value) != true
         }
         let unsupportedControl = controls.contains { key, value in
             key != "timelineIndex" && key != "groupItemIndex" && Mirror(reflecting: value).children.first != nil
