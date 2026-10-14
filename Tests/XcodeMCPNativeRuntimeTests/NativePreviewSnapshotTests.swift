@@ -38,6 +38,14 @@ struct NativePreviewSnapshotTests {
         #expect(rightBitmap.colorAt(x: 70, y: 20)?.alphaComponent == 1)
     }
 
+    @Test func thinPreviewRetainsADrawableThumbnail() throws {
+        let source = try image(width: 3, height: 6000)
+        let thumbnail = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
+            framebufferMask: nil, rotationDegrees: nil, swapsAxes: false))
+        #expect(thumbnail.width == 1)
+        #expect(thumbnail.height == 1500)
+    }
+
     private func image(width: Int, height: Int) throws -> CGImage {
         let context = try #require(unsafe CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
             bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))

@@ -65,7 +65,7 @@ extension NativePreviewCorrection {
                           rotationDegrees: Double?, swapsAxes: Bool) -> CGImage? {
         let scale = min(1, maximumDimension / CGFloat(max(image.width, image.height)))
         let size = CGSize(width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
-        guard let context = unsafe CGContext(data: nil, width: Int(size.width), height: Int(size.height),
+        guard let context = unsafe CGContext(data: nil, width: max(1, Int(size.width)), height: max(1, Int(size.height)),
             bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         context.interpolationQuality = .high
