@@ -50,7 +50,7 @@ let package = Package(
         .library(name: "XcodeMCPPreviewRenderer", type: .static, targets: ["XcodeMCPPreviewRenderer"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/lynnswap/ABIBridge.git", revision: "fcd3c225fb434716b1082c27a518837e8c96bf55"),
+        .package(url: "https://github.com/lynnswap/ABIBridge.git", revision: "c18dbbdff8ae4221771539ecf026c564d185724b"),
         .package(url: "https://github.com/p-x9/MachOKit.git", exact: "0.54.1"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.2"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
