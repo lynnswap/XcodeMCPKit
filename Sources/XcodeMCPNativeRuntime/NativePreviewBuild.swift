@@ -346,7 +346,9 @@ final class NativePreviewBuild {
         let makeResolvers = try await runtime.resolveSwiftFunction(
             named: "XcodeMCPNativeRuntime.nativePreviewArray<A>([Any]) throws -> [A]",
             as: (([Any]) throws -> NativeSwiftValue).self, genericArguments: [.type(protocolMetadata)])
-        let resolvers = try resolver.withCopy { try unsafe makeResolvers.unsafeInvoke([$0]) }
+        var resolverValues = try await registeredDestinationResolvers(elementMetadata: protocolMetadata, in: previews)
+        resolverValues.append(try resolver.withCopy { $0 })
+        let resolvers = try unsafe makeResolvers.unsafeInvoke(resolverValues)
         let queryType = try await runtime.resolveSwiftType(named: "PreviewsFoundationHost.QueryManager", in: foundation)
         let initializeQuery = try await queryType.resolveInitializer(
             named: "init(delegateManager: PreviewsFoundationHost.QueryManager?, resolvers: [PreviewsFoundationHost.QueryResolver]) -> PreviewsFoundationHost.QueryManager",
@@ -398,6 +400,51 @@ final class NativePreviewBuild {
             specifier: getter(propertiesType, "deviceSpecifier.getter : Swift.String?", String?.self))
         destinationPreparation = preparation
         return preparation
+    }
+
+    private func registeredDestinationResolvers(elementMetadata: Any.Type, in previews: ImageSelector) async throws -> [Any] {
+        guard let managerClass = NSClassFromString("DVTPlugInManager") else {
+            throw NativeRuntimeError.unsupportedContract("Native plug-in manager is unavailable")
+        }
+        let shared = try runtime.object(managerClass as AnyObject).resolveMethodAndWait(
+            selector: "defaultPlugInManager", as: (() -> AnyObject).self)
+        let manager = try unsafe shared.unsafeInvoke()
+        let extensionPoint = try runtime.object(manager).resolveMethodAndWait(
+            selector: "extensionPointWithIdentifier:", as: ((String) -> AnyObject?).self)
+        guard let point = try unsafe extensionPoint.unsafeInvoke("Xcode.PreviewsXcode.PreviewsExtension") else { return [] }
+        let registered = try runtime.object(point).resolveMethodAndWait(selector: "extensions", as: (() -> NSSet).self)
+        let extensions = try unsafe registered.unsafeInvoke()
+        let descriptor = try await runtime.resolve(.init(machOName: "_$s13PreviewsXcode0aB9ExtensionMp",
+            language: .swift, kind: .data), in: previews)
+        let getter = try await runtime.resolve(.init(machOName:
+            "_$s13PreviewsXcode0aB9ExtensionP14queryResolversSay0A14FoundationHost13QueryResolver_pGvgZTj",
+            language: .swift), in: previews)
+        let pointer = try unsafe abi.scalar(Int32(ABIValuePointer))
+        let interface = try unsafe abi.callInterface(result: pointer, parameters: [pointer, pointer])
+        var resolvers: [Any] = []
+        for extensionValue in extensions.allObjects {
+            let getClass = try runtime.object(extensionValue as AnyObject).resolveMethodAndWait(
+                selector: "valueForKey:", as: ((String) -> AnyClass?).self)
+            guard let type = try unsafe getClass.unsafeInvoke("extensionClass") else { continue }
+            let metadata = unsafe unsafeBitCast(type as Any.Type, to: UnsafeRawPointer.self)
+            guard let witness = unsafe descriptor.withUnsafeAddress({ unsafe ABISwiftConformance(metadata, $0) }) else { continue }
+            @MainActor func collect<Element>(_ type: Element.Type) throws -> [Any] {
+                var metadataArgument = unsafe metadata
+                var witnessArgument = unsafe witness
+                // The native static requirement passes Self metadata in x0/x20,
+                // its existing witness in x1, and returns an owned Array in x0.
+                let values: [Element] = try withUnsafeMutablePointer(to: &metadataArgument) { metadataArgument in
+                    try withUnsafeMutablePointer(to: &witnessArgument) { witnessArgument in
+                        try unsafe abi.invoke(symbol: getter, interface: interface,
+                            arguments: [UnsafeMutableRawPointer(metadataArgument), UnsafeMutableRawPointer(witnessArgument)],
+                            context: metadata, returning: [Element].self)
+                    }
+                }
+                return values.map { $0 as Any }
+            }
+            resolvers += try _openExistential(elementMetadata, do: collect)
+        }
+        return resolvers
     }
 
     private func destinations(_ available: NSArray) async throws -> [Destination] {
