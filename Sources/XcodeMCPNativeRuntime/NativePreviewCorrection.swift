@@ -309,7 +309,8 @@ final class NativePreviewCorrection {
             let snapshotURL = artifacts.appendingPathComponent("preview.png")
             try await writeSnapshot(from: documents.appendingPathComponent(snapshot), to: snapshotURL,
                 deviceType: simulator.deviceType, usesDeviceLayout: response.usesDeviceLayout == true,
-                orientation: response.interfaceOrientation)
+                orientation: response.interfaceOrientation,
+                exclusion: response.exclusionSnapshotName.map { documents.appendingPathComponent($0) })
             var fields: [String: JSONValue] = [
                 "previewSnapshotPath": .string(snapshotURL.path),
                 "errors": .array((response.errors ?? []).map { .object(["message": .string($0)]) }),
