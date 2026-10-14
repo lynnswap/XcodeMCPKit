@@ -23,8 +23,25 @@ final class NativePreviewCorrection {
               case .object(var output) = fields["outputSchema"],
               case .object(var properties) = output["properties"],
               case .object(var snapshot) = properties["previewSnapshotPath"] else { return tool }
-        snapshot["description"] = .string("The full path to the preview snapshot. Direct SwiftUI previews capture the hosting view without hardware display cutout masks; WidgetKit previews use the widget's size and rounded corners. Other previews use Xcode's native snapshot format.")
+        snapshot["description"] = .string("The full path to the preview snapshot. Direct SwiftUI and UIKit previews capture the hosting view without hardware display cutout masks; WidgetKit previews use the widget's size and rounded corners. Other previews use Xcode's native snapshot format.")
         properties["previewSnapshotPath"] = .object(snapshot)
+        if case .object(var controls) = properties["supportedCanvasControlOverrides"],
+           case .object(var controlProperties) = controls["properties"],
+           case .object(var groups) = controlProperties["groupItems"],
+           case .object(let item) = groups["items"], item["type"] == .string("integer") {
+            // Xcode 27.1 declares integer items but returns index/title objects.
+            groups["items"] = .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "index": .object(["type": .string("integer")]),
+                    "title": .object(["type": .string("string")]),
+                ]),
+                "required": .array([.string("index")]),
+            ])
+            controlProperties["groupItems"] = .object(groups)
+            controls["properties"] = .object(controlProperties)
+            properties["supportedCanvasControlOverrides"] = .object(controls)
+        }
         output["properties"] = .object(properties)
         fields["outputSchema"] = .object(output)
         return NativeTool(name: tool.name, descriptor: .object(fields), workspaceScoped: tool.workspaceScoped)
@@ -150,7 +167,7 @@ final class NativePreviewCorrection {
     private struct Prepared {
         let workspace: AnyObject
         let source: URL
-        let location: (line: Int, column: Int, displayName: String)
+        let location: Definition
         let destination: AnyObject
     }
 
@@ -158,7 +175,7 @@ final class NativePreviewCorrection {
         try Task.checkCancellation()
         let workspace = try await workspace(input.workspaceIdentifier)
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
-        let location = try await registryLocation(source: source, index: input.index)
+        let location = try await previewDefinition(source: source, index: input.index)
         guard let destination = try builder.selectDestination(workspace: workspace, preferred: input.destination) else {
             throw NativePipelineRequired()
         }
@@ -239,9 +256,16 @@ final class NativePreviewCorrection {
             registryLibraries: registryLibraries, sourceOutput: selection.source.outputURL)
         let symbols = try await process.xcrun(["nm", "-arch", "arm64", "-j"] + registryLibraries.map(\.path))
         let names = Self.registryNames(in: symbols)
+        let providerName: String?
+        if let path = location.providerPath {
+            guard let moduleName = selection.source.moduleName else { throw NativePipelineRequired() }
+            providerName = try await providerTypeName(path: path, moduleName: moduleName)
+        } else { providerName = nil }
         let request = PreviewRendererRequest(libraryNames: libraryPaths, registryNames: names,
             fileName: source.lastPathComponent, moduleName: selection.source.moduleName, lineNumber: location.line, columnNumber: location.column,
-            definitionIndex: input.index, localization: input.localization, widgetFamily: input.widgetFamily, timelineIndex: input.timelineIndex)
+            definitionIndex: input.index, localization: input.localization, widgetFamily: input.widgetFamily,
+            timelineIndex: input.timelineIndex, groupItemIndex: input.groupItemIndex,
+            providerTypeName: providerName)
         try JSONEncoder().encode(request).write(to: app.appendingPathComponent("PreviewRequest.json"))
         var signing = ["--force", "--sign", "-"]
         if let signedEntitlements = entitlements.signed {
@@ -285,7 +309,8 @@ final class NativePreviewCorrection {
             let snapshotURL = artifacts.appendingPathComponent("preview.png")
             try FileManager.default.copyItem(at: documents.appendingPathComponent(snapshot), to: snapshotURL)
             var fields: [String: JSONValue] = [
-                "previewSnapshotPath": .string(snapshotURL.path), "errors": .array([]),
+                "previewSnapshotPath": .string(snapshotURL.path),
+                "errors": .array((response.errors ?? []).map { .object(["message": .string($0)]) }),
                 "renderedDestination": .object(simulator.destination),
                 "supportedLocalizations": .array(try await supportedLocalizations(in: workspace).map(JSONValue.string)),
             ]
@@ -294,6 +319,15 @@ final class NativePreviewCorrection {
             if let indexes = response.timelineIndexes {
                 fields["supportedCanvasControlOverrides"] = .object([
                     "timelineIndexes": .array(indexes.map { .number(.int(Int64($0))) }),
+                ])
+            }
+            if let items = response.groupItems {
+                fields["supportedCanvasControlOverrides"] = .object([
+                    "groupItems": .array(items.enumerated().map { index, title in
+                        var item: [String: JSONValue] = ["index": .number(.int(Int64(index)))]
+                        if let title { item["title"] = .string(title) }
+                        return .object(item)
+                    }),
                 ])
             }
             if let families = response.widgetFamilies {
@@ -413,7 +447,14 @@ final class NativePreviewCorrection {
         return candidates[0]
     }
 
-    private func registryLocation(source: URL, index: Int) async throws -> (line: Int, column: Int, displayName: String) {
+    private struct Definition {
+        let line: Int
+        let column: Int
+        let displayName: String
+        let providerPath: NativeSwiftValue?
+    }
+
+    private func previewDefinition(source: URL, index: Int) async throws -> Definition {
         let runtime = ABIRuntime.shared
         let action = try await runtime.resolveSwiftType(named: "PreviewsXcode.RenderPreviewAction",
             in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
@@ -433,37 +474,76 @@ final class NativePreviewCorrection {
         guard previews.indices.contains(index) else {
             throw NativeRuntimeError.invalidRequest("Preview index \(index) is outside the \(previews.count) definitions in \(source.lastPathComponent)")
         }
-        // Native enumeration includes PreviewProvider definitions. Its ordering
-        // must be retained when selecting a registry from the built dylib.
         func own<T>(_ value: T) async throws -> NativeSwiftValue {
             let identity = try await runtime.resolveSwiftFunction(named: "XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A",
                 as: ((T) -> NativeSwiftValue).self, genericArguments: [.type(T.self)])
             return try unsafe identity.unsafeInvoke(value)
         }
-        let definition = try await _openExistential(previews[index], do: own)
-        guard let registry = try await definition.resolveEnumPayload(forCase: "registryPreview") else {
-            throw NativePipelineRequired()
-        }
-        let getLine = try await registry.type.resolveGetter(named: "lineNumber", as: (() -> Int).self,
-            receiverABI: .opaque(named: registry.type.name))
-        let line = try unsafe getLine.unsafeInvoke(on: registry)
-        let getDisplayName = try await registry.type.resolveGetter(
-            named: "(extension in PreviewsPipeline):PreviewsModel.RegistryDefinition.defaultDisplayName.getter : Swift.String",
-            as: (() -> String).self, receiverABI: .opaque(named: registry.type.name))
-        let displayName = try unsafe getDisplayName.unsafeInvoke(on: registry)
         let model = ImageSelector.path(installation.framework("PreviewsModel", in: "SharedFrameworks"))
         let locationType = try await runtime.resolveSwiftType(named: "PreviewsModel.SourceLocation", in: model)
         let boundType = try await runtime.resolveSwiftType(named: "PreviewsModel.SourceLocation.Bound", in: model)
-        let getLocation = try await registry.type.resolveGetter(named: "fullSourceLocation", as: (() -> NativeSwiftValue).self,
-            valueABIs: [locationType: .opaque(named: locationType.name)], receiverABI: .opaque(named: registry.type.name))
-        let location = try unsafe getLocation.unsafeInvoke(on: registry)
-        let getBound = try await location.type.resolveGetter(named: "lowerBound", as: (() -> NativeSwiftValue).self,
-            valueABIs: [boundType: .opaque(named: boundType.name)], receiverABI: .opaque(named: location.type.name))
-        let bound = try unsafe getBound.unsafeInvoke(on: location)
-        let getColumn = try await bound.type.resolveGetter(named: "column", as: (() -> Int).self,
-            receiverABI: .opaque(named: bound.type.name))
-        let column = try unsafe getColumn.unsafeInvoke(on: bound)
-        return try (line, Self.registryColumn(in: String(contentsOf: source, encoding: .utf8), line: line, utf16Column: column), displayName)
+        let pathType = try await runtime.resolveSwiftType(named: "PreviewsModel.MangleableTypePath", in: model)
+        let syntaxType = try await runtime.resolveSwiftType(named: "PreviewsModel.SyntaxLocation", in: model)
+        let contents = try String(contentsOf: source, encoding: .utf8)
+        var definitions: [Definition] = []
+        for value in previews {
+            let definition = try await _openExistential(value, do: own)
+            let record: NativeSwiftValue
+            let location: NativeSwiftValue
+            let displayName: String
+            let providerPath: NativeSwiftValue?
+            if let provider = try await definition.resolveEnumPayload(forCase: "previewProvider") {
+                record = provider
+                let getPath = try await provider.type.resolveGetter(named: "path", as: (() -> NativeSwiftValue).self,
+                    valueABIs: [pathType: .opaque(named: pathType.name)], receiverABI: .opaque(named: provider.type.name))
+                providerPath = try unsafe getPath.unsafeInvoke(on: provider)
+                let getSyntax = try await provider.type.resolveGetter(named: "location", as: (() -> NativeSwiftValue).self,
+                    valueABIs: [syntaxType: .opaque(named: syntaxType.name)], receiverABI: .opaque(named: provider.type.name))
+                let syntax = try unsafe getSyntax.unsafeInvoke(on: provider)
+                let getLocation = try await syntax.type.resolveGetter(named: "locationExcludingTrivia", as: (() -> NativeSwiftValue).self,
+                    valueABIs: [locationType: .opaque(named: locationType.name)], receiverABI: .opaque(named: syntax.type.name))
+                location = try unsafe getLocation.unsafeInvoke(on: syntax)
+                let getName = try await provider.type.resolveGetter(named: "displayName", as: (() -> String).self,
+                    receiverABI: .opaque(named: provider.type.name))
+                displayName = try unsafe getName.unsafeInvoke(on: provider)
+            } else if let registry = try await definition.resolveEnumPayload(forCase: "registryPreview") {
+                record = registry
+                providerPath = nil
+                let getName = try await registry.type.resolveGetter(
+                    named: "(extension in PreviewsPipeline):PreviewsModel.RegistryDefinition.defaultDisplayName.getter : Swift.String",
+                    as: (() -> String).self, receiverABI: .opaque(named: registry.type.name))
+                displayName = try unsafe getName.unsafeInvoke(on: registry)
+                let getLocation = try await registry.type.resolveGetter(named: "fullSourceLocation", as: (() -> NativeSwiftValue).self,
+                    valueABIs: [locationType: .opaque(named: locationType.name)], receiverABI: .opaque(named: registry.type.name))
+                location = try unsafe getLocation.unsafeInvoke(on: registry)
+            } else { throw NativePipelineRequired() }
+            let getLine = try await record.type.resolveGetter(named: "lineNumber", as: (() -> Int).self,
+                receiverABI: .opaque(named: record.type.name))
+            let line = try unsafe getLine.unsafeInvoke(on: record)
+            let getBound = try await location.type.resolveGetter(named: "lowerBound", as: (() -> NativeSwiftValue).self,
+                valueABIs: [boundType: .opaque(named: boundType.name)], receiverABI: .opaque(named: location.type.name))
+            let bound = try unsafe getBound.unsafeInvoke(on: location)
+            let getColumn = try await bound.type.resolveGetter(named: "column", as: (() -> Int).self,
+                receiverABI: .opaque(named: bound.type.name))
+            let column = try unsafe getColumn.unsafeInvoke(on: bound)
+            definitions.append(Definition(line: line, column: try Self.registryColumn(in: contents, line: line, utf16Column: column),
+                displayName: displayName, providerPath: providerPath))
+        }
+        // The parser returns providers and registries in separate batches. The
+        // native tool selects definitions in source order, including mixed files.
+        return definitions.sorted { ($0.line, $0.column) < ($1.line, $1.column) }[index]
+    }
+
+    private func providerTypeName(path: NativeSwiftValue, moduleName: String) async throws -> String {
+        let model = ImageSelector.path(installation.framework("PreviewsModel", in: "SharedFrameworks"))
+        let type = try await ABIRuntime.shared.resolveSwiftType(named: "PreviewsModel.Module", in: model)
+        let initialize = try await type.resolveInitializer(named: "init(name: Swift.String) -> PreviewsModel.Module",
+            as: ((String) -> NativeSwiftValue).self, valueABIs: [type: .opaque(named: type.name)])
+        let module = try unsafe initialize.unsafeInvoke(moduleName)
+        let mangle = try await path.type.resolveMethod(named: "mangledName(in: PreviewsModel.Module) -> Swift.String",
+            as: ((NativeSwiftValue) -> String).self, valueABIs: [type: .opaque(named: type.name)],
+            receiverABI: .opaque(named: path.type.name))
+        return try unsafe mangle.unsafeInvoke(on: path, module)
     }
 
     static func registryColumn(in source: String, line: Int, utf16Column: Int) throws -> Int {
@@ -666,6 +746,7 @@ final class NativePreviewCorrection {
         let timeout: Int
         let widgetFamily: String?
         let timelineIndex: Int?
+        let groupItemIndex: Int?
         let requiresNativePipeline: Bool
     }
 
@@ -699,21 +780,22 @@ final class NativePreviewCorrection {
         return Input(workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
             index: index, localization: fields["previewLocalizationOverride"] as? String? ?? nil,
             destination: destination, timeout: timeout,
-            widgetFamily: options.widgetFamily, timelineIndex: options.timelineIndex,
+            widgetFamily: options.widgetFamily, timelineIndex: options.timelineIndex, groupItemIndex: options.groupItemIndex,
             requiresNativePipeline: options.requiresNativePipeline)
     }
 
     static func directOptions(variants: [String: String], controls: [String: Any]) ->
-        (widgetFamily: String?, timelineIndex: Int?, requiresNativePipeline: Bool) {
+        (widgetFamily: String?, timelineIndex: Int?, groupItemIndex: Int?, requiresNativePipeline: Bool) {
         let family = variants["Widget Family"]
         let timeline = controls["timelineIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
+        let groupItem = controls["groupItemIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
         let unsupportedVariant = variants.contains { key, value in
             key != "Widget Family" || !["Small", "Medium"].contains(value)
         }
         let unsupportedControl = controls.contains { key, value in
-            key != "timelineIndex" && Mirror(reflecting: value).children.first != nil
+            key != "timelineIndex" && key != "groupItemIndex" && Mirror(reflecting: value).children.first != nil
         }
-        return (family, timeline, unsupportedVariant || unsupportedControl)
+        return (family, timeline, groupItem, unsupportedVariant || unsupportedControl)
     }
 
     private func event(_ type: String, _ value: JSONValue) throws -> Data {

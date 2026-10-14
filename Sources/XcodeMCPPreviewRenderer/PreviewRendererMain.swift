@@ -51,41 +51,74 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 throw PreviewRendererError("Cannot load \(name): \(message)")
             }
         }
-        let registries = request.registryNames.compactMap { _typeByName($0) as? any PreviewRegistry.Type }
-            .filter { registry in
-                let components = registry.fileID.split(separator: "/")
-                return components.last.map(String.init) == request.fileName
-                    && (request.moduleName == nil || components.first.map(String.init) == request.moduleName)
-                    && (request.lineNumber == nil || registry.line == request.lineNumber)
-                    && (request.columnNumber == nil || registry.column == request.columnNumber)
-            }
-            .sorted { ($0.line, $0.column) < ($1.line, $1.column) }
-        let index = request.lineNumber == nil ? request.definitionIndex : 0
-        guard registries.indices.contains(index), request.lineNumber == nil || registries.count == 1 else {
-            throw NativePreviewPipelineRequired()
-        }
-        let registry = registries[index]
-        let preview = try registry.makePreview()
-        try requireSupportedTraits(preview)
-        let value = try await ownedPreview(preview)
-        let source = try await previewSource(value)
         // Preview mode defers SwiftUI graph creation until its code is ready.
         __previewThunksHaveFinishedLoading()
         let widget: WidgetPreview?
         var view: AnyView
         let layout: DeveloperToolsSupport.PreviewLayout
-        switch source.type.name {
-        case "DeveloperToolsSupport.DefaultPreviewSource<SwiftUI.ViewPreviewBody>":
+        let displayName: String?
+        let sourceLineNumber: Int?
+        let groupItems: [String?]?
+        var errors: [String] = []
+        if let typeName = request.providerTypeName {
             guard request.widgetFamily == nil, request.timelineIndex == nil else { throw NativePreviewPipelineRequired() }
+            let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
+            guard preview.context == nil, preview.device == nil, preview.interfaceOrientation == .portrait else {
+                throw NativePreviewPipelineRequired()
+            }
             widget = nil
-            view = try await makeViewPreview(source: source)
-            layout = try await viewPreviewLayout(value)
-        case "WidgetKit.TimelineEntryPreviewSource", "WidgetKit.TimelineProviderPreviewSource":
-            let result = try await makeWidgetPreview(source: source, family: request.widgetFamily, timelineEntryIndex: request.timelineIndex)
-            widget = result
-            view = AnyView(result.view.clipShape(RoundedRectangle(cornerRadius: result.cornerRadius, style: .continuous)))
-            layout = .fixed(width: result.size.width, height: result.size.height)
-        default: throw NativePreviewPipelineRequired()
+            view = preview.content
+            if let colorScheme = preview.colorScheme { view = AnyView(view.environment(\.colorScheme, colorScheme)) }
+            layout = preview.layout
+            displayName = preview.displayName
+            sourceLineNumber = request.lineNumber
+            groupItems = nil
+            if let index = request.groupItemIndex {
+                errors.append(unsupportedPreviewGroupItemMessage(index, supportsGroups: false))
+            }
+        } else {
+            let registries = request.registryNames.compactMap { _typeByName($0) as? any PreviewRegistry.Type }
+                .filter { registry in
+                    let components = registry.fileID.split(separator: "/")
+                    return components.last.map(String.init) == request.fileName
+                        && (request.moduleName == nil || components.first.map(String.init) == request.moduleName)
+                        && (request.lineNumber == nil || registry.line == request.lineNumber)
+                        && (request.columnNumber == nil || registry.column == request.columnNumber)
+                }
+                .sorted { ($0.line, $0.column) < ($1.line, $1.column) }
+            let index = request.lineNumber == nil ? request.definitionIndex : 0
+            guard registries.indices.contains(index), request.lineNumber == nil || registries.count == 1 else {
+                throw NativePreviewPipelineRequired()
+            }
+            let registry = registries[index]
+            let preview = try registry.makePreview()
+            try requireSupportedTraits(preview)
+            let value = try await ownedPreview(preview)
+            let source = try await previewSource(value)
+            switch source.type.name {
+            case "DeveloperToolsSupport.DefaultPreviewSource<SwiftUI.ViewPreviewBody>",
+                 "DeveloperToolsSupport.DefaultPreviewSource<__C.UIView>",
+                 "DeveloperToolsSupport.DefaultPreviewSource<__C.UIViewController>":
+                guard request.widgetFamily == nil, request.timelineIndex == nil else { throw NativePreviewPipelineRequired() }
+                widget = nil
+                let result = try await makeViewPreview(source: source, groupItemIndex: request.groupItemIndex)
+                view = try await applyPreviewModifiers(result.view, preview: value)
+                groupItems = result.groupItems
+                errors = result.errors
+                layout = try await viewPreviewLayout(value)
+            case "WidgetKit.TimelineEntryPreviewSource", "WidgetKit.TimelineProviderPreviewSource":
+                guard request.groupItemIndex == nil else { throw NativePreviewPipelineRequired() }
+                let result = try await makeWidgetPreview(source: source, family: request.widgetFamily, timelineEntryIndex: request.timelineIndex)
+                widget = result
+                view = AnyView(result.view.clipShape(RoundedRectangle(cornerRadius: result.cornerRadius, style: .continuous)))
+                groupItems = nil
+                layout = .fixed(width: result.size.width, height: result.size.height)
+            default: throw NativePreviewPipelineRequired()
+            }
+            let displayGetter = try await value.type.resolveGetter(named: "displayName", as: (() -> String?).self,
+                receiverABI: .opaque(named: value.type.name))
+            displayName = try unsafe displayGetter.unsafeInvoke(on: value)
+            sourceLineNumber = registry.line
         }
         var size = window.bounds.size
         if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }
@@ -131,10 +164,9 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         guard drawn, let data = image.pngData() else { throw PreviewRendererError("The preview host could not capture its rendered view") }
         try widget?.validate()
         try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
-        let displayGetter = try await value.type.resolveGetter(named: "displayName", as: (() -> String?).self,
-            receiverABI: .opaque(named: value.type.name))
-        write(PreviewRendererResult(snapshotName: "Preview.png", displayName: try unsafe displayGetter.unsafeInvoke(on: value),
-            sourceLineNumber: registry.line, timelineIndexes: widget?.timelineIndexes, widgetFamilies: widget?.supportedFamilies))
+        write(PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
+            sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes, widgetFamilies: widget?.supportedFamilies,
+            groupItems: groupItems, errors: errors))
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }

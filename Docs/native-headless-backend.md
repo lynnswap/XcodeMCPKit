@@ -140,11 +140,13 @@ inventory or alter caches. It remains separate from generic action execution and
 can be removed when the affected native contract is fixed. Cached report
 retrieval does not establish online/account-dependent retrieval.
 
-`RenderPreview` uses a packaged iOS Simulator renderer for individual SwiftUI and
-WidgetKit `#Preview` definitions in an arm64 Simulator application or app extension built with a debug dylib,
+`RenderPreview` uses a packaged iOS Simulator renderer for SwiftUI and UIKit
+`#Preview` definitions, SwiftUI `PreviewProvider` definitions, and WidgetKit previews
+in an arm64 Simulator application or app extension built with a debug dylib,
 on iOS 18.4 or later.
 The host builds the active scheme through Xcode's build engine, selects the
-definition from the built `PreviewRegistry` metadata, including linked embedded
+definition in source order, including files that mix providers and registries.
+It resolves registry metadata or a provider's type in the built image, including linked embedded
 frameworks and libraries, and extracts its view with
 ABIBridge. A public `UIHostingController` renders the view and captures the image.
 Source and host selection retain the native buildable's identity. Among applications and extensions
@@ -175,6 +177,22 @@ SwiftUI environment. The response's `supportedLocalizations` comes from Xcode's
 workspace. The image captures the rectangular hosting view; hardware display
 cutout masks are not applied.
 Size-that-fits uses the hosting view's intrinsic size without a screen-size cap.
+
+UIKit previews retain their actual `UIView` or `UIViewController` in standard
+SwiftUI representables. An `arguments:` group uses its native group closure and
+section/index metadata. `previewCanvasControlOverrides.groupItemIndex` selects
+an item, and `supportedCanvasControlOverrides.groupItems` returns the native
+titles and indexes. An unsupported group index renders the default item and
+returns the native warning in `errors`. `PreviewProvider` uses the first view in
+SwiftUI's `_allPreviews`, retaining its name and layout, as native RenderPreview does.
+Provider type identity comes from Xcode's native module and type path. Private
+providers remain unavailable with Xcode 27.1, whose native RenderPreview also
+reports `preview provider not found` for those definitions.
+`PreviewModifier` calls `makeSharedContext()` once per concrete modifier type in
+each render and applies the native modifier wrappers in their original order.
+Provider contexts, device overrides, and non-portrait orientations still use
+the native pipeline, along with display traits and variants beyond the layouts
+and localization described above.
 
 Widget previews support `StaticConfiguration` and `AppIntentConfiguration` in the
 Small and Medium families. Previews can provide explicit `timeline:` entries or a
@@ -226,9 +244,7 @@ cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 
 Targets without an application or extension host or with its debug dylib disabled, other
-platforms, `PreviewProvider` definitions, grouped previews, Intent and
-Live Activity configurations, other widget families, orientation and modifier
-traits, and variant overrides or canvas controls beyond the widget options above
+platforms, and source or display contracts beyond the direct capabilities described above
 continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
 requirements, including the limitation tracked in
 [issue #302](https://github.com/lynnswap/XcodeMCPKit/issues/302).
@@ -236,10 +252,10 @@ requirements, including the limitation tracked in
 The direct route depends on private `DeveloperToolsSupport`/SwiftUI/WidgetKit source
 contracts, SwiftUI's underscored `__previewThunksHaveFinishedLoading()` readiness
 signal, SpringBoardHome/ChronoServices widget metrics, and Xcode's private build interfaces. The trait list is inspected with
-Swift reflection because `Preview` has no exported getter for it; traits other
-than layout use the native pipeline. Widget descriptor and container background
+Swift reflection because `Preview` has no exported getter for it; traits without
+a direct implementation use the native pipeline. Widget descriptor and container background
 fields are also read with Swift reflection because they have no exported getters.
-Unknown widget configurations, modifiers, or reflected representations use the
+Unknown widget configurations, descriptor transforms, or reflected representations use the
 native pipeline instead of returning a partial widget. The renderer resolves its view contracts from
 the selected Xcode and installed Simulator runtime. Unsupported input contracts
 use the native pipeline; other contract changes produce diagnostics.
