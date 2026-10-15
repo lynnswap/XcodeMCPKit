@@ -7,6 +7,16 @@ import XcodeMCPKitTesting
 @testable import XcodeMCPProxyToolVerifier
 
 struct PreviewVerifierTests {
+    @Test func nativeWindowSelectionMatchesTheOwnedProjectDirectory() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Owned Fixture.xcodeproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: false)
+        let message = "* tabIdentifier: unrelated-window, workspacePath: \(root.appendingPathComponent("Other.xcodeproj").path)\n"
+            + "* tabIdentifier: owned-window, workspacePath: \(project.path)\n"
+        #expect(previewTabIdentifier(in: message, project: project) == "owned-window")
+    }
+
     @Test func preparePhysicalChangesOnlyItsOwnedSourceAndRequestedConfiguration() throws {
         let repository = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let definition = try #require(PreviewFixtureDefinition.load(in: repository).first { $0.id == "physical-bare" })

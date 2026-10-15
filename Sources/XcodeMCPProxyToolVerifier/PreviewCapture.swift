@@ -104,13 +104,9 @@ struct PreviewCaptureRunner {
         repeat {
             let result = try await call("XcodeListWindows", arguments: [:], client: client)
             if let raw = result.rawResult,
-               let message = previewStructuredContent(raw)?["message"]?.stringValue {
-                for line in message.split(separator: "\n") {
-                    let fields = line.components(separatedBy: ", workspacePath: ")
-                    guard fields.count == 2, URL(filePath: fields[1]).resolvingSymlinksInPath() == project.resolvingSymlinksInPath(),
-                          let marker = fields[0].range(of: "tabIdentifier: ") else { continue }
-                    return String(fields[0][marker.upperBound...])
-                }
+               let message = previewStructuredContent(raw)?["message"]?.stringValue,
+               let identifier = previewTabIdentifier(in: message, project: project) {
+                return identifier
             }
             try await Task.sleep(for: .milliseconds(500))
         } while ContinuousClock.now < deadline
@@ -118,6 +114,17 @@ struct PreviewCaptureRunner {
     }
 
     func save() throws { try writePreviewJSON(report, to: output.appendingPathComponent("capture.json")) }
+}
+
+func previewTabIdentifier(in message: String, project: URL) -> String? {
+    let projectPath = project.resolvingSymlinksInPath().path
+    for line in message.split(separator: "\n") {
+        let fields = line.components(separatedBy: ", workspacePath: ")
+        guard fields.count == 2, URL(filePath: fields[1]).resolvingSymlinksInPath().path == projectPath,
+              let marker = fields[0].range(of: "tabIdentifier: ") else { continue }
+        return String(fields[0][marker.upperBound...])
+    }
+    return nil
 }
 
 func previewStructuredContent(_ raw: MCPJSONValue) -> [String: MCPJSONValue]? {
