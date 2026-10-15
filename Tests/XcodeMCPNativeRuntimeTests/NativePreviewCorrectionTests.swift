@@ -381,14 +381,28 @@ struct NativePreviewCorrectionTests {
         try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", dependency.path])
         let staticCode = root.appendingPathComponent("StaticDependency.cpp")
         let staticObject = root.appendingPathComponent("StaticDependency.o")
-        let staticArchive = root.appendingPathComponent("libStaticDependency.a")
+        let staticFramework = frameworkSearchPath.appendingPathComponent("StaticDependency.framework")
+        let staticModule = staticFramework.appendingPathComponent("Modules/StaticDependency.swiftmodule")
+        try FileManager.default.createDirectory(at: staticModule, withIntermediateDirectories: true)
+        let staticArchive = staticFramework.appendingPathComponent("StaticDependency")
         try Data("""
         #include <string>
         extern "C" int archive_dependency_value(void) { return (int)std::string("x").size(); }
         """.utf8).write(to: staticCode)
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang++", "-target", NativePreviewPlatform.macOS.triple,
             "-c", staticCode.path, "-o", staticObject.path])
-        try previewBinaryOutput("/usr/bin/xcrun", ["libtool", "-static", staticObject.path, "-o", staticArchive.path])
+        let staticSwiftCode = root.appendingPathComponent("StaticDependency.swift")
+        let staticSwiftObject = root.appendingPathComponent("StaticDependencySwift.o")
+        try Data("""
+        @_silgen_name("archive_dependency_value") func archiveValue() -> Int32
+        public func staticDependencyValue() -> Int32 { archiveValue() }
+        """.utf8).write(to: staticSwiftCode)
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "swiftc", "-parse-as-library", "-c", "-emit-module",
+            "-module-name", "StaticDependency", "-target", NativePreviewPlatform.macOS.triple, staticSwiftCode.path,
+            "-emit-module-path", staticModule.appendingPathComponent("arm64-apple-macos.swiftmodule").path,
+            "-o", staticSwiftObject.path])
+        try previewBinaryOutput("/usr/bin/xcrun", ["libtool", "-static", staticObject.path, staticSwiftObject.path,
+            "-o", staticArchive.path])
         let code = root.appendingPathComponent("StaticSource.c")
         let object = root.appendingPathComponent("StaticSource.o")
         // Model the compiler autolink directives that survive in a static archive until its final image is linked.
@@ -402,10 +416,10 @@ struct NativePreviewCorrectionTests {
         let swiftObject = root.appendingPathComponent("StaticSwiftSource.o")
         try Data("""
         import Dependency
+        import StaticDependency
         @_silgen_name("preview_fixture_value") func supportValue() -> Int32
-        @_silgen_name("archive_dependency_value") func archiveValue() -> Int32
         @_cdecl("static_preview_value") public func staticPreviewValue() -> Int32 {
-            dependencyValue() + supportValue() + archiveValue()
+            dependencyValue() + supportValue() + staticDependencyValue()
         }
         """.utf8).write(to: swiftCode)
         let compileCommand = ["swiftc", "-parse-as-library", "-c", "-target", NativePreviewPlatform.macOS.triple,
@@ -423,6 +437,7 @@ struct NativePreviewCorrectionTests {
         let original = try Data(contentsOf: binary)
         let originalSupport = try Data(contentsOf: support)
         let originalDependency = try Data(contentsOf: dependencyBinary)
+        let originalStaticDependency = try Data(contentsOf: staticArchive)
         let helper = root.appendingPathComponent("Helper")
         try FileManager.default.createDirectory(at: helper.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
         let loader = root.appendingPathComponent("Loader.c")
@@ -464,6 +479,7 @@ struct NativePreviewCorrectionTests {
         #expect(try Data(contentsOf: binary) == original)
         #expect(try Data(contentsOf: support) == originalSupport)
         #expect(try Data(contentsOf: dependencyBinary) == originalDependency)
+        #expect(try Data(contentsOf: staticArchive) == originalStaticDependency)
         let stagedFramework = NativePreviewPlatform.macOS.frameworksDirectory(in: app).appendingPathComponent(framework.lastPathComponent)
         try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", app.path])
         try previewBinaryOutput("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
