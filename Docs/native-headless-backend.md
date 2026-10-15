@@ -145,7 +145,7 @@ retrieval does not establish online/account-dependent retrieval.
 in an application or app extension built with a debug dylib. The packaged
 hosts cover iOS 18.4+, tvOS 18.4+, visionOS 2.4+, and watchOS 11.4+ Simulators,
 plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
-The renderers support arm64 on these platforms and x86_64 on macOS, including
+The renderers support arm64 on these platforms and x86_64 on macOS and Mac Catalyst, including
 an eligible Rosetta destination on an Apple silicon Mac. The selected source
 build determines the renderer architecture.
 For a universal build, the destination's architecture selects the slice.

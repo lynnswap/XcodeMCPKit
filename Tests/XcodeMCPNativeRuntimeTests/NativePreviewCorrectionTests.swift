@@ -180,20 +180,21 @@ struct NativePreviewCorrectionTests {
         #expect(selected.host.architecture == architecture)
     }
 
-    @Test func macSharedLibraryUsesSameArchitectureHost() throws {
+    @Test(arguments: [NativePreviewPlatform.macOS, .catalyst])
+    func desktopSharedLibraryUsesSameArchitectureHost(platform: NativePreviewPlatform) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = root.appendingPathComponent("PackageView.swift")
         let product = root.appendingPathComponent("FixturePackage.o")
         let hosts = ["arm64", "x86_64"].map { architecture in
             NativePreviewBuild.Target(moduleName: architecture, buildableName: "FixtureHost.app",
-                sdkRoot: "macosx", sdkVariant: nil, architecture: architecture,
+                sdkRoot: "macosx", sdkVariant: platform == .catalyst ? "iosmac" : nil, architecture: architecture,
                 linkCommandLine: ["-o", root.appendingPathComponent("\(architecture).app/Contents/MacOS/FixtureHost.debug.dylib").path, product.path],
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
         }
         let sourceTarget = NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
-            sdkRoot: "macosx", sdkVariant: nil, architecture: "x86_64", linkCommandLine: ["-o", product.path],
+            sdkRoot: "macosx", sdkVariant: platform == .catalyst ? "iosmac" : nil, architecture: "x86_64", linkCommandLine: ["-o", product.path],
             linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [sourceTarget], source: source, platform: .macOS,
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [sourceTarget], source: source, platform: platform,
             preferredArchitecture: "arm64")
         #expect(selected.source.architecture == "x86_64")
         #expect(selected.host.architecture == "x86_64")

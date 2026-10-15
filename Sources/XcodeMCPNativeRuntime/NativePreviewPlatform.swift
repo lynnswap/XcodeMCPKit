@@ -29,7 +29,7 @@ enum NativePreviewPlatform: String, CaseIterable {
 
     var isSimulator: Bool { self != .macOS && self != .catalyst }
     func supports(architecture: String) -> Bool {
-        architecture == "arm64" || (self == .macOS && architecture == "x86_64")
+        architecture == "arm64" || (!isSimulator && architecture == "x86_64")
     }
     func helperDirectory(architecture: String) -> String { rawValue + "-" + architecture }
     var sdk: String { self == .catalyst ? "macosx" : rawValue }

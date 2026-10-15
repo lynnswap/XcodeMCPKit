@@ -34,7 +34,7 @@ case "$platform:$architecture" in
   xrsimulator:arm64) sdk_name=xrsimulator; triple=arm64-apple-xros2.4-simulator ;;
   watchsimulator:arm64) sdk_name=watchsimulator; triple=arm64-apple-watchos11.4-simulator ;;
   macosx:arm64|macosx:x86_64) sdk_name=macosx; triple="$architecture-apple-macos15.4" ;;
-  maccatalyst:arm64) sdk_name=macosx; triple=arm64-apple-ios18.4-macabi ;;
+  maccatalyst:arm64|maccatalyst:x86_64) sdk_name=macosx; triple="$architecture-apple-ios18.4-macabi" ;;
   *) echo "Unsupported preview platform and architecture: $platform $architecture" >&2; exit 1 ;;
 esac
 if [[ -z "$output" ]]; then output="$repo_root/.build/native/PreviewRenderer/$platform-$architecture"; fi

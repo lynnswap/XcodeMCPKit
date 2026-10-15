@@ -46,8 +46,10 @@ for platform in iphonesimulator appletvsimulator xrsimulator watchsimulator maco
   "$repo_root/scripts/build-preview-renderer.sh" --configuration "$configuration" --platform "$platform" \
     --output "$output/Contents/Resources/PreviewRenderer/$platform-arm64" --developer-dir "$developer_dir"
 done
-"$repo_root/scripts/build-preview-renderer.sh" --configuration "$configuration" --platform macosx --architecture x86_64 \
-  --output "$output/Contents/Resources/PreviewRenderer/macosx-x86_64" --developer-dir "$developer_dir"
+for platform in macosx maccatalyst; do
+  "$repo_root/scripts/build-preview-renderer.sh" --configuration "$configuration" --platform "$platform" --architecture x86_64 \
+    --output "$output/Contents/Resources/PreviewRenderer/$platform-x86_64" --developer-dir "$developer_dir"
+done
 python3 - "$output/Contents/Info.plist" <<'PY'
 import pathlib, plistlib, sys
 pathlib.Path(sys.argv[1]).write_bytes(plistlib.dumps({
