@@ -11,7 +11,8 @@ final class NativePreviewProcess {
         self.artifacts = artifacts
     }
 
-    func run(_ executable: String, _ arguments: [String]) async throws -> String {
+    func run(_ executable: String, _ arguments: [String], environment launchEnvironment: [String: String] = [:],
+             directory: URL? = nil) async throws -> String {
         try Task.checkCancellation()
         let logURL = artifacts.appendingPathComponent("process-\(UUID().uuidString).log")
         try Data().write(to: logURL)
@@ -24,6 +25,7 @@ final class NativePreviewProcess {
         let process = Process()
         process.executableURL = URL(filePath: executable)
         process.arguments = arguments
+        process.currentDirectoryURL = directory
         var environment = ProcessInfo.processInfo.environment
         // Child tools and Simulator apps use their SDK libraries, rather than
         // the framework search paths needed by this macOS native host.
@@ -31,6 +33,7 @@ final class NativePreviewProcess {
             environment[key] = nil
         }
         environment["DEVELOPER_DIR"] = installation.developerDirectory.path
+        environment.merge(launchEnvironment, uniquingKeysWith: { _, new in new })
         process.environment = environment
         process.standardOutput = output
         process.standardError = errors
@@ -64,7 +67,7 @@ final class NativePreviewProcess {
         return text
     }
 
-    func xcrun(_ arguments: [String]) async throws -> String {
-        try await run("/usr/bin/xcrun", arguments)
+    func xcrun(_ arguments: [String], environment: [String: String] = [:]) async throws -> String {
+        try await run("/usr/bin/xcrun", arguments, environment: environment)
     }
 }

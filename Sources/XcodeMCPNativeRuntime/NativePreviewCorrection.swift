@@ -215,7 +215,7 @@ final class NativePreviewCorrection {
     private func prepareRenderer(_ input: Input, prepared: Prepared, app: URL, build: NativePreviewBuild.Result,
                                  platform: NativePreviewPlatform, process: NativePreviewProcess,
                                  metadataOnly: Bool? = nil, isLegacyComplication: Bool? = nil) async throws ->
-        (request: PreviewRendererRequest, signing: [String], product: URL, containingApp: URL?) {
+        (request: PreviewRendererRequest, signing: [String], product: URL, containingApp: URL?, environment: [String: String]) {
         let source = prepared.source
         let location = prepared.location
         let selection = try Self.selectTarget(build.targets, source: source, platform: platform)
@@ -234,17 +234,28 @@ final class NativePreviewCorrection {
             product = appProduct
         } else if let standaloneFramework { product = standaloneFramework }
         else { throw NativePipelineRequired() }
-        let entitlements = try NativePreviewEntitlements.read(from: product)
+        let staticFramework = try selection.source.outputURL.map {
+            try Self.frameworkBundle(containing: $0) != nil && NativePreviewBinary.isStaticArchive(at: $0)
+        } ?? false
+        // A standalone static archive has no executable signature or Simulator entitlement section.
+        let entitlements = staticFramework && standaloneFramework != nil ? NativePreviewEntitlements(signed: nil, simulator: nil)
+            : try NativePreviewEntitlements.read(from: product)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
         let containingApp = try Self.containingApp(for: output, targets: build.targets)
         let nativeProviderIdentifier = metadataOnly == true && location.providerPath != nil
             && (platform == .iOS || platform == .watchOS) && containingApp != nil
             ? try Self.widgetExtensionIdentifier(product) : nil
-        let dependencies = standaloneFramework == nil ? FrameworkDependencies()
-            : try Self.frameworkDependencies(for: target, targets: build.targets, platform: platform)
         try Self.prepareApp(product: product, helper: helper, app: app, containingApp: containingApp, platform: platform,
-            clientIdentifier: nativeProviderIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString },
-            dependencies: dependencies)
+            clientIdentifier: nativeProviderIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString })
+        let linkedImage: LinkedPreviewImage?
+        if staticFramework {
+            linkedImage = try await Self.linkStaticFramework(selection.source, host: selection.host, in: app, platform: platform, process: process)
+        } else { linkedImage = nil }
+        let primaryImage = linkedImage?.url
+        let dependencies = standaloneFramework == nil && linkedImage == nil ? FrameworkDependencies()
+            : try Self.frameworkDependencies(for: selection.source, targets: build.targets, platform: platform,
+                primaryImage: linkedImage, environment: target.rendererEnvironment)
+        try Self.copyFrameworkDependencies(dependencies, into: app, platform: platform)
         if let simulatorEntitlements = entitlements.simulator {
             let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
             try simulatorEntitlements.write(to: section)
@@ -257,10 +268,11 @@ final class NativePreviewCorrection {
                 "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__entitlements", "-Xlinker", section.path,
                 "-o", platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path])
         }
-        let libraries = standaloneFramework == nil ? try previewLibraries(in: app, platform: platform) : []
+        let libraries = try primaryImage.map { [$0] }
+            ?? (standaloneFramework == nil ? previewLibraries(in: app, platform: platform) : [])
         let registryLibraries = try Self.registryLibraries(in: app, previewLibraries: libraries)
         let libraryPaths = try Self.libraryPaths(in: app, previewLibraries: libraries,
-            registryLibraries: registryLibraries, sourceOutput: selection.source.outputURL)
+            registryLibraries: registryLibraries, sourceOutput: primaryImage ?? selection.source.outputURL)
         let symbols = try await process.xcrun(["nm", "-j"] + registryLibraries.map(\.path))
         let names = Self.registryNames(in: symbols)
         let providerName: String?
@@ -270,7 +282,7 @@ final class NativePreviewCorrection {
         } else { providerName = nil }
         let programRootNames: [String]?
         if providerName != nil {
-            let programLibraries = try Self.programLibraries(previewLibraries: registryLibraries, output: output)
+            let programLibraries = try Self.programLibraries(previewLibraries: registryLibraries, output: primaryImage ?? output)
             if programLibraries.isEmpty {
                 programRootNames = []
             } else {
@@ -288,6 +300,7 @@ final class NativePreviewCorrection {
             activityViewStyle: input.activityViewStyle, activityViewContext: input.activityViewContext,
             activityToggleState: input.activityToggleState,
             appName: try Self.appName(product: product, containingApp: containingApp, localization: input.localization),
+            nativeEnvironment: target.rendererEnvironment.isEmpty ? nil : target.rendererEnvironment,
             metadataOnly: metadataOnly, isLegacyComplication: isLegacyComplication)
         if let nativeProviderIdentifier, let providerName {
             request.libraryNames = []
@@ -303,7 +316,7 @@ final class NativePreviewCorrection {
             signing += ["--entitlements", plist.path]
         }
         try await writeRendererRequest(request, app: app, platform: platform, signing: signing, process: process)
-        return (request, signing, product, containingApp)
+        return (request, signing, product, containingApp, target.rendererEnvironment)
     }
 
     private func writeRendererRequest(_ request: PreviewRendererRequest, app: URL, platform: NativePreviewPlatform,
@@ -314,9 +327,9 @@ final class NativePreviewCorrection {
     }
 
     private func desktopPreview(app: URL, platform: NativePreviewPlatform, process: NativePreviewProcess,
-                                localization: String?) async throws -> PreviewRendererResult {
+                                localization: String?, environment: [String: String]) async throws -> PreviewRendererResult {
         let text = try await process.run(platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path,
-            Self.rendererArguments(localization: localization))
+            Self.rendererArguments(localization: localization), environment: environment)
         guard let record = text.split(whereSeparator: \.isNewline).last(where: { $0.hasPrefix("XcodeMCPPreviewResult:") }) else {
             throw NativeRuntimeError.invocation("The preview process returned no result; see its process log")
         }
@@ -332,16 +345,18 @@ final class NativePreviewCorrection {
         let workspace = prepared.workspace
         let location = prepared.location
         var destination = prepared.destination
-        var build = try await builder.build(workspace: workspace, destination: destination)
+        var build = try await builder.build(workspace: workspace, destination: destination, source: prepared.source)
         guard var platform = build.previewPlatform else { throw NativePipelineRequired() }
         var renderer = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
             platform: platform, process: process, metadataOnly: true)
         let metadataResponse: PreviewRendererResult
         if platform.isSimulator {
-            metadataResponse = try await renderSimulator(app: app, build: build, process: process, localization: input.localization,
+            metadataResponse = try await renderSimulator(app: app, build: build, process: process,
+                localization: input.localization, environment: renderer.environment,
                 containingApp: renderer.request.nativeSource == nil ? nil : renderer.containingApp).response
         } else {
-            metadataResponse = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
+            metadataResponse = try await desktopPreview(app: app, platform: platform, process: process,
+                localization: input.localization, environment: renderer.environment)
         }
         guard let metadata = metadataResponse.nativeMetadata else {
             throw NativeRuntimeError.invocation("The preview process returned no native metadata")
@@ -352,7 +367,7 @@ final class NativePreviewCorrection {
         let unchanged = (destination.selected.value as? NSObject)?.isEqual(evaluated.selected.value) == true
         destination = evaluated
         if !unchanged {
-            build = try await builder.build(workspace: workspace, destination: destination)
+            build = try await builder.build(workspace: workspace, destination: destination, source: prepared.source)
             guard let selectedPlatform = build.previewPlatform else { throw NativePipelineRequired() }
             platform = selectedPlatform
         }
@@ -399,7 +414,8 @@ final class NativePreviewCorrection {
         let deviceType: URL?
         let destinationFields: [String: JSONValue]
         if platform.isSimulator {
-            let rendered = try await renderSimulator(app: app, build: build, process: process, localization: input.localization,
+            let rendered = try await renderSimulator(app: app, build: build, process: process,
+                localization: input.localization, environment: renderer.environment,
                 containingApp: nativeContainingApp)
             response = rendered.response
             guard let snapshot = rendered.snapshot else { throw NativeRuntimeError.unsupportedContract("The preview renderer returned no snapshot") }
@@ -408,7 +424,8 @@ final class NativePreviewCorrection {
             deviceType = rendered.deviceType
             destinationFields = rendered.destination
         } else {
-            response = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
+            response = try await desktopPreview(app: app, platform: platform, process: process,
+                localization: input.localization, environment: renderer.environment)
             guard let data = response.snapshotData else { throw NativeRuntimeError.invocation("The preview process returned no snapshot") }
             snapshotData = data
             exclusionData = nil
@@ -459,7 +476,8 @@ final class NativePreviewCorrection {
         return .object(fields)
     }
 
-    private func renderSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess, localization: String?,
+    private func renderSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess,
+                                 localization: String?, environment: [String: String],
                                  containingApp: URL? = nil) async throws ->
         (response: PreviewRendererResult, snapshot: Data?, destination: [String: JSONValue], deviceType: URL, exclusion: Data?) {
         // Keep allocation alive through cancellation so its created identifier
@@ -482,6 +500,7 @@ final class NativePreviewCorrection {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let documents = URL(filePath: container, directoryHint: .isDirectory).appendingPathComponent("Documents")
             let arguments = try Self.rendererArguments(localization: localization)
+            let childEnvironment = Dictionary(uniqueKeysWithValues: environment.map { ("SIMCTL_CHILD_" + $0.key, $0.value) })
             if containingApp != nil {
                 let installedApp = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, simulator.bundleIdentifier, "app"])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -489,9 +508,9 @@ final class NativePreviewCorrection {
                 // PreviewShell owns the UI and the extension's active-preview assertion.
                 // A foreground helper app suspends that assertion when it takes focus.
                 _ = try await process.xcrun(["simctl", "spawn", simulator.identifier, executable.path,
-                    "--native-preview-result-directory", documents.path] + arguments)
+                    "--native-preview-result-directory", documents.path] + arguments, environment: childEnvironment)
             } else {
-                _ = try await process.xcrun(["simctl", "launch", simulator.identifier, simulator.bundleIdentifier] + arguments)
+                _ = try await process.xcrun(["simctl", "launch", simulator.identifier, simulator.bundleIdentifier] + arguments, environment: childEnvironment)
             }
             let responseURL = documents.appendingPathComponent("PreviewResult.json")
             while !FileManager.default.fileExists(atPath: responseURL.path) {
@@ -602,7 +621,9 @@ final class NativePreviewCorrection {
                     return true
                 }
                 guard let sourceOutput else { return false }
-                if ["a", "o", "dylib"].contains(sourceOutput.pathExtension), try candidate.linksProduct(at: sourceOutput) { return true }
+                if try (["a", "o", "dylib"].contains(sourceOutput.pathExtension)
+                    || (frameworkName != nil && NativePreviewBinary.isStaticArchive(at: sourceOutput)))
+                    && candidate.linksProduct(at: sourceOutput) { return true }
                 guard frameworkName != nil || sourceOutput.pathExtension == "dylib" else { return false }
                 let rootLibrary = app.appendingPathComponent(sourceOutput.lastPathComponent)
                 if frameworkName == nil, FileManager.default.fileExists(atPath: rootLibrary.path),
@@ -621,7 +642,7 @@ final class NativePreviewCorrection {
             selections += hosts.map { Selection(source: target, host: $0) }
             if hosts.isEmpty, let sourceOutput,
                frameworkBundle(containing: sourceOutput) != nil,
-               try NativePreviewBinary.isDynamicLibrary(at: sourceOutput) {
+               try NativePreviewBinary.isDynamicLibrary(at: sourceOutput) || NativePreviewBinary.isStaticArchive(at: sourceOutput) {
                 selections.append(Selection(source: target, host: target))
             }
         }
@@ -881,6 +902,12 @@ final class NativePreviewCorrection {
         return info["CFBundleIdentifier"] as? String
     }
 
+    struct LinkedPreviewImage {
+        let url: URL
+        let searchPaths: [(framework: Bool, url: URL)]
+        let linkInputs: [URL]
+    }
+
     struct FrameworkDependencies {
         struct Relocation {
             let library: String
@@ -892,7 +919,8 @@ final class NativePreviewCorrection {
     }
 
     static func frameworkDependencies(for source: NativePreviewBuild.Target, targets: [NativePreviewBuild.Target],
-                                      platform: NativePreviewPlatform) throws -> FrameworkDependencies {
+                                      platform: NativePreviewPlatform, primaryImage: LinkedPreviewImage? = nil,
+                                      environment: [String: String] = [:]) throws -> FrameworkDependencies {
         typealias SearchPath = (framework: Bool, url: URL)
         typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String], target: NativePreviewBuild.Target?)
         func library(at output: URL, target: NativePreviewBuild.Target? = nil) throws -> Library? {
@@ -909,14 +937,18 @@ final class NativePreviewCorrection {
             }
             return path.hasPrefix("/") ? URL(filePath: path) : nil
         }
+        // Native-preloaded runtimes must keep their original image identity when their clients are relocated.
+        let preloaded = Set(environment["DYLD_INSERT_LIBRARIES", default: ""].split(separator: ":")
+            .filter { $0.hasPrefix("/") }.map { URL(filePath: String($0)).resolvingSymlinksInPath() })
         let libraries = try targets.compactMap { target -> Library? in
             guard target.architecture == "arm64",
                   NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) == platform,
                   let output = target.outputURL, productBundle(containing: output) == nil else { return nil }
             return try library(at: output, target: target)
         }
-        guard let output = source.outputURL?.resolvingSymlinksInPath(),
-              let sourceLibrary = libraries.first(where: { $0.output == output }) else { return FrameworkDependencies() }
+        guard let output = (primaryImage?.url ?? source.outputURL)?.resolvingSymlinksInPath(),
+              let sourceLibrary = try primaryImage.flatMap({ try library(at: $0.url, target: source) })
+                ?? libraries.first(where: { $0.output == output }) else { return FrameworkDependencies() }
         var pending = [(library: sourceLibrary, inheritedPaths: [URL](), inheritedLinkPaths: [SearchPath]())]
         var visited: Set<URL> = [output.resolvingSymlinksInPath()]
         var result = FrameworkDependencies()
@@ -937,8 +969,9 @@ final class NativePreviewCorrection {
             let runtimePaths = current.library.rpaths.compactMap { runtimeURL($0, importer: current.library.output) }
                 + current.inheritedPaths
             let inputs = try current.library.target?.linkedInputs()
-            let searchPaths = (inputs?.searchPaths ?? []) + current.inheritedLinkPaths
-            let linkedLibraries = try (inputs?.files ?? []).compactMap { candidate in
+            let linkedImage = current.library.output == output ? primaryImage : nil
+            let searchPaths = (linkedImage?.searchPaths ?? inputs?.searchPaths ?? []) + current.inheritedLinkPaths
+            let linkedLibraries = try (linkedImage?.linkInputs ?? inputs?.files ?? []).compactMap { candidate in
                 try libraries.first { $0.output.resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath() }
                     ?? library(at: candidate)
             }
@@ -971,7 +1004,7 @@ final class NativePreviewCorrection {
                     }
                 }
                 if dependency == nil, matches.count == 1 { dependency = matches[0] }
-                guard let dependency else { continue }
+                guard let dependency, !preloaded.contains(dependency.output) else { continue }
                 let importer = stagedPath(current.library)
                 let target = stagedPath(dependency)
                 let parentDepth = importer.split(separator: "/").count - 1
@@ -988,6 +1021,141 @@ final class NativePreviewCorrection {
             }
         }
         return result
+    }
+
+    static func linkStaticFramework(_ source: NativePreviewBuild.Target, host: NativePreviewBuild.Target? = nil,
+                                    in app: URL, platform: NativePreviewPlatform,
+                                    process: NativePreviewProcess) async throws -> LinkedPreviewImage {
+        guard let output = source.outputURL else {
+            throw NativeRuntimeError.unsupportedContract("The static preview target has no linked archive")
+        }
+        // A separate image keeps the static source's entry symbol away from the renderer's entry point.
+        // Its classes retain ordinary host Bundle(for:) semantics, rather than becoming a dynamic framework.
+        let archive = app.deletingLastPathComponent().appendingPathComponent("PreviewSource.a")
+        try copyReplacingItem(output, to: archive)
+        let image = platform.frameworksDirectory(in: app).appendingPathComponent("XcodeMCPPreviewSource.dylib")
+        let context: NativePreviewBuild.Target
+        let command: [String]
+        if let host, host.outputURL?.resolvingSymlinksInPath() != output.resolvingSymlinksInPath() {
+            context = host
+            command = try hostedStaticFrameworkCommand(source: source, host: host, archive: archive, image: image)
+            _ = try await process.run(command[0], Array(command.dropFirst()),
+                directory: host.linkerWorkingDirectory.map { URL(filePath: $0, directoryHint: .isDirectory) })
+        } else {
+            context = source
+            let sdk = try await process.xcrun(["--sdk", platform.sdk, "--show-sdk-path"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // A Swift input lets the driver link while only this archive is force-loaded.
+            let linkSource = app.deletingLastPathComponent().appendingPathComponent("PreviewSource.swift")
+            try Data().write(to: linkSource)
+            var arguments = ["--sdk", platform.sdk, "swiftc", "-emit-library", "-parse-as-library", "-target", platform.triple, "-sdk", sdk,
+                linkSource.path, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive.path,
+                "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
+                "@rpath/" + image.lastPathComponent, "-o", image.path]
+            let sanitizers = [(source.enableAddressSanitizer, "address"), (source.enableThreadSanitizer, "thread"),
+                              (source.enableUndefinedBehaviorSanitizer, "undefined")].filter(\.0).map(\.1)
+            if !sanitizers.isEmpty { arguments.append("-sanitize=" + sanitizers.joined(separator: ",")) }
+            let inputs = try source.linkedInputs()
+            for path in source.searchPaths(in: source.compileCommandLine) + source.searchPaths(in: source.linkCommandLine) {
+                arguments += [path.argument, path.url.path]
+            }
+            for input in inputs.files where input.resolvingSymlinksInPath() != output.resolvingSymlinksInPath() {
+                var directory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: input.path, isDirectory: &directory), !directory.boolValue,
+                   try input.pathExtension == "tbd" || NativePreviewBinary.isStaticArchive(at: input) || NativePreviewBinary.isDynamicLibrary(at: input) {
+                    arguments += ["-Xlinker", input.path]
+                }
+            }
+            for library in inputs.libraries where library.file == nil {
+                arguments += library.framework ? ["-framework", library.name] : ["-l" + library.name]
+            }
+            command = ["/usr/bin/xcrun"] + arguments
+            _ = try await process.xcrun(arguments)
+        }
+        // Native debug links can defer code signing to Xcode; this generated copy has its own signing owner.
+        _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", image.path])
+        if let framework = frameworkBundle(containing: output) {
+            let copiedFramework = platform.frameworksDirectory(in: app).appendingPathComponent(framework.lastPathComponent)
+            if FileManager.default.fileExists(atPath: copiedFramework.path) {
+                _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", copiedFramework.path])
+            }
+        }
+        let inputs = try context.linkedInputs(in: command)
+        return LinkedPreviewImage(url: image, searchPaths: inputs.searchPaths, linkInputs: inputs.files)
+    }
+
+    private static func hostedStaticFrameworkCommand(source: NativePreviewBuild.Target, host: NativePreviewBuild.Target,
+                                                       archive: URL, image: URL) throws -> [String] {
+        guard let executable = host.linkCommandLine.first else {
+            throw NativeRuntimeError.unsupportedContract("The static preview host has no link command")
+        }
+        let directory = archive.deletingLastPathComponent().appendingPathComponent("PreviewLink", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let inputs = try host.linkedInputs()
+        var owned = Set((source.objectFiles + [source.outputURL].compactMap { $0 }).map { $0.resolvingSymlinksInPath() })
+        // libtool can merge other archives; those bytes already belong to the force-loaded source image.
+        for input in try source.linkedInputs().files {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectory), !isDirectory.boolValue,
+               try NativePreviewBinary.isStaticArchive(at: input) || NativePreviewBinary.file(at: input)?.header.fileType == .object {
+                owned.insert(input.resolvingSymlinksInPath())
+            }
+        }
+        func owns(_ path: String) -> Bool {
+            host.url(for: path).map { owned.contains($0.resolvingSymlinksInPath()) } ?? false
+        }
+        func ownsLibrary(framework: Bool, name: String) -> Bool {
+            inputs.libraries.contains { $0.framework == framework && $0.name == name
+                && $0.file.map { owned.contains($0.resolvingSymlinksInPath()) } == true }
+        }
+        func encode(_ argument: (value: String, forwarded: Bool), replacing value: String? = nil) -> [String] {
+            let value = value ?? argument.value
+            return argument.forwarded ? ["-Xlinker", value] : [value]
+        }
+        let arguments = host.linkArguments(in: Array(host.linkCommandLine.dropFirst()))
+        var result = [executable]
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            let next = arguments.indices.contains(index + 1) ? arguments[index + 1] : nil
+            if ["-o", "-install_name", "-dependency_info", "-object_path_lto", "-map"].contains(argument.value), let next {
+                let value = argument.value == "-o" ? image.path : argument.value == "-install_name" ? "@rpath/" + image.lastPathComponent
+                    : directory.appendingPathComponent(URL(filePath: next.value).lastPathComponent).path
+                result += encode(argument) + encode(next, replacing: value)
+                index += 2
+            } else if argument.value == "-filelist", let next, let path = host.url(for: next.value) {
+                let entries = try String(contentsOf: path, encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
+                let copy = directory.appendingPathComponent("PreviewLinkFileList-\(index).txt")
+                try (entries.filter { !owns($0) }.joined(separator: "\n") + "\n").write(to: copy, atomically: true, encoding: .utf8)
+                result += encode(argument) + encode(next, replacing: copy.path)
+                index += 2
+            } else if argument.value == "-force_load", let next, owns(next.value) {
+                index += 2
+            } else if argument.value == "-framework", let next, ownsLibrary(framework: true, name: next.value) {
+                index += 2
+            } else if argument.value == "-l", let next, ownsLibrary(framework: false, name: next.value) {
+                index += 2
+            } else if argument.value.hasPrefix("-l"), ownsLibrary(framework: false, name: String(argument.value.dropFirst(2))) {
+                index += 1
+            } else {
+                if !owns(argument.value) { result += encode(argument) }
+                index += 1
+            }
+        }
+        for path in source.searchPaths(in: source.compileCommandLine) + source.searchPaths(in: source.linkCommandLine) {
+            result += [path.argument == "-L" ? "-L" : "-F", path.url.path]
+        }
+        return result + ["-Xlinker", "-force_load", "-Xlinker", archive.path, "-Xlinker", "-headerpad_max_install_names"]
+    }
+
+    static func copyFrameworkDependencies(_ dependencies: FrameworkDependencies, into app: URL,
+                                          platform: NativePreviewPlatform) throws {
+        let frameworks = platform.frameworksDirectory(in: app)
+        for (source, path) in dependencies.products {
+            let destination = frameworks.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: source, to: destination)
+        }
     }
 
     static func relocateFrameworkDependencies(_ dependencies: FrameworkDependencies, in app: URL,
@@ -1008,7 +1176,7 @@ final class NativePreviewCorrection {
     }
 
     static func prepareApp(product: URL, helper: URL, app: URL, containingApp: URL? = nil, platform: NativePreviewPlatform = .iOS,
-                           clientIdentifier: String? = nil, dependencies: FrameworkDependencies = FrameworkDependencies()) throws {
+                           clientIdentifier: String? = nil) throws {
         let standaloneFramework = product.pathExtension == "framework"
         let frameworks = platform.frameworksDirectory(in: app)
         var original: [String: Any]
@@ -1016,11 +1184,6 @@ final class NativePreviewCorrection {
             try FileManager.default.createDirectory(at: platform.executableDirectory(in: app), withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: product, to: frameworks.appendingPathComponent(product.lastPathComponent))
-            for (source, path) in dependencies.products {
-                let destination = frameworks.appendingPathComponent(path)
-                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try FileManager.default.copyItem(at: source, to: destination)
-            }
             // The framework remains its own bundle; the renderer is only its executable host.
             original = ["CFBundleIdentifier": "dev.xcodemcp.PreviewClient." + UUID().uuidString, "CFBundleName": "Preview"]
             switch platform {
@@ -1143,7 +1306,8 @@ final class NativePreviewCorrection {
         var libraries = previewLibraries
         if let sourceOutput, Self.productBundle(containing: sourceOutput) == nil {
             let frameworkName = sourceOutput.pathComponents.last(where: { $0.hasSuffix(".framework") })
-            if frameworkName != nil || sourceOutput.pathExtension == "dylib" {
+            if frameworkName != nil || sourceOutput.pathExtension == "dylib",
+               try !NativePreviewBinary.isStaticArchive(at: sourceOutput) {
                 guard let sourceLibrary = try registryLibraries.first(where: { library in
                     guard library.lastPathComponent == sourceOutput.lastPathComponent,
                           frameworkName.map({ library.pathComponents.contains($0) }) ?? true else { return false }

@@ -4,6 +4,12 @@ import MachOKit
 @safe
 @MainActor
 enum NativePreviewBinary {
+    static func isStaticArchive(at url: URL) throws -> Bool {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        return try handle.read(upToCount: 8) == Data("!<arch>\n".utf8)
+    }
+
     static func isDynamicLibrary(at url: URL) throws -> Bool {
         try dynamicLibrary(at: url) != nil
     }
