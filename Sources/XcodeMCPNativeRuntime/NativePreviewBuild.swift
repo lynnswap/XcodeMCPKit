@@ -43,22 +43,46 @@ final class NativePreviewBuild {
         }
 
         func linksProduct(at product: URL) throws -> Bool {
+            let productPath = product.resolvingSymlinksInPath().path
+            return try linkedInputs().files.contains { $0.resolvingSymlinksInPath().path == productPath }
+        }
+
+        func linkedInputs() throws -> (files: [URL], searchPaths: [(framework: Bool, url: URL)]) {
             func url(for path: String) -> URL? {
                 if path.hasPrefix("/") { return URL(filePath: path) }
                 guard let linkerWorkingDirectory else { return nil }
                 return URL(filePath: path, relativeTo: URL(filePath: linkerWorkingDirectory, directoryHint: .isDirectory))
                     .absoluteURL
             }
-            let productPath = product.resolvingSymlinksInPath().path
-            if linkCommandLine.contains(where: { url(for: $0)?.resolvingSymlinksInPath().path == productPath }) {
-                return true
+            var inputs = linkCommandLine.compactMap { url(for: $0) }
+            var searchPaths: [(framework: Bool, url: URL)] = []
+            var namedInputs: [(framework: Bool, name: String)] = []
+            for index in linkCommandLine.indices {
+                let argument = linkCommandLine[index]
+                let next = linkCommandLine.indices.contains(index + 1) ? linkCommandLine[index + 1] : nil
+                if argument == "-filelist", let fileList = next.flatMap({ url(for: $0) }) {
+                    let paths = try String(contentsOf: fileList, encoding: .utf8).split(whereSeparator: \.isNewline)
+                    inputs += paths.compactMap { url(for: String($0)) }
+                } else if argument.hasPrefix("-F") || argument.hasPrefix("-L") {
+                    let path = argument.count == 2 ? next : String(argument.dropFirst(2))
+                    if let path, let url = url(for: path) { searchPaths.append((argument.hasPrefix("-F"), url)) }
+                } else if argument == "-framework", let next {
+                    namedInputs.append((true, next))
+                } else if argument.hasPrefix("-l") {
+                    if let name = argument.count == 2 ? next : String(argument.dropFirst(2)) {
+                        namedInputs.append((false, name))
+                    }
+                }
             }
-            for index in linkCommandLine.indices where linkCommandLine[index] == "-filelist" {
-                guard linkCommandLine.indices.contains(index + 1), let fileList = url(for: linkCommandLine[index + 1]) else { continue }
-                let paths = try String(contentsOf: fileList, encoding: .utf8).split(whereSeparator: \.isNewline)
-                if paths.contains(where: { url(for: String($0))?.resolvingSymlinksInPath().path == productPath }) { return true }
+            for input in namedInputs {
+                let names = input.framework ? ["\(input.name).framework/\(input.name)"] : ["lib\(input.name).dylib", "lib\(input.name).a"]
+                let candidates = searchPaths.filter { $0.framework == input.framework }.flatMap { path in
+                    names.map { path.url.appendingPathComponent($0) }
+                }
+                if let file = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) { inputs.append(file) }
             }
-            return false
+            var seen: Set<URL> = []
+            return (inputs.filter { seen.insert($0.resolvingSymlinksInPath()).inserted }, searchPaths)
         }
     }
 
