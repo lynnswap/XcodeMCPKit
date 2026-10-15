@@ -45,10 +45,8 @@ func previewRegistry(for request: PreviewRendererRequest) throws -> any PreviewR
 @MainActor
 func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     (view: AnyView, layout: DeveloperToolsSupport.PreviewLayout, variants: [String: String], result: PreviewRendererResult) {
-    guard request.displayVariantOverrides.allSatisfy({ supportedPreviewDisplayVariants[$0.key]?.contains($0.value) == true }) else {
-        throw NativePreviewPipelineRequired()
-    }
-    var variants = request.displayVariantOverrides
+    let options = request.generalPreviewOptions(supportedVariants: supportedPreviewDisplayVariants)
+    var variants = options.displayVariants
     var view: AnyView
     let layout: DeveloperToolsSupport.PreviewLayout
     var result: PreviewRendererResult
@@ -85,7 +83,7 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     }
     if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }
     view = try applyDisplayVariants(to: view, variants: variants)
-    result.errors = (result.errors ?? []) + request.unsupportedGeneralPreviewOptions
+    result.errors = (result.errors ?? []) + options.errors
     result.supportedDisplayVariants = supportedPreviewDisplayVariants
     return (view, layout, variants, result)
 }
