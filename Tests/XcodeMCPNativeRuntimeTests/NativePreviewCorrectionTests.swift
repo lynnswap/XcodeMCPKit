@@ -180,6 +180,27 @@ struct NativePreviewCorrectionTests {
         #expect(selected.host.architecture == architecture)
     }
 
+    @Test func sharedLibraryPrefersDestinationArchitectureBeforeRunnableHost() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("PackageView.swift")
+        let targets = ["arm64", "x86_64"].flatMap { architecture in
+            let product = root.appendingPathComponent("\(architecture)/FixturePackage.o")
+            return [NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
+                sdkRoot: "macosx", sdkVariant: nil, architecture: architecture,
+                linkCommandLine: ["-o", product.path], linkerWorkingDirectory: nil, objectFiles: [],
+                sourceFiles: [source], debugDylibEnabled: false, isRunnable: false),
+                NativePreviewBuild.Target(moduleName: architecture, buildableName: "\(architecture).app",
+                    sdkRoot: "macosx", sdkVariant: nil, architecture: architecture,
+                    linkCommandLine: ["-o", root.appendingPathComponent("\(architecture).app/Contents/MacOS/Host.debug.dylib").path, product.path],
+                    linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true,
+                    isRunnable: architecture == "arm64")]
+        }
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS,
+            preferredArchitecture: "x86_64")
+        #expect(selected.source.architecture == "x86_64")
+        #expect(selected.host.architecture == "x86_64")
+    }
+
     @Test(arguments: [NativePreviewPlatform.macOS, .catalyst])
     func desktopSharedLibraryUsesSameArchitectureHost(platform: NativePreviewPlatform) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -609,14 +609,15 @@ final class NativePreviewCorrection {
             }
             selections += hosts.map { Selection(source: target, host: $0) }
         }
-        let runnable = selections.filter { $0.host.isRunnable }
-        var candidates = runnable.isEmpty ? selections : runnable
+        var candidates = selections
         if let preferredArchitecture {
             let matching = candidates.filter { $0.host.architecture == preferredArchitecture }
             // A single-architecture source still uses its actual build when
             // the destination's architecture does not occur in those records.
             if !matching.isEmpty { candidates = matching }
         }
+        let runnable = candidates.filter { $0.host.isRunnable }
+        if !runnable.isEmpty { candidates = runnable }
         guard candidates.count == 1 else { throw NativePipelineRequired() }
         return candidates[0]
     }
