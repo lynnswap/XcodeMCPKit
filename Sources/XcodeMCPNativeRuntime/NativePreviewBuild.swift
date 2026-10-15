@@ -309,17 +309,18 @@ final class NativePreviewBuild {
         if let platform {
             let selection = try NativePreviewCorrection.selectTarget(result, source: source, platform: platform)
             if let index = result.firstIndex(where: { $0.outputURL == selection.host.outputURL && $0.architecture == selection.host.architecture }) {
-                let (buildable, record) = contexts[index]
+                let (buildable, _) = contexts[index]
                 result[index].rendererEnvironment = try sanitizerEnvironment(for: buildable, priorBuild: priorBuild,
                     scheme: scheme, destination: destination)
-                if selection.host.outputURL == selection.source.outputURL, let output = selection.source.outputURL,
-                   output.pathComponents.contains(where: { $0.hasSuffix(".framework") }),
-                   try NativePreviewBinary.isStaticArchive(at: output) {
-                    let buildVariant = try await type.resolveGetter(named: "buildVariant", as: (() -> String).self, receiverABI: receiver)
-                    result[index].compileCommandLine = try await compileCommandLine(for: result[index], buildable: buildable,
-                        buildVariant: unsafe buildVariant.unsafeInvoke(on: record), priorBuild: priorBuild,
-                        workspace: workspace, source: source)
-                }
+            }
+            if let output = selection.source.outputURL, output.pathComponents.contains(where: { $0.hasSuffix(".framework") }),
+               try NativePreviewBinary.isStaticArchive(at: output),
+               let index = result.firstIndex(where: { $0.outputURL == output && $0.architecture == selection.source.architecture }) {
+                let (buildable, record) = contexts[index]
+                let buildVariant = try await type.resolveGetter(named: "buildVariant", as: (() -> String).self, receiverABI: receiver)
+                result[index].compileCommandLine = try await compileCommandLine(for: result[index], buildable: buildable,
+                    buildVariant: unsafe buildVariant.unsafeInvoke(on: record), priorBuild: priorBuild,
+                    workspace: workspace, source: source)
             }
         }
         return result

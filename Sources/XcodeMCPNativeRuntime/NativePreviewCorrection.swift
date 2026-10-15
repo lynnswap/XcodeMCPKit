@@ -234,9 +234,11 @@ final class NativePreviewCorrection {
             product = appProduct
         } else if let standaloneFramework { product = standaloneFramework }
         else { throw NativePipelineRequired() }
-        let staticFramework = try standaloneFramework != nil && NativePreviewBinary.isStaticArchive(at: output)
-        // A static archive has no executable signature or Simulator entitlement section.
-        let entitlements = staticFramework ? NativePreviewEntitlements(signed: nil, simulator: nil)
+        let staticFramework = try selection.source.outputURL.map {
+            try Self.frameworkBundle(containing: $0) != nil && NativePreviewBinary.isStaticArchive(at: $0)
+        } ?? false
+        // A standalone static archive has no executable signature or Simulator entitlement section.
+        let entitlements = staticFramework && standaloneFramework != nil ? NativePreviewEntitlements(signed: nil, simulator: nil)
             : try NativePreviewEntitlements.read(from: product)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
         let containingApp = try Self.containingApp(for: output, targets: build.targets)
@@ -247,11 +249,12 @@ final class NativePreviewCorrection {
             clientIdentifier: nativeProviderIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString })
         let linkedImage: LinkedPreviewImage?
         if staticFramework {
-            linkedImage = try await Self.linkStaticFramework(target, in: app, platform: platform, process: process)
+            linkedImage = try await Self.linkStaticFramework(selection.source, in: app, platform: platform, process: process)
         } else { linkedImage = nil }
         let primaryImage = linkedImage?.url
-        let dependencies = standaloneFramework == nil ? FrameworkDependencies()
-            : try Self.frameworkDependencies(for: target, targets: build.targets, platform: platform, primaryImage: linkedImage)
+        let dependencies = standaloneFramework == nil && linkedImage == nil ? FrameworkDependencies()
+            : try Self.frameworkDependencies(for: selection.source, targets: build.targets, platform: platform,
+                primaryImage: linkedImage, environment: target.rendererEnvironment)
         try Self.copyFrameworkDependencies(dependencies, into: app, platform: platform)
         if let simulatorEntitlements = entitlements.simulator {
             let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
@@ -915,7 +918,8 @@ final class NativePreviewCorrection {
     }
 
     static func frameworkDependencies(for source: NativePreviewBuild.Target, targets: [NativePreviewBuild.Target],
-                                      platform: NativePreviewPlatform, primaryImage: LinkedPreviewImage? = nil) throws -> FrameworkDependencies {
+                                      platform: NativePreviewPlatform, primaryImage: LinkedPreviewImage? = nil,
+                                      environment: [String: String] = [:]) throws -> FrameworkDependencies {
         typealias SearchPath = (framework: Bool, url: URL)
         typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String], target: NativePreviewBuild.Target?)
         func library(at output: URL, target: NativePreviewBuild.Target? = nil) throws -> Library? {
@@ -933,7 +937,7 @@ final class NativePreviewCorrection {
             return path.hasPrefix("/") ? URL(filePath: path) : nil
         }
         // Native-preloaded runtimes must keep their original image identity when their clients are relocated.
-        let preloaded = Set(source.rendererEnvironment["DYLD_INSERT_LIBRARIES", default: ""].split(separator: ":")
+        let preloaded = Set(environment["DYLD_INSERT_LIBRARIES", default: ""].split(separator: ":")
             .filter { $0.hasPrefix("/") }.map { URL(filePath: String($0)).resolvingSymlinksInPath() })
         let libraries = try targets.compactMap { target -> Library? in
             guard target.architecture == "arm64",
@@ -1053,7 +1057,9 @@ final class NativePreviewCorrection {
         _ = try await process.xcrun(arguments)
         if let framework = frameworkBundle(containing: output) {
             let copiedFramework = platform.frameworksDirectory(in: app).appendingPathComponent(framework.lastPathComponent)
-            _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", copiedFramework.path])
+            if FileManager.default.fileExists(atPath: copiedFramework.path) {
+                _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", copiedFramework.path])
+            }
         }
         return LinkedPreviewImage(url: image, searchPaths: searchPaths.map { ($0.argument != "-L", $0.url) })
     }
