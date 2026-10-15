@@ -569,10 +569,17 @@ final class NativePreviewCorrection {
         guard targets.contains(where: { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }) else {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
         }
-        let supportedTargets = targets.filter {
-            platform.supports(architecture: $0.architecture) && NativePreviewPlatform(sdkRoot: $0.sdkRoot, sdkVariant: $0.sdkVariant) == platform
+        let platformTargets = targets.filter {
+            NativePreviewPlatform(sdkRoot: $0.sdkRoot, sdkVariant: $0.sdkVariant) == platform
         }
-        let sources = supportedTargets.filter { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }
+        var sources = platformTargets.filter { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }
+        if let preferredArchitecture {
+            let matching = sources.filter { $0.architecture == preferredArchitecture }
+            // A single-architecture source still uses its actual build when
+            // the destination's architecture does not occur in those records.
+            if !matching.isEmpty { sources = matching }
+        }
+        sources.removeAll { !platform.supports(architecture: $0.architecture) }
         guard !sources.isEmpty else { throw NativePipelineRequired() }
         var selections: [Selection] = []
         for target in sources {
@@ -583,9 +590,8 @@ final class NativePreviewCorrection {
             let objectPaths = Set(target.objectFiles.map { $0.resolvingSymlinksInPath().path })
             let sourceOutput = target.outputURL
             let frameworkName = sourceOutput?.pathComponents.last(where: { $0.hasSuffix(".framework") })
-            let hosts = try supportedTargets.filter { candidate in
+            let hosts = try platformTargets.filter { candidate in
                 guard candidate.architecture == target.architecture,
-                      NativePreviewPlatform(sdkRoot: candidate.sdkRoot, sdkVariant: candidate.sdkVariant) == platform,
                       let output = candidate.outputURL, let app = productBundle(containing: output) else { return false }
                 if candidate.objectFiles.contains(where: { objectPaths.contains($0.resolvingSymlinksInPath().path) }) {
                     return true
@@ -610,12 +616,6 @@ final class NativePreviewCorrection {
             selections += hosts.map { Selection(source: target, host: $0) }
         }
         var candidates = selections
-        if let preferredArchitecture {
-            let matching = candidates.filter { $0.host.architecture == preferredArchitecture }
-            // A single-architecture source still uses its actual build when
-            // the destination's architecture does not occur in those records.
-            if !matching.isEmpty { candidates = matching }
-        }
         let runnable = candidates.filter { $0.host.isRunnable }
         if !runnable.isEmpty { candidates = runnable }
         guard candidates.count == 1 else { throw NativePipelineRequired() }

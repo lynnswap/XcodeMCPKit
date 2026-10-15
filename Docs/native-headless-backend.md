@@ -148,7 +148,8 @@ plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
 The renderers support arm64 on these platforms and x86_64 on macOS and Mac Catalyst, including
 an eligible Rosetta destination on an Apple silicon Mac. The selected source
 build determines the renderer architecture.
-For a universal build, the destination's architecture selects the slice.
+For a universal build, the destination's architecture selects the source slice
+before the renderer looks for a compatible application host.
 The host builds the active scheme through Xcode's build engine, selects the
 definition in source order, including files that mix providers and registries.
 It resolves registry metadata or a provider's type in the built image, including linked embedded

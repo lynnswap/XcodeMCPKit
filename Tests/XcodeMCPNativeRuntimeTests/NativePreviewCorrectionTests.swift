@@ -130,6 +130,10 @@ struct NativePreviewCorrectionTests {
         #expect(selected.source.architecture == "arm64")
         #expect(selected.host.architecture == "arm64")
         #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS,
+                preferredArchitecture: "x86_64")
+        }
+        #expect(throws: NativePipelineRequired.self) {
             try NativePreviewCorrection.selectTarget(targets.filter { $0.architecture == "x86_64" }, source: source, platform: .iOS)
         }
     }
@@ -180,10 +184,11 @@ struct NativePreviewCorrectionTests {
         #expect(selected.host.architecture == architecture)
     }
 
-    @Test func sharedLibraryPrefersDestinationArchitectureBeforeRunnableHost() throws {
+    @Test(arguments: [true, false])
+    func sharedLibraryDestinationArchitecturePrecedesHostSelection(hasCompatibleHost: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = root.appendingPathComponent("PackageView.swift")
-        let targets = ["arm64", "x86_64"].flatMap { architecture in
+        var targets = ["arm64", "x86_64"].flatMap { architecture in
             let product = root.appendingPathComponent("\(architecture)/FixturePackage.o")
             return [NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
                 sdkRoot: "macosx", sdkVariant: nil, architecture: architecture,
@@ -195,10 +200,18 @@ struct NativePreviewCorrectionTests {
                     linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true,
                     isRunnable: architecture == "arm64")]
         }
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS,
-            preferredArchitecture: "x86_64")
-        #expect(selected.source.architecture == "x86_64")
-        #expect(selected.host.architecture == "x86_64")
+        if hasCompatibleHost {
+            let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS,
+                preferredArchitecture: "x86_64")
+            #expect(selected.source.architecture == "x86_64")
+            #expect(selected.host.architecture == "x86_64")
+        } else {
+            targets.removeAll { $0.buildableName == "x86_64.app" }
+            #expect(throws: NativePipelineRequired.self) {
+                try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS,
+                    preferredArchitecture: "x86_64")
+            }
+        }
     }
 
     @Test(arguments: [NativePreviewPlatform.macOS, .catalyst])
