@@ -890,12 +890,12 @@ final class NativePreviewCorrection {
     static func frameworkDependencies(for source: NativePreviewBuild.Target, targets: [NativePreviewBuild.Target],
                                       platform: NativePreviewPlatform) throws -> [URL] {
         typealias SearchPath = (framework: Bool, url: URL)
-        typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String], linkPaths: [SearchPath])
-        func library(at output: URL, linkPaths: [SearchPath] = []) throws -> Library? {
+        typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String], target: NativePreviewBuild.Target?)
+        func library(at output: URL, target: NativePreviewBuild.Target? = nil) throws -> Library? {
             let output = output.standardizedFileURL
             guard FileManager.default.fileExists(atPath: output.path),
                   let image = try NativePreviewBinary.dynamicLibrary(at: output, architecture: source.architecture) else { return nil }
-            return (output, frameworkBundle(containing: output) ?? output, image.identifier, image.dependencies, image.rpaths, linkPaths)
+            return (output, frameworkBundle(containing: output) ?? output, image.identifier, image.dependencies, image.rpaths, target)
         }
         func absoluteURL(_ path: String, target: NativePreviewBuild.Target) -> URL? {
             if path.hasPrefix("/") { return URL(filePath: path) }
@@ -929,7 +929,7 @@ final class NativePreviewCorrection {
             guard target.architecture == source.architecture,
                   NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) == platform,
                   let output = target.outputURL, productBundle(containing: output) == nil else { return nil }
-            return try library(at: output, linkPaths: linkPaths(for: target))
+            return try library(at: output, target: target)
         }
         guard let output = source.outputURL?.standardizedFileURL,
               let sourceLibrary = libraries.first(where: { $0.output == output }) else { return [] }
@@ -940,9 +940,14 @@ final class NativePreviewCorrection {
         while let current = pending.popLast() {
             let runtimePaths = current.library.rpaths.compactMap { runtimeURL($0, importer: current.library.output) }
                 + current.inheritedPaths
-            let searchPaths = current.library.linkPaths + current.inheritedLinkPaths
+            let searchPaths = (current.library.target.map { linkPaths(for: $0) } ?? []) + current.inheritedLinkPaths
             for name in current.library.dependencies {
-                var dependency = libraries.first { $0.identifier == name || $0.output.path == name }
+                let matches = libraries.filter { $0.identifier == name || $0.output.path == name }
+                var dependency = matches.first { $0.output.path == name }
+                if dependency == nil, let target = current.library.target {
+                    let linked = try matches.filter { try target.linksProduct(at: $0.output) }
+                    if linked.count == 1 { dependency = linked[0] }
+                }
                 if dependency == nil {
                     let candidates: [URL]
                     if name.hasPrefix("@rpath/") {
@@ -956,12 +961,17 @@ final class NativePreviewCorrection {
                     }
                     // Prebuilt inputs have no native target record; their real load commands and linker paths locate them.
                     for candidate in candidates {
+                        if let built = libraries.first(where: { $0.output.resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath() }) {
+                            dependency = built
+                            break
+                        }
                         if let resolved = try library(at: candidate) {
                             dependency = resolved
                             break
                         }
                     }
                 }
+                if dependency == nil, matches.count == 1 { dependency = matches[0] }
                 guard let dependency else { continue }
                 if visited.insert(dependency.output.resolvingSymlinksInPath()).inserted {
                     if copiedProducts.insert(dependency.product.resolvingSymlinksInPath()).inserted {

@@ -437,9 +437,10 @@ struct NativePreviewCorrectionTests {
         let products = root.appendingPathComponent("Products")
         let source = products.appendingPathComponent("Feature.framework/Feature")
         let dependency = products.appendingPathComponent("Dependency.framework/Dependency")
+        let otherDependency = root.appendingPathComponent("OtherProducts/Dependency.framework/Dependency")
         let library = root.appendingPathComponent("Support/libSupport.dylib")
         let unrelated = products.appendingPathComponent("libUnrelated.dylib")
-        for binary in [source, dependency] {
+        for binary in [source, dependency, otherDependency] {
             let resources = binary.deletingLastPathComponent().appendingPathComponent("Resources")
             try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
             let info = ["CFBundleIdentifier": "dev.lynnswap." + binary.lastPathComponent,
@@ -449,6 +450,10 @@ struct NativePreviewCorrectionTests {
         }
         let marker = dependency.deletingLastPathComponent().appendingPathComponent("Resources/Marker.txt")
         try Data("dependency resource".utf8).write(to: marker)
+        try Data("unrelated dependency resource".utf8)
+            .write(to: otherDependency.deletingLastPathComponent().appendingPathComponent("Resources/Marker.txt"))
+        try compilePreviewLibrary(at: otherDependency, value: 1, platform: .macOS,
+            installName: "@rpath/Dependency.framework/Dependency")
         try compilePreviewLibrary(at: library, platform: .macOS, installName: "@rpath/libSupport.dylib")
         try compilePreviewLibrary(at: unrelated, platform: .macOS, installName: "@rpath/libUnrelated.dylib")
         let sourceCode = root.appendingPathComponent("Feature.c")
@@ -462,7 +467,7 @@ struct NativePreviewCorrectionTests {
             sourceCode.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path,
             "-F", products.path, "-framework", "Dependency", "-Wl,-no_adhoc_codesign"]
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + sourceLinkArguments)
-        for binary in [source, dependency, library] {
+        for binary in [source, dependency, library, otherDependency] {
             try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", binary.path])
         }
         func target(_ binary: URL, command: [String]? = nil) -> NativePreviewBuild.Target {
@@ -474,7 +479,8 @@ struct NativePreviewCorrectionTests {
             sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: sourceLinkArguments,
             linkerWorkingDirectory: root.path, objectFiles: [], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)
         let dependencies = try NativePreviewCorrection.frameworkDependencies(for: sourceTarget,
-            targets: prebuilt ? [sourceTarget] : [sourceTarget, target(dependency, command: dependencyLinkArguments), target(unrelated)],
+            targets: prebuilt ? [sourceTarget] : [sourceTarget, target(otherDependency),
+                target(dependency, command: dependencyLinkArguments), target(unrelated)],
             platform: .macOS)
 
         let helper = root.appendingPathComponent("Helper")
