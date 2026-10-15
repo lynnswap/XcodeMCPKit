@@ -33,7 +33,8 @@ struct PreviewRendererWatch: App {
         let image: CGImage
         var result: PreviewRendererResult
         if let legacyPreview, let complication = try await makeClockKitPreview(from: legacyPreview, request: request) {
-            image = try await captureWatchPreview(controller: complication.controller)
+            image = try await captureWatchPreview(controller: complication.controller,
+                prepareForSnapshot: configureClockKitPreviewHosting)
             result = complication.result
         } else {
             let content = try await makeGeneralPreview(request, legacyPreview: legacyPreview)
