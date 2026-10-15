@@ -52,13 +52,15 @@ final class NativePreviewBuild {
             return try linkedInputs().files.contains { $0.resolvingSymlinksInPath().path == productPath }
         }
 
-        func linkedInputs() throws -> (files: [URL], searchPaths: [(framework: Bool, url: URL)]) {
-            var inputs = linkCommandLine.compactMap { url(for: $0) }
-            let searchPaths = searchPaths(in: linkCommandLine).map { (framework: $0.argument != "-L", url: $0.url) }
+        func linkedInputs(in rawCommand: [String]? = nil) throws -> (files: [URL], searchPaths: [(framework: Bool, url: URL)],
+                                      libraries: [(framework: Bool, name: String, file: URL?)]) {
+            let command = linkArguments(in: rawCommand ?? linkCommandLine).map(\.value)
+            var inputs = command.compactMap { url(for: $0) }
+            let searchPaths = searchPaths(in: command).map { (framework: $0.argument != "-L", url: $0.url) }
             var namedInputs: [(framework: Bool, name: String)] = []
-            for index in linkCommandLine.indices {
-                let argument = linkCommandLine[index]
-                let next = linkCommandLine.indices.contains(index + 1) ? linkCommandLine[index + 1] : nil
+            for index in command.indices {
+                let argument = command[index]
+                let next = command.indices.contains(index + 1) ? command[index + 1] : nil
                 if argument == "-filelist", let fileList = next.flatMap({ url(for: $0) }) {
                     let paths = try String(contentsOf: fileList, encoding: .utf8).split(whereSeparator: \.isNewline)
                     inputs += paths.compactMap { url(for: String($0)) }
@@ -70,15 +72,36 @@ final class NativePreviewBuild {
                     }
                 }
             }
-            for input in namedInputs {
+            let libraries = namedInputs.map { input in
                 let names = input.framework ? ["\(input.name).framework/\(input.name)"] : ["lib\(input.name).dylib", "lib\(input.name).a"]
                 let candidates = searchPaths.filter { $0.framework == input.framework }.flatMap { path in
                     names.map { path.url.appendingPathComponent($0) }
                 }
-                if let file = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) { inputs.append(file) }
+                return (framework: input.framework, name: input.name,
+                    file: candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }))
             }
+            inputs += libraries.compactMap(\.file)
             var seen: Set<URL> = []
-            return (inputs.filter { seen.insert($0.resolvingSymlinksInPath()).inserted }, searchPaths)
+            return (inputs.filter { seen.insert($0.resolvingSymlinksInPath()).inserted }, searchPaths, libraries)
+        }
+
+        func linkArguments(in command: [String]) -> [(value: String, forwarded: Bool)] {
+            var result: [(value: String, forwarded: Bool)] = []
+            var index = 0
+            while index < command.count {
+                let argument = command[index]
+                if argument == "-Xlinker", command.indices.contains(index + 1) {
+                    result.append((command[index + 1], true))
+                    index += 2
+                } else if argument.hasPrefix("-Wl,") {
+                    result += argument.dropFirst(4).split(separator: ",", omittingEmptySubsequences: false).map { (String($0), true) }
+                    index += 1
+                } else {
+                    result.append((argument, false))
+                    index += 1
+                }
+            }
+            return result
         }
 
         func searchPaths(in command: [String]) -> [(argument: String, url: URL)] {
@@ -94,7 +117,7 @@ final class NativePreviewBuild {
             }
         }
 
-        private func url(for path: String) -> URL? {
+        func url(for path: String) -> URL? {
             if path.hasPrefix("/") { return URL(filePath: path) }
             guard let linkerWorkingDirectory else { return nil }
             return URL(filePath: path, relativeTo: URL(filePath: linkerWorkingDirectory, directoryHint: .isDirectory)).absoluteURL
@@ -309,17 +332,18 @@ final class NativePreviewBuild {
         if let platform {
             let selection = try NativePreviewCorrection.selectTarget(result, source: source, platform: platform)
             if let index = result.firstIndex(where: { $0.outputURL == selection.host.outputURL && $0.architecture == selection.host.architecture }) {
-                let (buildable, record) = contexts[index]
+                let (buildable, _) = contexts[index]
                 result[index].rendererEnvironment = try sanitizerEnvironment(for: buildable, priorBuild: priorBuild,
                     scheme: scheme, destination: destination)
-                if selection.host.outputURL == selection.source.outputURL, let output = selection.source.outputURL,
-                   output.pathComponents.contains(where: { $0.hasSuffix(".framework") }),
-                   try NativePreviewBinary.isStaticArchive(at: output) {
-                    let buildVariant = try await type.resolveGetter(named: "buildVariant", as: (() -> String).self, receiverABI: receiver)
-                    result[index].compileCommandLine = try await compileCommandLine(for: result[index], buildable: buildable,
-                        buildVariant: unsafe buildVariant.unsafeInvoke(on: record), priorBuild: priorBuild,
-                        workspace: workspace, source: source)
-                }
+            }
+            if let output = selection.source.outputURL, output.pathComponents.contains(where: { $0.hasSuffix(".framework") }),
+               try NativePreviewBinary.isStaticArchive(at: output),
+               let index = result.firstIndex(where: { $0.outputURL == output && $0.architecture == selection.source.architecture }) {
+                let (buildable, record) = contexts[index]
+                let buildVariant = try await type.resolveGetter(named: "buildVariant", as: (() -> String).self, receiverABI: receiver)
+                result[index].compileCommandLine = try await compileCommandLine(for: result[index], buildable: buildable,
+                    buildVariant: unsafe buildVariant.unsafeInvoke(on: record), priorBuild: priorBuild,
+                    workspace: workspace, source: source)
             }
         }
         return result

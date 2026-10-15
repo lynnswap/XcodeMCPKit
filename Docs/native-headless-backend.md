@@ -170,12 +170,17 @@ transitive Mach-O dependencies. Native build records, linker search paths, and
 the importing image's runtime search paths locate built and prebuilt dependencies.
 Resolved dependency references are adjusted to their staged locations
 without changing the original build products.
-For a standalone static framework, the host links its archive into a preview
-sidecar dylib using compiler autolink records and the target's library/search
+For a static framework rendered by the helper, the host links its archive into a
+preview sidecar dylib using compiler autolink records and the target's library/search
 inputs. The original archive, framework resources, and renderer executable remain
 unchanged. The sidecar uses the same dependency staging and preview lifecycle.
+A source-connected app supplies its native link command to the sidecar, preserving
+host objects and library-loading options while loading the static source once.
+The app retains its bundle, resources, entitlements, and launch environment;
+its original debug image is not also loaded.
 Static framework rendering was verified on macOS; Simulator installation and
-static bundle lookup remain tracked in #360.
+static bundle lookup remain tracked in #360. Static source frameworks in the
+original Widget extension service remain unverified.
 Classes linked from a static archive retain ordinary host `Bundle(for:)` semantics;
 the copied framework resources are not assigned to that class's runtime bundle.
 Standalone dynamic framework image parity was verified on macOS 26.6.2 and iOS 27.2 with
