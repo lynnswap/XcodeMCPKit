@@ -169,20 +169,20 @@ values. For example:
 {
   "ProxyToolVerifierFixture": {
     "Debug": {
-      "CODE_SIGNING_ALLOWED": "YES",
-      "CODE_SIGN_STYLE": "Automatic",
-      "DEVELOPMENT_TEAM": "YOUR_TEAM_ID",
-      "CODE_SIGN_IDENTITY": "Apple Development",
-      "PROVISIONING_PROFILE_SPECIFIER": ""
+      "CODE_SIGNING_ALLOWED[sdk=iphoneos*]": "YES",
+      "CODE_SIGN_STYLE[sdk=iphoneos*]": "Automatic",
+      "DEVELOPMENT_TEAM[sdk=iphoneos*]": "YOUR_TEAM_ID",
+      "CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Development",
+      "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": ""
     }
   },
   "OriginalWidgetProbeExtension": {
     "Debug": {
-      "CODE_SIGNING_ALLOWED": "YES",
-      "CODE_SIGN_STYLE": "Automatic",
-      "DEVELOPMENT_TEAM": "YOUR_TEAM_ID",
-      "CODE_SIGN_IDENTITY": "Apple Development",
-      "PROVISIONING_PROFILE_SPECIFIER": ""
+      "CODE_SIGNING_ALLOWED[sdk=iphoneos*]": "YES",
+      "CODE_SIGN_STYLE[sdk=iphoneos*]": "Automatic",
+      "DEVELOPMENT_TEAM[sdk=iphoneos*]": "YOUR_TEAM_ID",
+      "CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Development",
+      "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": ""
     }
   }
 }
@@ -194,3 +194,9 @@ also supports settings such as `CODE_SIGNING_ALLOWED` that the native setting
 tool may reject. It does not enable provisioning updates or register devices.
 Keep team, profile, certificate, and device values in local output files.
 The prepared projects retain those local settings, so review them before sharing.
+
+Native physical capture uses Xcode's installation lifecycle. The fixture app and
+PreviewShell process can remain after its document closes; the verifier closes
+the document and MCP connection but does not uninstall physical-device apps.
+Record pre-existing installations and processes so you can remove only those
+created by your run, preserving existing app data and the system PreviewShell app.
