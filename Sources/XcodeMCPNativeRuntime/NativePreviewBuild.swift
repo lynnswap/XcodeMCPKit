@@ -32,6 +32,10 @@ final class NativePreviewBuild {
         let debugDylibEnabled: Bool
         let isRunnable: Bool
         var compileCommandLine: [String] = []
+        var enableAddressSanitizer = false
+        var enableThreadSanitizer = false
+        var enableUndefinedBehaviorSanitizer = false
+        var rendererEnvironment: [String: String] = [:]
 
         var outputURL: URL? {
             guard let index = linkCommandLine.lastIndex(of: "-o"),
@@ -179,7 +183,7 @@ final class NativePreviewBuild {
         let descriptions = try unsafe await describe.unsafeInvoke(workspace, priorBuild, selectedBuildables)
         try Task.checkCancellation()
         let records = try await targets(descriptions, image: image, runnable: runnable, priorBuild: priorBuild,
-            workspace: workspace, source: source, platform: info.previewPlatform)
+            workspace: workspace, source: source, platform: info.previewPlatform, scheme: scheme, destination: destination)
         return Result(targets: records, destinationIdentifier: info.identifier,
                       previewDestinationIdentifier: info.previewIdentifier,
                       platformIdentifier: info.platformIdentifier, previewPlatform: info.previewPlatform,
@@ -250,7 +254,8 @@ final class NativePreviewBuild {
     }
 
     private func targets(_ descriptions: NativeSwiftValue, image: URL, runnable: AnyObject?, priorBuild: AnyObject,
-                         workspace: AnyObject, source: URL, platform: NativePreviewPlatform?) async throws -> [Target] {
+                         workspace: AnyObject, source: URL, platform: NativePreviewPlatform?,
+                         scheme: AnyObject, destination: AnyObject) async throws -> [Target] {
         let type = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.IDEBuiltTargetDescription", in: .path(image))
         let receiver = try NativeType.opaque(named: type.name)
         let module = try await type.resolveGetter(named: "productModuleName", as: (() -> String?).self, receiverABI: receiver)
@@ -261,6 +266,9 @@ final class NativePreviewBuild {
         let command = try await type.resolveGetter(named: "linkCommandLine", as: (() -> [String]).self, receiverABI: receiver)
         let directory = try await type.resolveGetter(named: "linkerWorkingDirectory", as: (() -> String?).self, receiverABI: receiver)
         let dylib = try await type.resolveGetter(named: "enableDebugDylib", as: (() -> Bool).self, receiverABI: receiver)
+        let address = try await type.resolveGetter(named: "enableAddressSanitizer", as: (() -> Bool).self, receiverABI: receiver)
+        let thread = try await type.resolveGetter(named: "enableThreadSanitizer", as: (() -> Bool).self, receiverABI: receiver)
+        let undefined = try await type.resolveGetter(named: "enableUndefinedBehaviorSanitizer", as: (() -> Bool).self, receiverABI: receiver)
         let files = try await type.resolveGetter(named: "objectFiles", as: (() -> NativeSwiftValue).self, receiverABI: receiver)
         let fileType = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.IDEBuiltObjectFileDescription", in: .path(image))
         let path = try await fileType.resolveGetter(named: "builtPath.getter : Foundation.URL", as: (() -> NativePreviewBuildURL).self,
@@ -291,29 +299,69 @@ final class NativePreviewBuild {
                     sdkVariant: variant.unsafeInvoke(on: record), architecture: architecture.unsafeInvoke(on: record),
                     linkCommandLine: command.unsafeInvoke(on: record), linkerWorkingDirectory: directory.unsafeInvoke(on: record),
                     objectFiles: objectFiles.map(\.0), sourceFiles: Set(objectFiles.flatMap(\.1)),
-                    debugDylibEnabled: dylib.unsafeInvoke(on: record), isRunnable: isRunnable)
+                    debugDylibEnabled: dylib.unsafeInvoke(on: record), isRunnable: isRunnable,
+                    enableAddressSanitizer: address.unsafeInvoke(on: record), enableThreadSanitizer: thread.unsafeInvoke(on: record),
+                    enableUndefinedBehaviorSanitizer: undefined.unsafeInvoke(on: record))
                 result.append(target)
                 contexts.append((buildable, record))
             }
         }
-        let sourcePath = source.resolvingSymlinksInPath().path
-        let hasStaticSource = try result.contains { target in
-            guard target.sourceFiles.contains(where: { $0.resolvingSymlinksInPath().path == sourcePath }),
-                  let output = target.outputURL, output.pathComponents.contains(where: { $0.hasSuffix(".framework") }) else { return false }
-            return try NativePreviewBinary.isStaticArchive(at: output)
-        }
-        if hasStaticSource, let platform {
+        if let platform {
             let selection = try NativePreviewCorrection.selectTarget(result, source: source, platform: platform)
-            if selection.host.outputURL == selection.source.outputURL,
-               let index = result.firstIndex(where: { $0.outputURL == selection.source.outputURL && $0.architecture == selection.source.architecture }) {
+            if let index = result.firstIndex(where: { $0.outputURL == selection.host.outputURL && $0.architecture == selection.host.architecture }) {
                 let (buildable, record) = contexts[index]
-                let buildVariant = try await type.resolveGetter(named: "buildVariant", as: (() -> String).self, receiverABI: receiver)
-                result[index].compileCommandLine = try await compileCommandLine(for: result[index], buildable: buildable,
-                    buildVariant: unsafe buildVariant.unsafeInvoke(on: record), priorBuild: priorBuild,
-                    workspace: workspace, source: source)
+                result[index].rendererEnvironment = try sanitizerEnvironment(for: buildable, priorBuild: priorBuild,
+                    scheme: scheme, destination: destination)
+                if selection.host.outputURL == selection.source.outputURL, let output = selection.source.outputURL,
+                   output.pathComponents.contains(where: { $0.hasSuffix(".framework") }),
+                   try NativePreviewBinary.isStaticArchive(at: output) {
+                    let buildVariant = try await type.resolveGetter(named: "buildVariant", as: (() -> String).self, receiverABI: receiver)
+                    result[index].compileCommandLine = try await compileCommandLine(for: result[index], buildable: buildable,
+                        buildVariant: unsafe buildVariant.unsafeInvoke(on: record), priorBuild: priorBuild,
+                        workspace: workspace, source: source)
+                }
             }
         }
         return result
+    }
+
+    private func sanitizerEnvironment(for buildable: AnyObject, priorBuild: AnyObject, scheme: AnyObject,
+                                      destination: AnyObject) throws -> [String: String] {
+        guard let action = try object(scheme, selector: "launchSchemeAction") else { return [:] }
+        let address = try runtime.object(action).resolveMethodAndWait(selector: "enableAddressSanitizer", as: (() -> Bool).self)
+        let thread = try runtime.object(action).resolveMethodAndWait(selector: "enableThreadSanitizer", as: (() -> Bool).self)
+        var sanitizers: [String] = []
+        if try unsafe thread.unsafeInvoke() {
+            let allowed = try runtime.object(action).resolveMethodAndWait(selector: "threadSanitizerAllowedForRunDestination:",
+                as: ((AnyObject) -> Bool).self)
+            if try unsafe allowed.unsafeInvoke(destination) { sanitizers.append("Thread") }
+        }
+        if try unsafe address.unsafeInvoke() { sanitizers.append("Address") }
+        guard !sanitizers.isEmpty else { return [:] }
+        guard let actionClass = NSClassFromString("IDESchemeAction") else {
+            throw NativeRuntimeError.unavailable("Xcode scheme action class is unavailable")
+        }
+        let parameters = try runtime.object(priorBuild).resolveMethodAndWait(selector: "_buildParametersForBuildable:",
+            as: ((AnyObject) -> AnyObject).self)
+        let buildParameters = try unsafe parameters.unsafeInvoke(buildable)
+        let environment = NSMutableDictionary()
+        for sanitizer in sanitizers {
+            let add = try unsafe runtime.object(actionClass as AnyObject).resolveMethodAndWait(
+                selector: "add\(sanitizer)SanitizerEnvironmentVariables:buildParameters:buildable:debugAppExtensions:debugging:testingSpecifier:error:",
+                as: ((NSMutableDictionary, AnyObject, AnyObject, Bool, Bool, AnyObject?, UnsafeMutableRawPointer?) -> Bool).self)
+            var errorAddress: UnsafeRawPointer?
+            let success = try withUnsafeMutablePointer(to: &errorAddress) {
+                try unsafe add.unsafeInvoke(environment, buildParameters, buildable, false, false, nil, UnsafeMutableRawPointer($0))
+            }
+            guard success else {
+                if let errorAddress = unsafe errorAddress { throw unsafe Unmanaged<NSError>.fromOpaque(errorAddress).takeUnretainedValue() }
+                throw NativeRuntimeError.invocation("Xcode could not create the \(sanitizer) Sanitizer launch environment")
+            }
+        }
+        guard let values = environment as NSDictionary as? [String: String] else {
+            throw NativeRuntimeError.unsupportedContract("Xcode's sanitizer launch environment is not a string dictionary")
+        }
+        return values
     }
 
     private func compileCommandLine(for target: Target, buildable: AnyObject, buildVariant: String,

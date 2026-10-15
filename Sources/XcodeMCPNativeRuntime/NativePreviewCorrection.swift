@@ -221,7 +221,7 @@ final class NativePreviewCorrection {
     private func prepareRenderer(_ input: Input, prepared: Prepared, app: URL, build: NativePreviewBuild.Result,
                                  platform: NativePreviewPlatform, process: NativePreviewProcess,
                                  metadataOnly: Bool? = nil, isLegacyComplication: Bool? = nil) async throws ->
-        (request: PreviewRendererRequest, signing: [String], product: URL, containingApp: URL?) {
+        (request: PreviewRendererRequest, signing: [String], product: URL, containingApp: URL?, environment: [String: String]) {
         let source = prepared.source
         let location = prepared.location
         let selection = try Self.selectTarget(build.targets, source: source, platform: platform)
@@ -303,6 +303,7 @@ final class NativePreviewCorrection {
             activityViewStyle: input.activityViewStyle, activityViewContext: input.activityViewContext,
             activityToggleState: input.activityToggleState,
             appName: try Self.appName(product: product, containingApp: containingApp, localization: input.localization),
+            nativeEnvironment: target.rendererEnvironment.isEmpty ? nil : target.rendererEnvironment,
             metadataOnly: metadataOnly, isLegacyComplication: isLegacyComplication)
         if let nativeProviderIdentifier, let providerName {
             request.libraryNames = []
@@ -318,7 +319,7 @@ final class NativePreviewCorrection {
             signing += ["--entitlements", plist.path]
         }
         try await writeRendererRequest(request, app: app, platform: platform, signing: signing, process: process)
-        return (request, signing, product, containingApp)
+        return (request, signing, product, containingApp, target.rendererEnvironment)
     }
 
     private func writeRendererRequest(_ request: PreviewRendererRequest, app: URL, platform: NativePreviewPlatform,
@@ -329,9 +330,9 @@ final class NativePreviewCorrection {
     }
 
     private func desktopPreview(app: URL, platform: NativePreviewPlatform, process: NativePreviewProcess,
-                                localization: String?) async throws -> PreviewRendererResult {
+                                localization: String?, environment: [String: String]) async throws -> PreviewRendererResult {
         let text = try await process.run(platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path,
-            Self.rendererArguments(localization: localization))
+            Self.rendererArguments(localization: localization), environment: environment)
         guard let record = text.split(whereSeparator: \.isNewline).last(where: { $0.hasPrefix("XcodeMCPPreviewResult:") }) else {
             throw NativeRuntimeError.invocation("The preview process returned no result; see its process log")
         }
@@ -353,10 +354,12 @@ final class NativePreviewCorrection {
             platform: platform, process: process, metadataOnly: true)
         let metadataResponse: PreviewRendererResult
         if platform.isSimulator {
-            metadataResponse = try await renderSimulator(app: app, build: build, process: process, localization: input.localization,
+            metadataResponse = try await renderSimulator(app: app, build: build, process: process,
+                localization: input.localization, environment: renderer.environment,
                 containingApp: renderer.request.nativeSource == nil ? nil : renderer.containingApp).response
         } else {
-            metadataResponse = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
+            metadataResponse = try await desktopPreview(app: app, platform: platform, process: process,
+                localization: input.localization, environment: renderer.environment)
         }
         guard let metadata = metadataResponse.nativeMetadata else {
             throw NativeRuntimeError.invocation("The preview process returned no native metadata")
@@ -414,7 +417,8 @@ final class NativePreviewCorrection {
         let deviceType: URL?
         let destinationFields: [String: JSONValue]
         if platform.isSimulator {
-            let rendered = try await renderSimulator(app: app, build: build, process: process, localization: input.localization,
+            let rendered = try await renderSimulator(app: app, build: build, process: process,
+                localization: input.localization, environment: renderer.environment,
                 containingApp: nativeContainingApp)
             response = rendered.response
             guard let snapshot = rendered.snapshot else { throw NativeRuntimeError.unsupportedContract("The preview renderer returned no snapshot") }
@@ -423,7 +427,8 @@ final class NativePreviewCorrection {
             deviceType = rendered.deviceType
             destinationFields = rendered.destination
         } else {
-            response = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
+            response = try await desktopPreview(app: app, platform: platform, process: process,
+                localization: input.localization, environment: renderer.environment)
             guard let data = response.snapshotData else { throw NativeRuntimeError.invocation("The preview process returned no snapshot") }
             snapshotData = data
             exclusionData = nil
@@ -474,7 +479,8 @@ final class NativePreviewCorrection {
         return .object(fields)
     }
 
-    private func renderSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess, localization: String?,
+    private func renderSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess,
+                                 localization: String?, environment: [String: String],
                                  containingApp: URL? = nil) async throws ->
         (response: PreviewRendererResult, snapshot: Data?, destination: [String: JSONValue], deviceType: URL, exclusion: Data?) {
         // Keep allocation alive through cancellation so its created identifier
@@ -505,6 +511,7 @@ final class NativePreviewCorrection {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let documents = URL(filePath: container, directoryHint: .isDirectory).appendingPathComponent("Documents")
             let arguments = try Self.rendererArguments(localization: localization)
+            let childEnvironment = Dictionary(uniqueKeysWithValues: environment.map { ("SIMCTL_CHILD_" + $0.key, $0.value) })
             if containingApp != nil {
                 let installedApp = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, simulator.bundleIdentifier, "app"])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -512,9 +519,9 @@ final class NativePreviewCorrection {
                 // PreviewShell owns the UI and the extension's active-preview assertion.
                 // A foreground helper app suspends that assertion when it takes focus.
                 _ = try await process.xcrun(["simctl", "spawn", simulator.identifier, executable.path,
-                    "--native-preview-result-directory", documents.path] + arguments)
+                    "--native-preview-result-directory", documents.path] + arguments, environment: childEnvironment)
             } else {
-                _ = try await process.xcrun(["simctl", "launch", simulator.identifier, simulator.bundleIdentifier] + arguments)
+                _ = try await process.xcrun(["simctl", "launch", simulator.identifier, simulator.bundleIdentifier] + arguments, environment: childEnvironment)
             }
             let responseURL = documents.appendingPathComponent("PreviewResult.json")
             while !FileManager.default.fileExists(atPath: responseURL.path) {
@@ -939,6 +946,9 @@ final class NativePreviewCorrection {
             }
             return path.hasPrefix("/") ? URL(filePath: path) : nil
         }
+        // Native-preloaded runtimes must keep their original image identity when their clients are relocated.
+        let preloaded = Set(source.rendererEnvironment["DYLD_INSERT_LIBRARIES", default: ""].split(separator: ":")
+            .filter { $0.hasPrefix("/") }.map { URL(filePath: String($0)).resolvingSymlinksInPath() })
         let libraries = try targets.compactMap { target -> Library? in
             guard target.architecture == "arm64",
                   NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) == platform,
@@ -1003,7 +1013,7 @@ final class NativePreviewCorrection {
                     }
                 }
                 if dependency == nil, matches.count == 1 { dependency = matches[0] }
-                guard let dependency else { continue }
+                guard let dependency, !preloaded.contains(dependency.output) else { continue }
                 let importer = stagedPath(current.library)
                 let target = stagedPath(dependency)
                 let parentDepth = importer.split(separator: "/").count - 1
@@ -1042,6 +1052,9 @@ final class NativePreviewCorrection {
             linkSource.path, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive.path,
             "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
             "@rpath/" + image.lastPathComponent, "-o", image.path]
+        let sanitizers = [(source.enableAddressSanitizer, "address"), (source.enableThreadSanitizer, "thread"),
+                          (source.enableUndefinedBehaviorSanitizer, "undefined")].filter(\.0).map(\.1)
+        if !sanitizers.isEmpty { arguments.append("-sanitize=" + sanitizers.joined(separator: ",")) }
         let inputs = try source.linkedInputs()
         let searchPaths = source.searchPaths(in: source.compileCommandLine) + source.searchPaths(in: source.linkCommandLine)
         for path in searchPaths { arguments += [path.argument, path.url.path] }

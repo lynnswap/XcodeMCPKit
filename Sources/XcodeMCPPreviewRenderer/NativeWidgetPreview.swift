@@ -43,7 +43,8 @@ func writeNativeWidgetPreviewResult(to directory: URL) async throws {
 func renderNativeWidgetPreview(_ request: PreviewRendererRequest) async throws -> PreviewRendererResult {
     guard let source = request.nativeSource else { throw NativePreviewPipelineRequired() }
     return try await NativePreviewService.withService { service in
-        let pid = try await service.relaunch(extensionIdentifier: source.extensionIdentifier, localization: request.localization)
+        let pid = try await service.relaunch(extensionIdentifier: source.extensionIdentifier, localization: request.localization,
+            environment: request.nativeEnvironment ?? [:])
         if case .providerMetadata(_, let name) = source {
             let value = try await service.providerMetadata(named: name, pid: pid)
             return PreviewRendererResult(nativeMetadata: value.metadata,

@@ -174,6 +174,8 @@ For a standalone static framework, the host links its archive into a preview
 sidecar dylib using compiler autolink records and the target's library/search
 inputs. The original archive, framework resources, and renderer executable remain
 unchanged. The sidecar uses the same dependency staging and preview lifecycle.
+Static framework rendering was verified on macOS; Simulator installation and
+static bundle lookup remain tracked in #360.
 Classes linked from a static archive retain ordinary host `Bundle(for:)` semantics;
 the copied framework resources are not assigned to that class's runtime bundle.
 Standalone dynamic framework image parity was verified on macOS 26.6.2 and iOS 27.2 with

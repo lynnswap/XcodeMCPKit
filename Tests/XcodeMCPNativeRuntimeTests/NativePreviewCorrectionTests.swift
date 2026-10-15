@@ -393,7 +393,7 @@ struct NativePreviewCorrectionTests {
         extern "C" int archive_dependency_value(void) { return (int)std::string("x").size(); }
         """.utf8).write(to: staticCode)
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang++", "-target", NativePreviewPlatform.macOS.triple,
-            "-c", staticCode.path, "-o", staticObject.path])
+            "-fsanitize=address", "-c", staticCode.path, "-o", staticObject.path])
         let staticSwiftCode = root.appendingPathComponent("StaticDependency.swift")
         let staticSwiftObject = root.appendingPathComponent("StaticDependencySwift.o")
         try Data("""
@@ -438,7 +438,7 @@ struct NativePreviewCorrectionTests {
         let target = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
             sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: command,
             linkerWorkingDirectory: root.path, objectFiles: [object], sourceFiles: [code], debugDylibEnabled: false, isRunnable: false,
-            compileCommandLine: compileCommand)
+            compileCommandLine: compileCommand, enableAddressSanitizer: true)
         let original = try Data(contentsOf: binary)
         let originalSupport = try Data(contentsOf: support)
         let originalDependency = try Data(contentsOf: dependencyBinary)
@@ -451,8 +451,12 @@ struct NativePreviewCorrectionTests {
         #include <dlfcn.h>
         #include <objc/runtime.h>
         #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
         int main(int argc, char **argv) {
             @autoreleasepool {
+                if (!dlsym(RTLD_DEFAULT, "__asan_init") || !getenv("ASAN_OPTIONS") ||
+                    strcmp(getenv("ASAN_OPTIONS"), "color=never:external_symbolizer_path='':abort_on_error=1")) return 2;
                 void *image = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
                 if (!image) { fputs(dlerror(), stderr); return 1; }
                 int (*value)(void) = dlsym(image, "static_preview_value");
@@ -500,7 +504,13 @@ struct NativePreviewCorrectionTests {
         try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: products, process: process)
         let stagedExecutable = NativePreviewPlatform.macOS.executableDirectory(in: app).appendingPathComponent(executable.lastPathComponent)
         let helperIdentifier = try #require(Bundle(url: app)?.bundleIdentifier)
-        let text = try previewBinaryOutput(stagedExecutable.path, [app.appendingPathComponent(paths[0]).path])
+        let runtime = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang",
+            "-print-file-name=libclang_rt.asan_osx_dynamic.dylib"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let nativeEnvironment = [
+            "ASAN_OPTIONS": "color=never:external_symbolizer_path='':abort_on_error=1",
+            "DYLD_INSERT_LIBRARIES": runtime,
+        ]
+        let text = try await process.run(stagedExecutable.path, [app.appendingPathComponent(paths[0]).path], environment: nativeEnvironment)
         let record = try #require(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         #expect(record["value"] as? Int == 32)
         #expect(record["ownerIdentifier"] is NSNull)
@@ -532,7 +542,8 @@ struct NativePreviewCorrectionTests {
             to: installedApp.deletingLastPathComponent().appendingPathComponent("Products"))
         try NativePreviewCorrection.removeStagedApp(app)
         let installedExecutable = NativePreviewPlatform.macOS.executableDirectory(in: installedApp).appendingPathComponent(executable.lastPathComponent)
-        let installedText = try previewBinaryOutput(installedExecutable.path, [installedApp.appendingPathComponent(paths[0]).path])
+        let installedText = try await process.run(installedExecutable.path,
+            [installedApp.appendingPathComponent(paths[0]).path], environment: nativeEnvironment)
         let installed = try #require(JSONSerialization.jsonObject(with: Data(installedText.utf8)) as? [String: Any])
         #expect(installed["value"] as? Int == 32)
         #expect(installed["ownerIdentifier"] is NSNull)

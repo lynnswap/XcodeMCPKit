@@ -11,7 +11,7 @@ final class NativePreviewProcess {
         self.artifacts = artifacts
     }
 
-    func run(_ executable: String, _ arguments: [String]) async throws -> String {
+    func run(_ executable: String, _ arguments: [String], environment launchEnvironment: [String: String] = [:]) async throws -> String {
         try Task.checkCancellation()
         let logURL = artifacts.appendingPathComponent("process-\(UUID().uuidString).log")
         try Data().write(to: logURL)
@@ -31,6 +31,7 @@ final class NativePreviewProcess {
             environment[key] = nil
         }
         environment["DEVELOPER_DIR"] = installation.developerDirectory.path
+        environment.merge(launchEnvironment, uniquingKeysWith: { _, new in new })
         process.environment = environment
         process.standardOutput = output
         process.standardError = errors
@@ -64,7 +65,7 @@ final class NativePreviewProcess {
         return text
     }
 
-    func xcrun(_ arguments: [String]) async throws -> String {
-        try await run("/usr/bin/xcrun", arguments)
+    func xcrun(_ arguments: [String], environment: [String: String] = [:]) async throws -> String {
+        try await run("/usr/bin/xcrun", arguments, environment: environment)
     }
 }
