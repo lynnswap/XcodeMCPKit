@@ -376,7 +376,7 @@ struct NativePreviewCorrectionTests {
         let dependency = prebuilt ? products.appendingPathComponent("Dependency.framework/Versions/A/Dependency") : dependencyAlias
         let otherDependency = root.appendingPathComponent("OtherProducts/Dependency.framework/Dependency")
         let library = (prebuilt ? products : root).appendingPathComponent("Support/libSupport.dylib")
-        let absoluteSupport = products.appendingPathComponent("Vendor/libAbsoluteSupport.dylib")
+        let absoluteSupport = products.appendingPathComponent("Vendor/libSupport.dylib")
         let leaf = products.appendingPathComponent("Vendor/libLeaf.dylib")
         let unrelated = products.appendingPathComponent("libUnrelated.dylib")
         for binary in [source, dependency, otherDependency] {
@@ -422,11 +422,14 @@ struct NativePreviewCorrectionTests {
             sourceCode.path, "-install_name", "@rpath/Dependency.framework/Dependency", "-o", dependency.path,
             "-L", library.deletingLastPathComponent().path, "-lSupport", "-Wl,-no_adhoc_codesign"]
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + dependencyLinkArguments)
+        // Reserve room for changing the staged copy's dependency references.
         let sourceLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple,
-            sourceCode.path, "-isysroot", sdkAlias.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path, "-Wl,-no_adhoc_codesign"]
+            sourceCode.path, "-isysroot", sdkAlias.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path,
+            "-Wl,-headerpad_max_install_names", "-Wl,-no_adhoc_codesign"]
             + ["-Xlinker", "-unexported_symbols_list", "-Xlinker", unexportedSymbols.path]
             + (prebuilt ? ["-Wl,-rpath,@loader_path/..", "-Wl,-rpath,@loader_path/../Vendor", dependencyAlias.path]
                 : ["-F", products.path, "-framework", "Dependency"])
+            + (kind == .built ? ["-Wl,-rpath," + products.path] : [])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + sourceLinkArguments)
         let originalBinaries = [source, dependency, library] + (prebuilt ? [absoluteSupport, leaf] : [])
         for binary in originalBinaries + [otherDependency] {
@@ -462,12 +465,20 @@ struct NativePreviewCorrectionTests {
         let developerDirectory = try previewBinaryOutput("/usr/bin/xcode-select", ["-p"])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developerDirectory)), artifacts: root)
-        try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: app, platform: .macOS, process: process)
         let frameworks = app.appendingPathComponent("Contents/Frameworks")
-        let stagedDependency = try #require(Bundle(url: frameworks.appendingPathComponent("Dependency.framework")))
+        let stagedLibraries = try NativePreviewCorrection.registryLibraries(in: app, previewLibraries: [])
+        for binary in originalBinaries {
+            #expect(try stagedLibraries.contains { try NativePreviewBinary.matches(binary, $0) })
+        }
+        #expect(try !stagedLibraries.contains { try NativePreviewBinary.matches(unrelated, $0) })
+        let paths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [],
+            registryLibraries: stagedLibraries, sourceOutput: source)
+        #expect(paths == ["Contents/Frameworks/Feature.framework/Feature"])
+        let dependencyPath = try #require(dependencies.products[dependencyAlias.deletingLastPathComponent().resolvingSymlinksInPath()])
+        let stagedDependency = try #require(Bundle(url: frameworks.appendingPathComponent(dependencyPath)))
         let stagedMarker = try #require(stagedDependency.url(forResource: "Marker", withExtension: "txt"))
         #expect(try String(contentsOf: stagedMarker, encoding: .utf8) == "dependency resource")
-        #expect(!FileManager.default.fileExists(atPath: frameworks.appendingPathComponent(unrelated.lastPathComponent).path))
+        try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: app, platform: .macOS, process: process)
         try previewBinaryOutput(app.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer").path,
             [frameworks.appendingPathComponent("Feature.framework/Feature").path])
         #expect(try originalBinaries.map { try Data(contentsOf: $0) } == original)

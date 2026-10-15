@@ -887,7 +887,7 @@ final class NativePreviewCorrection {
             let name: String
             let replacement: String
         }
-        var products: [URL] = []
+        var products: [URL: String] = [:]
         var relocations: [Relocation] = []
     }
 
@@ -901,9 +901,6 @@ final class NativePreviewCorrection {
             guard FileManager.default.fileExists(atPath: output.path, isDirectory: &isDirectory), !isDirectory.boolValue,
                   let image = try NativePreviewBinary.dynamicLibrary(at: output) else { return nil }
             return (output, frameworkBundle(containing: output) ?? output, image.identifier, image.dependencies, image.rpaths, target)
-        }
-        func stagedPath(_ library: Library) -> String {
-            library.product.lastPathComponent + library.output.path.dropFirst(library.product.path.count)
         }
         func runtimeURL(_ path: String, importer: URL) -> URL? {
             if path == "@loader_path" { return importer.deletingLastPathComponent() }
@@ -922,8 +919,20 @@ final class NativePreviewCorrection {
               let sourceLibrary = libraries.first(where: { $0.output == output }) else { return FrameworkDependencies() }
         var pending = [(library: sourceLibrary, inheritedPaths: [URL](), inheritedLinkPaths: [SearchPath]())]
         var visited: Set<URL> = [output.resolvingSymlinksInPath()]
-        var copiedProducts: Set<URL> = [sourceLibrary.product.resolvingSymlinksInPath()]
         var result = FrameworkDependencies()
+        func stagedPath(_ library: Library) -> String {
+            let product = library.product.resolvingSymlinksInPath()
+            let relativeProduct: String
+            if product == sourceLibrary.product.resolvingSymlinksInPath() {
+                relativeProduct = product.lastPathComponent
+            } else if let path = result.products[product] {
+                relativeProduct = path
+            } else {
+                relativeProduct = "Dependencies/\(result.products.count)/" + product.lastPathComponent
+                result.products[product] = relativeProduct
+            }
+            return relativeProduct + library.output.path.dropFirst(product.path.count)
+        }
         while let current = pending.popLast() {
             let runtimePaths = current.library.rpaths.compactMap { runtimeURL($0, importer: current.library.output) }
                 + current.inheritedPaths
@@ -963,17 +972,17 @@ final class NativePreviewCorrection {
                 }
                 if dependency == nil, matches.count == 1 { dependency = matches[0] }
                 guard let dependency else { continue }
-                let replacement = "@rpath/" + stagedPath(dependency)
+                let importer = stagedPath(current.library)
+                let target = stagedPath(dependency)
+                let parentDepth = importer.split(separator: "/").count - 1
+                let replacement = "@loader_path/" + String(repeating: "../", count: parentDepth) + target
                 let internalRelative = name.hasPrefix("@loader_path/")
                     && current.library.product.resolvingSymlinksInPath() == dependency.product.resolvingSymlinksInPath()
                 if name != replacement && !internalRelative {
-                    result.relocations.append(.init(library: stagedPath(current.library), name: name,
+                    result.relocations.append(.init(library: importer, name: name,
                         replacement: replacement))
                 }
                 if visited.insert(dependency.output.resolvingSymlinksInPath()).inserted {
-                    if copiedProducts.insert(dependency.product.resolvingSymlinksInPath()).inserted {
-                        result.products.append(dependency.product)
-                    }
                     pending.append((dependency, runtimePaths, searchPaths))
                 }
             }
@@ -1007,8 +1016,10 @@ final class NativePreviewCorrection {
             try FileManager.default.createDirectory(at: platform.executableDirectory(in: app), withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: product, to: frameworks.appendingPathComponent(product.lastPathComponent))
-            for dependency in dependencies.products {
-                try FileManager.default.copyItem(at: dependency, to: frameworks.appendingPathComponent(dependency.lastPathComponent))
+            for (source, path) in dependencies.products {
+                let destination = frameworks.appendingPathComponent(path)
+                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try FileManager.default.copyItem(at: source, to: destination)
             }
             // The framework remains its own bundle; the renderer is only its executable host.
             original = ["CFBundleIdentifier": "dev.xcodemcp.PreviewClient." + UUID().uuidString, "CFBundleName": "Preview"]
