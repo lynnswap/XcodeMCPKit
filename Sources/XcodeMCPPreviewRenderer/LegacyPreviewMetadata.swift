@@ -64,16 +64,38 @@ func nativeLegacyPreviewMetadata(typeName: String) async throws -> (metadata: Da
                 descriptionType: .opaque(named: descriptionType.name)])
         let description = try unsafe initialize.unsafeInvoke(preview.id, preview.contentType,
             preview.device?.rawValue, preview.displayName, layout, domain.copy(), true, onDevice, orientation, category.copy())
-        let traitsType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewTraits", in: image)
-        let traitsGetter = try await descriptionType.resolveGetter(named: "previewTraits", as: (() -> NativeSwiftValue).self,
-            valueABIs: [traitsType: .opaque(named: traitsType.name)], receiverABI: .opaque(named: descriptionType.name))
-        let traits = try unsafe traitsGetter.unsafeInvoke(on: description)
-        let metadata = try await makeNativePreviewMetadata(domain: domain, category: category,
-            onDevice: onDevice, interactive: true, traits: traits, group: false, displayName: preview.displayName)
-        return (try await nativePreviewPropertyListData(metadata), try await nativePreviewPropertyListData(description))
+        return try await nativeLegacyPreviewMetadata(description: description)
     } catch is ABIResolutionError {
         throw NativePreviewPipelineRequired()
     }
+}
+
+@MainActor
+func nativeLegacyPreviewMetadata(description: NativeSwiftValue) async throws -> (metadata: Data, providerDescription: Data?) {
+    let runtime = ABIRuntime.shared
+    let image = ImageSelector.framework(named: "PreviewsMessagingOS")
+    func value(_ name: String, typeName: String) async throws -> NativeSwiftValue {
+        let type = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.\(typeName)", in: image)
+        let getter = try await description.type.resolveGetter(named: name, as: (() -> NativeSwiftValue).self,
+            valueABIs: [type: .opaque(named: type.name)], receiverABI: .opaque(named: description.type.name))
+        return try unsafe getter.unsafeInvoke(on: description)
+    }
+    func flag(_ name: String) async throws -> Bool {
+        let getter = try await description.type.resolveGetter(named: name, as: (() -> Bool).self,
+            receiverABI: .opaque(named: description.type.name))
+        return try unsafe getter.unsafeInvoke(on: description)
+    }
+    let domain = try await value("contentDomain", typeName: "PreviewContentDomain")
+    let category = try await value("contentCategory", typeName: "ContentCategory")
+    let traits = try await value("previewTraits", typeName: "PreviewTraits")
+    let onDevice = try await flag("supportsOnDevice")
+    let interactive = try await flag("supportsLive")
+    let displayNameGetter = try await description.type.resolveGetter(named: "displayName", as: (() -> String?).self,
+        receiverABI: .opaque(named: description.type.name))
+    let displayName = try unsafe displayNameGetter.unsafeInvoke(on: description)
+    let metadata = try await makeNativePreviewMetadata(domain: domain, category: category,
+        onDevice: onDevice, interactive: interactive, traits: traits, group: false, displayName: displayName)
+    return (try await nativePreviewPropertyListData(metadata), try await nativePreviewPropertyListData(description))
 }
 
 @MainActor
