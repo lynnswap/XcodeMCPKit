@@ -284,8 +284,8 @@ SwiftUI's `_allPreviews`, retaining its name and layout, as native RenderPreview
 Provider type identity comes from Xcode's native module and type path. Private
 providers remain unavailable with Xcode 27.1, whose native RenderPreview also
 reports `preview provider not found` for those definitions.
-Custom `PreviewContext` values without Widget or Activity payloads render as
-ordinary SwiftUI views on macOS, Mac Catalyst, iOS, and tvOS.
+Providers with a default-valued custom `PreviewContext` render as ordinary
+SwiftUI views on macOS, Mac Catalyst, and tvOS.
 `PreviewModifier` calls `makeSharedContext()` once per concrete modifier type in
 each render and applies the native modifier wrappers in their original order.
 Activity `PreviewProvider` contexts use the original Widget or WidgetBundle
