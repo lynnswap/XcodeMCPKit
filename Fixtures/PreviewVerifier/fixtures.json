@@ -245,6 +245,21 @@
     ]
   },
   {
+    "id": "hostless-package",
+    "directory": "Package",
+    "project": "HostlessPreviewPackage.xcworkspace",
+    "cases": [
+      {
+        "id": "package-basic",
+        "sourceFile": "Sources/HostlessPreviewPackage/StandaloneFrameworkPreview.swift",
+        "navigatorPath": "HostlessPreviewPackage/Sources/HostlessPreviewPackage/StandaloneFrameworkPreview.swift",
+        "scheme": "HostlessPreviewPackage",
+        "index": 0,
+        "arguments": {}
+      }
+    ]
+  },
+  {
     "id": "general",
     "directory": "../ProxyToolVerifierFixture",
     "project": "ProxyToolVerifierFixture.xcodeproj",
