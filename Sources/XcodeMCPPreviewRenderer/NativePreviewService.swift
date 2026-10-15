@@ -344,15 +344,6 @@ final class NativePreviewService {
         try await send("update", payload: payload)
     }
 
-    func staticReply(_ value: NativeSwiftValue) async throws -> NativeSwiftValue {
-        let type = try await messagingType("StaticPreviewReply")
-        let decoder = try await type.resolveInitializer(
-            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.StaticPreviewReply",
-            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
-            valueABIs: [propertyListType: .opaque(named: propertyListType.name), type: .opaque(named: type.name)])
-        return try unsafe decoder.unsafeInvoke(value)
-    }
-
     func providerMetadata(named name: String, pid: Int32) async throws -> (metadata: Data, providerDescription: Data?) {
         let payloadType = try await messagingType("ProviderPayload")
         let makePayload = try await payloadType.resolveInitializer(
@@ -369,16 +360,13 @@ final class NativePreviewService {
         let identifier = try unsafe makeIdentifier.unsafeInvoke(UUID().uuidString)
         let update = try await makeUpdate(pid: pid, identifier: identifier, category: category,
             content: encode(payload), controls: nil)
-        let reply = try await staticReply(sendUpdate(update))
-        let contentGetter = try await reply.type.resolveGetter(named: "contentPayload", as: (() -> NativeSwiftValue).self,
-            valueABIs: [propertyListType: .opaque(named: propertyListType.name)], receiverABI: .opaque(named: reply.type.name))
-        let content = try unsafe contentGetter.unsafeInvoke(on: reply)
+        let reply = try await sendUpdate(update)
         let responseType = try await messagingType("PreviewInstancesPayload")
         let decode = try await responseType.resolveInitializer(
             named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewInstancesPayload",
             as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
             valueABIs: [propertyListType: .opaque(named: propertyListType.name), responseType: .opaque(named: responseType.name)])
-        let response = try unsafe decode.unsafeInvoke(content)
+        let response = try unsafe decode.unsafeInvoke(reply)
         let descriptionType = try await messagingType("PreviewDescription")
         let descriptionsType = try await runtime.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(descriptionType)])
         let getter = try await responseType.resolveGetter(named: "previewDescriptions", as: (() -> NativeSwiftValue).self,

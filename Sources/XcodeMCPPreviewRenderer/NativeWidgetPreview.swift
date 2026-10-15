@@ -84,7 +84,7 @@ private struct NativeWidgetPreview {
         let initialUpdate = try await service.makeUpdate(pid: pid, identifier: identifier,
             category: previewCategory, content: encoded.copy(), controls: nil)
         let initialReply = try await service.sendUpdate(initialUpdate)
-        let initial = try await service.staticReply(initialReply)
+        let initial = try await staticReply(initialReply)
         let initialEncoded = try await service.encode(initial)
         let initialMetadata = try await service.dictionary(initialEncoded)
         let initialDescriptions = initialMetadata["controlDescriptions"] as? [[String: Any]] ?? []
@@ -97,7 +97,7 @@ private struct NativeWidgetPreview {
             let requestedUpdate = try await service.makeUpdate(pid: pid, identifier: identifier,
                 category: previewCategory, content: encoded, controls: controls)
             let reply = try await service.sendUpdate(requestedUpdate)
-            final = try await service.staticReply(reply)
+            final = try await staticReply(reply)
         } else { final = initial }
         let finalEncoded = try await service.encode(final)
         let resultMetadata = try await service.dictionary(finalEncoded)
@@ -111,6 +111,9 @@ private struct NativeWidgetPreview {
                   let stops = configuration["stops"] as? [[String: Any]] else { return nil }
             return stops.compactMap { $0["id"] as? Int }
         }.first
+        if let index = request.timelineIndex, let indexes, !indexes.contains(index) {
+            errors.append("Unsupported timeline index \(index); see the `supportedCanvasControlOverrides` field of the result for the list of supported indexes for rendering this preview in the currently active scheme.")
+        }
         if let index = request.groupItemIndex { errors.append(unsupportedPreviewGroupItemMessage(index, supportsGroups: false)) }
         return PreviewRendererResult(snapshotData: snapshot, displayName: try unsafe displayGetter.unsafeInvoke(on: metadata),
             sourceLineNumber: request.lineNumber, timelineIndexes: indexes, errors: errors,
@@ -140,6 +143,15 @@ private struct NativeWidgetPreview {
         let getter = try await responseType.resolveGetter(named: "groups", as: (() -> NativeSwiftValue).self,
             valueABIs: [array: .pointer], receiverABI: .opaque(named: responseType.name))
         return try unsafe getter.unsafeInvoke(on: response).withCopy { try WidgetVariantCatalog(nativeGroups: $0) }
+    }
+
+    private func staticReply(_ value: NativeSwiftValue) async throws -> NativeSwiftValue {
+        let type = try await service.messagingType("StaticPreviewReply")
+        let decoder = try await type.resolveInitializer(
+            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.StaticPreviewReply",
+            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+            valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name), type: .opaque(named: type.name)])
+        return try unsafe decoder.unsafeInvoke(value)
     }
 
     private func requestedControls(descriptions: [[String: Any]], reply: NativeSwiftValue) async throws ->
