@@ -442,7 +442,7 @@ timeout error. The build method binding is
 cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 
-Targets without an application or extension host or with its debug dylib disabled,
+Standalone static frameworks, targets whose application or extension host has its debug dylib disabled,
 unsupported platform/architecture combinations, and source or display contracts beyond the direct capabilities described above
 continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
 requirements, including the limitation tracked in
