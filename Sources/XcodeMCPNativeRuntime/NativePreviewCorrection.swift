@@ -465,12 +465,21 @@ final class NativePreviewCorrection {
                 _ = try await process.xcrun(["simctl", "launch", simulator.identifier, "com.apple.PreviewShell"])
             }
             _ = try await process.xcrun(["simctl", "install", simulator.identifier, app.path])
-            let launch = ["simctl", "launch", simulator.identifier, simulator.bundleIdentifier]
-                + (try Self.rendererArguments(localization: localization))
-            _ = try await process.xcrun(launch)
             let container = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, simulator.bundleIdentifier, "data"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let documents = URL(filePath: container, directoryHint: .isDirectory).appendingPathComponent("Documents")
+            let arguments = try Self.rendererArguments(localization: localization)
+            if containingApp != nil {
+                let installedApp = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, simulator.bundleIdentifier, "app"])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let executable = URL(filePath: installedApp, directoryHint: .isDirectory).appendingPathComponent("XcodeMCPPreviewRenderer")
+                // PreviewShell owns the UI and the extension's active-preview assertion.
+                // A foreground helper app suspends that assertion when it takes focus.
+                _ = try await process.xcrun(["simctl", "spawn", simulator.identifier, executable.path,
+                    "--native-preview-result-directory", documents.path] + arguments)
+            } else {
+                _ = try await process.xcrun(["simctl", "launch", simulator.identifier, simulator.bundleIdentifier] + arguments)
+            }
             let responseURL = documents.appendingPathComponent("PreviewResult.json")
             while !FileManager.default.fileExists(atPath: responseURL.path) {
                 try await Task.sleep(for: .milliseconds(100))

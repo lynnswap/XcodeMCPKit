@@ -10,6 +10,35 @@ import UniformTypeIdentifiers
 #endif
 import XcodeMCPWire
 
+func nativePreviewServiceResultDirectory() throws -> URL? {
+    guard let index = CommandLine.arguments.firstIndex(of: "--native-preview-result-directory") else { return nil }
+    guard CommandLine.arguments.indices.contains(index + 1) else {
+        throw PreviewRendererError("The native preview client requires a result directory")
+    }
+    return URL(filePath: CommandLine.arguments[index + 1], directoryHint: .isDirectory)
+}
+
+@MainActor
+func writeNativeWidgetPreviewResult(to directory: URL) async throws {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    var result: PreviewRendererResult
+    do {
+        let url = Bundle.main.bundleURL.appendingPathComponent("PreviewRequest.json")
+        let request = try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: url))
+        result = try await renderNativeWidgetPreview(request)
+        if let data = result.snapshotData {
+            try data.write(to: directory.appendingPathComponent("Preview.png"), options: .atomic)
+            result.snapshotName = "Preview.png"
+            result.snapshotData = nil
+        }
+    } catch is NativePreviewPipelineRequired {
+        result = PreviewRendererResult(requiresNativePipeline: true)
+    } catch {
+        result = PreviewRendererResult(error: String(describing: error))
+    }
+    try JSONEncoder().encode(result).write(to: directory.appendingPathComponent("PreviewResult.json"), options: .atomic)
+}
+
 @MainActor
 func renderNativeWidgetPreview(_ request: PreviewRendererRequest) async throws -> PreviewRendererResult {
     guard let source = request.nativeSource else { throw NativePreviewPipelineRequired() }

@@ -10,6 +10,24 @@ import XcodeMCPWire
 
 @main
 @MainActor
+enum PreviewRendererMain {
+    static func main() async {
+        do {
+            if let directory = try nativePreviewServiceResultDirectory() {
+                try await writeNativeWidgetPreviewResult(to: directory)
+                return
+            }
+        } catch {
+            try? FileHandle.standardError.write(contentsOf: Data("Preview result could not be written: \(error)\n".utf8))
+            exit(1)
+        }
+        let status = unsafe UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv,
+            nil, NSStringFromClass(PreviewRendererApp.self))
+        exit(status)
+    }
+}
+
+@MainActor
 final class PreviewRendererApp: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool { true }
 
@@ -40,18 +58,6 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
     private func render(in window: UIWindow) async throws {
         let requestURL = Bundle.main.bundleURL.appendingPathComponent("PreviewRequest.json")
         let request = try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: requestURL))
-        if request.nativeSource != nil {
-            window.rootViewController = UIViewController()
-            window.makeKeyAndVisible()
-            var result = try await renderNativeWidgetPreview(request)
-            if let data = result.snapshotData {
-                try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
-                result.snapshotName = "Preview.png"
-                result.snapshotData = nil
-            }
-            write(result)
-            return
-        }
         guard unsafe setenv("XCODE_RUNNING_FOR_PREVIEWS", "1", 1) == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
@@ -87,7 +93,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
                 variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"
             }
-            if let context = preview.context {
+            if let context = preview.context, try await legacyPreviewContextCategory(context) != nil {
                 guard request.widgetFamily == nil, request.widgetPresentation == nil,
                       variants.keys.allSatisfy({ ["Color Scheme", "Dynamic Type"].contains($0) }) else {
                     throw NativePreviewPipelineRequired()
