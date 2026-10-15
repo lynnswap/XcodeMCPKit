@@ -344,11 +344,14 @@ struct NativePreviewCorrectionTests {
         let support = root.appendingPathComponent("Vendor/libSupport.dylib")
         try compilePreviewLibrary(at: support, value: 21, platform: .macOS, installName: "@rpath/libSupport.dylib")
         try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", support.path])
-        let staticCode = root.appendingPathComponent("StaticDependency.c")
+        let staticCode = root.appendingPathComponent("StaticDependency.cpp")
         let staticObject = root.appendingPathComponent("StaticDependency.o")
         let staticArchive = root.appendingPathComponent("libStaticDependency.a")
-        try Data("int archive_dependency_value(void) { return 1; }\n".utf8).write(to: staticCode)
-        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-target", NativePreviewPlatform.macOS.triple,
+        try Data("""
+        #include <string>
+        extern "C" int archive_dependency_value(void) { return (int)std::string("x").size(); }
+        """.utf8).write(to: staticCode)
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang++", "-target", NativePreviewPlatform.macOS.triple,
             "-c", staticCode.path, "-o", staticObject.path])
         try previewBinaryOutput("/usr/bin/xcrun", ["libtool", "-static", staticObject.path, "-o", staticArchive.path])
         let code = root.appendingPathComponent("StaticSource.c")
@@ -411,6 +414,8 @@ struct NativePreviewCorrectionTests {
         #expect(try Data(contentsOf: binary) == original)
         #expect(try Data(contentsOf: support) == originalSupport)
         let stagedFramework = NativePreviewPlatform.macOS.frameworksDirectory(in: app).appendingPathComponent(framework.lastPathComponent)
+        try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", app.path])
+        try previewBinaryOutput("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
         #expect(try Data(contentsOf: stagedFramework.appendingPathComponent("FixtureKit")) == original)
         #expect(try String(contentsOf: stagedFramework.appendingPathComponent("Resources/Marker.txt"), encoding: .utf8) == "static resource")
     }

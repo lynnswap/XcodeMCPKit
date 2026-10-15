@@ -1012,7 +1012,7 @@ final class NativePreviewCorrection {
         let sdk = try await process.xcrun(["--sdk", platform.sdk, "--show-sdk-path"])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         var arguments = ["--sdk", platform.sdk, "swiftc", "-emit-library", "-target", platform.triple, "-sdk", sdk,
-            archive.path, "-Xlinker", "-force_load", "-Xlinker", archive.path,
+            archive.path, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive.path,
             "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
             "@rpath/" + image.lastPathComponent, "-o", image.path]
         let inputs = try source.linkedInputs()
@@ -1025,6 +1025,10 @@ final class NativePreviewCorrection {
             }
         }
         _ = try await process.xcrun(arguments)
+        if let framework = frameworkBundle(containing: output) {
+            let copiedFramework = platform.frameworksDirectory(in: app).appendingPathComponent(framework.lastPathComponent)
+            _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", copiedFramework.path])
+        }
         return image
     }
 
