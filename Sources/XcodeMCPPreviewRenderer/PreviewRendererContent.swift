@@ -8,8 +8,19 @@ import XcodeMCPWire
 
 @MainActor
 func loadPreviewRequest() throws -> PreviewRendererRequest {
+    let request = try readPreviewRequest()
+    try loadPreviewLibraries(request)
+    return request
+}
+
+@MainActor
+func readPreviewRequest() throws -> PreviewRendererRequest {
     let url = Bundle.main.resourceURL!.appendingPathComponent("PreviewRequest.json")
-    let request = try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: url))
+    return try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: url))
+}
+
+@MainActor
+func loadPreviewLibraries(_ request: PreviewRendererRequest) throws {
     guard unsafe setenv("XCODE_RUNNING_FOR_PREVIEWS", "1", 1) == 0 else {
         throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
@@ -21,7 +32,6 @@ func loadPreviewRequest() throws -> PreviewRendererRequest {
         }
     }
     __previewThunksHaveFinishedLoading()
-    return request
 }
 
 @MainActor

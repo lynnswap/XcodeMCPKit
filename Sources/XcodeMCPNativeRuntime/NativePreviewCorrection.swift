@@ -214,7 +214,8 @@ final class NativePreviewCorrection {
 
     private func prepareRenderer(_ input: Input, prepared: Prepared, app: URL, build: NativePreviewBuild.Result,
                                  platform: NativePreviewPlatform, process: NativePreviewProcess,
-                                 metadataOnly: Bool? = nil) async throws -> (request: PreviewRendererRequest, signing: [String], product: URL, containingApp: URL?) {
+                                 metadataOnly: Bool? = nil, isLegacyComplication: Bool? = nil) async throws ->
+        (request: PreviewRendererRequest, signing: [String], product: URL, containingApp: URL?) {
         let source = prepared.source
         let location = prepared.location
         let selection = try Self.selectTarget(build.targets, source: source, platform: platform)
@@ -282,7 +283,7 @@ final class NativePreviewCorrection {
             activityViewStyle: input.activityViewStyle, activityViewContext: input.activityViewContext,
             activityToggleState: input.activityToggleState,
             appName: try Self.appName(product: product, containingApp: containingApp, localization: input.localization),
-            metadataOnly: metadataOnly)
+            metadataOnly: metadataOnly, isLegacyComplication: isLegacyComplication)
         if let nativeProviderIdentifier, let providerName {
             request.libraryNames = []
             request.registryNames = []
@@ -348,13 +349,18 @@ final class NativePreviewCorrection {
             guard let selectedPlatform = build.previewPlatform else { throw NativePipelineRequired() }
             platform = selectedPlatform
         }
+        let isLegacyComplication: Bool?
+        if platform == .watchOS, location.providerPath != nil {
+            isLegacyComplication = try await builder.isComplicationPreview(metadata: metadata) ? true : nil
+        } else { isLegacyComplication = nil }
         if unchanged && renderer.request.nativeSource == nil {
             renderer.request.metadataOnly = nil
+            renderer.request.isLegacyComplication = isLegacyComplication
             try await writeRendererRequest(renderer.request, app: app, platform: platform, signing: renderer.signing, process: process)
         } else {
             try FileManager.default.removeItem(at: app)
             renderer = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
-                platform: platform, process: process)
+                platform: platform, process: process, isLegacyComplication: isLegacyComplication)
         }
         let nativeContainingApp: URL?
         if (platform == .iOS || platform == .watchOS), try await builder.isWidgetPreview(metadata: metadata),

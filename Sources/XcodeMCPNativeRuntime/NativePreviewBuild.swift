@@ -515,18 +515,26 @@ extension NativePreviewBuild {
     }
 
     func isWidgetPreview(metadata: Data) async throws -> Bool {
+        try await hasContentDomain("widget", metadata: metadata)
+    }
+
+    func isComplicationPreview(metadata: Data) async throws -> Bool {
+        try await hasContentDomain("complication", metadata: metadata)
+    }
+
+    private func hasContentDomain(_ name: String, metadata: Data) async throws -> Bool {
         let metadata = try await decodePreviewValue(metadata, named: "PreviewMetadata")
         let domainType = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.PreviewContentDomain",
             in: .path(installation.framework("PreviewsMessagingHost", in: "SharedFrameworks")))
         let domain = try await sourceGetter(metadata,
             "contentDomain.getter : PreviewsMessagingHost.PreviewContentDomain", resultType: domainType)
-        let widget = try domainType.makeEnumCase(named: "widget")
+        let expected = try domainType.makeEnumCase(named: name)
         return try domain.withCopy { value in
             guard let value = value as? any Equatable else {
                 throw NativeRuntimeError.unsupportedContract("The native preview content domain is not Equatable")
             }
             func compare<Value: Equatable>(_ value: Value) throws -> Bool {
-                try widget.withCopy { $0 as? Value == value }
+                try expected.withCopy { $0 as? Value == value }
             }
             return try _openExistential(value, do: compare)
         }
