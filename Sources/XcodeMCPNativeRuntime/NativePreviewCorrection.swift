@@ -98,6 +98,7 @@ final class NativePreviewCorrection {
                          native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws {
         let prepared: Prepared
         do {
+            guard !input.requiresNativePipeline else { throw NativePipelineRequired() }
             prepared = try await prepare(input)
         } catch is NativePipelineRequired {
             try await relayNative(native, continuation: continuation)
@@ -377,7 +378,6 @@ final class NativePreviewCorrection {
             try await writeRendererRequest(renderer.request, app: app, platform: platform, signing: ["--force", "--sign", "-"], process: process)
             nativeContainingApp = containingApp
         } else {
-            guard !input.requiresNativePipeline else { throw NativePipelineRequired() }
             nativeContainingApp = nil
         }
         let response: PreviewRendererResult
