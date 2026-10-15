@@ -63,11 +63,9 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
         if let context = preview.context {
             // Native metadata classifies recognized context keys; a custom
             // context returning their defaults still describes a plain view.
-            do {
-                guard try await legacyWidgetCategory(context) == nil else {
-                    throw NativePreviewPipelineRequired()
-                }
-            } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
+            guard try await legacyPreviewContextCategory(context) == nil else {
+                throw NativePreviewPipelineRequired()
+            }
         }
         #elseif !os(tvOS)
         guard preview.context == nil else {

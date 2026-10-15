@@ -1,4 +1,4 @@
-#if os(iOS) && targetEnvironment(simulator)
+#if (os(iOS) || os(watchOS)) && targetEnvironment(simulator)
 import ABIBridge
 import ABIBridgeCore
 import Darwin
@@ -17,6 +17,23 @@ struct WidgetVariantCatalog {
         let variants: [Variant]
     }
     let groups: [Group]
+
+    init(groups: [Group]) { self.groups = groups }
+
+    init(nativeGroups: Any) throws {
+        var groups: [Group] = []
+        for child in Mirror(reflecting: nativeGroups).children {
+            let stored = try widgetVariantField(child.value, "overridesConfiguration")
+            guard let overrides = Mirror(reflecting: stored).children.first?.value else { continue }
+            guard let title = try widgetVariantField(overrides, "title") as? String else { throw NativePreviewPipelineRequired() }
+            let variants = try Mirror(reflecting: widgetVariantField(overrides, "variants")).children.map { child in
+                guard let name = try widgetVariantField(child.value, "displayName") as? String else { throw NativePreviewPipelineRequired() }
+                return Variant(name: name, effects: try widgetVariantField(child.value, "renderEffects"))
+            }
+            groups.append(.init(title: title, variants: variants))
+        }
+        self.groups = groups
+    }
 
     var supported: [String: [String]] {
         groups.reduce(into: [:]) { $0[$1.title] = $1.variants.map(\.name) }
@@ -39,7 +56,8 @@ struct WidgetVariantCatalog {
                 return value
             }
         }
-        return try await widgetAnyValue(_openExistential(example, do: array))
+        let values = try _openExistential(example, do: array)
+        return try await _openExistential(values, do: ownedPreviewValue)
     }
 }
 
@@ -110,18 +128,7 @@ func widgetVariantCatalog(source: NativeSwiftValue) async throws -> WidgetVarian
             }
             guard success else { throw unsafe abi.error(&failure) }
             let values = unsafe result.move()
-            var groups: [WidgetVariantCatalog.Group] = []
-            for value in values {
-                let stored = try widgetVariantField(value, "overridesConfiguration")
-                guard let overrides = Mirror(reflecting: stored).children.first?.value else { continue }
-                guard let title = try widgetVariantField(overrides, "title") as? String else { throw NativePreviewPipelineRequired() }
-                let variants = try Mirror(reflecting: widgetVariantField(overrides, "variants")).children.map { child in
-                    guard let name = try widgetVariantField(child.value, "displayName") as? String else { throw NativePreviewPipelineRequired() }
-                    return WidgetVariantCatalog.Variant(name: name, effects: try widgetVariantField(child.value, "renderEffects"))
-                }
-                groups.append(.init(title: title, variants: variants))
-            }
-            return WidgetVariantCatalog(groups: groups)
+            return try WidgetVariantCatalog(nativeGroups: values)
         }
         return try _openExistential(type, do: openGroup)
     }
@@ -138,6 +145,7 @@ private func widgetVariantField(_ value: Any, _ name: String) throws -> Any {
     return value
 }
 
+#if os(iOS)
 @MainActor
 func applyWidgetEffects(_ effects: NativeSwiftValue, to environment: inout EnvironmentValues) async throws -> WidgetFamily? {
     let runtime = ABIRuntime.shared
@@ -160,6 +168,7 @@ func applyWidgetEffects(_ effects: NativeSwiftValue, to environment: inout Envir
     environment.isLuminanceReduced = try unsafe luminance.unsafeInvoke(on: effects)
     return family
 }
+#endif
 
 @MainActor @safe
 private final class WidgetVariantABI {

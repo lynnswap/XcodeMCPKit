@@ -10,6 +10,24 @@ import XcodeMCPWire
 
 @main
 @MainActor
+enum PreviewRendererMain {
+    static func main() async {
+        do {
+            if let directory = try nativePreviewServiceResultDirectory() {
+                try await writeNativeWidgetPreviewResult(to: directory)
+                return
+            }
+        } catch {
+            try? FileHandle.standardError.write(contentsOf: Data("Preview result could not be written: \(error)\n".utf8))
+            exit(1)
+        }
+        let status = unsafe UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv,
+            nil, NSStringFromClass(PreviewRendererApp.self))
+        exit(status)
+    }
+}
+
+@MainActor
 final class PreviewRendererApp: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool { true }
 
@@ -75,7 +93,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
                 variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"
             }
-            if let context = preview.context {
+            if let context = preview.context, try await legacyPreviewContextCategory(context) != nil {
                 guard request.widgetFamily == nil, request.widgetPresentation == nil,
                       request.activityViewStyle.map({ PreviewRendererRequest.activityViewStyles.contains($0) }) ?? true,
                       request.activityViewContext.map({ PreviewRendererRequest.activityViewContexts.contains($0) }) ?? true,
