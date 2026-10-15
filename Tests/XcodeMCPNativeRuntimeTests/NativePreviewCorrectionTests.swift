@@ -464,8 +464,8 @@ struct NativePreviewCorrectionTests {
             + (prebuilt ? ["-Wl,-rpath,@loader_path/../../Support"] : [])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + dependencyLinkArguments)
         let sourceLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple(architecture: "arm64"),
-            sourceCode.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path,
-            "-F", products.path, "-framework", "Dependency", "-Wl,-no_adhoc_codesign"]
+            sourceCode.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path, "-Wl,-no_adhoc_codesign"]
+            + (prebuilt ? [dependency.path] : ["-F", products.path, "-framework", "Dependency"])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + sourceLinkArguments)
         for binary in [source, dependency, library, otherDependency] {
             try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", binary.path])
@@ -502,24 +502,27 @@ struct NativePreviewCorrectionTests {
             [frameworks.appendingPathComponent("Feature.framework/Feature").path])
     }
 
-    @Test func standaloneFrameworkTraversesInnerLibrariesWithoutCopyingItsBundleAgain() throws {
+    @Test func standaloneFrameworkTraversesInnerLibrariesWithoutCopyingItsBundleAgain() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let framework = root.appendingPathComponent("Feature.framework")
         let source = framework.appendingPathComponent("Feature")
         let inner = framework.appendingPathComponent("Libraries/libInner.dylib")
-        let support = root.appendingPathComponent("libSupport.dylib")
+        let support = root.appendingPathComponent("Support/libSupport.dylib")
         let resources = framework.appendingPathComponent("Resources")
         try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
         try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "dev.lynnswap.Feature",
             "CFBundleExecutable": "Feature", "CFBundlePackageType": "FMWK"], format: .binary, options: 0)
             .write(to: resources.appendingPathComponent("Info.plist"))
-        try compilePreviewLibrary(at: support, platform: .macOS, installName: "@loader_path/../../libSupport.dylib")
+        try Data("framework resource".utf8).write(to: resources.appendingPathComponent("Marker.txt"))
+        try compilePreviewLibrary(at: support, platform: .macOS, installName: "@loader_path/../../Support/libSupport.dylib")
         try compilePreviewLibrary(at: inner, platform: .macOS, installName: "@loader_path/Libraries/libInner.dylib", libraries: [support])
         try compilePreviewLibrary(at: source, platform: .macOS, libraries: [inner])
         for binary in [source, inner, support] {
             try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", binary.path])
         }
+        try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", framework.path])
+        let original = try [source, inner, support].map { try Data(contentsOf: $0) }
         let target = NativePreviewBuild.Target(moduleName: "Feature", buildableName: "Feature.framework",
             sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", source.path],
             linkerWorkingDirectory: root.path, objectFiles: [], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)
@@ -531,12 +534,24 @@ struct NativePreviewCorrectionTests {
         try Data("#include <dlfcn.h>\n#include <stdio.h>\nint main(int argc, char **argv) { if (dlopen(argv[1], RTLD_NOW)) return 0; fputs(dlerror(), stderr); return 1; }\n".utf8)
             .write(to: loaderSource)
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-arch", "arm64", loaderSource.path,
+            "-Wl,-rpath,@executable_path/../Frameworks",
             "-o", helper.appendingPathComponent("XcodeMCPPreviewRenderer").path])
+
+        try previewBinaryOutput(helper.appendingPathComponent("XcodeMCPPreviewRenderer").path, [source.path])
 
         try NativePreviewCorrection.prepareApp(product: framework, helper: helper, app: app, platform: .macOS, dependencies: dependencies)
 
+        let developerDirectory = try previewBinaryOutput("/usr/bin/xcode-select", ["-p"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developerDirectory)), artifacts: root)
+        try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: app, platform: .macOS, process: process)
+
         try previewBinaryOutput(app.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer").path,
             [app.appendingPathComponent("Contents/Frameworks/Feature.framework/Feature").path])
+        #expect(try [source, inner, support].map { try Data(contentsOf: $0) } == original)
+        #expect(try String(contentsOf: app.appendingPathComponent("Contents/Frameworks/Feature.framework/Resources/Marker.txt"),
+            encoding: .utf8) == "framework resource")
+        try previewBinaryOutput("/usr/bin/codesign", ["--verify", "--strict", app.appendingPathComponent("Contents/Frameworks/Feature.framework").path])
     }
 
     @Test(arguments: [false, true])

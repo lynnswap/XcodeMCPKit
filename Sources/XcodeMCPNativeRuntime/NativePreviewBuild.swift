@@ -44,22 +44,25 @@ final class NativePreviewBuild {
         }
 
         func linksProduct(at product: URL) throws -> Bool {
+            let productPath = product.resolvingSymlinksInPath().path
+            return try linkedInputs().contains { $0.resolvingSymlinksInPath().path == productPath }
+        }
+
+        func linkedInputs() throws -> [URL] {
             func url(for path: String) -> URL? {
                 if path.hasPrefix("/") { return URL(filePath: path) }
                 guard let linkerWorkingDirectory else { return nil }
                 return URL(filePath: path, relativeTo: URL(filePath: linkerWorkingDirectory, directoryHint: .isDirectory))
                     .absoluteURL
             }
-            let productPath = product.resolvingSymlinksInPath().path
-            if linkCommandLine.contains(where: { url(for: $0)?.resolvingSymlinksInPath().path == productPath }) {
-                return true
-            }
+            var inputs = linkCommandLine.compactMap { url(for: $0) }
             for index in linkCommandLine.indices where linkCommandLine[index] == "-filelist" {
                 guard linkCommandLine.indices.contains(index + 1), let fileList = url(for: linkCommandLine[index + 1]) else { continue }
                 let paths = try String(contentsOf: fileList, encoding: .utf8).split(whereSeparator: \.isNewline)
-                if paths.contains(where: { url(for: String($0))?.resolvingSymlinksInPath().path == productPath }) { return true }
+                inputs += paths.compactMap { url(for: String($0)) }
             }
-            return false
+            var seen: Set<URL> = []
+            return inputs.filter { seen.insert($0.resolvingSymlinksInPath()).inserted }
         }
     }
 
