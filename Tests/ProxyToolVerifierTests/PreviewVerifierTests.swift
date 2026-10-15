@@ -45,16 +45,35 @@ struct PreviewVerifierTests {
         #expect(values["DEVELOPMENT_TEAM"] as? String == "EXAMPLE")
     }
 
-    @Test func failedSelectionStopsRenderingAndClosesOnlyTheOwnedWorkspace() async throws {
+    @Test(arguments: ["general", "hostless-package"])
+    func failedSelectionStopsRenderingAndClosesOnlyTheOwnedWorkspace(fixtureID: String) async throws {
+        let repository = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let definition = try #require(PreviewFixtureDefinition.load(in: repository).first { $0.id == fixtureID })
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
+        let prepared = root.appendingPathComponent("prepared")
+        _ = try PreparedPreviewFixture.prepare(definition: definition, repository: repository, output: prepared,
+            deviceName: nil, buildSettings: nil)
+        let projectRoot = prepared.appendingPathComponent("Project")
+        let project = projectRoot.appendingPathComponent(definition.project)
         let runtime = XcodeMCPTestRuntime(tools: [
             previewTool("XcodeOpenWorkspace"), previewTool("XcodeSwitchScheme"),
             previewTool("XcodeSwitchRunDestination"), previewTool("XcodeCloseWorkspace"), previewTool("RenderPreview")
         ])
         await runtime.setToolHandler { call in
             switch call.name {
-            case "XcodeOpenWorkspace": return previewResult(["workspaceIdentifier": "owned-workspace"])
+            case "XcodeOpenWorkspace":
+                let path = try #require(call.arguments["path"]?.stringValue)
+                if fixtureID == "hostless-package" {
+                    #expect(path == project.path)
+                } else {
+                    let workspace = URL(filePath: path)
+                    #expect(workspace.deletingLastPathComponent().path == root.path)
+                    let document = try XMLDocument(contentsOf: workspace.appendingPathComponent("contents.xcworkspacedata"))
+                    let reference = try #require(try document.nodes(forXPath: "/Workspace/FileRef/@location").first?.stringValue)
+                    #expect(reference == "absolute:" + project.path)
+                }
+                return previewResult(["workspaceIdentifier": "owned-workspace"])
             case "XcodeSwitchRunDestination": return previewResult(["success": false, "errorDescription": "Destination unavailable"])
             case "XcodeCloseWorkspace":
                 #expect(call.arguments["workspaceIdentifier"] == "owned-workspace")
@@ -65,7 +84,7 @@ struct PreviewVerifierTests {
             return previewResult(["success": true])
         }
         let client = try await runtime.makeClient()
-        var runner = PreviewCaptureRunner(output: root, projectRoot: root, project: root.appendingPathComponent("Fixture.xcodeproj"),
+        var runner = PreviewCaptureRunner(output: root, projectRoot: projectRoot, project: project,
             report: captureReport(backend: .headless))
         await runner.capture(client: client)
         await client.close()

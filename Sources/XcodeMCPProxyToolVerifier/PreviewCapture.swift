@@ -44,9 +44,14 @@ struct PreviewCaptureRunner {
             try writePreviewJSON(tools.map(\.raw), to: output.appendingPathComponent("tool-catalog.json"))
             let selector: [String: MCPJSONValue]
             if report.backend == .headless {
-                let workspace = output.appendingPathComponent("Preview.xcworkspace", isDirectory: true)
-                try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false)
-                try writeVerifierWorkspace(at: workspace, project: project)
+                let workspace: URL
+                if project.pathExtension == "xcworkspace" {
+                    workspace = project
+                } else {
+                    workspace = output.appendingPathComponent("Preview.xcworkspace", isDirectory: true)
+                    try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false)
+                    try writeVerifierWorkspace(at: workspace, project: project)
+                }
                 let result = try await call("XcodeOpenWorkspace", arguments: ["path": .string(workspace.path)], client: client)
                 guard let raw = result.rawResult, let identifier = parseFirstString(named: "workspaceIdentifier", from: raw) else {
                     throw VerifierFailure("XcodeOpenWorkspace did not return its owned workspace identifier")
