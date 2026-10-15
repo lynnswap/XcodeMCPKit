@@ -41,8 +41,8 @@ struct NativePreviewDiscoveryTests {
         try FileManager.default.copyItem(at: output, to: stagedHost)
         try FileManager.default.copyItem(at: otherOutput, to: otherLibrary)
 
-        #expect(try NativePreviewCorrection.programLibraries(previewLibraries: [otherLibrary, stagedHost], output: output, architecture: "arm64") == [stagedHost])
-        #expect(try NativePreviewCorrection.programLibraries(previewLibraries: [otherLibrary], output: output, architecture: "arm64") == [])
+        #expect(try NativePreviewCorrection.programLibraries(previewLibraries: [otherLibrary, stagedHost], output: output) == [stagedHost])
+        #expect(try NativePreviewCorrection.programLibraries(previewLibraries: [otherLibrary], output: output) == [])
     }
 
     @Test func includesEmbeddedFrameworkExecutablesAndDebugLibraries() throws {
@@ -80,11 +80,11 @@ struct NativePreviewDiscoveryTests {
         #expect(Set(libraries.map(\.path)) == Set(expected))
 
         let frameworkPaths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [preview],
-            registryLibraries: libraries, sourceOutput: sourceOutput, architecture: "arm64")
+            registryLibraries: libraries, sourceOutput: sourceOutput)
         #expect(frameworkPaths == ["FixtureApp.debug.dylib", "Frameworks/FixtureKit.framework/FixtureImplementation"])
 
         let staticPaths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [preview],
-            registryLibraries: libraries, sourceOutput: app.deletingLastPathComponent().appendingPathComponent("FixturePackage.o"), architecture: "arm64")
+            registryLibraries: libraries, sourceOutput: app.deletingLastPathComponent().appendingPathComponent("FixturePackage.o"))
         #expect(staticPaths == ["FixtureApp.debug.dylib"])
     }
 }
