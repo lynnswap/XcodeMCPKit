@@ -142,7 +142,8 @@ retrieval does not establish online/account-dependent retrieval.
 
 `RenderPreview` uses packaged platform renderers for SwiftUI, UIKit, and AppKit
 `#Preview` definitions, SwiftUI `PreviewProvider` definitions, and iOS and watchOS WidgetKit previews
-in an arm64 application or app extension built with a debug dylib. The packaged
+in an arm64 application or app extension built with a debug dylib, or a standalone
+arm64 macOS dynamic framework. The packaged
 hosts cover iOS 18.4+, tvOS 18.4+, visionOS 2.4+, and watchOS 11.4+ Simulators,
 plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
 The host builds the active scheme through Xcode's build engine, selects the
