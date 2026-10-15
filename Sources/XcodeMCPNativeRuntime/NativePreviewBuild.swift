@@ -514,7 +514,25 @@ extension NativePreviewBuild {
         return try unsafe getter.unsafeInvoke(on: value)
     }
 
-    private func decodePreviewValue(_ data: Data, named name: String) async throws -> NativeSwiftValue {
+    func isWidgetPreview(metadata: Data) async throws -> Bool {
+        let metadata = try await decodePreviewValue(metadata, named: "PreviewMetadata")
+        let domainType = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.PreviewContentDomain",
+            in: .path(installation.framework("PreviewsMessagingHost", in: "SharedFrameworks")))
+        let domain = try await sourceGetter(metadata,
+            "contentDomain.getter : PreviewsMessagingHost.PreviewContentDomain", resultType: domainType)
+        let widget = try domainType.makeEnumCase(named: "widget")
+        return try domain.withCopy { value in
+            guard let value = value as? any Equatable else {
+                throw NativeRuntimeError.unsupportedContract("The native preview content domain is not Equatable")
+            }
+            func compare<Value: Equatable>(_ value: Value) throws -> Bool {
+                try widget.withCopy { $0 as? Value == value }
+            }
+            return try _openExistential(value, do: compare)
+        }
+    }
+
+    func decodePreviewValue(_ data: Data, named name: String) async throws -> NativeSwiftValue {
         guard let dictionary = try unsafe PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
             throw NativeRuntimeError.invocation("The preview metadata is not a serializable dictionary")
         }

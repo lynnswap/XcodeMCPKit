@@ -11,9 +11,7 @@ func makeClockKitPreview(from preview: SwiftUI._Preview, request: PreviewRendere
     guard let context = preview.context else { return nil }
     // Watch's native metadata treats legacy contexts as complications unless
     // the WidgetKit context supplies a different content category.
-    do {
-        guard try await legacyWidgetCategory(context) == nil else { return nil }
-    } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
+    guard try await legacyPreviewContextCategory(context) == nil else { return nil }
     let timeline = _ComplicationPreviewContext._previewTimeline(from: preview)
     let runtime = ABIRuntime.shared
     let symbol = try await runtime.resolve(

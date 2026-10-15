@@ -1,5 +1,16 @@
 import Foundation
 
+package enum PreviewRendererNativeSource: Codable, Sendable {
+    case providerMetadata(extensionIdentifier: String, providerName: String)
+    case preview(extensionIdentifier: String, specification: Data, metadata: Data, variantOverrides: [String: String])
+
+    package var extensionIdentifier: String {
+        switch self {
+        case .providerMetadata(let identifier, _), .preview(let identifier, _, _, _): identifier
+        }
+    }
+}
+
 package struct PreviewRendererRequest: Codable, Sendable {
     package static let displayVariantValues: [String: [String]] = [
         "Color Scheme": ["Light Appearance", "Dark Appearance"],
@@ -32,6 +43,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var activityViewContext: String?
     package var activityToggleState: Bool?
     package var appName: String?
+    package var nativeSource: PreviewRendererNativeSource?
     package var metadataOnly: Bool?
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
@@ -41,7 +53,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
                  programRootNames: [String]? = nil,
                  displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
                  activityViewContext: String? = nil, activityToggleState: Bool? = nil,
-                 appName: String? = nil, metadataOnly: Bool? = nil) {
+                 appName: String? = nil, nativeSource: PreviewRendererNativeSource? = nil, metadataOnly: Bool? = nil) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
         self.fileName = fileName
@@ -61,6 +73,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.activityViewContext = activityViewContext
         self.activityToggleState = activityToggleState
         self.appName = appName
+        self.nativeSource = nativeSource
         self.metadataOnly = metadataOnly
     }
 

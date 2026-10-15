@@ -1,5 +1,6 @@
 #if os(watchOS) && targetEnvironment(simulator)
 import CoreGraphics
+import Darwin
 import DeveloperToolsSupport
 import Foundation
 import ImageIO
@@ -9,6 +10,22 @@ import WatchKit
 import XcodeMCPWire
 
 @main
+@MainActor
+enum PreviewRendererWatchMain {
+    static func main() async {
+        do {
+            if let directory = try nativePreviewServiceResultDirectory() {
+                try await writeNativeWidgetPreviewResult(to: directory)
+                return
+            }
+        } catch {
+            try? FileHandle.standardError.write(contentsOf: Data("Preview result could not be written: \(error)\n".utf8))
+            exit(1)
+        }
+        PreviewRendererWatch.main()
+    }
+}
+
 struct PreviewRendererWatch: App {
     var body: some Scene {
         WindowGroup {
