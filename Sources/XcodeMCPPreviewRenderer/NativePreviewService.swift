@@ -395,7 +395,7 @@ final class NativePreviewService {
         return try await nativeLegacyPreviewMetadata(description: description)
     }
 
-    func relaunch(extensionIdentifier: String, localization: String?) async throws -> Int32 {
+    func relaunch(extensionIdentifier: String, localization: String?, environment: [String: String]) async throws -> Int32 {
         let bundleType = try await messagingType("AgentDescriptor.Bundle")
         let descriptorType = try await messagingType("AgentDescriptor")
         let roleType = try await messagingType("PreviewAgentRole")
@@ -439,7 +439,7 @@ final class NativePreviewService {
         let binary = try unsafe getBinary.unsafeInvoke()
         let targets = try await emptyArray(element: targetType)
         let token = try await ownedPreviewValue(Optional<audit_token_t>.none)
-        let environment = try await ownedPreviewValue(["XCODE_RUNNING_FOR_PREVIEWS": "1"])
+        let environment = try await ownedPreviewValue(environment.merging(["XCODE_RUNNING_FOR_PREVIEWS": "1"], uniquingKeysWith: { _, new in new }))
         let arguments = try await ownedPreviewValue(Self.launchArguments(localization: localization))
         let makeLaunch = try await launchType.resolveInitializer(
             named: "init(workspaceID: Swift.String, agentDescriptor: PreviewsMessagingOS.AgentDescriptor, agentRole: PreviewsMessagingOS.PreviewAgentRole, agentBootstrapMode: PreviewsMessagingOS.PreviewAgentBootstrapMode, environment: [Swift.String : Swift.String], arguments: [Swift.String], processType: PreviewsMessagingOS.ProcessType, binaryType: PreviewsMessagingOS.BinaryType, targetDescriptions: [PreviewsMessagingOS.BuiltTargetDescription], hostAuditToken: __C.audit_token_t?) -> PreviewsMessagingOS.LaunchPayload",

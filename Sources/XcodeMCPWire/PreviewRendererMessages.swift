@@ -44,6 +44,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var activityToggleState: Bool?
     package var appName: String?
     package var nativeSource: PreviewRendererNativeSource?
+    package var nativeEnvironment: [String: String]?
     package var metadataOnly: Bool?
     package var isLegacyComplication: Bool?
 
@@ -54,7 +55,8 @@ package struct PreviewRendererRequest: Codable, Sendable {
                  programRootNames: [String]? = nil,
                  displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
                  activityViewContext: String? = nil, activityToggleState: Bool? = nil,
-                 appName: String? = nil, nativeSource: PreviewRendererNativeSource? = nil, metadataOnly: Bool? = nil,
+                 appName: String? = nil, nativeSource: PreviewRendererNativeSource? = nil, nativeEnvironment: [String: String]? = nil,
+                 metadataOnly: Bool? = nil,
                  isLegacyComplication: Bool? = nil) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
@@ -76,6 +78,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.activityToggleState = activityToggleState
         self.appName = appName
         self.nativeSource = nativeSource
+        self.nativeEnvironment = nativeEnvironment
         self.metadataOnly = metadataOnly
         self.isLegacyComplication = isLegacyComplication
     }

@@ -390,7 +390,7 @@ struct NativePreviewCorrectionTests {
         extern "C" int archive_dependency_value(void) { return (int)std::string("x").size(); }
         """.utf8).write(to: staticCode)
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang++", "-target", NativePreviewPlatform.macOS.triple,
-            "-c", staticCode.path, "-o", staticObject.path])
+            "-fsanitize=address", "-c", staticCode.path, "-o", staticObject.path])
         let staticSwiftCode = root.appendingPathComponent("StaticDependency.swift")
         let staticSwiftObject = root.appendingPathComponent("StaticDependencySwift.o")
         try Data("""
@@ -433,7 +433,7 @@ struct NativePreviewCorrectionTests {
         let target = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
             sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: command,
             linkerWorkingDirectory: root.path, objectFiles: [object], sourceFiles: [code], debugDylibEnabled: false, isRunnable: false,
-            compileCommandLine: compileCommand)
+            compileCommandLine: compileCommand, enableAddressSanitizer: true)
         let original = try Data(contentsOf: binary)
         let originalSupport = try Data(contentsOf: support)
         let originalDependency = try Data(contentsOf: dependencyBinary)
@@ -444,7 +444,11 @@ struct NativePreviewCorrectionTests {
         try Data("""
         #include <dlfcn.h>
         #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
         int main(int argc, char **argv) {
+            if (!dlsym(RTLD_DEFAULT, "__asan_init") || !getenv("ASAN_OPTIONS") ||
+                strcmp(getenv("ASAN_OPTIONS"), "color=never:external_symbolizer_path='':abort_on_error=1")) return 2;
             void *image = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
             if (!image) { fputs(dlerror(), stderr); return 1; }
             int (*value)(void) = dlsym(image, "static_preview_value");
@@ -474,7 +478,13 @@ struct NativePreviewCorrectionTests {
         #expect(symbols.contains("_main"))
         try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: app, platform: .macOS, process: process)
         let stagedExecutable = NativePreviewPlatform.macOS.executableDirectory(in: app).appendingPathComponent(executable.lastPathComponent)
-        #expect(try previewBinaryOutput(stagedExecutable.path, [image.path]) == "32\n")
+        let runtime = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang",
+            "-print-file-name=libclang_rt.asan_osx_dynamic.dylib"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = try await process.run(stagedExecutable.path, [image.path], environment: [
+            "ASAN_OPTIONS": "color=never:external_symbolizer_path='':abort_on_error=1",
+            "DYLD_INSERT_LIBRARIES": runtime,
+        ])
+        #expect(output == "32\n")
         #expect(try Data(contentsOf: stagedExecutable) == helperBytes)
         #expect(try Data(contentsOf: binary) == original)
         #expect(try Data(contentsOf: support) == originalSupport)
