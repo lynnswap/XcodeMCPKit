@@ -3,16 +3,18 @@ set -euo pipefail
 
 configuration=debug
 platform=iphonesimulator
+architecture=arm64
 output=""
 developer_dir="${DEVELOPER_DIR:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --platform) platform="${2:?Missing platform}"; shift 2 ;;
+    --architecture) architecture="${2:?Missing architecture}"; shift 2 ;;
     --configuration) configuration="${2:?Missing configuration}"; shift 2 ;;
     --output) output="${2:?Missing output directory}"; shift 2 ;;
     --developer-dir) developer_dir="${2:?Missing developer directory}"; shift 2 ;;
     -h|--help)
-      echo 'Usage: scripts/build-preview-renderer.sh [--platform iphonesimulator|appletvsimulator|xrsimulator|watchsimulator|macosx|maccatalyst] [--configuration debug|release] [--output directory] [--developer-dir path]'
+      echo 'Usage: scripts/build-preview-renderer.sh [--platform iphonesimulator|appletvsimulator|xrsimulator|watchsimulator|macosx|maccatalyst] [--architecture arm64|x86_64] [--configuration debug|release] [--output directory] [--developer-dir path]'
       exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -26,16 +28,16 @@ if [[ -z "$developer_dir" ]]; then developer_dir="$(/usr/bin/xcode-select -p)"; 
 if [[ "$developer_dir" == *.app || "$developer_dir" == *.app/ ]]; then
   developer_dir="${developer_dir%/}/Contents/Developer"
 fi
-case "$platform" in
-  iphonesimulator) sdk_name=iphonesimulator; triple=arm64-apple-ios18.4-simulator ;;
-  appletvsimulator) sdk_name=appletvsimulator; triple=arm64-apple-tvos18.4-simulator ;;
-  xrsimulator) sdk_name=xrsimulator; triple=arm64-apple-xros2.4-simulator ;;
-  watchsimulator) sdk_name=watchsimulator; triple=arm64-apple-watchos11.4-simulator ;;
-  macosx) sdk_name=macosx; triple=arm64-apple-macos15.4 ;;
-  maccatalyst) sdk_name=macosx; triple=arm64-apple-ios18.4-macabi ;;
-  *) echo "Unknown preview platform: $platform" >&2; exit 1 ;;
+case "$platform:$architecture" in
+  iphonesimulator:arm64) sdk_name=iphonesimulator; triple=arm64-apple-ios18.4-simulator ;;
+  appletvsimulator:arm64) sdk_name=appletvsimulator; triple=arm64-apple-tvos18.4-simulator ;;
+  xrsimulator:arm64) sdk_name=xrsimulator; triple=arm64-apple-xros2.4-simulator ;;
+  watchsimulator:arm64) sdk_name=watchsimulator; triple=arm64-apple-watchos11.4-simulator ;;
+  macosx:arm64|macosx:x86_64) sdk_name=macosx; triple="$architecture-apple-macos15.4" ;;
+  maccatalyst:arm64|maccatalyst:x86_64) sdk_name=macosx; triple="$architecture-apple-ios18.4-macabi" ;;
+  *) echo "Unsupported preview platform and architecture: $platform $architecture" >&2; exit 1 ;;
 esac
-if [[ -z "$output" ]]; then output="$repo_root/.build/native/PreviewRenderer/$platform-arm64"; fi
+if [[ -z "$output" ]]; then output="$repo_root/.build/native/PreviewRenderer/$platform-$architecture"; fi
 if [[ "$output" != /* ]]; then output="$PWD/$output"; fi
 swift_executable="$(DEVELOPER_DIR="$developer_dir" xcrun --find swift)"
 sdk="$(DEVELOPER_DIR="$developer_dir" xcrun --sdk "$sdk_name" --show-sdk-path)"
@@ -51,6 +53,7 @@ if [[ "$platform" == maccatalyst ]]; then
 fi
 # Cross-building must not retarget the installer's macOS configuration symlinks.
 scratch_path="$repo_root/.build/preview-renderer-$platform"
+if [[ "$architecture" != arm64 ]]; then scratch_path="$scratch_path-$architecture"; fi
 
 cd "$repo_root"
 DEVELOPER_DIR="$developer_dir" "$swift_executable" build -c "$configuration" --disable-sandbox \

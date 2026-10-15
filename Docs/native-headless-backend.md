@@ -142,10 +142,15 @@ retrieval does not establish online/account-dependent retrieval.
 
 `RenderPreview` uses packaged platform renderers for SwiftUI, UIKit, and AppKit
 `#Preview` definitions, SwiftUI `PreviewProvider` definitions, and iOS and watchOS WidgetKit previews
-in an arm64 application or app extension built with a debug dylib, or a standalone
-arm64 dynamic framework. The packaged
+in an application or app extension built with a debug dylib, or a standalone
+dynamic framework. The packaged
 hosts cover iOS 18.4+, tvOS 18.4+, visionOS 2.4+, and watchOS 11.4+ Simulators,
 plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
+The renderers support arm64 on these platforms and x86_64 on macOS and Mac Catalyst, including
+an eligible Rosetta destination on an Apple silicon Mac. The selected source
+build determines the renderer architecture.
+For a universal build, the destination's architecture selects the source slice
+before the renderer looks for a compatible application host.
 The host builds the active scheme through Xcode's build engine, selects the
 definition in source order, including files that mix providers and registries.
 It resolves registry metadata or a provider's type in the built image, including linked embedded
@@ -167,15 +172,16 @@ lookups; `Bundle.main` identifies the helper application. Linked frameworks and
 dynamic libraries from the same native build are copied with their resources,
 following the source image's transitive Mach-O dependencies.
 Standalone framework image and resource parity was verified on macOS 26.6.2 with Xcode 27.1.
-Source and host records must use the same supported platform and arm64 architecture
+Source and host records must use the same supported platform and architecture
 before checking for ambiguity. An extension's own bundle supplies its resources,
 identifier, and entitlements. A containing application's shared Frameworks are
 copied when its embedded extension binary matches the source's build UUID;
 the extension's own Frameworks take precedence. The containing application's
 root resources and application lifecycle are not used.
-Embedded runtime images are matched to the built source's arm64 build UUID,
-with exact byte comparison when UUIDs are absent. A shared filename alone
+Embedded runtime images are matched to the selected architecture's build UUID,
+with exact slice byte comparison when UUIDs are absent. A shared filename alone
 does not establish that an application contains the source binary.
+Code-signing and Simulator entitlements are read from that architecture's slice.
 The renderer loads the source's embedded runtime image by its bundle-relative
 path, including images that the application's debug dylib does not load itself.
 This route does not contact `previewsd` or require its Apple-restricted entitlement.

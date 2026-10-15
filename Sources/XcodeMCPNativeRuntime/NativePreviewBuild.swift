@@ -9,6 +9,7 @@ final class NativePreviewBuild {
     struct Result {
         let targets: [Target]
         let destinationIdentifier: String
+        let destinationArchitecture: String?
         let previewDestinationIdentifier: String
         let platformIdentifier: String?
         let previewPlatform: NativePreviewPlatform?
@@ -144,7 +145,9 @@ final class NativePreviewBuild {
         let descriptions = try unsafe await describe.unsafeInvoke(workspace, priorBuild, selectedBuildables)
         try Task.checkCancellation()
         let records = try await targets(descriptions, image: image, runnable: runnable)
-        return Result(targets: records, destinationIdentifier: info.identifier, previewDestinationIdentifier: info.previewIdentifier,
+        return Result(targets: records, destinationIdentifier: info.identifier,
+                      destinationArchitecture: try optionalString(destination, selector: "targetArchitecture"),
+                      previewDestinationIdentifier: info.previewIdentifier,
                       platformIdentifier: info.platformIdentifier, previewPlatform: info.previewPlatform,
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
     }
