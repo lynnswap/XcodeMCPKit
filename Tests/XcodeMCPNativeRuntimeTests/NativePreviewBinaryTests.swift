@@ -5,7 +5,8 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewBinaryTests {
-    @Test func signedAndThinnedCopiesRetainBinaryIdentity() throws {
+    @Test(arguments: ["arm64", "x86_64"])
+    func signedAndThinnedCopiesRetainBinaryIdentity(architecture: String) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -16,11 +17,11 @@ struct NativePreviewBinaryTests {
         try compilePreviewLibrary(at: arm64)
         try compilePreviewLibrary(at: intel, architecture: "x86_64")
         try previewBinaryOutput("/usr/bin/xcrun", ["lipo", "-create", arm64.path, intel.path, "-output", universal.path])
-        try previewBinaryOutput("/usr/bin/xcrun", ["lipo", universal.path, "-thin", "arm64", "-output", signed.path])
+        try previewBinaryOutput("/usr/bin/xcrun", ["lipo", universal.path, "-thin", architecture, "-output", signed.path])
         try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", signed.path])
 
-        #expect(try Data(contentsOf: arm64) != Data(contentsOf: signed))
-        #expect(try NativePreviewBinary.matches(universal, signed))
+        #expect(try Data(contentsOf: architecture == "arm64" ? arm64 : intel) != Data(contentsOf: signed))
+        #expect(try NativePreviewBinary.matches(universal, signed, architecture: architecture))
     }
 
     @Test func uuidlessLibrariesMatchOnlyExactCopies() throws {
@@ -34,8 +35,8 @@ struct NativePreviewBinaryTests {
         try FileManager.default.copyItem(at: source, to: copy)
         try compilePreviewLibrary(at: other, value: 1, uuid: false)
 
-        #expect(try NativePreviewBinary.matches(source, copy))
-        #expect(try !NativePreviewBinary.matches(source, other))
+        #expect(try NativePreviewBinary.matches(source, copy, architecture: "arm64"))
+        #expect(try !NativePreviewBinary.matches(source, other, architecture: "arm64"))
     }
 }
 

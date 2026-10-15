@@ -4,9 +4,9 @@ import MachOKit
 @safe
 @MainActor
 enum NativePreviewBinary {
-    static func matches(_ source: URL, _ candidate: URL) throws -> Bool {
-        guard let sourceFile = try arm64File(at: source),
-              let candidateFile = try arm64File(at: candidate) else { return false }
+    static func matches(_ source: URL, _ candidate: URL, architecture: String) throws -> Bool {
+        guard let sourceFile = try file(at: source, architecture: architecture),
+              let candidateFile = try file(at: candidate, architecture: architecture) else { return false }
         if let sourceUUID = sourceFile.loadCommands.info(of: LoadCommand.uuid)?.uuid,
            let candidateUUID = candidateFile.loadCommands.info(of: LoadCommand.uuid)?.uuid {
             // Signing and thinning can change bytes while preserving the built image's UUID.
@@ -16,12 +16,18 @@ enum NativePreviewBinary {
             == Data(contentsOf: candidate, options: .mappedIfSafe)
     }
 
-    private static func arm64File(at url: URL) throws -> MachOFile? {
+    static func file(at url: URL, architecture: String) throws -> MachOFile? {
+        let cpuType: CPUType
+        switch architecture {
+        case "arm64": cpuType = .arm64
+        case "x86_64": cpuType = .x86_64
+        default: return nil
+        }
         let files: [MachOFile]
         switch try MachOKit.loadFromFile(url: url) {
         case .machO(let file): files = [file]
         case .fat(let file): files = try file.machOFiles()
         }
-        return files.first { $0.header.cpuType == .arm64 }
+        return files.first { $0.header.cpuType == cpuType }
     }
 }

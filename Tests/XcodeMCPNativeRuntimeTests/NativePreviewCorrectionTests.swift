@@ -163,6 +163,24 @@ struct NativePreviewCorrectionTests {
         #expect(selected.source.moduleName == feature.moduleName)
     }
 
+    @Test func macSharedLibraryUsesSameArchitectureHost() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("PackageView.swift")
+        let product = root.appendingPathComponent("FixturePackage.o")
+        let hosts = ["arm64", "x86_64"].map { architecture in
+            NativePreviewBuild.Target(moduleName: architecture, buildableName: "FixtureHost.app",
+                sdkRoot: "macosx", sdkVariant: nil, architecture: architecture,
+                linkCommandLine: ["-o", root.appendingPathComponent("\(architecture).app/Contents/MacOS/FixtureHost.debug.dylib").path, product.path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
+        }
+        let sourceTarget = NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
+            sdkRoot: "macosx", sdkVariant: nil, architecture: "x86_64", linkCommandLine: ["-o", product.path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [sourceTarget], source: source, platform: .macOS)
+        #expect(selected.source.architecture == "x86_64")
+        #expect(selected.host.architecture == "x86_64")
+    }
+
     @Test(arguments: [true, false])
     func frameworkHostMustEmbedSourceBinary(embedded: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -345,9 +363,9 @@ struct NativePreviewCorrectionTests {
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [],
                 debugDylibEnabled: true, isRunnable: name != "Unselected")
         }
-        #expect(try NativePreviewCorrection.containingApp(for: output, targets: hosts)?.path
+        #expect(try NativePreviewCorrection.containingApp(for: output, targets: hosts, architecture: "arm64")?.path
             == root.appendingPathComponent("Matching.app").path)
-        #expect(try NativePreviewCorrection.containingApp(for: output, targets: [hosts[0]]) == nil)
+        #expect(try NativePreviewCorrection.containingApp(for: output, targets: [hosts[0]], architecture: "arm64") == nil)
     }
 
     @Test(arguments: [false, true])
