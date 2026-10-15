@@ -80,8 +80,8 @@ enum PreviewVerifierCommand {
                     throw VerifierFailure("--xcode-pid does not identify the Xcode selected by --developer-dir")
                 }
                 openedNativeDocument = true
-                try runProcess(executable: "/usr/bin/open", arguments: ["-g", "-a", xcode.path, project.path], currentDirectory: repository)
-                // open returns before Xcode creates the workspace window required by its MCP server.
+                // The native MCP server requires a last-active workspace window, so open the fixture in the foreground.
+                try runProcess(executable: "/usr/bin/open", arguments: ["-a", xcode.path, project.path], currentDirectory: repository)
                 let windowReady = """
                 tell application \(appleScriptString(xcode.path))
                     set deadline to (current date) + 45
