@@ -362,7 +362,8 @@ struct NativePreviewCorrectionTests {
         let support = root.appendingPathComponent("Vendor/libSupport.dylib")
         try compilePreviewLibrary(at: support, value: 21, platform: .macOS, installName: "@rpath/libSupport.dylib")
         try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", support.path])
-        let dependency = root.appendingPathComponent("Dependency.framework")
+        let frameworkSearchPath = root.appendingPathComponent("FrameworkVendor")
+        let dependency = frameworkSearchPath.appendingPathComponent("Dependency.framework")
         let dependencyBinary = dependency.appendingPathComponent("Dependency")
         let dependencyModule = dependency.appendingPathComponent("Modules/Dependency.swiftmodule")
         try FileManager.default.createDirectory(at: dependencyModule, withIntermediateDirectories: true)
@@ -407,8 +408,9 @@ struct NativePreviewCorrectionTests {
             dependencyValue() + supportValue() + archiveValue()
         }
         """.utf8).write(to: swiftCode)
-        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "swiftc", "-parse-as-library", "-c",
-            "-target", NativePreviewPlatform.macOS.triple, "-F", root.path, swiftCode.path, "-o", swiftObject.path])
+        let compileCommand = ["swiftc", "-parse-as-library", "-c", "-target", NativePreviewPlatform.macOS.triple,
+            "-F", frameworkSearchPath.path, swiftCode.path, "-o", swiftObject.path]
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx"] + compileCommand)
         // Xcode's archive command keeps its Products -L but has no framework link step or -F.
         let command = ["libtool", "-static", "-L" + root.path, "-L" + support.deletingLastPathComponent().path,
             object.path, swiftObject.path, staticArchive.path,
@@ -416,7 +418,8 @@ struct NativePreviewCorrectionTests {
         try previewBinaryOutput("/usr/bin/xcrun", command)
         let target = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
             sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: command,
-            linkerWorkingDirectory: root.path, objectFiles: [object], sourceFiles: [code], debugDylibEnabled: false, isRunnable: false)
+            linkerWorkingDirectory: root.path, objectFiles: [object], sourceFiles: [code], debugDylibEnabled: false, isRunnable: false,
+            compileCommandLine: compileCommand)
         let original = try Data(contentsOf: binary)
         let originalSupport = try Data(contentsOf: support)
         let originalDependency = try Data(contentsOf: dependencyBinary)
@@ -489,14 +492,16 @@ struct NativePreviewCorrectionTests {
         let sdk = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", platform.sdk, "--show-sdk-path"])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let support = URL(filePath: sdk).appendingPathComponent("System/iOSSupport")
-        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", platform.sdk, "swiftc", "-parse-as-library", "-c",
-            "-target", platform.triple, "-sdk", sdk, "-F", support.appendingPathComponent("System/Library/Frameworks").path,
-            "-I", support.appendingPathComponent("usr/include").path, code.path, "-o", object.path])
+        let compileCommand = ["swiftc", "-parse-as-library", "-c", "-target", platform.triple, "-sdk", sdk,
+            "-Fsystem", support.appendingPathComponent("System/Library/Frameworks").path,
+            "-I", support.appendingPathComponent("usr/include").path, code.path, "-o", object.path]
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", platform.sdk] + compileCommand)
         let command = ["libtool", "-static", "-L" + root.path, object.path, "-o", binary.path]
         try previewBinaryOutput("/usr/bin/xcrun", command)
         let target = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
             sdkRoot: sdk, sdkVariant: "iosmac", architecture: "arm64", linkCommandLine: command,
-            linkerWorkingDirectory: root.path, objectFiles: [object], sourceFiles: [code], debugDylibEnabled: false, isRunnable: false)
+            linkerWorkingDirectory: root.path, objectFiles: [object], sourceFiles: [code], debugDylibEnabled: false, isRunnable: false,
+            compileCommandLine: compileCommand)
         let original = try Data(contentsOf: binary)
         let app = root.appendingPathComponent("Preview.app")
         let frameworks = platform.frameworksDirectory(in: app)

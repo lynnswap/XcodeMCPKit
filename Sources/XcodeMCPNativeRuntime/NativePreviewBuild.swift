@@ -31,6 +31,7 @@ final class NativePreviewBuild {
         let sourceFiles: Set<URL>
         let debugDylibEnabled: Bool
         let isRunnable: Bool
+        var compileCommandLine: [String] = []
 
         var outputURL: URL? {
             guard let index = linkCommandLine.lastIndex(of: "-o"),
@@ -48,14 +49,8 @@ final class NativePreviewBuild {
         }
 
         func linkedInputs() throws -> (files: [URL], searchPaths: [(framework: Bool, url: URL)]) {
-            func url(for path: String) -> URL? {
-                if path.hasPrefix("/") { return URL(filePath: path) }
-                guard let linkerWorkingDirectory else { return nil }
-                return URL(filePath: path, relativeTo: URL(filePath: linkerWorkingDirectory, directoryHint: .isDirectory))
-                    .absoluteURL
-            }
             var inputs = linkCommandLine.compactMap { url(for: $0) }
-            var searchPaths: [(framework: Bool, url: URL)] = []
+            let searchPaths = searchPaths(in: linkCommandLine).map { (framework: $0.argument != "-L", url: $0.url) }
             var namedInputs: [(framework: Bool, name: String)] = []
             for index in linkCommandLine.indices {
                 let argument = linkCommandLine[index]
@@ -63,9 +58,6 @@ final class NativePreviewBuild {
                 if argument == "-filelist", let fileList = next.flatMap({ url(for: $0) }) {
                     let paths = try String(contentsOf: fileList, encoding: .utf8).split(whereSeparator: \.isNewline)
                     inputs += paths.compactMap { url(for: String($0)) }
-                } else if argument.hasPrefix("-F") || argument.hasPrefix("-L") {
-                    let path = argument.count == 2 ? next : String(argument.dropFirst(2))
-                    if let path, let url = url(for: path) { searchPaths.append((argument.hasPrefix("-F"), url)) }
                 } else if argument == "-framework", let next {
                     namedInputs.append((true, next))
                 } else if argument.hasPrefix("-l") {
@@ -83,6 +75,25 @@ final class NativePreviewBuild {
             }
             var seen: Set<URL> = []
             return (inputs.filter { seen.insert($0.resolvingSymlinksInPath()).inserted }, searchPaths)
+        }
+
+        func searchPaths(in command: [String]) -> [(argument: String, url: URL)] {
+            command.indices.compactMap { index in
+                let argument = command[index]
+                guard let option = ["-Fsystem", "-F", "-L"].first(where: { argument.hasPrefix($0) }) else { return nil }
+                let path: String
+                if argument == option {
+                    guard command.indices.contains(index + 1) else { return nil }
+                    path = command[index + 1]
+                } else { path = String(argument.dropFirst(option.count)) }
+                return url(for: path).map { (option, $0) }
+            }
+        }
+
+        private func url(for path: String) -> URL? {
+            if path.hasPrefix("/") { return URL(filePath: path) }
+            guard let linkerWorkingDirectory else { return nil }
+            return URL(filePath: path, relativeTo: URL(filePath: linkerWorkingDirectory, directoryHint: .isDirectory)).absoluteURL
         }
     }
 
@@ -122,7 +133,7 @@ final class NativePreviewBuild {
         return buildable.isEqual(runnable)
     }
 
-    func build(workspace: AnyObject, destination selection: DestinationSelection) async throws -> Result {
+    func build(workspace: AnyObject, destination selection: DestinationSelection, source: URL) async throws -> Result {
         try Task.checkCancellation()
         let info = selection.selected
         let destination = info.value
@@ -167,7 +178,8 @@ final class NativePreviewBuild {
             as: (@concurrent (AnyObject, AnyObject, NativeSwiftValue) async throws -> NativeSwiftValue).self)
         let descriptions = try unsafe await describe.unsafeInvoke(workspace, priorBuild, selectedBuildables)
         try Task.checkCancellation()
-        let records = try await targets(descriptions, image: image, runnable: runnable)
+        let records = try await targets(descriptions, image: image, runnable: runnable, priorBuild: priorBuild,
+            workspace: workspace, source: source, platform: info.previewPlatform)
         return Result(targets: records, destinationIdentifier: info.identifier,
                       previewDestinationIdentifier: info.previewIdentifier,
                       platformIdentifier: info.platformIdentifier, previewPlatform: info.previewPlatform,
@@ -237,7 +249,8 @@ final class NativePreviewBuild {
         return try unsafe subsections.unsafeInvoke().flatMap { try buildErrors(in: $0 as AnyObject) }
     }
 
-    private func targets(_ descriptions: NativeSwiftValue, image: URL, runnable: AnyObject?) async throws -> [Target] {
+    private func targets(_ descriptions: NativeSwiftValue, image: URL, runnable: AnyObject?, priorBuild: AnyObject,
+                         workspace: AnyObject, source: URL, platform: NativePreviewPlatform?) async throws -> [Target] {
         let type = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.IDEBuiltTargetDescription", in: .path(image))
         let receiver = try NativeType.opaque(named: type.name)
         let module = try await type.resolveGetter(named: "productModuleName", as: (() -> String?).self, receiverABI: receiver)
@@ -254,32 +267,100 @@ final class NativePreviewBuild {
             receiverABI: .opaque(named: fileType.name))
         let sources = try await fileType.resolveGetter(named: "sourceFiles.getter : Swift.Set<Foundation.URL>", as: (() -> NativePreviewBuildSources).self,
             receiverABI: .opaque(named: fileType.name))
-        return try descriptions.withCopy { value in
-            guard let entries = value as? [Any] else {
-                throw NativeRuntimeError.unsupportedContract("Native built target descriptions are not an array")
+        defer { withExtendedLifetime(descriptions) {} }
+        let entries = try descriptions.withCopy { value -> [(NSObject, [Any])] in
+            guard let entries = value as? [(NSObject, [Any])] else {
+                throw NativeRuntimeError.unsupportedContract("Native built target descriptions have an unsupported array or tuple")
             }
-            return try entries.flatMap { entry -> [Target] in
-                guard let (buildable, records) = entry as? (NSObject, [Any]) else {
-                    throw NativeRuntimeError.unsupportedContract("Native built target description has an unsupported tuple")
-                }
-                // The native build service groups these variants by target PIF GUID.
-                let isRunnable = Self.isRunnable(buildable, runnable: runnable)
-                return try records.map { record in
-                    let nativeFiles = try unsafe files.unsafeInvoke(on: record)
-                    let objectFiles = try nativeFiles.withCopy { values -> [(URL, Set<URL>)] in
-                        guard let values = values as? [Any] else {
-                            throw NativeRuntimeError.unsupportedContract("Native object file descriptions are not an array")
-                        }
-                        return try values.map { try unsafe (path.unsafeInvoke(on: $0).value, sources.unsafeInvoke(on: $0).value) }
+            return entries
+        }
+        var result: [Target] = []
+        var contexts: [(AnyObject, Any)] = []
+        for (buildable, records) in entries {
+            let isRunnable = Self.isRunnable(buildable, runnable: runnable)
+            for record in records {
+                let nativeFiles = try unsafe files.unsafeInvoke(on: record)
+                let objectFiles = try nativeFiles.withCopy { values -> [(URL, Set<URL>)] in
+                    guard let values = values as? [Any] else {
+                        throw NativeRuntimeError.unsupportedContract("Native object file descriptions are not an array")
                     }
-                    return try unsafe Target(moduleName: module.unsafeInvoke(on: record),
-                        buildableName: name.unsafeInvoke(on: record), sdkRoot: sdk.unsafeInvoke(on: record),
-                        sdkVariant: variant.unsafeInvoke(on: record), architecture: architecture.unsafeInvoke(on: record),
-                        linkCommandLine: command.unsafeInvoke(on: record), linkerWorkingDirectory: directory.unsafeInvoke(on: record),
-                        objectFiles: objectFiles.map(\.0), sourceFiles: Set(objectFiles.flatMap(\.1)),
-                        debugDylibEnabled: dylib.unsafeInvoke(on: record), isRunnable: isRunnable)
+                    return try values.map { try unsafe (path.unsafeInvoke(on: $0).value, sources.unsafeInvoke(on: $0).value) }
+                }
+                let target = try unsafe Target(moduleName: module.unsafeInvoke(on: record),
+                    buildableName: name.unsafeInvoke(on: record), sdkRoot: sdk.unsafeInvoke(on: record),
+                    sdkVariant: variant.unsafeInvoke(on: record), architecture: architecture.unsafeInvoke(on: record),
+                    linkCommandLine: command.unsafeInvoke(on: record), linkerWorkingDirectory: directory.unsafeInvoke(on: record),
+                    objectFiles: objectFiles.map(\.0), sourceFiles: Set(objectFiles.flatMap(\.1)),
+                    debugDylibEnabled: dylib.unsafeInvoke(on: record), isRunnable: isRunnable)
+                result.append(target)
+                contexts.append((buildable, record))
+            }
+        }
+        let sourcePath = source.resolvingSymlinksInPath().path
+        let hasStaticSource = try result.contains { target in
+            guard target.sourceFiles.contains(where: { $0.resolvingSymlinksInPath().path == sourcePath }),
+                  let output = target.outputURL, output.pathComponents.contains(where: { $0.hasSuffix(".framework") }) else { return false }
+            return try NativePreviewBinary.isStaticArchive(at: output)
+        }
+        if hasStaticSource, let platform {
+            let selection = try NativePreviewCorrection.selectTarget(result, source: source, platform: platform)
+            if selection.host.outputURL == selection.source.outputURL,
+               let index = result.firstIndex(where: { $0.outputURL == selection.source.outputURL && $0.architecture == selection.source.architecture }) {
+                let (buildable, record) = contexts[index]
+                let buildVariant = try await type.resolveGetter(named: "buildVariant", as: (() -> String).self, receiverABI: receiver)
+                result[index].compileCommandLine = try await compileCommandLine(for: result[index], buildable: buildable,
+                    buildVariant: unsafe buildVariant.unsafeInvoke(on: record), priorBuild: priorBuild,
+                    workspace: workspace, source: source)
+            }
+        }
+        return result
+    }
+
+    private func compileCommandLine(for target: Target, buildable: AnyObject, buildVariant: String,
+                                    priorBuild: AnyObject, workspace: AnyObject, source: URL) async throws -> [String] {
+        guard let service = try object(workspace, selector: "buildSystemService"),
+              let blueprint = try object(buildable, selector: "blueprint"),
+              let parametersClass = NSClassFromString("IDEBuildParameters"),
+              let pathClass = NSClassFromString("DVTFilePath") else {
+            throw NativeRuntimeError.unsupportedContract("The native build has no preview compilation context")
+        }
+        let path = try runtime.object(pathClass as AnyObject).resolveMethodAndWait(
+            selector: "filePathForPathString:", as: ((String) -> AnyObject).self)
+        let sourcePath = try unsafe path.unsafeInvoke(source.path)
+        let dictionary = try await runtime.resolveSwiftType(named: "Swift.Dictionary",
+            genericArguments: [.type(String.self), .type(parametersClass)])
+        // The concrete Dictionary parameter uses its frozen single-word ABI.
+        let valueABIs: [NativeSwiftType: NativeType] = [dictionary: .pointer]
+        let initialize = try await dictionary.resolveInitializer(
+            named: "init(minimumCapacity: Swift.Int) -> [A : B]",
+            as: ((Int) -> NativeSwiftValue).self, valueABIs: valueABIs)
+        let overrides = try unsafe initialize.unsafeInvoke(0)
+        let serviceType = try await runtime.resolveSwiftType(named: "IDEXCBuildSupportCore.IDEXCBuildSystemWorkspaceService",
+            in: .path(installation.framework("IDEXCBuildSupportCore", in: "PlugIns")))
+        let query = try await serviceType.resolveMethod(
+            named: "generatePreviewInfo(forRecentBuild: __C.IDEBuildOperation, blueprint: __C.IDEBlueprint, sourceFilePath: __C.DVTFilePath, thunkVariantSuffix: Swift.String, perTargetOverridingBuildParameters: [Swift.String : __C.IDEBuildParameters]) async throws -> [IDEFoundation.IDEPreviewInfoOutput]",
+            as: (@concurrent (AnyObject, AnyObject, AnyObject, String, NativeSwiftValue) async throws -> NativeSwiftValue).self,
+            valueABIs: valueABIs)
+        let outputType = try await runtime.resolveSwiftType(named: "IDEFoundation.IDEPreviewInfoOutput")
+        let sdk = try await outputType.resolveGetter(named: "sdkRoot.getter : Swift.String", as: (() -> String).self)
+        let variant = try await outputType.resolveGetter(named: "sdkVariant.getter : Swift.String?", as: (() -> String?).self)
+        let architecture = try await outputType.resolveGetter(named: "architecture.getter : Swift.String", as: (() -> String).self)
+        let build = try await outputType.resolveGetter(named: "buildVariant.getter : Swift.String", as: (() -> String).self)
+        let command = try await outputType.resolveGetter(named: "compileCommandLine.getter : [Swift.String]", as: (() -> [String]).self)
+        let suffix = "Preview_" + UUID().uuidString.replacingOccurrences(of: "-", with: "_")
+        let info = try unsafe await query.unsafeInvoke(on: service, priorBuild, blueprint, sourcePath, suffix, overrides)
+        try Task.checkCancellation()
+        return try info.withCopy { value in
+            guard let outputs = value as? [AnyObject] else {
+                throw NativeRuntimeError.unsupportedContract("Native preview compilation information is not an array")
+            }
+            for output in outputs {
+                if try unsafe sdk.unsafeInvoke(on: output) == target.sdkRoot && variant.unsafeInvoke(on: output) == target.sdkVariant
+                    && architecture.unsafeInvoke(on: output) == target.architecture && build.unsafeInvoke(on: output) == buildVariant {
+                    return try unsafe command.unsafeInvoke(on: output)
                 }
             }
+            throw NativeRuntimeError.unsupportedContract("Native preview compilation information did not include the static source target")
         }
     }
 

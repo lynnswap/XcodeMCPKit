@@ -341,7 +341,7 @@ final class NativePreviewCorrection {
         let workspace = prepared.workspace
         let location = prepared.location
         var destination = prepared.destination
-        var build = try await builder.build(workspace: workspace, destination: destination)
+        var build = try await builder.build(workspace: workspace, destination: destination, source: prepared.source)
         guard var platform = build.previewPlatform else { throw NativePipelineRequired() }
         var renderer = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
             platform: platform, process: process, metadataOnly: true)
@@ -361,7 +361,7 @@ final class NativePreviewCorrection {
         let unchanged = (destination.selected.value as? NSObject)?.isEqual(evaluated.selected.value) == true
         destination = evaluated
         if !unchanged {
-            build = try await builder.build(workspace: workspace, destination: destination)
+            build = try await builder.build(workspace: workspace, destination: destination, source: prepared.source)
             guard let selectedPlatform = build.previewPlatform else { throw NativePipelineRequired() }
             platform = selectedPlatform
         }
@@ -1024,19 +1024,9 @@ final class NativePreviewCorrection {
             archive.path, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive.path,
             "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
             "@rpath/" + image.lastPathComponent, "-o", image.path]
-        var searchPaths: [(framework: Bool, url: URL)] = []
-        if platform == .catalyst {
-            let support = URL(filePath: sdk).appendingPathComponent("System/iOSSupport")
-            searchPaths += [(true, support.appendingPathComponent("System/Library/Frameworks")),
-                            (false, support.appendingPathComponent("usr/lib"))]
-        }
         let inputs = try source.linkedInputs()
-        searchPaths += inputs.searchPaths
-        if let framework = frameworkBundle(containing: output) {
-            // Archive commands have no framework link step; Swift object autolinks still need their Products directory.
-            searchPaths.append((true, framework.deletingLastPathComponent()))
-        }
-        for path in searchPaths { arguments += [path.framework ? "-F" : "-L", path.url.path] }
+        let searchPaths = source.searchPaths(in: source.compileCommandLine) + source.searchPaths(in: source.linkCommandLine)
+        for path in searchPaths { arguments += [path.argument, path.url.path] }
         for input in inputs.files {
             var directory: ObjCBool = false
             if FileManager.default.fileExists(atPath: input.path, isDirectory: &directory), !directory.boolValue,
@@ -1049,7 +1039,7 @@ final class NativePreviewCorrection {
             let copiedFramework = platform.frameworksDirectory(in: app).appendingPathComponent(framework.lastPathComponent)
             _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", copiedFramework.path])
         }
-        return LinkedPreviewImage(url: image, searchPaths: searchPaths)
+        return LinkedPreviewImage(url: image, searchPaths: searchPaths.map { ($0.argument != "-L", $0.url) })
     }
 
     static func copyFrameworkDependencies(_ dependencies: FrameworkDependencies, into app: URL,
