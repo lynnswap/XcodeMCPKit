@@ -48,7 +48,7 @@ func nativeLegacyPreviewMetadata(typeName: String) async throws -> (metadata: Da
         let categoryType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.ContentCategory", in: image)
         let categoryDeclaration = "(extension in PreviewsOSSupportUI):DeveloperToolsSupport.PreviewSourceContentCategory.contentCategory.getter : PreviewsMessagingOS.ContentCategory"
         let support = try await runtime.resolve(.init(name: categoryDeclaration, language: .swift),
-            in: .framework(named: "PreviewsOSSupportUI"))
+            in: previewFrameworkImage(named: "PreviewsOSSupportUI"))
         let nativeCategoryGetter = try await sourceCategory.type.resolveGetter(named: categoryDeclaration,
             as: (() -> NativeSwiftValue).self, valueABIs: [categoryType: .opaque(named: categoryType.name)],
             receiverABI: .opaque(named: sourceCategory.type.name))
@@ -101,7 +101,7 @@ private func legacyPreviewOrientation(_ preview: SwiftUI._Preview) async throws 
     let source = try await ownedPreviewValue(preview.interfaceOrientation)
     let declaration = "(extension in PreviewsOSSupportUI):SwiftUI.InterfaceOrientation.previewOrientation.getter : PreviewsMessagingOS.PreviewTraits.Orientation"
     let support = try await ABIRuntime.shared.resolve(.init(name: declaration, language: .swift),
-        in: .framework(named: "PreviewsOSSupportUI"))
+        in: previewFrameworkImage(named: "PreviewsOSSupportUI"))
     let getter = try await source.type.resolveGetter(named: declaration, as: (() -> NativeSwiftValue).self,
         valueABIs: [type: .opaque(named: type.name)], receiverABI: .opaque(named: source.type.name))
     return try withExtendedLifetime(support) { try unsafe getter.unsafeInvoke(on: source) }
@@ -131,7 +131,7 @@ private func legacyComplicationCategory(_ sourceCategoryType: NativeSwiftType) a
 private func legacyWidgetCategory(_ context: any PreviewContext) async throws -> NativeSwiftValue? {
     // Native PreviewsInjection loads WidgetKit even for non-Widget contexts.
     _ = try await ABIRuntime.shared.resolveSwiftType(named: "WidgetKit.WidgetPreviewContextKey",
-        in: .framework(named: "WidgetKit"))
+        in: previewFrameworkImage(named: "WidgetKit"))
     guard let key = _typeByName("9WidgetKit0A17PreviewContextKeyV") as? any PreviewContextKey.Type else {
         throw NativePreviewPipelineRequired()
     }
