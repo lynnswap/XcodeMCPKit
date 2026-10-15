@@ -8,7 +8,6 @@ import WatchKit
 
 @MainActor
 func captureWatchPreview(view: AnyView, layout: DeveloperToolsSupport.PreviewLayout) async throws -> CGImage {
-    let runtime = ABIRuntime.shared
     let controller = _makeWatchKitUIHostingController(AnyView(view._statusBar(hidden: true)))
     // The native device entry point keeps WatchKit's safe-area layout active;
     // fixed and fitting previews use the unconstrained hosting layout.
@@ -16,6 +15,18 @@ func captureWatchPreview(view: AnyView, layout: DeveloperToolsSupport.PreviewLay
     case .device: controller._disableSafeArea = false
     default: controller._disableSafeArea = true
     }
+    return try await captureWatchPreview(controller: controller, layout: layout, hostingController: controller)
+}
+
+@MainActor
+func captureWatchPreview(controller: AnyObject) async throws -> CGImage {
+    try await captureWatchPreview(controller: controller, layout: .device, hostingController: nil)
+}
+
+@MainActor
+private func captureWatchPreview(controller: AnyObject, layout: DeveloperToolsSupport.PreviewLayout,
+                                 hostingController: (any _UIHostingViewable)?) async throws -> CGImage {
+    let runtime = ABIRuntime.shared
     // watchOS exposes SwiftUI's host protocol but marks UIKit controllers
     // unavailable. Use the existing ABI bridge for standard view containment.
     let applicationSymbol = try await runtime.resolve(
@@ -83,16 +94,16 @@ func captureWatchPreview(view: AnyView, layout: DeveloperToolsSupport.PreviewLay
         try unsafe didMove.unsafeInvoke(parent)
         try unsafe layoutIfNeeded.unsafeInvoke()
         try await Task.sleep(for: .milliseconds(500))
-        controller._render(seconds: 0)
-        if case .sizeThatFits = layout {
-            size = controller.sizeThatFits(in: screen)
+        hostingController?._render(seconds: 0)
+        if case .sizeThatFits = layout, let hostingController {
+            size = hostingController.sizeThatFits(in: screen)
             try requireWatchDrawableSize(size)
             let frame = CGRect(origin: .zero, size: size)
             try unsafe setFrame.unsafeInvoke(frame)
             try unsafe setBounds.unsafeInvoke(frame)
         }
         try unsafe layoutIfNeeded.unsafeInvoke()
-        controller._render(seconds: 0)
+        hostingController?._render(seconds: 0)
         let image = try await captureWatchHierarchy(host, size: size)
         try detach()
         withExtendedLifetime((applicationSymbol, controller, host, application, window, parent)) {}

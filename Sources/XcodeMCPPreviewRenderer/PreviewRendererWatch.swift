@@ -29,8 +29,21 @@ struct PreviewRendererWatch: App {
                 nativeProviderPreviewDescription: value.providerDescription))
             return
         }
-        let content = try await makeGeneralPreview(request)
-        let image = try await captureWatchPreview(view: content.view, layout: content.layout)
+        let legacyPreview = try request.providerTypeName.map { try makeLegacyViewPreview(typeName: $0, index: 0) }
+        let image: CGImage
+        var result: PreviewRendererResult
+        if let legacyPreview, let complication = try await makeClockKitPreview(from: legacyPreview, request: request) {
+            image = try await captureWatchPreview(controller: complication.controller)
+            result = complication.result
+        } else {
+            let content = try await makeGeneralPreview(request, legacyPreview: legacyPreview)
+            image = try await captureWatchPreview(view: content.view, layout: content.layout)
+            result = content.result
+            if case .device = content.layout {
+                result.usesDeviceLayout = true
+                result.interfaceOrientation = "portrait"
+            }
+        }
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
             throw PreviewRendererError("The preview host could not create a PNG destination")
@@ -38,12 +51,7 @@ struct PreviewRendererWatch: App {
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { throw PreviewRendererError("The preview host could not encode its snapshot") }
         try (data as Data).write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
-        var result = content.result
         result.snapshotName = "Preview.png"
-        if case .device = content.layout {
-            result.usesDeviceLayout = true
-            result.interfaceOrientation = "portrait"
-        }
         write(result)
     }
 

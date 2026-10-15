@@ -43,7 +43,7 @@ func previewRegistry(for request: PreviewRendererRequest) throws -> any PreviewR
 }
 
 @MainActor
-func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
+func makeGeneralPreview(_ request: PreviewRendererRequest, legacyPreview: SwiftUI._Preview? = nil) async throws ->
     (view: AnyView, layout: DeveloperToolsSupport.PreviewLayout, variants: [String: String], result: PreviewRendererResult) {
     let options = request.generalPreviewOptions(supportedVariants: supportedPreviewDisplayVariants)
     var variants = options.displayVariants
@@ -51,7 +51,7 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     let layout: DeveloperToolsSupport.PreviewLayout
     var result: PreviewRendererResult
     if let typeName = request.providerTypeName {
-        let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
+        let preview = try legacyPreview ?? makeLegacyViewPreview(typeName: typeName, index: 0)
         guard preview.context == nil else {
             throw NativePreviewPipelineRequired()
         }

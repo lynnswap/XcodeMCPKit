@@ -128,7 +128,7 @@ private func legacyComplicationCategory(_ sourceCategoryType: NativeSwiftType) a
 #endif
 
 @MainActor
-private func legacyWidgetCategory(_ context: any PreviewContext) async throws -> NativeSwiftValue? {
+func legacyWidgetCategory(_ context: any PreviewContext) async throws -> NativeSwiftValue? {
     // Native PreviewsInjection loads WidgetKit even for non-Widget contexts.
     _ = try await ABIRuntime.shared.resolveSwiftType(named: "WidgetKit.WidgetPreviewContextKey",
         in: previewFrameworkImage(named: "WidgetKit"))
