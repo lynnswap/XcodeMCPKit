@@ -1143,7 +1143,7 @@ final class NativePreviewCorrection {
             }
         }
         for path in source.searchPaths(in: source.compileCommandLine) + source.searchPaths(in: source.linkCommandLine) {
-            result += [path.argument, path.url.path]
+            result += [path.argument == "-L" ? "-L" : "-F", path.url.path]
         }
         return result + ["-Xlinker", "-force_load", "-Xlinker", archive.path, "-Xlinker", "-headerpad_max_install_names"]
     }

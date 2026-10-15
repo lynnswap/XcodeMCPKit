@@ -354,8 +354,10 @@ struct NativePreviewCorrectionTests {
         import SwiftUI
         #Preview { Text("Unreferenced preview member") }
         """.utf8).write(to: source)
+        let sdk = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "--show-sdk-path"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let compileCommand = ["swiftc", "-parse-as-library", "-c", "-module-name", "FixtureKit", "-target",
-            NativePreviewPlatform.macOS.triple, source.path, "-o", object.path]
+            NativePreviewPlatform.macOS.triple, "-Fsystem", URL(filePath: sdk).appendingPathComponent("System/Library/Frameworks").path,
+            source.path, "-o", object.path]
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx"] + compileCommand)
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "swiftc", "-parse-as-library", "-c",
             "-module-name", "FixtureKit", "-target", NativePreviewPlatform.macOS.triple, coreSource.path, "-o", core.path])
@@ -417,7 +419,6 @@ struct NativePreviewCorrectionTests {
         let listedObjects = [appObject.lastPathComponent, packageObject.lastPathComponent] + (forceLoad ? [] : [core.lastPathComponent])
         try Data((listedObjects.joined(separator: "\n") + "\n").utf8).write(to: fileList)
         let compiler = try previewBinaryOutput("/usr/bin/xcrun", ["--find", "clang"]).trimmingCharacters(in: .whitespacesAndNewlines)
-        let sdk = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "--show-sdk-path"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let swiftLibraries = URL(filePath: compiler).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("lib/swift/macosx")
         let dependencyInfo = root.appendingPathComponent("Host_dependency_info.dat")
         let ltoOutput = root.appendingPathComponent("Host_lto.o")
