@@ -73,7 +73,7 @@ private struct NativeWidgetPreview {
         let payload = try unsafe makePayload.unsafeInvoke(specification, effects)
         let encoded = try await service.encode(payload)
         let identifier = try unsafe makeIdentifier.unsafeInvoke(UUID().uuidString)
-        let initialUpdate = try await update(pid: pid, identifier: identifier,
+        let initialUpdate = try await service.makeUpdate(pid: pid, identifier: identifier,
             category: previewCategory, content: encoded.copy(), controls: nil)
         let initialReply = try await service.sendUpdate(initialUpdate)
         let initial = try await staticReply(initialReply)
@@ -86,7 +86,7 @@ private struct NativeWidgetPreview {
         if let controls = requested.states {
             // The native CanvasBox decodes incoming states only after its first
             // result has installed the actual control configuration.
-            let requestedUpdate = try await update(pid: pid, identifier: identifier,
+            let requestedUpdate = try await service.makeUpdate(pid: pid, identifier: identifier,
                 category: previewCategory, content: encoded, controls: controls)
             let reply = try await service.sendUpdate(requestedUpdate)
             final = try await staticReply(reply)
@@ -111,14 +111,14 @@ private struct NativeWidgetPreview {
     }
 
     private func variantCatalog(category: NativeSwiftValue) async throws -> WidgetVariantCatalog {
-        let strategy = try await archivingStrategy()
+        let parameter = try await service.archivingParameter()
         let request = try await service.messagingType("RequestPreviewVariantsPayload")
         let make = try await request.resolveInitializer(
-            named: "init(contentCategory: PreviewsMessagingOS.ContentCategory, archivingStrategy: PreviewsMessagingOS.ArchivingStrategy) -> PreviewsMessagingOS.RequestPreviewVariantsPayload",
+            named: "init(contentCategory: PreviewsMessagingOS.ContentCategory, \(parameter.label): \(parameter.value.type.name)) -> PreviewsMessagingOS.RequestPreviewVariantsPayload",
             as: ((NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
-            valueABIs: [category.type: .opaque(named: category.type.name), strategy.type: .opaque(named: strategy.type.name),
+            valueABIs: [category.type: .opaque(named: category.type.name), parameter.value.type: .opaque(named: parameter.value.type.name),
                         request: .opaque(named: request.name)])
-        let payload = try unsafe make.unsafeInvoke(category.copy(), strategy)
+        let payload = try unsafe make.unsafeInvoke(category.copy(), parameter.value)
         let encoded = try await service.encode(payload)
         let reply = try await service.send("variants", payload: encoded)
         let responseType = try await service.messagingType("PreviewVariantsPayload")
@@ -132,62 +132,6 @@ private struct NativeWidgetPreview {
         let getter = try await responseType.resolveGetter(named: "groups", as: (() -> NativeSwiftValue).self,
             valueABIs: [array: .pointer], receiverABI: .opaque(named: responseType.name))
         return try unsafe getter.unsafeInvoke(on: response).withCopy { try WidgetVariantCatalog(nativeGroups: $0) }
-    }
-
-    private func archivingStrategy() async throws -> NativeSwiftValue {
-        let type = try await service.messagingType("ArchivingStrategy")
-        let getter = try await type.resolveStaticGetter(named: "default", as: (() -> NativeSwiftValue).self,
-            valueABIs: [type: .opaque(named: type.name)])
-        return try unsafe getter.unsafeInvoke()
-    }
-
-    private func update(pid: Int32, identifier: NativeSwiftValue, category: NativeSwiftValue,
-                        content: NativeSwiftValue, controls: NativeSwiftValue?) async throws -> NativeSwiftValue {
-        let dynamicType = try await service.messagingType("DynamicLoadablePreviewProduct")
-        let staticType = try await service.messagingType("StaticLinkablePreviewProduct")
-        let incrementalType = try await service.messagingType("PreviewIncrementalUpdate")
-        let setupType = try await service.messagingType("UpdateSetupPayload")
-        let dynamic = try await service.emptyArray(element: dynamicType)
-        let products = try await service.emptyArray(element: staticType)
-        let increments = try await service.emptyArray(element: incrementalType)
-        let setupInitializer = try await setupType.resolveInitializer(
-            named: "init(dynamicProducts: [PreviewsMessagingOS.DynamicLoadablePreviewProduct], staticProducts: [PreviewsMessagingOS.StaticLinkablePreviewProduct], shellDidLoadStaticProducts: Swift.Bool, updates: [PreviewsMessagingOS.PreviewIncrementalUpdate], loggingOutputPath: Swift.String?) -> PreviewsMessagingOS.UpdateSetupPayload",
-            as: ((NativeSwiftValue, NativeSwiftValue, Bool, NativeSwiftValue, String?) -> NativeSwiftValue).self,
-            valueABIs: [dynamic.type: .pointer, products.type: .pointer, increments.type: .pointer,
-                        setupType: .opaque(named: setupType.name)])
-        let setup = try unsafe setupInitializer.unsafeInvoke(dynamic, products.copy(), false, increments, nil)
-        let seedType = try await service.messagingType("HostUpdateSeed")
-        let groupSeedType = try await service.messagingType("HostUpdateGroupSeed")
-        let seed = try await service.none(of: seedType)
-        let groupSeed = try await service.none(of: groupSeedType)
-        let previewType = try await service.messagingType("PreviewType")
-        let preview = try previewType.makeEnumCase(named: "static")
-        let box = try await service.messagingType("PlistValueBox")
-        let boxes = try await runtime.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(box)])
-        let states: NativeSwiftValue
-        if let controls { states = controls } else {
-            // The native first static update carries some([]) before the canvas
-            // discovers its control configuration.
-            let optionalBoxes = try await runtime.resolveSwiftType(named: "Swift.Optional", genericArguments: [.type(boxes)])
-            let factory = try await runtime.resolveSwiftFunction(
-                named: "XcodeMCPPreviewRenderer.previewServiceEmptyOptionalArray<A>() -> Swift.Array<A>?",
-                as: (() -> NativeSwiftValue).self, genericArguments: [.type(box)], valueABIs: [optionalBoxes: .pointer])
-            states = try unsafe factory.unsafeInvoke()
-        }
-        let strategy = try await archivingStrategy()
-        let type = try await service.messagingType("ShellUpdatePayload")
-        let make = try await type.resolveInitializer(
-            named: "init(pid: Swift.Int32, hostUpdateSeed: PreviewsMessagingOS.HostUpdateSeed?, hostUpdateGroupSeed: PreviewsMessagingOS.HostUpdateGroupSeed?, previewType: PreviewsMessagingOS.PreviewType, contentIdentifier: PreviewsMessagingOS.ContentIdentifier, contentCategory: PreviewsMessagingOS.ContentCategory, archivingStrategy: PreviewsMessagingOS.ArchivingStrategy, contentPayload: PreviewsFoundationOS.PropertyList, staticProducts: [PreviewsMessagingOS.StaticLinkablePreviewProduct], setupPayload: PreviewsMessagingOS.UpdateSetupPayload, controlStates: [PreviewsMessagingOS.PlistValueBox]?) -> PreviewsMessagingOS.ShellUpdatePayload",
-            as: ((Int32, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue,
-                  NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
-            valueABIs: [seed.type: .opaque(named: seed.type.name), groupSeed.type: .opaque(named: groupSeed.type.name),
-                preview.type: .opaque(named: preview.type.name), identifier.type: .opaque(named: identifier.type.name),
-                category.type: .opaque(named: category.type.name), strategy.type: .opaque(named: strategy.type.name),
-                service.propertyListType: .opaque(named: service.propertyListType.name), products.type: .pointer,
-                setupType: .opaque(named: setupType.name), states.type: .pointer, type: .opaque(named: type.name)])
-        let value = try unsafe make.unsafeInvoke(pid, seed, groupSeed, preview, identifier.copy(), category.copy(),
-            strategy, content, products, setup, states)
-        return try await service.encode(value)
     }
 
     private func staticReply(_ value: NativeSwiftValue) async throws -> NativeSwiftValue {
