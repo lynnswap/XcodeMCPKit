@@ -946,10 +946,8 @@ final class NativePreviewCorrection {
                         let relative = String(name.dropFirst("@rpath/".count))
                         let paths = searchPaths.filter { $0.framework == relative.contains(".framework/") }.map(\.url)
                         candidates = (runtimePaths + paths).map { $0.appendingPathComponent(relative) }
-                    } else if name.hasPrefix("@loader_path/") {
-                        candidates = runtimeURL(name, importer: current.library.output).map { [$0] } ?? []
                     } else {
-                        candidates = []
+                        candidates = runtimeURL(name, importer: current.library.output).map { [$0] } ?? []
                     }
                     // Prebuilt inputs have no native target record; their real load commands and linker paths locate them.
                     for candidate in candidates {

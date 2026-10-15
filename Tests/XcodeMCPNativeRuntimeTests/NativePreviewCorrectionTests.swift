@@ -374,6 +374,8 @@ struct NativePreviewCorrectionTests {
         let dependency = prebuilt ? products.appendingPathComponent("Dependency.framework/Versions/A/Dependency") : dependencyAlias
         let otherDependency = root.appendingPathComponent("OtherProducts/Dependency.framework/Dependency")
         let library = (prebuilt ? products : root).appendingPathComponent("Support/libSupport.dylib")
+        let absoluteSupport = products.appendingPathComponent("Vendor/libAbsoluteSupport.dylib")
+        let leaf = products.appendingPathComponent("Vendor/libLeaf.dylib")
         let unrelated = products.appendingPathComponent("libUnrelated.dylib")
         for binary in [source, dependency, otherDependency] {
             let resources = binary.deletingLastPathComponent().appendingPathComponent("Resources")
@@ -399,7 +401,12 @@ struct NativePreviewCorrectionTests {
             installName: "@rpath/Dependency.framework/Dependency")
         let libraryIdentifier = kind != .prebuilt
             ? root.appendingPathComponent("Install/libSupport.dylib").path : "@loader_path/../../../Support/libSupport.dylib"
-        try compilePreviewLibrary(at: library, platform: .macOS, installName: libraryIdentifier)
+        if prebuilt {
+            try compilePreviewLibrary(at: leaf, platform: .macOS, installName: "@rpath/libLeaf.dylib")
+            try compilePreviewLibrary(at: absoluteSupport, platform: .macOS, installName: absoluteSupport.path, libraries: [leaf])
+        }
+        try compilePreviewLibrary(at: library, platform: .macOS, installName: libraryIdentifier,
+            libraries: prebuilt ? [absoluteSupport] : [])
         try compilePreviewLibrary(at: unrelated, platform: .macOS, installName: "@rpath/libUnrelated.dylib")
         let sourceCode = root.appendingPathComponent("Feature.c")
         try Data("int preview_fixture_value(void) { return 0; }\n".utf8).write(to: sourceCode)
@@ -407,18 +414,23 @@ struct NativePreviewCorrectionTests {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let sdkAlias = root.appendingPathComponent("MacOSX.sdk")
         try FileManager.default.createSymbolicLink(at: sdkAlias, withDestinationURL: URL(filePath: sdk))
+        let unexportedSymbols = root.appendingPathComponent("FrameworkDependencyUnexportedSymbols.txt")
+        try Data().write(to: unexportedSymbols)
         let dependencyLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple,
             sourceCode.path, "-install_name", "@rpath/Dependency.framework/Dependency", "-o", dependency.path,
             "-L", library.deletingLastPathComponent().path, "-lSupport", "-Wl,-no_adhoc_codesign"]
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + dependencyLinkArguments)
         let sourceLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple,
             sourceCode.path, "-isysroot", sdkAlias.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path, "-Wl,-no_adhoc_codesign"]
-            + (prebuilt ? ["-Wl,-rpath,@loader_path/..", dependencyAlias.path] : ["-F", products.path, "-framework", "Dependency"])
+            + ["-Xlinker", "-unexported_symbols_list", "-Xlinker", unexportedSymbols.path]
+            + (prebuilt ? ["-Wl,-rpath,@loader_path/..", "-Wl,-rpath,@loader_path/../Vendor", dependencyAlias.path]
+                : ["-F", products.path, "-framework", "Dependency"])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + sourceLinkArguments)
-        for binary in [source, dependency, library, otherDependency] {
+        let originalBinaries = [source, dependency, library] + (prebuilt ? [absoluteSupport, leaf] : [])
+        for binary in originalBinaries + [otherDependency] {
             try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", binary.path])
         }
-        let original = try [source, dependency, library].map { try Data(contentsOf: $0) }
+        let original = try originalBinaries.map { try Data(contentsOf: $0) }
         func target(_ binary: URL, command: [String]? = nil) -> NativePreviewBuild.Target {
             NativePreviewBuild.Target(moduleName: binary.lastPathComponent, buildableName: binary.lastPathComponent,
                 sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: command ?? ["-o", binary.path],
@@ -456,7 +468,7 @@ struct NativePreviewCorrectionTests {
         #expect(!FileManager.default.fileExists(atPath: frameworks.appendingPathComponent(unrelated.lastPathComponent).path))
         try previewBinaryOutput(app.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer").path,
             [frameworks.appendingPathComponent("Feature.framework/Feature").path])
-        #expect(try [source, dependency, library].map { try Data(contentsOf: $0) } == original)
+        #expect(try originalBinaries.map { try Data(contentsOf: $0) } == original)
     }
 
     @Test func standaloneFrameworkTraversesInnerLibrariesWithoutCopyingItsBundleAgain() async throws {

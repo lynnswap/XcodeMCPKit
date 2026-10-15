@@ -28,8 +28,13 @@ enum NativePreviewBinary {
     }
 
     static func file(at url: URL) throws -> MachOFile? {
-        guard case .machO(let file) = try MachOKit.loadFromFile(url: url),
-              file.header.cpuType == .arm64 else { return nil }
+        // Linker operands include auxiliary files; MachOKit's magic read assumes four available bytes.
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        guard let data = try handle.read(upToCount: MemoryLayout<UInt32>.size), data.count == MemoryLayout<UInt32>.size,
+              data.withUnsafeBytes({ unsafe Magic(rawValue: $0.loadUnaligned(as: UInt32.self))?.is64BitMach }) == true else { return nil }
+        let file = try MachOFile(url: url)
+        guard file.header.cpuType == .arm64 else { return nil }
         return file
     }
 }
