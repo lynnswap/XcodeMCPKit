@@ -350,6 +350,8 @@ struct NativePreviewCorrectionTests {
         let marker = try #require(bundle.url(forResource: "Marker", withExtension: "txt"))
         #expect(try String(contentsOf: marker, encoding: .utf8) == "framework resource")
         #expect(Bundle(url: app)?.bundleIdentifier != identifier)
+        let expectedFamilies: [Int]? = platform == .iOS ? [1, 2] : nil
+        #expect(Bundle(url: app)?.infoDictionary?["UIDeviceFamily"] as? [Int] == expectedFamilies)
         #expect(Bundle(url: app)?.url(forResource: "Marker", withExtension: "txt") == nil)
         #expect(try NativePreviewCorrection.appName(product: framework, containingApp: nil, localization: "ja-JP") == "Framework JA")
         #expect(try Data(contentsOf: platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer")) == Data("renderer".utf8))
@@ -606,7 +608,7 @@ struct NativePreviewCorrectionTests {
         try sharedFramework.write(to: containing.appendingPathComponent("Frameworks/libShared.dylib"))
         try Data("renderer".utf8).write(to: helper.appendingPathComponent("XcodeMCPPreviewRenderer"))
         let info: [String: Any] = ["CFBundleIdentifier": "dev.lynnswap.Host.Extension", "CFBundleExecutable": "Extension",
-            "CFBundlePackageType": "XPC!", "MinimumOSVersion": "27.0",
+            "CFBundlePackageType": "XPC!", "MinimumOSVersion": "27.0", "UIDeviceFamily": [1],
             "NSExtension": ["NSExtensionPointIdentifier": "com.apple.widgetkit-extension"]]
         let originalInfo = try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
         try originalInfo.write(to: product.appendingPathComponent("Info.plist"))
@@ -622,6 +624,7 @@ struct NativePreviewCorrectionTests {
         let stagedInfo = try #require(rawInfo as? [String: Any])
         #expect(stagedInfo["CFBundleIdentifier"] as? String == (clientIdentifier ?? "dev.lynnswap.Host.Extension"))
         #expect(stagedInfo["CFBundlePackageType"] as? String == "APPL")
+        #expect(stagedInfo["UIDeviceFamily"] as? [Int] == [1])
         #expect(stagedInfo["NSExtension"] == nil)
         #expect(try Data(contentsOf: product.appendingPathComponent("Frameworks/libLocal.dylib")) == localFramework)
         #expect(try Data(contentsOf: containing.appendingPathComponent("Frameworks/libLocal.dylib")) == sharedFramework)

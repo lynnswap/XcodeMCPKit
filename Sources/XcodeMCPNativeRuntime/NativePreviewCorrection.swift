@@ -1002,7 +1002,7 @@ final class NativePreviewCorrection {
                            clientIdentifier: String? = nil, dependencies: FrameworkDependencies = FrameworkDependencies()) throws {
         let standaloneFramework = product.pathExtension == "framework"
         let frameworks = platform.frameworksDirectory(in: app)
-        let original: [String: Any]
+        var original: [String: Any]
         if standaloneFramework {
             try FileManager.default.createDirectory(at: platform.executableDirectory(in: app), withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
@@ -1012,6 +1012,14 @@ final class NativePreviewCorrection {
             }
             // The framework remains its own bundle; the renderer is only its executable host.
             original = ["CFBundleIdentifier": "dev.xcodemcp.PreviewClient." + UUID().uuidString, "CFBundleName": "Preview"]
+            switch platform {
+            case .iOS: original["UIDeviceFamily"] = [1, 2]
+            case .tvOS: original["UIDeviceFamily"] = [3]
+            case .watchOS: original["UIDeviceFamily"] = [4]
+            case .visionOS: original["UIDeviceFamily"] = [7]
+            case .catalyst: original["UIDeviceFamily"] = [2]
+            case .macOS: break
+            }
         } else {
             try FileManager.default.copyItem(at: product, to: app)
             original = try bundleInfo(at: app)
