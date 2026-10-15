@@ -80,7 +80,23 @@ enum PreviewVerifierCommand {
                     throw VerifierFailure("--xcode-pid does not identify the Xcode selected by --developer-dir")
                 }
                 openedNativeDocument = true
-                try runProcess(executable: "/usr/bin/open", arguments: ["-g", "-a", xcode.path, project.path], currentDirectory: repository)
+                // The native MCP server requires a last-active workspace window, so open the fixture in the foreground.
+                try runProcess(executable: "/usr/bin/open", arguments: ["-a", xcode.path, project.path], currentDirectory: repository)
+                let windowReady = """
+                tell application \(appleScriptString(xcode.path))
+                    set deadline to (current date) + 45
+                    repeat
+                        repeat with w in windows
+                            if exists document of w then
+                                if path of document of w is \(appleScriptString(project.path)) then return
+                            end if
+                        end repeat
+                        if (current date) >= deadline then error "Xcode did not open the owned fixture window within 45 seconds"
+                        delay 0.5
+                    end repeat
+                end tell
+                """
+                try runProcess(executable: "/usr/bin/osascript", arguments: ["-e", windowReady], currentDirectory: repository)
             } else {
                 let host = options.url("native-host") ?? repository.appendingPathComponent(".build/debug/XcodeMCPNativeHost.app")
                 if options.url("native-host") == nil {
