@@ -340,6 +340,16 @@ Simulator, containing application, extension process, and client application are
 removed by the existing Simulator cleanup owner; cleanup failures are reported
 alongside the original failure.
 
+On watchOS Simulator, legacy ClockKit complication `PreviewProvider` contexts
+supported by native RenderPreview use ClockKit's timeline construction and
+NanoTimeKit's watch-face controller. The renderer archives the source template
+before creating a display scene, then attaches the controller to the running
+watch application for capture. This preserves the source archive's environment,
+template, and face color. The result retains the source metadata and selected
+destination, with an empty display-variant catalog. The source layout controls
+device masking; fixed and fitting layouts retain the native watch-face snapshot
+size without the device mask.
+
 Live Activity previews use WidgetKit's archived activity views and native
 WidgetRenderer controllers. `previewVariantOverrides` selects `View Style`,
 `Activity View Context`, `Color Scheme`, and `Dynamic Type`; the response lists
