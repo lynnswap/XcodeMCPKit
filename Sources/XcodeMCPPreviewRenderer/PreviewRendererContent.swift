@@ -45,6 +45,13 @@ func previewRegistry(for request: PreviewRendererRequest) throws -> any PreviewR
 @MainActor
 func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     (view: AnyView, layout: DeveloperToolsSupport.PreviewLayout, variants: [String: String], result: PreviewRendererResult) {
+    #if os(visionOS)
+    guard request.displayVariantOverrides.isEmpty,
+          request.activityViewStyle.map(PreviewRendererRequest.activityViewStyles.contains) ?? true,
+          request.activityViewContext.map(PreviewRendererRequest.activityViewContexts.contains) ?? true else {
+        throw NativePreviewPipelineRequired()
+    }
+    #endif
     let options = request.generalPreviewOptions(supportedVariants: supportedPreviewDisplayVariants)
     var variants = options.displayVariants
     var view: AnyView
