@@ -226,7 +226,7 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.unsupportedContract("The preview target has no linked product")
         }
         let appProduct = Self.productBundle(containing: output)
-        let standaloneFramework = appProduct == nil && platform == .macOS ? Self.frameworkBundle(containing: output) : nil
+        let standaloneFramework = appProduct == nil ? Self.frameworkBundle(containing: output) : nil
         let product: URL
         if let appProduct {
             guard target.debugDylibEnabled else { throw NativePipelineRequired() }
@@ -609,7 +609,7 @@ final class NativePreviewCorrection {
                 }
             }
             selections += hosts.map { Selection(source: target, host: $0) }
-            if hosts.isEmpty, platform == .macOS, let sourceOutput,
+            if hosts.isEmpty, let sourceOutput,
                frameworkBundle(containing: sourceOutput) != nil,
                try NativePreviewBinary.isDynamicLibrary(at: sourceOutput) {
                 selections.append(Selection(source: target, host: target))

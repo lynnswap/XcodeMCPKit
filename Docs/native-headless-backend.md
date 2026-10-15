@@ -143,7 +143,7 @@ retrieval does not establish online/account-dependent retrieval.
 `RenderPreview` uses packaged platform renderers for SwiftUI, UIKit, and AppKit
 `#Preview` definitions, SwiftUI `PreviewProvider` definitions, and iOS and watchOS WidgetKit previews
 in an arm64 application or app extension built with a debug dylib, or a standalone
-arm64 macOS dynamic framework. The packaged
+arm64 dynamic framework. The packaged
 hosts cover iOS 18.4+, tvOS 18.4+, visionOS 2.4+, and watchOS 11.4+ Simulators,
 plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
 The host builds the active scheme through Xcode's build engine, selects the
@@ -160,12 +160,13 @@ precedence. When that runnable is not a compatible host, a unique compatible
 host can be used; ambiguous candidates use the native pipeline.
 Application target ordering does not determine the host. This selection does not
 recreate Xcode's complete source-specific preview dependency graph.
-When no compatible application or extension hosts a macOS dynamic framework,
+When no compatible application or extension hosts a dynamic framework,
 the renderer stages that framework inside its own helper application. The
 framework retains its bundle identifier and resources for `Bundle(for:)`
 lookups; `Bundle.main` identifies the helper application. Linked frameworks and
 dynamic libraries from the same native build are copied with their resources,
 following the source image's transitive Mach-O dependencies.
+Standalone framework image and resource parity was verified on macOS 26.6.2 with Xcode 27.1.
 Source and host records must use the same supported platform and arm64 architecture
 before checking for ambiguity. An extension's own bundle supplies its resources,
 identifier, and entitlements. A containing application's shared Frameworks are
