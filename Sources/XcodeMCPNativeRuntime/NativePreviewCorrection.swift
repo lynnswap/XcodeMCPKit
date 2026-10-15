@@ -897,8 +897,8 @@ final class NativePreviewCorrection {
         typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String], target: NativePreviewBuild.Target?)
         func library(at output: URL, target: NativePreviewBuild.Target? = nil) throws -> Library? {
             let output = output.standardizedFileURL
-            guard FileManager.default.fileExists(atPath: output.path),
-                  try output.resourceValues(forKeys: [.isDirectoryKey]).isDirectory != true,
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: output.path, isDirectory: &isDirectory), !isDirectory.boolValue,
                   let image = try NativePreviewBinary.dynamicLibrary(at: output) else { return nil }
             return (output, frameworkBundle(containing: output) ?? output, image.identifier, image.dependencies, image.rpaths, target)
         }

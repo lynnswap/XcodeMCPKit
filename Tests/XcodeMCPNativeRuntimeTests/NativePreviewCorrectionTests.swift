@@ -394,13 +394,17 @@ struct NativePreviewCorrectionTests {
         try compilePreviewLibrary(at: unrelated, platform: .macOS, installName: "@rpath/libUnrelated.dylib")
         let sourceCode = root.appendingPathComponent("Feature.c")
         try Data("int preview_fixture_value(void) { return 0; }\n".utf8).write(to: sourceCode)
+        let sdk = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "--show-sdk-path"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let sdkAlias = root.appendingPathComponent("MacOSX.sdk")
+        try FileManager.default.createSymbolicLink(at: sdkAlias, withDestinationURL: URL(filePath: sdk))
         let dependencyLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple,
             sourceCode.path, "-install_name", "@rpath/Dependency.framework/Dependency", "-o", dependency.path,
             "-L", library.deletingLastPathComponent().path, "-lSupport", "-Wl,-no_adhoc_codesign"]
             + (prebuilt ? ["-Wl,-rpath,@loader_path/../../Support"] : [])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + dependencyLinkArguments)
         let sourceLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple,
-            sourceCode.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path, "-Wl,-no_adhoc_codesign"]
+            sourceCode.path, "-isysroot", sdkAlias.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path, "-Wl,-no_adhoc_codesign"]
             + (prebuilt ? [dependency.path] : ["-F", products.path, "-framework", "Dependency"])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + sourceLinkArguments)
         for binary in [source, dependency, library, otherDependency] {
