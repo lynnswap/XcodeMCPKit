@@ -896,7 +896,7 @@ final class NativePreviewCorrection {
         typealias SearchPath = (framework: Bool, url: URL)
         typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String], target: NativePreviewBuild.Target?)
         func library(at output: URL, target: NativePreviewBuild.Target? = nil) throws -> Library? {
-            let output = output.standardizedFileURL
+            let output = output.resolvingSymlinksInPath()
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: output.path, isDirectory: &isDirectory), !isDirectory.boolValue,
                   let image = try NativePreviewBinary.dynamicLibrary(at: output) else { return nil }
@@ -918,7 +918,7 @@ final class NativePreviewCorrection {
                   let output = target.outputURL, productBundle(containing: output) == nil else { return nil }
             return try library(at: output, target: target)
         }
-        guard let output = source.outputURL?.standardizedFileURL,
+        guard let output = source.outputURL?.resolvingSymlinksInPath(),
               let sourceLibrary = libraries.first(where: { $0.output == output }) else { return FrameworkDependencies() }
         var pending = [(library: sourceLibrary, inheritedPaths: [URL](), inheritedLinkPaths: [SearchPath]())]
         var visited: Set<URL> = [output.resolvingSymlinksInPath()]

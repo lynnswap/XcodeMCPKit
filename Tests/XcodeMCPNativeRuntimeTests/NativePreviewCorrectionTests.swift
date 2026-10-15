@@ -370,9 +370,10 @@ struct NativePreviewCorrectionTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let products = root.appendingPathComponent("Products")
         let source = products.appendingPathComponent("Feature.framework/Feature")
-        let dependency = products.appendingPathComponent("Dependency.framework/Dependency")
+        let dependencyAlias = products.appendingPathComponent("Dependency.framework/Dependency")
+        let dependency = prebuilt ? products.appendingPathComponent("Dependency.framework/Versions/A/Dependency") : dependencyAlias
         let otherDependency = root.appendingPathComponent("OtherProducts/Dependency.framework/Dependency")
-        let library = root.appendingPathComponent("Support/libSupport.dylib")
+        let library = (prebuilt ? products : root).appendingPathComponent("Support/libSupport.dylib")
         let unrelated = products.appendingPathComponent("libUnrelated.dylib")
         for binary in [source, dependency, otherDependency] {
             let resources = binary.deletingLastPathComponent().appendingPathComponent("Resources")
@@ -382,6 +383,14 @@ struct NativePreviewCorrectionTests {
             try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
                 .write(to: resources.appendingPathComponent("Info.plist"))
         }
+        if prebuilt {
+            let framework = dependencyAlias.deletingLastPathComponent()
+            try FileManager.default.createSymbolicLink(atPath: framework.appendingPathComponent("Versions/Current").path,
+                withDestinationPath: "A")
+            try FileManager.default.createSymbolicLink(atPath: dependencyAlias.path, withDestinationPath: "Versions/Current/Dependency")
+            try FileManager.default.createSymbolicLink(atPath: framework.appendingPathComponent("Resources").path,
+                withDestinationPath: "Versions/Current/Resources")
+        }
         let marker = dependency.deletingLastPathComponent().appendingPathComponent("Resources/Marker.txt")
         try Data("dependency resource".utf8).write(to: marker)
         try Data("unrelated dependency resource".utf8)
@@ -389,7 +398,7 @@ struct NativePreviewCorrectionTests {
         try compilePreviewLibrary(at: otherDependency, value: 1, platform: .macOS,
             installName: "@rpath/Dependency.framework/Dependency")
         let libraryIdentifier = kind != .prebuilt
-            ? root.appendingPathComponent("Install/libSupport.dylib").path : "@rpath/libSupport.dylib"
+            ? root.appendingPathComponent("Install/libSupport.dylib").path : "@loader_path/../../../Support/libSupport.dylib"
         try compilePreviewLibrary(at: library, platform: .macOS, installName: libraryIdentifier)
         try compilePreviewLibrary(at: unrelated, platform: .macOS, installName: "@rpath/libUnrelated.dylib")
         let sourceCode = root.appendingPathComponent("Feature.c")
@@ -401,11 +410,10 @@ struct NativePreviewCorrectionTests {
         let dependencyLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple,
             sourceCode.path, "-install_name", "@rpath/Dependency.framework/Dependency", "-o", dependency.path,
             "-L", library.deletingLastPathComponent().path, "-lSupport", "-Wl,-no_adhoc_codesign"]
-            + (prebuilt ? ["-Wl,-rpath,@loader_path/../../Support"] : [])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + dependencyLinkArguments)
         let sourceLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple,
             sourceCode.path, "-isysroot", sdkAlias.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path, "-Wl,-no_adhoc_codesign"]
-            + (prebuilt ? [dependency.path] : ["-F", products.path, "-framework", "Dependency"])
+            + (prebuilt ? ["-Wl,-rpath,@loader_path/..", dependencyAlias.path] : ["-F", products.path, "-framework", "Dependency"])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + sourceLinkArguments)
         for binary in [source, dependency, library, otherDependency] {
             try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", binary.path])
@@ -432,6 +440,9 @@ struct NativePreviewCorrectionTests {
             .write(to: loaderSource)
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-arch", "arm64", loaderSource.path,
             "-Wl,-rpath,@executable_path/../Frameworks", "-o", helper.appendingPathComponent("XcodeMCPPreviewRenderer").path])
+        if prebuilt {
+            try previewBinaryOutput(helper.appendingPathComponent("XcodeMCPPreviewRenderer").path, [source.path])
+        }
         try NativePreviewCorrection.prepareApp(product: source.deletingLastPathComponent(), helper: helper, app: app,
             platform: .macOS, dependencies: dependencies)
         let developerDirectory = try previewBinaryOutput("/usr/bin/xcode-select", ["-p"])
