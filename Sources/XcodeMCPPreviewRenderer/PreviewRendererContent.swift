@@ -54,9 +54,14 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     var result: PreviewRendererResult
     if let typeName = request.providerTypeName {
         let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
-        guard preview.context == nil, preview.device == nil, preview.interfaceOrientation == .portrait else {
+        guard preview.context == nil else {
             throw NativePreviewPipelineRequired()
         }
+        #if targetEnvironment(macCatalyst) || os(visionOS)
+        guard preview.interfaceOrientation == .portrait else {
+            throw NativePreviewPipelineRequired()
+        }
+        #endif
         view = preview.content
         if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
             variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"

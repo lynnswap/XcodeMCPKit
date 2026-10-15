@@ -336,10 +336,33 @@ Other display controls retain the native pipeline for Live Activity previews.
 Each Simulator render creates a device matching the selected destination's device
 type and runtime. macOS and Mac Catalyst launch a staged application process and
 return its snapshot through inherited stdout, including when the app is sandboxed.
-Desktop destinations accept both Xcode's device identifier and its native preview
-identifier, and return the latter (`dvtdevice-local-computer:localhost` for My Mac). Without a destination override, it retains the workspace's active
-destination; unsupported destinations use the native pipeline. The returned
-`renderedDestination.identifier` identifies that selected destination for reuse.
+Destination selection retains the decoded native RenderPreview input and the
+selected source's translation unit. Xcode's source graph and update plan choose
+the destination; the correction consumes the first native update record whose
+execution-point pack matches the selected source's complete preflight pack.
+This source-plan producer uses ABIBridge's enum-payload and protocol-member APIs
+from main revision `2d75421a2c6796787f8deb4598505c4b8589395f`; ABIBridge 0.10.0
+does not include the required enum-payload construction API.
+Xcode's render-destination-choice setting controls whether
+`preferredRenderDestination` is considered and `availableRenderDestinations` is
+returned. The correction preserves that setting, the native destination fields,
+and any unmatched-preference warning. `renderedDestination` describes the native
+plan's chosen destination. Destinations unsupported by the direct renderer retain
+the native pipeline.
+For registry and provider previews, a first renderer process evaluates the preview
+declaration and traits, then returns native preview metadata without invoking the
+deferred view body. Providers also return the selected child's native preview
+description, which supplies evaluated source-device preferences. The host decodes
+these native property lists and plans again with
+the evaluated content domain and effective destination preferences. Nonempty
+operation preferences take precedence over source preferences. These RenderPreview
+requests use the native Location's `none` requirements. The final renderer
+evaluates the declaration again and renders its body. When the native destination
+is unchanged, the host reuses the build and staged product; otherwise it builds
+and stages the selected destination. Native platform-specific context, orientation,
+and on-device support policies are preserved in the evaluated metadata.
+Preview forms unsupported by the direct renderer retain
+their existing native fallback behavior.
 The correction deletes its temporary Simulator after success, failure, timeout, or
 cancellation, and reports cleanup failures. The correction does not boot, install
 to, or delete existing Simulator devices or change the workspace's active run

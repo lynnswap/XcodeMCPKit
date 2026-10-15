@@ -38,7 +38,14 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
     }
 
     private func render(in window: UIWindow) async throws {
-        let content = try await makeGeneralPreview(loadPreviewRequest())
+        let request = try loadPreviewRequest()
+        if request.metadataOnly == true {
+            let value = try await nativePreviewMetadata(request)
+            write(PreviewRendererResult(nativeMetadata: value.metadata,
+                nativeProviderPreviewDescription: value.providerDescription))
+            return
+        }
+        let content = try await makeGeneralPreview(request)
         let controller = UIHostingController(rootView: content.view)
         applyDisplayVariants(to: controller, variants: content.variants)
         #if os(tvOS)
