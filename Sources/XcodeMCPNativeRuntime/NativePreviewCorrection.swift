@@ -233,7 +233,11 @@ final class NativePreviewCorrection {
         let entitlements = try NativePreviewEntitlements.read(from: product)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
         let containingApp = try Self.containingApp(for: output, targets: build.targets)
-        try Self.prepareApp(product: product, helper: helper, app: app, containingApp: containingApp, platform: platform)
+        let nativeProviderIdentifier = metadataOnly == true && location.providerPath != nil
+            && (platform == .iOS || platform == .watchOS) && containingApp != nil
+            ? try Self.widgetExtensionIdentifier(product) : nil
+        try Self.prepareApp(product: product, helper: helper, app: app, containingApp: containingApp, platform: platform,
+            clientIdentifier: nativeProviderIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString })
         if let simulatorEntitlements = entitlements.simulator {
             let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
             try simulatorEntitlements.write(to: section)
@@ -267,7 +271,7 @@ final class NativePreviewCorrection {
                 programRootNames = Self.programRootNames(in: symbols)
             }
         } else { programRootNames = nil }
-        let request = PreviewRendererRequest(libraryNames: libraryPaths, registryNames: names,
+        var request = PreviewRendererRequest(libraryNames: libraryPaths, registryNames: names,
             fileName: source.lastPathComponent, moduleName: selection.source.moduleName, lineNumber: location.line, columnNumber: location.column,
             definitionIndex: input.index, localization: input.localization, widgetFamily: input.widgetFamily,
             widgetPresentation: input.widgetPresentation,
@@ -278,6 +282,11 @@ final class NativePreviewCorrection {
             activityToggleState: input.activityToggleState,
             appName: try Self.appName(product: product, containingApp: containingApp, localization: input.localization),
             metadataOnly: metadataOnly)
+        if let nativeProviderIdentifier, let providerName {
+            request.libraryNames = []
+            request.registryNames = []
+            request.nativeSource = .providerMetadata(extensionIdentifier: nativeProviderIdentifier, providerName: providerName)
+        }
         var signing = ["--force", "--sign", "-"]
         if let signedEntitlements = entitlements.signed {
             let plist = app.deletingLastPathComponent().appendingPathComponent("signed-entitlements.plist")
@@ -320,7 +329,8 @@ final class NativePreviewCorrection {
             platform: platform, process: process, metadataOnly: true)
         let metadataResponse: PreviewRendererResult
         if platform.isSimulator {
-            metadataResponse = try await renderSimulator(app: app, build: build, process: process, localization: input.localization).response
+            metadataResponse = try await renderSimulator(app: app, build: build, process: process, localization: input.localization,
+                containingApp: renderer.request.nativeSource == nil ? nil : renderer.containingApp).response
         } else {
             metadataResponse = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
         }
@@ -332,25 +342,23 @@ final class NativePreviewCorrection {
             providerDescription: metadataResponse.nativeProviderPreviewDescription) else { throw NativePipelineRequired() }
         let unchanged = (destination.selected.value as? NSObject)?.isEqual(evaluated.selected.value) == true
         destination = evaluated
-        if unchanged {
-            renderer.request.metadataOnly = nil
-            try await writeRendererRequest(renderer.request, app: app, platform: platform, signing: renderer.signing, process: process)
-        } else {
+        if !unchanged {
             build = try await builder.build(workspace: workspace, destination: destination)
             guard let selectedPlatform = build.previewPlatform else { throw NativePipelineRequired() }
             platform = selectedPlatform
+        }
+        if unchanged && renderer.request.nativeSource == nil {
+            renderer.request.metadataOnly = nil
+            try await writeRendererRequest(renderer.request, app: app, platform: platform, signing: renderer.signing, process: process)
+        } else {
             try FileManager.default.removeItem(at: app)
             renderer = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
                 platform: platform, process: process)
         }
         let nativeContainingApp: URL?
         if (platform == .iOS || platform == .watchOS), try await builder.isWidgetPreview(metadata: metadata),
-           renderer.product.pathExtension == "appex", let containingApp = renderer.containingApp,
-           let extensionIdentifier = try Self.bundleInfo(at: renderer.product)["CFBundleIdentifier"] as? String {
-            let info = try Self.bundleInfo(at: renderer.product)
-            guard (info["NSExtension"] as? [String: Any])?["NSExtensionPointIdentifier"] as? String == "com.apple.widgetkit-extension" else {
-                throw NativePipelineRequired()
-            }
+           let containingApp = renderer.containingApp,
+           let extensionIdentifier = try Self.widgetExtensionIdentifier(renderer.product) {
             let specification: Data
             if let registry = location.registry, let moduleName = renderer.request.moduleName {
                 specification = try await registrySpecification(registry: registry, moduleName: moduleName)
@@ -363,7 +371,7 @@ final class NativePreviewCorrection {
                 clientIdentifier: "dev.xcodemcp.PreviewClient." + UUID().uuidString)
             renderer.request.libraryNames = []
             renderer.request.registryNames = []
-            renderer.request.nativeSource = PreviewRendererNativeSource(extensionIdentifier: extensionIdentifier,
+            renderer.request.nativeSource = .preview(extensionIdentifier: extensionIdentifier,
                 specification: specification,
                 metadata: metadata, variantOverrides: input.variantOverrides)
             try await writeRendererRequest(renderer.request, app: app, platform: platform, signing: ["--force", "--sign", "-"], process: process)
@@ -823,6 +831,15 @@ final class NativePreviewCorrection {
         let matches = runnable.isEmpty ? candidates : runnable
         guard matches.count == 1 else { throw NativePipelineRequired() }
         return matches[0].app
+    }
+
+    private static func widgetExtensionIdentifier(_ product: URL) throws -> String? {
+        guard product.pathExtension == "appex" else { return nil }
+        let info = try bundleInfo(at: product)
+        guard (info["NSExtension"] as? [String: Any])?["NSExtensionPointIdentifier"] as? String == "com.apple.widgetkit-extension" else {
+            return nil
+        }
+        return info["CFBundleIdentifier"] as? String
     }
 
     static func prepareApp(product: URL, helper: URL, app: URL, containingApp: URL? = nil, platform: NativePreviewPlatform = .iOS, clientIdentifier: String? = nil) throws {

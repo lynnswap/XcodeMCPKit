@@ -14,6 +14,15 @@ import XcodeMCPWire
 func renderNativeWidgetPreview(_ request: PreviewRendererRequest) async throws -> PreviewRendererResult {
     guard let source = request.nativeSource else { throw NativePreviewPipelineRequired() }
     return try await NativePreviewService.withService { service in
+        let pid = try await service.relaunch(extensionIdentifier: source.extensionIdentifier, localization: request.localization)
+        if case .providerMetadata(_, let name) = source {
+            let value = try await service.providerMetadata(named: name, pid: pid)
+            return PreviewRendererResult(nativeMetadata: value.metadata,
+                nativeProviderPreviewDescription: value.providerDescription)
+        }
+        guard case .preview(_, let sourceSpecification, let sourceMetadata, let variants) = source else {
+            throw NativePreviewPipelineRequired()
+        }
         let renderer = NativeWidgetPreview(service: service, request: request)
         let specificationType = try await service.messagingType("PreviewSpecification")
         let decoder = try await specificationType.resolveInitializer(
@@ -21,7 +30,7 @@ func renderNativeWidgetPreview(_ request: PreviewRendererRequest) async throws -
             as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
             valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name),
                         specificationType: .opaque(named: specificationType.name)])
-        let encodedSpecification = try await service.propertyList(source.specification)
+        let encodedSpecification = try await service.propertyList(sourceSpecification)
         let specification = try unsafe decoder.unsafeInvoke(encodedSpecification)
         let metadataType = try await service.messagingType("PreviewMetadata")
         let metadataDecoder = try await metadataType.resolveInitializer(
@@ -29,11 +38,10 @@ func renderNativeWidgetPreview(_ request: PreviewRendererRequest) async throws -
             as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
             valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name),
                         metadataType: .opaque(named: metadataType.name)])
-        let encodedMetadata = try await service.propertyList(source.metadata)
+        let encodedMetadata = try await service.propertyList(sourceMetadata)
         let metadata = try unsafe metadataDecoder.unsafeInvoke(encodedMetadata)
-        let pid = try await service.relaunch(extensionIdentifier: source.extensionIdentifier, localization: request.localization)
         return try await renderer.render(pid: pid, specification: specification,
-                                         metadata: metadata, variants: source.variantOverrides)
+                                         metadata: metadata, variants: variants)
     }
 }
 
@@ -76,7 +84,7 @@ private struct NativeWidgetPreview {
         let initialUpdate = try await service.makeUpdate(pid: pid, identifier: identifier,
             category: previewCategory, content: encoded.copy(), controls: nil)
         let initialReply = try await service.sendUpdate(initialUpdate)
-        let initial = try await staticReply(initialReply)
+        let initial = try await service.staticReply(initialReply)
         let initialEncoded = try await service.encode(initial)
         let initialMetadata = try await service.dictionary(initialEncoded)
         let initialDescriptions = initialMetadata["controlDescriptions"] as? [[String: Any]] ?? []
@@ -89,7 +97,7 @@ private struct NativeWidgetPreview {
             let requestedUpdate = try await service.makeUpdate(pid: pid, identifier: identifier,
                 category: previewCategory, content: encoded, controls: controls)
             let reply = try await service.sendUpdate(requestedUpdate)
-            final = try await staticReply(reply)
+            final = try await service.staticReply(reply)
         } else { final = initial }
         let finalEncoded = try await service.encode(final)
         let resultMetadata = try await service.dictionary(finalEncoded)
@@ -132,15 +140,6 @@ private struct NativeWidgetPreview {
         let getter = try await responseType.resolveGetter(named: "groups", as: (() -> NativeSwiftValue).self,
             valueABIs: [array: .pointer], receiverABI: .opaque(named: responseType.name))
         return try unsafe getter.unsafeInvoke(on: response).withCopy { try WidgetVariantCatalog(nativeGroups: $0) }
-    }
-
-    private func staticReply(_ value: NativeSwiftValue) async throws -> NativeSwiftValue {
-        let type = try await service.messagingType("StaticPreviewReply")
-        let decoder = try await type.resolveInitializer(
-            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.StaticPreviewReply",
-            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
-            valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name), type: .opaque(named: type.name)])
-        return try unsafe decoder.unsafeInvoke(value)
     }
 
     private func requestedControls(descriptions: [[String: Any]], reply: NativeSwiftValue) async throws ->

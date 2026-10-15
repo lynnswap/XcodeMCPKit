@@ -323,6 +323,57 @@ final class NativePreviewService {
         try await send("update", payload: payload)
     }
 
+    func staticReply(_ value: NativeSwiftValue) async throws -> NativeSwiftValue {
+        let type = try await messagingType("StaticPreviewReply")
+        let decoder = try await type.resolveInitializer(
+            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.StaticPreviewReply",
+            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+            valueABIs: [propertyListType: .opaque(named: propertyListType.name), type: .opaque(named: type.name)])
+        return try unsafe decoder.unsafeInvoke(value)
+    }
+
+    func providerMetadata(named name: String, pid: Int32) async throws -> (metadata: Data, providerDescription: Data?) {
+        let payloadType = try await messagingType("ProviderPayload")
+        let makePayload = try await payloadType.resolveInitializer(
+            named: "init(providerName: Swift.String) -> PreviewsMessagingOS.ProviderPayload",
+            as: ((String) -> NativeSwiftValue).self, valueABIs: [payloadType: .opaque(named: payloadType.name)])
+        let payload = try unsafe makePayload.unsafeInvoke(name)
+        let categoryType = try await messagingType("ContentCategory")
+        let getCategory = try await categoryType.resolveStaticGetter(named: "previewProvider", as: (() -> NativeSwiftValue).self,
+            valueABIs: [categoryType: .opaque(named: categoryType.name)])
+        let category = try unsafe getCategory.unsafeInvoke()
+        let identifierType = try await messagingType("ContentIdentifier")
+        let makeIdentifier = try await identifierType.resolveInitializer(named: "init(rawValue: Swift.String) -> PreviewsMessagingOS.ContentIdentifier",
+            as: ((String) -> NativeSwiftValue).self, valueABIs: [identifierType: .opaque(named: identifierType.name)])
+        let identifier = try unsafe makeIdentifier.unsafeInvoke(UUID().uuidString)
+        let update = try await makeUpdate(pid: pid, identifier: identifier, category: category,
+            content: encode(payload), controls: nil)
+        let reply = try await staticReply(sendUpdate(update))
+        let contentGetter = try await reply.type.resolveGetter(named: "contentPayload", as: (() -> NativeSwiftValue).self,
+            valueABIs: [propertyListType: .opaque(named: propertyListType.name)], receiverABI: .opaque(named: reply.type.name))
+        let content = try unsafe contentGetter.unsafeInvoke(on: reply)
+        let responseType = try await messagingType("PreviewInstancesPayload")
+        let decode = try await responseType.resolveInitializer(
+            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewInstancesPayload",
+            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+            valueABIs: [propertyListType: .opaque(named: propertyListType.name), responseType: .opaque(named: responseType.name)])
+        let response = try unsafe decode.unsafeInvoke(content)
+        let descriptionType = try await messagingType("PreviewDescription")
+        let descriptionsType = try await runtime.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(descriptionType)])
+        let getter = try await responseType.resolveGetter(named: "previewDescriptions", as: (() -> NativeSwiftValue).self,
+            valueABIs: [descriptionsType: .pointer], receiverABI: .opaque(named: responseType.name))
+        let descriptions = try unsafe getter.unsafeInvoke(on: response)
+        let first = try descriptions.withCopy { value -> Any in
+            guard let values = value as? any Collection, let first = values.first else {
+                throw PreviewRendererError("The native preview provider returned no descriptions")
+            }
+            return first
+        }
+        func own<Value>(_ value: Value) async throws -> NativeSwiftValue { try await ownedPreviewValue(value) }
+        let description = try await _openExistential(first, do: own)
+        return try await nativeLegacyPreviewMetadata(description: description)
+    }
+
     func relaunch(extensionIdentifier: String, localization: String?) async throws -> Int32 {
         let bundleType = try await messagingType("AgentDescriptor.Bundle")
         let descriptorType = try await messagingType("AgentDescriptor")

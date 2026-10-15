@@ -1,16 +1,13 @@
 import Foundation
 
-package struct PreviewRendererNativeSource: Codable, Sendable {
-    package var extensionIdentifier: String
-    package var specification: Data
-    package var metadata: Data
-    package var variantOverrides: [String: String]
+package enum PreviewRendererNativeSource: Codable, Sendable {
+    case providerMetadata(extensionIdentifier: String, providerName: String)
+    case preview(extensionIdentifier: String, specification: Data, metadata: Data, variantOverrides: [String: String])
 
-    package init(extensionIdentifier: String, specification: Data, metadata: Data, variantOverrides: [String: String]) {
-        self.extensionIdentifier = extensionIdentifier
-        self.specification = specification
-        self.metadata = metadata
-        self.variantOverrides = variantOverrides
+    package var extensionIdentifier: String {
+        switch self {
+        case .providerMetadata(let identifier, _), .preview(let identifier, _, _, _): identifier
+        }
     }
 }
 
