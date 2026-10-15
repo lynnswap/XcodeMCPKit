@@ -610,7 +610,9 @@ final class NativePreviewCorrection {
                     return true
                 }
                 guard let sourceOutput else { return false }
-                if try candidate.linksProduct(at: sourceOutput) { return true }
+                if try (["a", "o", "dylib"].contains(sourceOutput.pathExtension)
+                    || (frameworkName != nil && NativePreviewBinary.isStaticArchive(at: sourceOutput)))
+                    && candidate.linksProduct(at: sourceOutput) { return true }
                 guard frameworkName != nil || sourceOutput.pathExtension == "dylib" else { return false }
                 let rootLibrary = app.appendingPathComponent(sourceOutput.lastPathComponent)
                 if frameworkName == nil, FileManager.default.fileExists(atPath: rootLibrary.path),

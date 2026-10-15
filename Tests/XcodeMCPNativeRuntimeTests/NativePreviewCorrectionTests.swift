@@ -296,6 +296,24 @@ struct NativePreviewCorrectionTests {
         #expect(selected.host.moduleName == (embedded ? "Host" : "FixtureKit"))
     }
 
+    @Test func linkedDynamicFrameworkWithoutEmbeddingUsesItsOwnProduct() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("FrameworkView.swift")
+        let binary = root.appendingPathComponent("FixtureKit.framework/FixtureKit")
+        try compilePreviewLibrary(at: binary, platform: .macOS)
+        let framework = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
+            sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", binary.path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
+        let appImage = root.appendingPathComponent("Host.app/Contents/MacOS/Host.debug.dylib")
+        let app = NativePreviewBuild.Target(moduleName: "Host", buildableName: "Host.app", sdkRoot: "macosx",
+            sdkVariant: nil, architecture: "arm64", linkCommandLine: [binary.path, "-o", appImage.path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
+        let selected = try NativePreviewCorrection.selectTarget([framework, app], source: source, platform: .macOS)
+        #expect(selected.source.moduleName == "FixtureKit")
+        #expect(selected.host.moduleName == "FixtureKit")
+    }
+
     @Test func staticFrameworkUsesItsOwnProductOrItsLinkedApp() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
