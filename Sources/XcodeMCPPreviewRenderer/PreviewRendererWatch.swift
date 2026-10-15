@@ -12,22 +12,6 @@ import XcodeMCPWire
 @main
 @MainActor
 enum PreviewRendererWatchMain {
-    static let preparation = Task { @MainActor in
-        let request = try readPreviewRequest()
-        let legacyPreview: SwiftUI._Preview?
-        let complication: ClockKitPreview?
-        if request.isLegacyComplication == true {
-            try loadPreviewLibraries(request)
-            legacyPreview = try request.providerTypeName.map { try makeLegacyViewPreview(typeName: $0, index: 0) }
-            if let legacyPreview { complication = try await makeClockKitPreview(from: legacyPreview, request: request) }
-            else { complication = nil }
-        } else {
-            legacyPreview = nil
-            complication = nil
-        }
-        return WatchPreviewSource(request: request, legacyPreview: legacyPreview, complication: complication)
-    }
-
     static func main() async {
         do {
             if let directory = try nativePreviewServiceResultDirectory() {
@@ -38,9 +22,6 @@ enum PreviewRendererWatchMain {
             try? FileHandle.standardError.write(contentsOf: Data("Preview result could not be written: \(error)\n".utf8))
             exit(1)
         }
-        // ClockKit archives SwiftUI template content before the display scene
-        // exists. The UI task consumes this same source and any preparation error.
-        _ = await preparation.result
         PreviewRendererWatch.main()
     }
 }
@@ -53,6 +34,27 @@ struct WatchPreviewSource {
 }
 
 struct PreviewRendererWatch: App {
+    private let source: Result<WatchPreviewSource, any Error>
+
+    init() {
+        // ClockKit's source archive uses the environment before a display scene
+        // exists; creating its controller and capturing remain in the UI task.
+        source = Result {
+            let request = try readPreviewRequest()
+            let legacyPreview: SwiftUI._Preview?
+            let complication: ClockKitPreview?
+            if request.isLegacyComplication == true {
+                try loadPreviewLibraries(request)
+                legacyPreview = try request.providerTypeName.map { try makeLegacyViewPreview(typeName: $0, index: 0) }
+                complication = legacyPreview.map { makeClockKitPreview(from: $0, request: request) }
+            } else {
+                legacyPreview = nil
+                complication = nil
+            }
+            return WatchPreviewSource(request: request, legacyPreview: legacyPreview, complication: complication)
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             Color.clear.task {
@@ -65,7 +67,7 @@ struct PreviewRendererWatch: App {
 
     @MainActor
     private func render() async throws {
-        let source = try await PreviewRendererWatchMain.preparation.value
+        let source = try self.source.get()
         let request = source.request
         if request.isLegacyComplication != true { try loadPreviewLibraries(request) }
         if request.metadataOnly == true {

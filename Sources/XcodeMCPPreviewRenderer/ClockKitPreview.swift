@@ -12,12 +12,7 @@ struct ClockKitPreview {
 }
 
 @MainActor
-func makeClockKitPreview(from preview: SwiftUI._Preview, request: PreviewRendererRequest) async throws ->
-    ClockKitPreview? {
-    guard let context = preview.context else { return nil }
-    // Watch's native metadata treats legacy contexts as complications unless
-    // the WidgetKit context supplies a different content category.
-    guard try await legacyPreviewContextCategory(context) == nil else { return nil }
+func makeClockKitPreview(from preview: SwiftUI._Preview, request: PreviewRendererRequest) -> ClockKitPreview {
     let timeline = _ComplicationPreviewContext._previewTimeline(from: preview)
     var errors = request.generalPreviewOptions(supportedVariants: [:]).errors
     if let index = request.groupItemIndex {
