@@ -217,7 +217,8 @@ final class NativePreviewCorrection {
                                  metadataOnly: Bool? = nil) async throws -> (request: PreviewRendererRequest, signing: [String], product: URL, containingApp: URL?, architecture: String) {
         let source = prepared.source
         let location = prepared.location
-        let selection = try Self.selectTarget(build.targets, source: source, platform: platform)
+        let selection = try Self.selectTarget(build.targets, source: source, platform: platform,
+            preferredArchitecture: build.destinationArchitecture)
         let target = selection.host
         let architecture = target.architecture
         guard target.debugDylibEnabled else {
@@ -562,7 +563,8 @@ final class NativePreviewCorrection {
         return ["-AppleLanguages", String(decoding: languages, as: UTF8.self), "-AppleLocale", localization]
     }
 
-    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL, platform: NativePreviewPlatform) throws -> Selection {
+    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL, platform: NativePreviewPlatform,
+                             preferredArchitecture: String? = nil) throws -> Selection {
         let sourcePath = source.resolvingSymlinksInPath().path
         guard targets.contains(where: { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }) else {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
@@ -608,7 +610,13 @@ final class NativePreviewCorrection {
             selections += hosts.map { Selection(source: target, host: $0) }
         }
         let runnable = selections.filter { $0.host.isRunnable }
-        let candidates = runnable.isEmpty ? selections : runnable
+        var candidates = runnable.isEmpty ? selections : runnable
+        if let preferredArchitecture {
+            let matching = candidates.filter { $0.host.architecture == preferredArchitecture }
+            // A single-architecture source still uses its actual build when
+            // the destination's architecture does not occur in those records.
+            if !matching.isEmpty { candidates = matching }
+        }
         guard candidates.count == 1 else { throw NativePipelineRequired() }
         return candidates[0]
     }

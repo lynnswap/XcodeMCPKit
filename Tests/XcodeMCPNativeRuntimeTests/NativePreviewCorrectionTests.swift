@@ -163,6 +163,23 @@ struct NativePreviewCorrectionTests {
         #expect(selected.source.moduleName == feature.moduleName)
     }
 
+    @Test(arguments: ["arm64", "x86_64"])
+    func universalMacHostUsesDestinationArchitecture(architecture: String) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("ContentView.swift")
+        let output = root.appendingPathComponent("Fixture.app/Contents/MacOS/Fixture.debug.dylib")
+        let targets = ["arm64", "x86_64"].map { architecture in
+            NativePreviewBuild.Target(moduleName: "Fixture", buildableName: "Fixture.app",
+                sdkRoot: "macosx", sdkVariant: nil, architecture: architecture,
+                linkCommandLine: ["-o", output.path], linkerWorkingDirectory: nil,
+                objectFiles: [], sourceFiles: [source], debugDylibEnabled: true, isRunnable: true)
+        }
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS,
+            preferredArchitecture: architecture)
+        #expect(selected.source.architecture == architecture)
+        #expect(selected.host.architecture == architecture)
+    }
+
     @Test func macSharedLibraryUsesSameArchitectureHost() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = root.appendingPathComponent("PackageView.swift")
@@ -176,7 +193,8 @@ struct NativePreviewCorrectionTests {
         let sourceTarget = NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
             sdkRoot: "macosx", sdkVariant: nil, architecture: "x86_64", linkCommandLine: ["-o", product.path],
             linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [sourceTarget], source: source, platform: .macOS)
+        let selected = try NativePreviewCorrection.selectTarget(hosts + [sourceTarget], source: source, platform: .macOS,
+            preferredArchitecture: "arm64")
         #expect(selected.source.architecture == "x86_64")
         #expect(selected.host.architecture == "x86_64")
     }
