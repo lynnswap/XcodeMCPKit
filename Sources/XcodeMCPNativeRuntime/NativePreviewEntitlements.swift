@@ -8,17 +8,19 @@ struct NativePreviewEntitlements {
     let signed: Data?
     let simulator: Data?
 
-    static func read(from bundle: URL) throws -> Self {
+    static func read(from bundle: URL, architecture: String) throws -> Self {
         guard let executable = Bundle(url: bundle)?.executableURL else {
             throw NativeRuntimeError.unsupportedContract("The preview product has no main executable: \(bundle.path)")
         }
-        return try Self(signed: signedEntitlements(in: bundle), simulator: simulatorEntitlements(in: executable))
+        return try Self(signed: signedEntitlements(in: bundle, architecture: architecture),
+                        simulator: simulatorEntitlements(in: executable, architecture: architecture))
     }
 
-    private static func signedEntitlements(in bundle: URL) throws -> Data? {
+    private static func signedEntitlements(in bundle: URL, architecture: String) throws -> Data? {
         var code: SecStaticCode?
-        let createStatus = unsafe SecStaticCodeCreateWithPath(bundle as CFURL, [], &code)
-        try check(createStatus, operation: "SecStaticCodeCreateWithPath", bundle: bundle)
+        let attributes = [kSecCodeAttributeArchitecture as String: architecture] as CFDictionary
+        let createStatus = unsafe SecStaticCodeCreateWithPathAndAttributes(bundle as CFURL, [], attributes, &code)
+        try check(createStatus, operation: "SecStaticCodeCreateWithPathAndAttributes", bundle: bundle)
         guard let code else {
             throw NativeRuntimeError.unsupportedContract("Security returned no code object for \(bundle.path)")
         }
@@ -41,14 +43,9 @@ struct NativePreviewEntitlements {
         return try PropertyListSerialization.data(fromPropertyList: entitlements, format: .xml, options: 0)
     }
 
-    private static func simulatorEntitlements(in executable: URL) throws -> Data? {
-        let files: [MachOFile]
-        switch try MachOKit.loadFromFile(url: executable) {
-        case .machO(let file): files = [file]
-        case .fat(let file): files = try file.machOFiles()
-        }
-        guard let file = files.first(where: { $0.header.cpuType == .arm64 }) else {
-            throw NativeRuntimeError.unsupportedContract("The preview product has no arm64 executable: \(executable.path)")
+    private static func simulatorEntitlements(in executable: URL, architecture: String) throws -> Data? {
+        guard let file = try NativePreviewBinary.file(at: executable, architecture: architecture) else {
+            throw NativeRuntimeError.unsupportedContract("The preview product has no \(architecture) executable: \(executable.path)")
         }
         guard let section = file.sections64.first(where: {
             $0.segmentName == "__TEXT" && $0.sectionName == "__entitlements"
