@@ -31,8 +31,7 @@ func makeClockKitPreview(from preview: SwiftUI._Preview, request: PreviewRendere
     let setLive = try await runtime.object(controller)
         .resolveMethod(selector: "setDisplayingLivePreview:", as: ((Bool) -> Void).self)
     try unsafe setLive.unsafeInvoke(false)
-    var errors = try await complicationPreviewErrors(in: timeline)
-    errors += request.generalPreviewOptions(supportedVariants: [:]).errors
+    var errors = request.generalPreviewOptions(supportedVariants: [:]).errors
     if let index = request.groupItemIndex {
         errors.append(unsupportedPreviewGroupItemMessage(index, supportsGroups: false))
     }
@@ -45,19 +44,4 @@ func makeClockKitPreview(from preview: SwiftUI._Preview, request: PreviewRendere
     return (controller, result)
 }
 
-@MainActor
-private func complicationPreviewErrors(in timeline: [CLKComplicationTimelineEntry]) async throws -> [String] {
-    let runtime = ABIRuntime.shared
-    var result: [String] = []
-    for entry in timeline {
-        let errors = try await runtime.object(entry)
-            .resolveMethod(selector: "tl_errors", as: (() -> NSArray?).self)
-        for error in try unsafe errors.unsafeInvoke() ?? [] {
-            let description = try await runtime.object(error as AnyObject)
-                .resolveMethod(selector: "errorDescription", as: (() -> NSString).self)
-            result.append(try unsafe description.unsafeInvoke() as String)
-        }
-    }
-    return result
-}
 #endif
