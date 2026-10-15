@@ -37,7 +37,7 @@ func nativeLegacyPreviewMetadata(typeName: String) async throws -> (metadata: Da
         }
         #endif
         #if !os(tvOS)
-        if let context = preview.context, let category = try await legacyWidgetCategory(context) {
+        if let context = preview.context, let category = try await legacyPreviewContextCategory(context) {
             domain = try domainType.makeEnumCase(named: "widget")
             sourceCategory = category
             #if os(iOS) && targetEnvironment(simulator)
@@ -128,22 +128,65 @@ private func legacyComplicationCategory(_ sourceCategoryType: NativeSwiftType) a
 #endif
 
 @MainActor
-func legacyWidgetCategory(_ context: any PreviewContext) async throws -> NativeSwiftValue? {
+func legacyPreviewContextCategory(_ context: any PreviewContext) async throws -> NativeSwiftValue? {
+    do {
+        let widget = try await legacyPreviewContextValue(context,
+            keyName: "WidgetKit.WidgetPreviewContextKey", mangledName: "9WidgetKit0A17PreviewContextKeyV")
+        var category: NativeSwiftValue?
+        if let widget { category = try await previewContextCategory(widget) }
+        #if os(iOS) && targetEnvironment(simulator)
+        if isLegacyActivityPreviewContext(context) {
+            // Reading this context's Activity key requires Widget.main's provider.
+            // Its category getter and this static factory produce the same category.
+            let declaration = "static (extension in WidgetKit):DeveloperToolsSupport.PreviewSourceContentCategory.activityWidget.getter : DeveloperToolsSupport.PreviewSourceContentCategory"
+            let runtime = ABIRuntime.shared
+            let support = try await runtime.resolve(.init(name: declaration, language: .swift),
+                in: previewFrameworkImage(named: "WidgetKit"))
+            let type = try await runtime.resolveSwiftType(named: "DeveloperToolsSupport.PreviewSourceContentCategory",
+                in: .framework(named: "DeveloperToolsSupport"))
+            let getter = try await type.resolveStaticGetter(named: declaration, as: (() -> NativeSwiftValue).self,
+                valueABIs: [type: .opaque(named: type.name)])
+            return try withExtendedLifetime(support) { try unsafe getter.unsafeInvoke() }
+        }
+        if let activity = try await legacyPreviewContextValue(context,
+            keyName: "WidgetKit.ActivityPreviewContextKey", mangledName: "9WidgetKit25ActivityPreviewContextKeyV") {
+            // Native metadata reads Activity after Widget, so Activity takes precedence.
+            category = try await previewContextCategory(activity)
+        }
+        #endif
+        return category
+    } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
+}
+
+@MainActor
+private func previewContextCategory(_ value: NativeSwiftValue) async throws -> NativeSwiftValue {
+    let categoryType = try await ABIRuntime.shared.resolveSwiftType(named: "DeveloperToolsSupport.PreviewSourceContentCategory",
+        in: .framework(named: "DeveloperToolsSupport"))
+    let getter = try await value.type.resolveGetter(named: "previewContentCategory", as: (() -> NativeSwiftValue).self,
+        valueABIs: [categoryType: .opaque(named: categoryType.name)], receiverABI: .opaque(named: value.type.name))
+    return try unsafe getter.unsafeInvoke(on: value)
+}
+
+#if os(iOS) && targetEnvironment(simulator)
+func isLegacyActivityPreviewContext(_ context: any PreviewContext) -> Bool {
+    String(reflecting: type(of: context)).hasPrefix("WidgetKit.ActivityPreviewContext<")
+}
+#endif
+
+@MainActor
+func legacyPreviewContextValue(_ context: any PreviewContext, keyName: String, mangledName: String) async throws -> NativeSwiftValue? {
     // Native PreviewsInjection loads WidgetKit even for non-Widget contexts.
-    _ = try await ABIRuntime.shared.resolveSwiftType(named: "WidgetKit.WidgetPreviewContextKey",
-        in: previewFrameworkImage(named: "WidgetKit"))
-    guard let key = _typeByName("9WidgetKit0A17PreviewContextKeyV") as? any PreviewContextKey.Type else {
-        throw NativePreviewPipelineRequired()
-    }
-    @MainActor func read<Key: PreviewContextKey>(_ key: Key.Type) async throws -> NativeSwiftValue? {
-        let optional = try await ownedPreviewValue(context[key])
-        guard let value = try await optional.resolveEnumPayload(forCase: "some") else { return nil }
-        let categoryType = try await ABIRuntime.shared.resolveSwiftType(named: "DeveloperToolsSupport.PreviewSourceContentCategory",
-            in: .framework(named: "DeveloperToolsSupport"))
-        let getter = try await value.type.resolveGetter(named: "previewContentCategory", as: (() -> NativeSwiftValue).self,
-            valueABIs: [categoryType: .opaque(named: categoryType.name)], receiverABI: .opaque(named: value.type.name))
-        return try unsafe getter.unsafeInvoke(on: value)
-    }
-    return try await _openExistential(key, do: read)
+    do {
+        _ = try await ABIRuntime.shared.resolveSwiftType(named: keyName,
+            in: previewFrameworkImage(named: "WidgetKit"))
+        guard let key = _typeByName(mangledName) as? any PreviewContextKey.Type else {
+            throw NativePreviewPipelineRequired()
+        }
+        @MainActor func read<Key: PreviewContextKey>(_ key: Key.Type) async throws -> NativeSwiftValue? {
+            let optional = try await ownedPreviewValue(context[key])
+            return try await optional.resolveEnumPayload(forCase: "some")
+        }
+        return try await _openExistential(key, do: read)
+    } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
 }
 #endif
