@@ -53,7 +53,7 @@ func previewRegistry(for request: PreviewRendererRequest) throws -> any PreviewR
 }
 
 @MainActor
-func makeGeneralPreview(_ request: PreviewRendererRequest, legacyPreview: SwiftUI._Preview? = nil) async throws ->
+func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     (view: AnyView, layout: DeveloperToolsSupport.PreviewLayout, variants: [String: String], result: PreviewRendererResult) {
     #if os(visionOS)
     guard request.displayVariantOverrides.isEmpty,
@@ -68,7 +68,7 @@ func makeGeneralPreview(_ request: PreviewRendererRequest, legacyPreview: SwiftU
     let layout: DeveloperToolsSupport.PreviewLayout
     var result: PreviewRendererResult
     if let typeName = request.providerTypeName {
-        let preview = try legacyPreview ?? makeLegacyViewPreview(typeName: typeName, index: 0)
+        let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
         #if os(macOS) || targetEnvironment(macCatalyst)
         if let context = preview.context {
             // Native metadata classifies recognized context keys; a custom

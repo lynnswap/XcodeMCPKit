@@ -29,7 +29,6 @@ enum PreviewRendererWatchMain {
 @MainActor
 struct WatchPreviewSource {
     let request: PreviewRendererRequest
-    let legacyPreview: SwiftUI._Preview?
     let complication: ClockKitPreview?
 }
 
@@ -41,17 +40,17 @@ struct PreviewRendererWatch: App {
         // exists; creating its controller and capturing remain in the UI task.
         source = Result {
             let request = try readPreviewRequest()
-            let legacyPreview: SwiftUI._Preview?
             let complication: ClockKitPreview?
             if request.isLegacyComplication == true {
                 try loadPreviewLibraries(request)
-                legacyPreview = try request.providerTypeName.map { try makeLegacyViewPreview(typeName: $0, index: 0) }
-                complication = legacyPreview.map { makeClockKitPreview(from: $0, request: request) }
+                complication = try request.providerTypeName.map { typeName in
+                    let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
+                    return makeClockKitPreview(from: preview, request: request)
+                }
             } else {
-                legacyPreview = nil
                 complication = nil
             }
-            return WatchPreviewSource(request: request, legacyPreview: legacyPreview, complication: complication)
+            return WatchPreviewSource(request: request, complication: complication)
         }
     }
 
@@ -83,7 +82,7 @@ struct PreviewRendererWatch: App {
             image = try await captureWatchPreview(controller: controller)
             result = complication.result
         } else {
-            let content = try await makeGeneralPreview(request, legacyPreview: source.legacyPreview)
+            let content = try await makeGeneralPreview(request)
             image = try await captureWatchPreview(view: content.view, layout: content.layout)
             result = content.result
             if case .device = content.layout {
