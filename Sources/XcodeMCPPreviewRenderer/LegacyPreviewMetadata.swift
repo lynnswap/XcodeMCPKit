@@ -86,7 +86,26 @@ func nativeLegacyPreviewMetadata(description: NativeSwiftValue) async throws -> 
         return try unsafe getter.unsafeInvoke(on: description)
     }
     let domain = try await value("contentDomain", typeName: "PreviewContentDomain")
-    let category = try await value("contentCategory", typeName: "ContentCategory")
+    let categoryType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.ContentCategory", in: image)
+    let optionalCategoryType = try await runtime.resolveSwiftType(named: "Swift.Optional",
+        genericArguments: [.type(categoryType)])
+    // The getter returns an Optional on older runtimes. Bind its actual
+    // declaration before projecting the owned value into the metadata category.
+    let categoryGetter = try await description.type.resolveGetter(named: "contentCategory",
+        as: (() -> NativeSwiftValue).self,
+        valueABIs: [categoryType: .opaque(named: categoryType.name),
+            optionalCategoryType: .opaque(named: optionalCategoryType.name)],
+        receiverABI: .opaque(named: description.type.name))
+    let returnedCategory = try unsafe categoryGetter.unsafeInvoke(on: description)
+    let category: NativeSwiftValue
+    if returnedCategory.type == optionalCategoryType {
+        guard let payload = try await returnedCategory.resolveEnumPayload(forCase: "some") else {
+            throw PreviewRendererError("The native preview description is missing its content category")
+        }
+        category = payload
+    } else {
+        category = returnedCategory
+    }
     let traits = try await value("previewTraits", typeName: "PreviewTraits")
     let onDevice = try await flag("supportsOnDevice")
     let interactive = try await flag("supportsLive")
