@@ -292,10 +292,14 @@ final class NativePreviewService {
         do {
             preview = try previewType.makeEnumCase(named: "static")
         } catch NativeSwiftValueError.enumCaseRequiresPayload(name: "static") {
-            // Native Widget and provider updates use the default outer display.
-            let displayType = try await messagingType("PreviewDisplay")
-            let display = try displayType.makeEnumCase(named: "outer")
-            preview = try await previewType.makeEnumCase(named: "static", payload: display)
+            // The native backward-compatible decoder supplies the formal display payload.
+            let data = try PropertyListSerialization.data(fromPropertyList: ["discriminant": "static"], format: .binary, options: 0)
+            let encoded = try await propertyList(data)
+            let decode = try await previewType.resolveInitializer(
+                named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewType",
+                as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+                valueABIs: [propertyListType: .opaque(named: propertyListType.name), previewType: .opaque(named: previewType.name)])
+            preview = try unsafe decode.unsafeInvoke(encoded)
         }
         let box = try await messagingType("PlistValueBox")
         let boxes = try await runtime.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(box)])
