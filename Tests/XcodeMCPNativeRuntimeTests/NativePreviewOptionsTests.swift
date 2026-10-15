@@ -11,7 +11,9 @@ struct NativePreviewOptionsTests {
             moduleName: nil, lineNumber: nil, columnNumber: nil, definitionIndex: 0, localization: nil,
             widgetPresentation: "Placeholder", timelineIndex: 42, displayVariantOverrides: ["Color Scheme": "Dark Appearance"],
             activityViewStyle: "Compact", activityViewContext: "Stale", activityToggleState: false)
-        #expect(request.unsupportedGeneralPreviewOptions == [
+        let options = request.generalPreviewOptions(supportedVariants: PreviewRendererRequest.displayVariantValues)
+        #expect(options.displayVariants == ["Color Scheme": "Dark Appearance"])
+        #expect(options.errors == [
             "Unsupported timeline index 42; the specified preview doesn't support timeline indexes in the currently active scheme.",
             "Unsupported toggle state false; the specified preview doesn't support a toggle control in the currently active scheme.",
             "Unsupported variant group ‘Activity View Context’; see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.",
@@ -24,7 +26,27 @@ struct NativePreviewOptionsTests {
         supported.activityViewStyle = nil
         supported.activityViewContext = nil
         supported.activityToggleState = nil
-        #expect(supported.unsupportedGeneralPreviewOptions.isEmpty)
+        #expect(supported.generalPreviewOptions(supportedVariants: PreviewRendererRequest.displayVariantValues).errors.isEmpty)
+    }
+
+    @Test func generalPreviewKeepsValidOverridesWhenOtherVariantsAreUnsupported() throws {
+        let request = PreviewRendererRequest(libraryNames: [], registryNames: [], fileName: "View.swift",
+            moduleName: nil, lineNumber: nil, columnNumber: nil, definitionIndex: 0, localization: nil,
+            displayVariantOverrides: ["Color Scheme": "Unknown Appearance", "Contrast": "Increased Contrast",
+                "Orientation": "Landscape Left", "Unknown Group": "Unknown Value"],
+            activityViewStyle: "Unknown Style")
+        let decoded = try JSONDecoder().decode(PreviewRendererRequest.self, from: JSONEncoder().encode(request))
+        let options = decoded.generalPreviewOptions(supportedVariants: [
+            "Color Scheme": ["Light Appearance", "Dark Appearance"],
+            "Contrast": ["Standard Contrast", "Increased Contrast"],
+        ])
+        #expect(options.displayVariants == ["Contrast": "Increased Contrast"])
+        #expect(options.errors == [
+            "Unsupported variant ‘Unknown Appearance’ for group ‘Color Scheme’; see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.",
+            "Unsupported variant group ‘Orientation’; see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.",
+            "Unsupported variant group ‘Unknown Group’; see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.",
+            "Unsupported variant group ‘View Style’; see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.",
+        ])
     }
 
     @Test func widgetFamilyPresentationAndTimelineUseDirectRenderer() {
@@ -78,9 +100,16 @@ struct NativePreviewOptionsTests {
         #expect(try nativeTestField(item, "required") == .array([.string("index")]))
     }
 
-    @Test func otherVariantsAndControlsKeepNativeRendering() {
-        #expect(NativePreviewCorrection.directOptions(variants: ["View Style": "Unknown Style"], controls: [:]).requiresNativePipeline)
-        #expect(NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Unknown Appearance"], controls: [:]).requiresNativePipeline)
+    @Test func unknownVariantsReachRendererValidationAndUnknownControlsKeepNativeRendering() {
+        let options = NativePreviewCorrection.directOptions(variants: [
+            "View Style": "Unknown Style", "Color Scheme": "Unknown Appearance",
+            "Unknown Group": "Unknown Value", "Contrast": "Increased Contrast",
+        ], controls: [:])
+        #expect(options.activityViewStyle == "Unknown Style")
+        #expect(options.displayVariants == [
+            "Color Scheme": "Unknown Appearance", "Unknown Group": "Unknown Value", "Contrast": "Increased Contrast",
+        ])
+        #expect(!options.requiresNativePipeline)
         #expect(NativePreviewCorrection.directOptions(variants: [:],
             controls: ["futureControl": Optional(1) as Any]).requiresNativePipeline)
     }

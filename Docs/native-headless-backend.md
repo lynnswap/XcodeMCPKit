@@ -222,6 +222,9 @@ macOS and Mac Catalyst expose Color Scheme; tvOS exposes Color Scheme, Contrast,
 and Control Borders; watchOS exposes Dynamic Type. visionOS display overrides
 remain on the native pipeline pending a native static-preview contract.
 `supportedPreviewVariantOverrides` returns their native display names and values.
+For ordinary previews, unsupported groups or values are ignored and reported in
+`errors`. Valid overrides still apply, and the response retains the snapshot and
+supported override catalog.
 Color scheme, contrast, and Dynamic Type reach both the SwiftUI environment and
 UIKit hosting traits. Control Borders uses SwiftUI's button-shapes environment.
 On iOS 26 and later, SwiftUI previews also apply `.assistiveAccess` through the
@@ -241,6 +244,8 @@ Its reference frame stays in the display's fixed coordinate space; native scene
 bounds apply the requested orientation. This path was verified on iOS 27.2 with
 Xcode 27.1 and uses ABIBridge 0.9.0's existing Objective-C APIs. Unavailable private
 scene APIs use the native pipeline.
+On Mac Catalyst, source orientation traits leave static snapshots unrotated,
+matching native RenderPreview.
 
 On tvOS, previews use the same scene owner with the original scene's display and
 orientation settings. Fixed-size previews use the source's requested frame;
@@ -255,6 +260,8 @@ Unavailable private scene or color bindings use the native pipeline.
 Static iOS and tvOS snapshots allocate integer pixel dimensions with the native
 FBS snapshot's unsigned conversion and use a standard 8-bit renderer. The view's
 point frame and drawing rectangle are retained, including fractional dimensions.
+Mac Catalyst snapshots also use a standard 8-bit renderer to avoid introducing
+RGB dithering when an extended-range bitmap is encoded as PNG.
 
 Each render owns a fresh, nonpersistent scene session with a passive delegate.
 After UIKit connects, the owner sends the workspace's initial nil-diff settings
@@ -277,6 +284,8 @@ SwiftUI's `_allPreviews`, retaining its name and layout, as native RenderPreview
 Provider type identity comes from Xcode's native module and type path. Private
 providers remain unavailable with Xcode 27.1, whose native RenderPreview also
 reports `preview provider not found` for those definitions.
+Providers with a default-valued custom `PreviewContext` render as ordinary
+SwiftUI views on macOS, Mac Catalyst, and tvOS.
 `PreviewModifier` calls `makeSharedContext()` once per concrete modifier type in
 each render and applies the native modifier wrappers in their original order.
 Widget and Activity `PreviewProvider` definitions in an iOS or watchOS Widget

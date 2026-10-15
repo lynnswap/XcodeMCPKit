@@ -1111,20 +1111,16 @@ final class NativePreviewCorrection {
         let timeline = controls["timelineIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
         let groupItem = controls["groupItemIndex"].flatMap { Mirror(reflecting: $0).children.first?.value as? Int }
         let toggle = controls["toggleState"].flatMap { Mirror(reflecting: $0).children.first?.value as? Bool }
-        let displayVariants = variants.filter { PreviewRendererRequest.displayVariantValues[$0.key] != nil }
-        let unsupportedVariant = variants.contains { key, value in
-            switch key {
-            case "Widget Family", "Presentation": return false
-            case "View Style": return !PreviewRendererRequest.activityViewStyles.contains(value)
-            case "Activity View Context": return !PreviewRendererRequest.activityViewContexts.contains(value)
-            default: return PreviewRendererRequest.displayVariantValues[key]?.contains(value) != true
-            }
+        // The selected renderer owns the catalog. Preserve unknown groups so it
+        // can return the native warning alongside the valid overrides' image.
+        let displayVariants = variants.filter {
+            !["Widget Family", "Presentation", "View Style", "Activity View Context"].contains($0.key)
         }
         let unsupportedControl = controls.contains { key, value in
             key != "timelineIndex" && key != "groupItemIndex" && key != "toggleState" && Mirror(reflecting: value).children.first != nil
         }
         return (family, presentation, timeline, groupItem, displayVariants, variants["View Style"], variants["Activity View Context"], toggle,
-                unsupportedVariant || unsupportedControl)
+                unsupportedControl)
     }
 
     private func event(_ type: String, _ value: JSONValue) throws -> Data {

@@ -95,6 +95,8 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             }
             if let context = preview.context, try await legacyPreviewContextCategory(context) != nil {
                 guard request.widgetFamily == nil, request.widgetPresentation == nil,
+                      request.activityViewStyle.map({ PreviewRendererRequest.activityViewStyles.contains($0) }) ?? true,
+                      request.activityViewContext.map({ PreviewRendererRequest.activityViewContexts.contains($0) }) ?? true,
                       variants.keys.allSatisfy({ ["Color Scheme", "Dynamic Type"].contains($0) }) else {
                     throw NativePreviewPipelineRequired()
                 }
@@ -119,7 +121,12 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 widget = nil
                 activity = nil
                 view = preview.content
-                errors = request.unsupportedGeneralPreviewOptions
+                let options = request.generalPreviewOptions(supportedVariants: supportedPreviewDisplayVariants)
+                variants = options.displayVariants
+                if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
+                    variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"
+                }
+                errors = options.errors
                 switch preview.interfaceOrientation {
                 case .portrait: sourceOrientation = .portrait
                 case .portraitUpsideDown: sourceOrientation = .portraitUpsideDown
@@ -163,7 +170,9 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 let result = try await makeViewPreview(source: source, groupItemIndex: request.groupItemIndex)
                 view = try await applyViewPreviewTraits(result.view, preview: value)
                 groupItems = result.groupItems
-                errors = result.errors + request.unsupportedGeneralPreviewOptions
+                let options = request.generalPreviewOptions(supportedVariants: supportedPreviewDisplayVariants)
+                variants = options.displayVariants
+                errors = result.errors + options.errors
                 layout = try await viewPreviewLayout(value)
                 sourceOrientation = try await viewPreviewOrientation(value)
             case "WidgetKit.TimelineEntryPreviewSource", "WidgetKit.TimelineProviderPreviewSource":
@@ -183,6 +192,8 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 sourceOrientation = .portrait
             case "WidgetKit.ActivityPreviewSource":
                 guard request.widgetFamily == nil, request.widgetPresentation == nil,
+                      request.activityViewStyle.map({ PreviewRendererRequest.activityViewStyles.contains($0) }) ?? true,
+                      request.activityViewContext.map({ PreviewRendererRequest.activityViewContexts.contains($0) }) ?? true,
                       variants.keys.allSatisfy({ ["Color Scheme", "Dynamic Type"].contains($0) }) else {
                     throw NativePreviewPipelineRequired()
                 }

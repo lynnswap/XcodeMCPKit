@@ -77,7 +77,8 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.metadataOnly = metadataOnly
     }
 
-    package var unsupportedGeneralPreviewOptions: [String] {
+    package func generalPreviewOptions(supportedVariants: [String: [String]]) ->
+        (displayVariants: [String: String], errors: [String]) {
         var errors: [String] = []
         if let timelineIndex {
             errors.append("Unsupported timeline index \(timelineIndex); the specified preview doesn't support timeline indexes in the currently active scheme.")
@@ -85,12 +86,26 @@ package struct PreviewRendererRequest: Codable, Sendable {
         if let activityToggleState {
             errors.append("Unsupported toggle state \(activityToggleState); the specified preview doesn't support a toggle control in the currently active scheme.")
         }
+        var requestedVariants = displayVariantOverrides
         for (group, value) in [("Widget Family", widgetFamily), ("Presentation", widgetPresentation),
-                               ("View Style", activityViewStyle), ("Activity View Context", activityViewContext)]
-            .sorted(by: { $0.0 < $1.0 }) where value != nil {
-            errors.append("Unsupported variant group ‘\(group)’; see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.")
+                               ("View Style", activityViewStyle), ("Activity View Context", activityViewContext)] {
+            if let value { requestedVariants[group] = value }
         }
-        return errors
+        var displayVariants: [String: String] = [:]
+        for (group, value) in requestedVariants.sorted(by: { $0.key < $1.key }) {
+            let message: String
+            if let values = supportedVariants[group] {
+                if values.contains(value) {
+                    displayVariants[group] = value
+                    continue
+                }
+                message = "Unsupported variant ‘\(value)’ for group ‘\(group)’"
+            } else {
+                message = "Unsupported variant group ‘\(group)’"
+            }
+            errors.append("\(message); see the `supportedPreviewVariantOverrides` field of the result for the list of supported groups and variants for rendering this preview in the currently active scheme.")
+        }
+        return (displayVariants, errors)
     }
 }
 

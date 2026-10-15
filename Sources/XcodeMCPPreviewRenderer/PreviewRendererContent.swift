@@ -45,19 +45,34 @@ func previewRegistry(for request: PreviewRendererRequest) throws -> any PreviewR
 @MainActor
 func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     (view: AnyView, layout: DeveloperToolsSupport.PreviewLayout, variants: [String: String], result: PreviewRendererResult) {
-    guard request.displayVariantOverrides.allSatisfy({ supportedPreviewDisplayVariants[$0.key]?.contains($0.value) == true }) else {
+    #if os(visionOS)
+    guard request.displayVariantOverrides.isEmpty,
+          request.activityViewStyle.map(PreviewRendererRequest.activityViewStyles.contains) ?? true,
+          request.activityViewContext.map(PreviewRendererRequest.activityViewContexts.contains) ?? true else {
         throw NativePreviewPipelineRequired()
     }
-    var variants = request.displayVariantOverrides
+    #endif
+    let options = request.generalPreviewOptions(supportedVariants: supportedPreviewDisplayVariants)
+    var variants = options.displayVariants
     var view: AnyView
     let layout: DeveloperToolsSupport.PreviewLayout
     var result: PreviewRendererResult
     if let typeName = request.providerTypeName {
         let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
+        #if os(macOS) || targetEnvironment(macCatalyst)
+        if let context = preview.context {
+            // Native metadata classifies recognized context keys; a custom
+            // context returning their defaults still describes a plain view.
+            guard try await legacyPreviewContextCategory(context) == nil else {
+                throw NativePreviewPipelineRequired()
+            }
+        }
+        #elseif !os(tvOS)
         guard preview.context == nil else {
             throw NativePreviewPipelineRequired()
         }
-        #if targetEnvironment(macCatalyst) || os(visionOS)
+        #endif
+        #if os(visionOS)
         guard preview.interfaceOrientation == .portrait else {
             throw NativePreviewPipelineRequired()
         }
@@ -85,7 +100,7 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     }
     if let localization = request.localization { view = AnyView(view.environment(\.locale, Locale(identifier: localization))) }
     view = try applyDisplayVariants(to: view, variants: variants)
-    result.errors = (result.errors ?? []) + request.unsupportedGeneralPreviewOptions
+    result.errors = (result.errors ?? []) + options.errors
     result.supportedDisplayVariants = supportedPreviewDisplayVariants
     return (view, layout, variants, result)
 }
