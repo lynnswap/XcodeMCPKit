@@ -285,7 +285,7 @@ Provider type identity comes from Xcode's native module and type path. Private
 providers remain unavailable with Xcode 27.1, whose native RenderPreview also
 reports `preview provider not found` for those definitions.
 Providers with a default-valued custom `PreviewContext` render as ordinary
-SwiftUI views on macOS, Mac Catalyst, and tvOS.
+SwiftUI views on iOS, macOS, Mac Catalyst, and tvOS.
 `PreviewModifier` calls `makeSharedContext()` once per concrete modifier type in
 each render and applies the native modifier wrappers in their original order.
 Widget and Activity `PreviewProvider` definitions in an iOS or watchOS Widget
