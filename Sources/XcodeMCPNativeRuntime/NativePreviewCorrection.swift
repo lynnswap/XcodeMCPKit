@@ -245,12 +245,13 @@ final class NativePreviewCorrection {
             ? try Self.widgetExtensionIdentifier(product) : nil
         try Self.prepareApp(product: product, helper: helper, app: app, containingApp: containingApp, platform: platform,
             clientIdentifier: nativeProviderIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString })
-        let primaryImage: URL?
+        let linkedImage: LinkedPreviewImage?
         if staticFramework {
-            primaryImage = try await Self.linkStaticFramework(target, in: app, platform: platform, process: process)
-        } else { primaryImage = nil }
+            linkedImage = try await Self.linkStaticFramework(target, in: app, platform: platform, process: process)
+        } else { linkedImage = nil }
+        let primaryImage = linkedImage?.url
         let dependencies = standaloneFramework == nil ? FrameworkDependencies()
-            : try Self.frameworkDependencies(for: target, targets: build.targets, platform: platform, primaryImageURL: primaryImage)
+            : try Self.frameworkDependencies(for: target, targets: build.targets, platform: platform, primaryImage: linkedImage)
         try Self.copyFrameworkDependencies(dependencies, into: app, platform: platform)
         if let simulatorEntitlements = entitlements.simulator {
             let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
@@ -891,6 +892,11 @@ final class NativePreviewCorrection {
         return info["CFBundleIdentifier"] as? String
     }
 
+    struct LinkedPreviewImage {
+        let url: URL
+        let searchPaths: [(framework: Bool, url: URL)]
+    }
+
     struct FrameworkDependencies {
         struct Relocation {
             let library: String
@@ -902,7 +908,7 @@ final class NativePreviewCorrection {
     }
 
     static func frameworkDependencies(for source: NativePreviewBuild.Target, targets: [NativePreviewBuild.Target],
-                                      platform: NativePreviewPlatform, primaryImageURL: URL? = nil) throws -> FrameworkDependencies {
+                                      platform: NativePreviewPlatform, primaryImage: LinkedPreviewImage? = nil) throws -> FrameworkDependencies {
         typealias SearchPath = (framework: Bool, url: URL)
         typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String], target: NativePreviewBuild.Target?)
         func library(at output: URL, target: NativePreviewBuild.Target? = nil) throws -> Library? {
@@ -925,8 +931,8 @@ final class NativePreviewCorrection {
                   let output = target.outputURL, productBundle(containing: output) == nil else { return nil }
             return try library(at: output, target: target)
         }
-        guard let output = (primaryImageURL ?? source.outputURL)?.resolvingSymlinksInPath(),
-              let sourceLibrary = try primaryImageURL.flatMap({ try library(at: $0, target: source) })
+        guard let output = (primaryImage?.url ?? source.outputURL)?.resolvingSymlinksInPath(),
+              let sourceLibrary = try primaryImage.flatMap({ try library(at: $0.url, target: source) })
                 ?? libraries.first(where: { $0.output == output }) else { return FrameworkDependencies() }
         var pending = [(library: sourceLibrary, inheritedPaths: [URL](), inheritedLinkPaths: [SearchPath]())]
         var visited: Set<URL> = [output.resolvingSymlinksInPath()]
@@ -948,7 +954,8 @@ final class NativePreviewCorrection {
             let runtimePaths = current.library.rpaths.compactMap { runtimeURL($0, importer: current.library.output) }
                 + current.inheritedPaths
             let inputs = try current.library.target?.linkedInputs()
-            let searchPaths = (inputs?.searchPaths ?? []) + current.inheritedLinkPaths
+            let linkedPaths = current.library.output == output ? primaryImage?.searchPaths : nil
+            let searchPaths = (linkedPaths ?? inputs?.searchPaths ?? []) + current.inheritedLinkPaths
             let linkedLibraries = try (inputs?.files ?? []).compactMap { candidate in
                 try libraries.first { $0.output.resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath() }
                     ?? library(at: candidate)
@@ -1002,7 +1009,7 @@ final class NativePreviewCorrection {
     }
 
     static func linkStaticFramework(_ source: NativePreviewBuild.Target, in app: URL, platform: NativePreviewPlatform,
-                                    process: NativePreviewProcess) async throws -> URL {
+                                    process: NativePreviewProcess) async throws -> LinkedPreviewImage {
         guard let output = source.outputURL else {
             throw NativeRuntimeError.unsupportedContract("The static preview target has no linked archive")
         }
@@ -1017,17 +1024,19 @@ final class NativePreviewCorrection {
             archive.path, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive.path,
             "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
             "@rpath/" + image.lastPathComponent, "-o", image.path]
+        var searchPaths: [(framework: Bool, url: URL)] = []
         if platform == .catalyst {
             let support = URL(filePath: sdk).appendingPathComponent("System/iOSSupport")
-            arguments += ["-F", support.appendingPathComponent("System/Library/Frameworks").path,
-                          "-L", support.appendingPathComponent("usr/lib").path]
+            searchPaths += [(true, support.appendingPathComponent("System/Library/Frameworks")),
+                            (false, support.appendingPathComponent("usr/lib"))]
         }
         let inputs = try source.linkedInputs()
-        for path in inputs.searchPaths { arguments += [path.framework ? "-F" : "-L", path.url.path] }
+        searchPaths += inputs.searchPaths
         if let framework = frameworkBundle(containing: output) {
             // Archive commands have no framework link step; Swift object autolinks still need their Products directory.
-            arguments += ["-F", framework.deletingLastPathComponent().path]
+            searchPaths.append((true, framework.deletingLastPathComponent()))
         }
+        for path in searchPaths { arguments += [path.framework ? "-F" : "-L", path.url.path] }
         for input in inputs.files {
             var directory: ObjCBool = false
             if FileManager.default.fileExists(atPath: input.path, isDirectory: &directory), !directory.boolValue,
@@ -1040,7 +1049,7 @@ final class NativePreviewCorrection {
             let copiedFramework = platform.frameworksDirectory(in: app).appendingPathComponent(framework.lastPathComponent)
             _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", copiedFramework.path])
         }
-        return image
+        return LinkedPreviewImage(url: image, searchPaths: searchPaths)
     }
 
     static func copyFrameworkDependencies(_ dependencies: FrameworkDependencies, into app: URL,

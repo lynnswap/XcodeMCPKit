@@ -420,9 +420,6 @@ struct NativePreviewCorrectionTests {
         let original = try Data(contentsOf: binary)
         let originalSupport = try Data(contentsOf: support)
         let originalDependency = try Data(contentsOf: dependencyBinary)
-        let dependencyTarget = NativePreviewBuild.Target(moduleName: "Dependency", buildableName: "Dependency.framework",
-            sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", dependencyBinary.path],
-            linkerWorkingDirectory: root.path, objectFiles: [], sourceFiles: [dependencyCode], debugDylibEnabled: false, isRunnable: false)
         let helper = root.appendingPathComponent("Helper")
         try FileManager.default.createDirectory(at: helper.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
         let loader = root.appendingPathComponent("Loader.c")
@@ -444,9 +441,10 @@ struct NativePreviewCorrectionTests {
         try NativePreviewCorrection.prepareApp(product: framework, helper: helper, app: app, platform: .macOS)
         let developer = try previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
-        let image = try await NativePreviewCorrection.linkStaticFramework(target, in: app, platform: .macOS, process: process)
-        let dependencies = try NativePreviewCorrection.frameworkDependencies(for: target, targets: [target, dependencyTarget], platform: .macOS,
-            primaryImageURL: image)
+        let linked = try await NativePreviewCorrection.linkStaticFramework(target, in: app, platform: .macOS, process: process)
+        let image = linked.url
+        let dependencies = try NativePreviewCorrection.frameworkDependencies(for: target, targets: [target], platform: .macOS,
+            primaryImage: linked)
         try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: app, platform: .macOS)
         let libraries = try NativePreviewCorrection.registryLibraries(in: app, previewLibraries: [image])
         let paths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [image], registryLibraries: libraries,
@@ -506,7 +504,7 @@ struct NativePreviewCorrectionTests {
         try FileManager.default.copyItem(at: framework, to: frameworks.appendingPathComponent(framework.lastPathComponent))
         let developer = try previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
-        let image = try await NativePreviewCorrection.linkStaticFramework(target, in: app, platform: platform, process: process)
+        let image = try await NativePreviewCorrection.linkStaticFramework(target, in: app, platform: platform, process: process).url
         let linked = try #require(try NativePreviewBinary.dynamicLibrary(at: image))
         #expect(linked.dependencies.contains { $0.contains("/iOSSupport/") && $0.contains("/SwiftUI.framework/") })
         let symbols = try previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", image.path])
