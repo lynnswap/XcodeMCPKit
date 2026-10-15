@@ -365,6 +365,63 @@ struct NativePreviewCorrectionTests {
         #expect(try String(contentsOf: resources.appendingPathComponent("Marker.txt"), encoding: .utf8) == "framework resource")
     }
 
+    @Test func standaloneFrameworkStagesItsTransitiveBuiltDependencies() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let products = root.appendingPathComponent("Products")
+        let source = products.appendingPathComponent("Feature.framework/Feature")
+        let dependency = products.appendingPathComponent("Dependency.framework/Dependency")
+        let library = products.appendingPathComponent("libSupport.dylib")
+        let unrelated = products.appendingPathComponent("libUnrelated.dylib")
+        for binary in [source, dependency] {
+            let resources = binary.deletingLastPathComponent().appendingPathComponent("Resources")
+            try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+            let info = ["CFBundleIdentifier": "dev.lynnswap." + binary.lastPathComponent,
+                        "CFBundleExecutable": binary.lastPathComponent, "CFBundlePackageType": "FMWK"]
+            try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+                .write(to: resources.appendingPathComponent("Info.plist"))
+        }
+        let marker = dependency.deletingLastPathComponent().appendingPathComponent("Resources/Marker.txt")
+        try Data("dependency resource".utf8).write(to: marker)
+        try compilePreviewLibrary(at: library, platform: .macOS, installName: "@rpath/libSupport.dylib")
+        try compilePreviewLibrary(at: unrelated, platform: .macOS, installName: "@rpath/libUnrelated.dylib")
+        try compilePreviewLibrary(at: dependency, platform: .macOS,
+            installName: "@rpath/Dependency.framework/Dependency", libraries: [library])
+        try compilePreviewLibrary(at: source, platform: .macOS,
+            installName: "@rpath/Feature.framework/Feature", libraries: [dependency])
+        for binary in [source, dependency, library] {
+            try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", binary.path])
+        }
+        func target(_ binary: URL, sdk: String = "macosx") -> NativePreviewBuild.Target {
+            NativePreviewBuild.Target(moduleName: binary.lastPathComponent, buildableName: binary.lastPathComponent,
+                sdkRoot: sdk, sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", binary.path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)
+        }
+        let sourceTarget = target(source)
+        let dependencies = try NativePreviewCorrection.frameworkDependencies(for: sourceTarget,
+            targets: [sourceTarget, target(dependency), target(library), target(unrelated)], platform: .macOS)
+
+        let helper = root.appendingPathComponent("Helper")
+        let app = root.appendingPathComponent("Preview.app")
+        try FileManager.default.createDirectory(at: helper.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
+        let loaderSource = root.appendingPathComponent("Loader.c")
+        try Data("#include <dlfcn.h>\n#include <stdio.h>\nint main(int argc, char **argv) { if (dlopen(argv[1], RTLD_NOW)) return 0; fputs(dlerror(), stderr); return 1; }\n".utf8)
+            .write(to: loaderSource)
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-arch", "arm64", loaderSource.path,
+            "-Wl,-rpath,@executable_path/../Frameworks", "-o", helper.appendingPathComponent("XcodeMCPPreviewRenderer").path])
+        try NativePreviewCorrection.prepareApp(product: source.deletingLastPathComponent(), helper: helper, app: app,
+            platform: .macOS, dependencies: dependencies)
+        // Loading succeeds entirely from staging after the original products move.
+        try FileManager.default.moveItem(at: products, to: root.appendingPathComponent("OriginalProducts"))
+        let frameworks = app.appendingPathComponent("Contents/Frameworks")
+        let stagedDependency = try #require(Bundle(url: frameworks.appendingPathComponent("Dependency.framework")))
+        let stagedMarker = try #require(stagedDependency.url(forResource: "Marker", withExtension: "txt"))
+        #expect(try String(contentsOf: stagedMarker, encoding: .utf8) == "dependency resource")
+        #expect(!FileManager.default.fileExists(atPath: frameworks.appendingPathComponent(unrelated.lastPathComponent).path))
+        try previewBinaryOutput(app.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer").path,
+            [frameworks.appendingPathComponent("Feature.framework/Feature").path])
+    }
+
     @Test(arguments: [false, true])
     func extensionPreviewsUseTheirOwnBundle(linkedLibrary: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

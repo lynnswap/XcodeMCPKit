@@ -40,22 +40,26 @@ struct NativePreviewBinaryTests {
 }
 
 @MainActor
-func compilePreviewLibrary(at binary: URL, value: Int = 0, uuid: Bool = true, architecture: String = "arm64") throws {
+func compilePreviewLibrary(at binary: URL, value: Int = 0, uuid: Bool = true, architecture: String = "arm64",
+                           platform: NativePreviewPlatform = .iOS, installName: String = "@rpath/libPreviewFixture.dylib",
+                           libraries: [URL] = []) throws {
     try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
     let source = binary.appendingPathExtension("c")
     try Data("int preview_fixture_value(void) { return \(value); }\n".utf8).write(to: source)
-    let sdk = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "iphonesimulator", "--show-sdk-path"])
+    defer { try? FileManager.default.removeItem(at: source) }
+    let sdk = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", platform.sdk, "--show-sdk-path"])
         .trimmingCharacters(in: .whitespacesAndNewlines)
-    var arguments = ["--sdk", "iphonesimulator", "clang", "-dynamiclib", "-target", "\(architecture)-apple-ios18.4-simulator",
-                     "-isysroot", sdk, source.path, "-install_name", "@rpath/libPreviewFixture.dylib", "-o", binary.path,
-                     "-Wl,-no_adhoc_codesign"]
+    let triple = platform.triple.replacingOccurrences(of: "arm64-", with: "\(architecture)-")
+    var arguments = ["--sdk", platform.sdk, "clang", "-dynamiclib", "-target", triple,
+                     "-isysroot", sdk, source.path, "-install_name", installName, "-o", binary.path,
+                     "-Wl,-no_adhoc_codesign"] + libraries.map(\.path)
     if !uuid { arguments.append("-Wl,-no_uuid") }
     try previewBinaryOutput("/usr/bin/xcrun", arguments)
 }
 
 @discardableResult
 @MainActor
-private func previewBinaryOutput(_ executable: String, _ arguments: [String]) throws -> String {
+func previewBinaryOutput(_ executable: String, _ arguments: [String]) throws -> String {
     let process = Process()
     process.executableURL = URL(filePath: executable)
     process.arguments = arguments

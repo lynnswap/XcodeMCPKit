@@ -163,7 +163,9 @@ recreate Xcode's complete source-specific preview dependency graph.
 When no compatible application or extension hosts a macOS dynamic framework,
 the renderer stages that framework inside its own helper application. The
 framework retains its bundle identifier and resources for `Bundle(for:)`
-lookups; `Bundle.main` identifies the helper application.
+lookups; `Bundle.main` identifies the helper application. Linked frameworks and
+dynamic libraries from the same native build are copied with their resources,
+following the source image's transitive Mach-O dependencies.
 Source and host records must use the same supported platform and arm64 architecture
 before checking for ambiguity. An extension's own bundle supplies its resources,
 identifier, and entitlements. A containing application's shared Frameworks are

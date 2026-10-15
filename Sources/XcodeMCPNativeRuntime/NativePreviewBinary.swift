@@ -5,8 +5,15 @@ import MachOKit
 @MainActor
 enum NativePreviewBinary {
     static func isDynamicLibrary(at url: URL) throws -> Bool {
-        do { return try arm64File(at: url)?.header.fileType == .dylib }
-        catch MachOKitError.invalidMagic { return false }
+        try dynamicLibrary(at: url) != nil
+    }
+
+    static func dynamicLibrary(at url: URL) throws -> (identifier: String, dependencies: [String])? {
+        do {
+            guard let file = try arm64File(at: url), file.header.fileType == .dylib else { return nil }
+            return (file.imagePath, file.dependencies.map(\.dylib.name))
+        }
+        catch MachOKitError.invalidMagic { return nil }
     }
 
     static func matches(_ source: URL, _ candidate: URL) throws -> Bool {

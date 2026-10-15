@@ -239,8 +239,11 @@ final class NativePreviewCorrection {
         let nativeProviderIdentifier = metadataOnly == true && location.providerPath != nil
             && (platform == .iOS || platform == .watchOS) && containingApp != nil
             ? try Self.widgetExtensionIdentifier(product) : nil
+        let dependencies = standaloneFramework == nil ? []
+            : try Self.frameworkDependencies(for: target, targets: build.targets, platform: platform)
         try Self.prepareApp(product: product, helper: helper, app: app, containingApp: containingApp, platform: platform,
-            clientIdentifier: nativeProviderIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString })
+            clientIdentifier: nativeProviderIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString },
+            dependencies: dependencies)
         if let simulatorEntitlements = entitlements.simulator {
             let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
             try simulatorEntitlements.write(to: section)
@@ -867,7 +870,35 @@ final class NativePreviewCorrection {
         return info["CFBundleIdentifier"] as? String
     }
 
-    static func prepareApp(product: URL, helper: URL, app: URL, containingApp: URL? = nil, platform: NativePreviewPlatform = .iOS, clientIdentifier: String? = nil) throws {
+    static func frameworkDependencies(for source: NativePreviewBuild.Target, targets: [NativePreviewBuild.Target],
+                                      platform: NativePreviewPlatform) throws -> [URL] {
+        let libraries = try targets.compactMap { target -> (output: URL, product: URL, identifier: String, dependencies: [String])? in
+            guard target.architecture == source.architecture,
+                  NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) == platform,
+                  let output = target.outputURL, productBundle(containing: output) == nil,
+                  FileManager.default.fileExists(atPath: output.path),
+                  let image = try NativePreviewBinary.dynamicLibrary(at: output) else { return nil }
+            return (output, frameworkBundle(containing: output) ?? output, image.identifier, image.dependencies)
+        }
+        guard let output = source.outputURL,
+              let sourceLibrary = libraries.first(where: { $0.output == output }) else { return [] }
+        var pending = [sourceLibrary]
+        var visited: Set<URL> = [output.resolvingSymlinksInPath()]
+        var products: [URL] = []
+        while let library = pending.popLast() {
+            for dependency in libraries where library.dependencies.contains(dependency.identifier)
+                || library.dependencies.contains(dependency.output.path) {
+                if visited.insert(dependency.output.resolvingSymlinksInPath()).inserted {
+                    products.append(dependency.product)
+                    pending.append(dependency)
+                }
+            }
+        }
+        return products
+    }
+
+    static func prepareApp(product: URL, helper: URL, app: URL, containingApp: URL? = nil, platform: NativePreviewPlatform = .iOS,
+                           clientIdentifier: String? = nil, dependencies: [URL] = []) throws {
         let standaloneFramework = product.pathExtension == "framework"
         let frameworks = platform.frameworksDirectory(in: app)
         let original: [String: Any]
@@ -875,6 +906,9 @@ final class NativePreviewCorrection {
             try FileManager.default.createDirectory(at: platform.executableDirectory(in: app), withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: product, to: frameworks.appendingPathComponent(product.lastPathComponent))
+            for dependency in dependencies {
+                try FileManager.default.copyItem(at: dependency, to: frameworks.appendingPathComponent(dependency.lastPathComponent))
+            }
             // The framework remains its own bundle; the renderer is only its executable host.
             original = ["CFBundleIdentifier": "dev.xcodemcp.PreviewClient." + UUID().uuidString, "CFBundleName": "Preview"]
         } else {
