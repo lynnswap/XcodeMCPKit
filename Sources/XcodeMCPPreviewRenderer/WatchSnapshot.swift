@@ -19,16 +19,13 @@ func captureWatchPreview(view: AnyView, layout: DeveloperToolsSupport.PreviewLay
 }
 
 @MainActor
-func captureWatchPreview(controller: AnyObject,
-                         prepareForSnapshot: @MainActor (AnyObject) async throws -> Void) async throws -> CGImage {
-    try await captureWatchPreview(controller: controller, layout: .device, hostingController: nil,
-                                  prepareForSnapshot: prepareForSnapshot)
+func captureWatchPreview(controller: AnyObject) async throws -> CGImage {
+    try await captureWatchPreview(controller: controller, layout: .device, hostingController: nil)
 }
 
 @MainActor
 private func captureWatchPreview(controller: AnyObject, layout: DeveloperToolsSupport.PreviewLayout,
-                                 hostingController: (any _UIHostingViewable)?,
-                                 prepareForSnapshot: @MainActor (AnyObject) async throws -> Void = { _ in }) async throws -> CGImage {
+                                 hostingController: (any _UIHostingViewable)?) async throws -> CGImage {
     let runtime = ABIRuntime.shared
     // watchOS exposes SwiftUI's host protocol but marks UIKit controllers
     // unavailable. Use the existing ABI bridge for standard view containment.
@@ -96,7 +93,6 @@ private func captureWatchPreview(controller: AnyObject, layout: DeveloperToolsSu
         try unsafe addSubview.unsafeInvoke(host)
         try unsafe didMove.unsafeInvoke(parent)
         try unsafe layoutIfNeeded.unsafeInvoke()
-        try await prepareForSnapshot(host)
         try await Task.sleep(for: .milliseconds(500))
         hostingController?._render(seconds: 0)
         if case .sizeThatFits = layout, let hostingController {
