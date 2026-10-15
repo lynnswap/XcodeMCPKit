@@ -4,6 +4,11 @@ import MachOKit
 @safe
 @MainActor
 enum NativePreviewBinary {
+    static func isDynamicLibrary(at url: URL) throws -> Bool {
+        do { return try arm64File(at: url)?.header.fileType == .dylib }
+        catch MachOKitError.invalidMagic { return false }
+    }
+
     static func matches(_ source: URL, _ candidate: URL) throws -> Bool {
         guard let sourceFile = try arm64File(at: source),
               let candidateFile = try arm64File(at: candidate) else { return false }

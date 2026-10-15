@@ -289,6 +289,83 @@ struct NativePreviewCorrectionTests {
     }
 
     @Test(arguments: [false, true])
+    func macFrameworkUsesAnEmbeddedAppOrItsOwnProduct(embedded: Bool) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("FrameworkView.swift")
+        let binary = root.appendingPathComponent("FixtureKit.framework/FixtureKit")
+        try compilePreviewLibrary(at: binary)
+        let framework = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
+            sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", binary.path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
+        var targets = [framework]
+        if embedded {
+            let app = root.appendingPathComponent("Host.app")
+            let copy = app.appendingPathComponent("Contents/Frameworks/FixtureKit.framework/FixtureKit")
+            try FileManager.default.createDirectory(at: copy.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: binary, to: copy)
+            targets.append(NativePreviewBuild.Target(moduleName: "Host", buildableName: "Host.app", sdkRoot: "macosx",
+                sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", app.appendingPathComponent("Contents/MacOS/Host.debug.dylib").path],
+                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true))
+        }
+        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS)
+        #expect(selected.source.moduleName == "FixtureKit")
+        #expect(selected.host.moduleName == (embedded ? "Host" : "FixtureKit"))
+    }
+
+    @Test func standaloneStaticMacFrameworkRequiresNativePipeline() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("FrameworkView.swift")
+        let binary = root.appendingPathComponent("FixtureKit.framework/FixtureKit")
+        try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("!<arch>\n".utf8).write(to: binary)
+        let target = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
+            sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", binary.path],
+            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
+        #expect(throws: NativePipelineRequired.self) {
+            try NativePreviewCorrection.selectTarget([target], source: source, platform: .macOS)
+        }
+    }
+
+    @Test func stagedMacFrameworkRetainsItsOwnBundleAndResources() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let framework = root.appendingPathComponent("FixtureKit.framework")
+        let resources = framework.appendingPathComponent("Versions/A/Resources")
+        let binary = framework.appendingPathComponent("Versions/A/FixtureKit")
+        let helper = root.appendingPathComponent("Helper")
+        let app = root.appendingPathComponent("Preview.app")
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: helper.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
+        try compilePreviewLibrary(at: binary)
+        try FileManager.default.createSymbolicLink(atPath: framework.appendingPathComponent("Versions/Current").path, withDestinationPath: "A")
+        try FileManager.default.createSymbolicLink(atPath: framework.appendingPathComponent("Resources").path, withDestinationPath: "Versions/Current/Resources")
+        try FileManager.default.createSymbolicLink(atPath: framework.appendingPathComponent("FixtureKit").path, withDestinationPath: "Versions/Current/FixtureKit")
+        let identifier = "dev.lynnswap.FixtureKit"
+        let info = ["CFBundleIdentifier": identifier, "CFBundleExecutable": "FixtureKit", "CFBundleName": "FixtureKit", "CFBundlePackageType": "FMWK"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+            .write(to: resources.appendingPathComponent("Info.plist"))
+        try Data("framework resource".utf8).write(to: resources.appendingPathComponent("Marker.txt"))
+        try Data("renderer".utf8).write(to: helper.appendingPathComponent("XcodeMCPPreviewRenderer"))
+
+        try NativePreviewCorrection.prepareApp(product: framework, helper: helper, app: app, platform: .macOS)
+
+        let staged = app.appendingPathComponent("Contents/Frameworks/FixtureKit.framework")
+        let bundle = try #require(Bundle(url: staged))
+        #expect(bundle.bundleIdentifier == identifier)
+        let marker = try #require(bundle.url(forResource: "Marker", withExtension: "txt"))
+        #expect(try String(contentsOf: marker, encoding: .utf8) == "framework resource")
+        #expect(Bundle(url: app)?.bundleIdentifier != identifier)
+        #expect(Bundle(url: app)?.url(forResource: "Marker", withExtension: "txt") == nil)
+        #expect(try Data(contentsOf: app.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer")) == Data("renderer".utf8))
+        let libraries = try NativePreviewCorrection.registryLibraries(in: app, previewLibraries: [])
+        let paths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [], registryLibraries: libraries, sourceOutput: binary)
+        #expect(paths == ["Contents/Frameworks/FixtureKit.framework/Versions/A/FixtureKit"])
+        #expect(try String(contentsOf: resources.appendingPathComponent("Marker.txt"), encoding: .utf8) == "framework resource")
+    }
+
+    @Test(arguments: [false, true])
     func extensionPreviewsUseTheirOwnBundle(linkedLibrary: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = root.appendingPathComponent("ExtensionView.swift")

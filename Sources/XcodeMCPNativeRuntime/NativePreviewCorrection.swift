@@ -219,18 +219,20 @@ final class NativePreviewCorrection {
         let location = prepared.location
         let selection = try Self.selectTarget(build.targets, source: source, platform: platform)
         let target = selection.host
-        guard target.debugDylibEnabled else {
-            throw NativePipelineRequired()
-        }
         guard let version = build.systemVersion, version.compare(platform.minimumVersion, options: .numeric) != .orderedAscending else {
             throw NativePipelineRequired()
         }
         guard let output = target.outputURL else {
             throw NativeRuntimeError.unsupportedContract("The preview target has no linked product")
         }
-        guard let product = Self.productBundle(containing: output) else {
-            throw NativePipelineRequired()
-        }
+        let appProduct = Self.productBundle(containing: output)
+        let standaloneFramework = appProduct == nil && platform == .macOS ? Self.frameworkBundle(containing: output) : nil
+        let product: URL
+        if let appProduct {
+            guard target.debugDylibEnabled else { throw NativePipelineRequired() }
+            product = appProduct
+        } else if let standaloneFramework { product = standaloneFramework }
+        else { throw NativePipelineRequired() }
         let entitlements = try NativePreviewEntitlements.read(from: product)
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
         let containingApp = try Self.containingApp(for: output, targets: build.targets)
@@ -251,7 +253,7 @@ final class NativePreviewCorrection {
                 "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__entitlements", "-Xlinker", section.path,
                 "-o", platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path])
         }
-        let libraries = try previewLibraries(in: app, platform: platform)
+        let libraries = standaloneFramework == nil ? try previewLibraries(in: app, platform: platform) : []
         let registryLibraries = try Self.registryLibraries(in: app, previewLibraries: libraries)
         let libraryPaths = try Self.libraryPaths(in: app, previewLibraries: libraries,
             registryLibraries: registryLibraries, sourceOutput: selection.source.outputURL)
@@ -604,6 +606,11 @@ final class NativePreviewCorrection {
                 }
             }
             selections += hosts.map { Selection(source: target, host: $0) }
+            if hosts.isEmpty, platform == .macOS, let sourceOutput,
+               frameworkBundle(containing: sourceOutput) != nil,
+               try NativePreviewBinary.isDynamicLibrary(at: sourceOutput) {
+                selections.append(Selection(source: target, host: target))
+            }
         }
         let runnable = selections.filter { $0.host.isRunnable }
         let candidates = runnable.isEmpty ? selections : runnable
@@ -821,6 +828,15 @@ final class NativePreviewCorrection {
         return nil
     }
 
+    private static func frameworkBundle(containing output: URL) -> URL? {
+        var url = output.deletingLastPathComponent()
+        while url.path != "/" {
+            if url.pathExtension == "framework" { return url }
+            url.deleteLastPathComponent()
+        }
+        return nil
+    }
+
     static func containingApp(for extensionOutput: URL, targets: [NativePreviewBuild.Target]) throws -> URL? {
         guard let product = productBundle(containing: extensionOutput), product.pathExtension == "appex" else { return nil }
         let relativeBinary = String(extensionOutput.path.dropFirst(product.path.count + 1))
@@ -852,15 +868,26 @@ final class NativePreviewCorrection {
     }
 
     static func prepareApp(product: URL, helper: URL, app: URL, containingApp: URL? = nil, platform: NativePreviewPlatform = .iOS, clientIdentifier: String? = nil) throws {
-        try FileManager.default.copyItem(at: product, to: app)
+        let standaloneFramework = product.pathExtension == "framework"
+        let frameworks = platform.frameworksDirectory(in: app)
+        let original: [String: Any]
+        if standaloneFramework {
+            try FileManager.default.createDirectory(at: platform.executableDirectory(in: app), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: product, to: frameworks.appendingPathComponent(product.lastPathComponent))
+            // The framework remains its own bundle; the renderer is only its executable host.
+            original = ["CFBundleIdentifier": "dev.xcodemcp.PreviewClient." + UUID().uuidString, "CFBundleName": "Preview"]
+        } else {
+            try FileManager.default.copyItem(at: product, to: app)
+            original = try bundleInfo(at: app)
+        }
         let executable = helper.appendingPathComponent("XcodeMCPPreviewRenderer")
         try copyReplacingItem(executable, to: platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer"))
-        var info = Self.rendererInfo(try bundleInfo(at: app), platform: platform)
+        var info = Self.rendererInfo(original, platform: platform)
         // The client coexists with the original extension registration.
         if let clientIdentifier { info["CFBundleIdentifier"] = clientIdentifier }
         try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
             .write(to: platform.infoURL(in: app))
-        let frameworks = platform.frameworksDirectory(in: app)
         try FileManager.default.createDirectory(at: platform.resourcesDirectory(in: app), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
         if let shared = containingApp.map({ platform.frameworksDirectory(in: $0) }),
