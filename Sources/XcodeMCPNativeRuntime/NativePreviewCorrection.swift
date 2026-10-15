@@ -1020,8 +1020,9 @@ final class NativePreviewCorrection {
         let image = platform.frameworksDirectory(in: app).appendingPathComponent("XcodeMCPPreviewSource.dylib")
         let sdk = try await process.xcrun(["--sdk", platform.sdk, "--show-sdk-path"])
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Passing the archive twice can make Xcode 26.6 ignore its later -force_load.
         var arguments = ["--sdk", platform.sdk, "swiftc", "-emit-library", "-target", platform.triple, "-sdk", sdk,
-            archive.path, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive.path,
+            archive.path, "-lc++", "-Xlinker", "-all_load",
             "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
             "@rpath/" + image.lastPathComponent, "-o", image.path]
         let inputs = try source.linkedInputs()
