@@ -28,7 +28,7 @@ func nativePreviewMetadata(_ request: PreviewRendererRequest) async throws -> (m
     // This extension's image supplies the native category conversion.
     let categoryDeclaration = "(extension in PreviewsOSSupportUI):DeveloperToolsSupport.PreviewSourceContentCategory.contentCategory.getter : PreviewsMessagingOS.ContentCategory"
     let support = try await runtime.resolve(.init(name: categoryDeclaration, language: .swift),
-        in: .framework(named: "PreviewsOSSupportUI"))
+        in: previewFrameworkImage(named: "PreviewsOSSupportUI"))
     let categoryType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.ContentCategory", in: messaging)
     let categoryGetter = try await sourceCategory.type.resolveGetter(
         named: categoryDeclaration,
@@ -117,7 +117,7 @@ private func nativePreviewTraits(_ preview: NativeSwiftValue) async throws -> Na
         named: "21DeveloperToolsSupport32PreviewInterfaceOrientationTraitV")
     let declaration = "(extension in PreviewsOSSupportUI):DeveloperToolsSupport.PreviewInterfaceOrientation.previewOrientation.getter : PreviewsMessagingOS.PreviewTraits.Orientation"
     let support = try await runtime.resolve(.init(name: declaration, language: .swift),
-        in: .framework(named: "PreviewsOSSupportUI"))
+        in: previewFrameworkImage(named: "PreviewsOSSupportUI"))
     let getter = try await sourceOrientation.type.resolveGetter(named: declaration, as: (() -> NativeSwiftValue).self,
         valueABIs: [orientationType: .opaque(named: orientationType.name)],
         receiverABI: .opaque(named: sourceOrientation.type.name))
