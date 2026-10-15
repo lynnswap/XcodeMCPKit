@@ -8,6 +8,9 @@ import Synchronization
 public func previewServiceEmptyArray<Element>() -> [Element] { [] }
 
 @inline(never)
+public func previewServiceEmptyOptionalArray<Element>() -> [Element]? { .some([]) }
+
+@inline(never)
 public func previewServiceNil<Value>() -> Value? { nil }
 
 private typealias PreviewServiceSender = @convention(block) @Sendable (AnyObject) -> Void

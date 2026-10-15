@@ -165,7 +165,15 @@ private struct NativeWidgetPreview {
         let box = try await service.messagingType("PlistValueBox")
         let boxes = try await runtime.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(box)])
         let states: NativeSwiftValue
-        if let controls { states = controls } else { states = try await service.none(of: boxes) }
+        if let controls { states = controls } else {
+            // The native first static update carries some([]) before the canvas
+            // discovers its control configuration.
+            let optionalBoxes = try await runtime.resolveSwiftType(named: "Swift.Optional", genericArguments: [.type(boxes)])
+            let factory = try await runtime.resolveSwiftFunction(
+                named: "XcodeMCPPreviewRenderer.previewServiceEmptyOptionalArray<A>() -> Swift.Array<A>?",
+                as: (() -> NativeSwiftValue).self, genericArguments: [.type(box)], valueABIs: [optionalBoxes: .pointer])
+            states = try unsafe factory.unsafeInvoke()
+        }
         let strategy = try await archivingStrategy()
         let type = try await service.messagingType("ShellUpdatePayload")
         let make = try await type.resolveInitializer(
