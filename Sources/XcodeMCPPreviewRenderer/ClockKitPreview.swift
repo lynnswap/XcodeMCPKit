@@ -36,8 +36,11 @@ func makeClockKitPreview(from preview: SwiftUI._Preview, request: PreviewRendere
     if let index = request.groupItemIndex {
         errors.append(unsupportedPreviewGroupItemMessage(index, supportsGroups: false))
     }
+    let usesDeviceLayout: Bool
+    if case .device = preview.layout { usesDeviceLayout = true }
+    else { usesDeviceLayout = false }
     let result = PreviewRendererResult(displayName: preview.displayName, sourceLineNumber: request.lineNumber,
-        errors: errors, supportedDisplayVariants: [:], usesDeviceLayout: true, interfaceOrientation: "portrait")
+        errors: errors, supportedDisplayVariants: [:], usesDeviceLayout: usesDeviceLayout, interfaceOrientation: "portrait")
     withExtendedLifetime(symbol) {}
     return (controller, result)
 }
