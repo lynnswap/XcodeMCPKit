@@ -255,7 +255,7 @@ final class NativePreviewService {
         return try await propertyList(data)
     }
 
-    func archivingParameter() async throws -> (label: String, value: NativeSwiftValue) {
+    func archivingParameter() async throws -> (declaration: String, value: NativeSwiftValue) {
         let type: NativeSwiftType
         do {
             type = try await messagingType("ArchivingStrategy")
@@ -263,11 +263,11 @@ final class NativePreviewService {
             // Older messaging images expose the same payloads with a native
             // optional ContentOverride instead of ArchivingStrategy.
             let type = try await messagingType("ContentOverride")
-            return ("contentOverride", try await none(of: type))
+            return ("contentOverride: PreviewsMessagingOS.ContentOverride?", try await none(of: type))
         }
         let getter = try await type.resolveStaticGetter(named: "default", as: (() -> NativeSwiftValue).self,
             valueABIs: [type: .opaque(named: type.name)])
-        return ("archivingStrategy", try unsafe getter.unsafeInvoke())
+        return ("archivingStrategy: PreviewsMessagingOS.ArchivingStrategy", try unsafe getter.unsafeInvoke())
     }
 
     func makeUpdate(pid: Int32, identifier: NativeSwiftValue, category: NativeSwiftValue,
@@ -303,7 +303,7 @@ final class NativePreviewService {
         }
         let parameter = try await archivingParameter()
         let type = try await messagingType("ShellUpdatePayload")
-        let suffix = "previewType: PreviewsMessagingOS.PreviewType, contentIdentifier: PreviewsMessagingOS.ContentIdentifier, contentCategory: PreviewsMessagingOS.ContentCategory, \(parameter.label): \(parameter.value.type.name), contentPayload: PreviewsFoundationOS.PropertyList, staticProducts: [PreviewsMessagingOS.StaticLinkablePreviewProduct], setupPayload: PreviewsMessagingOS.UpdateSetupPayload, controlStates: [PreviewsMessagingOS.PlistValueBox]?) -> PreviewsMessagingOS.ShellUpdatePayload"
+        let suffix = "previewType: PreviewsMessagingOS.PreviewType, contentIdentifier: PreviewsMessagingOS.ContentIdentifier, contentCategory: PreviewsMessagingOS.ContentCategory, \(parameter.declaration), contentPayload: PreviewsFoundationOS.PropertyList, staticProducts: [PreviewsMessagingOS.StaticLinkablePreviewProduct], setupPayload: PreviewsMessagingOS.UpdateSetupPayload, controlStates: [PreviewsMessagingOS.PlistValueBox]?) -> PreviewsMessagingOS.ShellUpdatePayload"
         let groupedInitializer = "init(pid: Swift.Int32, hostUpdateSeed: PreviewsMessagingOS.HostUpdateSeed?, hostUpdateGroupSeed: PreviewsMessagingOS.HostUpdateGroupSeed?, " + suffix
         let hasGroupSeed: Bool
         do {

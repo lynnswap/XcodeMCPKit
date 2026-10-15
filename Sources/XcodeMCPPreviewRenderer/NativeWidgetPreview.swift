@@ -125,7 +125,7 @@ private struct NativeWidgetPreview {
         let parameter = try await service.archivingParameter()
         let request = try await service.messagingType("RequestPreviewVariantsPayload")
         let make = try await request.resolveInitializer(
-            named: "init(contentCategory: PreviewsMessagingOS.ContentCategory, \(parameter.label): \(parameter.value.type.name)) -> PreviewsMessagingOS.RequestPreviewVariantsPayload",
+            named: "init(contentCategory: PreviewsMessagingOS.ContentCategory, \(parameter.declaration)) -> PreviewsMessagingOS.RequestPreviewVariantsPayload",
             as: ((NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
             valueABIs: [category.type: .opaque(named: category.type.name), parameter.value.type: .opaque(named: parameter.value.type.name),
                         request: .opaque(named: request.name)])
