@@ -142,7 +142,8 @@ retrieval does not establish online/account-dependent retrieval.
 
 `RenderPreview` uses packaged platform renderers for SwiftUI, UIKit, and AppKit
 `#Preview` definitions, SwiftUI `PreviewProvider` definitions, and iOS and watchOS WidgetKit previews
-in an application or app extension built with a debug dylib. The packaged
+in an application or app extension built with a debug dylib, or a standalone
+dynamic framework. The packaged
 hosts cover iOS 18.4+, tvOS 18.4+, visionOS 2.4+, and watchOS 11.4+ Simulators,
 plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
 The renderers support arm64 executables on these platforms.
@@ -160,16 +161,27 @@ precedence. When that runnable is not a compatible host, a unique compatible
 host can be used; ambiguous candidates use the native pipeline.
 Application target ordering does not determine the host. This selection does not
 recreate Xcode's complete source-specific preview dependency graph.
+When no compatible application or extension hosts a dynamic framework,
+the renderer stages that framework inside its own helper application. The
+framework retains its bundle identifier and resources for `Bundle(for:)`
+lookups; `Bundle.main` identifies the helper application. Linked frameworks and
+dynamic libraries are copied with their resources, following the source image's
+transitive Mach-O dependencies. Native build records, linker search paths, and
+the importing image's runtime search paths locate built and prebuilt dependencies.
+Resolved dependency references are adjusted to their staged locations
+without changing the original build products.
+Standalone framework image parity was verified on macOS 26.6.2 and iOS 27.2 with
+Xcode 27.1, including framework bundle resources on macOS.
 Source and host records must use the same supported platform and architecture
 before checking for ambiguity. An extension's own bundle supplies its resources,
 identifier, and entitlements. A containing application's shared Frameworks are
 copied when its embedded extension binary matches the source's build UUID;
 the extension's own Frameworks take precedence. The containing application's
 root resources and application lifecycle are not used.
-Embedded runtime images are matched to the selected architecture's build UUID,
+Embedded runtime images are matched to the build UUID,
 with exact byte comparison when UUIDs are absent. A shared filename alone
 does not establish that an application contains the source binary.
-Code-signing and Simulator entitlements are read from that architecture's slice.
+Code-signing and Simulator entitlements are read from the arm64 image.
 The renderer loads the source's embedded runtime image by its bundle-relative
 path, including images that the application's debug dylib does not load itself.
 This route does not contact `previewsd` or require its Apple-restricted entitlement.
@@ -430,7 +442,7 @@ timeout error. The build method binding is
 cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 
-Targets without an application or extension host or with its debug dylib disabled,
+Standalone static frameworks, targets whose application or extension host has its debug dylib disabled,
 unsupported platform/architecture combinations, and source or display contracts beyond the direct capabilities described above
 continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
 requirements, including the limitation tracked in
