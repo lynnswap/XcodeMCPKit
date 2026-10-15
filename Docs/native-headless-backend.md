@@ -255,6 +255,8 @@ Unavailable private scene or color bindings use the native pipeline.
 Static iOS and tvOS snapshots allocate integer pixel dimensions with the native
 FBS snapshot's unsigned conversion and use a standard 8-bit renderer. The view's
 point frame and drawing rectangle are retained, including fractional dimensions.
+Mac Catalyst snapshots also use a standard 8-bit renderer to avoid introducing
+RGB dithering when an extended-range bitmap is encoded as PNG.
 
 Each render owns a fresh, nonpersistent scene session with a passive delegate.
 After UIKit connects, the owner sends the workspace's initial nil-diff settings
