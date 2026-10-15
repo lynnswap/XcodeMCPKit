@@ -6,7 +6,7 @@ Live verifier for a locally built proxy and its signed headless native helper:
 swift run xcode-mcp-proxy-tool-verifier
 ```
 
-Each run copies the tracked fixture to its output directory and explicitly opens
+The default catalog run copies the tracked fixture to its output directory and explicitly opens
 that saved workspace through the native host. It does not open Xcode windows.
 
 ## Run ownership
@@ -65,5 +65,138 @@ The verifier stops fixture operations if scheme, destination, or test-plan
 selection fails. Project and target creation runs after build, runtime, and
 device checks so a new target's automatic scheme cannot change those checks.
 
-`--no-open-xcode` is removed because every run is headless. `--upstream-processes`
+`--no-open-xcode` is removed because catalog runs are headless. `--upstream-processes`
 and `--xcode-mode` remain unsupported. The proxy owns one multiplexed native host.
+
+## Preview probes
+
+The `previews` commands preserve the projects and source variants used to compare
+Apple's native `RenderPreview` with the headless renderer. Run them from the
+repository root with Swift 6.3 or later. The fixtures cover arm64 execution.
+
+```sh
+swift run xcode-mcp-proxy-tool-verifier previews list
+swift run xcode-mcp-proxy-tool-verifier previews prepare \
+  --fixture platform --output ProxyToolVerifierOutput/platform
+```
+
+| Fixture | Contents |
+| --- | --- |
+| `platform` | macOS, Mac Catalyst, tvOS, visionOS, and watchOS apps; SwiftUI, UIKit, AppKit, ClockKit, and watch Relevance previews |
+| `widget` | iOS app display previews, WidgetKit, Intent/AppIntent configuration, Live Activity, empty timelines, and cancellation |
+| `framework` | Standalone framework previews and a bundle resource |
+| `general` | UIKit views/controllers, grouped and legacy SwiftUI previews, shared context, and preview state |
+| `physical` | App and Widget extension with a source-selected physical device |
+| `physical-bare` | The existing app fixture without a Widget extension, using the physical source variant |
+
+Project definitions, source, assets, and case descriptions live under
+[`Fixtures/PreviewVerifier`](../../Fixtures/PreviewVerifier). General and bare
+physical probes reuse `Fixtures/ProxyToolVerifierFixture`. Preparation copies the
+project into the requested directory; it does not change tracked files.
+The case list selects representative probes. Other declarations remain in the
+tracked sources for investigation.
+
+### Capture and compare
+
+Choose an installed Xcode and a destination title reported by
+`XcodeListRunDestinations`. Capture the same case with both backends:
+
+```sh
+developer_dir=/Applications/Xcode.app/Contents/Developer
+
+swift run xcode-mcp-proxy-tool-verifier previews capture \
+  --fixture ProxyToolVerifierOutput/platform --case mac-appkit-controller \
+  --developer-dir "$developer_dir" --destination "My Mac" \
+  --backend headless --output ProxyToolVerifierOutput/headless
+
+swift run xcode-mcp-proxy-tool-verifier previews capture \
+  --fixture ProxyToolVerifierOutput/platform --case mac-appkit-controller \
+  --developer-dir "$developer_dir" --destination "My Mac" \
+  --backend native --xcode-pid "$xcode_pid" --output ProxyToolVerifierOutput/native
+
+swift run xcode-mcp-proxy-tool-verifier previews compare \
+  --native ProxyToolVerifierOutput/native --headless ProxyToolVerifierOutput/headless \
+  --output ProxyToolVerifierOutput/comparison
+```
+
+Set `xcode_pid` to the running process for the selected Xcode. Native capture opens
+its own project copy with `open`, discovers that document through `mcpbridge`, and
+closes only that document with Xcode's scripting API. It requires Xcode's native
+preview services and permission for the terminal to automate Xcode. It does not
+use screen automation. Headless capture opens no Xcode windows. Without
+`--native-host`, it builds the signed debug host using the selected developer
+directory. Use `--native-host /path/to/XcodeMCPNativeHost.app` to test a package
+already built with `scripts/build-native-host.sh`.
+
+Each capture uses a fresh copy of the prepared project and saves `capture.json`,
+the live catalog, the PNG, raw tool results, selected destination, source/project
+hashes, and executable identity. The existing MCP client owns the bridge or
+headless host process. Workspace and document cleanup runs after failures as
+well as success; cleanup errors remain in the report. The renderer owns its
+temporary Simulator and staged application. The verifier does not remove other
+devices or applications. Output files remain available for inspection; choose a
+new output directory for each run.
+
+Comparison requires successful captures, matching source/project inputs, the
+same case, Xcode build, and requested destination. It compares the response's
+name, source line, errors, localizations, variant and canvas catalogs, and rendered
+destination. Images are decoded to sRGB premultiplied RGBA pixels before exact
+comparison. A native failure, missing image, incompatible input, metadata
+difference, or pixel difference produces a nonzero exit status. Keep reference
+captures with their execution context; images from a different Xcode or runtime
+are not portable golden files.
+
+The empty-timeline and cancellation probes intentionally exercise failures.
+Use `--timeout SECONDS` to bound a capture. Their failure responses are retained;
+two failed captures do not constitute a passing image comparison.
+
+### Physical device inputs
+
+Physical probes need a connected eligible device and locally configured signing.
+Supply the source device name when preparing the project:
+
+```sh
+swift run xcode-mcp-proxy-tool-verifier previews prepare \
+  --fixture physical --device-name "Your iPhone" \
+  --build-settings ProxyToolVerifierOutput/local-signing.json \
+  --output ProxyToolVerifierOutput/physical
+```
+
+The build-settings file maps target names to configuration names and string
+values. For example:
+
+```json
+{
+  "ProxyToolVerifierFixture": {
+    "Debug": {
+      "CODE_SIGNING_ALLOWED[sdk=iphoneos*]": "YES",
+      "CODE_SIGN_STYLE[sdk=iphoneos*]": "Automatic",
+      "DEVELOPMENT_TEAM[sdk=iphoneos*]": "YOUR_TEAM_ID",
+      "CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Development",
+      "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": ""
+    }
+  },
+  "OriginalWidgetProbeExtension": {
+    "Debug": {
+      "CODE_SIGNING_ALLOWED[sdk=iphoneos*]": "YES",
+      "CODE_SIGN_STYLE[sdk=iphoneos*]": "Automatic",
+      "DEVELOPMENT_TEAM[sdk=iphoneos*]": "YOUR_TEAM_ID",
+      "CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Development",
+      "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]": ""
+    }
+  }
+}
+```
+
+Use only the app target for `physical-bare`. Preparation follows the target's
+configuration references and writes the settings into its copied project. This
+also supports settings such as `CODE_SIGNING_ALLOWED` that the native setting
+tool may reject. It does not enable provisioning updates or register devices.
+Keep team, profile, certificate, and device values in local output files.
+The prepared projects retain those local settings, so review them before sharing.
+
+Native physical capture uses Xcode's installation lifecycle. The fixture app and
+PreviewShell process can remain after its document closes; the verifier closes
+the document and MCP connection but does not uninstall physical-device apps.
+Record pre-existing installations and processes so you can remove only those
+created by your run, preserving existing app data and the system PreviewShell app.
