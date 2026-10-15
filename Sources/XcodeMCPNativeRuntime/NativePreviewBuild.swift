@@ -52,14 +52,15 @@ final class NativePreviewBuild {
             return try linkedInputs().files.contains { $0.resolvingSymlinksInPath().path == productPath }
         }
 
-        func linkedInputs() throws -> (files: [URL], searchPaths: [(framework: Bool, url: URL)],
+        func linkedInputs(in rawCommand: [String]? = nil) throws -> (files: [URL], searchPaths: [(framework: Bool, url: URL)],
                                       libraries: [(framework: Bool, name: String, file: URL?)]) {
-            var inputs = linkCommandLine.compactMap { url(for: $0) }
-            let searchPaths = searchPaths(in: linkCommandLine).map { (framework: $0.argument != "-L", url: $0.url) }
+            let command = linkArguments(in: rawCommand ?? linkCommandLine).map(\.value)
+            var inputs = command.compactMap { url(for: $0) }
+            let searchPaths = searchPaths(in: command).map { (framework: $0.argument != "-L", url: $0.url) }
             var namedInputs: [(framework: Bool, name: String)] = []
-            for index in linkCommandLine.indices {
-                let argument = linkCommandLine[index]
-                let next = linkCommandLine.indices.contains(index + 1) ? linkCommandLine[index + 1] : nil
+            for index in command.indices {
+                let argument = command[index]
+                let next = command.indices.contains(index + 1) ? command[index + 1] : nil
                 if argument == "-filelist", let fileList = next.flatMap({ url(for: $0) }) {
                     let paths = try String(contentsOf: fileList, encoding: .utf8).split(whereSeparator: \.isNewline)
                     inputs += paths.compactMap { url(for: String($0)) }
@@ -84,6 +85,25 @@ final class NativePreviewBuild {
             return (inputs.filter { seen.insert($0.resolvingSymlinksInPath()).inserted }, searchPaths, libraries)
         }
 
+        func linkArguments(in command: [String]) -> [(value: String, forwarded: Bool)] {
+            var result: [(value: String, forwarded: Bool)] = []
+            var index = 0
+            while index < command.count {
+                let argument = command[index]
+                if argument == "-Xlinker", command.indices.contains(index + 1) {
+                    result.append((command[index + 1], true))
+                    index += 2
+                } else if argument.hasPrefix("-Wl,") {
+                    result += argument.dropFirst(4).split(separator: ",", omittingEmptySubsequences: false).map { (String($0), true) }
+                    index += 1
+                } else {
+                    result.append((argument, false))
+                    index += 1
+                }
+            }
+            return result
+        }
+
         func searchPaths(in command: [String]) -> [(argument: String, url: URL)] {
             command.indices.compactMap { index in
                 let argument = command[index]
@@ -97,7 +117,7 @@ final class NativePreviewBuild {
             }
         }
 
-        private func url(for path: String) -> URL? {
+        func url(for path: String) -> URL? {
             if path.hasPrefix("/") { return URL(filePath: path) }
             guard let linkerWorkingDirectory else { return nil }
             return URL(filePath: path, relativeTo: URL(filePath: linkerWorkingDirectory, directoryHint: .isDirectory)).absoluteURL

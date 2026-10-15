@@ -1034,47 +1034,118 @@ final class NativePreviewCorrection {
         let archive = app.deletingLastPathComponent().appendingPathComponent("PreviewSource.a")
         try copyReplacingItem(output, to: archive)
         let image = platform.frameworksDirectory(in: app).appendingPathComponent("XcodeMCPPreviewSource.dylib")
-        let sdk = try await process.xcrun(["--sdk", platform.sdk, "--show-sdk-path"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        // A Swift input lets the driver link while only this archive is force-loaded.
-        let linkSource = app.deletingLastPathComponent().appendingPathComponent("PreviewSource.swift")
-        try Data().write(to: linkSource)
-        var arguments = ["--sdk", platform.sdk, "swiftc", "-emit-library", "-parse-as-library", "-target", platform.triple, "-sdk", sdk,
-            linkSource.path, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive.path,
-            "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
-            "@rpath/" + image.lastPathComponent, "-o", image.path]
-        let sanitizers = [(source.enableAddressSanitizer, "address"), (source.enableThreadSanitizer, "thread"),
-                          (source.enableUndefinedBehaviorSanitizer, "undefined")].filter(\.0).map(\.1)
-        if !sanitizers.isEmpty { arguments.append("-sanitize=" + sanitizers.joined(separator: ",")) }
-        var targets = [source]
-        if let host, host.outputURL?.resolvingSymlinksInPath() != output.resolvingSymlinksInPath() { targets.append(host) }
-        let inputs = try targets.map { try $0.linkedInputs() }
-        let searchPaths = source.searchPaths(in: source.compileCommandLine) + targets.flatMap { $0.searchPaths(in: $0.linkCommandLine) }
-        for path in searchPaths { arguments += [path.argument, path.url.path] }
-        let excluded = Set(targets.compactMap(\.outputURL).map { $0.resolvingSymlinksInPath() })
-        var linkInputs: [URL] = []
-        var seen: Set<URL> = []
-        for input in inputs.flatMap(\.files) {
-            let canonical = input.resolvingSymlinksInPath()
-            guard !excluded.contains(canonical), seen.insert(canonical).inserted else { continue }
-            var directory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: input.path, isDirectory: &directory), !directory.boolValue,
-               try input.pathExtension == "tbd" || NativePreviewBinary.isStaticArchive(at: input) || NativePreviewBinary.isDynamicLibrary(at: input) {
-                arguments += ["-Xlinker", input.path]
-                linkInputs.append(input)
+        let context: NativePreviewBuild.Target
+        let command: [String]
+        if let host, host.outputURL?.resolvingSymlinksInPath() != output.resolvingSymlinksInPath() {
+            context = host
+            command = try hostedStaticFrameworkCommand(source: source, host: host, archive: archive, image: image)
+            _ = try await process.run(command[0], Array(command.dropFirst()),
+                directory: host.linkerWorkingDirectory.map { URL(filePath: $0, directoryHint: .isDirectory) })
+        } else {
+            context = source
+            let sdk = try await process.xcrun(["--sdk", platform.sdk, "--show-sdk-path"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // A Swift input lets the driver link while only this archive is force-loaded.
+            let linkSource = app.deletingLastPathComponent().appendingPathComponent("PreviewSource.swift")
+            try Data().write(to: linkSource)
+            var arguments = ["--sdk", platform.sdk, "swiftc", "-emit-library", "-parse-as-library", "-target", platform.triple, "-sdk", sdk,
+                linkSource.path, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive.path,
+                "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
+                "@rpath/" + image.lastPathComponent, "-o", image.path]
+            let sanitizers = [(source.enableAddressSanitizer, "address"), (source.enableThreadSanitizer, "thread"),
+                              (source.enableUndefinedBehaviorSanitizer, "undefined")].filter(\.0).map(\.1)
+            if !sanitizers.isEmpty { arguments.append("-sanitize=" + sanitizers.joined(separator: ",")) }
+            let inputs = try source.linkedInputs()
+            for path in source.searchPaths(in: source.compileCommandLine) + source.searchPaths(in: source.linkCommandLine) {
+                arguments += [path.argument, path.url.path]
             }
+            for input in inputs.files where input.resolvingSymlinksInPath() != output.resolvingSymlinksInPath() {
+                var directory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: input.path, isDirectory: &directory), !directory.boolValue,
+                   try input.pathExtension == "tbd" || NativePreviewBinary.isStaticArchive(at: input) || NativePreviewBinary.isDynamicLibrary(at: input) {
+                    arguments += ["-Xlinker", input.path]
+                }
+            }
+            for library in inputs.libraries where library.file == nil {
+                arguments += library.framework ? ["-framework", library.name] : ["-l" + library.name]
+            }
+            command = ["/usr/bin/xcrun"] + arguments
+            _ = try await process.xcrun(arguments)
         }
-        for library in inputs.flatMap(\.libraries) where library.file == nil {
-            arguments += library.framework ? ["-framework", library.name] : ["-l" + library.name]
-        }
-        _ = try await process.xcrun(arguments)
+        // Native debug links can defer code signing to Xcode; this generated copy has its own signing owner.
+        _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", image.path])
         if let framework = frameworkBundle(containing: output) {
             let copiedFramework = platform.frameworksDirectory(in: app).appendingPathComponent(framework.lastPathComponent)
             if FileManager.default.fileExists(atPath: copiedFramework.path) {
                 _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", copiedFramework.path])
             }
         }
-        return LinkedPreviewImage(url: image, searchPaths: searchPaths.map { ($0.argument != "-L", $0.url) }, linkInputs: linkInputs)
+        let inputs = try context.linkedInputs(in: command)
+        return LinkedPreviewImage(url: image, searchPaths: inputs.searchPaths, linkInputs: inputs.files)
+    }
+
+    private static func hostedStaticFrameworkCommand(source: NativePreviewBuild.Target, host: NativePreviewBuild.Target,
+                                                       archive: URL, image: URL) throws -> [String] {
+        guard let executable = host.linkCommandLine.first else {
+            throw NativeRuntimeError.unsupportedContract("The static preview host has no link command")
+        }
+        let directory = archive.deletingLastPathComponent().appendingPathComponent("PreviewLink", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let inputs = try host.linkedInputs()
+        var owned = Set((source.objectFiles + [source.outputURL].compactMap { $0 }).map { $0.resolvingSymlinksInPath() })
+        // libtool can merge other archives; those bytes already belong to the force-loaded source image.
+        for input in try source.linkedInputs().files {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectory), !isDirectory.boolValue,
+               try NativePreviewBinary.isStaticArchive(at: input) || NativePreviewBinary.file(at: input)?.header.fileType == .object {
+                owned.insert(input.resolvingSymlinksInPath())
+            }
+        }
+        func owns(_ path: String) -> Bool {
+            host.url(for: path).map { owned.contains($0.resolvingSymlinksInPath()) } ?? false
+        }
+        func ownsLibrary(framework: Bool, name: String) -> Bool {
+            inputs.libraries.contains { $0.framework == framework && $0.name == name
+                && $0.file.map { owned.contains($0.resolvingSymlinksInPath()) } == true }
+        }
+        func encode(_ argument: (value: String, forwarded: Bool), replacing value: String? = nil) -> [String] {
+            let value = value ?? argument.value
+            return argument.forwarded ? ["-Xlinker", value] : [value]
+        }
+        let arguments = host.linkArguments(in: Array(host.linkCommandLine.dropFirst()))
+        var result = [executable]
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            let next = arguments.indices.contains(index + 1) ? arguments[index + 1] : nil
+            if ["-o", "-install_name", "-dependency_info", "-object_path_lto", "-map"].contains(argument.value), let next {
+                let value = argument.value == "-o" ? image.path : argument.value == "-install_name" ? "@rpath/" + image.lastPathComponent
+                    : directory.appendingPathComponent(URL(filePath: next.value).lastPathComponent).path
+                result += encode(argument) + encode(next, replacing: value)
+                index += 2
+            } else if argument.value == "-filelist", let next, let path = host.url(for: next.value) {
+                let entries = try String(contentsOf: path, encoding: .utf8).split(whereSeparator: \.isNewline).map(String.init)
+                let copy = directory.appendingPathComponent("PreviewLinkFileList-\(index).txt")
+                try (entries.filter { !owns($0) }.joined(separator: "\n") + "\n").write(to: copy, atomically: true, encoding: .utf8)
+                result += encode(argument) + encode(next, replacing: copy.path)
+                index += 2
+            } else if argument.value == "-force_load", let next, owns(next.value) {
+                index += 2
+            } else if argument.value == "-framework", let next, ownsLibrary(framework: true, name: next.value) {
+                index += 2
+            } else if argument.value == "-l", let next, ownsLibrary(framework: false, name: next.value) {
+                index += 2
+            } else if argument.value.hasPrefix("-l"), ownsLibrary(framework: false, name: String(argument.value.dropFirst(2))) {
+                index += 1
+            } else {
+                if !owns(argument.value) { result += encode(argument) }
+                index += 1
+            }
+        }
+        for path in source.searchPaths(in: source.compileCommandLine) + source.searchPaths(in: source.linkCommandLine) {
+            result += [path.argument, path.url.path]
+        }
+        return result + ["-Xlinker", "-force_load", "-Xlinker", archive.path, "-Xlinker", "-headerpad_max_install_names"]
     }
 
     static func copyFrameworkDependencies(_ dependencies: FrameworkDependencies, into app: URL,
