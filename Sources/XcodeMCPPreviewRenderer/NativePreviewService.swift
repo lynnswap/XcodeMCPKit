@@ -286,9 +286,7 @@ final class NativePreviewService {
                         setupType: .opaque(named: setupType.name)])
         let setup = try unsafe setupInitializer.unsafeInvoke(dynamic, products.copy(), false, increments, nil)
         let seedType = try await messagingType("HostUpdateSeed")
-        let groupSeedType = try await messagingType("HostUpdateGroupSeed")
         let seed = try await none(of: seedType)
-        let groupSeed = try await none(of: groupSeedType)
         let previewType = try await messagingType("PreviewType")
         let preview = try previewType.makeEnumCase(named: "static")
         let box = try await messagingType("PlistValueBox")
@@ -305,17 +303,40 @@ final class NativePreviewService {
         }
         let parameter = try await archivingParameter()
         let type = try await messagingType("ShellUpdatePayload")
-        let make = try await type.resolveInitializer(
-            named: "init(pid: Swift.Int32, hostUpdateSeed: PreviewsMessagingOS.HostUpdateSeed?, hostUpdateGroupSeed: PreviewsMessagingOS.HostUpdateGroupSeed?, previewType: PreviewsMessagingOS.PreviewType, contentIdentifier: PreviewsMessagingOS.ContentIdentifier, contentCategory: PreviewsMessagingOS.ContentCategory, \(parameter.label): \(parameter.value.type.name), contentPayload: PreviewsFoundationOS.PropertyList, staticProducts: [PreviewsMessagingOS.StaticLinkablePreviewProduct], setupPayload: PreviewsMessagingOS.UpdateSetupPayload, controlStates: [PreviewsMessagingOS.PlistValueBox]?) -> PreviewsMessagingOS.ShellUpdatePayload",
-            as: ((Int32, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue,
-                  NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
-            valueABIs: [seed.type: .opaque(named: seed.type.name), groupSeed.type: .opaque(named: groupSeed.type.name),
-                preview.type: .opaque(named: preview.type.name), identifier.type: .opaque(named: identifier.type.name),
-                category.type: .opaque(named: category.type.name), parameter.value.type: .opaque(named: parameter.value.type.name),
-                propertyListType: .opaque(named: propertyListType.name), products.type: .pointer,
-                setupType: .opaque(named: setupType.name), states.type: .pointer, type: .opaque(named: type.name)])
-        let value = try unsafe make.unsafeInvoke(pid, seed, groupSeed, preview, identifier.copy(), category.copy(),
-            parameter.value, content, products, setup, states)
+        let suffix = "previewType: PreviewsMessagingOS.PreviewType, contentIdentifier: PreviewsMessagingOS.ContentIdentifier, contentCategory: PreviewsMessagingOS.ContentCategory, \(parameter.label): \(parameter.value.type.name), contentPayload: PreviewsFoundationOS.PropertyList, staticProducts: [PreviewsMessagingOS.StaticLinkablePreviewProduct], setupPayload: PreviewsMessagingOS.UpdateSetupPayload, controlStates: [PreviewsMessagingOS.PlistValueBox]?) -> PreviewsMessagingOS.ShellUpdatePayload"
+        let groupedInitializer = "init(pid: Swift.Int32, hostUpdateSeed: PreviewsMessagingOS.HostUpdateSeed?, hostUpdateGroupSeed: PreviewsMessagingOS.HostUpdateGroupSeed?, " + suffix
+        let hasGroupSeed: Bool
+        do {
+            _ = try await runtime.resolve(.init(name: type.name + "." + groupedInitializer, language: .swift), in: messagingImage)
+            hasGroupSeed = true
+        } catch ABIResolutionError.declarationNotFound {
+            hasGroupSeed = false
+        }
+        var valueABIs: [NativeSwiftType: NativeType] = try [seed.type: .opaque(named: seed.type.name),
+            preview.type: .opaque(named: preview.type.name), identifier.type: .opaque(named: identifier.type.name),
+            category.type: .opaque(named: category.type.name), parameter.value.type: .opaque(named: parameter.value.type.name),
+            propertyListType: .opaque(named: propertyListType.name), products.type: .pointer,
+            setupType: .opaque(named: setupType.name), states.type: .pointer, type: .opaque(named: type.name)]
+        let value: NativeSwiftValue
+        if hasGroupSeed {
+            let groupSeedType = try await messagingType("HostUpdateGroupSeed")
+            let groupSeed = try await none(of: groupSeedType)
+            valueABIs[groupSeed.type] = try .opaque(named: groupSeed.type.name)
+            let make = try await type.resolveInitializer(named: groupedInitializer,
+                as: ((Int32, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue,
+                      NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
+                valueABIs: valueABIs)
+            value = try unsafe make.unsafeInvoke(pid, seed, groupSeed, preview, identifier.copy(), category.copy(),
+                parameter.value, content, products, setup, states)
+        } else {
+            let make = try await type.resolveInitializer(
+                named: "init(pid: Swift.Int32, hostUpdateSeed: PreviewsMessagingOS.HostUpdateSeed?, " + suffix,
+                as: ((Int32, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue,
+                      NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
+                valueABIs: valueABIs)
+            value = try unsafe make.unsafeInvoke(pid, seed, preview, identifier.copy(), category.copy(),
+                parameter.value, content, products, setup, states)
+        }
         return try await encode(value)
     }
 
