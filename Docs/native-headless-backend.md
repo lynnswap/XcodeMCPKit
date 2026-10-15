@@ -141,7 +141,7 @@ can be removed when the affected native contract is fixed. Cached report
 retrieval does not establish online/account-dependent retrieval.
 
 `RenderPreview` uses packaged platform renderers for SwiftUI, UIKit, and AppKit
-`#Preview` definitions, SwiftUI `PreviewProvider` definitions, and iOS WidgetKit previews
+`#Preview` definitions, SwiftUI `PreviewProvider` definitions, and iOS and watchOS WidgetKit previews
 in an arm64 application or app extension built with a debug dylib. The packaged
 hosts cover iOS 18.4+, tvOS 18.4+, visionOS 2.4+, and watchOS 11.4+ Simulators,
 plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
@@ -279,39 +279,57 @@ providers remain unavailable with Xcode 27.1, whose native RenderPreview also
 reports `preview provider not found` for those definitions.
 `PreviewModifier` calls `makeSharedContext()` once per concrete modifier type in
 each render and applies the native modifier wrappers in their original order.
-Activity `PreviewProvider` contexts use the original Widget or WidgetBundle
+Widget and Activity `PreviewProvider` definitions in an iOS or watchOS Widget
+extension are evaluated by the registered extension. Its original program root
+initializes WidgetKit before the provider's context is read. The renderer retains
+the resulting native `PreviewDescription` for destination selection and rendering,
+including contexts that forward their keys to another `PreviewContext`.
+Activity `PreviewProvider` contexts outside this extension path use the original Widget or WidgetBundle
 program root to find the Activity configuration whose native attributes type
 matches the context. The root is discovered from compiler main symbols in the
 built host's debug library, identified by its Mach-O UUID. WidgetBundle descriptor
 preferences retain the original configuration modifiers. If the root or private
 host/preference contract is unavailable, the request uses the native pipeline.
-Widget provider contexts, device overrides, and other display traits, variants,
-or controls still use the native pipeline.
+Other unsupported display traits, variants, or controls still use the native pipeline.
 
 On iOS Simulator, Widget previews support `StaticConfiguration`, `IntentConfiguration`, and
 `AppIntentConfiguration`. Previews can provide explicit `timeline:` entries or a
 `timelineProvider:`. Intent and AppIntent provider previews retain the `using:`
-intent supplied by the preview, including its default parameter values. The renderer
-obtains the configuration's descriptor from `WidgetConfiguration.body` and applies its
-descriptor preference transforms in their original order. It uses WidgetKit's
-timeline provider context with `isPreview: false`, matching native RenderPreview,
-the selected family, and native metrics for the selected device. WidgetKit supplies
-the timeline's actual `AnyView`, which is hosted with its common widget environment and
-`.containerBackground(for: .widget)` content. The snapshot has the widget's
-size and rounded corners, with transparency outside them.
+intent supplied by the preview, including its default parameter values.
+For a Widget extension embedded in an application, the renderer installs the
+containing application in an isolated Simulator and launches the original extension
+through PreviewShell's ServiceHub preview service. The client has a separate bundle
+identifier so it can coexist with the registered extension, and runs as a command
+without opening a UI scene. PreviewShell retains foreground activation; launching
+the client as another foreground application can suspend the extension's preview
+assertion. This path uses the
+extension's native preview provider, Widget host, and static snapshot output without
+contacting `previewsd`. It preserves native content margins, disabled margins,
+container backgrounds, accessory presentation, and transparency.
+
+The first static update discovers the preview's canvas controls. Requested control
+states are then sent to the same preview session, preserving its timeline entries
+and provider state. WidgetKit supplies the provider context with `isPreview: false`,
+matching native RenderPreview. A `WidgetPreviewContext` retains its family and
+source-level preferences through the extension's native preview description.
 `supportedCanvasControlOverrides.timelineIndexes` lists the available entries;
 `previewCanvasControlOverrides.timelineIndex` selects an entry, defaulting to
-the first. `supportedPreviewVariantOverrides` returns the installed Widget preview
+the first. An index outside the returned control catalog adds the native warning
+to `errors` while preserving the native snapshot.
+`supportedPreviewVariantOverrides` returns the installed Widget preview
 plugin's catalog for `Widget Family`, `Presentation`, `Color Scheme`, and
 `Dynamic Type`. These values can be selected together through
-`previewVariantOverrides`; the renderer checks family and presentation selections
-against this catalog. Presentation applies the native redaction effects to the same timeline
-entries for normal, placeholder, privacy, and low-luminance rendering.
-Widget previews with disabled content margins or
-changes to their descriptor's background style use the native pipeline.
-The current common widget host can differ from native content margins. Native
-widget hosting and watchOS Relevance previews remain tracked in
-[#326](https://github.com/lynnswap/XcodeMCPKit/issues/326).
+`previewVariantOverrides`; the renderer applies the catalog's native render effects.
+The catalog depends on the preview category and installed runtime.
+
+On watchOS Simulator, Relevance previews use the same extension service for explicit
+entries, a provider, and a provider with supplied relevance. The native Smart Stack
+host supplies the watch presentation and timeline controls.
+The command owns the service connection until rendering ends. Cancellation stops
+the command and runs the existing Simulator cleanup. The render's
+Simulator, containing application, extension process, and client application are
+removed by the existing Simulator cleanup owner; cleanup failures are reported
+alongside the original failure.
 
 Live Activity previews use WidgetKit's archived activity views and native
 WidgetRenderer controllers. `previewVariantOverrides` selects `View Style`,
