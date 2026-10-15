@@ -249,7 +249,7 @@ final class NativePreviewCorrection {
             clientIdentifier: nativeProviderIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString })
         let linkedImage: LinkedPreviewImage?
         if staticFramework {
-            linkedImage = try await Self.linkStaticFramework(selection.source, in: app, platform: platform, process: process)
+            linkedImage = try await Self.linkStaticFramework(selection.source, host: selection.host, in: app, platform: platform, process: process)
         } else { linkedImage = nil }
         let primaryImage = linkedImage?.url
         let dependencies = standaloneFramework == nil && linkedImage == nil ? FrameworkDependencies()
@@ -905,6 +905,7 @@ final class NativePreviewCorrection {
     struct LinkedPreviewImage {
         let url: URL
         let searchPaths: [(framework: Bool, url: URL)]
+        let linkInputs: [URL]
     }
 
     struct FrameworkDependencies {
@@ -968,9 +969,9 @@ final class NativePreviewCorrection {
             let runtimePaths = current.library.rpaths.compactMap { runtimeURL($0, importer: current.library.output) }
                 + current.inheritedPaths
             let inputs = try current.library.target?.linkedInputs()
-            let linkedPaths = current.library.output == output ? primaryImage?.searchPaths : nil
-            let searchPaths = (linkedPaths ?? inputs?.searchPaths ?? []) + current.inheritedLinkPaths
-            let linkedLibraries = try (inputs?.files ?? []).compactMap { candidate in
+            let linkedImage = current.library.output == output ? primaryImage : nil
+            let searchPaths = (linkedImage?.searchPaths ?? inputs?.searchPaths ?? []) + current.inheritedLinkPaths
+            let linkedLibraries = try (linkedImage?.linkInputs ?? inputs?.files ?? []).compactMap { candidate in
                 try libraries.first { $0.output.resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath() }
                     ?? library(at: candidate)
             }
@@ -1022,7 +1023,8 @@ final class NativePreviewCorrection {
         return result
     }
 
-    static func linkStaticFramework(_ source: NativePreviewBuild.Target, in app: URL, platform: NativePreviewPlatform,
+    static func linkStaticFramework(_ source: NativePreviewBuild.Target, host: NativePreviewBuild.Target? = nil,
+                                    in app: URL, platform: NativePreviewPlatform,
                                     process: NativePreviewProcess) async throws -> LinkedPreviewImage {
         guard let output = source.outputURL else {
             throw NativeRuntimeError.unsupportedContract("The static preview target has no linked archive")
@@ -1044,15 +1046,26 @@ final class NativePreviewCorrection {
         let sanitizers = [(source.enableAddressSanitizer, "address"), (source.enableThreadSanitizer, "thread"),
                           (source.enableUndefinedBehaviorSanitizer, "undefined")].filter(\.0).map(\.1)
         if !sanitizers.isEmpty { arguments.append("-sanitize=" + sanitizers.joined(separator: ",")) }
-        let inputs = try source.linkedInputs()
-        let searchPaths = source.searchPaths(in: source.compileCommandLine) + source.searchPaths(in: source.linkCommandLine)
+        var targets = [source]
+        if let host, host.outputURL?.resolvingSymlinksInPath() != output.resolvingSymlinksInPath() { targets.append(host) }
+        let inputs = try targets.map { try $0.linkedInputs() }
+        let searchPaths = source.searchPaths(in: source.compileCommandLine) + targets.flatMap { $0.searchPaths(in: $0.linkCommandLine) }
         for path in searchPaths { arguments += [path.argument, path.url.path] }
-        for input in inputs.files {
+        let excluded = Set(targets.compactMap(\.outputURL).map { $0.resolvingSymlinksInPath() })
+        var linkInputs: [URL] = []
+        var seen: Set<URL> = []
+        for input in inputs.flatMap(\.files) {
+            let canonical = input.resolvingSymlinksInPath()
+            guard !excluded.contains(canonical), seen.insert(canonical).inserted else { continue }
             var directory: ObjCBool = false
             if FileManager.default.fileExists(atPath: input.path, isDirectory: &directory), !directory.boolValue,
-               try NativePreviewBinary.isDynamicLibrary(at: input) {
+               try input.pathExtension == "tbd" || NativePreviewBinary.isStaticArchive(at: input) || NativePreviewBinary.isDynamicLibrary(at: input) {
                 arguments += ["-Xlinker", input.path]
+                linkInputs.append(input)
             }
+        }
+        for library in inputs.flatMap(\.libraries) where library.file == nil {
+            arguments += library.framework ? ["-framework", library.name] : ["-l" + library.name]
         }
         _ = try await process.xcrun(arguments)
         if let framework = frameworkBundle(containing: output) {
@@ -1061,7 +1074,7 @@ final class NativePreviewCorrection {
                 _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", copiedFramework.path])
             }
         }
-        return LinkedPreviewImage(url: image, searchPaths: searchPaths.map { ($0.argument != "-L", $0.url) })
+        return LinkedPreviewImage(url: image, searchPaths: searchPaths.map { ($0.argument != "-L", $0.url) }, linkInputs: linkInputs)
     }
 
     static func copyFrameworkDependencies(_ dependencies: FrameworkDependencies, into app: URL,

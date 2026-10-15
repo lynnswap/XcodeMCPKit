@@ -52,7 +52,8 @@ final class NativePreviewBuild {
             return try linkedInputs().files.contains { $0.resolvingSymlinksInPath().path == productPath }
         }
 
-        func linkedInputs() throws -> (files: [URL], searchPaths: [(framework: Bool, url: URL)]) {
+        func linkedInputs() throws -> (files: [URL], searchPaths: [(framework: Bool, url: URL)],
+                                      libraries: [(framework: Bool, name: String, file: URL?)]) {
             var inputs = linkCommandLine.compactMap { url(for: $0) }
             let searchPaths = searchPaths(in: linkCommandLine).map { (framework: $0.argument != "-L", url: $0.url) }
             var namedInputs: [(framework: Bool, name: String)] = []
@@ -70,15 +71,17 @@ final class NativePreviewBuild {
                     }
                 }
             }
-            for input in namedInputs {
+            let libraries = namedInputs.map { input in
                 let names = input.framework ? ["\(input.name).framework/\(input.name)"] : ["lib\(input.name).dylib", "lib\(input.name).a"]
                 let candidates = searchPaths.filter { $0.framework == input.framework }.flatMap { path in
                     names.map { path.url.appendingPathComponent($0) }
                 }
-                if let file = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) { inputs.append(file) }
+                return (framework: input.framework, name: input.name,
+                    file: candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }))
             }
+            inputs += libraries.compactMap(\.file)
             var seen: Set<URL> = []
-            return (inputs.filter { seen.insert($0.resolvingSymlinksInPath()).inserted }, searchPaths)
+            return (inputs.filter { seen.insert($0.resolvingSymlinksInPath()).inserted }, searchPaths, libraries)
         }
 
         func searchPaths(in command: [String]) -> [(argument: String, url: URL)] {

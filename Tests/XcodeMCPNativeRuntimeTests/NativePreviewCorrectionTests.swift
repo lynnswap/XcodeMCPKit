@@ -324,10 +324,23 @@ struct NativePreviewCorrectionTests {
         try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
         let object = root.appendingPathComponent("FrameworkPreview.o")
         let core = root.appendingPathComponent("FrameworkCore.o")
+        let previewCode = root.appendingPathComponent("FrameworkPreviewValue.c")
+        let previewObject = root.appendingPathComponent("FrameworkPreviewValue.o")
+        let support = root.appendingPathComponent("Vendor/libSupport.dylib")
+        let supportCode = root.appendingPathComponent("Support.c")
+        try FileManager.default.createDirectory(at: support.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("int support_value(void) { return 22; }".utf8).write(to: supportCode)
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-dynamiclib", supportCode.path,
+            "-Wl,-install_name,@rpath/libSupport.dylib", "-o", support.path])
+        try Data("""
+        extern int support_value(void);
+        extern const char *zlibVersion(void);
+        int static_preview_value(void) { return support_value() + (zlibVersion() != 0 ? 0 : 1); }
+        """.utf8).write(to: previewCode)
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-c", previewCode.path, "-o", previewObject.path])
         try Data("@_cdecl(\"static_core_value\") public func coreValue() -> Int32 { 7 }".utf8).write(to: coreSource)
         try Data("""
         import SwiftUI
-        @_cdecl("static_preview_value") public func previewValue() -> Int32 { 22 }
         #Preview { Text("Unreferenced preview member") }
         """.utf8).write(to: source)
         let compileCommand = ["swiftc", "-parse-as-library", "-c", "-module-name", "FixtureKit", "-target",
@@ -335,11 +348,11 @@ struct NativePreviewCorrectionTests {
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx"] + compileCommand)
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "swiftc", "-parse-as-library", "-c",
             "-module-name", "FixtureKit", "-target", NativePreviewPlatform.macOS.triple, coreSource.path, "-o", core.path])
-        let archiveCommand = ["libtool", "-static", core.path, object.path, "-o", binary.path]
+        let archiveCommand = ["libtool", "-static", core.path, object.path, previewObject.path, "-o", binary.path]
         try previewBinaryOutput("/usr/bin/xcrun", archiveCommand)
         let target = NativePreviewBuild.Target(moduleName: "FixtureKit", buildableName: "FixtureKit.framework",
             sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: archiveCommand,
-            linkerWorkingDirectory: nil, objectFiles: [core, object], sourceFiles: [source, coreSource], debugDylibEnabled: false,
+            linkerWorkingDirectory: nil, objectFiles: [core, object, previewObject], sourceFiles: [source, coreSource, previewCode], debugDylibEnabled: false,
             isRunnable: false, compileCommandLine: compileCommand)
         let standalone = try NativePreviewCorrection.selectTarget([target], source: source, platform: .macOS)
         #expect(standalone.host.moduleName == "FixtureKit")
@@ -355,14 +368,19 @@ struct NativePreviewCorrectionTests {
         let appCode = root.appendingPathComponent("Host.swift")
         try Data("""
         @_silgen_name("static_core_value") func coreValue() -> Int32
-        @_cdecl("app_host_value") public func hostValue() -> Int32 { coreValue() }
+        @_silgen_name("support_value") func supportValue() -> Int32
+        @_cdecl("app_host_value") public func hostValue() -> Int32 { coreValue() + supportValue() }
         """.utf8).write(to: appCode)
         var appCommand = ["--sdk", "macosx", "swiftc", "-parse-as-library", "-emit-library", "-target", NativePreviewPlatform.macOS.triple,
-            appCode.path, "-F", root.path, "-framework", "FixtureKit", "-o", appImage.path]
+            appCode.path, "-F", root.path, "-framework", "FixtureKit", "-L", support.deletingLastPathComponent().path,
+            "-lSupport", "-lz", "-o", appImage.path]
         if forceLoad { appCommand += ["-Xlinker", "-force_load", "-Xlinker", binary.path] }
         try previewBinaryOutput("/usr/bin/xcrun", appCommand)
         let appSymbols = try previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", appImage.path])
         #expect(!NativePreviewCorrection.registryNames(in: appSymbols).isEmpty == forceLoad)
+        let originalArchive = try Data(contentsOf: binary)
+        let originalSupport = try Data(contentsOf: support)
+        let originalAppImage = try Data(contentsOf: appImage)
         let app = NativePreviewBuild.Target(moduleName: "Host", buildableName: "Host.app", sdkRoot: "macosx",
             sdkVariant: nil, architecture: "arm64", linkCommandLine: appCommand,
             linkerWorkingDirectory: root.path, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
@@ -394,7 +412,11 @@ struct NativePreviewCorrectionTests {
         try NativePreviewCorrection.prepareApp(product: appURL, helper: helper, app: staged, platform: .macOS)
         let developer = try previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
-        let linked = try await NativePreviewCorrection.linkStaticFramework(hosted.source, in: staged, platform: .macOS, process: process)
+        let linked = try await NativePreviewCorrection.linkStaticFramework(hosted.source, host: hosted.host, in: staged, platform: .macOS, process: process)
+        let dependencies = try NativePreviewCorrection.frameworkDependencies(for: hosted.source, targets: [target, app],
+            platform: .macOS, primaryImage: linked)
+        try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: staged, platform: .macOS)
+        try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: staged, platform: .macOS, process: process)
         let libraries = try NativePreviewCorrection.registryLibraries(in: staged, previewLibraries: [linked.url])
         let paths = try NativePreviewCorrection.libraryPaths(in: staged, previewLibraries: [linked.url], registryLibraries: libraries,
             sourceOutput: linked.url)
@@ -404,6 +426,9 @@ struct NativePreviewCorrectionTests {
         let executable = staged.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer")
         #expect(try await process.run(executable.path, [linked.url.path]) == "dev.lynnswap.StaticHost\nhost resource\n22\n")
         #expect(!FileManager.default.fileExists(atPath: staged.appendingPathComponent("Contents/Frameworks/FixtureKit.framework").path))
+        #expect(try Data(contentsOf: binary) == originalArchive)
+        #expect(try Data(contentsOf: support) == originalSupport)
+        #expect(try Data(contentsOf: appImage) == originalAppImage)
     }
 
     @Test func staticFrameworkSidecarRetainsCodeAndStagesItsDynamicDependency() async throws {

@@ -175,8 +175,9 @@ preview sidecar dylib using compiler autolink records and the target's library/s
 inputs. The original archive, framework resources, and renderer executable remain
 unchanged. The sidecar uses the same dependency staging and preview lifecycle.
 A source-connected app uses the same source sidecar while retaining the app's
-bundle, resources, entitlements, and launch environment. Its linked copy of the
-static code is not also loaded.
+bundle, resources, entitlements, and launch environment. The sidecar also uses the
+host's dependency link inputs and search paths; its linked copy of the static code
+is not also loaded.
 Static framework rendering was verified on macOS; Simulator installation and
 static bundle lookup remain tracked in #360. Static source frameworks in the
 original Widget extension service remain unverified.
