@@ -45,6 +45,13 @@ func previewRegistry(for request: PreviewRendererRequest) throws -> any PreviewR
 @MainActor
 func makeGeneralPreview(_ request: PreviewRendererRequest, legacyPreview: SwiftUI._Preview? = nil) async throws ->
     (view: AnyView, layout: DeveloperToolsSupport.PreviewLayout, variants: [String: String], result: PreviewRendererResult) {
+    #if os(visionOS)
+    guard request.displayVariantOverrides.isEmpty,
+          request.activityViewStyle.map(PreviewRendererRequest.activityViewStyles.contains) ?? true,
+          request.activityViewContext.map(PreviewRendererRequest.activityViewContexts.contains) ?? true else {
+        throw NativePreviewPipelineRequired()
+    }
+    #endif
     let options = request.generalPreviewOptions(supportedVariants: supportedPreviewDisplayVariants)
     var variants = options.displayVariants
     var view: AnyView
@@ -56,9 +63,11 @@ func makeGeneralPreview(_ request: PreviewRendererRequest, legacyPreview: SwiftU
         if let context = preview.context {
             // Native metadata classifies recognized context keys; a custom
             // context returning their defaults still describes a plain view.
-            guard try await legacyPreviewContextCategory(context) == nil else {
-                throw NativePreviewPipelineRequired()
-            }
+            do {
+                guard try await legacyWidgetCategory(context) == nil else {
+                    throw NativePreviewPipelineRequired()
+                }
+            } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
         }
         #elseif !os(tvOS)
         guard preview.context == nil else {

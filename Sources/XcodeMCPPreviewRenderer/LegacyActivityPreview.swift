@@ -12,7 +12,7 @@ func makeLegacyActivityPreview(context: any PreviewContext, programRootNames: [S
     appName: String, payloadID: String) async throws -> ActivityPreview {
     do {
         let fields = Array(Mirror(reflecting: context).children)
-        guard isLegacyActivityPreviewContext(context),
+        guard String(reflecting: type(of: context)).hasPrefix("WidgetKit.ActivityPreviewContext<"),
               let attributes = fields.first(where: { $0.label == "attributes" })?.value as? any ActivityAttributes,
               let state = fields.first(where: { $0.label == "contentState" })?.value,
               let stale = fields.first(where: { $0.label == "isStale" })?.value as? Bool,
