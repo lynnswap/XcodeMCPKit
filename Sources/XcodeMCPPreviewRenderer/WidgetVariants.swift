@@ -63,7 +63,13 @@ struct WidgetVariantCatalog {
 
 @MainActor
 func widgetVariantCatalog(source: NativeSwiftValue) async throws -> WidgetVariantCatalog {
+    guard unsafe dlopen("/System/Library/Previews/ShellPlugins/WidgetPreviewsShellPlugin.bundle/WidgetPreviewsShellPlugin",
+                        RTLD_NOW | RTLD_GLOBAL) != nil,
+          let provider = NSClassFromString("WidgetPreviewsShellPlugin.WidgetContentProvider") else {
+        throw NativePreviewPipelineRequired()
+    }
     let runtime = ABIRuntime.shared
+    let shell = ImageSelector.framework(named: "PreviewShellKit")
     let messaging = ImageSelector.framework(named: "PreviewsMessagingOS")
     let sourceCategoryType = try await runtime.resolveSwiftType(named: "DeveloperToolsSupport.PreviewSourceContentCategory",
         in: .framework(named: "DeveloperToolsSupport"))
@@ -76,19 +82,6 @@ func widgetVariantCatalog(source: NativeSwiftValue) async throws -> WidgetVarian
         as: ((NativeSwiftValue) -> NativeSwiftValue).self,
         valueABIs: [sourceCategoryType: .opaque(named: sourceCategoryType.name), categoryType: .opaque(named: categoryType.name)])
     let category = try unsafe makeCategory.unsafeInvoke(sourceCategory)
-    return try await widgetVariantCatalog(category: category)
-}
-
-@MainActor
-func widgetVariantCatalog(category: NativeSwiftValue) async throws -> WidgetVariantCatalog {
-    guard unsafe dlopen("/System/Library/Previews/ShellPlugins/WidgetPreviewsShellPlugin.bundle/WidgetPreviewsShellPlugin",
-                        RTLD_NOW | RTLD_GLOBAL) != nil,
-          let provider = NSClassFromString("WidgetPreviewsShellPlugin.WidgetContentProvider") else {
-        throw NativePreviewPipelineRequired()
-    }
-    let runtime = ABIRuntime.shared
-    let shell = ImageSelector.framework(named: "PreviewShellKit")
-    let messaging = ImageSelector.framework(named: "PreviewsMessagingOS")
     let descriptor = try await runtime.resolve(.init(machOName: "_$s15PreviewShellKit15ContentProviderMp", language: .swift, kind: .data), in: shell)
     let thunk = try await runtime.resolve(.init(machOName:
         "_$s15PreviewShellKit15ContentProviderP22supportedVariantGroups3forSay19PreviewsMessagingOS0aG5GroupVGAF0D8CategoryV_tFZTj",
