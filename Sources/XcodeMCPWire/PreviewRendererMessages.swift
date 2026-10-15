@@ -45,6 +45,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package var appName: String?
     package var nativeSource: PreviewRendererNativeSource?
     package var metadataOnly: Bool?
+    package var isLegacyComplication: Bool?
 
     package init(libraryNames: [String], registryNames: [String], fileName: String,
                  moduleName: String?, lineNumber: Int?, columnNumber: Int?, definitionIndex: Int,
@@ -53,7 +54,8 @@ package struct PreviewRendererRequest: Codable, Sendable {
                  programRootNames: [String]? = nil,
                  displayVariantOverrides: [String: String] = [:], activityViewStyle: String? = nil,
                  activityViewContext: String? = nil, activityToggleState: Bool? = nil,
-                 appName: String? = nil, nativeSource: PreviewRendererNativeSource? = nil, metadataOnly: Bool? = nil) {
+                 appName: String? = nil, nativeSource: PreviewRendererNativeSource? = nil, metadataOnly: Bool? = nil,
+                 isLegacyComplication: Bool? = nil) {
         self.libraryNames = libraryNames
         self.registryNames = registryNames
         self.fileName = fileName
@@ -75,6 +77,7 @@ package struct PreviewRendererRequest: Codable, Sendable {
         self.appName = appName
         self.nativeSource = nativeSource
         self.metadataOnly = metadataOnly
+        self.isLegacyComplication = isLegacyComplication
     }
 
     package func generalPreviewOptions(supportedVariants: [String: [String]]) ->
