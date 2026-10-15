@@ -4,6 +4,9 @@ import XcodeMCPKit
 package enum ProxyToolVerifierCommand {
     package static func run(arguments: [String]) async -> Int32 {
         do {
+            if arguments.first == "previews" {
+                return try await PreviewVerifierCommand.run(arguments: Array(arguments.dropFirst()))
+            }
             let options = try VerifierOptions(arguments: arguments)
             let runner = ProxyToolVerifier(options: options)
             let hasFailures = try await runner.run()
@@ -65,6 +68,7 @@ struct VerifierOptions {
     static let usage = """
     Usage:
       swift run xcode-mcp-proxy-tool-verifier [options]
+      swift run xcode-mcp-proxy-tool-verifier previews --help
 
     Options:
       --host host                 Listen host for the debug proxy server. Default: 127.0.0.1
@@ -156,7 +160,7 @@ struct ProxyToolVerifier {
         }
 
         do {
-            let openRecord = await call(
+            let openRecord = await callVerifierTool(
                 "XcodeOpenWorkspace",
                 arguments: ["path": .string(fixture.rootWorkspaceURL.path)],
                 client: client
@@ -184,7 +188,7 @@ struct ProxyToolVerifier {
                 switch decision {
                 case .call(let arguments):
                     print("-> [\(index + 1)/\(executionPlan.count)] \(toolName)")
-                    let record = await call(
+                    let record = await callVerifierTool(
                         toolName,
                         arguments: arguments,
                         client: client
@@ -270,92 +274,9 @@ struct ProxyToolVerifier {
             "HeadlessFixture-\(identity).xcworkspace", isDirectory: true
         )
         try fileManager.createDirectory(at: workspace, withIntermediateDirectories: false)
-        let root = XMLElement(name: "Workspace")
-        root.addAttribute(XMLNode.attribute(withName: "version", stringValue: "1.0") as! XMLNode)
-        let reference = XMLElement(name: "FileRef")
-        reference.addAttribute(XMLNode.attribute(
-            withName: "location", stringValue: "absolute:" + ownedFixture.xcodeProjectURL.path
-        ) as! XMLNode)
-        root.addChild(reference)
-        let document = XMLDocument(rootElement: root)
-        try document.xmlData(options: .nodePrettyPrint).write(
-            to: workspace.appendingPathComponent("contents.xcworkspacedata")
-        )
+        try writeVerifierWorkspace(at: workspace, project: ownedFixture.xcodeProjectURL)
         return FixtureLayout(repoRoot: fixture.repoRoot, outputRoot: fixture.outputRoot,
             workspaceURL: workspace, projectRootURL: projectRoot)
-    }
-
-    private func call(
-        _ toolName: String,
-        arguments: [String: MCPJSONValue],
-        client: XcodeMCP
-    ) async -> ToolVerificationRecord {
-        let started = Date()
-        let progressRecorder = progressReportingToolNames.contains(toolName)
-            ? RawProgressRecorder()
-            : nil
-        do {
-            let result: MCPToolResult
-            if let progressRecorder {
-                result = try await client.callTool(
-                    toolName,
-                    arguments: arguments
-                ) { progress in
-                    await progressRecorder.append(progress.raw)
-                }
-            } else {
-                result = try await client.callTool(toolName, arguments: arguments)
-            }
-            let elapsed = Date().timeIntervalSince(started)
-            let rawProgress = await progressRecorder?.snapshot()
-            let detail = responseSummary(result)
-            let status = verificationStatus(
-                toolName: toolName,
-                result: result,
-                detail: detail
-            )
-            return ToolVerificationRecord(
-                name: toolName,
-                status: status,
-                elapsedSeconds: elapsed,
-                detail: detail,
-                arguments: arguments,
-                rawResult: result.raw,
-                rawProgress: rawProgress
-            )
-        } catch let error as XcodeMCPError {
-            let elapsed = Date().timeIntervalSince(started)
-            let rawProgress = await progressRecorder?.snapshot()
-            let status: ToolVerificationStatus
-            switch error {
-            case .requestTimedOut:
-                status = .hung
-            case .serverError:
-                status = .rpcError
-            case .closed, .invalidRequest, .invalidResponse, .transportUnavailable,
-                 .sessionRecoveryFailed:
-                status = .failed
-            }
-            return ToolVerificationRecord(
-                name: toolName,
-                status: status,
-                elapsedSeconds: elapsed,
-                detail: errorDescription(error),
-                arguments: arguments,
-                rawProgress: rawProgress
-            )
-        } catch {
-            let elapsed = Date().timeIntervalSince(started)
-            let rawProgress = await progressRecorder?.snapshot()
-            return ToolVerificationRecord(
-                name: toolName,
-                status: .failed,
-                elapsedSeconds: elapsed,
-                detail: errorDescription(error),
-                arguments: arguments,
-                rawProgress: rawProgress
-            )
-        }
     }
 
     private func closeWorkspace(
@@ -363,7 +284,7 @@ struct ProxyToolVerifier {
         client: XcodeMCP
     ) async -> ToolVerificationRecord {
         print("-> XcodeCloseWorkspace")
-        let record = await call(
+        let record = await callVerifierTool(
             "XcodeCloseWorkspace",
             arguments: ["workspaceIdentifier": .string(workspaceIdentifier)],
             client: client
@@ -377,7 +298,7 @@ struct ProxyToolVerifier {
         client: XcodeMCP
     ) async -> ToolVerificationRecord {
         print("-> DeviceInteractionEndSession (cleanup)")
-        let record = await call(
+        let record = await callVerifierTool(
             "DeviceInteractionEndSession",
             arguments: ["interactionSessionKey": .string(interactionSessionKey)],
             client: client
@@ -591,6 +512,94 @@ struct ProxyToolVerifier {
         }
     }
 }
+
+func writeVerifierWorkspace(at workspace: URL, project: URL) throws {
+    let root = XMLElement(name: "Workspace")
+    root.addAttribute(XMLNode.attribute(withName: "version", stringValue: "1.0") as! XMLNode)
+    let reference = XMLElement(name: "FileRef")
+    reference.addAttribute(XMLNode.attribute(
+        withName: "location", stringValue: "absolute:" + project.path
+    ) as! XMLNode)
+    root.addChild(reference)
+    let document = XMLDocument(rootElement: root)
+    try document.xmlData(options: .nodePrettyPrint).write(
+        to: workspace.appendingPathComponent("contents.xcworkspacedata")
+    )
+}
+
+func callVerifierTool(
+    _ toolName: String,
+    arguments: [String: MCPJSONValue],
+    client: XcodeMCP
+) async -> ToolVerificationRecord {
+    let started = Date()
+    let progressRecorder = progressReportingToolNames.contains(toolName)
+        ? RawProgressRecorder()
+        : nil
+    do {
+        let result: MCPToolResult
+        if let progressRecorder {
+            result = try await client.callTool(
+                toolName,
+                arguments: arguments
+            ) { progress in
+                await progressRecorder.append(progress.raw)
+            }
+        } else {
+            result = try await client.callTool(toolName, arguments: arguments)
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        let rawProgress = await progressRecorder?.snapshot()
+        let detail = responseSummary(result)
+        let status = verificationStatus(
+            toolName: toolName,
+            result: result,
+            detail: detail
+        )
+        return ToolVerificationRecord(
+            name: toolName,
+            status: status,
+            elapsedSeconds: elapsed,
+            detail: detail,
+            arguments: arguments,
+            rawResult: result.raw,
+            rawProgress: rawProgress
+        )
+    } catch let error as XcodeMCPError {
+        let elapsed = Date().timeIntervalSince(started)
+        let rawProgress = await progressRecorder?.snapshot()
+        let status: ToolVerificationStatus
+        switch error {
+        case .requestTimedOut:
+            status = .hung
+        case .serverError:
+            status = .rpcError
+        case .closed, .invalidRequest, .invalidResponse, .transportUnavailable,
+             .sessionRecoveryFailed:
+            status = .failed
+        }
+        return ToolVerificationRecord(
+            name: toolName,
+            status: status,
+            elapsedSeconds: elapsed,
+            detail: errorDescription(error),
+            arguments: arguments,
+            rawProgress: rawProgress
+        )
+    } catch {
+        let elapsed = Date().timeIntervalSince(started)
+        let rawProgress = await progressRecorder?.snapshot()
+        return ToolVerificationRecord(
+            name: toolName,
+            status: .failed,
+            elapsedSeconds: elapsed,
+            detail: errorDescription(error),
+            arguments: arguments,
+            rawProgress: rawProgress
+        )
+    }
+}
+
 
 private enum ToolExecutionDecision {
     case call([String: MCPJSONValue])
@@ -1162,7 +1171,7 @@ private struct ToolCatalogArtifact: Codable {
     let tools: [MCPJSONValue]
 }
 
-private struct ToolVerificationRecord: Codable {
+struct ToolVerificationRecord: Codable {
     let name: String
     let status: ToolVerificationStatus
     let elapsedSeconds: TimeInterval
@@ -1190,7 +1199,7 @@ private struct ToolVerificationRecord: Codable {
     }
 }
 
-private enum ToolVerificationStatus: String, Codable, CaseIterable {
+enum ToolVerificationStatus: String, Codable, CaseIterable {
     case passed
     case notPlanned = "not-planned"
     case externalPrerequisite
@@ -1434,7 +1443,7 @@ private func responseSummary(_ result: MCPToolResult) -> String {
     return result.isError ? "tool returned isError=true" : "ok"
 }
 
-private func textContent(from result: MCPToolResult) -> String {
+func textContent(from result: MCPToolResult) -> String {
     result.content.compactMap { item -> String? in
         switch item {
         case .text(let text, _):
@@ -1452,7 +1461,7 @@ private func textContent(from result: MCPToolResult) -> String {
     .joined(separator: "\n")
 }
 
-private func parseFirstString(named key: String, from value: MCPJSONValue) -> String? {
+func parseFirstString(named key: String, from value: MCPJSONValue) -> String? {
     if let found = findFirstString(named: key, in: value.jsonObject) {
         return found
     }
@@ -1602,7 +1611,7 @@ private func osVersionIsAtLeast27(_ value: String?) -> Bool {
     return major >= 27
 }
 
-private func runProcess(
+func runProcess(
     executable: String,
     arguments: [String],
     currentDirectory: URL
@@ -1665,7 +1674,7 @@ private func formatSeconds(_ seconds: TimeInterval) -> String {
     return "\(whole).\(fractionText)s"
 }
 
-private func errorDescription(_ error: any Error) -> String {
+func errorDescription(_ error: any Error) -> String {
     if let localizedError = error as? any LocalizedError,
        let description = localizedError.errorDescription,
        description.isEmpty == false {
@@ -1678,7 +1687,7 @@ private func errorDescription(_ error: any Error) -> String {
     return String(describing: error)
 }
 
-private struct VerifierFailure: LocalizedError, CustomStringConvertible {
+struct VerifierFailure: LocalizedError, CustomStringConvertible {
     let description: String
     var errorDescription: String? { description }
 

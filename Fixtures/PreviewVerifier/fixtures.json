@@ -1,0 +1,346 @@
+[
+  {
+    "id": "platform",
+    "directory": "Platform",
+    "project": "PlatformPreviewFixture.xcodeproj",
+    "cases": [
+      {
+        "id": "mac-fixed",
+        "sourceFile": "Sources/ContentView.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ContentView.swift",
+        "scheme": "MacPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "mac-appkit-view",
+        "sourceFile": "Sources/ContentView.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ContentView.swift",
+        "scheme": "MacPreviewFixture",
+        "index": 3,
+        "arguments": {}
+      },
+      {
+        "id": "mac-appkit-controller",
+        "sourceFile": "Sources/ContentView.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ContentView.swift",
+        "scheme": "MacPreviewFixture",
+        "index": 4,
+        "arguments": {}
+      },
+      {
+        "id": "catalyst-fixed",
+        "sourceFile": "Sources/ContentView.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ContentView.swift",
+        "scheme": "CatalystPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "tv-fixed",
+        "sourceFile": "Sources/ContentView.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ContentView.swift",
+        "scheme": "TVPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "vision-fixed",
+        "sourceFile": "Sources/ContentView.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ContentView.swift",
+        "scheme": "VisionPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "watch-fixed",
+        "sourceFile": "Sources/ContentView.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ContentView.swift",
+        "scheme": "WatchPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "watch-legacy",
+        "sourceFile": "Sources/PlatformLegacyPreviews.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/PlatformLegacyPreviews.swift",
+        "scheme": "WatchPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "clockkit-device",
+        "sourceFile": "Sources/ClockKitLegacyPreviews.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ClockKitLegacyPreviews.swift",
+        "scheme": "WatchPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "clockkit-corner",
+        "sourceFile": "Sources/ClockKitAdditionalPreviews.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ClockKitAdditionalPreviews.swift",
+        "scheme": "WatchPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "clockkit-missing-provider",
+        "sourceFile": "Sources/ClockKitAdditionalPreviews.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ClockKitAdditionalPreviews.swift",
+        "scheme": "WatchPreviewFixture",
+        "index": 1,
+        "arguments": {}
+      },
+      {
+        "id": "clockkit-fixed",
+        "sourceFile": "Sources/ClockKitLayoutPreviews.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ClockKitLayoutPreviews.swift",
+        "scheme": "WatchPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "clockkit-fitting",
+        "sourceFile": "Sources/ClockKitLayoutPreviews.swift",
+        "navigatorPath": "PlatformPreviewFixture/Sources/ClockKitLayoutPreviews.swift",
+        "scheme": "WatchPreviewFixture",
+        "index": 1,
+        "arguments": {}
+      },
+      {
+        "id": "relevance-entries",
+        "sourceFile": "RelevanceWidgetProbe/RelevanceWidgetProbe.swift",
+        "navigatorPath": "RelevanceWidgetProbe/RelevanceWidgetProbe.swift",
+        "scheme": "WatchPreviewFixture",
+        "index": 0,
+        "arguments": {}
+      }
+    ]
+  },
+  {
+    "id": "widget",
+    "directory": "Widget",
+    "project": "ProxyToolVerifierFixture.xcodeproj",
+    "cases": [
+      {
+        "id": "activity-content",
+        "sourceFile": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "navigatorPath": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "scheme": "OriginalWidgetProbeExtension",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "activity-minimal",
+        "sourceFile": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "navigatorPath": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "scheme": "OriginalWidgetProbeExtension",
+        "index": 3,
+        "arguments": {}
+      },
+      {
+        "id": "intent-configured",
+        "sourceFile": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "navigatorPath": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "scheme": "OriginalWidgetProbeExtension",
+        "index": 6,
+        "arguments": {}
+      },
+      {
+        "id": "static-entries",
+        "sourceFile": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "navigatorPath": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "scheme": "OriginalWidgetProbeExtension",
+        "index": 7,
+        "arguments": {}
+      },
+      {
+        "id": "appintent-configured",
+        "sourceFile": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "navigatorPath": "OriginalWidgetProbe/OriginalWidgetProbe.swift",
+        "scheme": "OriginalWidgetProbeExtension",
+        "index": 8,
+        "arguments": {}
+      },
+      {
+        "id": "widget-no-margins",
+        "sourceFile": "OriginalWidgetProbe/WidgetHostOptions.swift",
+        "navigatorPath": "OriginalWidgetProbe/WidgetHostOptions.swift",
+        "scheme": "OriginalWidgetProbeExtension",
+        "index": 1,
+        "arguments": {}
+      },
+      {
+        "id": "widget-empty-timeline",
+        "sourceFile": "OriginalWidgetProbe/WidgetHostFailureCandidates.swift",
+        "navigatorPath": "OriginalWidgetProbe/WidgetHostFailureCandidates.swift",
+        "scheme": "OriginalWidgetProbeExtension",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "widget-cancellation",
+        "sourceFile": "OriginalWidgetProbe/WidgetHostFailureCandidates.swift",
+        "navigatorPath": "OriginalWidgetProbe/WidgetHostFailureCandidates.swift",
+        "scheme": "OriginalWidgetProbeExtension",
+        "index": 1,
+        "arguments": {}
+      },
+      {
+        "id": "display-device",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "display-fixed",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 2,
+        "arguments": {}
+      },
+      {
+        "id": "display-fitting",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 3,
+        "arguments": {}
+      },
+      {
+        "id": "uikit-borders",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 5,
+        "arguments": {}
+      }
+    ]
+  },
+  {
+    "id": "framework",
+    "directory": "Framework",
+    "project": "StandalonePreviewFramework.xcodeproj",
+    "cases": [
+      {
+        "id": "framework-basic",
+        "sourceFile": "StandalonePreviewFramework/StandalonePreviewFramework.swift",
+        "navigatorPath": "StandalonePreviewFramework/StandalonePreviewFramework/StandalonePreviewFramework.swift",
+        "scheme": "StandalonePreviewFramework",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "framework-resource",
+        "sourceFile": "StandalonePreviewFramework/FrameworkResourcePreview.swift",
+        "navigatorPath": "StandalonePreviewFramework/StandalonePreviewFramework/FrameworkResourcePreview.swift",
+        "scheme": "StandalonePreviewFramework",
+        "index": 0,
+        "arguments": {}
+      }
+    ]
+  },
+  {
+    "id": "general",
+    "directory": "../ProxyToolVerifierFixture",
+    "project": "ProxyToolVerifierFixture.xcodeproj",
+    "sourceVariant": "Variants/GeneralPreviews.swift",
+    "sourceDestination": "ProxyToolVerifierFixture/ContentView.swift",
+    "cases": [
+      {
+        "id": "uiview",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 0,
+        "arguments": {}
+      },
+      {
+        "id": "uiviewcontroller",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 1,
+        "arguments": {}
+      },
+      {
+        "id": "group-second",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 2,
+        "arguments": {
+          "previewCanvasControlOverrides": {
+            "groupItemIndex": 1
+          }
+        }
+      },
+      {
+        "id": "group-invalid",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 2,
+        "arguments": {
+          "previewCanvasControlOverrides": {
+            "groupItemIndex": 42
+          }
+        }
+      },
+      {
+        "id": "legacy",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 3,
+        "arguments": {}
+      },
+      {
+        "id": "modifier-state",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 4,
+        "arguments": {}
+      }
+    ]
+  },
+  {
+    "id": "physical",
+    "directory": "Widget",
+    "project": "ProxyToolVerifierFixture.xcodeproj",
+    "sourceVariant": "Variants/PhysicalPreviews.swift",
+    "sourceDestination": "ProxyToolVerifierFixture/ContentView.swift",
+    "cases": [
+      {
+        "id": "physical-source-device",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 0,
+        "arguments": {}
+      }
+    ]
+  },
+  {
+    "id": "physical-bare",
+    "directory": "../ProxyToolVerifierFixture",
+    "project": "ProxyToolVerifierFixture.xcodeproj",
+    "sourceVariant": "Variants/PhysicalPreviews.swift",
+    "sourceDestination": "ProxyToolVerifierFixture/ContentView.swift",
+    "cases": [
+      {
+        "id": "physical-source-device",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 0,
+        "arguments": {}
+      }
+    ]
+  }
+]
