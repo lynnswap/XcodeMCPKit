@@ -1017,8 +1017,17 @@ final class NativePreviewCorrection {
             archive.path, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive.path,
             "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
             "@rpath/" + image.lastPathComponent, "-o", image.path]
+        if platform == .catalyst {
+            let support = URL(filePath: sdk).appendingPathComponent("System/iOSSupport")
+            arguments += ["-F", support.appendingPathComponent("System/Library/Frameworks").path,
+                          "-L", support.appendingPathComponent("usr/lib").path]
+        }
         let inputs = try source.linkedInputs()
         for path in inputs.searchPaths { arguments += [path.framework ? "-F" : "-L", path.url.path] }
+        if let framework = frameworkBundle(containing: output) {
+            // Archive commands have no framework link step; Swift object autolinks still need their Products directory.
+            arguments += ["-F", framework.deletingLastPathComponent().path]
+        }
         for input in inputs.files {
             var directory: ObjCBool = false
             if FileManager.default.fileExists(atPath: input.path, isDirectory: &directory), !directory.boolValue,
