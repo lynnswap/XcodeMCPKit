@@ -2,12 +2,27 @@
 import ABIBridge
 import ABIBridgeSwiftUI
 import DeveloperToolsSupport
+import Foundation
 import SwiftUI
 #if os(macOS)
 import AppKit
 #elseif !os(watchOS)
 import UIKit
 #endif
+
+func previewFrameworkImage(named name: String) -> ImageSelector {
+    #if targetEnvironment(macCatalyst)
+    // These frameworks also have macOS images in the same shared cache.
+    switch name {
+    case "PreviewsOSSupportUI":
+        return .path(URL(fileURLWithPath: "/System/iOSSupport/System/Library/PrivateFrameworks/\(name).framework/\(name)"))
+    case "SwiftUI", "WidgetKit":
+        return .path(URL(fileURLWithPath: "/System/iOSSupport/System/Library/Frameworks/\(name).framework/\(name)"))
+    default: break
+    }
+    #endif
+    return .framework(named: name)
+}
 
 // A generic declaration preserves the native argument's formal indirect ABI.
 @inline(never)
@@ -72,7 +87,7 @@ func makeViewPreview(source: NativeSwiftValue, groupItemIndex: Int? = nil) async
     let makeView: @MainActor (NativeSwiftValue) async throws -> AnyView
     switch source.type.name {
     case "DeveloperToolsSupport.DefaultPreviewSource<SwiftUI.ViewPreviewBody>":
-        let bodyType = try await runtime.resolveSwiftType(named: "SwiftUI.ViewPreviewBody", in: .framework(named: "SwiftUI"))
+        let bodyType = try await runtime.resolveSwiftType(named: "SwiftUI.ViewPreviewBody", in: previewFrameworkImage(named: "SwiftUI"))
         bodyArgument = .type(bodyType)
         makeView = { body in
             let getter = try await body.type.resolveGetter(named: "body", as: (() -> NativeSwiftValue).self,
@@ -259,7 +274,7 @@ func applyViewPreviewTraits(_ view: AnyView, preview: NativeSwiftValue) async th
                 contexts[key] = context
             }
             let wrapperType = try await ABIRuntime.shared.resolveSwiftType(named: "SwiftUI.PreviewModifierViewModifier",
-                in: .framework(named: "SwiftUI"), genericArguments: [.type(M.self)])
+                in: previewFrameworkImage(named: "SwiftUI"), genericArguments: [.type(M.self)])
             let initializer = try await wrapperType.resolveInitializer(
                 named: "init(modifier: A, context: A.Context) -> SwiftUI.PreviewModifierViewModifier<A>",
                 as: ((M, M.Context) -> NativeSwiftValue).self, valueABIs: [wrapperType: .opaque(named: wrapperType.name)])

@@ -22,7 +22,14 @@ struct PreviewRendererWatch: App {
 
     @MainActor
     private func render() async throws {
-        let content = try await makeGeneralPreview(loadPreviewRequest())
+        let request = try loadPreviewRequest()
+        if request.metadataOnly == true {
+            let value = try await nativePreviewMetadata(request)
+            write(PreviewRendererResult(nativeMetadata: value.metadata,
+                nativeProviderPreviewDescription: value.providerDescription))
+            return
+        }
+        let content = try await makeGeneralPreview(request)
         let image = try await captureWatchPreview(view: content.view, layout: content.layout)
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {

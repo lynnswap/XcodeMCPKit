@@ -176,7 +176,7 @@ final class NativePreviewCorrection {
         let workspace = try await workspace(input.workspaceIdentifier)
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
         let location = try await previewDefinition(source: source, index: input.index)
-        guard let destination = try await builder.selectDestination(workspace: workspace, preferred: input.destination) else {
+        guard let destination = try await builder.selectDestination(workspace: workspace, source: location.source, input: input.nativeValue) else {
             throw NativePipelineRequired()
         }
         // Native rendering starts its timeout after resolving the source and
@@ -212,15 +212,11 @@ final class NativePreviewCorrection {
         return try result.get()
     }
 
-    private func renderApp(_ input: Input, prepared: Prepared, app: URL) async throws -> JSONValue {
-        let artifacts = URL(filePath: input.artifacts, directoryHint: .isDirectory)
-        let process = NativePreviewProcess(installation: installation, artifacts: artifacts)
-        let workspace = prepared.workspace
+    private func prepareRenderer(_ input: Input, prepared: Prepared, app: URL, build: NativePreviewBuild.Result,
+                                 platform: NativePreviewPlatform, process: NativePreviewProcess,
+                                 metadataOnly: Bool? = nil) async throws -> (request: PreviewRendererRequest, signing: [String]) {
         let source = prepared.source
         let location = prepared.location
-        let destination = prepared.destination
-        let build = try await builder.build(workspace: workspace, destination: destination)
-        guard let platform = build.previewPlatform else { throw NativePipelineRequired() }
         let selection = try Self.selectTarget(build.targets, source: source, platform: platform)
         let target = selection.host
         guard target.debugDylibEnabled else {
@@ -281,16 +277,73 @@ final class NativePreviewCorrection {
             displayVariantOverrides: input.displayVariants,
             activityViewStyle: input.activityViewStyle, activityViewContext: input.activityViewContext,
             activityToggleState: input.activityToggleState,
-            appName: try Self.appName(product: product, containingApp: containingApp, localization: input.localization))
-        try JSONEncoder().encode(request).write(to: platform.resourcesDirectory(in: app).appendingPathComponent("PreviewRequest.json"))
+            appName: try Self.appName(product: product, containingApp: containingApp, localization: input.localization),
+            metadataOnly: metadataOnly)
         var signing = ["--force", "--sign", "-"]
         if let signedEntitlements = entitlements.signed {
             let plist = app.deletingLastPathComponent().appendingPathComponent("signed-entitlements.plist")
             try signedEntitlements.write(to: plist)
             signing += ["--entitlements", plist.path]
         }
+        try await writeRendererRequest(request, app: app, platform: platform, signing: signing, process: process)
+        return (request, signing)
+    }
+
+    private func writeRendererRequest(_ request: PreviewRendererRequest, app: URL, platform: NativePreviewPlatform,
+                                      signing: [String], process: NativePreviewProcess) async throws {
+        try JSONEncoder().encode(request).write(to: platform.resourcesDirectory(in: app).appendingPathComponent("PreviewRequest.json"))
         _ = try await process.run("/usr/bin/codesign", signing + [app.path])
         try Task.checkCancellation()
+    }
+
+    private func desktopPreview(app: URL, platform: NativePreviewPlatform, process: NativePreviewProcess,
+                                localization: String?) async throws -> PreviewRendererResult {
+        let text = try await process.run(platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path,
+            Self.rendererArguments(localization: localization))
+        guard let record = text.split(whereSeparator: \.isNewline).last(where: { $0.hasPrefix("XcodeMCPPreviewResult:") }) else {
+            throw NativeRuntimeError.invocation("The preview process returned no result; see its process log")
+        }
+        let result = try JSONDecoder().decode(PreviewRendererResult.self, from: Data(record.dropFirst("XcodeMCPPreviewResult:".count).utf8))
+        if result.requiresNativePipeline == true { throw NativePipelineRequired() }
+        if let error = result.error { throw NativeRuntimeError.invocation(error) }
+        return result
+    }
+
+    private func renderApp(_ input: Input, prepared: Prepared, app: URL) async throws -> JSONValue {
+        let artifacts = URL(filePath: input.artifacts, directoryHint: .isDirectory)
+        let process = NativePreviewProcess(installation: installation, artifacts: artifacts)
+        let workspace = prepared.workspace
+        let location = prepared.location
+        var destination = prepared.destination
+        var build = try await builder.build(workspace: workspace, destination: destination)
+        guard var platform = build.previewPlatform else { throw NativePipelineRequired() }
+        var renderer = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
+            platform: platform, process: process, metadataOnly: true)
+        let metadataResponse: PreviewRendererResult
+        if platform.isSimulator {
+            metadataResponse = try await renderSimulator(app: app, build: build, process: process, localization: input.localization).response
+        } else {
+            metadataResponse = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
+        }
+        guard let metadata = metadataResponse.nativeMetadata else {
+            throw NativeRuntimeError.invocation("The preview process returned no native metadata")
+        }
+        guard let evaluated = try await builder.selectDestination(workspace: workspace, source: location.source,
+            input: input.nativeValue, metadata: metadata,
+            providerDescription: metadataResponse.nativeProviderPreviewDescription) else { throw NativePipelineRequired() }
+        let unchanged = (destination.selected.value as? NSObject)?.isEqual(evaluated.selected.value) == true
+        destination = evaluated
+        if unchanged {
+            renderer.request.metadataOnly = nil
+            try await writeRendererRequest(renderer.request, app: app, platform: platform, signing: renderer.signing, process: process)
+        } else {
+            build = try await builder.build(workspace: workspace, destination: destination)
+            guard let selectedPlatform = build.previewPlatform else { throw NativePipelineRequired() }
+            platform = selectedPlatform
+            try FileManager.default.removeItem(at: app)
+            _ = try await prepareRenderer(input, prepared: prepared, app: app, build: build,
+                platform: platform, process: process)
+        }
         let response: PreviewRendererResult
         let snapshotData: Data
         let exclusionData: Data?
@@ -299,19 +352,13 @@ final class NativePreviewCorrection {
         if platform.isSimulator {
             let rendered = try await renderSimulator(app: app, build: build, process: process, localization: input.localization)
             response = rendered.response
-            snapshotData = rendered.snapshot
+            guard let snapshot = rendered.snapshot else { throw NativeRuntimeError.unsupportedContract("The preview renderer returned no snapshot") }
+            snapshotData = snapshot
             exclusionData = rendered.exclusion
             deviceType = rendered.deviceType
             destinationFields = rendered.destination
         } else {
-            let text = try await process.run(platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer").path,
-                Self.rendererArguments(localization: input.localization))
-            guard let record = text.split(whereSeparator: \.isNewline).last(where: { $0.hasPrefix("XcodeMCPPreviewResult:") }) else {
-                throw NativeRuntimeError.invocation("The preview process returned no result; see its process log")
-            }
-            response = try JSONDecoder().decode(PreviewRendererResult.self, from: Data(record.dropFirst("XcodeMCPPreviewResult:".count).utf8))
-            if response.requiresNativePipeline == true { throw NativePipelineRequired() }
-            if let error = response.error { throw NativeRuntimeError.invocation(error) }
+            response = try await desktopPreview(app: app, platform: platform, process: process, localization: input.localization)
             guard let data = response.snapshotData else { throw NativeRuntimeError.invocation("The preview process returned no snapshot") }
             snapshotData = data
             exclusionData = nil
@@ -325,11 +372,11 @@ final class NativePreviewCorrection {
             usesDeviceLayout: response.usesDeviceLayout == true, orientation: response.interfaceOrientation, exclusion: exclusionData)
         var fields: [String: JSONValue] = [
             "previewSnapshotPath": .string(snapshotURL.path),
-            "errors": .array((response.errors ?? []).map { .object(["message": .string($0)]) }),
+            "errors": .array((destination.errors + (response.errors ?? [])).map { .object(["message": .string($0)]) }),
             "renderedDestination": .object(destinationFields),
-            "availableRenderDestinations": .array(build.availableDestinations.map { .object($0.renderFields) }),
             "supportedLocalizations": .array(try await supportedLocalizations(in: workspace).map(JSONValue.string)),
         ]
+        fields["availableRenderDestinations"] = destination.available
         fields["displayName"] = .string(response.displayName ?? location.displayName)
         if let line = response.sourceLineNumber { fields["sourceLineNumber"] = .number(.int(Int64(line))) }
         if let indexes = response.timelineIndexes {
@@ -363,14 +410,14 @@ final class NativePreviewCorrection {
     }
 
     private func renderSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess, localization: String?) async throws ->
-        (response: PreviewRendererResult, snapshot: Data, destination: [String: JSONValue], deviceType: URL, exclusion: Data?) {
+        (response: PreviewRendererResult, snapshot: Data?, destination: [String: JSONValue], deviceType: URL, exclusion: Data?) {
         // Keep allocation alive through cancellation so its created identifier
         // is always available to the cleanup owner below.
         let allocation = Task { @MainActor in
             try await createSimulator(app: app, build: build, process: process)
         }
         let simulator = try await allocation.value
-        var rendered: (PreviewRendererResult, Data, Data?)?
+        var rendered: (PreviewRendererResult, Data?, Data?)?
         var failure: (any Error)?
         do {
             _ = try await process.xcrun(["simctl", "boot", simulator.identifier])
@@ -389,9 +436,9 @@ final class NativePreviewCorrection {
             let response = try JSONDecoder().decode(PreviewRendererResult.self, from: Data(contentsOf: responseURL))
             if response.requiresNativePipeline == true { throw NativePipelineRequired() }
             if let error = response.error { throw NativeRuntimeError.invocation(error) }
-            guard let name = response.snapshotName else { throw NativeRuntimeError.unsupportedContract("The preview renderer returned no snapshot") }
+            let snapshot = try response.snapshotName.map { try Data(contentsOf: documents.appendingPathComponent($0)) }
             let exclusion = try response.exclusionSnapshotName.map { try Data(contentsOf: documents.appendingPathComponent($0)) }
-            rendered = (response, try Data(contentsOf: documents.appendingPathComponent(name)), exclusion)
+            rendered = (response, snapshot, exclusion)
         } catch { failure = error }
         // Cleanup is outside the cancelled task so it can delete the device even
         // when the caller has cancelled rendering or the request timed out.
@@ -518,6 +565,7 @@ final class NativePreviewCorrection {
         let column: Int
         let displayName: String
         let providerPath: NativeSwiftValue?
+        let source: NativePreviewBuild.Source
     }
 
     private func previewDefinition(source: URL, index: Int) async throws -> Definition {
@@ -530,6 +578,7 @@ final class NativePreviewCorrection {
             named: "(parseTranslationUnit in _FEA7E13ECD12FBA8521281D73C9764CE)(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.(RenderPreviewType in _FEA7E13ECD12FBA8521281D73C9764CE)])",
             as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])
         let parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
+        let translationUnit = try parsed.copyTupleElement(at: 0)
         let array = try parsed.copyTupleElement(at: 1)
         let previews = try array.withCopy { value -> [Any] in
             guard let values = value as? [Any] else {
@@ -593,7 +642,8 @@ final class NativePreviewCorrection {
                 receiverABI: .opaque(named: bound.type.name))
             let column = try unsafe getColumn.unsafeInvoke(on: bound)
             definitions.append(Definition(line: line, column: try Self.registryColumn(in: contents, line: line, utf16Column: column),
-                displayName: displayName, providerPath: providerPath))
+                displayName: displayName, providerPath: providerPath,
+                source: .init(translationUnit: translationUnit, definition: definition)))
         }
         // The parser returns providers and registries in separate batches. The
         // native tool selects definitions in source order, including mixed files.
@@ -850,13 +900,14 @@ final class NativePreviewCorrection {
         return info
     }
 
-    private struct Input: Sendable {
+    @MainActor
+    private struct Input {
+        let nativeValue: NativeSwiftValue
         let workspaceIdentifier: String?
         let artifacts: String
         let sourcePath: String
         let index: Int
         let localization: String?
-        let destination: [String: String]
         let timeout: Int
         let widgetFamily: String?
         let widgetPresentation: String?
@@ -871,6 +922,9 @@ final class NativePreviewCorrection {
 
     private func decode<T: Decodable>(_ type: T.Type, data: Data) throws -> Input {
         let value = try JSONDecoder().decode(type, from: data)
+        let identity = try ABIRuntime.shared.resolveSwiftFunctionAndWait(named: "XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A",
+            as: ((T) -> NativeSwiftValue).self, genericArguments: [.type(type)])
+        let nativeValue = try unsafe identity.unsafeInvoke(value)
         let fields = Dictionary(uniqueKeysWithValues: Mirror(reflecting: value).children.compactMap { field in field.label.map { ($0, field.value) } })
         guard let artifacts = fields["temporaryArtifactsPath"] as? String,
               let path = fields["sourceFilePath"] as? String else {
@@ -891,14 +945,9 @@ final class NativePreviewCorrection {
         let controls = fields["previewCanvasControlOverrides"].flatMap { Mirror(reflecting: $0).children.first?.value }
         let controlFields = controls.map { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap { field in field.label.map { ($0, field.value) } }) } ?? [:]
         let options = Self.directOptions(variants: variants, controls: controlFields)
-        let requestedDestination = fields["preferredRenderDestination"].flatMap { Mirror(reflecting: $0).children.first?.value }
-        let destination = requestedDestination.map { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap { field -> (String, String)? in
-            guard let label = field.label, let value = field.value as? String? ?? nil else { return nil }
-            return (label, value)
-        }) } ?? [:]
-        return Input(workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
+        return Input(nativeValue: nativeValue, workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
             index: index, localization: fields["previewLocalizationOverride"] as? String? ?? nil,
-            destination: destination, timeout: timeout,
+            timeout: timeout,
             widgetFamily: options.widgetFamily, widgetPresentation: options.widgetPresentation,
             timelineIndex: options.timelineIndex, groupItemIndex: options.groupItemIndex,
             displayVariants: options.displayVariants, activityViewStyle: options.activityViewStyle,
