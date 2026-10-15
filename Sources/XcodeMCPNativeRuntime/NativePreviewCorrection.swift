@@ -913,27 +913,6 @@ final class NativePreviewCorrection {
         func stagedPath(_ library: Library) -> String {
             library.product.lastPathComponent + library.output.path.dropFirst(library.product.path.count)
         }
-        func absoluteURL(_ path: String, target: NativePreviewBuild.Target) -> URL? {
-            if path.hasPrefix("/") { return URL(filePath: path) }
-            guard let directory = target.linkerWorkingDirectory else { return nil }
-            return URL(filePath: path, relativeTo: URL(filePath: directory, directoryHint: .isDirectory)).absoluteURL
-        }
-        func linkPaths(for target: NativePreviewBuild.Target) -> [SearchPath] {
-            var paths: [SearchPath] = []
-            for index in target.linkCommandLine.indices {
-                let argument = target.linkCommandLine[index]
-                guard argument.hasPrefix("-F") || argument.hasPrefix("-L") else { continue }
-                let path: String
-                if argument.count == 2 {
-                    guard target.linkCommandLine.indices.contains(index + 1) else { continue }
-                    path = target.linkCommandLine[index + 1]
-                } else {
-                    path = String(argument.dropFirst(2))
-                }
-                if let url = absoluteURL(path, target: target) { paths.append((argument.hasPrefix("-F"), url)) }
-            }
-            return paths
-        }
         func runtimeURL(_ path: String, importer: URL) -> URL? {
             if path == "@loader_path" { return importer.deletingLastPathComponent() }
             if path.hasPrefix("@loader_path/") {
@@ -956,13 +935,12 @@ final class NativePreviewCorrection {
         while let current = pending.popLast() {
             let runtimePaths = current.library.rpaths.compactMap { runtimeURL($0, importer: current.library.output) }
                 + current.inheritedPaths
-            let searchPaths = (current.library.target.map { linkPaths(for: $0) } ?? []) + current.inheritedLinkPaths
-            let linkedLibraries = try current.library.target.map { target in
-                try target.linkedInputs().compactMap { candidate in
-                    try libraries.first { $0.output.resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath() }
-                        ?? library(at: candidate)
-                }
-            } ?? []
+            let inputs = try current.library.target?.linkedInputs()
+            let searchPaths = (inputs?.searchPaths ?? []) + current.inheritedLinkPaths
+            let linkedLibraries = try (inputs?.files ?? []).compactMap { candidate in
+                try libraries.first { $0.output.resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath() }
+                    ?? library(at: candidate)
+            }
             for name in current.library.dependencies {
                 let matches = libraries.filter { $0.identifier == name || $0.output.path == name }
                 var dependency = matches.first { $0.output.path == name }

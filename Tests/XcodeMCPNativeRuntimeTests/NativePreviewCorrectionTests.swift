@@ -459,7 +459,7 @@ struct NativePreviewCorrectionTests {
             .write(to: otherDependency.deletingLastPathComponent().appendingPathComponent("Resources/Marker.txt"))
         try compilePreviewLibrary(at: otherDependency, value: 1, platform: .macOS,
             installName: "@rpath/Dependency.framework/Dependency")
-        let libraryIdentifier = kind == .absoluteBuilt
+        let libraryIdentifier = kind != .prebuilt
             ? root.appendingPathComponent("Install/libSupport.dylib").path : "@rpath/libSupport.dylib"
         try compilePreviewLibrary(at: library, platform: .macOS, installName: libraryIdentifier)
         try compilePreviewLibrary(at: unrelated, platform: .macOS, installName: "@rpath/libUnrelated.dylib")
