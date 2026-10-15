@@ -119,6 +119,9 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         #else
         let format = UIGraphicsImageRendererFormat()
         format.scale = window.traitCollection.displayScale
+        #if targetEnvironment(macCatalyst)
+        format.preferredRange = .standard
+        #endif
         var drawn = false
         let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
             drawn = controller.view.drawHierarchy(in: CGRect(origin: .zero, size: size), afterScreenUpdates: true)
