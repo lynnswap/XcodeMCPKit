@@ -8,10 +8,10 @@ enum NativePreviewBinary {
         try dynamicLibrary(at: url, architecture: architecture) != nil
     }
 
-    static func dynamicLibrary(at url: URL, architecture: String) throws -> (identifier: String, dependencies: [String])? {
+    static func dynamicLibrary(at url: URL, architecture: String) throws -> (identifier: String, dependencies: [String], rpaths: [String])? {
         do {
             guard let image = try file(at: url, architecture: architecture), image.header.fileType == .dylib else { return nil }
-            return (image.imagePath, image.dependencies.map(\.dylib.name))
+            return (image.imagePath, image.dependencies.map(\.dylib.name), image.rpaths)
         }
         catch MachOKitError.invalidMagic { return nil }
     }

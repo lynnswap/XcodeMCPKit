@@ -883,25 +883,77 @@ final class NativePreviewCorrection {
 
     static func frameworkDependencies(for source: NativePreviewBuild.Target, targets: [NativePreviewBuild.Target],
                                       platform: NativePreviewPlatform) throws -> [URL] {
-        let libraries = try targets.compactMap { target -> (output: URL, product: URL, identifier: String, dependencies: [String])? in
+        typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String])
+        func library(at output: URL) throws -> Library? {
+            let output = output.standardizedFileURL
+            guard FileManager.default.fileExists(atPath: output.path),
+                  let image = try NativePreviewBinary.dynamicLibrary(at: output, architecture: source.architecture) else { return nil }
+            return (output, frameworkBundle(containing: output) ?? output, image.identifier, image.dependencies, image.rpaths)
+        }
+        func absoluteURL(_ path: String) -> URL? {
+            if path.hasPrefix("/") { return URL(filePath: path) }
+            guard let directory = source.linkerWorkingDirectory else { return nil }
+            return URL(filePath: path, relativeTo: URL(filePath: directory, directoryHint: .isDirectory)).absoluteURL
+        }
+        var searchPaths: [(framework: Bool, url: URL)] = []
+        for index in source.linkCommandLine.indices {
+            let argument = source.linkCommandLine[index]
+            guard argument.hasPrefix("-F") || argument.hasPrefix("-L") else { continue }
+            let path: String
+            if argument.count == 2 {
+                guard source.linkCommandLine.indices.contains(index + 1) else { continue }
+                path = source.linkCommandLine[index + 1]
+            } else {
+                path = String(argument.dropFirst(2))
+            }
+            if let url = absoluteURL(path) { searchPaths.append((argument.hasPrefix("-F"), url)) }
+        }
+        func runtimeURL(_ path: String, importer: URL) -> URL? {
+            if path == "@loader_path" { return importer.deletingLastPathComponent() }
+            if path.hasPrefix("@loader_path/") {
+                return importer.deletingLastPathComponent().appendingPathComponent(String(path.dropFirst("@loader_path/".count)))
+            }
+            return path.hasPrefix("/") ? URL(filePath: path) : nil
+        }
+        let libraries = try targets.compactMap { target -> Library? in
             guard target.architecture == source.architecture,
                   NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) == platform,
-                  let output = target.outputURL, productBundle(containing: output) == nil,
-                  FileManager.default.fileExists(atPath: output.path),
-                  let image = try NativePreviewBinary.dynamicLibrary(at: output, architecture: target.architecture) else { return nil }
-            return (output, frameworkBundle(containing: output) ?? output, image.identifier, image.dependencies)
+                  let output = target.outputURL, productBundle(containing: output) == nil else { return nil }
+            return try library(at: output)
         }
-        guard let output = source.outputURL,
+        guard let output = source.outputURL?.standardizedFileURL,
               let sourceLibrary = libraries.first(where: { $0.output == output }) else { return [] }
-        var pending = [sourceLibrary]
+        var pending = [(library: sourceLibrary, inheritedPaths: [URL]())]
         var visited: Set<URL> = [output.resolvingSymlinksInPath()]
         var products: [URL] = []
-        while let library = pending.popLast() {
-            for dependency in libraries where library.dependencies.contains(dependency.identifier)
-                || library.dependencies.contains(dependency.output.path) {
+        while let current = pending.popLast() {
+            let runtimePaths = current.library.rpaths.compactMap { runtimeURL($0, importer: current.library.output) }
+                + current.inheritedPaths
+            for name in current.library.dependencies {
+                var dependency = libraries.first { $0.identifier == name || $0.output.path == name }
+                if dependency == nil {
+                    let candidates: [URL]
+                    if name.hasPrefix("@rpath/") {
+                        let relative = String(name.dropFirst("@rpath/".count))
+                        let paths = searchPaths.filter { $0.framework == relative.contains(".framework/") }.map(\.url)
+                        candidates = (runtimePaths + paths).map { $0.appendingPathComponent(relative) }
+                    } else if name.hasPrefix("@loader_path/") {
+                        candidates = runtimeURL(name, importer: current.library.output).map { [$0] } ?? []
+                    } else {
+                        candidates = []
+                    }
+                    // Prebuilt inputs have no native target record; their real load commands and linker paths locate them.
+                    for candidate in candidates {
+                        if let resolved = try library(at: candidate) {
+                            dependency = resolved
+                            break
+                        }
+                    }
+                }
+                guard let dependency else { continue }
                 if visited.insert(dependency.output.resolvingSymlinksInPath()).inserted {
                     products.append(dependency.product)
-                    pending.append(dependency)
+                    pending.append((dependency, runtimePaths))
                 }
             }
         }

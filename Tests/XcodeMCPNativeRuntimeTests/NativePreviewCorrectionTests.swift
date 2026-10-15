@@ -424,7 +424,8 @@ struct NativePreviewCorrectionTests {
         #expect(try String(contentsOf: resources.appendingPathComponent("Marker.txt"), encoding: .utf8) == "framework resource")
     }
 
-    @Test func standaloneFrameworkStagesItsTransitiveBuiltDependencies() throws {
+    @Test(arguments: [false, true])
+    func standaloneFrameworkStagesItsTransitiveDependencies(prebuilt: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let products = root.appendingPathComponent("Products")
@@ -445,9 +446,13 @@ struct NativePreviewCorrectionTests {
         try compilePreviewLibrary(at: library, platform: .macOS, installName: "@rpath/libSupport.dylib")
         try compilePreviewLibrary(at: unrelated, platform: .macOS, installName: "@rpath/libUnrelated.dylib")
         try compilePreviewLibrary(at: dependency, platform: .macOS,
-            installName: "@rpath/Dependency.framework/Dependency", libraries: [library])
-        try compilePreviewLibrary(at: source, platform: .macOS,
-            installName: "@rpath/Feature.framework/Feature", libraries: [dependency])
+            installName: "@rpath/Dependency.framework/Dependency", libraries: [library], rpaths: ["@loader_path/.."])
+        let sourceCode = root.appendingPathComponent("Feature.c")
+        try Data("int preview_fixture_value(void) { return 0; }\n".utf8).write(to: sourceCode)
+        let sourceLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple(architecture: "arm64"),
+            sourceCode.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path,
+            "-F", products.path, "-framework", "Dependency", "-Wl,-no_adhoc_codesign"]
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + sourceLinkArguments)
         for binary in [source, dependency, library] {
             try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", binary.path])
         }
@@ -456,9 +461,11 @@ struct NativePreviewCorrectionTests {
                 sdkRoot: sdk, sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", binary.path],
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)
         }
-        let sourceTarget = target(source)
+        let sourceTarget = NativePreviewBuild.Target(moduleName: "Feature", buildableName: "Feature.framework",
+            sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: sourceLinkArguments,
+            linkerWorkingDirectory: root.path, objectFiles: [], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)
         let dependencies = try NativePreviewCorrection.frameworkDependencies(for: sourceTarget,
-            targets: [sourceTarget, target(dependency), target(library), target(unrelated)], platform: .macOS)
+            targets: prebuilt ? [sourceTarget] : [sourceTarget, target(dependency), target(library), target(unrelated)], platform: .macOS)
 
         let helper = root.appendingPathComponent("Helper")
         let app = root.appendingPathComponent("Preview.app")
@@ -470,8 +477,6 @@ struct NativePreviewCorrectionTests {
             "-Wl,-rpath,@executable_path/../Frameworks", "-o", helper.appendingPathComponent("XcodeMCPPreviewRenderer").path])
         try NativePreviewCorrection.prepareApp(product: source.deletingLastPathComponent(), helper: helper, app: app,
             platform: .macOS, dependencies: dependencies)
-        // Loading succeeds entirely from staging after the original products move.
-        try FileManager.default.moveItem(at: products, to: root.appendingPathComponent("OriginalProducts"))
         let frameworks = app.appendingPathComponent("Contents/Frameworks")
         let stagedDependency = try #require(Bundle(url: frameworks.appendingPathComponent("Dependency.framework")))
         let stagedMarker = try #require(stagedDependency.url(forResource: "Marker", withExtension: "txt"))

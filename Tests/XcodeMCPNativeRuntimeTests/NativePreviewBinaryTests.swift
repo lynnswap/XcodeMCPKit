@@ -52,7 +52,7 @@ struct NativePreviewBinaryTests {
 @MainActor
 func compilePreviewLibrary(at binary: URL, value: Int = 0, uuid: Bool = true, architecture: String = "arm64",
                            platform: NativePreviewPlatform = .iOS, installName: String = "@rpath/libPreviewFixture.dylib",
-                           libraries: [URL] = []) throws {
+                           libraries: [URL] = [], rpaths: [String] = []) throws {
     try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
     let source = binary.appendingPathExtension("c")
     try Data("int preview_fixture_value(void) { return \(value); }\n".utf8).write(to: source)
@@ -62,7 +62,7 @@ func compilePreviewLibrary(at binary: URL, value: Int = 0, uuid: Bool = true, ar
     let triple = platform.triple(architecture: architecture)
     var arguments = ["--sdk", platform.sdk, "clang", "-dynamiclib", "-target", triple,
                      "-isysroot", sdk, source.path, "-install_name", installName, "-o", binary.path,
-                     "-Wl,-no_adhoc_codesign"] + libraries.map(\.path)
+                     "-Wl,-no_adhoc_codesign"] + libraries.map(\.path) + rpaths.map { "-Wl,-rpath," + $0 }
     if !uuid { arguments.append("-Wl,-no_uuid") }
     try previewBinaryOutput("/usr/bin/xcrun", arguments)
 }
