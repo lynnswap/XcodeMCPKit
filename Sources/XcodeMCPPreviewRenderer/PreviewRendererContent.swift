@@ -52,10 +52,20 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
     var result: PreviewRendererResult
     if let typeName = request.providerTypeName {
         let preview = try makeLegacyViewPreview(typeName: typeName, index: 0)
+        #if os(macOS) || targetEnvironment(macCatalyst)
+        if let context = preview.context {
+            // Native metadata classifies recognized context keys; a custom
+            // context returning their defaults still describes a plain view.
+            guard try await legacyPreviewContextCategory(context) == nil else {
+                throw NativePreviewPipelineRequired()
+            }
+        }
+        #elseif !os(tvOS)
         guard preview.context == nil else {
             throw NativePreviewPipelineRequired()
         }
-        #if targetEnvironment(macCatalyst) || os(visionOS)
+        #endif
+        #if os(visionOS)
         guard preview.interfaceOrientation == .portrait else {
             throw NativePreviewPipelineRequired()
         }

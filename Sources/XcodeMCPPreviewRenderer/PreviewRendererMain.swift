@@ -75,7 +75,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             if variants["Color Scheme"] == nil, let colorScheme = preview.colorScheme {
                 variants["Color Scheme"] = colorScheme == .dark ? "Dark Appearance" : "Light Appearance"
             }
-            if let context = preview.context {
+            if let context = preview.context, try await legacyPreviewContextCategory(context) != nil {
                 guard request.widgetFamily == nil, request.widgetPresentation == nil,
                       request.activityViewStyle.map({ PreviewRendererRequest.activityViewStyles.contains($0) }) ?? true,
                       request.activityViewContext.map({ PreviewRendererRequest.activityViewContexts.contains($0) }) ?? true,
