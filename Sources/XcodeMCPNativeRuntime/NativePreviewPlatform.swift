@@ -28,10 +28,7 @@ enum NativePreviewPlatform: String, CaseIterable {
     }
 
     var isSimulator: Bool { self != .macOS && self != .catalyst }
-    func supports(architecture: String) -> Bool {
-        architecture == "arm64" || (!isSimulator && architecture == "x86_64")
-    }
-    func helperDirectory(architecture: String) -> String { rawValue + "-" + architecture }
+    var helperDirectory: String { rawValue + "-arm64" }
     var sdk: String { self == .catalyst ? "macosx" : rawValue }
     var minimumVersion: String {
         switch self {
@@ -41,14 +38,14 @@ enum NativePreviewPlatform: String, CaseIterable {
         case .macOS, .catalyst: "15.4"
         }
     }
-    func triple(architecture: String) -> String {
+    var triple: String {
         switch self {
-        case .iOS: "\(architecture)-apple-ios18.4-simulator"
-        case .tvOS: "\(architecture)-apple-tvos18.4-simulator"
-        case .visionOS: "\(architecture)-apple-xros2.4-simulator"
-        case .watchOS: "\(architecture)-apple-watchos11.4-simulator"
-        case .macOS: "\(architecture)-apple-macos15.4"
-        case .catalyst: "\(architecture)-apple-ios18.4-macabi"
+        case .iOS: "arm64-apple-ios18.4-simulator"
+        case .tvOS: "arm64-apple-tvos18.4-simulator"
+        case .visionOS: "arm64-apple-xros2.4-simulator"
+        case .watchOS: "arm64-apple-watchos11.4-simulator"
+        case .macOS: "arm64-apple-macos15.4"
+        case .catalyst: "arm64-apple-ios18.4-macabi"
         }
     }
 

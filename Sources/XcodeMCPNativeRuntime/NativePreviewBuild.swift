@@ -9,7 +9,6 @@ final class NativePreviewBuild {
     struct Result {
         let targets: [Target]
         let destinationIdentifier: String
-        let destinationArchitecture: String?
         let previewDestinationIdentifier: String
         let platformIdentifier: String?
         let previewPlatform: NativePreviewPlatform?
@@ -146,7 +145,6 @@ final class NativePreviewBuild {
         try Task.checkCancellation()
         let records = try await targets(descriptions, image: image, runnable: runnable)
         return Result(targets: records, destinationIdentifier: info.identifier,
-                      destinationArchitecture: try optionalString(destination, selector: "targetArchitecture"),
                       previewDestinationIdentifier: info.previewIdentifier,
                       platformIdentifier: info.platformIdentifier, previewPlatform: info.previewPlatform,
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
