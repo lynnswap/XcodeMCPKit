@@ -143,7 +143,7 @@ retrieval does not establish online/account-dependent retrieval.
 `RenderPreview` uses packaged platform renderers for SwiftUI, UIKit, and AppKit
 `#Preview` definitions, SwiftUI `PreviewProvider` definitions, and iOS and watchOS WidgetKit previews
 in an application or app extension built with a debug dylib, or a standalone
-dynamic framework. The packaged
+dynamic or static framework. The packaged
 hosts cover iOS 18.4+, tvOS 18.4+, visionOS 2.4+, and watchOS 11.4+ Simulators,
 plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
 The renderers support arm64 executables on these platforms.
@@ -170,7 +170,13 @@ transitive Mach-O dependencies. Native build records, linker search paths, and
 the importing image's runtime search paths locate built and prebuilt dependencies.
 Resolved dependency references are adjusted to their staged locations
 without changing the original build products.
-Standalone framework image parity was verified on macOS 26.6.2 and iOS 27.2 with
+For a standalone static framework, the host links its archive into a preview
+sidecar dylib using compiler autolink records and the target's library/search
+inputs. The original archive, framework resources, and renderer executable remain
+unchanged. The sidecar uses the same dependency staging and preview lifecycle.
+Classes linked from a static archive retain ordinary host `Bundle(for:)` semantics;
+the copied framework resources are not assigned to that class's runtime bundle.
+Standalone dynamic framework image parity was verified on macOS 26.6.2 and iOS 27.2 with
 Xcode 27.1, including framework bundle resources on macOS.
 Source and host records must use the same supported platform and architecture
 before checking for ambiguity. An extension's own bundle supplies its resources,
@@ -442,7 +448,7 @@ timeout error. The build method binding is
 cached for subsequent requests. Initial binding can make the first request take
 longer than the rendering timeout.
 
-Standalone static frameworks, targets whose application or extension host has its debug dylib disabled,
+Targets whose application or extension host has its debug dylib disabled,
 unsupported platform/architecture combinations, and source or display contracts beyond the direct capabilities described above
 continue through Xcode's native preview pipeline. Those operations retain its service and entitlement
 requirements, including the limitation tracked in
