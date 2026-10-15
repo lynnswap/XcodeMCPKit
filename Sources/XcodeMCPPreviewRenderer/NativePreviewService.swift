@@ -288,7 +288,15 @@ final class NativePreviewService {
         let seedType = try await messagingType("HostUpdateSeed")
         let seed = try await none(of: seedType)
         let previewType = try await messagingType("PreviewType")
-        let preview = try previewType.makeEnumCase(named: "static")
+        let preview: NativeSwiftValue
+        do {
+            preview = try previewType.makeEnumCase(named: "static")
+        } catch NativeSwiftValueError.enumCaseRequiresPayload(name: "static") {
+            // Native Widget and provider updates use the default outer display.
+            let displayType = try await messagingType("PreviewDisplay")
+            let display = try displayType.makeEnumCase(named: "outer")
+            preview = try await previewType.makeEnumCase(named: "static", payload: display)
+        }
         let box = try await messagingType("PlistValueBox")
         let boxes = try await runtime.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(box)])
         let states: NativeSwiftValue
