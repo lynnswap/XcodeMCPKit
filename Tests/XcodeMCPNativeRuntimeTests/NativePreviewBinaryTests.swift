@@ -5,52 +5,38 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewBinaryTests {
-    @Test(arguments: ["arm64", "x86_64"])
-    func signedAndThinnedCopiesRetainBinaryIdentity(architecture: String) throws {
+    @Test func signedCopiesRetainBinaryIdentity() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
         let arm64 = root.appendingPathComponent("arm64.dylib")
-        let intel = root.appendingPathComponent("intel.dylib")
-        let universal = root.appendingPathComponent("universal.dylib")
         let signed = root.appendingPathComponent("signed.dylib")
         try compilePreviewLibrary(at: arm64)
-        try compilePreviewLibrary(at: intel, architecture: "x86_64")
-        try previewBinaryOutput("/usr/bin/xcrun", ["lipo", "-create", arm64.path, intel.path, "-output", universal.path])
-        try previewBinaryOutput("/usr/bin/xcrun", ["lipo", universal.path, "-thin", architecture, "-output", signed.path])
+        try FileManager.default.copyItem(at: arm64, to: signed)
         try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", signed.path])
 
-        #expect(try Data(contentsOf: architecture == "arm64" ? arm64 : intel) != Data(contentsOf: signed))
-        #expect(try NativePreviewBinary.matches(universal, signed, architecture: architecture))
+        #expect(try Data(contentsOf: arm64) != Data(contentsOf: signed))
+        #expect(try NativePreviewBinary.matches(arm64, signed))
     }
 
-    @Test func uuidlessLibrariesCompareOnlyTheSelectedArchitecture() throws {
+    @Test func uuidlessLibrariesCompareTheirBytes() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("source.dylib")
         let copy = root.appendingPathComponent("copy.dylib")
         let other = root.appendingPathComponent("other.dylib")
-        let intel = root.appendingPathComponent("intel.dylib")
-        let universal = root.appendingPathComponent("universal.dylib")
-        let otherArmUniversal = root.appendingPathComponent("other-arm-universal.dylib")
         try compilePreviewLibrary(at: source, uuid: false)
         try FileManager.default.copyItem(at: source, to: copy)
         try compilePreviewLibrary(at: other, value: 1, uuid: false)
-        try compilePreviewLibrary(at: intel, uuid: false, architecture: "x86_64")
-        try previewBinaryOutput("/usr/bin/xcrun", ["lipo", "-create", source.path, intel.path, "-output", universal.path])
-        try previewBinaryOutput("/usr/bin/xcrun", ["lipo", "-create", other.path, intel.path, "-output", otherArmUniversal.path])
 
-        #expect(try NativePreviewBinary.matches(source, copy, architecture: "arm64"))
-        #expect(try !NativePreviewBinary.matches(source, other, architecture: "arm64"))
-        #expect(try NativePreviewBinary.matches(universal, intel, architecture: "x86_64"))
-        #expect(try NativePreviewBinary.matches(universal, otherArmUniversal, architecture: "x86_64"))
-        #expect(try !NativePreviewBinary.matches(universal, otherArmUniversal, architecture: "arm64"))
+        #expect(try NativePreviewBinary.matches(source, copy))
+        #expect(try !NativePreviewBinary.matches(source, other))
     }
 }
 
 @MainActor
-func compilePreviewLibrary(at binary: URL, value: Int = 0, uuid: Bool = true, architecture: String = "arm64",
+func compilePreviewLibrary(at binary: URL, value: Int = 0, uuid: Bool = true,
                            platform: NativePreviewPlatform = .iOS, installName: String = "@rpath/libPreviewFixture.dylib",
                            libraries: [URL] = []) throws {
     try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -59,8 +45,7 @@ func compilePreviewLibrary(at binary: URL, value: Int = 0, uuid: Bool = true, ar
     defer { try? FileManager.default.removeItem(at: source) }
     let sdk = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", platform.sdk, "--show-sdk-path"])
         .trimmingCharacters(in: .whitespacesAndNewlines)
-    let triple = platform.triple(architecture: architecture)
-    var arguments = ["--sdk", platform.sdk, "clang", "-dynamiclib", "-target", triple,
+    var arguments = ["--sdk", platform.sdk, "clang", "-dynamiclib", "-target", platform.triple,
                      "-isysroot", sdk, source.path, "-install_name", installName, "-o", binary.path,
                      "-Wl,-no_adhoc_codesign"] + libraries.map(\.path)
     if !uuid { arguments.append("-Wl,-no_uuid") }

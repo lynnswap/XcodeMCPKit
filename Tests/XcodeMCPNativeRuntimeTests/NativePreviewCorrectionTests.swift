@@ -130,10 +130,6 @@ struct NativePreviewCorrectionTests {
         #expect(selected.source.architecture == "arm64")
         #expect(selected.host.architecture == "arm64")
         #expect(throws: NativePipelineRequired.self) {
-            try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS,
-                preferredArchitecture: "x86_64")
-        }
-        #expect(throws: NativePipelineRequired.self) {
             try NativePreviewCorrection.selectTarget(targets.filter { $0.architecture == "x86_64" }, source: source, platform: .iOS)
         }
     }
@@ -165,73 +161,6 @@ struct NativePreviewCorrectionTests {
         #expect(selected.host.outputURL == hosts[1].outputURL)
         #expect(selected.source.outputURL == feature.outputURL)
         #expect(selected.source.moduleName == feature.moduleName)
-    }
-
-    @Test(arguments: ["arm64", "x86_64"])
-    func universalMacHostUsesDestinationArchitecture(architecture: String) throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let source = root.appendingPathComponent("ContentView.swift")
-        let output = root.appendingPathComponent("Fixture.app/Contents/MacOS/Fixture.debug.dylib")
-        let targets = ["arm64", "x86_64"].map { architecture in
-            NativePreviewBuild.Target(moduleName: "Fixture", buildableName: "Fixture.app",
-                sdkRoot: "macosx", sdkVariant: nil, architecture: architecture,
-                linkCommandLine: ["-o", output.path], linkerWorkingDirectory: nil,
-                objectFiles: [], sourceFiles: [source], debugDylibEnabled: true, isRunnable: true)
-        }
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS,
-            preferredArchitecture: architecture)
-        #expect(selected.source.architecture == architecture)
-        #expect(selected.host.architecture == architecture)
-    }
-
-    @Test(arguments: [true, false])
-    func sharedLibraryDestinationArchitecturePrecedesHostSelection(hasCompatibleHost: Bool) throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let source = root.appendingPathComponent("PackageView.swift")
-        var targets = ["arm64", "x86_64"].flatMap { architecture in
-            let product = root.appendingPathComponent("\(architecture)/FixturePackage.o")
-            return [NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
-                sdkRoot: "macosx", sdkVariant: nil, architecture: architecture,
-                linkCommandLine: ["-o", product.path], linkerWorkingDirectory: nil, objectFiles: [],
-                sourceFiles: [source], debugDylibEnabled: false, isRunnable: false),
-                NativePreviewBuild.Target(moduleName: architecture, buildableName: "\(architecture).app",
-                    sdkRoot: "macosx", sdkVariant: nil, architecture: architecture,
-                    linkCommandLine: ["-o", root.appendingPathComponent("\(architecture).app/Contents/MacOS/Host.debug.dylib").path, product.path],
-                    linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true,
-                    isRunnable: architecture == "arm64")]
-        }
-        if hasCompatibleHost {
-            let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS,
-                preferredArchitecture: "x86_64")
-            #expect(selected.source.architecture == "x86_64")
-            #expect(selected.host.architecture == "x86_64")
-        } else {
-            targets.removeAll { $0.buildableName == "x86_64.app" }
-            #expect(throws: NativePipelineRequired.self) {
-                try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS,
-                    preferredArchitecture: "x86_64")
-            }
-        }
-    }
-
-    @Test(arguments: [NativePreviewPlatform.macOS, .catalyst])
-    func desktopSharedLibraryUsesSameArchitectureHost(platform: NativePreviewPlatform) throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let source = root.appendingPathComponent("PackageView.swift")
-        let product = root.appendingPathComponent("FixturePackage.o")
-        let hosts = ["arm64", "x86_64"].map { architecture in
-            NativePreviewBuild.Target(moduleName: architecture, buildableName: "FixtureHost.app",
-                sdkRoot: "macosx", sdkVariant: platform == .catalyst ? "iosmac" : nil, architecture: architecture,
-                linkCommandLine: ["-o", root.appendingPathComponent("\(architecture).app/Contents/MacOS/FixtureHost.debug.dylib").path, product.path],
-                linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
-        }
-        let sourceTarget = NativePreviewBuild.Target(moduleName: "FixturePackage", buildableName: "FixturePackage.o",
-            sdkRoot: "macosx", sdkVariant: platform == .catalyst ? "iosmac" : nil, architecture: "x86_64", linkCommandLine: ["-o", product.path],
-            linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [sourceTarget], source: source, platform: platform,
-            preferredArchitecture: "arm64")
-        #expect(selected.source.architecture == "x86_64")
-        #expect(selected.host.architecture == "x86_64")
     }
 
     @Test(arguments: [true, false])
@@ -425,7 +354,7 @@ struct NativePreviewCorrectionTests {
         #expect(try NativePreviewCorrection.appName(product: framework, containingApp: nil, localization: "ja-JP") == "Framework JA")
         #expect(try Data(contentsOf: platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer")) == Data("renderer".utf8))
         let libraries = try NativePreviewCorrection.registryLibraries(in: app, previewLibraries: [])
-        let paths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [], registryLibraries: libraries, sourceOutput: binary, architecture: "arm64")
+        let paths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [], registryLibraries: libraries, sourceOutput: binary)
         #expect(paths == [String(staged.appendingPathComponent(relativeBinary).path.dropFirst(app.path.count + 1))])
         #expect(try String(contentsOf: resources.appendingPathComponent("Marker.txt"), encoding: .utf8) == "framework resource")
     }
@@ -465,12 +394,12 @@ struct NativePreviewCorrectionTests {
         try compilePreviewLibrary(at: unrelated, platform: .macOS, installName: "@rpath/libUnrelated.dylib")
         let sourceCode = root.appendingPathComponent("Feature.c")
         try Data("int preview_fixture_value(void) { return 0; }\n".utf8).write(to: sourceCode)
-        let dependencyLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple(architecture: "arm64"),
+        let dependencyLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple,
             sourceCode.path, "-install_name", "@rpath/Dependency.framework/Dependency", "-o", dependency.path,
             "-L", library.deletingLastPathComponent().path, "-lSupport", "-Wl,-no_adhoc_codesign"]
             + (prebuilt ? ["-Wl,-rpath,@loader_path/../../Support"] : [])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + dependencyLinkArguments)
-        let sourceLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple(architecture: "arm64"),
+        let sourceLinkArguments = ["-dynamiclib", "-target", NativePreviewPlatform.macOS.triple,
             sourceCode.path, "-install_name", "@rpath/Feature.framework/Feature", "-o", source.path, "-Wl,-no_adhoc_codesign"]
             + (prebuilt ? [dependency.path] : ["-F", products.path, "-framework", "Dependency"])
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang"] + sourceLinkArguments)
@@ -624,9 +553,9 @@ struct NativePreviewCorrectionTests {
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [],
                 debugDylibEnabled: true, isRunnable: name != "Unselected")
         }
-        #expect(try NativePreviewCorrection.containingApp(for: output, targets: hosts, architecture: "arm64")?.path
+        #expect(try NativePreviewCorrection.containingApp(for: output, targets: hosts)?.path
             == root.appendingPathComponent("Matching.app").path)
-        #expect(try NativePreviewCorrection.containingApp(for: output, targets: [hosts[0]], architecture: "arm64") == nil)
+        #expect(try NativePreviewCorrection.containingApp(for: output, targets: [hosts[0]]) == nil)
     }
 
     @Test(arguments: [false, true])

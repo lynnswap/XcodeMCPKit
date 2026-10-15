@@ -8,19 +8,18 @@ struct NativePreviewEntitlements {
     let signed: Data?
     let simulator: Data?
 
-    static func read(from bundle: URL, architecture: String) throws -> Self {
+    static func read(from bundle: URL) throws -> Self {
         guard let executable = Bundle(url: bundle)?.executableURL else {
             throw NativeRuntimeError.unsupportedContract("The preview product has no main executable: \(bundle.path)")
         }
-        return try Self(signed: signedEntitlements(in: bundle, architecture: architecture),
-                        simulator: simulatorEntitlements(in: executable, architecture: architecture))
+        return try Self(signed: signedEntitlements(in: bundle),
+                        simulator: simulatorEntitlements(in: executable))
     }
 
-    private static func signedEntitlements(in bundle: URL, architecture: String) throws -> Data? {
+    private static func signedEntitlements(in bundle: URL) throws -> Data? {
         var code: SecStaticCode?
-        let attributes = [kSecCodeAttributeArchitecture as String: architecture] as CFDictionary
-        let createStatus = unsafe SecStaticCodeCreateWithPathAndAttributes(bundle as CFURL, [], attributes, &code)
-        try check(createStatus, operation: "SecStaticCodeCreateWithPathAndAttributes", bundle: bundle)
+        let createStatus = unsafe SecStaticCodeCreateWithPath(bundle as CFURL, [], &code)
+        try check(createStatus, operation: "SecStaticCodeCreateWithPath", bundle: bundle)
         guard let code else {
             throw NativeRuntimeError.unsupportedContract("Security returned no code object for \(bundle.path)")
         }
@@ -43,9 +42,9 @@ struct NativePreviewEntitlements {
         return try PropertyListSerialization.data(fromPropertyList: entitlements, format: .xml, options: 0)
     }
 
-    private static func simulatorEntitlements(in executable: URL, architecture: String) throws -> Data? {
-        guard let file = try NativePreviewBinary.file(at: executable, architecture: architecture) else {
-            throw NativeRuntimeError.unsupportedContract("The preview product has no \(architecture) executable: \(executable.path)")
+    private static func simulatorEntitlements(in executable: URL) throws -> Data? {
+        guard let file = try NativePreviewBinary.file(at: executable) else {
+            throw NativeRuntimeError.unsupportedContract("The preview product has no arm64 executable: \(executable.path)")
         }
         guard let section = file.sections64.first(where: {
             $0.segmentName == "__TEXT" && $0.sectionName == "__entitlements"
@@ -53,8 +52,8 @@ struct NativePreviewEntitlements {
         // Xcode stores Simulator capabilities here separately from the code signature.
         // Preserve the original bytes for the linker's -sectcreate input.
         let data = try Data(contentsOf: executable, options: .mappedIfSafe)
-        let (start, overflow) = file.headerStartOffset.addingReportingOverflow(section.offset)
-        guard !overflow, start >= 0, section.size >= 0, start <= data.count, section.size <= data.count - start else {
+        let start = section.offset
+        guard start >= 0, section.size >= 0, start <= data.count, section.size <= data.count - start else {
             throw NativeRuntimeError.unsupportedContract("The preview product's Simulator entitlement section is truncated: \(executable.path)")
         }
         return data.subdata(in: start..<(start + section.size))
