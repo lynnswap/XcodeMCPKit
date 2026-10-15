@@ -995,10 +995,12 @@ final class NativePreviewCorrection {
                 }
                 if dependency == nil, matches.count == 1 { dependency = matches[0] }
                 guard let dependency else { continue }
-                if name.hasPrefix("@loader_path/"),
-                   current.library.product.resolvingSymlinksInPath() != dependency.product.resolvingSymlinksInPath() {
+                let replacement = "@rpath/" + stagedPath(dependency)
+                let internalRelative = name.hasPrefix("@loader_path/")
+                    && current.library.product.resolvingSymlinksInPath() == dependency.product.resolvingSymlinksInPath()
+                if name != replacement && !internalRelative {
                     result.relocations.append(.init(library: stagedPath(current.library), name: name,
-                        replacement: "@rpath/" + stagedPath(dependency)))
+                        replacement: replacement))
                 }
                 if visited.insert(dependency.output.resolvingSymlinksInPath()).inserted {
                     if copiedProducts.insert(dependency.product.resolvingSymlinksInPath()).inserted {

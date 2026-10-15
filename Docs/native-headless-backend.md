@@ -172,7 +172,7 @@ lookups; `Bundle.main` identifies the helper application. Linked frameworks and
 dynamic libraries are copied with their resources, following the source image's
 transitive Mach-O dependencies. Native build records, linker search paths, and
 the importing image's runtime search paths locate built and prebuilt dependencies.
-Resolved external `@loader_path` references are adjusted in the staged copies
+Resolved dependency references are adjusted to their staged locations
 without changing the original build products.
 Standalone framework image parity was verified on macOS 26.6.2 and iOS 27.2 with
 Xcode 27.1, including framework bundle resources on macOS.
