@@ -270,7 +270,7 @@ final class NativePreviewCorrection {
         } else { providerName = nil }
         let programRootNames: [String]?
         if providerName != nil {
-            let programLibraries = try Self.programLibraries(previewLibraries: libraries, output: output)
+            let programLibraries = try Self.programLibraries(previewLibraries: registryLibraries, output: output)
             if programLibraries.isEmpty {
                 programRootNames = []
             } else {
