@@ -215,13 +215,11 @@ final class NativePreviewCorrection {
     private func prepareRenderer(_ input: Input, prepared: Prepared, app: URL, build: NativePreviewBuild.Result,
                                  platform: NativePreviewPlatform, process: NativePreviewProcess,
                                  metadataOnly: Bool? = nil, isLegacyComplication: Bool? = nil) async throws ->
-        (request: PreviewRendererRequest, signing: [String], product: URL, containingApp: URL?, architecture: String) {
+        (request: PreviewRendererRequest, signing: [String], product: URL, containingApp: URL?) {
         let source = prepared.source
         let location = prepared.location
-        let selection = try Self.selectTarget(build.targets, source: source, platform: platform,
-            preferredArchitecture: build.destinationArchitecture)
+        let selection = try Self.selectTarget(build.targets, source: source, platform: platform)
         let target = selection.host
-        let architecture = target.architecture
         guard target.debugDylibEnabled else {
             throw NativePipelineRequired()
         }
@@ -234,9 +232,9 @@ final class NativePreviewCorrection {
         guard let product = Self.productBundle(containing: output) else {
             throw NativePipelineRequired()
         }
-        let entitlements = try NativePreviewEntitlements.read(from: product, architecture: architecture)
-        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory(architecture: architecture))")
-        let containingApp = try Self.containingApp(for: output, targets: build.targets, architecture: architecture)
+        let entitlements = try NativePreviewEntitlements.read(from: product)
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
+        let containingApp = try Self.containingApp(for: output, targets: build.targets)
         let nativeProviderIdentifier = metadataOnly == true && location.providerPath != nil
             && (platform == .iOS || platform == .watchOS) && containingApp != nil
             ? try Self.widgetExtensionIdentifier(product) : nil
@@ -248,7 +246,7 @@ final class NativePreviewCorrection {
             let archive = helper.appendingPathComponent("libXcodeMCPPreviewRenderer.a").path
             let sdk = try await process.xcrun(["--sdk", platform.sdk, "--show-sdk-path"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            _ = try await process.xcrun(["--sdk", platform.sdk, "swiftc", "-target", platform.triple(architecture: architecture),
+            _ = try await process.xcrun(["--sdk", platform.sdk, "swiftc", "-target", platform.triple,
                 "-sdk", sdk, archive, "-lc++", "-Xlinker", "-force_load", "-Xlinker", archive,
                 "-Xlinker", "-rpath", "-Xlinker", "@executable_path/Frameworks",
                 "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__entitlements", "-Xlinker", section.path,
@@ -257,8 +255,8 @@ final class NativePreviewCorrection {
         let libraries = try previewLibraries(in: app, platform: platform)
         let registryLibraries = try Self.registryLibraries(in: app, previewLibraries: libraries)
         let libraryPaths = try Self.libraryPaths(in: app, previewLibraries: libraries,
-            registryLibraries: registryLibraries, sourceOutput: selection.source.outputURL, architecture: architecture)
-        let symbols = try await process.xcrun(["nm", "-arch", architecture, "-j"] + registryLibraries.map(\.path))
+            registryLibraries: registryLibraries, sourceOutput: selection.source.outputURL)
+        let symbols = try await process.xcrun(["nm", "-j"] + registryLibraries.map(\.path))
         let names = Self.registryNames(in: symbols)
         let providerName: String?
         if let path = location.providerPath {
@@ -267,11 +265,11 @@ final class NativePreviewCorrection {
         } else { providerName = nil }
         let programRootNames: [String]?
         if providerName != nil {
-            let programLibraries = try Self.programLibraries(previewLibraries: libraries, output: output, architecture: architecture)
+            let programLibraries = try Self.programLibraries(previewLibraries: libraries, output: output)
             if programLibraries.isEmpty {
                 programRootNames = []
             } else {
-                let symbols = try await process.xcrun(["nm", "-arch", architecture, "-j", "-U"] + programLibraries.map(\.path))
+                let symbols = try await process.xcrun(["nm", "-j", "-U"] + programLibraries.map(\.path))
                 programRootNames = Self.programRootNames(in: symbols)
             }
         } else { programRootNames = nil }
@@ -298,7 +296,7 @@ final class NativePreviewCorrection {
             signing += ["--entitlements", plist.path]
         }
         try await writeRendererRequest(request, app: app, platform: platform, signing: signing, process: process)
-        return (request, signing, product, containingApp, architecture)
+        return (request, signing, product, containingApp)
     }
 
     private func writeRendererRequest(_ request: PreviewRendererRequest, app: URL, platform: NativePreviewPlatform,
@@ -374,7 +372,7 @@ final class NativePreviewCorrection {
             } else if let providerName = renderer.request.providerTypeName, let description = metadataResponse.nativeProviderPreviewDescription {
                 specification = try await providerSpecification(name: providerName, description: description)
             } else { throw NativePipelineRequired() }
-            let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory(architecture: renderer.architecture))")
+            let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
             try FileManager.default.removeItem(at: app)
             try Self.prepareApp(product: renderer.product, helper: helper, app: app, containingApp: containingApp, platform: platform,
                 clientIdentifier: "dev.xcodemcp.PreviewClient." + UUID().uuidString)
@@ -569,8 +567,7 @@ final class NativePreviewCorrection {
         return ["-AppleLanguages", String(decoding: languages, as: UTF8.self), "-AppleLocale", localization]
     }
 
-    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL, platform: NativePreviewPlatform,
-                             preferredArchitecture: String? = nil) throws -> Selection {
+    static func selectTarget(_ targets: [NativePreviewBuild.Target], source: URL, platform: NativePreviewPlatform) throws -> Selection {
         let sourcePath = source.resolvingSymlinksInPath().path
         guard targets.contains(where: { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }) else {
             throw NativeRuntimeError.invalidRequest("The active scheme did not build \(source.path)")
@@ -578,14 +575,9 @@ final class NativePreviewCorrection {
         let platformTargets = targets.filter {
             NativePreviewPlatform(sdkRoot: $0.sdkRoot, sdkVariant: $0.sdkVariant) == platform
         }
-        var sources = platformTargets.filter { $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath } }
-        if let preferredArchitecture {
-            let matching = sources.filter { $0.architecture == preferredArchitecture }
-            // A single-architecture source still uses its actual build when
-            // the destination's architecture does not occur in those records.
-            if !matching.isEmpty { sources = matching }
+        let sources = platformTargets.filter {
+            $0.architecture == "arm64" && $0.sourceFiles.contains { $0.resolvingSymlinksInPath().path == sourcePath }
         }
-        sources.removeAll { !platform.supports(architecture: $0.architecture) }
         guard !sources.isEmpty else { throw NativePipelineRequired() }
         var selections: [Selection] = []
         for target in sources {
@@ -597,7 +589,7 @@ final class NativePreviewCorrection {
             let sourceOutput = target.outputURL
             let frameworkName = sourceOutput?.pathComponents.last(where: { $0.hasSuffix(".framework") })
             let hosts = try platformTargets.filter { candidate in
-                guard candidate.architecture == target.architecture,
+                guard candidate.architecture == "arm64",
                       let output = candidate.outputURL, let app = productBundle(containing: output) else { return false }
                 if candidate.objectFiles.contains(where: { objectPaths.contains($0.resolvingSymlinksInPath().path) }) {
                     return true
@@ -607,7 +599,7 @@ final class NativePreviewCorrection {
                 guard frameworkName != nil || sourceOutput.pathExtension == "dylib" else { return false }
                 let rootLibrary = app.appendingPathComponent(sourceOutput.lastPathComponent)
                 if frameworkName == nil, FileManager.default.fileExists(atPath: rootLibrary.path),
-                   try NativePreviewBinary.matches(sourceOutput, rootLibrary, architecture: target.architecture) {
+                   try NativePreviewBinary.matches(sourceOutput, rootLibrary) {
                     return true
                 }
                 let frameworks = Bundle(url: app)?.privateFrameworksURL ?? app.appendingPathComponent("Frameworks", isDirectory: true)
@@ -616,7 +608,7 @@ final class NativePreviewCorrection {
                     let library = frameworks.appendingPathComponent(subpath)
                     guard library.lastPathComponent == sourceOutput.lastPathComponent,
                           frameworkName.map({ library.pathComponents.contains($0) }) ?? true else { return false }
-                    return try NativePreviewBinary.matches(sourceOutput, library, architecture: target.architecture)
+                    return try NativePreviewBinary.matches(sourceOutput, library)
                 }
             }
             selections += hosts.map { Selection(source: target, host: $0) }
@@ -838,18 +830,18 @@ final class NativePreviewCorrection {
         return nil
     }
 
-    static func containingApp(for extensionOutput: URL, targets: [NativePreviewBuild.Target], architecture: String) throws -> URL? {
+    static func containingApp(for extensionOutput: URL, targets: [NativePreviewBuild.Target]) throws -> URL? {
         guard let product = productBundle(containing: extensionOutput), product.pathExtension == "appex" else { return nil }
         let relativeBinary = String(extensionOutput.path.dropFirst(product.path.count + 1))
         let candidates = try targets.compactMap { target -> (app: URL, isRunnable: Bool)? in
-            guard target.architecture == architecture, NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) != nil,
+            guard target.architecture == "arm64", NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) != nil,
                   let output = target.outputURL, let app = productBundle(containing: output),
                   app.pathExtension == "app" else { return nil }
             let embedded = (Bundle(url: app)?.builtInPlugInsURL ?? app.appendingPathComponent("PlugIns", isDirectory: true))
                 .appendingPathComponent(product.lastPathComponent, isDirectory: true)
                 .appendingPathComponent(relativeBinary)
             guard FileManager.default.fileExists(atPath: embedded.path),
-                  try NativePreviewBinary.matches(extensionOutput, embedded, architecture: architecture) else { return nil }
+                  try NativePreviewBinary.matches(extensionOutput, embedded) else { return nil }
             return (app, target.isRunnable)
         }
         guard !candidates.isEmpty else { return nil }
@@ -955,8 +947,8 @@ final class NativePreviewCorrection {
         return libraries
     }
 
-    static func programLibraries(previewLibraries: [URL], output: URL, architecture: String) throws -> [URL] {
-        try previewLibraries.filter { try NativePreviewBinary.matches(output, $0, architecture: architecture) }
+    static func programLibraries(previewLibraries: [URL], output: URL) throws -> [URL] {
+        try previewLibraries.filter { try NativePreviewBinary.matches(output, $0) }
     }
 
     static func registryLibraries(in app: URL, previewLibraries: [URL]) throws -> [URL] {
@@ -975,7 +967,7 @@ final class NativePreviewCorrection {
         return Array(Set(libraries.map { $0.resolvingSymlinksInPath() })).sorted { $0.path < $1.path }
     }
 
-    static func libraryPaths(in app: URL, previewLibraries: [URL], registryLibraries: [URL], sourceOutput: URL?, architecture: String) throws -> [String] {
+    static func libraryPaths(in app: URL, previewLibraries: [URL], registryLibraries: [URL], sourceOutput: URL?) throws -> [String] {
         var libraries = previewLibraries
         if let sourceOutput, Self.productBundle(containing: sourceOutput) == nil {
             let frameworkName = sourceOutput.pathComponents.last(where: { $0.hasSuffix(".framework") })
@@ -983,7 +975,7 @@ final class NativePreviewCorrection {
                 guard let sourceLibrary = try registryLibraries.first(where: { library in
                     guard library.lastPathComponent == sourceOutput.lastPathComponent,
                           frameworkName.map({ library.pathComponents.contains($0) }) ?? true else { return false }
-                    return try NativePreviewBinary.matches(sourceOutput, library, architecture: architecture)
+                    return try NativePreviewBinary.matches(sourceOutput, library)
                 }) else { throw NativePipelineRequired() }
                 libraries.append(sourceLibrary)
             }

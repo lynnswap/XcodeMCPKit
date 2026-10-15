@@ -4,7 +4,7 @@ XcodeMCPKit is a server for using Xcode's MCP tools headlessly.
 
 ## Requirements
 
-- macOS 15.4+
+- An Apple silicon Mac running macOS 15.4+
 - An Xcode installation with native MCP tools
 - [Homebrew](https://brew.sh/) for installation
 
