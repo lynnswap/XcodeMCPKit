@@ -133,9 +133,21 @@ final class PreviewSnapshotWindow {
             guard let settings = try await object(nativeScene, "settings"),
                   let mutable = try await object(settings, "mutableCopy") else { throw NativePreviewPipelineRequired() }
             #if os(iOS)
-            let edgeFactory = try await runtime.object(edgeClass as AnyObject).resolveMethod(
-                selector: "defaultDisplayEdgeInfoForceInsets:", as: ((Bool) -> AnyObject).self)
-            let edge = try unsafe edgeFactory.unsafeInvoke(true)
+            guard let displayContextClass = NSClassFromString("UISDisplayContext") else { throw NativePreviewPipelineRequired() }
+            let edge: AnyObject
+            // PreviewShell takes edge information from its display context;
+            // the process-wide default can omit the selected iPad's insets.
+            if let context = try await object(displayContextClass as AnyObject, "_loadedInitialContext"),
+               let selectedEdge = try await object(context, "displayEdgeInfo") {
+                edge = selectedEdge
+            } else {
+                let allocate = try await runtime.object(edgeClass as AnyObject).resolveMethod(
+                    selector: "alloc", as: (() -> AnyObject).self)
+                let allocated = try unsafe allocate.unsafeInvoke()
+                let initialize = try await runtime.object(allocated).resolveMethod(
+                    selector: "init", as: (() -> AnyObject).self)
+                edge = try unsafe initialize.unsafeInvoke()
+            }
             let portraitInsets = try await insets(edge, "safeAreaInsetsPortrait")
             let peripheryInsets = try await insets(edge, "peripheryInsets")
             let home = try await object(edge, "homeAffordanceOverlayAllowance") as? NSNumber
