@@ -883,30 +883,34 @@ final class NativePreviewCorrection {
 
     static func frameworkDependencies(for source: NativePreviewBuild.Target, targets: [NativePreviewBuild.Target],
                                       platform: NativePreviewPlatform) throws -> [URL] {
-        typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String])
-        func library(at output: URL) throws -> Library? {
+        typealias SearchPath = (framework: Bool, url: URL)
+        typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String], linkPaths: [SearchPath])
+        func library(at output: URL, linkPaths: [SearchPath] = []) throws -> Library? {
             let output = output.standardizedFileURL
             guard FileManager.default.fileExists(atPath: output.path),
                   let image = try NativePreviewBinary.dynamicLibrary(at: output, architecture: source.architecture) else { return nil }
-            return (output, frameworkBundle(containing: output) ?? output, image.identifier, image.dependencies, image.rpaths)
+            return (output, frameworkBundle(containing: output) ?? output, image.identifier, image.dependencies, image.rpaths, linkPaths)
         }
-        func absoluteURL(_ path: String) -> URL? {
+        func absoluteURL(_ path: String, target: NativePreviewBuild.Target) -> URL? {
             if path.hasPrefix("/") { return URL(filePath: path) }
-            guard let directory = source.linkerWorkingDirectory else { return nil }
+            guard let directory = target.linkerWorkingDirectory else { return nil }
             return URL(filePath: path, relativeTo: URL(filePath: directory, directoryHint: .isDirectory)).absoluteURL
         }
-        var searchPaths: [(framework: Bool, url: URL)] = []
-        for index in source.linkCommandLine.indices {
-            let argument = source.linkCommandLine[index]
-            guard argument.hasPrefix("-F") || argument.hasPrefix("-L") else { continue }
-            let path: String
-            if argument.count == 2 {
-                guard source.linkCommandLine.indices.contains(index + 1) else { continue }
-                path = source.linkCommandLine[index + 1]
-            } else {
-                path = String(argument.dropFirst(2))
+        func linkPaths(for target: NativePreviewBuild.Target) -> [SearchPath] {
+            var paths: [SearchPath] = []
+            for index in target.linkCommandLine.indices {
+                let argument = target.linkCommandLine[index]
+                guard argument.hasPrefix("-F") || argument.hasPrefix("-L") else { continue }
+                let path: String
+                if argument.count == 2 {
+                    guard target.linkCommandLine.indices.contains(index + 1) else { continue }
+                    path = target.linkCommandLine[index + 1]
+                } else {
+                    path = String(argument.dropFirst(2))
+                }
+                if let url = absoluteURL(path, target: target) { paths.append((argument.hasPrefix("-F"), url)) }
             }
-            if let url = absoluteURL(path) { searchPaths.append((argument.hasPrefix("-F"), url)) }
+            return paths
         }
         func runtimeURL(_ path: String, importer: URL) -> URL? {
             if path == "@loader_path" { return importer.deletingLastPathComponent() }
@@ -919,16 +923,18 @@ final class NativePreviewCorrection {
             guard target.architecture == source.architecture,
                   NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) == platform,
                   let output = target.outputURL, productBundle(containing: output) == nil else { return nil }
-            return try library(at: output)
+            return try library(at: output, linkPaths: linkPaths(for: target))
         }
         guard let output = source.outputURL?.standardizedFileURL,
               let sourceLibrary = libraries.first(where: { $0.output == output }) else { return [] }
-        var pending = [(library: sourceLibrary, inheritedPaths: [URL]())]
+        var pending = [(library: sourceLibrary, inheritedPaths: [URL](), inheritedLinkPaths: [SearchPath]())]
         var visited: Set<URL> = [output.resolvingSymlinksInPath()]
+        var copiedProducts: Set<URL> = [sourceLibrary.product.resolvingSymlinksInPath()]
         var products: [URL] = []
         while let current = pending.popLast() {
             let runtimePaths = current.library.rpaths.compactMap { runtimeURL($0, importer: current.library.output) }
                 + current.inheritedPaths
+            let searchPaths = current.library.linkPaths + current.inheritedLinkPaths
             for name in current.library.dependencies {
                 var dependency = libraries.first { $0.identifier == name || $0.output.path == name }
                 if dependency == nil {
@@ -952,8 +958,10 @@ final class NativePreviewCorrection {
                 }
                 guard let dependency else { continue }
                 if visited.insert(dependency.output.resolvingSymlinksInPath()).inserted {
-                    products.append(dependency.product)
-                    pending.append((dependency, runtimePaths))
+                    if copiedProducts.insert(dependency.product.resolvingSymlinksInPath()).inserted {
+                        products.append(dependency.product)
+                    }
+                    pending.append((dependency, runtimePaths, searchPaths))
                 }
             }
         }
@@ -1004,7 +1012,7 @@ final class NativePreviewCorrection {
         let owner = containingApp ?? product
         guard let bundle = Bundle(url: owner) else { throw NativePipelineRequired() }
         if let localization {
-            let info = try bundleInfo(at: owner)
+            let info = bundle.infoDictionary ?? [:]
             let key = info["CFBundleDisplayName"] is String ? "CFBundleDisplayName" : "CFBundleName"
             guard let name = info[key] as? String else { return "" }
             return bundle.localizedString(forKey: key, value: name, table: "InfoPlist",
