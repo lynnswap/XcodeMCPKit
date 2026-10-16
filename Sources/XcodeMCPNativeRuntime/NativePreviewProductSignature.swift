@@ -62,16 +62,23 @@ struct NativePreviewProductSignature: Equatable {
          additionalProducts: [URL] = []) throws {
         var configuration = [source.path, build.destinationIdentifier, build.previewDestinationIdentifier,
             build.platformIdentifier ?? "", build.systemVersion ?? ""]
-        var products = Set(additionalProducts + [helper])
-        var pending = build.targets + build.previewRoots
-        while let target = pending.popLast() {
-            configuration += [target.moduleName ?? "", target.buildableName, target.sdkRoot, target.sdkVariant ?? "",
+        func targetConfiguration(_ target: NativePreviewBuild.Target) -> [String] {
+            var result = [target.moduleName ?? "", target.buildableName, target.sdkRoot, target.sdkVariant ?? "",
                 target.architecture, target.linkerWorkingDirectory ?? "", String(target.debugDylibEnabled),
                 String(target.isRunnable), String(target.enableAddressSanitizer), String(target.enableThreadSanitizer),
                 String(target.enableUndefinedBehaviorSanitizer), String(target.isDynamicPackageProduct),
                 String(target.containsPreviewSource), String(target.linkCommandLine.count)] + target.linkCommandLine
-            configuration += [String(target.compileCommandLine.count)] + target.compileCommandLine
-            configuration += target.rendererEnvironment.keys.sorted().flatMap { [$0, target.rendererEnvironment[$0]!] }
+            result += [String(target.compileCommandLine.count)] + target.compileCommandLine
+            result += target.rendererEnvironment.keys.sorted().flatMap { [$0, target.rendererEnvironment[$0]!] }
+            return result + target.dependencies.reversed().flatMap { targetConfiguration($0) }
+        }
+        // Native scheme buildables come from an unordered set; dependency and command order remain significant.
+        for targets in [build.targets, build.previewRoots] {
+            configuration += targets.map { targetConfiguration($0) }.sorted { $0.lexicographicallyPrecedes($1) }.flatMap { $0 }
+        }
+        var products = Set(additionalProducts + [helper])
+        var pending = build.targets + build.previewRoots
+        while let target = pending.popLast() {
             if let output = target.outputURL {
                 products.insert(NativePreviewCorrection.productBundle(containing: output)
                     ?? NativePreviewCorrection.frameworkBundle(containing: output) ?? output)

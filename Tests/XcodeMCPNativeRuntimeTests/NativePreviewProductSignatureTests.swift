@@ -6,6 +6,20 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewProductSignatureTests {
+    @Test func reusesProductsWhenNativeTargetOrderChanges() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let output = fixture.product.appendingPathComponent("Support.dylib")
+        try Data("support".utf8).write(to: output)
+        let support = NativePreviewBuild.Target(moduleName: "Support", buildableName: "Support.dylib", sdkRoot: "iphonesimulator",
+            sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", output.path], linkerWorkingDirectory: nil,
+            objectFiles: [], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)
+
+        let before = try fixture.signature(targets: [fixture.target, support])
+
+        #expect(try fixture.signature(targets: [support, fixture.target]) == before)
+    }
+
     @Test func reusesProductsAfterFileMetadataChangesWithoutContentChanges() throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -131,8 +145,8 @@ struct NativePreviewProductSignatureTests {
                 objectFiles: [], sourceFiles: [source], debugDylibEnabled: true, isRunnable: true)
         }
 
-        func signature() throws -> NativePreviewProductSignature {
-            let build = NativePreviewBuild.Result(targets: [target], previewRoots: [], destinationIdentifier: "destination",
+        func signature(targets: [NativePreviewBuild.Target]? = nil) throws -> NativePreviewProductSignature {
+            let build = NativePreviewBuild.Result(targets: targets ?? [target], previewRoots: [], destinationIdentifier: "destination",
                 previewDestinationIdentifier: "preview-destination", platformIdentifier: "com.apple.platform.iphonesimulator",
                 previewPlatform: .iOS, platformName: "iOS", deviceModelName: "iPhone", systemVersion: "27.1")
             return try NativePreviewProductSignature(build: build, source: source, helper: helper,
