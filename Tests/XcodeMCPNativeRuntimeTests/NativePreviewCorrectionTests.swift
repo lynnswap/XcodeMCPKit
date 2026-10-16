@@ -500,7 +500,7 @@ struct NativePreviewCorrectionTests {
             staticProduct: true)
         let linked = try await NativePreviewCorrection.linkStaticProduct(hosted.source, host: hosted.host, in: staged, products: products, platform: .macOS, process: process)
         let dependencies = try NativePreviewCorrection.frameworkDependencies(for: [hosted.source], targets: [target, app],
-            platform: .macOS, in: products, primaryImage: linked)
+            platform: .macOS, in: products, linkedImages: [try #require(hosted.source.outputURL).resolvingSymlinksInPath(): linked])
         try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: products)
         try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: products, process: process)
         let libraries = try NativePreviewCorrection.registryLibraries(in: staged, previewLibraries: [linked.url])
@@ -859,7 +859,7 @@ struct NativePreviewCorrectionTests {
             "DYLD_INSERT_LIBRARIES": runtime,
         ]
         let dependencies = try NativePreviewCorrection.frameworkDependencies(for: [target], targets: [target], platform: .macOS,
-            in: products, primaryImage: linked, environment: nativeEnvironment)
+            in: products, linkedImages: [try #require(target.outputURL).resolvingSymlinksInPath(): linked], environment: nativeEnvironment)
         try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: products)
         let libraries = try NativePreviewCorrection.registryLibraries(in: app, previewLibraries: [image], products: products)
         let paths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [image], registryLibraries: libraries,
@@ -978,7 +978,7 @@ struct NativePreviewCorrectionTests {
     }
 
     enum HostlessPackageKind: CaseIterable {
-        case automatic, dynamicDependency, dynamicSource
+        case automatic, dynamicDependency, dynamicSource, staticFrameworkDependency
     }
 
     @Test(arguments: HostlessPackageKind.allCases)
@@ -989,21 +989,22 @@ struct NativePreviewCorrectionTests {
         try FileManager.default.createDirectory(at: nativeProducts, withIntermediateDirectories: true)
         var targets: [NativePreviewBuild.Target] = []
         var resourceURLs: [URL] = []
-        let dynamicSupport = kind != .automatic
+        let frameworkSupport = kind != .automatic
         let privateSupport = root.appendingPathComponent("Private/libPrivateSupport.dylib")
-        if dynamicSupport {
+        if frameworkSupport {
             try compilePreviewLibrary(at: privateSupport, value: 7, platform: .macOS, installName: privateSupport.path)
             try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", privateSupport.path])
         }
         for name in ["Source", "Support"] {
-            let dynamic = dynamicSupport && name == "Support"
+            let framework = frameworkSupport && name == "Support"
+            let dynamic = framework && kind != .staticFrameworkDependency
             let source = root.appendingPathComponent(name + ".swift")
             let object = root.appendingPathComponent(name + "-part.o")
-            let output = nativeProducts.appendingPathComponent(dynamic
+            let output = nativeProducts.appendingPathComponent(framework
                 ? "PackageFrameworks/Support.framework/Versions/A/Support" : name + ".o")
             let body = name == "Source"
                 ? "@_silgen_name(\"support_value\") func supportValue() -> Int32\n@_cdecl(\"source_value\") public func value() -> Int32 { supportValue() + 3 }"
-                : dynamic
+                : framework
                     ? "@_silgen_name(\"preview_fixture_value\") func privateValue() -> Int32\n@_cdecl(\"support_value\") public func value() -> Int32 { privateValue() }"
                     : "@_cdecl(\"support_value\") public func value() -> Int32 { 7 }"
             try Data("""
@@ -1031,7 +1032,7 @@ struct NativePreviewCorrectionTests {
             let fileList = root.appendingPathComponent(name + ".LinkFileList")
             try (object.path + "\n").write(to: fileList, atomically: true, encoding: .utf8)
             let link: [String]
-            if dynamic {
+            if framework {
                 let resources = output.deletingLastPathComponent().appendingPathComponent("Resources")
                 try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
                 try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": "dev.lynnswap.DynamicSupport",
@@ -1041,8 +1042,10 @@ struct NativePreviewCorrectionTests {
                 try FileManager.default.createSymbolicLink(atPath: framework.appendingPathComponent("Versions/Current").path, withDestinationPath: "A")
                 try FileManager.default.createSymbolicLink(atPath: framework.appendingPathComponent("Support").path, withDestinationPath: "Versions/Current/Support")
                 try FileManager.default.createSymbolicLink(atPath: framework.appendingPathComponent("Resources").path, withDestinationPath: "Versions/Current/Resources")
-                link = ["swiftc", "-emit-library", "-target", NativePreviewPlatform.macOS.triple, object.path, privateSupport.path,
-                    "-Xlinker", "-install_name", "-Xlinker", "@rpath/Support.framework/Versions/A/Support", "-o", output.path]
+                link = dynamic
+                    ? ["swiftc", "-emit-library", "-target", NativePreviewPlatform.macOS.triple, object.path, privateSupport.path,
+                        "-Xlinker", "-install_name", "-Xlinker", "@rpath/Support.framework/Versions/A/Support", "-o", output.path]
+                    : ["libtool", "-static", "-filelist", fileList.path, "-o", output.path]
             } else {
                 link = ["clang", "-r", "-nostdlib", "-target", NativePreviewPlatform.macOS.triple,
                     "-filelist", fileList.path, "-o", output.path]
@@ -1060,9 +1063,14 @@ struct NativePreviewCorrectionTests {
             try Data((name + " resource").utf8).write(to: resources.appendingPathComponent("Marker.txt"))
             resourceURLs.append(resource)
         }
+        if kind == .staticFrameworkDependency {
+            targets[1].dependencies = [NativePreviewBuild.Target(moduleName: nil, buildableName: "PrivateSupport", sdkRoot: "macosx",
+                sdkVariant: nil, architecture: "arm64", linkCommandLine: ["clang", "-dynamiclib", "-o", privateSupport.path],
+                linkerWorkingDirectory: root.path, objectFiles: [], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)]
+        }
         targets[0].dependencies = [targets[1]]
         targets[0].resourceURLs = resourceURLs
-        var roots = kind == .dynamicDependency ? targets : [targets[0]]
+        var roots = kind == .dynamicDependency || kind == .staticFrameworkDependency ? targets : [targets[0]]
         if kind == .dynamicSource {
             let output = nativeProducts.appendingPathComponent("PackageFrameworks/Source.framework/Source")
             try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -1082,7 +1090,7 @@ struct NativePreviewCorrectionTests {
         let source = root.appendingPathComponent("Source.swift")
         let selection = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS)
         #expect(selection.source.outputURL == selection.host.outputURL)
-        let originalFiles = try targets.map { try #require($0.outputURL) } + (dynamicSupport ? [privateSupport] : [])
+        let originalFiles = try targets.map { try #require($0.outputURL) } + (frameworkSupport ? [privateSupport] : [])
         let original = try originalFiles.map { try Data(contentsOf: $0) }
         let helper = root.appendingPathComponent("Helper")
         try FileManager.default.createDirectory(at: helper.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
@@ -1130,10 +1138,10 @@ struct NativePreviewCorrectionTests {
             helper: helper, app: app, platform: .macOS, staticProduct: true, resourceURLs: selection.source.resourceURLs)
         let developer = try previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
-        let image = try await kind == .dynamicSource ? nil : NativePreviewCorrection.linkStaticProduct(selection.source, in: app, products: products,
+        let images = try await NativePreviewCorrection.linkStaticProducts(for: roots, in: app, products: products,
             platform: .macOS, process: process)
         let dependencies = try NativePreviewCorrection.frameworkDependencies(for: roots, targets: targets, platform: .macOS,
-            in: products, agentApp: app, primaryImage: image)
+            in: products, agentApp: app, linkedImages: images)
         try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: products)
         let libraries = dependencies.rootLibraries.map { products.appendingPathComponent($0) }
         try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: products, process: process)
@@ -1160,14 +1168,30 @@ struct NativePreviewCorrectionTests {
             } else {
                 #expect(record["owner"] as? String == products.resolvingSymlinksInPath().path)
                 #expect(record["identifier"] is NSNull)
-                #expect(loadedImage == image?.url.resolvingSymlinksInPath())
+                let owner = kind == .staticFrameworkDependency && name == "Support" ? targets[1] : selection.source
+                let ownerOutput = try #require(owner.outputURL).resolvingSymlinksInPath()
+                #expect(loadedImage == images[ownerOutput]?.url.resolvingSymlinksInPath())
             }
             #expect(record["module"] as? String == "dev.lynnswap." + name + ".resources")
             #expect(record["marker"] as? String == name + " resource")
         }
         let sourceRecord = try #require(result["Source"] as? [String: Any])
-        let sourceImage = URL(filePath: try #require(sourceRecord["image"] as? String))
+        let sourceImage = URL(filePath: try #require(sourceRecord["image"] as? String)).resolvingSymlinksInPath()
         #expect(try NativePreviewBinary.dynamicLibrary(at: sourceImage)?.dependencies.contains(where: { $0.contains(privateSupport.lastPathComponent) }) == false)
+        if kind == .staticFrameworkDependency {
+            let supportRecord = try #require(result["Support"] as? [String: Any])
+            let supportImage = URL(filePath: try #require(supportRecord["image"] as? String)).resolvingSymlinksInPath()
+            #expect(sourceImage != supportImage)
+            #expect(libraries.map { $0.resolvingSymlinksInPath() } == [sourceImage, supportImage])
+            let sourceSymbols = try previewBinaryOutput("/usr/bin/xcrun", ["nm", "-jU", sourceImage.path]).split(whereSeparator: \.isNewline)
+            let supportSymbols = try previewBinaryOutput("/usr/bin/xcrun", ["nm", "-jU", supportImage.path]).split(whereSeparator: \.isNewline)
+            #expect(sourceSymbols.contains("_source_value"))
+            #expect(!sourceSymbols.contains("_support_value"))
+            #expect(supportSymbols.contains("_support_value"))
+            #expect(!supportSymbols.contains("_source_value"))
+            #expect(try NativePreviewBinary.dynamicLibrary(at: sourceImage)?.dependencies.contains(where: { $0.contains(supportImage.lastPathComponent) }) == true)
+            #expect(try NativePreviewBinary.dynamicLibrary(at: supportImage)?.dependencies.contains(where: { $0.contains(privateSupport.lastPathComponent) }) == true)
+        }
         #expect(try originalFiles.map { try Data(contentsOf: $0) } == original)
     }
 

@@ -437,7 +437,7 @@ final class NativePreviewBuild {
         var pending = Array(canonicalBuildables.reversed())
         var edges: [ObjectIdentifier: [NSObject]] = [:]
         var codeIdentities: Set<ObjectIdentifier> = []
-        var dynamicLibraryCandidates: Set<ObjectIdentifier> = []
+        var jitBuildables: Set<ObjectIdentifier> = []
         var resourceBlueprints: [ObjectIdentifier: NSObject] = [:]
         while let buildable = pending.popLast() {
             try Task.checkCancellation()
@@ -459,21 +459,19 @@ final class NativePreviewBuild {
                 if let product = try unsafe productType.unsafeInvoke() {
                     if linkableProducts.contains(product) { codeIdentities.insert(identifier) }
                     if product == "com.apple.product-type.framework" || product == "com.apple.product-type.library.dynamic" {
-                        dynamicLibraryCandidates.insert(identifier)
+                        jitBuildables.insert(identifier)
                     }
                 }
             }
         }
         let codeEdges = edges.mapValues { $0.filter { codeIdentities.contains(ObjectIdentifier($0)) } }
         var dependents: [ObjectIdentifier: [NSObject]] = [:]
-        var ancestors: [NSObject] = []
         seen = []
         pending = [canonicalSource]
         while let buildable = pending.popLast() {
             try Task.checkCancellation()
             let identifier = ObjectIdentifier(buildable)
             guard seen.insert(identifier).inserted else { continue }
-            ancestors.append(buildable)
             let nativeParents = try unsafe directDependents.unsafeInvoke(buildable)
             guard let parents = try nativeParents.withCopy({ $0 as? [NSObject] }) else {
                 throw NativeRuntimeError.unsupportedContract("The native dependency graph parent edge is not an array of buildables")
@@ -492,59 +490,53 @@ final class NativePreviewBuild {
         try addRecords(records)
         // Preserve the selected source's compile command and environment already collected by targets().
         candidates[ObjectIdentifier(canonicalSource)] = [source]
-        func record(for buildable: NSObject) throws -> TargetRecord {
-            let matches = candidates[ObjectIdentifier(buildable), default: []]
-            guard matches.count == 1, let record = matches.first else {
-                throw NativeRuntimeError.unsupportedContract("The native build returned \(matches.count) matching products for dependency \(buildable) of \(source.target.buildableName)")
-            }
-            return record
-        }
         var queriedDescriptions: [NativeSwiftValue] = []
         defer { withExtendedLifetime((graph, queriedDescriptions)) {} }
-        let dynamicAncestors = ancestors.filter { dynamicLibraryCandidates.contains(ObjectIdentifier($0)) }
-        let missingAncestors = dynamicAncestors.filter { candidates[ObjectIdentifier($0)] == nil }
-        if !missingAncestors.isEmpty {
-            let nativeAncestors = try await buildableArray(missingAncestors, matching: buildables)
-            let descriptions = try await targetDescriptions(for: nativeAncestors, workspace: workspace, priorBuild: priorBuild, image: image)
-            queriedDescriptions.append(descriptions)
-            try addRecords(await targetRecords(descriptions, image: image, runnable: nil))
-        }
-        var dynamicBuildables: Set<ObjectIdentifier> = []
-        for buildable in dynamicAncestors {
-            let record = try record(for: buildable)
-            guard let output = record.target.outputURL else {
-                throw NativeRuntimeError.unsupportedContract("Native dependency \(record.target.buildableName) has no linked product")
-            }
-            if try NativePreviewBinary.isDynamicLibrary(at: output) { dynamicBuildables.insert(ObjectIdentifier(buildable)) }
-        }
-        // Incoming edges determine source owners before their dependency products are classified.
+        // Native product types define JIT boundaries even when a framework contains a static archive.
         let ownerRoots = Self.previewRootBuildables(for: canonicalSource, dependencies: [:], dependents: dependents,
-            dynamicBuildables: dynamicBuildables)
-        func reachable(from roots: [NSObject], through dependencies: [ObjectIdentifier: [NSObject]]) -> [NSObject] {
+            jitBuildables: jitBuildables)
+        func reachable(from roots: [NSObject], through dependencies: [ObjectIdentifier: [NSObject]],
+                       excluding excludedRoots: Set<ObjectIdentifier> = []) -> [NSObject] {
             var pending = Array(roots.reversed())
             var seen: Set<ObjectIdentifier> = []
             var result: [NSObject] = []
             while let buildable = pending.popLast() {
                 let identifier = ObjectIdentifier(buildable)
-                guard seen.insert(identifier).inserted else { continue }
+                guard !excludedRoots.contains(identifier), seen.insert(identifier).inserted else { continue }
                 result.append(buildable)
                 pending.append(contentsOf: dependencies[identifier, default: []].reversed())
             }
             return result
         }
-        let reachableBuildables = reachable(from: ownerRoots, through: edges)
-        let code = reachable(from: ownerRoots, through: codeEdges)
-        let missingCode = code.filter { candidates[ObjectIdentifier($0)] == nil }
+        let missingCode = reachable(from: ownerRoots, through: codeEdges).filter { candidates[ObjectIdentifier($0)] == nil }
         if !missingCode.isEmpty {
             let nativeCode = try await buildableArray(missingCode, matching: buildables)
             let descriptions = try await targetDescriptions(for: nativeCode, workspace: workspace, priorBuild: priorBuild, image: image)
             queriedDescriptions.append(descriptions)
             try addRecords(await targetRecords(descriptions, image: image, runnable: nil))
         }
+        let selectedRootBuildables = Self.previewRootBuildables(for: canonicalSource, dependencies: codeEdges, dependents: dependents,
+            jitBuildables: jitBuildables)
+        let unavailableRoots = Set(selectedRootBuildables.filter { candidates[ObjectIdentifier($0)] == nil }.map(ObjectIdentifier.init))
+        var rootBuildables = selectedRootBuildables.filter { !unavailableRoots.contains(ObjectIdentifier($0)) }
+        if ownerRoots.count > 1 {
+            let namedOwners = try rootBuildables.map { buildable in
+                let name = try runtime.object(buildable).resolveMethodAndWait(selector: "displayName", as: (() -> String).self)
+                return try unsafe (buildable: buildable, displayName: name.unsafeInvoke())
+            }
+            // Native library hosts have the same priority, then compare their cached buildable display names.
+            rootBuildables = namedOwners.sorted { $0.displayName < $1.displayName }.map(\.buildable)
+        }
+        let reachableBuildables = reachable(from: rootBuildables, through: edges, excluding: unavailableRoots)
+        let code = reachable(from: rootBuildables, through: codeEdges, excluding: unavailableRoots)
         var targets: [Target] = []
         var targetsByBuildable: [ObjectIdentifier: Target] = [:]
         for buildable in code {
-            let record = try record(for: buildable)
+            // A package product can contribute graph edges without producing its own linked artifact.
+            guard let matches = candidates[ObjectIdentifier(buildable)] else { continue }
+            guard matches.count == 1, let record = matches.first else {
+                throw NativeRuntimeError.unsupportedContract("The native build returned \(matches.count) matching products for dependency \(buildable) of \(source.target.buildableName)")
+            }
             guard let output = record.target.outputURL else {
                 throw NativeRuntimeError.unsupportedContract("Native dependency \(record.target.buildableName) has no linked product")
             }
@@ -559,7 +551,6 @@ final class NativePreviewBuild {
             }
             targets.append(target)
             targetsByBuildable[ObjectIdentifier(buildable)] = target
-            if try NativePreviewBinary.isDynamicLibrary(at: output) { dynamicBuildables.insert(ObjectIdentifier(buildable)) }
         }
         var resources: [URL] = []
         var resourcesByBuildable: [ObjectIdentifier: URL] = [:]
@@ -572,53 +563,43 @@ final class NativePreviewBuild {
             }
         }
         let sourceOwnerIdentities = Set(ownerRoots.map(ObjectIdentifier.init))
-        let rootBuildables: [NSObject]
-        if ownerRoots.count > 1 {
-            let namedOwners = try ownerRoots.map { buildable in
-                let name = try runtime.object(buildable).resolveMethodAndWait(selector: "displayName", as: (() -> String).self)
-                return try unsafe (buildable: buildable, displayName: name.unsafeInvoke())
-            }
-            // Native library hosts have the same priority, then compare their cached buildable display names.
-            rootBuildables = namedOwners.sorted { $0.displayName < $1.displayName }.map(\.buildable)
-        } else {
-            rootBuildables = Self.previewRootBuildables(for: canonicalSource, dependencies: codeEdges, dependents: dependents,
-                dynamicBuildables: dynamicBuildables)
-        }
-        let roots = try rootBuildables.map { buildable in
-                guard var root = targetsByBuildable[ObjectIdentifier(buildable)] else {
-                    throw NativeRuntimeError.unsupportedContract("The native preview root has no matching linked product")
-                }
+        let roots = rootBuildables.compactMap { buildable -> Target? in
+                guard var root = targetsByBuildable[ObjectIdentifier(buildable)] else { return nil }
                 root.containsPreviewSource = sourceOwnerIdentities.contains(ObjectIdentifier(buildable))
-                root.dependencies = Self.linkBuildables(for: buildable, dependencies: codeEdges, dynamicBuildables: dynamicBuildables)
+                root.dependencies = Self.linkBuildables(for: buildable, dependencies: codeEdges, jitBuildables: jitBuildables)
                     .compactMap { targetsByBuildable[ObjectIdentifier($0)] }
                 var seenResources: Set<URL> = []
-                root.resourceURLs = reachable(from: [buildable], through: edges).compactMap { resourcesByBuildable[ObjectIdentifier($0)] }
+                root.resourceURLs = reachable(from: [buildable], through: edges, excluding: unavailableRoots)
+                    .compactMap { resourcesByBuildable[ObjectIdentifier($0)] }
                     .filter { seenResources.insert($0).inserted }
                 return root
             }
-        let linkDependencies = Self.linkBuildables(for: canonicalSource, dependencies: codeEdges, dynamicBuildables: dynamicBuildables)
+        guard !roots.isEmpty else {
+            throw NativeRuntimeError.unsupportedContract("The native preview graph has no available linked roots for \(source.target.buildableName)")
+        }
+        let linkDependencies = Self.linkBuildables(for: canonicalSource, dependencies: codeEdges, jitBuildables: jitBuildables)
             .compactMap { targetsByBuildable[ObjectIdentifier($0)] }
         return (targets, roots, linkDependencies, resources)
     }
 
     static func previewRootBuildables(for source: NSObject, dependencies: [ObjectIdentifier: [NSObject]],
-                                     dependents: [ObjectIdentifier: [NSObject]], dynamicBuildables: Set<ObjectIdentifier>) -> [NSObject] {
+                                     dependents: [ObjectIdentifier: [NSObject]], jitBuildables: Set<ObjectIdentifier>) -> [NSObject] {
         var pending = [source]
         var seen: Set<ObjectIdentifier> = []
         var ancestors: [NSObject] = []
         while let buildable = pending.popLast() {
             let identifier = ObjectIdentifier(buildable)
             guard seen.insert(identifier).inserted else { continue }
-            if dynamicBuildables.contains(identifier) { ancestors.append(buildable) }
+            if jitBuildables.contains(identifier) { ancestors.append(buildable) }
             else { pending.append(contentsOf: dependents[identifier, default: []].reversed()) }
         }
         if !ancestors.isEmpty { return ancestors }
-        return [source] + linkBuildables(for: source, dependencies: dependencies, dynamicBuildables: dynamicBuildables)
-            .filter { dynamicBuildables.contains(ObjectIdentifier($0)) }
+        return [source] + linkBuildables(for: source, dependencies: dependencies, jitBuildables: jitBuildables)
+            .filter { jitBuildables.contains(ObjectIdentifier($0)) }
     }
 
     static func linkBuildables(for source: NSObject, dependencies: [ObjectIdentifier: [NSObject]],
-                              dynamicBuildables: Set<ObjectIdentifier>) -> [NSObject] {
+                              jitBuildables: Set<ObjectIdentifier>) -> [NSObject] {
         var pending = Array(dependencies[ObjectIdentifier(source), default: []].reversed())
         var seen: Set<ObjectIdentifier> = [ObjectIdentifier(source)]
         var result: [NSObject] = []
@@ -626,8 +607,8 @@ final class NativePreviewBuild {
             let identifier = ObjectIdentifier(buildable)
             guard seen.insert(identifier).inserted else { continue }
             result.append(buildable)
-            // A dynamic product owns its static children; a direct source edge can still reach those children independently.
-            if !dynamicBuildables.contains(identifier) {
+            // A JIT root owns its static children; a direct source edge can still reach those children independently.
+            if !jitBuildables.contains(identifier) {
                 pending.append(contentsOf: dependencies[identifier, default: []].reversed())
             }
         }

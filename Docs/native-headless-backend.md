@@ -175,16 +175,18 @@ Static archives and Swift package object products are linked into a preview
 sidecar dylib using compiler autolink records and the targets' library/search
 inputs. Xcode's build service supplies the selected source's dependency graph
 and evaluates resource bundle paths using the completed build's parameters.
-The renderer uses the first dynamic products containing the source as preview
-roots. If there are none, the source and its first dynamic dependencies are the
-roots. A static root and its reachable static dependencies form a sidecar;
-dynamic roots use their built images.
-Standalone static roots are staged outside the agent application
-under the native product directory's name, preserving their `Bundle(for:)` owner.
-Dynamic Swift package products selected as preview roots are staged in the agent's
-executable directory, preserving their native preview `Bundle.main` owner. Their
-dynamic dependencies retain their original framework bundles. Package resource
-bundles reachable from the preview roots are copied to the staged products directory.
+Xcode's product classifications define the preview roots and their dependency
+boundaries independently of the built products' Mach-O types. Graph nodes without
+built target descriptions retain their dependency edges but contribute no image.
+Each static root and its owned static dependencies form a separate sidecar;
+references to other roots use those roots' generated or built images.
+Package roots classified as frameworks or dynamic libraries use the agent's
+executable directory, preserving their native preview `Bundle.main` owner even
+when their image must be linked from static inputs. Other static roots are staged
+outside the agent under the native product directory's name for `Bundle(for:)`.
+Dynamic dependencies beyond a package root retain their original framework bundles.
+Package resource bundles reachable from the roots with available build products
+are copied to the staged products directory.
 The renderer sets
 `PACKAGE_RESOURCE_BUNDLE_PATH` to that directory for `Bundle.module` lookups,
 resolving the path after Simulator installation when necessary.

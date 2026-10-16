@@ -271,19 +271,14 @@ final class NativePreviewCorrection {
             containingApp: containingApp, platform: platform,
             clientIdentifier: nativeExtensionIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString }, staticProduct: staticProduct,
             resourceURLs: selection.source.resourceURLs)
-        let staticRoot = try roots.first { root in
-            try root.outputURL.map { try NativePreviewBinary.isStaticLibrary(at: $0) } ?? false
-        }
-        let linkedImage: LinkedPreviewImage?
-        if let staticRoot, nativeExtensionIdentifier == nil {
-            linkedImage = try await Self.linkStaticProduct(staticRoot, host: sourceProduct == nil ? selection.host : nil, in: app,
-                products: products, platform: platform, process: process)
-        } else { linkedImage = nil }
-        let primaryImage = linkedImage?.url
-        let dependencies = sourceProduct == nil && linkedImage == nil ? FrameworkDependencies()
+        let linkedImages = try await nativeExtensionIdentifier == nil
+            ? Self.linkStaticProducts(for: roots, host: sourceProduct == nil ? selection.host : nil, in: app,
+                products: products, platform: platform, process: process) : [:]
+        let primaryImage = selection.source.outputURL.flatMap { linkedImages[$0.resolvingSymlinksInPath()]?.url }
+        let dependencies = sourceProduct == nil && linkedImages.isEmpty ? FrameworkDependencies()
             : try Self.frameworkDependencies(for: roots, targets: build.targets, platform: platform,
                 in: products, agentApp: sourceProduct == nil ? nil : app,
-                sourceProduct: copiedSourceProduct, primaryImage: linkedImage, environment: target.rendererEnvironment)
+                sourceProduct: copiedSourceProduct, linkedImages: linkedImages, environment: target.rendererEnvironment)
         try Self.copyFrameworkDependencies(dependencies, into: products)
         if let simulatorEntitlements = entitlements.simulator {
             let section = app.deletingLastPathComponent().appendingPathComponent("simulator-entitlements.plist")
@@ -322,7 +317,7 @@ final class NativePreviewCorrection {
             let programOutputs: [URL]
             if sourceProduct != nil {
                 programOutputs = roots.filter(\.containsPreviewSource).compactMap { root in
-                    root.outputURL == staticRoot?.outputURL ? primaryImage : root.outputURL
+                    root.outputURL.map { linkedImages[$0.resolvingSymlinksInPath()]?.url ?? $0 }
                 }
             } else { programOutputs = [primaryImage ?? output] }
             let programLibraries = try programOutputs.flatMap {
@@ -993,11 +988,17 @@ final class NativePreviewCorrection {
 
     static func frameworkDependencies(for roots: [NativePreviewBuild.Target], targets: [NativePreviewBuild.Target],
                                       platform: NativePreviewPlatform, in products: URL, agentApp: URL? = nil,
-                                      sourceProduct: URL? = nil, primaryImage: LinkedPreviewImage? = nil,
+                                      sourceProduct: URL? = nil, linkedImages: [URL: LinkedPreviewImage] = [:],
                                       environment: [String: String] = [:], nativeApp: URL? = nil) throws -> FrameworkDependencies {
         typealias SearchPath = (framework: Bool, url: URL)
         typealias Library = (output: URL, product: URL, identifier: String, dependencies: [String], rpaths: [String], target: NativePreviewBuild.Target?)
         let rootOutputs = Set(roots.compactMap { $0.outputURL?.resolvingSymlinksInPath() })
+        func linkedImage(at output: URL) -> LinkedPreviewImage? {
+            linkedImages.values.first { $0.url.resolvingSymlinksInPath() == output.resolvingSymlinksInPath() }
+        }
+        let nativeImage = roots.compactMap { root in
+            root.outputURL.flatMap { linkedImages[$0.resolvingSymlinksInPath()]?.url }
+        }.first
         func library(at output: URL, target: NativePreviewBuild.Target? = nil) throws -> Library? {
             let output = output.resolvingSymlinksInPath()
             var isDirectory: ObjCBool = false
@@ -1019,7 +1020,7 @@ final class NativePreviewCorrection {
             if path.hasPrefix("@loader_path/") {
                 return importer.deletingLastPathComponent().appendingPathComponent(String(path.dropFirst("@loader_path/".count)))
             }
-            if nativeApp != nil, let output = primaryImage?.url, let host = productBundle(containing: output) {
+            if nativeApp != nil, let output = nativeImage, let host = productBundle(containing: output) {
                 let executable = platform.executableDirectory(in: host)
                 if path == "@executable_path" { return executable }
                 if path.hasPrefix("@executable_path/") {
@@ -1043,14 +1044,11 @@ final class NativePreviewCorrection {
             guard target.architecture == "arm64",
                   NativePreviewPlatform(sdkRoot: target.sdkRoot, sdkVariant: target.sdkVariant) == platform,
                   let output = target.outputURL, productBundle(containing: output) == nil else { return nil }
-            return try library(at: output, target: target)
+            return try library(at: linkedImages[output.resolvingSymlinksInPath()]?.url ?? output, target: target)
         }
         let rootImages = try roots.compactMap { root -> Library? in
             guard let output = root.outputURL?.resolvingSymlinksInPath() else { return nil }
-            if let primaryImage, try NativePreviewBinary.isStaticLibrary(at: output) {
-                return try library(at: primaryImage.url, target: root)
-            }
-            return try library(at: output, target: root)
+            return try library(at: linkedImages[output]?.url ?? output, target: root)
         }
         var pending = try rootImages.map { root in
             let executable = nativeApp == nil ? nil : productBundle(containing: root.output).flatMap { Bundle(url: $0)?.executableURL }
@@ -1063,7 +1061,7 @@ final class NativePreviewCorrection {
         var result = FrameworkDependencies()
         func stagedPath(_ library: Library) throws -> String {
             if let path = try nativePath(library.output) { return path }
-            if library.output == primaryImage?.url.resolvingSymlinksInPath() {
+            if linkedImage(at: library.output) != nil {
                 return relativePath(from: products, to: library.output)
             }
             let product = library.product.resolvingSymlinksInPath()
@@ -1095,7 +1093,7 @@ final class NativePreviewCorrection {
             let runtimePaths = current.library.rpaths.compactMap { runtimeURL($0, importer: current.library.output) }
                 + current.inheritedPaths
             let inputs = try current.library.target?.linkedInputs()
-            let linkedImage = current.library.output == primaryImage?.url.resolvingSymlinksInPath() ? primaryImage : nil
+            let linkedImage = linkedImage(at: current.library.output)
             let searchPaths = (linkedImage?.searchPaths ?? inputs?.searchPaths ?? []) + current.inheritedLinkPaths
             let linkedLibraries = try (linkedImage?.linkInputs ?? inputs?.files ?? []).compactMap { candidate in
                 try libraries.first { $0.output.resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath() }
@@ -1165,21 +1163,68 @@ final class NativePreviewCorrection {
         return result
     }
 
+    static func linkStaticProducts(for roots: [NativePreviewBuild.Target], host: NativePreviewBuild.Target? = nil,
+                                   in app: URL, products: URL, platform: NativePreviewPlatform,
+                                   process: NativePreviewProcess) async throws -> [URL: LinkedPreviewImage] {
+        let staticRoots = try roots.filter { root in
+            try root.outputURL.map { try NativePreviewBinary.isStaticLibrary(at: $0) } ?? false
+        }
+        let staticOutputs = Set(staticRoots.compactMap { $0.outputURL?.resolvingSymlinksInPath() })
+        var images: [URL: LinkedPreviewImage] = [:]
+        var active: Set<URL> = []
+        func link(_ root: NativePreviewBuild.Target) async throws {
+            guard let output = root.outputURL?.resolvingSymlinksInPath(), images[output] == nil else { return }
+            guard active.insert(output).inserted else {
+                throw NativeRuntimeError.unsupportedContract("The static preview roots contain a link dependency cycle at \(root.buildableName)")
+            }
+            defer { active.remove(output) }
+            if staticOutputs.count > 1 {
+                for dependency in root.dependencies {
+                    if let peer = staticRoots.first(where: { $0.outputURL?.resolvingSymlinksInPath() == dependency.outputURL?.resolvingSymlinksInPath() }) {
+                        try await link(peer)
+                    }
+                }
+                let targets = [root] + root.dependencies.filter { dependency in
+                    dependency.outputURL.map { !staticOutputs.contains($0.resolvingSymlinksInPath()) } ?? true
+                }
+                for target in targets {
+                    guard let targetOutput = target.outputURL?.resolvingSymlinksInPath(),
+                          try NativePreviewBinary.isStaticLibrary(at: targetOutput) else { continue }
+                    for input in try target.linkedInputs().files where input.resolvingSymlinksInPath() != targetOutput {
+                        if let peer = staticRoots.first(where: { $0.outputURL?.resolvingSymlinksInPath() == input.resolvingSymlinksInPath() }) {
+                            try await link(peer)
+                        }
+                    }
+                }
+            }
+            let packageRoot = host == nil && root.isDynamicPackageProduct
+            let directory = packageRoot ? platform.executableDirectory(in: app) : products
+            let name = packageRoot ? "XcodeMCPPreviewPackage-\(UUID().uuidString).dylib"
+                : staticRoots.count == 1 ? "XcodeMCPPreviewSource.dylib" : "XcodeMCPPreviewSource-\(UUID().uuidString).dylib"
+            images[output] = try await linkStaticProduct(root, host: host, in: app, products: products,
+                to: directory.appendingPathComponent(name), linkedImages: images, platform: platform, process: process)
+        }
+        for root in staticRoots { try await link(root) }
+        return images
+    }
+
     static func linkStaticProduct(_ source: NativePreviewBuild.Target, host: NativePreviewBuild.Target? = nil,
-                                    in app: URL, products: URL, platform: NativePreviewPlatform,
+                                    in app: URL, products: URL, to image: URL? = nil,
+                                    linkedImages: [URL: LinkedPreviewImage] = [:], platform: NativePreviewPlatform,
                                     process: NativePreviewProcess) async throws -> LinkedPreviewImage {
         guard let output = source.outputURL else {
             throw NativeRuntimeError.unsupportedContract("The static preview target has no linked product")
         }
-        let image = products.appendingPathComponent("XcodeMCPPreviewSource.dylib")
+        let image = image ?? products.appendingPathComponent("XcodeMCPPreviewSource.dylib")
         if let host, host.outputURL?.resolvingSymlinksInPath() != output.resolvingSymlinksInPath() {
             return try await linkStaticProduct(source, host: host, to: image, in: app.deletingLastPathComponent(),
                 installName: "@rpath/" + image.lastPathComponent, process: process)
         }
         // A separate image keeps the static source's entry symbol away from the renderer's entry point.
-        // The caller places standalone images outside the app and hosted images inside their owning bundle.
+        // Its placement preserves the bundle owner selected for this native root.
         let archive = try NativePreviewBinary.isStaticArchive(at: output)
-        let input = app.deletingLastPathComponent().appendingPathComponent(archive ? "PreviewSource.a" : output.lastPathComponent)
+        let input = app.deletingLastPathComponent().appendingPathComponent(image.deletingPathExtension().lastPathComponent)
+            .appendingPathExtension(archive ? "a" : "o")
         try copyReplacingItem(output, to: input)
         let sdk = try await process.xcrun(["--sdk", platform.sdk, "--show-sdk-path"])
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1192,7 +1237,9 @@ final class NativePreviewCorrection {
         arguments += [
             "-Xlinker", "-headerpad_max_install_names", "-Xlinker", "-install_name", "-Xlinker",
             "@rpath/" + image.lastPathComponent, "-o", image.path]
-        let targets = [source] + source.dependencies
+        let targets = [source] + source.dependencies.filter { dependency in
+            dependency.outputURL.flatMap { linkedImages[$0.resolvingSymlinksInPath()] } == nil
+        }
         let sanitizers = [(targets.contains(where: \.enableAddressSanitizer), "address"),
                           (targets.contains(where: \.enableThreadSanitizer), "thread"),
                           (targets.contains(where: \.enableUndefinedBehaviorSanitizer), "undefined")].filter(\.0).map(\.1)
@@ -1219,8 +1266,9 @@ final class NativePreviewCorrection {
                 throw NativeRuntimeError.unsupportedContract("The preview dependency \(dependency.buildableName) has no linked product")
             }
             guard linked.insert(output.resolvingSymlinksInPath()).inserted else { continue }
-            arguments += try NativePreviewBinary.file(at: output)?.header.fileType == .object
-                ? [output.path] : ["-Xlinker", output.path]
+            let input = linkedImages[output.resolvingSymlinksInPath()]?.url ?? output
+            arguments += try NativePreviewBinary.file(at: input)?.header.fileType == .object
+                ? [input.path] : ["-Xlinker", input.path]
         }
         for (target, inputs) in zip(targets, inputs) {
             guard let output = target.outputURL, try NativePreviewBinary.isStaticLibrary(at: output) else { continue }
@@ -1228,10 +1276,11 @@ final class NativePreviewCorrection {
                 arguments += [path.argument, path.url.path]
             }
             for input in inputs.files where !linked.contains(input.resolvingSymlinksInPath()) {
+                let linkedInput = linkedImages[input.resolvingSymlinksInPath()]?.url ?? input
                 var directory: ObjCBool = false
-                if FileManager.default.fileExists(atPath: input.path, isDirectory: &directory), !directory.boolValue,
-                   try input.pathExtension == "tbd" || NativePreviewBinary.isStaticArchive(at: input) || NativePreviewBinary.isDynamicLibrary(at: input) {
-                    arguments += ["-Xlinker", input.path]
+                if FileManager.default.fileExists(atPath: linkedInput.path, isDirectory: &directory), !directory.boolValue,
+                   try linkedInput.pathExtension == "tbd" || NativePreviewBinary.isStaticArchive(at: linkedInput) || NativePreviewBinary.isDynamicLibrary(at: linkedInput) {
+                    arguments += ["-Xlinker", linkedInput.path]
                     linked.insert(input.resolvingSymlinksInPath())
                 }
             }
@@ -1287,7 +1336,8 @@ final class NativePreviewCorrection {
         let image = embedded.appendingPathComponent(output.pathComponents.dropFirst(product.pathComponents.count).joined(separator: "/"))
         let linked = try await linkStaticProduct(source, host: host, to: image, in: directory, process: process)
         let dependencies = try frameworkDependencies(for: [source], targets: targets, platform: platform,
-            in: app, primaryImage: linked, environment: host.rendererEnvironment, nativeApp: app)
+            in: app, linkedImages: source.outputURL.map { [$0.resolvingSymlinksInPath(): linked] } ?? [:],
+            environment: host.rendererEnvironment, nativeApp: app)
         try copyFrameworkDependencies(dependencies, into: app)
         try await relocateFrameworkDependencies(dependencies, in: app, process: process)
         // Re-sign only the changed owners, preserving each bundle's own entitlements and executable stub.

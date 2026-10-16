@@ -124,7 +124,7 @@ struct NativePreviewBuildTests {
         ]
 
         let inputs = NativePreviewBuild.linkBuildables(for: source, dependencies: dependencies,
-            dynamicBuildables: [ObjectIdentifier(dynamic)])
+            jitBuildables: [ObjectIdentifier(dynamic)])
 
         #expect(inputs.count == 2)
         #expect(Set(inputs.map(ObjectIdentifier.init)) == [ObjectIdentifier(dynamic), ObjectIdentifier(sharedArchive)])
@@ -142,7 +142,7 @@ struct NativePreviewBuildTests {
         ]
 
         let roots = NativePreviewBuild.previewRootBuildables(for: source, dependencies: dependencies, dependents: [:],
-            dynamicBuildables: [ObjectIdentifier(dynamic), ObjectIdentifier(nested)])
+            jitBuildables: [ObjectIdentifier(dynamic), ObjectIdentifier(nested)])
 
         #expect(roots.count == 2)
         #expect(Set(roots.map(ObjectIdentifier.init)) == [ObjectIdentifier(source), ObjectIdentifier(dynamic)])
@@ -165,12 +165,12 @@ struct NativePreviewBuildTests {
             ObjectIdentifier(archive): [owner],
             ObjectIdentifier(owner): [outer],
         ]
-        let dynamicBuildables: Set<ObjectIdentifier> = [ObjectIdentifier(owner), ObjectIdentifier(outer), ObjectIdentifier(support)]
+        let jitBuildables: Set<ObjectIdentifier> = [ObjectIdentifier(owner), ObjectIdentifier(outer), ObjectIdentifier(support)]
 
         let roots = NativePreviewBuild.previewRootBuildables(for: source, dependencies: dependencies, dependents: dependents,
-            dynamicBuildables: dynamicBuildables)
+            jitBuildables: jitBuildables)
         let ownerRoots = NativePreviewBuild.previewRootBuildables(for: owner, dependencies: dependencies, dependents: dependents,
-            dynamicBuildables: dynamicBuildables)
+            jitBuildables: jitBuildables)
 
         #expect(roots.count == 1)
         #expect(roots.first === owner)
@@ -191,7 +191,7 @@ struct NativePreviewBuildTests {
         ]
 
         let roots = NativePreviewBuild.previewRootBuildables(for: source, dependencies: [:], dependents: dependents,
-            dynamicBuildables: [ObjectIdentifier(firstOwner), ObjectIdentifier(secondOwner)])
+            jitBuildables: [ObjectIdentifier(firstOwner), ObjectIdentifier(secondOwner)])
 
         #expect(roots.count == 2)
         #expect(Set(roots.map(ObjectIdentifier.init)) == [ObjectIdentifier(firstOwner), ObjectIdentifier(secondOwner)])
