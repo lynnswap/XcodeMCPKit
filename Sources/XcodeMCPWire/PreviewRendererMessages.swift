@@ -10,7 +10,7 @@ package struct PreviewRendererCommand: Codable, Sendable {
     }
 }
 
-package enum PreviewRendererNativeSource: Codable, Sendable {
+package enum PreviewRendererNativeSource: Codable, Equatable, Sendable {
     case providerMetadata(extensionIdentifier: String, providerName: String)
     case preview(extensionIdentifier: String, specification: Data, metadata: Data, variantOverrides: [String: String])
 
@@ -21,7 +21,7 @@ package enum PreviewRendererNativeSource: Codable, Sendable {
     }
 }
 
-package struct PreviewRendererRequest: Codable, Sendable {
+package struct PreviewRendererRequest: Codable, Equatable, Sendable {
     package static let displayVariantValues: [String: [String]] = [
         "Color Scheme": ["Light Appearance", "Dark Appearance"],
         "Contrast": ["Standard Contrast", "Increased Contrast"],

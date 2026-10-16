@@ -38,16 +38,12 @@ final class PreviewSnapshotWindow {
     }
 
     #if os(iOS)
-    static func withWindow<Output>(from original: UIWindow, orientation: UIInterfaceOrientation,
-                                  perform operation: (UIWindow) async throws -> Output) async throws -> Output {
-        try await withWindow(from: original, geometry: .display(orientation: orientation)) { owner in
-            try await operation(owner.window)
-        }
+    static func open(from original: UIWindow, orientation: UIInterfaceOrientation) async throws -> PreviewSnapshotWindow {
+        try await open(from: original, geometry: .display(orientation: orientation))
     }
     #else
-    static func withWindow<Output>(from original: UIWindow, size: CGSize,
-                                  perform operation: (PreviewSnapshotWindow) async throws -> Output) async throws -> Output {
-        try await withWindow(from: original, geometry: .custom(size: size), perform: operation)
+    static func open(from original: UIWindow, size: CGSize) async throws -> PreviewSnapshotWindow {
+        try await open(from: original, geometry: .custom(size: size))
     }
 
     func resize(to size: CGSize) async throws {
@@ -73,21 +69,9 @@ final class PreviewSnapshotWindow {
     }
     #endif
 
-    private static func withWindow<Output>(from original: UIWindow, geometry: Geometry,
-                                          perform operation: (PreviewSnapshotWindow) async throws -> Output) async throws -> Output {
-        let owner: PreviewSnapshotWindow
-        do { owner = try await connect(from: original, geometry: geometry) }
+    private static func open(from original: UIWindow, geometry: Geometry) async throws -> PreviewSnapshotWindow {
+        do { return try await connect(from: original, geometry: geometry) }
         catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
-        let output: Output
-        do { output = try await operation(owner) }
-        catch {
-            let operationError = error
-            do { try await owner.close() }
-            catch { throw PreviewRendererError("\(operationError); snapshot scene cleanup also failed: \(error)") }
-            throw operationError
-        }
-        try await owner.close()
-        return output
     }
 
     private static func connect(from originalWindow: UIWindow, geometry: Geometry) async throws -> PreviewSnapshotWindow {
@@ -272,7 +256,7 @@ final class PreviewSnapshotWindow {
         }
     }
 
-    private func close() async throws {
+    func close() async throws {
         window.isHidden = true
         window.rootViewController = nil
         window.windowScene = nil

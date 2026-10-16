@@ -43,6 +43,9 @@ final class PreviewRendererApp: UIResponder, UIApplicationDelegate {
 @MainActor
 final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
+    private var mountedPreview: (request: PreviewRendererRequest,
+                                 capture: @MainActor (URL) async throws -> PreviewRendererResult,
+                                 close: @MainActor () async throws -> Void)?
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
@@ -55,15 +58,46 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                         try await self.render(request, in: window, directory: output)
                     }
                 } else {
-                    write(try await render(readPreviewRequest(), in: window, directory: documents))
+                    let result = try await render(readPreviewRequest(), in: window, directory: documents)
+                    try await closeMountedPreview()
+                    write(result)
                 }
             }
-            catch is NativePreviewPipelineRequired { write(PreviewRendererResult(requiresNativePipeline: true)) }
-            catch { write(PreviewRendererResult(error: String(describing: error))) }
+            catch {
+                let original = error
+                do { try await closeMountedPreview() }
+                catch {
+                    write(PreviewRendererResult(error: "\(original); preview UI cleanup also failed: \(error)"))
+                    return
+                }
+                if original is NativePreviewPipelineRequired { write(PreviewRendererResult(requiresNativePipeline: true)) }
+                else { write(PreviewRendererResult(error: String(describing: original))) }
+            }
         }
     }
 
     private func render(_ request: PreviewRendererRequest, in window: UIWindow, directory: URL) async throws -> PreviewRendererResult {
+        do {
+            if let mountedPreview, mountedPreview.request == request {
+                return try await mountedPreview.capture(directory)
+            }
+            try await closeMountedPreview()
+            return try await makePreview(request, in: window, directory: directory)
+        } catch {
+            let original = error
+            do { try await closeMountedPreview() }
+            catch { throw PreviewRendererError("\(original); preview UI cleanup also failed: \(error)") }
+            throw original
+        }
+    }
+
+    private func closeMountedPreview() async throws {
+        guard let mounted = mountedPreview else { return }
+        mountedPreview = nil
+        try await mounted.close()
+    }
+
+    private func makePreview(_ request: PreviewRendererRequest, in window: UIWindow, directory: URL) async throws -> PreviewRendererResult {
         defer {
             window.rootViewController = nil
             window.isHidden = true
@@ -220,7 +254,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         }
         let orientation = try interfaceOrientation(variant: variants["Orientation"], source: sourceOrientation)
 
-        @MainActor func capture(in window: UIWindow) async throws -> PreviewRendererResult {
+        @MainActor func mount(in window: UIWindow) async throws -> (@MainActor (URL) async throws -> PreviewRendererResult) {
             var size = window.bounds.size
             let controller: UIViewController
             let rootController: UIViewController
@@ -270,50 +304,68 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             layoutController.view.layoutIfNeeded()
             // Allow appearance tasks to deliver initial updates before sizing and capture.
             try await Task.sleep(for: .milliseconds(500))
-            if let activity {
-                size = activity.preferredContentSize
+
+            let mountedSize = size
+            return { directory in
+                window.layoutIfNeeded()
+                controller.view.layoutIfNeeded()
+                var size = mountedSize
+                if let activity {
+                    size = activity.preferredContentSize
+                } else {
+                    switch layout {
+                    case .device: size = window.bounds.size
+                    case .sizeThatFits: size = controller.view.intrinsicContentSize
+                    default: break
+                    }
+                }
                 guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
                     throw PreviewRendererError("The preview has no drawable area: \(size)")
                 }
-            } else if case .sizeThatFits = layout {
-                size = controller.view.intrinsicContentSize
-                guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
-                    throw PreviewRendererError("The preview has no drawable area: \(size)")
+                layoutController.view.frame = CGRect(origin: .zero, size: size)
+                layoutController.view.layoutIfNeeded()
+                let data = try staticPreviewSnapshot(of: controller.view, size: size, scale: window.screen.scale)
+                try widget?.validate()
+                try data.write(to: directory.appendingPathComponent("Preview.png"), options: .atomic)
+                let deviceLayout: Bool
+                if case .device = layout { deviceLayout = activity == nil } else { deviceLayout = false }
+                var exclusionSnapshotName: String?
+                if deviceLayout, let exclusion = try await previewExclusionImage(in: window) {
+                    guard let exclusionData = exclusion.pngData() else {
+                        throw PreviewRendererError("The preview display exclusion could not be encoded")
+                    }
+                    exclusionSnapshotName = "PreviewExclusion.png"
+                    try exclusionData.write(to: directory.appendingPathComponent("PreviewExclusion.png"), options: .atomic)
                 }
+                return PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
+                    sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes ?? activity?.stateIndexes,
+                    groupItems: groupItems, errors: errors,
+                    toggleStates: activity == nil ? nil : [true, false],
+                    activityViewStyles: activity == nil ? nil : PreviewRendererRequest.activityViewStyles,
+                    activityViewContexts: activity == nil ? nil : PreviewRendererRequest.activityViewContexts,
+                    supportedDisplayVariants: widget?.supportedVariants ?? (activity == nil ? PreviewRendererRequest.displayVariantValues : nil),
+                    usesDeviceLayout: deviceLayout, interfaceOrientation: try interfaceOrientationName(orientation),
+                    exclusionSnapshotName: exclusionSnapshotName)
             }
-            layoutController.view.frame = CGRect(origin: .zero, size: size)
-            layoutController.view.layoutIfNeeded()
-            let data = try staticPreviewSnapshot(of: controller.view, size: size, scale: window.screen.scale)
-            try widget?.validate()
-            try data.write(to: directory.appendingPathComponent("Preview.png"), options: .atomic)
-            let deviceLayout: Bool
-            if case .device = layout { deviceLayout = activity == nil } else { deviceLayout = false }
-            var exclusionSnapshotName: String?
-            if deviceLayout, let exclusion = try await previewExclusionImage(in: window) {
-                guard let exclusionData = exclusion.pngData() else {
-                    throw PreviewRendererError("The preview display exclusion could not be encoded")
-                }
-                exclusionSnapshotName = "PreviewExclusion.png"
-                try exclusionData.write(to: directory.appendingPathComponent("PreviewExclusion.png"), options: .atomic)
-            }
-            return PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
-                sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes ?? activity?.stateIndexes,
-                groupItems: groupItems, errors: errors,
-                toggleStates: activity == nil ? nil : [true, false],
-                activityViewStyles: activity == nil ? nil : PreviewRendererRequest.activityViewStyles,
-                activityViewContexts: activity == nil ? nil : PreviewRendererRequest.activityViewContexts,
-                supportedDisplayVariants: widget?.supportedVariants ?? (activity == nil ? PreviewRendererRequest.displayVariantValues : nil),
-                usesDeviceLayout: deviceLayout, interfaceOrientation: try interfaceOrientationName(orientation),
-                exclusionSnapshotName: exclusionSnapshotName)
         }
 
-        let result: PreviewRendererResult
         if widget == nil && activity == nil {
-            result = try await PreviewSnapshotWindow.withWindow(from: window, orientation: orientation, perform: capture)
-        } else {
-            result = try await capture(in: window)
+            let snapshot = try await PreviewSnapshotWindow.open(from: window, orientation: orientation)
+            let capture: @MainActor (URL) async throws -> PreviewRendererResult
+            do { capture = try await mount(in: snapshot.window) }
+            catch {
+                let original = error
+                do { try await snapshot.close() }
+                catch { throw PreviewRendererError("\(original); snapshot scene cleanup also failed: \(error)") }
+                throw original
+            }
+            mountedPreview = (request, capture, { try await snapshot.close() })
+            let result = try await capture(directory)
+            if request.nativeSource != nil || request.isLegacyComplication == true { try await closeMountedPreview() }
+            return result
         }
-        return result
+        let capture = try await mount(in: window)
+        return try await capture(directory)
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
