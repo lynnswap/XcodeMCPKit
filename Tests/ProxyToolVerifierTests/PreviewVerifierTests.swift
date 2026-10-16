@@ -94,6 +94,64 @@ struct PreviewVerifierTests {
         #expect(await runtime.recordedToolCalls().filter { $0.name == "XcodeCloseWorkspace" }.count == 1)
     }
 
+    @Test(arguments: [false, true])
+    func nativeCaptureWaitsForDestinationsBeforeSelecting(requestedDestinationExists: Bool) async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("Fixture.xcworkspace")
+        let snapshot = root.appendingPathComponent("native.png")
+        try writePNG(snapshot, red: 1)
+        let readiness = PreviewDestinationReadiness()
+        let availableTitle = requestedDestinationExists ? "My Mac" : "Another Mac"
+        let runtime = XcodeMCPTestRuntime(tools: [
+            previewTool("XcodeListWindows"), previewTool("XcodeSwitchScheme"), previewTool("XcodeListRunDestinations"),
+            previewTool("XcodeSwitchRunDestination"), previewTool("RenderPreview")
+        ])
+        await runtime.setToolHandler { call in
+            if call.name != "XcodeListWindows" {
+                #expect(call.arguments["tabIdentifier"] == "owned-window")
+            }
+            switch call.name {
+            case "XcodeListWindows":
+                return previewResult(["message": .string("* tabIdentifier: owned-window, workspacePath: \(project.path)")])
+            case "XcodeListRunDestinations":
+                let ready = await readiness.readDestinations()
+                return previewResult([
+                    "activeSchemeName": "Fixture",
+                    "activeDestinationDisplayTitle": ready ? .string(availableTitle) : .null,
+                    "totalDestinations": ready ? 1 : 0,
+                    "destinations": ready ? [["displayTitle": .string(availableTitle)]] : [],
+                ])
+            case "XcodeSwitchRunDestination":
+                guard await readiness.isReady else {
+                    return previewResult(["success": false, "errorDescription": "Destinations are still loading"])
+                }
+                if !requestedDestinationExists {
+                    return previewResult(["success": false, "errorDescription": "Requested destination unavailable"])
+                }
+            case "RenderPreview":
+                return previewResult(["displayName": "Preview", "previewSnapshotPath": .string(snapshot.path)])
+            default: break
+            }
+            return previewResult(["success": true])
+        }
+        let client = try await runtime.makeClient()
+        var runner = PreviewCaptureRunner(output: root, projectRoot: root, project: project,
+            report: captureReport(backend: .native))
+        await runner.capture(client: client)
+        await client.close()
+        #expect(runner.report.operationSucceeded == requestedDestinationExists)
+        let calls = await runtime.recordedToolCalls()
+        #expect(calls.filter { $0.name == "XcodeSwitchRunDestination" }.count == 1)
+        if requestedDestinationExists {
+            #expect(runner.report.failure == nil)
+            #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("preview.png").path))
+        } else {
+            #expect(runner.report.failure?.contains("Requested destination unavailable") == true)
+            #expect(!calls.contains { $0.name == "RenderPreview" })
+        }
+    }
+
     @Test func failedNativeCaptureCannotProduceAPassingComparison() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -179,6 +237,16 @@ struct PreviewVerifierTests {
         let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil))
         CGImageDestinationAddImage(destination, image, nil)
         #expect(CGImageDestinationFinalize(destination))
+    }
+}
+
+private actor PreviewDestinationReadiness {
+    private var reads = 0
+    var isReady: Bool { reads > 1 }
+
+    func readDestinations() -> Bool {
+        reads += 1
+        return isReady
     }
 }
 
