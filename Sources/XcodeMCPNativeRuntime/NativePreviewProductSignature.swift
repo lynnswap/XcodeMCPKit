@@ -78,6 +78,7 @@ struct NativePreviewProductSignature: Equatable {
             configuration += targets.map { targetConfiguration($0) }.sorted { $0.lexicographicallyPrecedes($1) }.flatMap { $0 }
         }
         var products = Set(additionalProducts + [helper])
+        products.formUnion(build.inputProducts)
         var pending = build.targets + build.previewRoots
         while let target = pending.popLast() {
             if let output = target.outputURL {

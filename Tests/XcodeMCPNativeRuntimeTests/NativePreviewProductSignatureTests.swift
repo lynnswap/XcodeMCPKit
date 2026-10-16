@@ -78,6 +78,22 @@ struct NativePreviewProductSignatureTests {
         #expect(try fixture.signature() != removed)
     }
 
+    @Test func detectsChangesToProductsCopiedIntoTheHost() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let input = fixture.root.appendingPathComponent("Extension.appex")
+        try FileManager.default.createDirectory(at: input, withIntermediateDirectories: false)
+        let resource = input.appendingPathComponent("Label.txt")
+        try Data("before".utf8).write(to: resource)
+        let before = try fixture.signature(inputProducts: [input])
+        #expect(try before.matchesCurrentFiles(digestCache: fixture.digestCache))
+
+        try Data("after".utf8).write(to: resource)
+
+        #expect(try !before.matchesCurrentFiles(digestCache: fixture.digestCache))
+        #expect(try fixture.signature(inputProducts: [input]) != before)
+    }
+
     @Test func detectsAtomicallyReplacedResources() throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -147,10 +163,11 @@ struct NativePreviewProductSignatureTests {
                 objectFiles: [], sourceFiles: [source], debugDylibEnabled: true, isRunnable: true)
         }
 
-        func signature(targets: [NativePreviewBuild.Target]? = nil) throws -> NativePreviewProductSignature {
-            let build = NativePreviewBuild.Result(targets: targets ?? [target], previewRoots: [], destinationIdentifier: "destination",
+        func signature(targets: [NativePreviewBuild.Target]? = nil, inputProducts: Set<URL> = []) throws -> NativePreviewProductSignature {
+            var build = NativePreviewBuild.Result(targets: targets ?? [target], previewRoots: [], destinationIdentifier: "destination",
                 previewDestinationIdentifier: "preview-destination", platformIdentifier: "com.apple.platform.iphonesimulator",
                 previewPlatform: .iOS, platformName: "iOS", deviceModelName: "iPhone", systemVersion: "27.1")
+            build.inputProducts = inputProducts
             return try NativePreviewProductSignature(build: build, source: source, helper: helper,
                 digestCache: digestCache)
         }

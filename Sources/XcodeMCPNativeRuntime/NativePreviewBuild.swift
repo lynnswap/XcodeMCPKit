@@ -18,6 +18,8 @@ final class NativePreviewBuild {
         let systemVersion: String?
         var buildStartedAt: Date? = nil
         var workspaceBuilder: AnyObject? = nil
+        var declaredInputFiles: Set<URL>? = nil
+        var inputProducts: Set<URL> = []
 
         var productURLs: [URL] { targets.compactMap(\.outputURL) }
     }
@@ -333,7 +335,8 @@ final class NativePreviewBuild {
     }
 
     func inputRoots(workspace: AnyObject, build: Result, source: URL) throws -> [URL]? {
-        guard let containers = try object(workspace, selector: "referencedContainers") as? NSSet,
+        guard let declaredInputFiles = build.declaredInputFiles,
+              let containers = try object(workspace, selector: "referencedContainers") as? NSSet,
               let configurationPaths = try configurationFilePaths(in: containers) else { return nil }
         let baseFiles = Set(configurationPaths.bases.keys)
         let watchedFiles = Set(configurationPaths.watched.keys)
@@ -350,6 +353,7 @@ final class NativePreviewBuild {
         // Native builder invalidation owns workspace configuration; these trees also detect disk edits synchronously.
         var roots: Set<URL> = [workspaceURL]
         roots.formUnion(configurationFiles)
+        roots.formUnion(declaredInputFiles)
         var sources: Set<URL> = [source]
         var pending = build.targets + build.previewRoots
         while let target = pending.popLast() {
@@ -446,6 +450,15 @@ final class NativePreviewBuild {
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
         result.buildStartedAt = buildStartedAt
         result.workspaceBuilder = workspaceBuilder
+        do {
+            if let inputs = try await declaredInputs(for: selectedBuildables, workspace: workspace, priorBuild: priorBuild) {
+                result.declaredInputFiles = inputs.files
+                result.inputProducts = inputs.products
+            }
+        } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
+        }
         return result
     }
 
@@ -624,21 +637,133 @@ final class NativePreviewBuild {
         return result
     }
 
-    private func dependencies(for source: TargetRecord, records: [TargetRecord], buildables: NativeSwiftValue, image: URL, priorBuild: AnyObject,
-                              workspace: AnyObject, scheme: AnyObject, destination: AnyObject) async throws ->
-        (targets: [Target], roots: [Target], linkDependencies: [Target], resources: [URL]) {
+    private func canonicalBuildable(_ buildable: NSObject) throws -> NSObject {
+        guard let blueprint = try object(buildable, selector: "blueprint"),
+              let canonical = try object(blueprint, selector: "primaryBuildable") as? NSObject else {
+            throw NativeRuntimeError.unsupportedContract("A native dependency buildable has no primary buildable")
+        }
+        return canonical
+    }
+
+    private func declaredInputs(for buildables: NativeSwiftValue, workspace: AnyObject, priorBuild: AnyObject) async throws ->
+        (files: Set<URL>, products: Set<URL>)? {
+        let (graph, roots) = try await dependencyGraph(for: buildables, workspace: workspace, priorBuild: priorBuild)
+        defer { withExtendedLifetime(graph) {} }
+        let dependencies = try await runtime.object(graph).resolveMethod(
+            named: "dependencies(of: __C.IDEBuildable) -> [__C.IDEBuildable]",
+            as: ((AnyObject) -> NativeSwiftValue).self)
+        let parameters = try runtime.object(priorBuild).resolveMethodAndWait(selector: "_buildParametersForBuildable:",
+            as: ((AnyObject) -> AnyObject).self)
+        guard let service = try object(workspace, selector: "buildSystemService"),
+              let levelClass = NSClassFromString("IDEMacroEvaluation_Level_Blueprint") else {
+            throw NativeRuntimeError.unsupportedContract("The native build has no macro evaluation context")
+        }
+        let serviceType = try await runtime.resolveSwiftType(named: "IDEXCBuildSupportCore.IDEXCBuildSystemWorkspaceService",
+            in: .path(installation.framework("IDEXCBuildSupportCore", in: "PlugIns")))
+        let allocateLevel = try runtime.object(levelClass as AnyObject).resolveMethodAndWait(selector: "alloc",
+            as: (() -> AnyObject).self)
+        var files: Set<URL> = []
+        var products: Set<URL> = []
+        var pending = roots
+        var seen: Set<ObjectIdentifier> = []
+        while let buildable = pending.popLast() {
+            try Task.checkCancellation()
+            guard seen.insert(ObjectIdentifier(buildable)).inserted else { continue }
+            let values = try unsafe dependencies.unsafeInvoke(buildable)
+            guard let children = try values.withCopy({ $0 as? [NSObject] }),
+                  let blueprint = try object(buildable, selector: "blueprint") as? NSObject else { return nil }
+            pending.append(contentsOf: children)
+            guard blueprint.responds(to: NSSelectorFromString("pbxTarget")) else { continue }
+            guard let target = try object(blueprint, selector: "pbxTarget") else { return nil }
+            let phases: [NSObject] = try array(target, selector: "buildPhases")
+            let groups: [NSObject] = try array(target, selector: "fileSystemSynchronizedGroupsArray")
+            let buildParameters = try unsafe parameters.unsafeInvoke(buildable)
+            let allocatedLevel = try unsafe allocateLevel.unsafeInvoke()
+            let initializeLevel = try runtime.object(allocatedLevel).resolveMethodAndWait(selector: "initWithBlueprint:",
+                as: ((AnyObject) -> AnyObject?).self)
+            guard let level = try unsafe initializeLevel.unsafeInvoke(blueprint) else {
+                throw NativeRuntimeError.invocation("IDEMacroEvaluation_Level_Blueprint.initWithBlueprint: returned nil")
+            }
+            var references: Set<ObjectIdentifier> = []
+            func addReference(_ reference: NSObject) throws -> Bool {
+                guard references.insert(ObjectIdentifier(reference)).inserted else { return true }
+                if reference.responds(to: NSSelectorFromString("children")) {
+                    let children: [NSObject] = try array(reference, selector: "children")
+                    if !children.isEmpty {
+                        for child in children {
+                            guard try addReference(child) else { return false }
+                        }
+                        return true
+                    }
+                }
+                let absolutePath = try runtime.object(reference).resolveMethodAndWait(selector: "absolutePathForBuildParameters:",
+                    as: ((AnyObject) -> AnyObject?).self)
+                guard let path = try unsafe absolutePath.unsafeInvoke(buildParameters) as? String, path.hasPrefix("/") else { return false }
+                let url = URL(filePath: path).standardizedFileURL
+                if try boolean(reference, selector: "isProductReference")
+                    || optionalString(reference, selector: "sourceTree") == "BUILT_PRODUCTS_DIR" {
+                    products.insert(url)
+                } else {
+                    files.insert(url)
+                }
+                return true
+            }
+            for group in groups {
+                guard try addReference(group) else { return nil }
+            }
+            for phase in phases {
+                if try boolean(phase, selector: "runOnlyForDeploymentPostprocessing") {
+                    let deployment = try await serviceType.resolveMethod(
+                        named: "evaluateMacroAsBoolean(_: Swift.String, level: __C.IDEMacroEvaluation_Level, buildParameters: __C.IDEBuildParameters?, overrides: [Swift.String : Swift.String]?) async throws -> Swift.Bool",
+                        as: (@concurrent (String, AnyObject, AnyObject?, NativePreviewMacroOverrides) async throws -> Bool).self)
+                    let postprocessing = try unsafe await deployment.unsafeInvoke(on: service, "DEPLOYMENT_POSTPROCESSING", level,
+                        buildParameters, NativePreviewMacroOverrides(value: nil))
+                    if !postprocessing { continue }
+                }
+                if phase.responds(to: NSSelectorFromString("inputPaths")) {
+                    let inputs: [String] = try array(phase, selector: "inputPaths")
+                    let inputLists: [String] = try array(phase, selector: "inputFileListPaths")
+                    let outputs: [String] = try array(phase, selector: "outputPaths")
+                    let outputLists: [String] = try array(phase, selector: "outputFileListPaths")
+                    guard inputLists.isEmpty, outputLists.isEmpty,
+                          try !boolean(phase, selector: "alwaysOutOfDate") else { return nil }
+                    let evaluate = try await serviceType.resolveMethod(
+                        named: "evaluateMacroExpressionAsString(_: Swift.String, level: __C.IDEMacroEvaluation_Level, buildParameters: __C.IDEBuildParameters?, overrides: [Swift.String : Swift.String]?) async throws -> Swift.String",
+                        as: (@concurrent (String, AnyObject, AnyObject?, NativePreviewMacroOverrides) async throws -> String).self)
+                    // File-list expansion belongs to the build service, as does each script's output-node analysis.
+                    var hasOutput = false
+                    for expression in outputs {
+                        let path = try unsafe await evaluate.unsafeInvoke(on: service, expression, level, buildParameters, NativePreviewMacroOverrides(value: nil))
+                        if path.isEmpty { continue }
+                        guard path.hasPrefix("/") else { return nil }
+                        hasOutput = true
+                    }
+                    guard hasOutput else { return nil }
+                    for expression in inputs {
+                        let path = try unsafe await evaluate.unsafeInvoke(on: service, expression, level, buildParameters, NativePreviewMacroOverrides(value: nil))
+                        guard path.hasPrefix("/") else { return nil }
+                        files.insert(URL(filePath: path).standardizedFileURL)
+                    }
+                }
+                let buildFiles: [NSObject] = try array(phase, selector: "buildFiles")
+                for file in buildFiles {
+                    if let reference = try object(file, selector: "fileReference") as? NSObject {
+                        guard try addReference(reference) else { return nil }
+                    } else if try object(file, selector: "productReference") == nil {
+                        return nil
+                    }
+                }
+            }
+        }
+        return (files, products)
+    }
+
+    private func dependencyGraph(for buildables: NativeSwiftValue, workspace: AnyObject,
+                                 priorBuild: AnyObject) async throws -> (AnyObject, [NSObject]) {
         guard let service = try object(workspace, selector: "buildSystemService"),
               let parameters = try object(priorBuild, selector: "buildParameters") else {
             throw NativeRuntimeError.unsupportedContract("The native build has no dependency query context")
         }
-        func canonicalBuildable(_ buildable: NSObject) throws -> NSObject {
-            guard let blueprint = try object(buildable, selector: "blueprint"),
-                  let canonical = try object(blueprint, selector: "primaryBuildable") as? NSObject else {
-                throw NativeRuntimeError.unsupportedContract("A native dependency buildable has no primary buildable")
-            }
-            return canonical
-        }
-        let canonicalSource = try canonicalBuildable(source.buildable)
         guard let selectedBuildables = try buildables.withCopy({ $0 as? [NSObject] }) else {
             throw NativeRuntimeError.unsupportedContract("Native buildables are not an array of objects")
         }
@@ -655,6 +780,14 @@ final class NativePreviewBuild {
         // Scheme products retain the incoming edges from a package's dynamic product to its source module.
         let selected = try await buildableArray(canonicalBuildables, matching: buildables)
         let graph = try unsafe await query.unsafeInvoke(on: service, selected, parameters, implicit.unsafeInvoke())
+        return (graph, canonicalBuildables)
+    }
+
+    private func dependencies(for source: TargetRecord, records: [TargetRecord], buildables: NativeSwiftValue, image: URL, priorBuild: AnyObject,
+                              workspace: AnyObject, scheme: AnyObject, destination: AnyObject) async throws ->
+        (targets: [Target], roots: [Target], linkDependencies: [Target], resources: [URL]) {
+        let (graph, canonicalBuildables) = try await dependencyGraph(for: buildables, workspace: workspace, priorBuild: priorBuild)
+        let canonicalSource = try canonicalBuildable(source.buildable)
         let directDependencies = try await runtime.object(graph).resolveMethod(
             named: "dependencies(of: __C.IDEBuildable) -> [__C.IDEBuildable]",
             as: ((AnyObject) -> NativeSwiftValue).self)
@@ -995,6 +1128,19 @@ final class NativePreviewBuild {
     private func object(_ receiver: AnyObject, selector: String) throws -> AnyObject? {
         let get = try runtime.object(receiver).resolveMethodAndWait(selector: selector, as: (() -> AnyObject?).self)
         return try unsafe get.unsafeInvoke()
+    }
+
+    private func boolean(_ receiver: AnyObject, selector: String) throws -> Bool {
+        let get = try runtime.object(receiver).resolveMethodAndWait(selector: selector, as: (() -> Bool).self)
+        return try unsafe get.unsafeInvoke()
+    }
+
+    private func array<Value>(_ receiver: AnyObject, selector: String) throws -> [Value] {
+        guard let value = try object(receiver, selector: selector) else { return [] }
+        guard let values = value as? [Value] else {
+            throw NativeRuntimeError.unsupportedContract("The native \(selector) value is not an array of \(Value.self)")
+        }
+        return values
     }
 
     private func optionalString(_ receiver: AnyObject?, selector: String) throws -> String? {
