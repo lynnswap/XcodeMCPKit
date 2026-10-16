@@ -44,10 +44,10 @@ struct NativePreviewProductSignature: Equatable {
 
         private var files: [String: Entry] = [:]
 
-        func digest(for url: URL, metadata value: stat) throws -> Data {
-            let path = url.standardizedFileURL.path
+        func digest(for path: String, metadata value: stat) throws -> Data {
             let metadata = Metadata(value)
             if let entry = files[path], entry.metadata == metadata { return entry.digest }
+            let url = URL(filePath: path, directoryHint: .notDirectory)
             let digest = Data(SHA256.hash(data: try Data(contentsOf: url, options: .mappedIfSafe)))
             files[path] = Entry(metadata: metadata, digest: digest)
             return digest
@@ -91,13 +91,12 @@ struct NativePreviewProductSignature: Equatable {
     }
 
     private static func stamps(for roots: Set<URL>, digestCache: DigestCache) throws -> [FileStamp] {
-        var pending = Array(roots)
+        var pending = roots.map { $0.standardizedFileURL.path }
         var visited: Set<String> = []
         var regularFiles: Set<String> = []
         defer { digestCache.retain(regularFiles) }
         var result: [FileStamp] = []
-        while let url = pending.popLast() {
-            let path = url.standardizedFileURL.path
+        while let path = pending.popLast() {
             guard visited.insert(path).inserted else { continue }
             var value = stat()
             if lstat(path, &value) != 0 {
@@ -113,13 +112,14 @@ struct NativePreviewProductSignature: Equatable {
             switch value.st_mode & S_IFMT {
             case S_IFREG:
                 regularFiles.insert(path)
-                content = try digestCache.digest(for: url, metadata: value)
+                content = try digestCache.digest(for: path, metadata: value)
             case S_IFLNK:
                 content = Data(try FileManager.default.destinationOfSymbolicLink(atPath: path).utf8)
-                pending.append(url.resolvingSymlinksInPath())
+                pending.append(URL(filePath: path).resolvingSymlinksInPath().standardizedFileURL.path)
             case S_IFDIR:
                 content = nil
-                pending += try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+                let prefix = path.hasSuffix("/") ? path : path + "/"
+                pending += try FileManager.default.contentsOfDirectory(atPath: path).map { prefix + $0 }
             default:
                 content = nil
             }
