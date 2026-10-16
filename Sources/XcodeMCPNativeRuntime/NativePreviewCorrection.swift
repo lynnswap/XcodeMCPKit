@@ -24,6 +24,10 @@ final class NativePreviewCorrection {
         var activeUIStage: RendererStage?
         var plan: RetainedPlan?
 
+        var stagesDirectory: URL { directory.appendingPathComponent("Stages", isDirectory: true) }
+        var simulatorDeviceSet: URL { directory.appendingPathComponent("Devices", isDirectory: true) }
+        var simctlArguments: [String] { ["simctl", "--set", simulatorDeviceSet.path] }
+
         init(directory: URL) { self.directory = directory }
     }
 
@@ -255,6 +259,7 @@ final class NativePreviewCorrection {
     private func prepare(_ input: Input, session: WorkspaceSession) async throws -> Prepared {
         try Task.checkCancellation()
         let workspace = try await workspace(input.workspaceIdentifier)
+        try await builder.waitForSourcePackages(in: workspace)
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
         let location = try await previewDefinition(source: source, index: input.index)
         let context = try builder.planningContext(workspace: workspace)
@@ -397,15 +402,15 @@ final class NativePreviewCorrection {
         for stage in session.stages.values { try await stop(stage, session: session, process: process) }
         if let simulator = session.simulator {
             for identifier in session.installedApplications.sorted() {
-                _ = try await process.xcrun(["simctl", "uninstall", simulator.identifier, identifier])
+                _ = try await process.xcrun(session.simctlArguments + ["uninstall", simulator.identifier, identifier])
                 session.installedApplications.remove(identifier)
             }
         }
         session.stages.removeAll()
         session.metadata.removeAll()
         session.plan = nil
-        for url in try FileManager.default.contentsOfDirectory(at: session.directory, includingPropertiesForKeys: nil) {
-            try FileManager.default.removeItem(at: url)
+        if FileManager.default.fileExists(atPath: session.stagesDirectory.path) {
+            try FileManager.default.removeItem(at: session.stagesDirectory)
         }
     }
 
@@ -418,7 +423,7 @@ final class NativePreviewCorrection {
         }
         if let simulator = session.simulator {
             do {
-                _ = try await process.xcrun(["simctl", "delete", simulator.identifier])
+                _ = try await process.xcrun(session.simctlArguments + ["delete", simulator.identifier])
                 session.simulator = nil
                 session.installedApplications.removeAll()
             } catch { failures.append("Cannot delete preview Simulator \(simulator.identifier): \(error)") }
@@ -477,8 +482,8 @@ final class NativePreviewCorrection {
         let stage: RendererStage
         if let existing = session.stages[key] { stage = existing }
         else {
-            let directory = session.directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            let directory = session.stagesDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let renderer = try await prepareRenderer(input, prepared: prepared, directory: directory, build: build,
                 destination: destination, platform: platform, process: process, metadataOnly: metadataOnly,
                 isLegacyComplication: isLegacyComplication, nativeWidget: nativeWidget,
@@ -693,7 +698,7 @@ final class NativePreviewCorrection {
             session.signature = try NativePreviewProductSignature(build: build, source: source, helper: helper)
         }
         if let simulator = session.simulator, session.simulatorDestination != SimulatorDestination(build) {
-            _ = try await process.xcrun(["simctl", "delete", simulator.identifier])
+            _ = try await process.xcrun(session.simctlArguments + ["delete", simulator.identifier])
             session.simulator = nil
             session.simulatorDestination = nil
             session.installedApplications.removeAll()
@@ -963,13 +968,16 @@ final class NativePreviewCorrection {
         guard let bundle = info["CFBundleIdentifier"] as? String else {
             throw NativeRuntimeError.unsupportedContract("The preview product has no bundle identifier")
         }
+        let simctl = session.simctlArguments
         if session.simulator == nil {
-            let allocation = Task { @MainActor in try await self.createSimulator(build: build, process: process) }
+            let allocation = Task { @MainActor in
+                try await self.createSimulator(build: build, deviceSet: session.simulatorDeviceSet, process: process)
+            }
             let simulator = try await allocation.value
             session.simulator = simulator
             session.simulatorDestination = SimulatorDestination(build)
-            _ = try await process.xcrun(["simctl", "boot", simulator.identifier])
-            _ = try await process.xcrun(["simctl", "bootstatus", simulator.identifier, "-b"])
+            _ = try await process.xcrun(simctl + ["boot", simulator.identifier])
+            _ = try await process.xcrun(simctl + ["bootstatus", simulator.identifier, "-b"])
         }
         guard let simulator = session.simulator else { throw NativeRuntimeError.invocation("The preview Simulator was not created") }
         if !stage.installed {
@@ -984,16 +992,16 @@ final class NativePreviewCorrection {
                 guard let containingIdentifier = try Self.bundleInfo(at: containingApp)["CFBundleIdentifier"] as? String else {
                     throw NativeRuntimeError.unsupportedContract("The preview containing app has no bundle identifier")
                 }
-                _ = try await process.xcrun(["simctl", "install", simulator.identifier, containingApp.path])
+                _ = try await process.xcrun(simctl + ["install", simulator.identifier, containingApp.path])
                 session.installedApplications.insert(containingIdentifier)
             }
-            _ = try await process.xcrun(["simctl", "install", simulator.identifier, app.path])
+            _ = try await process.xcrun(simctl + ["install", simulator.identifier, app.path])
             session.installedApplications.insert(bundle)
-            let installed = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, bundle, "app"])
+            let installed = try await process.xcrun(simctl + ["get_app_container", simulator.identifier, bundle, "app"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let installedApp = URL(filePath: installed, directoryHint: .isDirectory)
             stage.executable = installedApp.appendingPathComponent("XcodeMCPPreviewRenderer")
-            let container = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, bundle, "data"])
+            let container = try await process.xcrun(simctl + ["get_app_container", simulator.identifier, bundle, "data"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             stage.documents = URL(filePath: container, directoryHint: .isDirectory).appendingPathComponent("Documents")
             let products = app.deletingLastPathComponent().appendingPathComponent("Products", isDirectory: true)
@@ -1006,7 +1014,7 @@ final class NativePreviewCorrection {
         }
         if containingApp != nil {
             // Metadata capture can foreground another helper between native service requests.
-            _ = try await process.xcrun(["simctl", "launch", simulator.identifier, "com.apple.PreviewShell"])
+            _ = try await process.xcrun(simctl + ["launch", simulator.identifier, "com.apple.PreviewShell"])
             session.activeUIStage = nil
         }
         if stage.launched && stage.localization != localization { try await stop(stage, session: session, process: process) }
@@ -1020,7 +1028,7 @@ final class NativePreviewCorrection {
             try JSONEncoder().encode(stage.preparation.request).write(to: requestURL, options: .atomic)
             let resultURL = documents.appendingPathComponent("PreviewResult.json")
             if FileManager.default.fileExists(atPath: resultURL.path) { try FileManager.default.removeItem(at: resultURL) }
-            let launch = try await process.xcrun(["simctl", "launch", "--terminate-running-process", simulator.identifier, bundle,
+            let launch = try await process.xcrun(simctl + ["launch", "--terminate-running-process", simulator.identifier, bundle,
                 "--preview-request-file", requestURL.path] + arguments, environment: environment)
             stage.processIdentifier = launch.split(separator: ":").last.flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
             session.activeUIStage = stage
@@ -1039,12 +1047,12 @@ final class NativePreviewCorrection {
                 if containingApp != nil {
                     guard let executable = stage.executable else { throw NativeRuntimeError.invocation("The installed renderer has no executable") }
                     let log = session.directory.deletingLastPathComponent().appendingPathComponent("process-renderer-\(UUID().uuidString).log")
-                    startProcess(stage, executable: "/usr/bin/xcrun", arguments: ["simctl", "spawn", simulator.identifier, executable.path,
+                    startProcess(stage, executable: "/usr/bin/xcrun", arguments: simctl + ["spawn", simulator.identifier, executable.path,
                         "--native-preview-result-directory", documents.path, "--preview-session-directory", directory.path] + arguments,
                         environment: environment, log: log, process: process)
                     stage.requestDirectory = try await waitForProcess(stage, log: log)
                 } else {
-                    let output = try await process.xcrun(["simctl", "launch", "--terminate-running-process", simulator.identifier, bundle,
+                    let output = try await process.xcrun(simctl + ["launch", "--terminate-running-process", simulator.identifier, bundle,
                         "--preview-session-directory", directory.path] + arguments, environment: environment)
                     stage.processIdentifier = output.split(separator: ":").last.flatMap {
                         Int32($0.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -1055,7 +1063,7 @@ final class NativePreviewCorrection {
                 if containingApp == nil { session.activeUIStage = stage }
             }
             if containingApp == nil, session.activeUIStage !== stage {
-                _ = try await process.xcrun(["simctl", "launch", simulator.identifier, bundle,
+                _ = try await process.xcrun(simctl + ["launch", simulator.identifier, bundle,
                     "--preview-session-directory", stage.requestDirectory!.path] + arguments, environment: environment)
                 session.activeUIStage = stage
             }
@@ -2094,7 +2102,8 @@ final class NativePreviewCorrection {
         let deviceType: URL
     }
 
-    private func createSimulator(build: NativePreviewBuild.Result, process: NativePreviewProcess) async throws -> Simulator {
+    private func createSimulator(build: NativePreviewBuild.Result, deviceSet: URL,
+                                 process: NativePreviewProcess) async throws -> Simulator {
         let inventoryData = Data(try await process.xcrun(["simctl", "list", "--json"]).utf8)
         guard let inventory = try JSONSerialization.jsonObject(with: inventoryData) as? [String: Any] else {
             throw NativeRuntimeError.unsupportedContract("Simulator inventory is not a JSON object")
@@ -2109,7 +2118,9 @@ final class NativePreviewCorrection {
         let type = (inventory["devicetypes"] as? [[String: Any]])?.first { $0["identifier"] as? String == deviceID }
         guard let path = type?["bundlePath"] as? String else { throw NativePipelineRequired() }
         let deviceType = URL(filePath: path, directoryHint: .isDirectory)
-        let identifier = try await process.xcrun(["simctl", "create", "XcodeMCPPreview-\(UUID().uuidString)", deviceID, runtimeID])
+        try FileManager.default.createDirectory(at: deviceSet, withIntermediateDirectories: true)
+        let identifier = try await process.xcrun(["simctl", "--set", deviceSet.path, "create",
+            "XcodeMCPPreview-\(UUID().uuidString)", deviceID, runtimeID])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return Simulator(identifier: identifier,
             destination: ["identifier": .string(build.destinationIdentifier),

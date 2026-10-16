@@ -145,6 +145,19 @@ final class NativePreviewBuild {
         self.installation = installation
     }
 
+    func waitForSourcePackages(in workspace: AnyObject) async throws {
+        try Task.checkCancellation()
+        let wait = try await runtime.object(workspace).resolveMethod(
+            named: "(extension in IDEFoundation):__C.IDEWorkspace.waitForFinishedResolvingSourcePackages() async throws -> ()",
+            as: (@concurrent () async throws -> Void).self)
+        do { try unsafe await wait.unsafeInvoke() }
+        catch let error as NativeSwiftError {
+            if error.withUnderlyingError({ $0 is CancellationError }) { throw CancellationError() }
+            throw error
+        }
+        try Task.checkCancellation()
+    }
+
     func prepare(workspace: AnyObject) async throws -> NativeSwiftMethod<@concurrent (AnyObject, AnyObject) async throws -> AnyObject> {
         if let performMethod { return performMethod }
         let bound = try await runtime.object(workspace).resolveMethod(
