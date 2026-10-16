@@ -142,8 +142,8 @@ retrieval does not establish online/account-dependent retrieval.
 
 `RenderPreview` uses packaged platform renderers for SwiftUI, UIKit, and AppKit
 `#Preview` definitions, SwiftUI `PreviewProvider` definitions, and iOS and watchOS WidgetKit previews
-in an application or app extension built with a debug dylib, or a standalone
-dynamic or static framework. The packaged
+in an application or app extension built with a debug dylib, a standalone
+dynamic or static framework, or a Swift package library. The packaged
 hosts cover iOS 18.4+, tvOS 18.4+, visionOS 2.4+, and watchOS 11.4+ Simulators,
 plus macOS 15.4+ and Mac Catalyst 18.4+ on the local Mac.
 The renderers support arm64 executables on these platforms.
@@ -159,32 +159,49 @@ that compile the source, embed its runtime image, or link its object/archive pro
 (including linker file lists), the active scheme's runnable application takes
 precedence. When that runnable is not a compatible host, a unique compatible
 host can be used; ambiguous candidates use the native pipeline.
-Application target ordering does not determine the host. This selection does not
-recreate Xcode's complete source-specific preview dependency graph.
-When no compatible application or extension hosts a dynamic framework,
-the renderer stages that framework inside its own helper application. The
-framework retains its bundle identifier and resources for `Bundle(for:)`
-lookups; `Bundle.main` identifies the helper application. Linked frameworks and
+For a source without a compatible application or extension, the selected native
+destination recipe supplies Xcode's preview agent bundle. The renderer copies
+that bundle and replaces its executable with the packaged renderer, preserving
+the agent's bundle identifier and basename for `Bundle.main`. A destination
+change obtains the agent from the newly selected recipe.
+Dynamic frameworks are staged inside the agent application and retain their
+bundle identifiers and resources for `Bundle(for:)` lookups. Linked frameworks and
 dynamic libraries are copied with their resources, following the source image's
 transitive Mach-O dependencies. Native build records, linker search paths, and
 the importing image's runtime search paths locate built and prebuilt dependencies.
 Resolved dependency references are adjusted to their staged locations
 without changing the original build products.
-For a static framework rendered by the helper, the host links its archive into a
-preview sidecar dylib using compiler autolink records and the target's library/search
-inputs. The original archive, framework resources, and renderer executable remain
-unchanged. The sidecar uses the same dependency staging and preview lifecycle.
+Static archives and Swift package object products are linked into a preview
+sidecar dylib using compiler autolink records and the targets' library/search
+inputs. Xcode's build service supplies the selected source's dependency graph
+and evaluates resource bundle paths using the completed build's parameters.
+Xcode's product classifications define the preview roots and their dependency
+boundaries independently of the built products' Mach-O types. Graph nodes without
+built target descriptions retain their dependency edges but contribute no image.
+Each static root and its owned static dependencies form a separate sidecar;
+references to other roots use those roots' generated or built images.
+Package roots classified as frameworks or dynamic libraries use the agent's
+executable directory, preserving their native preview `Bundle.main` owner even
+when their image must be linked from static inputs. Other static roots are staged
+outside the agent under the native product directory's name for `Bundle(for:)`.
+Dynamic dependencies beyond a package root retain their original framework bundles.
+Package resource bundles reachable from the roots with available build products
+are copied to the staged products directory. Resource traversal stops at any
+root omitted because its build product is unavailable.
+The renderer sets
+`PACKAGE_RESOURCE_BUNDLE_PATH` to that directory for `Bundle.module` lookups,
+resolving the path after Simulator installation when necessary.
+The sidecar uses the existing dependency staging and preview lifecycle.
 A source-connected app supplies its native link command to the sidecar, preserving
 host objects and library-loading options while loading the static source once.
 The app retains its bundle, resources, entitlements, and launch environment;
-its original debug image is not also loaded.
-Static framework rendering was verified on macOS; Simulator installation and
-static bundle lookup remain tracked in #360. Static source frameworks in the
-original Widget extension service remain unverified.
-Classes linked from a static archive retain ordinary host `Bundle(for:)` semantics;
-the copied framework resources are not assigned to that class's runtime bundle.
-Standalone dynamic framework image parity was verified on macOS 26.6.2 and iOS 27.2 with
-Xcode 27.1, including framework bundle resources on macOS.
+the sidecar replaces its original debug image and retains the app's `Bundle(for:)`
+ownership. Copied static framework resources are not assigned to classes linked
+from its archive. Static-framework Widget definitions use their native extension
+host for both `#Preview` and `PreviewProvider`.
+Standalone static and dynamic framework images were compared with Xcode 27.1 on
+macOS 26.6.2 and iOS 27.2, including static bundle lookup and dynamic framework
+resources on macOS.
 Source and host records must use the same supported platform and architecture
 before checking for ambiguity. An extension's own bundle supplies its resources,
 identifier, and entitlements. A containing application's shared Frameworks are
@@ -322,8 +339,9 @@ the resulting native `PreviewDescription` for destination selection and renderin
 including contexts that forward their keys to another `PreviewContext`.
 Activity `PreviewProvider` contexts outside this extension path use the original Widget or WidgetBundle
 program root to find the Activity configuration whose native attributes type
-matches the context. The root is discovered from compiler main symbols in the
-built host's debug library, identified by its Mach-O UUID. WidgetBundle descriptor
+matches the context. The renderer discovers the root from compiler main symbols
+in the host's debug image for hosted previews. Hostless previews use the generated
+or built images of the preview roots that contain the source. WidgetBundle descriptor
 preferences retain the original configuration modifiers. If the root or private
 host/preference contract is unavailable, the request uses the native pipeline.
 Other unsupported display traits, variants, or controls still use the native pipeline.

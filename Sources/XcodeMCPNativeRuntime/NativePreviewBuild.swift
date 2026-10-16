@@ -8,6 +8,7 @@ import XcodeMCPWire
 final class NativePreviewBuild {
     struct Result {
         let targets: [Target]
+        let previewRoots: [Target]
         let destinationIdentifier: String
         let previewDestinationIdentifier: String
         let platformIdentifier: String?
@@ -36,6 +37,10 @@ final class NativePreviewBuild {
         var enableThreadSanitizer = false
         var enableUndefinedBehaviorSanitizer = false
         var rendererEnvironment: [String: String] = [:]
+        var isDynamicPackageProduct = false
+        var containsPreviewSource = false
+        var dependencies: [Target] = []
+        var resourceURLs: [URL] = []
 
         var outputURL: URL? {
             guard let index = linkCommandLine.lastIndex(of: "-o"),
@@ -200,14 +205,11 @@ final class NativePreviewBuild {
             named: "buildables(scheme: __C.IDEScheme, workspace: __C.IDEWorkspace, runContextManager: __C.IDERunContextManager, executionEnvironment: __C.IDEExecutionEnvironment) -> [__C.IDEBuildable]",
             as: ((AnyObject, AnyObject, AnyObject, AnyObject) -> NativeSwiftValue).self)
         let selectedBuildables = try unsafe buildables.unsafeInvoke(scheme, workspace, manager, environment)
-        let describe = try await buildSystem.resolveStaticMethod(
-            named: "builtTargetDescriptions(workspace: __C.IDEWorkspace, priorBuild: __C.IDEBuildOperation, buildables: [__C.IDEBuildable]) async throws -> [(__C.IDEBuildable, [PreviewsIDEAPI.IDEBuiltTargetDescription])]",
-            as: (@concurrent (AnyObject, AnyObject, NativeSwiftValue) async throws -> NativeSwiftValue).self)
-        let descriptions = try unsafe await describe.unsafeInvoke(workspace, priorBuild, selectedBuildables)
+        let descriptions = try await targetDescriptions(for: selectedBuildables, workspace: workspace, priorBuild: priorBuild, image: image)
         try Task.checkCancellation()
-        let records = try await targets(descriptions, image: image, runnable: runnable, priorBuild: priorBuild,
+        let records = try await targets(descriptions, buildables: selectedBuildables, image: image, runnable: runnable, priorBuild: priorBuild,
             workspace: workspace, source: source, platform: info.previewPlatform, scheme: scheme, destination: destination)
-        return Result(targets: records, destinationIdentifier: info.identifier,
+        return Result(targets: records.targets, previewRoots: records.previewRoots, destinationIdentifier: info.identifier,
                       previewDestinationIdentifier: info.previewIdentifier,
                       platformIdentifier: info.platformIdentifier, previewPlatform: info.previewPlatform,
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
@@ -276,9 +278,65 @@ final class NativePreviewBuild {
         return try unsafe subsections.unsafeInvoke().flatMap { try buildErrors(in: $0 as AnyObject) }
     }
 
-    private func targets(_ descriptions: NativeSwiftValue, image: URL, runnable: AnyObject?, priorBuild: AnyObject,
+    private func targetDescriptions(for buildables: NativeSwiftValue, workspace: AnyObject, priorBuild: AnyObject,
+                                    image: URL) async throws -> NativeSwiftValue {
+        let buildSystem = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.BuildSystem", in: .path(image))
+        let describe = try await buildSystem.resolveStaticMethod(
+            named: "builtTargetDescriptions(workspace: __C.IDEWorkspace, priorBuild: __C.IDEBuildOperation, buildables: [__C.IDEBuildable]) async throws -> [(__C.IDEBuildable, [PreviewsIDEAPI.IDEBuiltTargetDescription])]",
+            as: (@concurrent (AnyObject, AnyObject, NativeSwiftValue) async throws -> NativeSwiftValue).self)
+        return try unsafe await describe.unsafeInvoke(workspace, priorBuild, buildables)
+    }
+
+    private typealias TargetRecord = (buildable: NSObject, native: Any, target: Target)
+
+    private func targets(_ descriptions: NativeSwiftValue, buildables: NativeSwiftValue, image: URL, runnable: AnyObject?, priorBuild: AnyObject,
                          workspace: AnyObject, source: URL, platform: NativePreviewPlatform?,
-                         scheme: AnyObject, destination: AnyObject) async throws -> [Target] {
+                         scheme: AnyObject, destination: AnyObject) async throws -> (targets: [Target], previewRoots: [Target]) {
+        let records = try await targetRecords(descriptions, image: image, runnable: runnable)
+        var result = records.map(\.target)
+        var previewRoots: [Target] = []
+        if let platform {
+            let selection = try NativePreviewCorrection.selectTarget(result, source: source, platform: platform)
+            if let index = result.firstIndex(where: {
+                $0.outputURL == selection.host.outputURL && $0.sdkRoot == selection.host.sdkRoot
+                    && $0.sdkVariant == selection.host.sdkVariant && $0.architecture == selection.host.architecture
+            }) {
+                result[index].rendererEnvironment = try sanitizerEnvironment(for: records[index].buildable, priorBuild: priorBuild,
+                    scheme: scheme, destination: destination)
+            }
+            if let output = selection.source.outputURL,
+               let index = result.firstIndex(where: {
+                   $0.outputURL == output && $0.sdkRoot == selection.source.sdkRoot
+                       && $0.sdkVariant == selection.source.sdkVariant && $0.architecture == selection.source.architecture
+               }) {
+                if try NativePreviewBinary.isStaticLibrary(at: output) {
+                    result[index].compileCommandLine = try await compileCommandLine(for: records[index], priorBuild: priorBuild,
+                        workspace: workspace, source: source, image: image)
+                }
+                if let hostOutput = selection.host.outputURL, NativePreviewCorrection.productBundle(containing: hostOutput) == nil {
+                    let sourceRecord = (buildable: records[index].buildable, native: records[index].native, target: result[index])
+                    let dependencies = try await dependencies(for: sourceRecord, records: records, buildables: buildables, image: image,
+                        priorBuild: priorBuild, workspace: workspace, scheme: scheme, destination: destination)
+                    previewRoots = dependencies.roots
+                    result[index].dependencies = dependencies.linkDependencies
+                    result[index].resourceURLs = dependencies.resources
+                    for dependency in dependencies.targets {
+                        if let existing = result.firstIndex(where: {
+                            $0.outputURL == dependency.outputURL && $0.sdkRoot == dependency.sdkRoot
+                                && $0.sdkVariant == dependency.sdkVariant && $0.architecture == dependency.architecture
+                        }) {
+                            result[existing].compileCommandLine = dependency.compileCommandLine
+                            result[existing].rendererEnvironment = dependency.rendererEnvironment
+                            result[existing].isDynamicPackageProduct = dependency.isDynamicPackageProduct
+                        } else { result.append(dependency) }
+                    }
+                }
+            }
+        }
+        return (result, previewRoots)
+    }
+
+    private func targetRecords(_ descriptions: NativeSwiftValue, image: URL, runnable: AnyObject?) async throws -> [TargetRecord] {
         let type = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.IDEBuiltTargetDescription", in: .path(image))
         let receiver = try NativeType.opaque(named: type.name)
         let module = try await type.resolveGetter(named: "productModuleName", as: (() -> String?).self, receiverABI: receiver)
@@ -305,10 +363,10 @@ final class NativePreviewBuild {
             }
             return entries
         }
-        var result: [Target] = []
-        var contexts: [(AnyObject, Any)] = []
+        var result: [TargetRecord] = []
         for (buildable, records) in entries {
             let isRunnable = Self.isRunnable(buildable, runnable: runnable)
+            let isDynamicPackageProduct = try self.isDynamicPackageProduct(buildable)
             for record in records {
                 let nativeFiles = try unsafe files.unsafeInvoke(on: record)
                 let objectFiles = try nativeFiles.withCopy { values -> [(URL, Set<URL>)] in
@@ -324,29 +382,293 @@ final class NativePreviewBuild {
                     objectFiles: objectFiles.map(\.0), sourceFiles: Set(objectFiles.flatMap(\.1)),
                     debugDylibEnabled: dylib.unsafeInvoke(on: record), isRunnable: isRunnable,
                     enableAddressSanitizer: address.unsafeInvoke(on: record), enableThreadSanitizer: thread.unsafeInvoke(on: record),
-                    enableUndefinedBehaviorSanitizer: undefined.unsafeInvoke(on: record))
-                result.append(target)
-                contexts.append((buildable, record))
-            }
-        }
-        if let platform {
-            let selection = try NativePreviewCorrection.selectTarget(result, source: source, platform: platform)
-            if let index = result.firstIndex(where: { $0.outputURL == selection.host.outputURL && $0.architecture == selection.host.architecture }) {
-                let (buildable, _) = contexts[index]
-                result[index].rendererEnvironment = try sanitizerEnvironment(for: buildable, priorBuild: priorBuild,
-                    scheme: scheme, destination: destination)
-            }
-            if let output = selection.source.outputURL, output.pathComponents.contains(where: { $0.hasSuffix(".framework") }),
-               try NativePreviewBinary.isStaticArchive(at: output),
-               let index = result.firstIndex(where: { $0.outputURL == output && $0.architecture == selection.source.architecture }) {
-                let (buildable, record) = contexts[index]
-                let buildVariant = try await type.resolveGetter(named: "buildVariant", as: (() -> String).self, receiverABI: receiver)
-                result[index].compileCommandLine = try await compileCommandLine(for: result[index], buildable: buildable,
-                    buildVariant: unsafe buildVariant.unsafeInvoke(on: record), priorBuild: priorBuild,
-                    workspace: workspace, source: source)
+                    enableUndefinedBehaviorSanitizer: undefined.unsafeInvoke(on: record),
+                    isDynamicPackageProduct: isDynamicPackageProduct)
+                result.append((buildable, record, target))
             }
         }
         return result
+    }
+
+    private func dependencies(for source: TargetRecord, records: [TargetRecord], buildables: NativeSwiftValue, image: URL, priorBuild: AnyObject,
+                              workspace: AnyObject, scheme: AnyObject, destination: AnyObject) async throws ->
+        (targets: [Target], roots: [Target], linkDependencies: [Target], resources: [URL]) {
+        guard let service = try object(workspace, selector: "buildSystemService"),
+              let parameters = try object(priorBuild, selector: "buildParameters") else {
+            throw NativeRuntimeError.unsupportedContract("The native build has no dependency query context")
+        }
+        func canonicalBuildable(_ buildable: NSObject) throws -> NSObject {
+            guard let blueprint = try object(buildable, selector: "blueprint"),
+                  let canonical = try object(blueprint, selector: "primaryBuildable") as? NSObject else {
+                throw NativeRuntimeError.unsupportedContract("A native dependency buildable has no primary buildable")
+            }
+            return canonical
+        }
+        let canonicalSource = try canonicalBuildable(source.buildable)
+        guard let selectedBuildables = try buildables.withCopy({ $0 as? [NSObject] }) else {
+            throw NativeRuntimeError.unsupportedContract("Native buildables are not an array of objects")
+        }
+        var selectedIdentities: Set<ObjectIdentifier> = []
+        let canonicalBuildables = try selectedBuildables.map(canonicalBuildable).filter {
+            selectedIdentities.insert(ObjectIdentifier($0)).inserted
+        }
+        let implicit = try runtime.object(priorBuild).resolveMethodAndWait(selector: "buildImplicitDependencies", as: (() -> Bool).self)
+        let serviceType = try await runtime.resolveSwiftType(named: "IDEXCBuildSupportCore.IDEXCBuildSystemWorkspaceService",
+            in: .path(installation.framework("IDEXCBuildSupportCore", in: "PlugIns")))
+        let query = try await serviceType.resolveMethod(
+            named: "computeDependencyGraph(for: [__C.IDEBuildable], buildParameters: __C.IDEBuildParameters, includeImplicitDependencies: Swift.Bool) async throws -> IDEFoundation.IDEBuildableDependencyGraph",
+            as: (@concurrent (NativeSwiftValue, AnyObject, Bool) async throws -> AnyObject).self)
+        // Scheme products retain the incoming edges from a package's dynamic product to its source module.
+        let selected = try await buildableArray(canonicalBuildables, matching: buildables)
+        let graph = try unsafe await query.unsafeInvoke(on: service, selected, parameters, implicit.unsafeInvoke())
+        let directDependencies = try await runtime.object(graph).resolveMethod(
+            named: "dependencies(of: __C.IDEBuildable) -> [__C.IDEBuildable]",
+            as: ((AnyObject) -> NativeSwiftValue).self)
+        let directDependents = try await runtime.object(graph).resolveMethod(
+            named: "dependents(of: __C.IDEBuildable) -> [__C.IDEBuildable]",
+            as: ((AnyObject) -> NativeSwiftValue).self)
+        try Task.checkCancellation()
+        let resourceClass = NSClassFromString("IDESwiftPackageCore.IDESwiftPackageResourceBundleProductBlueprint")
+        // The build graph also contains build tools and aggregate targets.
+        // Only native library products contribute code to the renderer image.
+        let linkableProducts: Set<String> = ["com.apple.product-type.objfile", "com.apple.product-type.library.static",
+            "com.apple.product-type.library.dynamic", "com.apple.product-type.framework", "com.apple.product-type.framework.static"]
+        var seen: Set<ObjectIdentifier> = []
+        var pending = Array(canonicalBuildables.reversed())
+        var edges: [ObjectIdentifier: [NSObject]] = [:]
+        var codeIdentities: Set<ObjectIdentifier> = []
+        var jitBuildables: Set<ObjectIdentifier> = []
+        var resourceBlueprints: [ObjectIdentifier: NSObject] = [:]
+        while let buildable = pending.popLast() {
+            try Task.checkCancellation()
+            let identifier = ObjectIdentifier(buildable)
+            guard seen.insert(identifier).inserted else { continue }
+            let nativeDependencies = try unsafe directDependencies.unsafeInvoke(buildable)
+            guard let dependencies = try nativeDependencies.withCopy({ $0 as? [NSObject] }) else {
+                throw NativeRuntimeError.unsupportedContract("The native dependency graph edge is not an array of buildables")
+            }
+            edges[identifier] = dependencies
+            pending.append(contentsOf: dependencies.reversed())
+            guard let blueprint = try object(buildable, selector: "blueprint") as? NSObject else {
+                throw NativeRuntimeError.unsupportedContract("A native dependency buildable has no blueprint")
+            }
+            if let resourceClass, blueprint.isKind(of: resourceClass) {
+                resourceBlueprints[identifier] = blueprint
+            } else {
+                let productType = try runtime.object(buildable).resolveMethodAndWait(selector: "productTypeIdentifier", as: (() -> String?).self)
+                if let product = try unsafe productType.unsafeInvoke() {
+                    if linkableProducts.contains(product) { codeIdentities.insert(identifier) }
+                    if product == "com.apple.product-type.framework" || product == "com.apple.product-type.library.dynamic" {
+                        jitBuildables.insert(identifier)
+                    }
+                }
+            }
+        }
+        let codeEdges = edges.mapValues { $0.filter { codeIdentities.contains(ObjectIdentifier($0)) } }
+        var dependents: [ObjectIdentifier: [NSObject]] = [:]
+        seen = []
+        pending = [canonicalSource]
+        while let buildable = pending.popLast() {
+            try Task.checkCancellation()
+            let identifier = ObjectIdentifier(buildable)
+            guard seen.insert(identifier).inserted else { continue }
+            let nativeParents = try unsafe directDependents.unsafeInvoke(buildable)
+            guard let parents = try nativeParents.withCopy({ $0 as? [NSObject] }) else {
+                throw NativeRuntimeError.unsupportedContract("The native dependency graph parent edge is not an array of buildables")
+            }
+            dependents[identifier] = parents
+            pending.append(contentsOf: parents.reversed())
+        }
+        var candidates: [ObjectIdentifier: [TargetRecord]] = [:]
+        func addRecords(_ records: [TargetRecord]) throws {
+            for record in records where record.target.sdkRoot == source.target.sdkRoot
+                && record.target.sdkVariant == source.target.sdkVariant && record.target.architecture == source.target.architecture {
+                let identifier = ObjectIdentifier(try canonicalBuildable(record.buildable))
+                candidates[identifier, default: []].append(record)
+            }
+        }
+        try addRecords(records)
+        // Preserve the selected source's compile command and environment already collected by targets().
+        candidates[ObjectIdentifier(canonicalSource)] = [source]
+        var queriedDescriptions: [NativeSwiftValue] = []
+        defer { withExtendedLifetime((graph, queriedDescriptions)) {} }
+        // Native product types define JIT boundaries even when a framework contains a static archive.
+        let ownerRoots = Self.previewRootBuildables(for: canonicalSource, dependencies: [:], dependents: dependents,
+            jitBuildables: jitBuildables)
+        func reachable(from roots: [NSObject], through dependencies: [ObjectIdentifier: [NSObject]],
+                       excluding excludedRoots: Set<ObjectIdentifier> = []) -> [NSObject] {
+            var pending = Array(roots.reversed())
+            var seen: Set<ObjectIdentifier> = []
+            var result: [NSObject] = []
+            while let buildable = pending.popLast() {
+                let identifier = ObjectIdentifier(buildable)
+                guard !excludedRoots.contains(identifier), seen.insert(identifier).inserted else { continue }
+                result.append(buildable)
+                pending.append(contentsOf: dependencies[identifier, default: []].reversed())
+            }
+            return result
+        }
+        let missingCode = reachable(from: ownerRoots, through: codeEdges).filter { candidates[ObjectIdentifier($0)] == nil }
+        if !missingCode.isEmpty {
+            let nativeCode = try await buildableArray(missingCode, matching: buildables)
+            let descriptions = try await targetDescriptions(for: nativeCode, workspace: workspace, priorBuild: priorBuild, image: image)
+            queriedDescriptions.append(descriptions)
+            try addRecords(await targetRecords(descriptions, image: image, runnable: nil))
+        }
+        let selectedRootBuildables = Self.previewRootBuildables(for: canonicalSource, dependencies: codeEdges, dependents: dependents,
+            jitBuildables: jitBuildables)
+        let unavailableRoots = Set(selectedRootBuildables.filter { candidates[ObjectIdentifier($0)] == nil }.map(ObjectIdentifier.init))
+        var rootBuildables = selectedRootBuildables.filter { !unavailableRoots.contains(ObjectIdentifier($0)) }
+        if ownerRoots.count > 1 {
+            let namedOwners = try rootBuildables.map { buildable in
+                let name = try runtime.object(buildable).resolveMethodAndWait(selector: "displayName", as: (() -> String).self)
+                return try unsafe (buildable: buildable, displayName: name.unsafeInvoke())
+            }
+            // Native library hosts have the same priority, then compare their cached buildable display names.
+            rootBuildables = namedOwners.sorted { $0.displayName < $1.displayName }.map(\.buildable)
+        }
+        let reachableBuildables = reachable(from: rootBuildables, through: edges, excluding: unavailableRoots)
+        let code = reachable(from: rootBuildables, through: codeEdges, excluding: unavailableRoots)
+        var targets: [Target] = []
+        var targetsByBuildable: [ObjectIdentifier: Target] = [:]
+        for buildable in code {
+            // A package product can contribute graph edges without producing its own linked artifact.
+            guard let matches = candidates[ObjectIdentifier(buildable)] else { continue }
+            guard matches.count == 1, let record = matches.first else {
+                throw NativeRuntimeError.unsupportedContract("The native build returned \(matches.count) matching products for dependency \(buildable) of \(source.target.buildableName)")
+            }
+            guard let output = record.target.outputURL else {
+                throw NativeRuntimeError.unsupportedContract("Native dependency \(record.target.buildableName) has no linked product")
+            }
+            var target = record.target
+            if target.compileCommandLine.isEmpty, try NativePreviewBinary.isStaticArchive(at: output),
+               let sourceFile = target.sourceFiles.filter({ $0.pathExtension == "swift" }).sorted(by: { $0.path < $1.path }).first {
+                target.compileCommandLine = try await compileCommandLine(for: record, priorBuild: priorBuild,
+                    workspace: workspace, source: sourceFile, image: image)
+            }
+            if ObjectIdentifier(buildable) != ObjectIdentifier(canonicalSource) {
+                target.rendererEnvironment = try sanitizerEnvironment(for: buildable, priorBuild: priorBuild, scheme: scheme, destination: destination)
+            }
+            targets.append(target)
+            targetsByBuildable[ObjectIdentifier(buildable)] = target
+        }
+        var resources: [URL] = []
+        var resourcesByBuildable: [ObjectIdentifier: URL] = [:]
+        for buildable in reachableBuildables {
+            let identifier = ObjectIdentifier(buildable)
+            if let blueprint = resourceBlueprints[identifier] {
+                let resource = try await resourceURL(for: blueprint, buildable: buildable, priorBuild: priorBuild)
+                resourcesByBuildable[identifier] = resource
+                if !resources.contains(resource) { resources.append(resource) }
+            }
+        }
+        let sourceOwnerIdentities = Set(ownerRoots.map(ObjectIdentifier.init))
+        let roots = rootBuildables.compactMap { buildable -> Target? in
+                guard var root = targetsByBuildable[ObjectIdentifier(buildable)] else { return nil }
+                root.containsPreviewSource = sourceOwnerIdentities.contains(ObjectIdentifier(buildable))
+                root.dependencies = Self.linkBuildables(for: buildable, dependencies: codeEdges, jitBuildables: jitBuildables)
+                    .compactMap { targetsByBuildable[ObjectIdentifier($0)] }
+                var seenResources: Set<URL> = []
+                root.resourceURLs = reachable(from: [buildable], through: edges, excluding: unavailableRoots)
+                    .compactMap { resourcesByBuildable[ObjectIdentifier($0)] }
+                    .filter { seenResources.insert($0).inserted }
+                return root
+            }
+        guard !roots.isEmpty else {
+            throw NativeRuntimeError.unsupportedContract("The native preview graph has no available linked roots for \(source.target.buildableName)")
+        }
+        let linkDependencies = Self.linkBuildables(for: canonicalSource, dependencies: codeEdges, jitBuildables: jitBuildables)
+            .compactMap { targetsByBuildable[ObjectIdentifier($0)] }
+        return (targets, roots, linkDependencies, resources)
+    }
+
+    static func previewRootBuildables(for source: NSObject, dependencies: [ObjectIdentifier: [NSObject]],
+                                     dependents: [ObjectIdentifier: [NSObject]], jitBuildables: Set<ObjectIdentifier>) -> [NSObject] {
+        var pending = [source]
+        var seen: Set<ObjectIdentifier> = []
+        var ancestors: [NSObject] = []
+        while let buildable = pending.popLast() {
+            let identifier = ObjectIdentifier(buildable)
+            guard seen.insert(identifier).inserted else { continue }
+            if jitBuildables.contains(identifier) { ancestors.append(buildable) }
+            else { pending.append(contentsOf: dependents[identifier, default: []].reversed()) }
+        }
+        if !ancestors.isEmpty { return ancestors }
+        return [source] + linkBuildables(for: source, dependencies: dependencies, jitBuildables: jitBuildables)
+            .filter { jitBuildables.contains(ObjectIdentifier($0)) }
+    }
+
+    static func linkBuildables(for source: NSObject, dependencies: [ObjectIdentifier: [NSObject]],
+                              jitBuildables: Set<ObjectIdentifier>) -> [NSObject] {
+        var pending = Array(dependencies[ObjectIdentifier(source), default: []].reversed())
+        var seen: Set<ObjectIdentifier> = [ObjectIdentifier(source)]
+        var result: [NSObject] = []
+        while let buildable = pending.popLast() {
+            let identifier = ObjectIdentifier(buildable)
+            guard seen.insert(identifier).inserted else { continue }
+            result.append(buildable)
+            // A JIT root owns its static children; a direct source edge can still reach those children independently.
+            if !jitBuildables.contains(identifier) {
+                pending.append(contentsOf: dependencies[identifier, default: []].reversed())
+            }
+        }
+        return result
+    }
+
+    private func isDynamicPackageProduct(_ buildable: NSObject) throws -> Bool {
+        let productType = try runtime.object(buildable).resolveMethodAndWait(selector: "productTypeIdentifier", as: (() -> String?).self)
+        guard let identifier = try unsafe productType.unsafeInvoke(),
+              identifier == "com.apple.product-type.framework" || identifier == "com.apple.product-type.library.dynamic" else { return false }
+        guard let blueprint = try object(buildable, selector: "blueprint") as? NSObject,
+              blueprint.responds(to: NSSelectorFromString("isValid")) else { return false }
+        let valid = try runtime.object(blueprint).resolveMethodAndWait(selector: "isValid", as: (() -> Bool).self)
+        guard try unsafe valid.unsafeInvoke(),
+              let provider = try object(blueprint, selector: "blueprintProvider") as? NSObject else { return false }
+        guard let package = NSProtocolFromString("IDESourcePackage") else {
+            throw NativeRuntimeError.unsupportedContract("The native source package protocol is unavailable")
+        }
+        return type(of: provider).conforms(to: package)
+    }
+
+    private func buildableArray(_ objects: [NSObject], matching nativeArray: NativeSwiftValue) async throws -> NativeSwiftValue {
+        guard let collection = try nativeArray.withCopy({ $0 as? any Collection }) else {
+            throw NativeRuntimeError.unsupportedContract("Native buildables are not a collection")
+        }
+        defer { withExtendedLifetime(nativeArray) {} }
+        // Preserve the imported IDEBuildable element type at the Swift ABI boundary.
+        func makeArray<Values: Collection>(_: Values) async throws -> NativeSwiftValue {
+            let values: [Values.Element] = try objects.map {
+                guard let value = $0 as? Values.Element else {
+                    throw NativeRuntimeError.unsupportedContract("The native buildable array does not accept a dependency buildable")
+                }
+                return value
+            }
+            return try await nativePreviewOwnedValue(values)
+        }
+        return try await _openExistential(collection, do: makeArray)
+    }
+
+    private func resourceURL(for blueprint: NSObject, buildable: NSObject, priorBuild: AnyObject) async throws -> URL {
+        let parameters = try runtime.object(priorBuild).resolveMethodAndWait(selector: "_buildParametersForBuildable:",
+            as: ((AnyObject) -> AnyObject).self)
+        let evaluate = try await runtime.object(blueprint).resolveMethod(
+            named: "evaluateMacroExpressionAsString(_: Swift.String, buildParameters: __C.IDEBuildParameters?, overrides: [Swift.String : Swift.String]?) async throws -> Swift.String",
+            as: (@concurrent (String, AnyObject?, NativePreviewMacroOverrides) async throws -> String).self)
+        let path = try unsafe await evaluate.unsafeInvoke("$(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)", parameters.unsafeInvoke(buildable),
+            NativePreviewMacroOverrides(value: nil))
+        try Task.checkCancellation()
+        guard path.hasPrefix("/") else {
+            throw NativeRuntimeError.unsupportedContract("The native resource product path is not absolute: \(path)")
+        }
+        return URL(filePath: path).resolvingSymlinksInPath()
+    }
+
+    private func compileCommandLine(for record: TargetRecord, priorBuild: AnyObject, workspace: AnyObject,
+                                    source: URL, image: URL) async throws -> [String] {
+        let type = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.IDEBuiltTargetDescription", in: .path(image))
+        let buildVariant = try await type.resolveGetter(named: "buildVariant", as: (() -> String).self, receiverABI: .opaque(named: type.name))
+        return try await compileCommandLine(for: record.target, buildable: record.buildable,
+            buildVariant: unsafe buildVariant.unsafeInvoke(on: record.native), priorBuild: priorBuild, workspace: workspace, source: source)
     }
 
     private func sanitizerEnvironment(for buildable: AnyObject, priorBuild: AnyObject, scheme: AnyObject,
@@ -516,7 +838,7 @@ final class NativePreviewBuild {
         let previewIdentifier = try unsafe prepared.identifierString.unsafeInvoke(on: nativeIdentifier)
         let platformName = try unsafe prepared.platformName.unsafeInvoke(on: nativePlatform)
         let systemVersion = try unsafe prepared.versionString.unsafeInvoke(on: version)
-        return Destination(value: destination, identifier: identifier, previewIdentifier: previewIdentifier,
+        return Destination(value: destination, recipe: recipe, identifier: identifier, previewIdentifier: previewIdentifier,
                            platformIdentifier: platformIdentifier,
                            previewPlatform: NativePreviewPlatform(platformIdentifier: platformIdentifier, isMacCatalyst: isMacCatalyst),
                            platformName: platformName,
@@ -537,6 +859,7 @@ final class NativePreviewBuild {
 
     struct Destination {
         let value: AnyObject
+        let recipe: NativeSwiftValue
         let identifier: String
         let previewIdentifier: String
         let platformIdentifier: String?
@@ -544,6 +867,21 @@ final class NativePreviewBuild {
         let platformName: String?
         let deviceModelName: String?
         let systemVersion: String?
+    }
+
+    func frameworkAgent(for destination: DestinationSelection) async throws -> URL {
+        try Task.checkCancellation()
+        let recipe = destination.selected.recipe
+        let bundleType = try await runtime.resolveSwiftType(named: "PreviewsPipeline.PreviewAgentBundle",
+            in: .path(installation.framework("PreviewsPipeline", in: "SharedFrameworks")))
+        let make = try await recipe.type.resolveMethod(named: "makeFrameworkAgent() throws -> PreviewsPipeline.PreviewAgentBundle",
+            as: (() throws -> NativeSwiftValue).self, valueABIs: [bundleType: .opaque(named: bundleType.name)],
+            receiverABI: .opaque(named: recipe.type.name))
+        let bundle = try unsafe make.unsafeInvoke(on: recipe)
+        let url = try await bundleType.resolveGetter(named: "url.getter : Foundation.URL", as: (() -> NativePreviewBuildURL).self,
+            receiverABI: .opaque(named: bundleType.name))
+        try Task.checkCancellation()
+        return try unsafe url.unsafeInvoke(on: bundle).value
     }
 
     @MainActor
@@ -581,6 +919,11 @@ private struct NativePreviewBuildURL: ABIBridgeSwiftValue {
 
 private struct NativePreviewBuildSources: ABIBridgeSwiftValue {
     let value: Set<URL>
+    static let swiftABIType: NativeType = .pointer
+}
+
+private struct NativePreviewMacroOverrides: ABIBridgeSwiftValue {
+    let value: [String: String]?
     static let swiftABIType: NativeType = .pointer
 }
 

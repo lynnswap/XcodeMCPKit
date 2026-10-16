@@ -5,11 +5,12 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewEntitlementsTests {
-    @Test func signedAndSimulatorEntitlementsRemainDistinct() throws {
+    @Test(arguments: [false, true])
+    func signedAndSimulatorEntitlementsRemainDistinct(universal: Bool) throws {
         let simulator = try plist(["application-identifier": "FIXTURE.dev.lynnswap.Preview",
                                    "com.apple.security.application-groups": ["group.dev.lynnswap.Preview"]])
         let signed = ["keychain-access-groups": ["FIXTURE.dev.lynnswap.SharedKeychain"]]
-        let product = try Product(simulator: simulator)
+        let product = try Product(simulator: simulator, universal: universal)
         defer { try? FileManager.default.removeItem(at: product.root) }
         let signedURL = product.root.appendingPathComponent("signed.plist")
         try plist(signed).write(to: signedURL)
@@ -49,7 +50,7 @@ private struct Product {
     let root: URL
     let bundle: URL
 
-    init(simulator: Data?) throws {
+    init(simulator: Data?, universal: Bool = false) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("preview-entitlements-\(UUID().uuidString)", isDirectory: true)
         bundle = root.appendingPathComponent("Fixture.app", isDirectory: true)
         try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
@@ -62,15 +63,22 @@ private struct Product {
             try Data("int main(void) { return 0; }\n".utf8).write(to: source)
             let sdk = try output("/usr/bin/xcrun", ["--sdk", "iphonesimulator", "--show-sdk-path"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            var arguments = ["--sdk", "iphonesimulator", "clang", "-target", "arm64-apple-ios18.4-simulator",
-                             "-isysroot", sdk, source.path, "-o", bundle.appendingPathComponent("Original").path,
-                             "-Wl,-no_adhoc_codesign"]
+            let executable = bundle.appendingPathComponent("Original")
+            let arm64 = universal ? root.appendingPathComponent("arm64") : executable
+            let baseArguments = ["--sdk", "iphonesimulator", "clang", "-isysroot", sdk, source.path,
+                                 "-Wl,-no_adhoc_codesign"]
+            var arguments = baseArguments + ["-target", "arm64-apple-ios18.4-simulator", "-o", arm64.path]
             if let simulator {
                 let entitlements = root.appendingPathComponent("simulator.plist")
                 try simulator.write(to: entitlements)
                 arguments += ["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__entitlements", "-Xlinker", entitlements.path]
             }
             try run("/usr/bin/xcrun", arguments)
+            if universal {
+                let x86_64 = root.appendingPathComponent("x86_64")
+                try run("/usr/bin/xcrun", baseArguments + ["-target", "x86_64-apple-ios18.4-simulator", "-o", x86_64.path])
+                try run("/usr/bin/xcrun", ["lipo", "-create", x86_64.path, arm64.path, "-output", executable.path])
+            }
         } catch {
             try? FileManager.default.removeItem(at: root)
             throw error

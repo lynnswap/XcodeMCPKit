@@ -112,6 +112,90 @@ struct NativePreviewBuildTests {
         #expect(absent == nil)
         #expect(!NativePreviewBuild.isRunnable(equivalent, runnable: absent))
     }
+
+    @Test func linkBuildablesPreserveDynamicOwnersAndDirectStaticDependencies() {
+        let source = PreviewBuildBuildable(identity: "Source")
+        let dynamic = PreviewBuildBuildable(identity: "Dynamic")
+        let internalStatic = PreviewBuildBuildable(identity: "Internal")
+        let sharedArchive = PreviewBuildBuildable(identity: "Shared")
+        let dependencies: [ObjectIdentifier: [NSObject]] = [
+            ObjectIdentifier(source): [dynamic, sharedArchive],
+            ObjectIdentifier(dynamic): [internalStatic, sharedArchive],
+        ]
+
+        let inputs = NativePreviewBuild.linkBuildables(for: source, dependencies: dependencies,
+            jitBuildables: [ObjectIdentifier(dynamic)])
+
+        #expect(inputs.count == 2)
+        #expect(Set(inputs.map(ObjectIdentifier.init)) == [ObjectIdentifier(dynamic), ObjectIdentifier(sharedArchive)])
+    }
+
+    @Test func previewRootsIncludeStaticSourceAndFirstDynamicDependencies() {
+        let source = PreviewBuildBuildable(identity: "Source")
+        let archive = PreviewBuildBuildable(identity: "Archive")
+        let dynamic = PreviewBuildBuildable(identity: "Dynamic")
+        let nested = PreviewBuildBuildable(identity: "Nested")
+        let dependencies: [ObjectIdentifier: [NSObject]] = [
+            ObjectIdentifier(source): [archive],
+            ObjectIdentifier(archive): [dynamic],
+            ObjectIdentifier(dynamic): [nested],
+        ]
+
+        let roots = NativePreviewBuild.previewRootBuildables(for: source, dependencies: dependencies, dependents: [:],
+            jitBuildables: [ObjectIdentifier(dynamic), ObjectIdentifier(nested)])
+
+        #expect(roots.count == 2)
+        #expect(Set(roots.map(ObjectIdentifier.init)) == [ObjectIdentifier(source), ObjectIdentifier(dynamic)])
+    }
+
+    @Test func previewRootsUseNearestDynamicAncestorIncludingSelf() {
+        let source = PreviewBuildBuildable(identity: "Source")
+        let archive = PreviewBuildBuildable(identity: "Archive")
+        let owner = PreviewBuildBuildable(identity: "Owner")
+        let outer = PreviewBuildBuildable(identity: "Outer")
+        let support = PreviewBuildBuildable(identity: "Support")
+        let dependencies: [ObjectIdentifier: [NSObject]] = [
+            ObjectIdentifier(outer): [owner],
+            ObjectIdentifier(owner): [archive],
+            ObjectIdentifier(archive): [source],
+            ObjectIdentifier(source): [support],
+        ]
+        let dependents: [ObjectIdentifier: [NSObject]] = [
+            ObjectIdentifier(source): [archive],
+            ObjectIdentifier(archive): [owner],
+            ObjectIdentifier(owner): [outer],
+        ]
+        let jitBuildables: Set<ObjectIdentifier> = [ObjectIdentifier(owner), ObjectIdentifier(outer), ObjectIdentifier(support)]
+
+        let roots = NativePreviewBuild.previewRootBuildables(for: source, dependencies: dependencies, dependents: dependents,
+            jitBuildables: jitBuildables)
+        let ownerRoots = NativePreviewBuild.previewRootBuildables(for: owner, dependencies: dependencies, dependents: dependents,
+            jitBuildables: jitBuildables)
+
+        #expect(roots.count == 1)
+        #expect(roots.first === owner)
+        #expect(ownerRoots.count == 1)
+        #expect(ownerRoots.first === owner)
+    }
+
+    @Test func previewRootsPreserveDistinctDynamicAncestorsAndDeduplicateSharedPaths() {
+        let source = PreviewBuildBuildable(identity: "Source")
+        let left = PreviewBuildBuildable(identity: "Left")
+        let right = PreviewBuildBuildable(identity: "Right")
+        let firstOwner = PreviewBuildBuildable(identity: "Owner")
+        let secondOwner = PreviewBuildBuildable(identity: "Owner")
+        let dependents: [ObjectIdentifier: [NSObject]] = [
+            ObjectIdentifier(source): [left, right],
+            ObjectIdentifier(left): [firstOwner],
+            ObjectIdentifier(right): [firstOwner, secondOwner],
+        ]
+
+        let roots = NativePreviewBuild.previewRootBuildables(for: source, dependencies: [:], dependents: dependents,
+            jitBuildables: [ObjectIdentifier(firstOwner), ObjectIdentifier(secondOwner)])
+
+        #expect(roots.count == 2)
+        #expect(Set(roots.map(ObjectIdentifier.init)) == [ObjectIdentifier(firstOwner), ObjectIdentifier(secondOwner)])
+    }
 }
 
 private struct SourceSelectionFailure: Error {}

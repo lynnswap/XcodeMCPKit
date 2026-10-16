@@ -25,6 +25,8 @@ package struct PreviewRendererRequest: Codable, Sendable {
     package static let activityViewContexts = ["Normal", "Stale"]
 
     package var libraryNames: [String]
+    /// Directory containing package resource bundles, relative to the renderer's main bundle.
+    package var packageResourceDirectory: String?
     package var registryNames: [String]
     package var fileName: String
     package var moduleName: String?
@@ -57,8 +59,9 @@ package struct PreviewRendererRequest: Codable, Sendable {
                  activityViewContext: String? = nil, activityToggleState: Bool? = nil,
                  appName: String? = nil, nativeSource: PreviewRendererNativeSource? = nil, nativeEnvironment: [String: String]? = nil,
                  metadataOnly: Bool? = nil,
-                 isLegacyComplication: Bool? = nil) {
+                 isLegacyComplication: Bool? = nil, packageResourceDirectory: String? = nil) {
         self.libraryNames = libraryNames
+        self.packageResourceDirectory = packageResourceDirectory
         self.registryNames = registryNames
         self.fileName = fileName
         self.moduleName = moduleName

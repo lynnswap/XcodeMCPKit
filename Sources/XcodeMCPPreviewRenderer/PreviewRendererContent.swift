@@ -24,6 +24,12 @@ func loadPreviewLibraries(_ request: PreviewRendererRequest) throws {
     guard unsafe setenv("XCODE_RUNNING_FOR_PREVIEWS", "1", 1) == 0 else {
         throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
+    if let directory = request.packageResourceDirectory {
+        let path = Bundle.main.bundleURL.appendingPathComponent(directory).path
+        guard unsafe setenv("PACKAGE_RESOURCE_BUNDLE_PATH", path, 1) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
     for name in request.libraryNames {
         let path = Bundle.main.bundleURL.appendingPathComponent(name).path
         // The process owns loaded preview code and its Swift metadata.
@@ -31,6 +37,7 @@ func loadPreviewLibraries(_ request: PreviewRendererRequest) throws {
             throw PreviewRendererError("Cannot load \(name): \(unsafe String(cString: dlerror()))")
         }
     }
+    // Preview mode defers SwiftUI graph creation until its code is ready.
     __previewThunksHaveFinishedLoading()
 }
 

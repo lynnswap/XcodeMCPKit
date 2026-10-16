@@ -58,20 +58,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
     private func render(in window: UIWindow) async throws {
         let requestURL = Bundle.main.bundleURL.appendingPathComponent("PreviewRequest.json")
         let request = try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: requestURL))
-        guard unsafe setenv("XCODE_RUNNING_FOR_PREVIEWS", "1", 1) == 0 else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-        }
-        for name in request.libraryNames {
-            let path = Bundle.main.bundleURL.appendingPathComponent(name).path
-            // The request owns this process; keep code and Swift metadata loaded
-            // until the Simulator app exits.
-            guard unsafe dlopen(path, RTLD_NOW | RTLD_GLOBAL) != nil else {
-                let message = unsafe String(cString: dlerror())
-                throw PreviewRendererError("Cannot load \(name): \(message)")
-            }
-        }
-        // Preview mode defers SwiftUI graph creation until its code is ready.
-        __previewThunksHaveFinishedLoading()
+        try loadPreviewLibraries(request)
         if request.metadataOnly == true {
             let value = try await nativePreviewMetadata(request)
             write(PreviewRendererResult(nativeMetadata: value.metadata,
