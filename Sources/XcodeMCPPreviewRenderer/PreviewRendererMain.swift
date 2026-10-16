@@ -268,7 +268,8 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             layoutController.view.frame = CGRect(origin: .zero, size: size)
             layoutController.view.setNeedsLayout()
             layoutController.view.layoutIfNeeded()
-            if widget != nil || activity != nil { try await Task.sleep(for: .milliseconds(500)) }
+            // Allow appearance tasks to deliver initial updates before sizing and capture.
+            try await Task.sleep(for: .milliseconds(500))
             if let activity {
                 size = activity.preferredContentSize
                 guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {

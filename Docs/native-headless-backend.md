@@ -452,6 +452,8 @@ remain unchanged. Each request evaluates the declaration and view body again and
 captures a new image. The current build also determines whether the host can
 reuse staged products and processes. Changes to built code, resources,
 dependencies, or destination invalidate the retained metadata and staged products.
+Before staging replacements, the host stops the retired renderers and uninstalls
+their applications from the owned Simulator.
 A change to the selected Simulator's identifier or OS version also replaces the
 owned device. Native platform-specific context, orientation, and on-device support
 policies are preserved in the evaluated metadata.

@@ -19,6 +19,7 @@ final class NativePreviewCorrection {
         var stages: [String: RendererStage] = [:]
         var simulator: Simulator?
         var simulatorDestination: SimulatorDestination?
+        var installedApplications: Set<String> = []
         var metadata: [MetadataKey: PreviewRendererResult] = [:]
         var activeUIStage: RendererStage?
         var plan: RetainedPlan?
@@ -161,10 +162,15 @@ final class NativePreviewCorrection {
         for task in pending { task.cancel() }
         for task in pending { _ = await task.result }
         for identifier in sessions.keys.sorted() where !identifiers.contains(identifier) {
-            guard let session = sessions[identifier] else { continue }
+            let cleanup = Task { @MainActor in
+                try await self.renderQueue.withAccess(to: identifier) {
+                    guard let session = self.sessions[identifier] else { return }
+                    try await self.close(session)
+                    self.sessions[identifier] = nil
+                }
+            }
             do {
-                try await close(session)
-                sessions[identifier] = nil
+                try await cleanup.value
             } catch { failures.append("\(identifier): \(error)") }
         }
         if !failures.isEmpty { throw NativeRuntimeError.invocation("Preview cleanup failed: " + failures.joined(separator: "; ")) }
@@ -389,6 +395,12 @@ final class NativePreviewCorrection {
 
     private func resetStages(_ session: WorkspaceSession, process: NativePreviewProcess) async throws {
         for stage in session.stages.values { try await stop(stage, session: session, process: process) }
+        if let simulator = session.simulator {
+            for identifier in session.installedApplications.sorted() {
+                _ = try await process.xcrun(["simctl", "uninstall", simulator.identifier, identifier])
+                session.installedApplications.remove(identifier)
+            }
+        }
         session.stages.removeAll()
         session.metadata.removeAll()
         session.plan = nil
@@ -408,6 +420,7 @@ final class NativePreviewCorrection {
             do {
                 _ = try await process.xcrun(["simctl", "delete", simulator.identifier])
                 session.simulator = nil
+                session.installedApplications.removeAll()
             } catch { failures.append("Cannot delete preview Simulator \(simulator.identifier): \(error)") }
         }
         if failures.isEmpty {
@@ -683,6 +696,7 @@ final class NativePreviewCorrection {
             _ = try await process.xcrun(["simctl", "delete", simulator.identifier])
             session.simulator = nil
             session.simulatorDestination = nil
+            session.installedApplications.removeAll()
         }
     }
 
@@ -967,9 +981,14 @@ final class NativePreviewCorrection {
                 }
             }
             if let containingApp {
+                guard let containingIdentifier = try Self.bundleInfo(at: containingApp)["CFBundleIdentifier"] as? String else {
+                    throw NativeRuntimeError.unsupportedContract("The preview containing app has no bundle identifier")
+                }
                 _ = try await process.xcrun(["simctl", "install", simulator.identifier, containingApp.path])
+                session.installedApplications.insert(containingIdentifier)
             }
             _ = try await process.xcrun(["simctl", "install", simulator.identifier, app.path])
+            session.installedApplications.insert(bundle)
             let installed = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, bundle, "app"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let installedApp = URL(filePath: installed, directoryHint: .isDirectory)
