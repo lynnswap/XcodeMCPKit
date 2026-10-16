@@ -255,7 +255,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             }
             window.rootViewController = rootController
             window.makeKeyAndVisible()
-        if activity != nil {
+            if activity != nil {
                 guard let scene = window.windowScene else { throw NativePreviewPipelineRequired() }
                 try await requestActivityPreviewOrientation(orientation, in: scene)
             }
@@ -268,7 +268,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             layoutController.view.frame = CGRect(origin: .zero, size: size)
             layoutController.view.setNeedsLayout()
             layoutController.view.layoutIfNeeded()
-            try await Task.sleep(for: .milliseconds(500))
+            if widget != nil || activity != nil { try await Task.sleep(for: .milliseconds(500)) }
             if let activity {
                 size = activity.preferredContentSize
                 guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {

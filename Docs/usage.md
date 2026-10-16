@@ -81,6 +81,8 @@ operation. Opening the same project in Xcode does not transfer its unsaved buffe
 active scheme, selected destination, or debugger session to the host.
 
 `RenderPreview` builds saved changes and captures a new image for each request.
+Repeated requests reuse preview planning when build products and preview settings
+are unchanged.
 Successful calls retain the workspace's preview processes and owned Simulator for
 later requests. Changes to build products, resources, or destination invalidate the
 retained preview metadata and staged products. Failure, timeout, or cancellation

@@ -18,9 +18,10 @@ final class NativePreviewCorrection {
         var additionalProducts: [URL] = []
         var stages: [String: RendererStage] = [:]
         var simulator: Simulator?
-        var simulatorDestination: String?
+        var simulatorDestination: SimulatorDestination?
         var metadata: [MetadataKey: PreviewRendererResult] = [:]
         var activeUIStage: RendererStage?
+        var plan: RetainedPlan?
 
         init(directory: URL) { self.directory = directory }
     }
@@ -28,6 +29,24 @@ final class NativePreviewCorrection {
     private struct MetadataKey: Hashable {
         let index: Int
         let localization: String?
+    }
+
+    private struct SimulatorDestination: Equatable {
+        let identifier: String
+        let systemVersion: String?
+
+        init(_ build: NativePreviewBuild.Result) {
+            identifier = build.destinationIdentifier
+            systemVersion = build.systemVersion
+        }
+    }
+
+    private struct RetainedPlan {
+        let source: URL
+        let index: Int
+        let localization: String?
+        let context: NativePreviewBuild.PlanningContext
+        let destination: NativePreviewBuild.DestinationSelection
     }
 
     private final class RendererStage {
@@ -153,17 +172,13 @@ final class NativePreviewCorrection {
 
     private func produce(_ input: Input, continuation: AsyncStream<Data>.Continuation,
                          native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws {
-        let prepared: Prepared
-        do {
-            guard !input.requiresNativePipeline else { throw NativePipelineRequired() }
-            prepared = try await prepare(input)
-        } catch is NativePipelineRequired {
+        if input.requiresNativePipeline {
             try await relayNative(native, continuation: continuation)
             return
         }
         let result: JSONValue? = try await Self.withTimeout(seconds: input.timeout) {
             do {
-                return try await self.render(input, prepared: prepared)
+                return try await self.render(input)
             } catch is NativePipelineRequired {
                 try await self.relayNative(native, continuation: continuation)
                 return nil
@@ -226,24 +241,50 @@ final class NativePreviewCorrection {
         let source: URL
         let location: Definition
         let destination: NativePreviewBuild.DestinationSelection
+        let context: NativePreviewBuild.PlanningContext
+        let build: NativePreviewBuild.Result?
+        let reusesDestination: Bool
     }
 
-    private func prepare(_ input: Input) async throws -> Prepared {
+    private func prepare(_ input: Input, session: WorkspaceSession) async throws -> Prepared {
         try Task.checkCancellation()
         let workspace = try await workspace(input.workspaceIdentifier)
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
         let location = try await previewDefinition(source: source, index: input.index)
-        guard let destination = try await builder.selectDestination(workspace: workspace, source: location.source, input: input.nativeValue) else {
-            throw NativePipelineRequired()
+        let context = try builder.planningContext(workspace: workspace)
+        let resolution = try await builder.resolveDestination(workspace: workspace, input: input.nativeValue)
+        if let plan = session.plan, plan.source == source, plan.index == input.index,
+           plan.localization == input.localization,
+           plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)),
+           try await builder.destinationResolution(resolution, matches: plan.destination.resolution) {
+            do {
+                // The current build certifies a retained plan; stale plans return to native selection below.
+                let destination = NativePreviewBuild.DestinationSelection(selected: plan.destination.selected, resolution: resolution)
+                let build = try await builder.build(workspace: workspace, destination: destination, source: source)
+                if let platform = build.previewPlatform {
+                    let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
+                    let signature = try NativePreviewProductSignature(build: build, source: source, helper: helper,
+                        additionalProducts: session.additionalProducts)
+                    if signature == session.signature,
+                       plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
+                        return Prepared(workspace: workspace, source: source, location: location, destination: destination,
+                            context: context, build: build, reusesDestination: true)
+                    }
+                }
+            } catch {
+                try Task.checkCancellation()
+                if error is CancellationError { throw error }
+            }
         }
-        // Native rendering starts its timeout after resolving the source and
-        // destination. Binding the adapter must not consume the build budget.
+        session.plan = nil
+        let destination = try await builder.selectDestination(workspace: workspace, source: location.source, resolution: resolution)
         _ = try await builder.prepare(workspace: workspace)
         try Task.checkCancellation()
-        return Prepared(workspace: workspace, source: source, location: location, destination: destination)
+        return Prepared(workspace: workspace, source: source, location: location, destination: destination,
+            context: context, build: nil, reusesDestination: false)
     }
 
-    private func render(_ input: Input, prepared: Prepared) async throws -> JSONValue {
+    private func render(_ input: Input) async throws -> JSONValue {
         guard let workspace = input.workspaceIdentifier else { throw NativeRuntimeError.invalidRequest("A workspaceIdentifier is required") }
         let identifier = UUID()
         let task = Task { @MainActor in
@@ -258,7 +299,10 @@ final class NativePreviewCorrection {
                     session = WorkspaceSession(directory: directory)
                     self.sessions[workspace] = session
                 }
-                do { return try await self.renderApp(input, prepared: prepared, session: session) }
+                do {
+                    let prepared = try await self.prepare(input, session: session)
+                    return try await self.renderApp(input, prepared: prepared, session: session)
+                }
                 catch {
                     let original = error
                     let cleanup = Task { @MainActor in try await self.close(session) }
@@ -347,6 +391,7 @@ final class NativePreviewCorrection {
         for stage in session.stages.values { try await stop(stage, session: session, process: process) }
         session.stages.removeAll()
         session.metadata.removeAll()
+        session.plan = nil
         for url in try FileManager.default.contentsOfDirectory(at: session.directory, includingPropertiesForKeys: nil) {
             try FileManager.default.removeItem(at: url)
         }
@@ -400,7 +445,6 @@ final class NativePreviewCorrection {
     private struct RendererPreparation {
         var request: PreviewRendererRequest
         let app: URL
-        let signing: [String]
         let product: URL
         let containingApp: URL?
         let environment: [String: String]
@@ -496,6 +540,8 @@ final class NativePreviewCorrection {
         let nativeExtensionIdentifier = ((metadataOnly == true && location.providerPath != nil) || nativeWidget)
             && (platform == .iOS || platform == .watchOS) && containingApp != nil
             ? try Self.widgetExtensionIdentifier(product) : nil
+        let clientIdentifier = (platform == .iOS || platform == .watchOS) && containingApp != nil
+            ? "dev.xcodemcp.PreviewClient." + UUID().uuidString : nil
         let roots = sourceProduct == nil ? [selection.source] : build.previewRoots
         let copiedSourceProduct = sourceProduct.flatMap { product in
             roots.contains { $0.isDynamicPackageProduct && $0.outputURL.flatMap(Self.frameworkBundle(containing:)) == product }
@@ -503,7 +549,7 @@ final class NativePreviewCorrection {
         }
         let products = try Self.prepareApp(product: product, sourceProduct: copiedSourceProduct, helper: helper, app: app,
             containingApp: containingApp, platform: platform,
-            clientIdentifier: nativeExtensionIdentifier.map { _ in "dev.xcodemcp.PreviewClient." + UUID().uuidString }, staticProduct: staticProduct,
+            clientIdentifier: clientIdentifier, staticProduct: staticProduct,
             resourceURLs: selection.source.resourceURLs)
         let linkedImages = try await nativeExtensionIdentifier == nil
             ? Self.linkStaticProducts(for: roots, host: sourceProduct == nil ? selection.host : nil, in: app,
@@ -601,7 +647,7 @@ final class NativePreviewCorrection {
                   additionalProducts: copiedProducts)) else {
             throw NativeRuntimeError.invocation("Build products changed while preparing the preview; render again")
         }
-        return RendererPreparation(request: request, app: app, signing: signing, product: product, containingApp: containingApp,
+        return RendererPreparation(request: request, app: app, product: product, containingApp: containingApp,
             environment: target.rendererEnvironment, selection: selection, staticProduct: staticProduct,
             additionalProducts: copiedProducts, productSignature: productSignature)
     }
@@ -633,7 +679,7 @@ final class NativePreviewCorrection {
             session.additionalProducts = []
             session.signature = try NativePreviewProductSignature(build: build, source: source, helper: helper)
         }
-        if let simulator = session.simulator, session.simulatorDestination != build.destinationIdentifier {
+        if let simulator = session.simulator, session.simulatorDestination != SimulatorDestination(build) {
             _ = try await process.xcrun(["simctl", "delete", simulator.identifier])
             session.simulator = nil
             session.simulatorDestination = nil
@@ -653,7 +699,9 @@ final class NativePreviewCorrection {
         let workspace = prepared.workspace
         let location = prepared.location
         var destination = prepared.destination
-        var build = try await builder.build(workspace: workspace, destination: destination, source: prepared.source)
+        var build: NativePreviewBuild.Result
+        if let retained = prepared.build { build = retained }
+        else { build = try await builder.build(workspace: workspace, destination: destination, source: prepared.source) }
         guard var platform = build.previewPlatform else { throw NativePipelineRequired() }
         try await update(session, build: build, source: prepared.source, platform: platform, process: process)
         var stage = try await prepareStage(input, prepared: prepared, session: session, build: build,
@@ -677,9 +725,15 @@ final class NativePreviewCorrection {
         guard let metadata = metadataResponse.nativeMetadata else {
             throw NativeRuntimeError.invocation("The preview process returned no native metadata")
         }
-        guard let evaluated = try await builder.selectDestination(workspace: workspace, source: location.source,
-            input: input.nativeValue, metadata: metadata,
-            providerDescription: metadataResponse.nativeProviderPreviewDescription) else { throw NativePipelineRequired() }
+        let evaluated: NativePreviewBuild.DestinationSelection
+        if prepared.reusesDestination, session.plan != nil {
+            evaluated = destination
+        } else {
+            let resolution = try await builder.resolveDestination(workspace: workspace, input: input.nativeValue)
+            evaluated = try await builder.selectDestination(workspace: workspace, source: location.source,
+                resolution: resolution, metadata: metadata,
+                providerDescription: metadataResponse.nativeProviderPreviewDescription)
+        }
         let unchanged = (destination.selected.value as? NSObject)?.isEqual(evaluated.selected.value) == true
         destination = evaluated
         if !unchanged {
@@ -688,6 +742,7 @@ final class NativePreviewCorrection {
             platform = selectedPlatform
             try await update(session, build: build, source: prepared.source, platform: platform, process: process)
         }
+        let planContext = try builder.planningContext(workspace: workspace, destination: destination)
         let isLegacyComplication: Bool?
         if platform == .watchOS, location.providerPath != nil {
             isLegacyComplication = try await builder.isComplicationPreview(metadata: metadata) ? true : nil
@@ -801,6 +856,11 @@ final class NativePreviewCorrection {
                 "Dynamic Type": .array(PreviewRendererRequest.displayVariantValues["Dynamic Type", default: []].map(JSONValue.string)),
             ])
         }
+        if prepared.context.matches(try builder.planningContext(workspace: workspace)),
+           planContext.matches(try builder.planningContext(workspace: workspace, destination: destination)) {
+            session.plan = RetainedPlan(source: prepared.source, index: input.index, localization: input.localization,
+                context: planContext, destination: destination)
+        } else { session.plan = nil }
         return .object(fields)
     }
 
@@ -885,19 +945,19 @@ final class NativePreviewCorrection {
                                  process: NativePreviewProcess, localization: String?, containingApp: URL? = nil) async throws ->
         (response: PreviewRendererResult, snapshot: Data?, destination: [String: JSONValue], deviceType: URL, exclusion: Data?) {
         let app = stage.preparation.app
-        if session.simulator == nil {
-            let allocation = Task { @MainActor in try await self.createSimulator(app: app, build: build, process: process) }
-            let simulator = try await allocation.value
-            session.simulator = simulator
-            session.simulatorDestination = build.destinationIdentifier
-            _ = try await process.xcrun(["simctl", "boot", simulator.identifier])
-            _ = try await process.xcrun(["simctl", "bootstatus", simulator.identifier, "-b"])
-        }
-        guard let simulator = session.simulator else { throw NativeRuntimeError.invocation("The preview Simulator was not created") }
         let info = try Self.bundleInfo(at: app)
         guard let bundle = info["CFBundleIdentifier"] as? String else {
             throw NativeRuntimeError.unsupportedContract("The preview product has no bundle identifier")
         }
+        if session.simulator == nil {
+            let allocation = Task { @MainActor in try await self.createSimulator(build: build, process: process) }
+            let simulator = try await allocation.value
+            session.simulator = simulator
+            session.simulatorDestination = SimulatorDestination(build)
+            _ = try await process.xcrun(["simctl", "boot", simulator.identifier])
+            _ = try await process.xcrun(["simctl", "bootstatus", simulator.identifier, "-b"])
+        }
+        guard let simulator = session.simulator else { throw NativeRuntimeError.invocation("The preview Simulator was not created") }
         if !stage.installed {
             if stage.processIdentifier != nil { try await stop(stage, session: session, process: process) }
             for other in session.stages.values where other !== stage && other.installed {
@@ -908,8 +968,6 @@ final class NativePreviewCorrection {
             }
             if let containingApp {
                 _ = try await process.xcrun(["simctl", "install", simulator.identifier, containingApp.path])
-                _ = try await process.xcrun(["simctl", "launch", simulator.identifier, "com.apple.PreviewShell"])
-                session.activeUIStage = nil
             }
             _ = try await process.xcrun(["simctl", "install", simulator.identifier, app.path])
             let installed = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, bundle, "app"])
@@ -927,6 +985,11 @@ final class NativePreviewCorrection {
             }
             stage.installed = true
         }
+        if containingApp != nil {
+            // Metadata capture can foreground another helper between native service requests.
+            _ = try await process.xcrun(["simctl", "launch", simulator.identifier, "com.apple.PreviewShell"])
+            session.activeUIStage = nil
+        }
         if stage.launched && stage.localization != localization { try await stop(stage, session: session, process: process) }
         guard let documents = stage.documents else { throw NativeRuntimeError.invocation("The installed renderer has no data container") }
         let arguments = try Self.rendererArguments(localization: localization)
@@ -934,16 +997,14 @@ final class NativePreviewCorrection {
         let rendered: RendererOutput
         if stage.preparation.request.isLegacyComplication == true {
             try await stop(stage, session: session, process: process)
-            try await writeRendererRequest(stage.preparation.request, app: app, platform: .watchOS,
-                signing: stage.preparation.signing, process: process)
-            _ = try await process.xcrun(["simctl", "install", simulator.identifier, app.path])
+            let requestURL = documents.appendingPathComponent("PreviewRequest.json")
+            try JSONEncoder().encode(stage.preparation.request).write(to: requestURL, options: .atomic)
             let resultURL = documents.appendingPathComponent("PreviewResult.json")
             if FileManager.default.fileExists(atPath: resultURL.path) { try FileManager.default.removeItem(at: resultURL) }
-            let installed = try await process.xcrun(["simctl", "get_app_container", simulator.identifier, bundle, "app"])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            stage.executable = URL(filePath: installed, directoryHint: .isDirectory).appendingPathComponent("XcodeMCPPreviewRenderer")
-            let launch = try await process.xcrun(["simctl", "launch", "--terminate-running-process", simulator.identifier, bundle] + arguments, environment: environment)
+            let launch = try await process.xcrun(["simctl", "launch", "--terminate-running-process", simulator.identifier, bundle,
+                "--preview-request-file", requestURL.path] + arguments, environment: environment)
             stage.processIdentifier = launch.split(separator: ":").last.flatMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            session.activeUIStage = stage
             while !FileManager.default.fileExists(atPath: resultURL.path) { try await Task.sleep(for: .milliseconds(25)) }
             let response = try JSONDecoder().decode(PreviewRendererResult.self, from: Data(contentsOf: resultURL))
             if response.requiresNativePipeline == true { throw NativePipelineRequired() }
@@ -951,7 +1012,6 @@ final class NativePreviewCorrection {
             let snapshot = try response.snapshotName.map { try Data(contentsOf: documents.appendingPathComponent($0)) }
             let exclusion = try response.exclusionSnapshotName.map { try Data(contentsOf: documents.appendingPathComponent($0)) }
             rendered = (response, snapshot, exclusion)
-            stage.installed = false
         } else {
             if !stage.launched {
                 let directory = documents.appendingPathComponent("XcodeMCPPreviewSession-" + UUID().uuidString, isDirectory: true)
@@ -981,7 +1041,6 @@ final class NativePreviewCorrection {
                 session.activeUIStage = stage
             }
             rendered = try await rendererCommand(stage)
-            if containingApp != nil { session.activeUIStage = nil }
         }
         return (rendered.response, rendered.snapshot, simulator.destination, simulator.deviceType, rendered.exclusion)
     }
@@ -2012,12 +2071,11 @@ final class NativePreviewCorrection {
 
     private struct Simulator {
         let identifier: String
-        let bundleIdentifier: String
         let destination: [String: JSONValue]
         let deviceType: URL
     }
 
-    private func createSimulator(app: URL, build: NativePreviewBuild.Result, process: NativePreviewProcess) async throws -> Simulator {
+    private func createSimulator(build: NativePreviewBuild.Result, process: NativePreviewProcess) async throws -> Simulator {
         let inventoryData = Data(try await process.xcrun(["simctl", "list", "--json"]).utf8)
         guard let inventory = try JSONSerialization.jsonObject(with: inventoryData) as? [String: Any] else {
             throw NativeRuntimeError.unsupportedContract("Simulator inventory is not a JSON object")
@@ -2032,13 +2090,9 @@ final class NativePreviewCorrection {
         let type = (inventory["devicetypes"] as? [[String: Any]])?.first { $0["identifier"] as? String == deviceID }
         guard let path = type?["bundlePath"] as? String else { throw NativePipelineRequired() }
         let deviceType = URL(filePath: path, directoryHint: .isDirectory)
-        let info = try Self.bundleInfo(at: app)
-        guard let bundleIdentifier = info["CFBundleIdentifier"] as? String else {
-            throw NativeRuntimeError.unsupportedContract("The built preview product has no bundle identifier")
-        }
         let identifier = try await process.xcrun(["simctl", "create", "XcodeMCPPreview-\(UUID().uuidString)", deviceID, runtimeID])
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return Simulator(identifier: identifier, bundleIdentifier: bundleIdentifier,
+        return Simulator(identifier: identifier,
             destination: ["identifier": .string(build.destinationIdentifier),
                 "platformName": .string(build.platformName ?? "iOS"),
                 "deviceModelName": .string(build.deviceModelName ?? selected.1["name"] as? String ?? deviceID),

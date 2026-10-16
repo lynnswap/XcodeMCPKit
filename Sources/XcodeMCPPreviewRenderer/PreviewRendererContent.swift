@@ -15,7 +15,15 @@ func loadPreviewRequest() throws -> PreviewRendererRequest {
 
 @MainActor
 func readPreviewRequest() throws -> PreviewRendererRequest {
-    let url = Bundle.main.resourceURL!.appendingPathComponent("PreviewRequest.json")
+    let url: URL
+    if let index = CommandLine.arguments.firstIndex(of: "--preview-request-file") {
+        guard CommandLine.arguments.indices.contains(index + 1) else {
+            throw PreviewRendererError("The preview renderer requires a request file")
+        }
+        url = URL(filePath: CommandLine.arguments[index + 1])
+    } else {
+        url = Bundle.main.resourceURL!.appendingPathComponent("PreviewRequest.json")
+    }
     return try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: url))
 }
 

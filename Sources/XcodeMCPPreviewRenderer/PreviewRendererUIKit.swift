@@ -113,7 +113,6 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         controller.view.frame = CGRect(origin: .zero, size: size)
         #endif
         controller.view.layoutIfNeeded()
-        try await Task.sleep(for: .milliseconds(500))
         if case .sizeThatFits = layout {
             #if os(tvOS)
             size = controller.sizeThatFits(in: window.screen.bounds.size)

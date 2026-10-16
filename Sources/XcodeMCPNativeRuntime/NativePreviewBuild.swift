@@ -165,6 +165,17 @@ final class NativePreviewBuild {
         return buildable.isEqual(runnable)
     }
 
+    func planningContext(workspace: AnyObject, destination: DestinationSelection? = nil) throws -> PlanningContext {
+        guard let manager = try object(workspace, selector: "runContextManager"),
+              let scheme = try object(manager, selector: "activeRunContext"),
+              let environment = try object(workspace, selector: "executionEnvironment") else {
+            throw NativeRuntimeError.invalidRequest("The workspace has no active scheme, run destination, or execution environment")
+        }
+        return try PlanningContext(scheme: scheme, schemeIdentifier: object(scheme, selector: "schemeIdentifier") as? NSObject,
+            environment: environment, activeDestination: destinationContext(object(manager, selector: "activeRunDestination")),
+            destination: destinationContext(destination?.selected.value))
+    }
+
     func build(workspace: AnyObject, destination selection: DestinationSelection, source: URL) async throws -> Result {
         try Task.checkCancellation()
         let info = selection.selected
@@ -770,6 +781,25 @@ final class NativePreviewBuild {
         return try unsafe get.unsafeInvoke()
     }
 
+    private func destinationContext(_ destination: AnyObject?) throws -> DestinationContext? {
+        guard let destination else { return nil }
+        let device = try object(destination, selector: "targetDevice")
+        let sdk = try object(destination, selector: "targetSDK")
+        let variant = try object(destination, selector: "targetSDKVariant")
+        let hostPlatform = try object(destination, selector: "hostTargetedPlatform")
+        let available: Bool?
+        if let device {
+            let get = try runtime.object(device).resolveMethodAndWait(selector: "isAvailable", as: (() -> Bool).self)
+            available = try unsafe get.unsafeInvoke()
+        } else { available = nil }
+        return try DestinationContext(identifier: optionalString(device, selector: "identifier")
+                ?? optionalString(destination, selector: "targetIdentifier"),
+            architecture: optionalString(destination, selector: "targetArchitecture"),
+            sdk: optionalString(sdk, selector: "canonicalName"), variant: optionalString(variant, selector: "name"),
+            hostPlatform: optionalString(hostPlatform, selector: "identifier"),
+            runtimeVersion: optionalString(device, selector: "operatingSystemVersion"), available: available)
+    }
+
     @safe
     private struct DestinationPreparation {
         let properties: NativeSwiftMethod<() -> NativeSwiftValue>
@@ -845,16 +875,48 @@ final class NativePreviewBuild {
                            deviceModelName: model, systemVersion: systemVersion)
     }
 
-    struct DestinationSelection {
-        let selected: Destination
+    struct PlanningContext {
+        fileprivate let scheme: AnyObject
+        fileprivate let schemeIdentifier: NSObject?
+        fileprivate let environment: AnyObject
+        fileprivate let activeDestination: DestinationContext?
+        fileprivate let destination: DestinationContext?
+
+        func matches(_ other: PlanningContext) -> Bool {
+            let sameScheme: Bool
+            switch (schemeIdentifier, other.schemeIdentifier) {
+            case let (left?, right?): sameScheme = left.isEqual(right)
+            case (nil, nil): sameScheme = scheme === other.scheme
+            default: sameScheme = false
+            }
+            return sameScheme && environment === other.environment
+                && activeDestination == other.activeDestination && destination == other.destination
+        }
+    }
+
+    fileprivate struct DestinationContext: Equatable {
+        let identifier: String?
+        let architecture: String?
+        let sdk: String?
+        let variant: String?
+        let hostPlatform: String?
+        let runtimeVersion: String?
+        let available: Bool?
+    }
+
+    struct DestinationResolution {
+        fileprivate let host: AnyObject
+        fileprivate let preferences: NativeSwiftValue
         let available: JSONValue?
         let errors: [String]
+    }
 
-        init(selected: Destination, available: JSONValue?, errors: [String] = []) {
-            self.selected = selected
-            self.available = available
-            self.errors = errors
-        }
+    struct DestinationSelection {
+        let selected: Destination
+        let resolution: DestinationResolution
+
+        var available: JSONValue? { resolution.available }
+        var errors: [String] { resolution.errors }
     }
 
     struct Destination {
@@ -974,8 +1036,51 @@ extension NativePreviewBuild {
         return try await operation()
     }
 
-    func selectDestination(workspace: AnyObject, source: Source, input: NativeSwiftValue,
-                           metadata: Data? = nil, providerDescription: Data? = nil) async throws -> DestinationSelection? {
+    func resolveDestination(workspace: AnyObject, input: NativeSwiftValue) async throws -> DestinationResolution {
+        try Task.checkCancellation()
+        let previews = ImageSelector.path(installation.framework("PreviewsXcode", in: "PlugIns"))
+        let createHost = try await runtime.object(workspace).resolveMethod(
+            named: "(extension in PreviewsXcode):__C.IDEWorkspace.sceneHost(isNewProjectFromTemplate: Swift.Bool) -> PreviewsXcode.XcodeWorkspaceSceneHost",
+            as: ((Bool) -> AnyObject).self)
+        let host = try unsafe createHost.unsafeInvoke(false)
+        let resolutionType = try await runtime.resolveSwiftType(named: "PreviewsXcode.RenderPreviewAction.DestinationResolution", in: previews)
+        let actionType = try await runtime.resolveSwiftType(named: "PreviewsXcode.RenderPreviewAction", in: previews)
+        let resolve = try await actionType.resolveStaticMethod(
+            named: "static PreviewsXcode.RenderPreviewAction.resolveDestination(input: PreviewsXcode.RenderPreviewAction.Input, sceneHost: PreviewsXcode.XcodeWorkspaceSceneHost) async -> PreviewsXcode.RenderPreviewAction.DestinationResolution",
+            as: (@concurrent (NativeSwiftValue, AnyObject) async -> NativeSwiftValue).self,
+            valueABIs: [input.type: .opaque(named: input.type.name), resolutionType: .opaque(named: resolutionType.name)])
+        let resolution = try unsafe await resolve.unsafeInvoke(input, host)
+        try Task.checkCancellation()
+        let fields = try resolution.withCopy { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap {
+            field in field.label.map { ($0, field.value) }
+        }) }
+        guard let rawPreferences = fields["preferences"] else {
+            throw NativeRuntimeError.unsupportedContract("Native preview destination resolution has no preferences")
+        }
+        let preferences = try await _openExistential(rawPreferences, do: nativePreviewOwnedValue)
+        let errors = (fields["errorMessage"] as? String? ?? nil).map { [$0] } ?? []
+        guard let available = fields["availableRenderDestinations"] as? any Encodable else {
+            throw NativeRuntimeError.unsupportedContract("Native preview destination resolution has no encodable destinations")
+        }
+        let encodedAvailable = try JSONEncoder().encode(available)
+        guard let availableJSON = JSONValue(any: try JSONSerialization.jsonObject(with: encodedAvailable, options: .fragmentsAllowed)) else {
+            throw NativeRuntimeError.unsupportedContract("Native preview destinations have an unsupported JSON representation")
+        }
+        return DestinationResolution(host: host, preferences: preferences,
+            available: availableJSON == .null ? nil : availableJSON, errors: errors)
+    }
+
+    func destinationResolution(_ lhs: DestinationResolution, matches rhs: DestinationResolution) async throws -> Bool {
+        guard lhs.available == rhs.available, lhs.errors == rhs.errors else { return false }
+        let type = lhs.preferences.type
+        let equals = try await type.resolveStaticMethod(
+            named: "== infix(PreviewsPipeline.DestinationPreferences, PreviewsPipeline.DestinationPreferences) -> Swift.Bool",
+            as: ((NativeSwiftValue, NativeSwiftValue) -> Bool).self, valueABIs: [type: .opaque(named: type.name)])
+        return try unsafe equals.unsafeInvoke(lhs.preferences, rhs.preferences)
+    }
+
+    func selectDestination(workspace: AnyObject, source: Source, resolution: DestinationResolution,
+                           metadata: Data? = nil, providerDescription: Data? = nil) async throws -> DestinationSelection {
         let evaluatedMetadata: NativeSwiftValue?
         if let metadata { evaluatedMetadata = try await decodePreviewValue(metadata, named: "PreviewMetadata") }
         else { evaluatedMetadata = nil }
@@ -983,36 +1088,9 @@ extension NativePreviewBuild {
         if let providerDescription { evaluatedDescription = try await decodePreviewValue(providerDescription, named: "PreviewDescription") }
         else { evaluatedDescription = nil }
         return try await withSourceSelection(workspace: workspace) {
-            let previews = ImageSelector.path(installation.framework("PreviewsXcode", in: "PlugIns"))
-            let createHost = try await runtime.object(workspace).resolveMethod(
-                named: "(extension in PreviewsXcode):__C.IDEWorkspace.sceneHost(isNewProjectFromTemplate: Swift.Bool) -> PreviewsXcode.XcodeWorkspaceSceneHost",
-                as: ((Bool) -> AnyObject).self)
-            let host = try unsafe createHost.unsafeInvoke(false)
-            let resolutionType = try await runtime.resolveSwiftType(named: "PreviewsXcode.RenderPreviewAction.DestinationResolution", in: previews)
-            let actionType = try await runtime.resolveSwiftType(named: "PreviewsXcode.RenderPreviewAction", in: previews)
-            let resolve = try await actionType.resolveStaticMethod(
-                named: "static PreviewsXcode.RenderPreviewAction.resolveDestination(input: PreviewsXcode.RenderPreviewAction.Input, sceneHost: PreviewsXcode.XcodeWorkspaceSceneHost) async -> PreviewsXcode.RenderPreviewAction.DestinationResolution",
-                as: (@concurrent (NativeSwiftValue, AnyObject) async -> NativeSwiftValue).self,
-                valueABIs: [input.type: .opaque(named: input.type.name), resolutionType: .opaque(named: resolutionType.name)])
-            let resolution = try unsafe await resolve.unsafeInvoke(input, host)
-            let fields = try resolution.withCopy { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap {
-                field in field.label.map { ($0, field.value) }
-            }) }
-            guard let rawPreferences = fields["preferences"] else {
-                throw NativeRuntimeError.unsupportedContract("Native preview destination resolution has no preferences")
-            }
-            let preferences = try await _openExistential(rawPreferences, do: nativePreviewOwnedValue)
-            let errors = (fields["errorMessage"] as? String? ?? nil).map { [$0] } ?? []
-            guard let available = fields["availableRenderDestinations"] as? any Encodable else {
-                throw NativeRuntimeError.unsupportedContract("Native preview destination resolution has no encodable destinations")
-            }
-            let encodedAvailable = try JSONEncoder().encode(available)
-            guard let availableJSON = JSONValue(any: try JSONSerialization.jsonObject(with: encodedAvailable, options: .fragmentsAllowed)) else {
-                throw NativeRuntimeError.unsupportedContract("Native preview destinations have an unsupported JSON representation")
-            }
-            guard let pack = try await executionPointPack(source: source, preferences: preferences,
-                metadata: evaluatedMetadata, providerDescription: evaluatedDescription) else { return nil }
-            let plan = try await sourcePlan(workspace: workspace, host: host, source: source, pack: pack)
+            guard let pack = try await executionPointPack(source: source, preferences: resolution.preferences,
+                metadata: evaluatedMetadata, providerDescription: evaluatedDescription) else { throw NativePipelineRequired() }
+            let plan = try await sourcePlan(workspace: workspace, host: resolution.host, source: source, pack: pack)
             let record = try await sourcePlanRecord(plan, pack: pack)
             let prepared = try await prepareDestinationProperties()
             let recipeType = try await runtime.resolveSwiftType(named: "PreviewsPipeline.AnyRunDestinationRecipe",
@@ -1023,8 +1101,10 @@ extension NativePreviewBuild {
                 Mirror(reflecting: $0).children.first { $0.label == "runDestination" }?.value as? NSObject
             }) else { throw NativeRuntimeError.unsupportedContract("Native preview plan has no IDERunDestination representation") }
             let selected = try destinationInfo(destination, recipe: recipe, prepared: prepared)
-            guard NativePreviewPlatform.supportsDestination(platformIdentifier: selected.platformIdentifier, identifier: selected.identifier) else { return nil }
-            return DestinationSelection(selected: selected, available: availableJSON == .null ? nil : availableJSON, errors: errors)
+            guard NativePreviewPlatform.supportsDestination(platformIdentifier: selected.platformIdentifier, identifier: selected.identifier) else {
+                throw NativePipelineRequired()
+            }
+            return DestinationSelection(selected: selected, resolution: resolution)
         }
     }
 

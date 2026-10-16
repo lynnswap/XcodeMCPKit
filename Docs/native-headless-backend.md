@@ -203,8 +203,12 @@ Standalone static and dynamic framework images were compared with Xcode 27.1 on
 macOS 26.6.2 and iOS 27.2, including static bundle lookup and dynamic framework
 resources on macOS.
 Source and host records must use the same supported platform and architecture
-before checking for ambiguity. An extension's own bundle supplies its resources,
-identifier, and entitlements. A containing application's shared Frameworks are
+before checking for ambiguity. An extension's own bundle supplies its resources
+and entitlements. On iOS and watchOS, an extension's helper application uses a
+separate client identifier so it can coexist with the original embedded extension.
+Direct preview code reading `Bundle.main.bundleIdentifier` observes that client
+identifier; native Widget services run the original extension with its original
+identifier. A containing application's shared Frameworks are
 copied when its embedded extension binary matches the source's build UUID;
 the extension's own Frameworks take precedence. The containing application's
 root resources and application lifecycle are not used.
@@ -412,10 +416,10 @@ Activity labels use the containing application's localized name when that
 application is available, falling back to the extension's name.
 Other display controls retain the native pipeline for Live Activity previews.
 
-Each workspace owns a preview session that retains its staged products and renderer
-processes. Simulator previews reuse an owned device matching the selected
-destination's device type and runtime. macOS and Mac Catalyst reuse a staged
-application process, including when the app is sandboxed. The host sends each
+Each workspace owns a preview session that retains its staged products, their
+resources, and renderer processes. Simulator previews reuse an owned device for
+the selected destination identifier and OS version. macOS and Mac Catalyst reuse
+a staged application process, including when the app is sandboxed. The host sends each
 render request to the process's session directory and reads its new result there.
 Destination selection retains the decoded native RenderPreview input and the
 selected source's translation unit. Xcode's source graph and update plan choose
@@ -429,6 +433,12 @@ returned. The correction preserves that setting, the native destination fields,
 and any unmatched-preference warning. `renderedDestination` describes the native
 plan's chosen destination. Destinations unsupported by the direct renderer retain
 the native pipeline.
+Every request resolves destination preferences and availability through Xcode and
+retains its current warnings. It also runs an incremental build of the active
+scheme. When the compiled products, workspace execution context, selected
+definition and localization, and native destination resolution are unchanged, the
+session reuses its previous native source plan. If those inputs change or building
+with a retained plan fails, the host repeats native source planning.
 For registry and provider previews, the renderer first evaluates the preview
 declaration and traits, then returns native preview metadata without invoking the
 deferred view body. Providers also return the selected child's native preview
@@ -439,12 +449,12 @@ operation preferences take precedence over source preferences. These RenderPrevi
 requests use the native Location's `none` requirements. The session retains metadata
 for each definition and localization while its build products and destination
 remain unchanged. Each request evaluates the declaration and view body again and
-captures a new image. The host builds the active scheme before checking whether
-it can reuse staged products and processes. Changes to built code, resources,
+captures a new image. The current build also determines whether the host can
+reuse staged products and processes. Changes to built code, resources,
 dependencies, or destination invalidate the retained metadata and staged products.
-A changed Simulator destination also replaces the owned device. Native
-platform-specific context, orientation, and on-device support policies are preserved
-in the evaluated metadata.
+A change to the selected Simulator's identifier or OS version also replaces the
+owned device. Native platform-specific context, orientation, and on-device support
+policies are preserved in the evaluated metadata.
 Preview forms unsupported by the direct renderer retain
 their existing native fallback behavior.
 Closing a workspace or shutting down the host stops its renderer processes,
