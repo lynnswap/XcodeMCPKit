@@ -33,12 +33,18 @@ struct WatchPreviewSource {
 }
 
 struct PreviewRendererWatch: App {
-    private let source: Result<WatchPreviewSource, any Error>
+    private enum Source {
+        case session(URL)
+        case oneShot(WatchPreviewSource)
+    }
+
+    private let source: Result<Source, any Error>
 
     init() {
         // ClockKit's source archive uses the environment before a display scene
         // exists; creating its controller and capturing remain in the UI task.
         source = Result {
+            if let directory = try previewRendererSessionDirectory() { return .session(directory) }
             let request = try readPreviewRequest()
             let complication: ClockKitPreview?
             if request.isLegacyComplication == true {
@@ -50,14 +56,25 @@ struct PreviewRendererWatch: App {
             } else {
                 complication = nil
             }
-            return WatchPreviewSource(request: request, complication: complication)
+            return .oneShot(WatchPreviewSource(request: request, complication: complication))
         }
     }
 
     var body: some Scene {
         WindowGroup {
             Color.clear.task {
-                do { try await render() }
+                do {
+                    switch try source.get() {
+                    case .session(let directory):
+                        try await runPreviewRendererSession(in: directory) { request, output in
+                            // ClockKit archives need the pre-scene environment from the one-shot entry point.
+                            guard request.isLegacyComplication != true else { throw NativePreviewPipelineRequired() }
+                            return try await render(WatchPreviewSource(request: request, complication: nil), directory: output)
+                        }
+                    case .oneShot(let source):
+                        write(try await render(source, directory: documents))
+                    }
+                }
                 catch is NativePreviewPipelineRequired { write(PreviewRendererResult(requiresNativePipeline: true)) }
                 catch { write(PreviewRendererResult(error: String(describing: error))) }
             }
@@ -65,15 +82,13 @@ struct PreviewRendererWatch: App {
     }
 
     @MainActor
-    private func render() async throws {
-        let source = try self.source.get()
+    private func render(_ source: WatchPreviewSource, directory: URL) async throws -> PreviewRendererResult {
         let request = source.request
         if request.isLegacyComplication != true { try loadPreviewLibraries(request) }
         if request.metadataOnly == true {
             let value = try await nativePreviewMetadata(request)
-            write(PreviewRendererResult(nativeMetadata: value.metadata,
-                nativeProviderPreviewDescription: value.providerDescription))
-            return
+            return PreviewRendererResult(nativeMetadata: value.metadata,
+                nativeProviderPreviewDescription: value.providerDescription)
         }
         let image: CGImage
         var result: PreviewRendererResult
@@ -96,9 +111,9 @@ struct PreviewRendererWatch: App {
         }
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { throw PreviewRendererError("The preview host could not encode its snapshot") }
-        try (data as Data).write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
+        try (data as Data).write(to: directory.appendingPathComponent("Preview.png"), options: .atomic)
         result.snapshotName = "Preview.png"
-        write(result)
+        return result
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }

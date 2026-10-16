@@ -12,9 +12,9 @@ final class NativePreviewProcess {
     }
 
     func run(_ executable: String, _ arguments: [String], environment launchEnvironment: [String: String] = [:],
-             directory: URL? = nil) async throws -> String {
+             directory: URL? = nil, outputLog: URL? = nil) async throws -> String {
         try Task.checkCancellation()
-        let logURL = artifacts.appendingPathComponent("process-\(UUID().uuidString).log")
+        let logURL = outputLog ?? artifacts.appendingPathComponent("process-\(UUID().uuidString).log")
         try Data().write(to: logURL)
         let errorURL = logURL.appendingPathExtension("stderr")
         try Data().write(to: errorURL)

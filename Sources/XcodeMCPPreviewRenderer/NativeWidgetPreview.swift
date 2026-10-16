@@ -20,6 +20,12 @@ func nativePreviewServiceResultDirectory() throws -> URL? {
 
 @MainActor
 func writeNativeWidgetPreviewResult(to directory: URL) async throws {
+    if let sessionDirectory = try previewRendererSessionDirectory() {
+        try await runPreviewRendererSession(in: sessionDirectory) { request, _ in
+            try await renderNativeWidgetPreview(request)
+        }
+        return
+    }
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     var result: PreviewRendererResult
     do {

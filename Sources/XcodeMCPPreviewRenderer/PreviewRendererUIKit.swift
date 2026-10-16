@@ -31,19 +31,30 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         let window = UIWindow(windowScene: scene)
         self.window = window
         Task { @MainActor in
-            do { try await render(in: window) }
+            do {
+                if let directory = try previewRendererSessionDirectory() {
+                    try await runPreviewRendererSession(in: directory) { request, output in
+                        try await self.render(request, in: window, directory: output)
+                    }
+                } else {
+                    write(try await render(readPreviewRequest(), in: window, directory: documents))
+                }
+            }
             catch is NativePreviewPipelineRequired { write(PreviewRendererResult(requiresNativePipeline: true)) }
             catch { write(PreviewRendererResult(error: String(describing: error))) }
         }
     }
 
-    private func render(in window: UIWindow) async throws {
-        let request = try loadPreviewRequest()
+    private func render(_ request: PreviewRendererRequest, in window: UIWindow, directory: URL) async throws -> PreviewRendererResult {
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        try loadPreviewLibraries(request)
         if request.metadataOnly == true {
             let value = try await nativePreviewMetadata(request)
-            write(PreviewRendererResult(nativeMetadata: value.metadata,
-                nativeProviderPreviewDescription: value.providerDescription))
-            return
+            return PreviewRendererResult(nativeMetadata: value.metadata,
+                nativeProviderPreviewDescription: value.providerDescription)
         }
         let content = try await makeGeneralPreview(request)
         let controller = UIHostingController(rootView: content.view)
@@ -78,18 +89,20 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         #if os(tvOS)
         let result = try await PreviewSnapshotWindow.withWindow(from: window, size: size) { snapshot in
             try await capture(in: snapshot.window, controller: controller, layout: content.layout,
-                              size: size, result: content.result, resizeWindow: { size in try await snapshot.resize(to: size) })
+                              size: size, result: content.result, directory: directory,
+                              resizeWindow: { size in try await snapshot.resize(to: size) })
         }
         #else
         let result = try await capture(in: window, controller: controller, layout: content.layout,
-                                       size: size, result: content.result)
+                                       size: size, result: content.result, directory: directory)
         #endif
-        write(result)
+        return result
     }
 
     private func capture(in window: UIWindow, controller: UIHostingController<AnyView>,
                          layout: DeveloperToolsSupport.PreviewLayout, size initialSize: CGSize,
                          result initialResult: PreviewRendererResult,
+                         directory: URL,
                          resizeWindow: ((CGSize) async throws -> Void)? = nil) async throws -> PreviewRendererResult {
         var size = initialSize
         window.rootViewController = controller
@@ -100,6 +113,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         controller.view.frame = CGRect(origin: .zero, size: size)
         #endif
         controller.view.layoutIfNeeded()
+        // Allow appearance tasks to deliver initial updates before sizing and capture.
         try await Task.sleep(for: .milliseconds(500))
         if case .sizeThatFits = layout {
             #if os(tvOS)
@@ -132,7 +146,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         #if targetEnvironment(macCatalyst)
         result.snapshotData = data
         #else
-        try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
+        try data.write(to: directory.appendingPathComponent("Preview.png"), options: .atomic)
         result.snapshotName = "Preview.png"
         #endif
         return result

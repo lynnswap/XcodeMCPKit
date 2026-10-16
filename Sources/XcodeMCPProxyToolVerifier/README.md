@@ -133,10 +133,10 @@ Each capture uses a fresh copy of the prepared project and saves `capture.json`,
 the live catalog, the PNG, raw tool results, selected destination, source/project
 hashes, and executable identity. The existing MCP client owns the bridge or
 headless host process. Workspace and document cleanup runs after failures as
-well as success; cleanup errors remain in the report. The renderer owns its
-temporary Simulator and staged application. The verifier does not remove other
-devices or applications. Output files remain available for inspection; choose a
-new output directory for each run.
+well as success; cleanup errors remain in the report. Closing the workspace
+releases its preview processes, owned Simulator, and staged products. The verifier
+does not remove other devices or applications. Output files remain available for
+inspection; choose a new output directory for each run.
 
 Comparison requires successful captures, matching source/project inputs, the
 same case, Xcode build, and requested destination. It compares the response's

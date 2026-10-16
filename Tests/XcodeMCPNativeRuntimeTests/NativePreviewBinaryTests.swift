@@ -5,6 +5,38 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewBinaryTests {
+    @Test func discoversPreviewSymbolsInTheArm64Image() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registry = "7Fixture04ViewfMu_V"
+        let importedRegistry = "12ExternalViewfMu_V"
+        let appRoot = "10FixtureApp0B0V"
+        var libraries: [URL] = []
+        for architecture in ["arm64", "x86_64"] {
+            let source = root.appendingPathComponent(architecture + ".c")
+            let library = root.appendingPathComponent(architecture + ".dylib")
+            let selectedRoot = architecture == "arm64" ? appRoot : "12OtherAppRootV"
+            let code = """
+                int registry __asm__("_$s\(registry)Mn") = 1;
+                extern void imported_registry(void) __asm__("_$s\(importedRegistry)Mn");
+                extern void imported_main(void) __asm__("_$s12ExternalRootV5$mainyyFZ");
+                void preview_main(void) __asm__("_$s\(selectedRoot)5$mainyyFZ");
+                void preview_main(void) { imported_main(); imported_registry(); }
+                """
+            try Data(code.utf8).write(to: source)
+            try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-arch", architecture,
+                "-dynamiclib", source.path, "-Wl,-undefined,dynamic_lookup", "-o", library.path])
+            libraries.append(library)
+        }
+        let universal = root.appendingPathComponent("universal.dylib")
+        try previewBinaryOutput("/usr/bin/xcrun", ["lipo", "-create"] + libraries.map(\.path) + ["-output", universal.path])
+
+        let symbols = try NativePreviewBinary.previewSymbols(in: [libraries[0], universal])
+        #expect(symbols.registryNames == [importedRegistry, registry].sorted())
+        #expect(symbols.programRootNames == [appRoot])
+    }
+
     @Test func signedCopiesRetainBinaryIdentity() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

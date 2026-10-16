@@ -15,27 +15,47 @@ func loadPreviewRequest() throws -> PreviewRendererRequest {
 
 @MainActor
 func readPreviewRequest() throws -> PreviewRendererRequest {
-    let url = Bundle.main.resourceURL!.appendingPathComponent("PreviewRequest.json")
+    let url: URL
+    if let index = CommandLine.arguments.firstIndex(of: "--preview-request-file") {
+        guard CommandLine.arguments.indices.contains(index + 1) else {
+            throw PreviewRendererError("The preview renderer requires a request file")
+        }
+        url = URL(filePath: CommandLine.arguments[index + 1])
+    } else {
+        url = Bundle.main.resourceURL!.appendingPathComponent("PreviewRequest.json")
+    }
     return try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: url))
 }
 
 @MainActor
+private var loadedPreviewLibraryPaths: Set<String> = []
+private let initialPackageResourceDirectory = ProcessInfo.processInfo.environment["PACKAGE_RESOURCE_BUNDLE_PATH"]
+
+@MainActor
 func loadPreviewLibraries(_ request: PreviewRendererRequest) throws {
+    let initialDirectory = initialPackageResourceDirectory
     guard unsafe setenv("XCODE_RUNNING_FOR_PREVIEWS", "1", 1) == 0 else {
         throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
-    if let directory = request.packageResourceDirectory {
-        let path = Bundle.main.bundleURL.appendingPathComponent(directory).path
+    let packageDirectory = request.packageResourceDirectory.map { Bundle.main.bundleURL.appendingPathComponent($0).path }
+        ?? initialDirectory
+    if let path = packageDirectory {
         guard unsafe setenv("PACKAGE_RESOURCE_BUNDLE_PATH", path, 1) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    } else {
+        guard unsafe unsetenv("PACKAGE_RESOURCE_BUNDLE_PATH") == 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
     }
     for name in request.libraryNames {
         let path = Bundle.main.bundleURL.appendingPathComponent(name).path
+        guard !loadedPreviewLibraryPaths.contains(path) else { continue }
         // The process owns loaded preview code and its Swift metadata.
         guard unsafe dlopen(path, RTLD_NOW | RTLD_GLOBAL) != nil else {
             throw PreviewRendererError("Cannot load \(name): \(unsafe String(cString: dlerror()))")
         }
+        loadedPreviewLibraryPaths.insert(path)
     }
     // Preview mode defers SwiftUI graph creation until its code is ready.
     __previewThunksHaveFinishedLoading()

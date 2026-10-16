@@ -12,15 +12,23 @@ struct PreviewRendererAppKit {
         let application = NSApplication.shared
         application.setActivationPolicy(.prohibited)
         Task { @MainActor in
-            do { writeDesktopPreviewResult(try await render()) }
+            do {
+                if let directory = try previewRendererSessionDirectory() {
+                    try await runPreviewRendererSession(in: directory) { request, _ in
+                        try await render(request)
+                    }
+                } else {
+                    writeDesktopPreviewResult(try await render(readPreviewRequest()))
+                }
+            }
             catch is NativePreviewPipelineRequired { writeDesktopPreviewResult(PreviewRendererResult(requiresNativePipeline: true)) }
             catch { writeDesktopPreviewResult(PreviewRendererResult(error: String(describing: error))) }
         }
         application.run()
     }
 
-    private static func render() async throws -> PreviewRendererResult {
-        let request = try loadPreviewRequest()
+    private static func render(_ request: PreviewRendererRequest) async throws -> PreviewRendererResult {
+        try loadPreviewLibraries(request)
         if request.metadataOnly == true {
             let value = try await nativePreviewMetadata(request)
             return PreviewRendererResult(nativeMetadata: value.metadata,

@@ -49,21 +49,30 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         let window = UIWindow(windowScene: scene)
         self.window = window
         Task { @MainActor in
-            do { try await render(in: window) }
+            do {
+                if let directory = try previewRendererSessionDirectory() {
+                    try await runPreviewRendererSession(in: directory) { request, output in
+                        try await self.render(request, in: window, directory: output)
+                    }
+                } else {
+                    write(try await render(readPreviewRequest(), in: window, directory: documents))
+                }
+            }
             catch is NativePreviewPipelineRequired { write(PreviewRendererResult(requiresNativePipeline: true)) }
             catch { write(PreviewRendererResult(error: String(describing: error))) }
         }
     }
 
-    private func render(in window: UIWindow) async throws {
-        let requestURL = Bundle.main.bundleURL.appendingPathComponent("PreviewRequest.json")
-        let request = try JSONDecoder().decode(PreviewRendererRequest.self, from: Data(contentsOf: requestURL))
+    private func render(_ request: PreviewRendererRequest, in window: UIWindow, directory: URL) async throws -> PreviewRendererResult {
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
         try loadPreviewLibraries(request)
         if request.metadataOnly == true {
             let value = try await nativePreviewMetadata(request)
-            write(PreviewRendererResult(nativeMetadata: value.metadata,
-                nativeProviderPreviewDescription: value.providerDescription))
-            return
+            return PreviewRendererResult(nativeMetadata: value.metadata,
+                nativeProviderPreviewDescription: value.providerDescription)
         }
         let widget: WidgetPreview?
         let activity: ActivityPreview?
@@ -246,7 +255,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             }
             window.rootViewController = rootController
             window.makeKeyAndVisible()
-            if activity != nil, orientation != .portrait {
+            if activity != nil {
                 guard let scene = window.windowScene else { throw NativePreviewPipelineRequired() }
                 try await requestActivityPreviewOrientation(orientation, in: scene)
             }
@@ -259,6 +268,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             layoutController.view.frame = CGRect(origin: .zero, size: size)
             layoutController.view.setNeedsLayout()
             layoutController.view.layoutIfNeeded()
+            // Allow appearance tasks to deliver initial updates before sizing and capture.
             try await Task.sleep(for: .milliseconds(500))
             if let activity {
                 size = activity.preferredContentSize
@@ -275,7 +285,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             layoutController.view.layoutIfNeeded()
             let data = try staticPreviewSnapshot(of: controller.view, size: size, scale: window.screen.scale)
             try widget?.validate()
-            try data.write(to: documents.appendingPathComponent("Preview.png"), options: .atomic)
+            try data.write(to: directory.appendingPathComponent("Preview.png"), options: .atomic)
             let deviceLayout: Bool
             if case .device = layout { deviceLayout = activity == nil } else { deviceLayout = false }
             var exclusionSnapshotName: String?
@@ -284,7 +294,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                     throw PreviewRendererError("The preview display exclusion could not be encoded")
                 }
                 exclusionSnapshotName = "PreviewExclusion.png"
-                try exclusionData.write(to: documents.appendingPathComponent("PreviewExclusion.png"), options: .atomic)
+                try exclusionData.write(to: directory.appendingPathComponent("PreviewExclusion.png"), options: .atomic)
             }
             return PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
                 sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes ?? activity?.stateIndexes,
@@ -303,7 +313,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         } else {
             result = try await capture(in: window)
         }
-        write(result)
+        return result
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }

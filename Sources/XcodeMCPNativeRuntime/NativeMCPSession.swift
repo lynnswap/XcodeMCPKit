@@ -145,12 +145,12 @@ package final class NativeMCPSession {
         let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID)
         do {
             let result = try await consumeTool(params: params, name: name, arguments: arguments, context: context)
-            do { try backend.finishExecution(context: context) }
+            do { try await backend.finishExecution(context: context) }
             catch { NativeErrorPresentation.report(error as NSError) }
             return result
         } catch {
             let original = error
-            do { try backend.finishExecution(context: context) }
+            do { try await backend.finishExecution(context: context) }
             catch {
                 throw NativeRuntimeError.invocation("\(original); workspace cleanup failed: \(error)")
             }

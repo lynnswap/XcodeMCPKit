@@ -4,6 +4,36 @@ import MachOKit
 @safe
 @MainActor
 enum NativePreviewBinary {
+    struct PreviewSymbols: Sendable {
+        let registryNames: [String]
+        let programRootNames: [String]
+    }
+
+    static func previewSymbols(in libraries: [URL]) throws -> PreviewSymbols {
+        var registries: Set<String> = []
+        var roots: Set<String> = []
+        let mainSuffix = "5$mainyyFZ"
+        for library in libraries {
+            guard let image = try file(at: library) else {
+                throw NativeRuntimeError.unsupportedContract("The preview library has no arm64 Mach-O image: \(library.path)")
+            }
+            guard let symbols = image.symbols64 else { continue }
+            for symbol in symbols {
+                guard symbol.nlist.flags?.stab == nil else { continue }
+                let name = symbol.name
+                guard name.hasPrefix("_$s") else { continue }
+                if name.hasSuffix("VMn"), name.contains("fMu_") {
+                    registries.insert(String(name.dropFirst(3).dropLast(2)))
+                }
+                if name.hasSuffix(mainSuffix), let type = symbol.nlist.flags?.type,
+                   type != .undf, type != .pbud {
+                    roots.insert(String(name.dropFirst(3).dropLast(mainSuffix.count)))
+                }
+            }
+        }
+        return PreviewSymbols(registryNames: registries.sorted(), programRootNames: roots.sorted())
+    }
+
     static func isStaticArchive(at url: URL) throws -> Bool {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }

@@ -1,5 +1,15 @@
 import Foundation
 
+package struct PreviewRendererCommand: Codable, Sendable {
+    package let identifier: String
+    package let request: PreviewRendererRequest
+
+    package init(identifier: String, request: PreviewRendererRequest) {
+        self.identifier = identifier
+        self.request = request
+    }
+}
+
 package enum PreviewRendererNativeSource: Codable, Sendable {
     case providerMetadata(extensionIdentifier: String, providerName: String)
     case preview(extensionIdentifier: String, specification: Data, metadata: Data, variantOverrides: [String: String])
