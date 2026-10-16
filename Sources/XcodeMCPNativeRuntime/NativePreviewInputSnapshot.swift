@@ -45,34 +45,39 @@ struct NativePreviewInputSnapshot: Equatable {
     }
 
     static func capture(roots: [URL]) throws -> Self {
-        var pending = roots.map { (path: $0.standardizedFileURL.path, isCanonical: false) }
+        let fileMetadata = NativePreviewFileMetadata()
+        var pending = roots.map { (path: $0.standardizedFileURL.path, isCanonical: false, metadata: Optional<stat>.none) }
         var visited: Set<String> = []
         var expandedDirectories: Set<String> = []
         var entries: [Entry] = []
         while let next = pending.popLast() {
             let path = next.path
             guard visited.insert(path).inserted else { continue }
-            var value = stat()
-            guard lstat(path, &value) == 0 else {
-                let code = errno
-                if code == ENOENT || code == ENOTDIR { continue }
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
+            var value: stat
+            if let metadata = next.metadata { value = metadata }
+            else {
+                value = stat()
+                guard unsafe lstat(path, &value) == 0 else {
+                    let code = errno
+                    if code == ENOENT || code == ENOTDIR { continue }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
+                }
             }
             let symbolicLinkDestination: String?
             if value.st_mode & S_IFMT == S_IFLNK {
                 let destination = try FileManager.default.destinationOfSymbolicLink(atPath: path)
                 symbolicLinkDestination = destination
                 let destinationURL = URL(filePath: destination, relativeTo: URL(filePath: path).deletingLastPathComponent())
-                pending.append((path: destinationURL.absoluteURL.standardizedFileURL.path, isCanonical: false))
+                pending.append((path: destinationURL.absoluteURL.standardizedFileURL.path, isCanonical: false, metadata: nil))
             } else {
                 symbolicLinkDestination = nil
                 let canonical = next.isCanonical ? path : URL(filePath: path).resolvingSymlinksInPath().path
-                if canonical != path { pending.append((path: canonical, isCanonical: true)) }
+                if canonical != path { pending.append((path: canonical, isCanonical: true, metadata: nil)) }
                 if value.st_mode & S_IFMT == S_IFDIR, expandedDirectories.insert(canonical).inserted {
                     // Names enumerated from canonical directories already have canonical parents.
                     let prefix = canonical == "/" ? canonical : canonical + "/"
-                    pending += try FileManager.default.contentsOfDirectory(atPath: canonical).map {
-                        (path: prefix + $0, isCanonical: true)
+                    pending += try fileMetadata.directoryEntries(atPath: canonical).map {
+                        (path: prefix + $0.name, isCanonical: true, metadata: $0.metadata)
                     }
                 }
             }

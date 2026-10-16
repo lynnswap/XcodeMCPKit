@@ -91,22 +91,28 @@ struct NativePreviewProductSignature: Equatable {
     }
 
     private static func stamps(for roots: Set<URL>, digestCache: DigestCache) throws -> [FileStamp] {
-        var pending = roots.map { $0.standardizedFileURL.path }
+        let fileMetadata = NativePreviewFileMetadata()
+        var pending = roots.map { (path: $0.standardizedFileURL.path, metadata: Optional<stat>.none) }
         var visited: Set<String> = []
         var regularFiles: Set<String> = []
         defer { digestCache.retain(regularFiles) }
         var result: [FileStamp] = []
-        while let path = pending.popLast() {
+        while let next = pending.popLast() {
+            let path = next.path
             guard visited.insert(path).inserted else { continue }
-            var value = stat()
-            if lstat(path, &value) != 0 {
-                let code = errno
-                // Native build descriptions include optional products that were not built.
-                guard code == ENOENT || code == ENOTDIR else {
-                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
+            var value: stat
+            if let metadata = next.metadata { value = metadata }
+            else {
+                value = stat()
+                if unsafe lstat(path, &value) != 0 {
+                    let code = errno
+                    // Native build descriptions include optional products that were not built.
+                    guard code == ENOENT || code == ENOTDIR else {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
+                    }
+                    result.append(FileStamp(path: path, mode: 0, content: nil))
+                    continue
                 }
-                result.append(FileStamp(path: path, mode: 0, content: nil))
-                continue
             }
             let content: Data?
             switch value.st_mode & S_IFMT {
@@ -115,11 +121,11 @@ struct NativePreviewProductSignature: Equatable {
                 content = try digestCache.digest(for: path, metadata: value)
             case S_IFLNK:
                 content = Data(try FileManager.default.destinationOfSymbolicLink(atPath: path).utf8)
-                pending.append(URL(filePath: path).resolvingSymlinksInPath().standardizedFileURL.path)
+                pending.append((path: URL(filePath: path).resolvingSymlinksInPath().standardizedFileURL.path, metadata: nil))
             case S_IFDIR:
                 content = nil
                 let prefix = path.hasSuffix("/") ? path : path + "/"
-                pending += try FileManager.default.contentsOfDirectory(atPath: path).map { prefix + $0 }
+                pending += try fileMetadata.directoryEntries(atPath: path).map { (path: prefix + $0.name, metadata: $0.metadata) }
             default:
                 content = nil
             }
