@@ -52,8 +52,8 @@ struct NativePreviewEntitlements {
         // Xcode stores Simulator capabilities here separately from the code signature.
         // Preserve the original bytes for the linker's -sectcreate input.
         let data = try Data(contentsOf: executable, options: .mappedIfSafe)
-        let start = section.offset
-        guard start >= 0, section.size >= 0, start <= data.count, section.size <= data.count - start else {
+        let (start, overflowed) = file.headerStartOffset.addingReportingOverflow(section.offset)
+        guard !overflowed, start >= 0, section.size >= 0, start <= data.count, section.size <= data.count - start else {
             throw NativeRuntimeError.unsupportedContract("The preview product's Simulator entitlement section is truncated: \(executable.path)")
         }
         return data.subdata(in: start..<(start + section.size))
