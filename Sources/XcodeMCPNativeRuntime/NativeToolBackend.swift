@@ -41,6 +41,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
     private let previewCorrection: NativePreviewCorrection
     private var actions: [String: NativeActionClass] = unsafe [:]
     private var tools: [String: NativeTool] = [:]
+    private var previewBuildInvalidations: [URL: String?] = [:]
 
     package init(installation: NativeXcodeInstallation) async throws {
         self.installation = installation
@@ -92,6 +93,12 @@ package final class NativeXcodeBackend: NativeToolBackend {
             try Task.checkCancellation()
         }
         var arguments = arguments
+        let isPreview = unsafe NativePreviewCorrection.handles(action)
+        let invalidatesPreviewBuild = !isPreview && !tool.isReadOnly
+        if invalidatesPreviewBuild, !tool.workspaceScoped {
+            previewBuildInvalidations.updateValue(nil, forKey: context.artifactsDirectory)
+            previewCorrection.invalidateReusableBuild(workspaceIdentifier: nil)
+        }
         if name == "XcodeOpenWorkspace", case .string(let path) = arguments["path"] {
             try await workspaces.prepareOpen(path: path, request: context.artifactsDirectory)
         }
@@ -99,9 +106,16 @@ package final class NativeXcodeBackend: NativeToolBackend {
             arguments["workspaceIdentifier"] = .string(try await workspaces.resolve(
                 selector, opensIfMissing: name != "XcodeCloseWorkspace", request: context.artifactsDirectory))
             try Task.checkCancellation()
-            if tool.workspaceScoped, case .string(let identifier) = arguments["workspaceIdentifier"] {
-                try await workspaces.prepareDebugger(for: identifier)
-            }
+        }
+        if invalidatesPreviewBuild, tool.workspaceScoped {
+            let identifier: String?
+            if case .string(let value) = arguments["workspaceIdentifier"] { identifier = value }
+            else { identifier = nil }
+            previewBuildInvalidations.updateValue(identifier, forKey: context.artifactsDirectory)
+            previewCorrection.invalidateReusableBuild(workspaceIdentifier: identifier)
+        }
+        if tool.workspaceScoped, case .string(let identifier) = arguments["workspaceIdentifier"] {
+            try await workspaces.prepareDebugger(for: identifier)
         }
         try Task.checkCancellation()
         arguments["temporaryArtifactsPath"] = .string(context.artifactsDirectory.path)
@@ -110,7 +124,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         if let kind = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
             return try unsafe crashCorrection.execute(kind, inputType: scope.inputType(for: action), input: input)
         }
-        if unsafe NativePreviewCorrection.handles(action) {
+        if isPreview {
             return try unsafe await previewCorrection.execute(inputType: scope.inputType(for: action), input: input) { [self] in
                 guard let action = unsafe actions[name] else {
                     throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
@@ -130,6 +144,10 @@ package final class NativeXcodeBackend: NativeToolBackend {
     }
 
     package func finishExecution(context: NativeToolContext) async throws {
+        if let identifier = previewBuildInvalidations.removeValue(forKey: context.artifactsDirectory) {
+            // A native action's stream can overlap rendering before its mutation finishes.
+            previewCorrection.invalidateReusableBuild(workspaceIdentifier: identifier)
+        }
         try workspaces.finishOpen(request: context.artifactsDirectory)
         try await previewCorrection.retainWorkspaces(workspaces.registeredIdentifiers())
     }
@@ -140,5 +158,13 @@ package final class NativeXcodeBackend: NativeToolBackend {
         do { try await previewCorrection.shutdown() } catch { failures.append(String(describing: error)) }
         do { try await workspaces.closeAllWorkspaces() } catch { failures.append(String(describing: error)) }
         if !failures.isEmpty { throw NativeRuntimeError.invocation(failures.joined(separator: "; ")) }
+    }
+}
+
+private extension NativeTool {
+    var isReadOnly: Bool {
+        guard case .object(let fields) = descriptor,
+              case .object(let annotations) = fields["annotations"] else { return false }
+        return annotations["readOnlyHint"] == .bool(true)
     }
 }

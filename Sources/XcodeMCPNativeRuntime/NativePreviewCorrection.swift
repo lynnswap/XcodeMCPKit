@@ -24,6 +24,7 @@ final class NativePreviewCorrection {
         var metadata: [MetadataKey: PreviewRendererResult] = [:]
         var activeUIStage: RendererStage?
         var plan: RetainedPlan?
+        var inputRevision: UInt64 = 0
 
         var stagesDirectory: URL { directory.appendingPathComponent("Stages", isDirectory: true) }
         var simulatorDeviceSet: URL { directory.appendingPathComponent("Devices", isDirectory: true) }
@@ -48,11 +49,22 @@ final class NativePreviewCorrection {
     }
 
     private struct RetainedPlan {
+        let requestKey: [String: JSONValue]
+        let sourcePath: String
         let source: URL
+        let location: Definition
         let index: Int
         let localization: String?
         let context: NativePreviewBuild.PlanningContext
         let destination: NativePreviewBuild.DestinationSelection
+        var certificate: BuildCertificate?
+    }
+
+    private struct BuildCertificate {
+        let build: NativePreviewBuild.Result
+        let workspaceBuilder: AnyObject
+        let roots: [URL]
+        let inputs: NativePreviewInputSnapshot
     }
 
     private final class RendererStage {
@@ -181,6 +193,16 @@ final class NativePreviewCorrection {
         if !failures.isEmpty { throw NativeRuntimeError.invocation("Preview cleanup failed: " + failures.joined(separator: "; ")) }
     }
 
+    func invalidateReusableBuild(workspaceIdentifier: String?) {
+        let selected: [WorkspaceSession]
+        if let workspaceIdentifier { selected = sessions[workspaceIdentifier].map { [$0] } ?? [] }
+        else { selected = Array(sessions.values) }
+        for session in selected {
+            session.inputRevision &+= 1
+            session.plan?.certificate = nil
+        }
+    }
+
     private func produce(_ input: Input, continuation: AsyncStream<Data>.Continuation,
                          native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws {
         if input.requiresNativePipeline {
@@ -255,12 +277,40 @@ final class NativePreviewCorrection {
         let context: NativePreviewBuild.PlanningContext
         let retainedBuild: (build: NativePreviewBuild.Result, signature: NativePreviewProductSignature)?
         let reusesDestination: Bool
+        let inputRevision: UInt64
+        let reusedCertificate: BuildCertificate?
     }
 
     private func prepare(_ input: Input, session: WorkspaceSession) async throws -> Prepared {
         try Task.checkCancellation()
+        let inputRevision = session.inputRevision
         let workspace = try await workspace(input.workspaceIdentifier)
         try await builder.waitForSourcePackages(in: workspace)
+        let currentContext = try builder.planningContext(workspace: workspace)
+        if let plan = session.plan, plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
+           let certificate = plan.certificate, let platform = certificate.build.previewPlatform,
+           plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
+            do {
+                let currentBuilder = try await builder.workspaceBuilder(for: plan.destination)
+                if currentBuilder === certificate.workspaceBuilder,
+                   try NativePreviewInputSnapshot.capture(roots: certificate.roots) == certificate.inputs {
+                    let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
+                    let signature = try NativePreviewProductSignature(build: certificate.build, source: plan.source, helper: helper,
+                        digestCache: session.productDigests, additionalProducts: session.additionalProducts)
+                    if signature == session.signature, inputRevision == session.inputRevision,
+                       plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
+                        return Prepared(workspace: workspace, source: plan.source, location: plan.location,
+                            destination: plan.destination, context: currentContext,
+                            retainedBuild: (certificate.build, signature), reusesDestination: true,
+                            inputRevision: inputRevision, reusedCertificate: certificate)
+                    }
+                }
+            } catch {
+                try Task.checkCancellation()
+                if error is CancellationError { throw error }
+            }
+        }
+        session.plan?.certificate = nil
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
         let location = try await previewDefinition(source: source, index: input.index)
         let context = try builder.planningContext(workspace: workspace)
@@ -281,7 +331,8 @@ final class NativePreviewCorrection {
                     if signature == session.signature,
                        plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
                         return Prepared(workspace: workspace, source: source, location: location, destination: destination,
-                            context: context, retainedBuild: (build, signature), reusesDestination: true)
+                            context: context, retainedBuild: (build, signature), reusesDestination: true,
+                            inputRevision: inputRevision, reusedCertificate: nil)
                     }
                 }
             } catch {
@@ -294,7 +345,21 @@ final class NativePreviewCorrection {
         _ = try await builder.prepare(workspace: workspace)
         try Task.checkCancellation()
         return Prepared(workspace: workspace, source: source, location: location, destination: destination,
-            context: context, retainedBuild: nil, reusesDestination: false)
+            context: context, retainedBuild: nil, reusesDestination: false,
+            inputRevision: inputRevision, reusedCertificate: nil)
+    }
+
+    private func certifyBuild(_ build: NativePreviewBuild.Result, workspace: AnyObject,
+                             destination: NativePreviewBuild.DestinationSelection, source: URL,
+                             session: WorkspaceSession, inputRevision: UInt64) async throws -> BuildCertificate? {
+        guard let buildStartedAt = build.buildStartedAt, let workspaceBuilder = build.workspaceBuilder else { return nil }
+        let roots = try builder.inputRoots(workspace: workspace, build: build, source: source)
+        let inputs = try NativePreviewInputSnapshot.capture(roots: roots)
+        // A post-build snapshot must not certify source edits that arrived during the build.
+        guard inputs.predates(buildStartedAt) else { return nil }
+        let currentBuilder = try await builder.workspaceBuilder(for: destination)
+        guard currentBuilder === workspaceBuilder, inputRevision == session.inputRevision else { return nil }
+        return BuildCertificate(build: build, workspaceBuilder: workspaceBuilder, roots: roots, inputs: inputs)
     }
 
     private func render(_ input: Input) async throws -> JSONValue {
@@ -887,10 +952,25 @@ final class NativePreviewCorrection {
                 "Dynamic Type": .array(PreviewRendererRequest.displayVariantValues["Dynamic Type", default: []].map(JSONValue.string)),
             ])
         }
+        var certificate: BuildCertificate?
+        if prepared.inputRevision == session.inputRevision {
+            if unchanged, let reused = prepared.reusedCertificate {
+                certificate = reused
+            } else {
+                do {
+                    certificate = try await certifyBuild(build, workspace: workspace, destination: destination,
+                        source: prepared.source, session: session, inputRevision: prepared.inputRevision)
+                } catch {
+                    try Task.checkCancellation()
+                    if error is CancellationError { throw error }
+                }
+            }
+        }
         if prepared.context.matches(try builder.planningContext(workspace: workspace)),
            planContext.matches(try builder.planningContext(workspace: workspace, destination: destination)) {
-            session.plan = RetainedPlan(source: prepared.source, index: input.index, localization: input.localization,
-                context: planContext, destination: destination)
+            session.plan = RetainedPlan(requestKey: input.requestKey, sourcePath: input.sourcePath,
+                source: prepared.source, location: prepared.location, index: input.index, localization: input.localization,
+                context: planContext, destination: destination, certificate: certificate)
         } else { session.plan = nil }
         return .object(fields)
     }
@@ -2154,6 +2234,7 @@ final class NativePreviewCorrection {
     @MainActor
     private struct Input {
         let nativeValue: NativeSwiftValue
+        let requestKey: [String: JSONValue]
         let workspaceIdentifier: String?
         let artifacts: String
         let sourcePath: String
@@ -2174,6 +2255,13 @@ final class NativePreviewCorrection {
 
     private func decode<T: Decodable>(_ type: T.Type, data: Data) throws -> Input {
         let value = try JSONDecoder().decode(type, from: data)
+        guard let json = JSONValue(any: try JSONSerialization.jsonObject(with: data)),
+              case .object(let arguments) = json else {
+            throw NativeRuntimeError.invalidRequest("Native preview input must be an object")
+        }
+        let requestKey = arguments.filter {
+            !["temporaryArtifactsPath", "conversationID", "workspaceIdentifier", "timeout"].contains($0.key)
+        }
         let identity = try ABIRuntime.shared.resolveSwiftFunctionAndWait(named: "XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A",
             as: ((T) -> NativeSwiftValue).self, genericArguments: [.type(type)])
         let nativeValue = try unsafe identity.unsafeInvoke(value)
@@ -2197,7 +2285,8 @@ final class NativePreviewCorrection {
         let controls = fields["previewCanvasControlOverrides"].flatMap { Mirror(reflecting: $0).children.first?.value }
         let controlFields = controls.map { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap { field in field.label.map { ($0, field.value) } }) } ?? [:]
         let options = Self.directOptions(variants: variants, controls: controlFields)
-        return Input(nativeValue: nativeValue, workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
+        return Input(nativeValue: nativeValue, requestKey: requestKey,
+            workspaceIdentifier: fields["workspaceIdentifier"] as? String? ?? nil, artifacts: artifacts, sourcePath: path,
             index: index, localization: fields["previewLocalizationOverride"] as? String? ?? nil,
             timeout: timeout,
             widgetFamily: options.widgetFamily, widgetPresentation: options.widgetPresentation,

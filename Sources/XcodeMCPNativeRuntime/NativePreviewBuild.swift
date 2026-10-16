@@ -16,6 +16,8 @@ final class NativePreviewBuild {
         let platformName: String?
         let deviceModelName: String?
         let systemVersion: String?
+        var buildStartedAt: Date? = nil
+        var workspaceBuilder: AnyObject? = nil
 
         var productURLs: [URL] { targets.compactMap(\.outputURL) }
     }
@@ -189,6 +191,58 @@ final class NativePreviewBuild {
             destination: destinationContext(destination?.selected.value))
     }
 
+    func workspaceBuilder(for destination: DestinationSelection) async throws -> AnyObject {
+        let hostType = try await runtime.resolveSwiftType(named: "PreviewsXcode.XcodeWorkspaceSceneHost",
+            in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
+        let makeBuilder = try await hostType.resolveMethod(
+            named: "makeBuilder() throws -> PreviewsXcode.XcodeWorkspaceBuilder", as: (() throws -> AnyObject).self)
+        return try unsafe makeBuilder.unsafeInvoke(on: destination.resolution.host)
+    }
+
+    func inputRoots(workspace: AnyObject, build: Result, source: URL) throws -> [URL] {
+        guard let filePath = try object(workspace, selector: "representingFilePath"),
+              let workspaceURL = try object(filePath, selector: "fileURL") as? URL else {
+            throw NativeRuntimeError.unsupportedContract("The native workspace has no representing file URL")
+        }
+        // Native builder invalidation owns workspace configuration; these trees also detect disk edits synchronously.
+        var roots: Set<URL> = [workspaceURL]
+        var sources: Set<URL> = [source]
+        var pending = build.targets + build.previewRoots
+        while let target = pending.popLast() {
+            if let directory = target.linkerWorkingDirectory, !directory.isEmpty {
+                roots.insert(URL(filePath: directory, directoryHint: .isDirectory))
+            }
+            sources.formUnion(target.sourceFiles)
+            pending += target.dependencies
+        }
+        let sourceDirectories = Set(sources.map { $0.deletingLastPathComponent().standardizedFileURL })
+        var packageSearches: Set<URL> = []
+        for sourceDirectory in sourceDirectories {
+            roots.insert(sourceDirectory)
+            var directory = sourceDirectory
+            while packageSearches.insert(directory).inserted {
+                if FileManager.default.fileExists(atPath: directory.appendingPathComponent("Package.swift").path) {
+                    roots.insert(directory)
+                    break
+                }
+                let parent = directory.deletingLastPathComponent()
+                if parent == directory { break }
+                directory = parent
+            }
+        }
+        let normalized = Set(roots.map(\.standardizedFileURL))
+            .sorted { left, right in
+                let leftCount = left.pathComponents.count
+                let rightCount = right.pathComponents.count
+                return leftCount == rightCount ? left.path < right.path : leftCount < rightCount
+            }
+        return normalized.reduce(into: [URL]()) { result, candidate in
+            if !result.contains(where: { candidate.pathComponents.starts(with: $0.pathComponents) }) {
+                result.append(candidate)
+            }
+        }
+    }
+
     func build(workspace: AnyObject, destination selection: DestinationSelection, source: URL) async throws -> Result {
         try Task.checkCancellation()
         let info = selection.selected
@@ -211,6 +265,9 @@ final class NativePreviewBuild {
 
         let parameters = try operationParameters(environment: environment, destination: destination, client: client)
         let perform = try await prepare(workspace: workspace)
+        let workspaceBuilder = try? await self.workspaceBuilder(for: selection)
+        try Task.checkCancellation()
+        let buildStartedAt = Date()
         let operation: AnyObject = try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try unsafe await perform.unsafeInvoke(on: workspace, scheme, parameters)
@@ -233,10 +290,13 @@ final class NativePreviewBuild {
         try Task.checkCancellation()
         let records = try await targets(descriptions, buildables: selectedBuildables, image: image, runnable: runnable, priorBuild: priorBuild,
             workspace: workspace, source: source, platform: info.previewPlatform, scheme: scheme, destination: destination)
-        return Result(targets: records.targets, previewRoots: records.previewRoots, destinationIdentifier: info.identifier,
+        var result = Result(targets: records.targets, previewRoots: records.previewRoots, destinationIdentifier: info.identifier,
                       previewDestinationIdentifier: info.previewIdentifier,
                       platformIdentifier: info.platformIdentifier, previewPlatform: info.previewPlatform,
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
+        result.buildStartedAt = buildStartedAt
+        result.workspaceBuilder = workspaceBuilder
+        return result
     }
 
     func cancelPendingOperations() {
