@@ -287,28 +287,38 @@ final class NativePreviewCorrection {
         let workspace = try await workspace(input.workspaceIdentifier)
         try await builder.waitForSourcePackages(in: workspace)
         let currentContext = try builder.planningContext(workspace: workspace)
-        if let plan = session.plan, plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
-           let certificate = plan.certificate, let platform = certificate.build.previewPlatform,
+        var inputsAreCurrent = false
+        if let plan = session.plan, let certificate = plan.certificate,
            plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
             do {
                 let currentBuilder = try await builder.workspaceBuilder(for: plan.destination)
                 if currentBuilder === certificate.workspaceBuilder,
-                   try NativePreviewInputSnapshot.capture(roots: certificate.roots) == certificate.inputs {
-                    let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
-                    let signature = try NativePreviewProductSignature(build: certificate.build, source: plan.source, helper: helper,
-                        digestCache: session.productDigests, additionalProducts: session.additionalProducts)
-                    if signature == session.signature, inputRevision == session.inputRevision,
-                       plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
-                        return Prepared(workspace: workspace, source: plan.source, location: plan.location,
-                            destination: plan.destination, context: currentContext,
-                            retainedBuild: (certificate.build, signature), reusesDestination: true,
-                            inputRevision: inputRevision, reusedCertificate: certificate)
+                   try NativePreviewInputSnapshot.capture(roots: certificate.roots) == certificate.inputs,
+                   inputRevision == session.inputRevision {
+                    inputsAreCurrent = true
+                    if plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
+                       let platform = certificate.build.previewPlatform {
+                        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
+                        let signature = try NativePreviewProductSignature(build: certificate.build, source: plan.source, helper: helper,
+                            digestCache: session.productDigests, additionalProducts: session.additionalProducts)
+                        if signature == session.signature, inputRevision == session.inputRevision,
+                           plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
+                            return Prepared(workspace: workspace, source: plan.source, location: plan.location,
+                                destination: plan.destination, context: currentContext,
+                                retainedBuild: (certificate.build, signature), reusesDestination: true,
+                                inputRevision: inputRevision, reusedCertificate: certificate)
+                        }
                     }
                 }
             } catch {
                 try Task.checkCancellation()
                 if error is CancellationError { throw error }
             }
+        }
+        if !inputsAreCurrent {
+            session.plan = nil
+            try await builder.synchronizeProjectContainers(in: workspace)
+            try await builder.waitForSourcePackages(in: workspace)
         }
         session.plan?.certificate = nil
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
@@ -353,7 +363,7 @@ final class NativePreviewCorrection {
                              destination: NativePreviewBuild.DestinationSelection, source: URL,
                              session: WorkspaceSession, inputRevision: UInt64) async throws -> BuildCertificate? {
         guard let buildStartedAt = build.buildStartedAt, let workspaceBuilder = build.workspaceBuilder else { return nil }
-        let roots = try builder.inputRoots(workspace: workspace, build: build, source: source)
+        guard let roots = try builder.inputRoots(workspace: workspace, build: build, source: source) else { return nil }
         let inputs = try NativePreviewInputSnapshot.capture(roots: roots)
         // A post-build snapshot must not certify source edits that arrived during the build.
         guard inputs.predates(buildStartedAt) else { return nil }

@@ -160,6 +160,99 @@ final class NativePreviewBuild {
         try Task.checkCancellation()
     }
 
+    func synchronizeProjectContainers(in workspace: AnyObject) async throws {
+        try Task.checkCancellation()
+        guard let containers = try object(workspace, selector: "referencedContainers") as? NSSet else {
+            throw NativeRuntimeError.unsupportedContract("The native workspace has no referenced containers")
+        }
+        var updates: [(valid: NativeBoundObjCMethod<Bool>, edited: NativeBoundObjCMethod<Bool>,
+                       invalidate: NativeBoundObjCMethod<Void, Bool>, queue: OperationQueue)] = []
+        var inputFiles: [(invalidate: NativeBoundObjCMethod<Void>, modificationDate: NativeBoundObjCMethod<AnyObject?>)] = []
+        func addInputFile(_ filePath: AnyObject) throws {
+            let path = runtime.object(filePath)
+            inputFiles.append((
+                try path.resolveMethodAndWait(selector: "invalidateFilePath", as: (() -> Void).self),
+                try path.resolveMethodAndWait(selector: "modificationDate", as: (() -> AnyObject?).self)))
+        }
+        for case let container as NSObject in containers.allObjects
+            where container !== workspace && container.responds(to: NSSelectorFromString("pbxProject")) {
+            let native = runtime.object(container)
+            let valid = try native.resolveMethodAndWait(selector: "isValid", as: (() -> Bool).self)
+            guard try unsafe valid.unsafeInvoke() else { continue }
+            let edited = try native.resolveMethodAndWait(selector: "containerEditedByUserInUI", as: (() -> Bool).self)
+            guard try unsafe !edited.unsafeInvoke() else { continue }
+            let invalidate = try native.resolveMethodAndWait(selector: "_invalidateContainerToDiscardInMemoryRepresentation:",
+                as: ((Bool) -> Void).self)
+            guard let graph = try object(container, selector: "objectGraph"),
+                  let queue = try object(graph, selector: "changeQueue") as? OperationQueue else {
+                throw NativeRuntimeError.unsupportedContract("A native project container has no model change queue")
+            }
+            let dataFiles = try native.resolveMethodAndWait(selector: "_containerDataFilePaths", as: (() -> NSArray).self)
+            for filePath in try unsafe dataFiles.unsafeInvoke() { try addInputFile(filePath as AnyObject) }
+            updates.append((valid, edited, invalidate, queue))
+        }
+        guard !updates.isEmpty else { return }
+        if let configurationPaths = try configurationFilePaths(in: containers) {
+            let paths = configurationPaths.bases.merging(configurationPaths.watched) { existing, _ in existing }
+            for filePath in paths.values { try addInputFile(filePath) }
+        }
+        guard let environment = try object(workspace, selector: "executionEnvironment") else {
+            throw NativeRuntimeError.unsupportedContract("The native workspace has no execution environment")
+        }
+        let disable = try runtime.object(environment).resolveMethodAndWait(
+            selector: "disableSubmissionOfBuildOperationsWithReason:", as: ((String) -> Void).self)
+        let enable = try runtime.object(environment).resolveMethodAndWait(
+            selector: "enableSubmissionOfBuildOperationsWithReason:", as: ((String) -> Void).self)
+        typealias Completion = @convention(block) () -> Void
+        let cancel = try runtime.object(workspace).resolveMethodAndWait(
+            selector: "_cancelOngoingBuildWithCompletionBlockIfNeeded:",
+            as: ((Completion?) -> Bool).self)
+        let reason = "Synchronizing preview project inputs"
+        try Task.checkCancellation()
+        try unsafe disable.unsafeInvoke(reason)
+        let outcome: Swift.Result<Void, any Error>
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let completed: Completion = { continuation.resume() }
+                do {
+                    // A false result means no build was queued and the callback will not run.
+                    if try unsafe !cancel.unsafeInvoke(completed) { continuation.resume() }
+                } catch { continuation.resume(throwing: error) }
+            }
+            try Task.checkCancellation()
+            // Replacement containers use these dates; configuration parsers also reuse the vnode's derived cache.
+            for file in inputFiles {
+                try unsafe file.invalidate.unsafeInvoke()
+                _ = try unsafe file.modificationDate.unsafeInvoke()
+            }
+            var queues: [OperationQueue] = []
+            var seen: Set<ObjectIdentifier> = []
+            for update in updates {
+                if seen.insert(ObjectIdentifier(update.queue)).inserted { queues.append(update.queue) }
+                // Invalidating one container can also replace another referenced container.
+                guard try unsafe update.valid.unsafeInvoke(), try unsafe !update.edited.unsafeInvoke() else { continue }
+                try unsafe update.invalidate.unsafeInvoke(true)
+            }
+            for queue in queues {
+                await withCheckedContinuation { continuation in
+                    queue.addBarrierBlock { continuation.resume() }
+                }
+            }
+            try Task.checkCancellation()
+            outcome = .success(())
+        } catch { outcome = .failure(error) }
+        do { try unsafe enable.unsafeInvoke(reason) }
+        catch {
+            let operation: String
+            switch outcome {
+            case .success: operation = "Native preview project synchronization completed"
+            case .failure(let failure): operation = String(describing: failure)
+            }
+            throw NativeRuntimeError.invocation("\(operation); failed to resume native build submissions: \(error)")
+        }
+        try outcome.get()
+    }
+
     func prepare(workspace: AnyObject) async throws -> NativeSwiftMethod<@concurrent (AnyObject, AnyObject) async throws -> AnyObject> {
         if let performMethod { return performMethod }
         let bound = try await runtime.object(workspace).resolveMethod(
@@ -208,13 +301,55 @@ final class NativePreviewBuild {
         return value as AnyObject
     }
 
-    func inputRoots(workspace: AnyObject, build: Result, source: URL) throws -> [URL] {
+    private func configurationFilePaths(in containers: NSSet) throws -> (bases: [URL: AnyObject], watched: [URL: AnyObject])? {
+        var baseFiles: [URL: AnyObject] = [:]
+        var watchedFiles: [URL: AnyObject] = [:]
+        for entry in containers.allObjects {
+            guard let container = entry as? NSObject else { return nil }
+            guard container.responds(to: NSSelectorFromString("pbxProject")) else { continue }
+            guard let project = try object(container, selector: "pbxProject"),
+                  let targets = try object(project, selector: "targets") as? NSArray else { return nil }
+            for owner in [project] + targets.map({ $0 as AnyObject }) {
+                guard let list = try object(owner, selector: "buildConfigurationList"),
+                      let configurations = try object(list, selector: "buildConfigurations") as? NSArray else { return nil }
+                for configuration in configurations {
+                    let configuration = configuration as AnyObject
+                    guard try object(configuration, selector: "baseConfigurationAnchoredReference") != nil else { continue }
+                    guard let reference = try object(configuration, selector: "resolvedBaseConfigurationReference"),
+                          let path = try object(reference, selector: "resolvedAbsolutePath") as? String,
+                          path.hasPrefix("/"),
+                          let filePath = try object(path as NSString, selector: "dvt_absoluteFilePath") else { return nil }
+                    baseFiles[URL(filePath: path).standardizedFileURL] = filePath
+                    let watched = try runtime.object(configuration).value(forIvar: "_watchedBaseConfigurationFilePaths", as: NSSet?.self)
+                    for filePath in watched?.allObjects ?? [] {
+                        guard let url = try object(filePath as AnyObject, selector: "fileURL") as? URL,
+                              url.isFileURL, url.path.hasPrefix("/") else { return nil }
+                        watchedFiles[url.standardizedFileURL] = filePath as AnyObject
+                    }
+                }
+            }
+        }
+        return (baseFiles, watchedFiles)
+    }
+
+    func inputRoots(workspace: AnyObject, build: Result, source: URL) throws -> [URL]? {
+        guard let containers = try object(workspace, selector: "referencedContainers") as? NSSet,
+              let configurationPaths = try configurationFilePaths(in: containers) else { return nil }
+        let baseFiles = Set(configurationPaths.bases.keys)
+        let watchedFiles = Set(configurationPaths.watched.keys)
+        let configurationFiles = baseFiles.union(watchedFiles)
+        for file in configurationFiles {
+            // Optional includes can name paths absent from the native watched set.
+            guard let text = try? String(contentsOf: file, encoding: .utf8), !text.utf8.contains(0x3f) else { return nil }
+            if baseFiles.contains(file), text.utf8.contains(0x23), !watchedFiles.contains(file) { return nil }
+        }
         guard let filePath = try object(workspace, selector: "representingFilePath"),
               let workspaceURL = try object(filePath, selector: "fileURL") as? URL else {
             throw NativeRuntimeError.unsupportedContract("The native workspace has no representing file URL")
         }
         // Native builder invalidation owns workspace configuration; these trees also detect disk edits synchronously.
         var roots: Set<URL> = [workspaceURL]
+        roots.formUnion(configurationFiles)
         var sources: Set<URL> = [source]
         var pending = build.targets + build.previewRoots
         while let target = pending.popLast() {
