@@ -252,7 +252,7 @@ final class NativePreviewCorrection {
         let location: Definition
         let destination: NativePreviewBuild.DestinationSelection
         let context: NativePreviewBuild.PlanningContext
-        let build: NativePreviewBuild.Result?
+        let retainedBuild: (build: NativePreviewBuild.Result, signature: NativePreviewProductSignature)?
         let reusesDestination: Bool
     }
 
@@ -279,7 +279,7 @@ final class NativePreviewCorrection {
                     if signature == session.signature,
                        plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
                         return Prepared(workspace: workspace, source: source, location: location, destination: destination,
-                            context: context, build: build, reusesDestination: true)
+                            context: context, retainedBuild: (build, signature), reusesDestination: true)
                     }
                 }
             } catch {
@@ -292,7 +292,7 @@ final class NativePreviewCorrection {
         _ = try await builder.prepare(workspace: workspace)
         try Task.checkCancellation()
         return Prepared(workspace: workspace, source: source, location: location, destination: destination,
-            context: context, build: nil, reusesDestination: false)
+            context: context, retainedBuild: nil, reusesDestination: false)
     }
 
     private func render(_ input: Input) async throws -> JSONValue {
@@ -688,9 +688,10 @@ final class NativePreviewCorrection {
     }
 
     private func update(_ session: WorkspaceSession, build: NativePreviewBuild.Result, source: URL,
-                        platform: NativePreviewPlatform, process: NativePreviewProcess) async throws {
+                        platform: NativePreviewPlatform, signature retainedSignature: NativePreviewProductSignature? = nil,
+                        process: NativePreviewProcess) async throws {
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
-        let signature = try NativePreviewProductSignature(build: build, source: source, helper: helper,
+        let signature = try retainedSignature ?? NativePreviewProductSignature(build: build, source: source, helper: helper,
             additionalProducts: session.additionalProducts)
         if session.signature != signature {
             try await resetStages(session, process: process)
@@ -719,10 +720,11 @@ final class NativePreviewCorrection {
         let location = prepared.location
         var destination = prepared.destination
         var build: NativePreviewBuild.Result
-        if let retained = prepared.build { build = retained }
+        if let retained = prepared.retainedBuild { build = retained.build }
         else { build = try await builder.build(workspace: workspace, destination: destination, source: prepared.source) }
         guard var platform = build.previewPlatform else { throw NativePipelineRequired() }
-        try await update(session, build: build, source: prepared.source, platform: platform, process: process)
+        try await update(session, build: build, source: prepared.source, platform: platform,
+                         signature: prepared.retainedBuild?.signature, process: process)
         var stage = try await prepareStage(input, prepared: prepared, session: session, build: build,
             destination: destination, platform: platform, process: process, metadataOnly: true)
         var renderer = stage.preparation
