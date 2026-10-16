@@ -62,6 +62,9 @@ struct PreviewCaptureRunner {
                 selector = ["tabIdentifier": .string(try await nativeTab(client: client))]
             }
             _ = try await call("XcodeSwitchScheme", arguments: selector.merging(["schemeName": .string(report.preview.scheme)]) { _, value in value }, client: client)
+            if report.backend == .native {
+                try await waitForNativeDestinations(selector: selector, client: client)
+            }
             _ = try await call("XcodeSwitchRunDestination", arguments: selector.merging(["displayTitle": .string(report.requestedDestination)]) { _, value in value }, client: client)
             let selection = try await call("XcodeListRunDestinations", arguments: selector, client: client)
             guard let rawSelection = selection.rawResult,
@@ -102,6 +105,18 @@ struct PreviewCaptureRunner {
         try save()
         guard record.status == .passed else { throw VerifierFailure("\(name): \(record.detail)") }
         return record
+    }
+
+    private mutating func waitForNativeDestinations(selector: [String: MCPJSONValue], client: XcodeMCP) async throws {
+        // Package schemes can appear before Xcode finishes resolving their destinations.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(45))
+        repeat {
+            let result = try await call("XcodeListRunDestinations", arguments: selector, client: client)
+            let count = result.rawResult.flatMap(previewStructuredContent)?["totalDestinations"]?.integerValue
+            if count != 0 { return }
+            try await Task.sleep(for: .milliseconds(500))
+        } while ContinuousClock.now < deadline
+        throw VerifierFailure("Xcode did not resolve run destinations for \(report.preview.scheme) within 45 seconds")
     }
 
     private mutating func nativeTab(client: XcodeMCP) async throws -> String {
