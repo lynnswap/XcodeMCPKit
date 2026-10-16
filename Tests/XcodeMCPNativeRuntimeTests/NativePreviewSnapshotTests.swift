@@ -26,14 +26,19 @@ struct NativePreviewSnapshotTests {
             return true
         }
         let source = try image(width: 80, height: 40)
-        let left = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
-            framebufferMask: mask, rotationDegrees: 90, swapsAxes: true))
-        let right = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
-            framebufferMask: mask, rotationDegrees: 270, swapsAxes: true))
-        let leftBitmap = NSBitmapImageRep(cgImage: left)
-        let rightBitmap = NSBitmapImageRep(cgImage: right)
+        let images = NativePreviewCorrection.SnapshotImages()
+        func bitmap(_ image: CGImage, degrees: Double) throws -> NSBitmapImageRep {
+            let png = try images.png(from: pngData(image), image: image, framebufferMask: mask,
+                rotationDegrees: degrees, swapsAxes: true, exclusion: nil, exclusionImage: nil)
+            return try #require(NSBitmapImageRep(data: png))
+        }
+        let leftBitmap = try bitmap(source, degrees: 90)
         #expect(leftBitmap.colorAt(x: 10, y: 20)?.alphaComponent == 1)
         #expect(leftBitmap.colorAt(x: 70, y: 20)?.alphaComponent == 0)
+        #expect(try bitmap(source, degrees: 90).colorAt(x: 10, y: 20)?.redComponent == 1)
+        let changedSource = try image(width: 80, height: 40, color: CGColor(gray: 0, alpha: 1))
+        #expect(try bitmap(changedSource, degrees: 90).colorAt(x: 10, y: 20)?.redComponent == 0)
+        let rightBitmap = try bitmap(changedSource, degrees: 270)
         #expect(rightBitmap.colorAt(x: 10, y: 20)?.alphaComponent == 0)
         #expect(rightBitmap.colorAt(x: 70, y: 20)?.alphaComponent == 1)
     }
@@ -79,10 +84,12 @@ struct NativePreviewSnapshotTests {
         try pngData(image(width: 40, height: 80)).write(to: resource)
         let images = NativePreviewCorrection.SnapshotImages()
         let source = try image(width: 40, height: 80)
+        let sourcePNG = try pngData(source)
         func thumbnail() throws -> NSBitmapImageRep {
             let mask = try #require(try images.framebufferMask(in: root, geometry: CGSize(width: 40, height: 80)))
-            return try NSBitmapImageRep(cgImage: #require(NativePreviewCorrection.thumbnail(from: source,
-                maximumDimension: 1500, framebufferMask: mask, rotationDegrees: 0, swapsAxes: false)))
+            let png = try images.png(from: sourcePNG, image: source, framebufferMask: mask,
+                rotationDegrees: 0, swapsAxes: false, exclusion: nil, exclusionImage: nil)
+            return try #require(NSBitmapImageRep(data: png))
         }
         #expect(try thumbnail().colorAt(x: 20, y: 40)?.alphaComponent == 1)
         #expect(try thumbnail().colorAt(x: 20, y: 40)?.alphaComponent == 1)
@@ -94,12 +101,19 @@ struct NativePreviewSnapshotTests {
 
     @Test func displayExclusionChangesWithItsEncodedPixels() throws {
         let images = NativePreviewCorrection.SnapshotImages()
+        let source = try image(width: 20, height: 20)
+        let sourcePNG = try pngData(source)
         let white = try pngData(image(width: 20, height: 20))
         let black = try pngData(image(width: 20, height: 20, color: CGColor(gray: 0, alpha: 1)))
-        #expect(try NSBitmapImageRep(cgImage: images.exclusionImage(from: white)).colorAt(x: 10, y: 10)?.redComponent == 1)
-        #expect(try NSBitmapImageRep(cgImage: images.exclusionImage(from: white)).colorAt(x: 10, y: 10)?.redComponent == 1)
-
-        #expect(try NSBitmapImageRep(cgImage: images.exclusionImage(from: black)).colorAt(x: 10, y: 10)?.redComponent == 0)
+        func thumbnail(exclusion: Data) throws -> NSBitmapImageRep {
+            let png = try images.png(from: sourcePNG, image: source, framebufferMask: nil,
+                rotationDegrees: 0, swapsAxes: false, exclusion: exclusion,
+                exclusionImage: images.exclusionImage(from: exclusion))
+            return try #require(NSBitmapImageRep(data: png))
+        }
+        #expect(try thumbnail(exclusion: white).colorAt(x: 10, y: 10)?.redComponent == 1)
+        #expect(try thumbnail(exclusion: white).colorAt(x: 10, y: 10)?.redComponent == 1)
+        #expect(try thumbnail(exclusion: black).colorAt(x: 10, y: 10)?.redComponent == 0)
     }
 
     private func pngData(_ image: CGImage) throws -> Data {

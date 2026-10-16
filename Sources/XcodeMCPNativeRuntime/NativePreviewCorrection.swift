@@ -22,7 +22,7 @@ final class NativePreviewCorrection {
         var simulator: Simulator?
         var simulatorDestination: SimulatorDestination?
         var installedApplications: Set<String> = []
-        var metadata: [MetadataKey: PreviewRendererResult] = [:]
+        var metadata: [MetadataKey: MetadataEntry] = [:]
         var activeUIStage: RendererStage?
         var plan: RetainedPlan?
         var inputRevision: UInt64 = 0
@@ -37,6 +37,14 @@ final class NativePreviewCorrection {
     private struct MetadataKey: Hashable {
         let index: Int
         let localization: String?
+    }
+
+    private final class MetadataEntry {
+        let response: PreviewRendererResult
+        var isWidgetPreview: Bool?
+        var isComplicationPreview: Bool?
+
+        init(response: PreviewRendererResult) { self.response = response }
     }
 
     private struct SimulatorDestination: Equatable {
@@ -298,11 +306,8 @@ final class NativePreviewCorrection {
                    inputRevision == session.inputRevision {
                     inputsAreCurrent = true
                     if plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
-                       let platform = certificate.build.previewPlatform {
-                        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
-                        let signature = try NativePreviewProductSignature(build: certificate.build, source: plan.source, helper: helper,
-                            digestCache: session.productDigests, additionalProducts: session.additionalProducts)
-                        if signature == session.signature, inputRevision == session.inputRevision,
+                       certificate.build.previewPlatform != nil, let signature = session.signature {
+                        if try signature.matchesCurrentFiles(digestCache: session.productDigests), inputRevision == session.inputRevision,
                            plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
                             return Prepared(workspace: workspace, source: plan.source, location: plan.location,
                                 destination: plan.destination, context: currentContext,
@@ -741,12 +746,8 @@ final class NativePreviewCorrection {
             signing += ["--entitlements", plist.path]
         }
         try await writeRendererRequest(request, app: app, platform: platform, signing: signing, process: process)
-        guard originalSignature == (try NativePreviewProductSignature(build: build, source: source, helper: helper,
-                  digestCache: digestCache,
-                  additionalProducts: originalProducts)),
-              productSignature == (try NativePreviewProductSignature(build: build, source: source, helper: helper,
-                  digestCache: digestCache,
-                  additionalProducts: copiedProducts)) else {
+        guard try originalSignature.matchesCurrentFiles(digestCache: digestCache),
+              try productSignature.matchesCurrentFiles(digestCache: digestCache) else {
             throw NativeRuntimeError.invocation("Build products changed while preparing the preview; render again")
         }
         return RendererPreparation(request: request, app: app, product: product, containingApp: containingApp,
@@ -783,7 +784,7 @@ final class NativePreviewCorrection {
             session.additionalProducts = []
             session.signature = try NativePreviewProductSignature(build: build, source: source, helper: helper,
                 digestCache: session.productDigests)
-        }
+        } else { session.signature = signature }
         if let simulator = session.simulator, session.simulatorDestination != SimulatorDestination(build) {
             _ = try await process.xcrun(session.simctlArguments + ["delete", simulator.identifier])
             session.simulator = nil
@@ -815,20 +816,21 @@ final class NativePreviewCorrection {
             destination: destination, platform: platform, process: process, metadataOnly: true)
         var renderer = stage.preparation
         let metadataKey = MetadataKey(index: input.index, localization: input.localization)
-        let metadataResponse: PreviewRendererResult
+        let metadataEntry: MetadataEntry
         if let cached = session.metadata[metadataKey] {
-            metadataResponse = cached
+            metadataEntry = cached
         } else if platform.isSimulator {
             let containingApp = renderer.request.nativeSource == nil ? nil
                 : try await nativeContainingApp(for: stage, build: build, platform: platform, process: process)
-            metadataResponse = try await renderSimulator(stage: stage, session: session, build: build, process: process,
+            metadataEntry = MetadataEntry(response: try await renderSimulator(stage: stage, session: session, build: build, process: process,
                 localization: input.localization,
-                containingApp: containingApp).response
+                containingApp: containingApp).response)
         } else {
-            metadataResponse = try await desktopPreview(stage: stage, session: session, platform: platform, process: process,
-                localization: input.localization).response
+            metadataEntry = MetadataEntry(response: try await desktopPreview(stage: stage, session: session, platform: platform, process: process,
+                localization: input.localization).response)
         }
-        session.metadata[metadataKey] = metadataResponse
+        session.metadata[metadataKey] = metadataEntry
+        let metadataResponse = metadataEntry.response
         guard let metadata = metadataResponse.nativeMetadata else {
             throw NativeRuntimeError.invocation("The preview process returned no native metadata")
         }
@@ -852,11 +854,22 @@ final class NativePreviewCorrection {
         let planContext = try builder.planningContext(workspace: workspace, destination: destination)
         let isLegacyComplication: Bool?
         if platform == .watchOS, location.providerPath != nil {
-            isLegacyComplication = try await builder.isComplicationPreview(metadata: metadata) ? true : nil
+            let complication: Bool
+            if let cached = metadataEntry.isComplicationPreview { complication = cached }
+            else {
+                complication = try await builder.isComplicationPreview(metadata: metadata)
+                metadataEntry.isComplicationPreview = complication
+            }
+            isLegacyComplication = complication ? true : nil
         } else { isLegacyComplication = nil }
         let nativeWidget: Bool
-        if platform == .iOS || platform == .watchOS { nativeWidget = try await builder.isWidgetPreview(metadata: metadata) }
-        else { nativeWidget = false }
+        if platform == .iOS || platform == .watchOS {
+            if let cached = metadataEntry.isWidgetPreview { nativeWidget = cached }
+            else {
+                nativeWidget = try await builder.isWidgetPreview(metadata: metadata)
+                metadataEntry.isWidgetPreview = nativeWidget
+            }
+        } else { nativeWidget = false }
         if unchanged && renderer.request.nativeSource == nil && !nativeWidget {
             renderer.request.metadataOnly = nil
             renderer.request.isLegacyComplication = isLegacyComplication

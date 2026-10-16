@@ -5,6 +5,7 @@ import Foundation
 @MainActor
 struct NativePreviewProductSignature: Equatable {
     private let configuration: [String]
+    private let products: Set<URL>
     private let files: [FileStamp]
 
     private struct FileStamp: Equatable {
@@ -87,7 +88,16 @@ struct NativePreviewProductSignature: Equatable {
             pending += target.dependencies
         }
         self.configuration = configuration
+        self.products = products
         files = try Self.stamps(for: products, digestCache: digestCache)
+    }
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.configuration == rhs.configuration && lhs.files == rhs.files
+    }
+
+    func matchesCurrentFiles(digestCache: DigestCache) throws -> Bool {
+        files == (try Self.stamps(for: products, digestCache: digestCache))
     }
 
     private static func stamps(for roots: Set<URL>, digestCache: DigestCache) throws -> [FileStamp] {

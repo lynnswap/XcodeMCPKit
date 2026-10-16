@@ -40,6 +40,7 @@ struct NativePreviewProductSignatureTests {
         var original = stat()
         try #require(unsafe lstat(resource.path, &original) == 0)
         let before = try fixture.signature()
+        #expect(try before.matchesCurrentFiles(digestCache: fixture.digestCache))
 
         let file = try FileHandle(forWritingTo: resource)
         try file.write(contentsOf: Data("new".utf8))
@@ -56,6 +57,7 @@ struct NativePreviewProductSignatureTests {
         #expect(changed.st_size == original.st_size)
         #expect(changed.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec)
         #expect(changed.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec)
+        #expect(try !before.matchesCurrentFiles(digestCache: fixture.digestCache))
         #expect(try fixture.signature() != before)
     }
 

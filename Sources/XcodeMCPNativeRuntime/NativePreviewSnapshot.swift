@@ -25,22 +25,39 @@ extension NativePreviewCorrection {
             do { degrees = try await snapshotRotationDegrees(orientation) }
             catch is ABIResolutionError { throw NativePipelineRequired() }
         } else { degrees = nil }
-        guard let thumbnail = Self.thumbnail(from: image, maximumDimension: 1500, framebufferMask: mask,
+        let png = try snapshotImages.png(from: source, image: image, framebufferMask: mask,
             rotationDegrees: degrees, swapsAxes: orientation == "landscapeLeft" || orientation == "landscapeRight",
-            exclusionImage: exclusionImage),
-              let output = CGImageDestinationCreateWithURL(destination as CFURL, "public.png" as CFString, 1, nil) else {
-            throw NativeRuntimeError.invocation("The preview thumbnail could not be created")
-        }
-        CGImageDestinationAddImage(output, thumbnail, nil)
-        guard CGImageDestinationFinalize(output) else {
-            throw NativeRuntimeError.invocation("The preview thumbnail could not be saved")
-        }
+            exclusion: exclusion, exclusionImage: exclusionImage)
+        try png.write(to: destination)
     }
 
     @MainActor
     final class SnapshotImages {
         private var mask: (resource: URL, data: Data, geometry: CGSize, image: NSImage)?
         private var exclusion: (data: Data, image: CGImage)?
+        private var snapshot: (source: Data, mask: NSImage?, exclusion: Data?, rotationDegrees: Double?, swapsAxes: Bool, png: Data)?
+
+        func png(from source: Data, image: CGImage, framebufferMask: NSImage?, rotationDegrees: Double?,
+                 swapsAxes: Bool, exclusion: Data?, exclusionImage: CGImage?) throws -> Data {
+            if let snapshot, snapshot.source == source, snapshot.mask === framebufferMask,
+               snapshot.exclusion == exclusion, snapshot.rotationDegrees == rotationDegrees, snapshot.swapsAxes == swapsAxes {
+                return snapshot.png
+            }
+            let data = NSMutableData()
+            guard let thumbnail = NativePreviewCorrection.thumbnail(from: image, maximumDimension: 1500,
+                framebufferMask: framebufferMask, rotationDegrees: rotationDegrees, swapsAxes: swapsAxes,
+                exclusionImage: exclusionImage),
+                  let output = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else {
+                throw NativeRuntimeError.invocation("The preview thumbnail could not be created")
+            }
+            CGImageDestinationAddImage(output, thumbnail, nil)
+            guard CGImageDestinationFinalize(output) else {
+                throw NativeRuntimeError.invocation("The preview thumbnail could not be saved")
+            }
+            let png = data as Data
+            snapshot = (source, framebufferMask, exclusion, rotationDegrees, swapsAxes, png)
+            return png
+        }
 
         func framebufferMask(in deviceType: URL, geometry: CGSize) throws -> NSImage? {
             let resources = deviceType.appendingPathComponent("Contents/Resources", isDirectory: true)
