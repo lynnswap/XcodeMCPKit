@@ -1,5 +1,6 @@
 import ABIBridge
 import Darwin
+import Dispatch
 import Foundation
 import XcodeMCPWire
 
@@ -80,7 +81,8 @@ final class NativePreviewCorrection {
         var preparation: RendererPreparation
         var requestDirectory: URL?
         var task: Task<Void, Never>?
-        var processFailure: (any Error)?
+        @MainActor var processFailure: (any Error)? { didSet { processFailureWake?() } }
+        var processFailureWake: (@MainActor () -> Void)?
         var installed = false
         var launched = false
         var localization: String?
@@ -302,7 +304,8 @@ final class NativePreviewCorrection {
             do {
                 let currentBuilder = try await builder.workspaceBuilder(for: plan.destination)
                 if currentBuilder === certificate.workspaceBuilder,
-                   try NativePreviewInputSnapshot.capture(roots: certificate.roots) == certificate.inputs,
+                   try NativePreviewInputSnapshot.capture(
+                       roots: certificate.inputs.prioritizedRoots(certificate.roots)) == certificate.inputs,
                    inputRevision == session.inputRevision {
                     inputsAreCurrent = true
                     if plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
@@ -1038,24 +1041,44 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.invocation("The preview renderer has no request directory")
         }
         return try await Self.withStagedDirectory(in: directory) { output in
-            let command = PreviewRendererCommand(identifier: output.lastPathComponent, request: stage.preparation.request)
-            try JSONEncoder().encode(command).write(to: directory.appendingPathComponent("PreviewRequest.json"), options: .atomic)
-            let resultURL = output.appendingPathComponent("PreviewResult.json")
-            while !FileManager.default.fileExists(atPath: resultURL.path) {
-                try Task.checkCancellation()
-                if let error = stage.processFailure { throw error }
-                if let identifier = stage.processIdentifier, let executable = stage.executable,
-                   try !Self.rendererIsRunning(identifier, executable: executable) {
-                    throw NativeRuntimeError.invocation("The preview renderer process \(identifier) exited before returning a result")
+            try await PreviewRendererFileEvents.withEvents(in: output) { changes, wake in
+                stage.processFailureWake = { wake.yield(.changed) }
+                defer { stage.processFailureWake = nil }
+                let exitSource = stage.processIdentifier.map { identifier in
+                    let source = DispatchSource.makeProcessSource(identifier: identifier, eventMask: .exit,
+                        queue: .global(qos: .userInitiated))
+                    source.setEventHandler { @Sendable in wake.yield(.changed) }
+                    source.setRegistrationHandler { @Sendable in wake.yield(.changed) }
+                    source.activate()
+                    return source
                 }
-                try await Task.sleep(for: .milliseconds(25))
+                defer { exitSource?.cancel() }
+                let command = PreviewRendererCommand(identifier: output.lastPathComponent, request: stage.preparation.request)
+                var events = changes.makeAsyncIterator()
+                try JSONEncoder().encode(command).write(to: directory.appendingPathComponent("PreviewRequest.json"), options: .atomic)
+                let resultURL = output.appendingPathComponent("PreviewResult.json")
+                while !FileManager.default.fileExists(atPath: resultURL.path) {
+                    try Task.checkCancellation()
+                    if let error = stage.processFailure { throw error }
+                    if let identifier = stage.processIdentifier, let executable = stage.executable,
+                       try !Self.rendererIsRunning(identifier, executable: executable) {
+                        throw NativeRuntimeError.invocation("The preview renderer process \(identifier) exited before returning a result")
+                    }
+                    guard let event = await events.next() else {
+                        try Task.checkCancellation()
+                        throw NativeRuntimeError.invocation("The preview result directory event stream ended")
+                    }
+                    if case .invalidated = event {
+                        throw NativeRuntimeError.invocation("The preview result directory is no longer available")
+                    }
+                }
+                let result = try JSONDecoder().decode(PreviewRendererResult.self, from: Data(contentsOf: resultURL))
+                if result.requiresNativePipeline == true { throw NativePipelineRequired() }
+                if let error = result.error { throw NativeRuntimeError.invocation(error) }
+                let snapshot = try result.snapshotName.map { try Data(contentsOf: output.appendingPathComponent($0)) } ?? result.snapshotData
+                let exclusion = try result.exclusionSnapshotName.map { try Data(contentsOf: output.appendingPathComponent($0)) }
+                return (result, snapshot, exclusion)
             }
-            let result = try JSONDecoder().decode(PreviewRendererResult.self, from: Data(contentsOf: resultURL))
-            if result.requiresNativePipeline == true { throw NativePipelineRequired() }
-            if let error = result.error { throw NativeRuntimeError.invocation(error) }
-            let snapshot = try result.snapshotName.map { try Data(contentsOf: output.appendingPathComponent($0)) } ?? result.snapshotData
-            let exclusion = try result.exclusionSnapshotName.map { try Data(contentsOf: output.appendingPathComponent($0)) }
-            return (result, snapshot, exclusion)
         }
     }
 

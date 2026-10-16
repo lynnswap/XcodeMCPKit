@@ -1,10 +1,56 @@
 import Foundation
 import Testing
+import XcodeMCPWire
 @testable import XcodeMCPNativeRuntime
 
 @Suite
 @MainActor
 struct NativePreviewProcessTests {
+    @Test func rendererDirectoryEventsObserveAtomicReplacements() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let file = fixture.root.appendingPathComponent("PreviewRequest.json")
+        try Data("before".utf8).write(to: file, options: .atomic)
+
+        let value = try await PreviewRendererFileEvents.withEvents(in: fixture.root) { changes, _ in
+            #expect(try String(contentsOf: file, encoding: .utf8) == "before")
+            var events = changes.makeAsyncIterator()
+            let registered = await events.next()
+            #expect(registered != nil)
+
+            try Data("after".utf8).write(to: file, options: .atomic)
+            let changed = await events.next()
+            #expect(changed != nil)
+            return try String(contentsOf: file, encoding: .utf8)
+        }
+        #expect(value == "after")
+    }
+
+    @Test func cancelledRendererDirectoryWaitFinishes() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let ready = AsyncStream<Void>.makeStream()
+        let task = Task {
+            defer { ready.continuation.finish() }
+            try await PreviewRendererFileEvents.withEvents(in: fixture.root) { changes, _ in
+                var events = changes.makeAsyncIterator()
+                _ = await events.next()
+                ready.continuation.yield(())
+                while await events.next() != nil { try Task.checkCancellation() }
+                try Task.checkCancellation()
+            }
+        }
+        defer { task.cancel() }
+        var readiness = ready.stream.makeAsyncIterator()
+        _ = await readiness.next()
+        task.cancel()
+
+        do {
+            try await task.value
+            Issue.record("A cancelled renderer directory wait returned success")
+        } catch is CancellationError {}
+    }
+
     @Test func localizedRendererUsesRequestedBundleResourcesAndLocale() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

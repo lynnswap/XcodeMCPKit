@@ -46,6 +46,33 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         }
     }
 
+    func prioritizedRoots(_ roots: [URL]) -> [URL] {
+        guard roots.count > 1 else { return roots }
+        let weighted = roots.enumerated().map { index, root in
+            let path = root.path
+            let prefix = path == "/" ? path : path + "/"
+            var first = 0
+            var end = entries.count
+            while first < end {
+                let middle = first + (end - first) / 2
+                if entries[middle].path < prefix { first = middle + 1 }
+                else { end = middle }
+            }
+            var last = first
+            end = entries.count
+            while last < end {
+                let middle = last + (end - last) / 2
+                if entries[middle].path.hasPrefix(prefix) { last = middle + 1 }
+                else { end = middle }
+            }
+            return (root: root, count: last - first, index: index)
+        }
+        // Prior entries guide scheduling only; the next capture still reads every root.
+        return weighted.sorted {
+            $0.count == $1.count ? $0.index < $1.index : $0.count > $1.count
+        }.map(\.root)
+    }
+
     private struct CaptureWork: Sendable {
         var nextRoot = 0
         var snapshots: [NativePreviewInputSnapshot] = []
