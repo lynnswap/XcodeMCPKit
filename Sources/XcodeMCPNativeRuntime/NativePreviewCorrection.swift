@@ -1361,12 +1361,14 @@ final class NativePreviewCorrection {
         let directory = product.deletingLastPathComponent().appendingPathComponent("PreviewLink", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let inputs = try host.linkedInputs()
+        let mergesArchives = try NativePreviewBinary.isStaticArchive(at: product)
         var owned = Set((source.objectFiles + [source.outputURL].compactMap { $0 }).map { $0.resolvingSymlinksInPath() })
-        // libtool can merge other archives; those bytes already belong to the force-loaded source image.
+        // A relocatable link can leave archive members for the host's final link.
         for input in try source.linkedInputs().files {
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectory), !isDirectory.boolValue,
-               try NativePreviewBinary.isStaticArchive(at: input) || NativePreviewBinary.file(at: input)?.header.fileType == .object {
+               try (mergesArchives && NativePreviewBinary.isStaticArchive(at: input))
+                || NativePreviewBinary.file(at: input)?.header.fileType == .object {
                 owned.insert(input.resolvingSymlinksInPath())
             }
         }
@@ -1414,7 +1416,7 @@ final class NativePreviewCorrection {
         for path in source.searchPaths(in: source.compileCommandLine) + source.searchPaths(in: source.linkCommandLine) {
             result += [path.argument == "-L" ? "-L" : "-F", path.url.path]
         }
-        let sourceArguments = try NativePreviewBinary.isStaticArchive(at: product)
+        let sourceArguments = mergesArchives
             ? ["-Xlinker", "-force_load", "-Xlinker", product.path] : [product.path]
         return result + sourceArguments + ["-Xlinker", "-headerpad_max_install_names"]
     }

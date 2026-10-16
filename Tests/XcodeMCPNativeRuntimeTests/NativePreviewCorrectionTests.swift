@@ -923,8 +923,12 @@ struct NativePreviewCorrectionTests {
         #expect(try Data(contentsOf: refreshedProducts.appendingPathComponent("FixtureKit.framework/FixtureKit")) == original)
     }
 
-    @Test(arguments: [true, false])
-    func hostlessPackageRetainsArchiveMembersUnusedByAnotherDependency(dynamicDependency: Bool) async throws {
+    enum ArchiveLinkKind: CaseIterable {
+        case dynamicDependency, objectDependency, hostedObject
+    }
+
+    @Test(arguments: ArchiveLinkKind.allCases)
+    func staticProductsRetainArchiveMembersNeededByTheirClients(kind: ArchiveLinkKind) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let products = root.appendingPathComponent("Staged/Products")
@@ -950,6 +954,7 @@ struct NativePreviewCorrectionTests {
         let base = NativePreviewBuild.Target(moduleName: "Base", buildableName: "Base.a", sdkRoot: "macosx",
             sdkVariant: nil, architecture: "arm64", linkCommandLine: archiveCommand, linkerWorkingDirectory: root.path,
             objectFiles: [baseDependency, baseSource], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)
+        let dynamicDependency = kind == .dynamicDependency
         let dependencyOutput = root.appendingPathComponent(dynamicDependency ? "Dependency.dylib" : "Dependency.o")
         let dependencyCommand = ["clang", "-target", NativePreviewPlatform.macOS.triple]
             + (dynamicDependency ? ["-dynamiclib"] : ["-r", "-nostdlib"])
@@ -957,8 +962,8 @@ struct NativePreviewCorrectionTests {
         try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx"] + dependencyCommand)
         let dependency = NativePreviewBuild.Target(moduleName: "Dependency", buildableName: dependencyOutput.lastPathComponent,
             sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: dependencyCommand,
-            linkerWorkingDirectory: root.path, objectFiles: [dependencyObject], sourceFiles: [],
-            debugDylibEnabled: false, isRunnable: false, dependencies: [base])
+            linkerWorkingDirectory: root.path, objectFiles: [dependencyObject], sourceFiles: [dependencyObject.appendingPathExtension("c")],
+            debugDylibEnabled: false, isRunnable: false, dependencies: kind == .hostedObject ? [] : [base])
         let sourceOutput = root.appendingPathComponent("Source.o")
         let fileList = root.appendingPathComponent("Source.LinkFileList")
         try (sourceObject.path + "\n").write(to: fileList, atomically: true, encoding: .utf8)
@@ -971,7 +976,30 @@ struct NativePreviewCorrectionTests {
             debugDylibEnabled: false, isRunnable: false, dependencies: [base, dependency])
         let developer = try previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
-        let image = try await NativePreviewCorrection.linkStaticProduct(source, in: root.appendingPathComponent("Staged/Preview.app"),
+        let selectedSource: NativePreviewBuild.Target
+        let selectedHost: NativePreviewBuild.Target?
+        if kind == .hostedObject {
+            let hostOutput = root.appendingPathComponent("Host.app/Contents/MacOS/Host.debug.dylib")
+            try FileManager.default.createDirectory(at: hostOutput.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let compiler = try previewBinaryOutput("/usr/bin/xcrun", ["--find", "clang"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let sdk = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "--show-sdk-path"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let command = [compiler, "-dynamiclib", "-target", NativePreviewPlatform.macOS.triple, "-isysroot", sdk,
+                sourceOutput.path, dependencyOutput.path, archive.path, "-o", hostOutput.path]
+            try await process.run(command[0], Array(command.dropFirst()))
+            let host = NativePreviewBuild.Target(moduleName: "Host", buildableName: "Host.app", sdkRoot: "macosx",
+                sdkVariant: nil, architecture: "arm64", linkCommandLine: command, linkerWorkingDirectory: root.path,
+                objectFiles: [sourceObject], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
+            let selection = try NativePreviewCorrection.selectTarget([dependency, host], source: dependencyObject.appendingPathExtension("c"), platform: .macOS)
+            #expect(selection.source.outputURL == dependencyOutput)
+            #expect(selection.host.outputURL == hostOutput)
+            selectedSource = selection.source
+            selectedHost = selection.host
+        } else {
+            selectedSource = source
+            selectedHost = nil
+        }
+        let image = try await NativePreviewCorrection.linkStaticProduct(selectedSource, host: selectedHost,
+            in: root.appendingPathComponent("Staged/Preview.app"),
             products: products, platform: .macOS, process: process)
         let symbols = try previewBinaryOutput("/usr/bin/xcrun", ["nm", "-jU", image.url.path]).split(whereSeparator: \.isNewline)
         #expect(symbols.contains("_base_source_value"))

@@ -51,6 +51,10 @@ enum NativePreviewBinary {
             let architectures = universal.arches
             guard let architecture = architectures.first(where: { $0.cpuSubType == .arm64(.arm64_all) })
                 ?? architectures.first(where: { $0.cpuType == .arm64 }) else { return nil }
+            // Universal containers can hold archive slices as well as Mach-O images.
+            try handle.seek(toOffset: UInt64(architecture.offset))
+            guard let data = try handle.read(upToCount: MemoryLayout<UInt32>.size), data.count == MemoryLayout<UInt32>.size,
+                  data.withUnsafeBytes({ unsafe Magic(rawValue: $0.loadUnaligned(as: UInt32.self))?.is64BitMach }) == true else { return nil }
             file = try MachOFile(url: url, headerStartOffset: Int(architecture.offset))
         }
         guard file.header.cpuType == .arm64 else { return nil }

@@ -33,6 +33,27 @@ struct NativePreviewBinaryTests {
         #expect(try NativePreviewBinary.matches(source, copy))
         #expect(try !NativePreviewBinary.matches(source, other))
     }
+
+    @Test func universalArchivesAreNotMachOImages() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.c")
+        try Data("int preview_fixture_value(void) { return 0; }\n".utf8).write(to: source)
+        var archives: [URL] = []
+        for architecture in ["arm64", "x86_64"] {
+            let object = root.appendingPathComponent(architecture + ".o")
+            let archive = root.appendingPathComponent(architecture + ".a")
+            try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-arch", architecture,
+                "-c", source.path, "-o", object.path])
+            try previewBinaryOutput("/usr/bin/xcrun", ["libtool", "-static", object.path, "-o", archive.path])
+            archives.append(archive)
+        }
+        let universal = root.appendingPathComponent("universal.a")
+        try previewBinaryOutput("/usr/bin/xcrun", ["lipo", "-create"] + archives.map(\.path) + ["-output", universal.path])
+
+        #expect(try !NativePreviewBinary.isStaticLibrary(at: universal))
+    }
 }
 
 @MainActor
