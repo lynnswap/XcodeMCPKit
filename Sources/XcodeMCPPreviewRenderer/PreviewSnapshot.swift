@@ -32,7 +32,39 @@ import CoreFoundation
 import UIKit
 
 @MainActor
-func previewExclusionImage(in window: UIWindow) async throws -> UIImage? {
+struct PreviewExclusionGeometry: Equatable {
+    let rect: CGRect
+    let bounds: CGRect
+    let scale: CGFloat
+
+    func pngData(in window: UIWindow) throws -> Data {
+        let overlay = UIView(frame: bounds)
+        overlay.backgroundColor = .clear
+        let exclusion = UIView(frame: rect)
+        exclusion.backgroundColor = .black
+        // PreviewShell.ExclusionView uses the canonical display rect with these layer settings.
+        exclusion.layer.cornerRadius = rect.height * 0.5
+        exclusion.layer.cornerCurve = .continuous
+        overlay.addSubview(exclusion)
+        window.addSubview(overlay)
+        defer { overlay.removeFromSuperview() }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = false
+        var drawn = false
+        let image = UIGraphicsImageRenderer(bounds: bounds, format: format).image { _ in
+            drawn = overlay.drawHierarchy(in: bounds, afterScreenUpdates: true)
+        }
+        guard drawn else { throw PreviewRendererError("The preview display exclusion could not be captured") }
+        guard let data = image.pngData() else {
+            throw PreviewRendererError("The preview display exclusion could not be encoded")
+        }
+        return data
+    }
+}
+
+@MainActor
+func previewExclusionGeometry(in window: UIWindow) async throws -> PreviewExclusionGeometry? {
     let runtime = ABIRuntime.shared
     let available = try await runtime.resolveCFunction(named: "SBSIsSystemApertureAvailable",
         as: (() -> Bool).self, in: .framework(named: "SpringBoardServices"))
@@ -44,27 +76,8 @@ func previewExclusionImage(in window: UIWindow) async throws -> UIImage? {
     guard let shape = try unsafe getter.unsafeInvoke(), let object = shape as? NSObject,
           let shapeClass = NSClassFromString("UISDisplaySingleRectShape"), object.isKind(of: shapeClass) else { return nil }
     let rectGetter = try await runtime.object(shape).resolveMethod(selector: "rect", as: (() -> CGRect).self)
-    let rect = try unsafe rectGetter.unsafeInvoke()
-    let bounds = CGRect(origin: .zero, size: window.screen.fixedCoordinateSpace.bounds.size)
-    let overlay = UIView(frame: bounds)
-    overlay.backgroundColor = .clear
-    let exclusion = UIView(frame: rect)
-    exclusion.backgroundColor = .black
-    // PreviewShell.ExclusionView uses the canonical display rect with these layer settings.
-    exclusion.layer.cornerRadius = rect.height * 0.5
-    exclusion.layer.cornerCurve = .continuous
-    overlay.addSubview(exclusion)
-    window.addSubview(overlay)
-    defer { overlay.removeFromSuperview() }
-    let format = UIGraphicsImageRendererFormat()
-    format.scale = window.screen.scale
-    format.opaque = false
-    var drawn = false
-    let image = UIGraphicsImageRenderer(bounds: bounds, format: format).image { _ in
-        drawn = overlay.drawHierarchy(in: bounds, afterScreenUpdates: true)
-    }
-    guard drawn else { throw PreviewRendererError("The preview display exclusion could not be captured") }
-    return image
+    return try unsafe PreviewExclusionGeometry(rect: rectGetter.unsafeInvoke(),
+        bounds: CGRect(origin: .zero, size: window.screen.fixedCoordinateSpace.bounds.size), scale: window.screen.scale)
 }
 
 @MainActor

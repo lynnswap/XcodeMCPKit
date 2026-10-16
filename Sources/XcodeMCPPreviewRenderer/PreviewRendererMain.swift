@@ -306,6 +306,7 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             try await Task.sleep(for: .milliseconds(500))
 
             let mountedSize = size
+            var cachedExclusion: (geometry: PreviewExclusionGeometry, data: Data)?
             return { directory in
                 window.layoutIfNeeded()
                 controller.view.layoutIfNeeded()
@@ -330,13 +331,16 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 let deviceLayout: Bool
                 if case .device = layout { deviceLayout = activity == nil } else { deviceLayout = false }
                 var exclusionSnapshotName: String?
-                if deviceLayout, let exclusion = try await previewExclusionImage(in: window) {
-                    guard let exclusionData = exclusion.pngData() else {
-                        throw PreviewRendererError("The preview display exclusion could not be encoded")
+                if deviceLayout, let geometry = try await previewExclusionGeometry(in: window) {
+                    let exclusionData: Data
+                    if let cachedExclusion, cachedExclusion.geometry == geometry { exclusionData = cachedExclusion.data }
+                    else {
+                        exclusionData = try geometry.pngData(in: window)
+                        cachedExclusion = (geometry, exclusionData)
                     }
                     exclusionSnapshotName = "PreviewExclusion.png"
                     try exclusionData.write(to: directory.appendingPathComponent("PreviewExclusion.png"), options: .atomic)
-                }
+                } else { cachedExclusion = nil }
                 return PreviewRendererResult(snapshotName: "Preview.png", displayName: displayName,
                     sourceLineNumber: sourceLineNumber, timelineIndexes: widget?.timelineIndexes ?? activity?.stateIndexes,
                     groupItems: groupItems, errors: errors,
