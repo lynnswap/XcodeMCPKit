@@ -275,4 +275,6 @@ final class NativeWorkspaceRegistry {
             }
         }
     }
+
+    func registeredIdentifiers() throws -> Set<String> { Set(try entries().map(\.identifier)) }
 }

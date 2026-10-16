@@ -57,9 +57,10 @@ build, and test operations that accept `workspaceIdentifier`.
 
 `XcodeOpenWorkspace` explicitly preloads a model and returns its native identifier.
 `XcodeListWorkspaces` lists the host's models. `XcodeCloseWorkspace` closes an
-owned model; host shutdown closes its remaining models. These operations do not
-manage windows in a separate Xcode application. Host restart invalidates native
-identifiers, so use the absolute project path to load it again.
+owned model and releases its preview processes, staged products, and owned
+Simulator. Host shutdown releases those resources for all remaining models. These
+operations do not manage windows in a separate Xcode application. Host restart
+invalidates native identifiers, so use the absolute project path to load it again.
 
 Before executing a tool, the host closes models whose saved workspace or project
 directories have been removed. Other loaded workspaces remain available. Cleanup
@@ -78,6 +79,12 @@ effects were rolled back.
 The host reads saved project and source files. Save editor changes before an MCP
 operation. Opening the same project in Xcode does not transfer its unsaved buffers,
 active scheme, selected destination, or debugger session to the host.
+
+`RenderPreview` builds saved changes and captures a new image for each request.
+Successful calls retain the workspace's preview processes and owned Simulator for
+later requests. Changes to build products, resources, or destination invalidate the
+retained preview metadata and staged products. Failure, timeout, or cancellation
+cleans up the affected preview session; cleanup failures remain in the error.
 
 Use `XcodeListSchemes`, `XcodeListRunDestinations`, and `XcodeListTestPlans` to
 inspect the project's settings. Select the required values with

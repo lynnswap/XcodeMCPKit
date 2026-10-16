@@ -17,7 +17,7 @@ package protocol NativeToolBackend: AnyObject {
     var origin: [String: JSONValue]? { get }
     func listTools() async throws -> [NativeTool]
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data>
-    func finishExecution(context: NativeToolContext) throws
+    func finishExecution(context: NativeToolContext) async throws
     /// Prepares pending requests to drain before shutdown performs final cleanup.
     func beginShutdown()
     func shutdown() async throws
@@ -26,7 +26,7 @@ package protocol NativeToolBackend: AnyObject {
 extension NativeToolBackend {
     package var origin: [String: JSONValue]? { nil }
     package func beginShutdown() {}
-    package func finishExecution(context: NativeToolContext) throws {}
+    package func finishExecution(context: NativeToolContext) async throws {}
 }
 
 @safe
@@ -84,7 +84,10 @@ package final class NativeXcodeBackend: NativeToolBackend {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
         try await NativeErrorPresentation.$capture.withValue(nil) {
-            do { try await workspaces.closeRemovedWorkspaces() }
+            do {
+                try await workspaces.closeRemovedWorkspaces()
+                try await previewCorrection.retainWorkspaces(workspaces.registeredIdentifiers())
+            }
             catch { NativeErrorPresentation.reportBackground("Native workspace cleanup failed: \(error)") }
             try Task.checkCancellation()
         }
@@ -126,13 +129,16 @@ package final class NativeXcodeBackend: NativeToolBackend {
         previewCorrection.cancelPendingOperations()
     }
 
-    package func finishExecution(context: NativeToolContext) throws {
+    package func finishExecution(context: NativeToolContext) async throws {
         try workspaces.finishOpen(request: context.artifactsDirectory)
+        try await previewCorrection.retainWorkspaces(workspaces.registeredIdentifiers())
     }
 
     package func shutdown() async throws {
         await crashCorrection.shutdown()
-        await previewCorrection.shutdown()
-        try await workspaces.closeAllWorkspaces()
+        var failures: [String] = []
+        do { try await previewCorrection.shutdown() } catch { failures.append(String(describing: error)) }
+        do { try await workspaces.closeAllWorkspaces() } catch { failures.append(String(describing: error)) }
+        if !failures.isEmpty { throw NativeRuntimeError.invocation(failures.joined(separator: "; ")) }
     }
 }

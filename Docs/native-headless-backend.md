@@ -31,7 +31,7 @@ frameworks are loaded from the selected installation and are not redistributed.
 | Action streams and native cancellation | Native runtime using Apple's executor |
 | Per-request artifacts and conversation context | Native runtime |
 | Build engine | Native host and its Swift Build child |
-| Direct SwiftUI preview build, rendering, and temporary Simulator cleanup | Native preview correction |
+| Preview sessions, staged products, rendering, and owned process/Simulator cleanup | Native preview correction |
 
 The separate process isolates AppKit state, loaded native libraries, and
 termination handlers from the HTTP server. The broker owns logical host
@@ -379,11 +379,8 @@ The catalog depends on the preview category and installed runtime.
 On watchOS Simulator, Relevance previews use the same extension service for explicit
 entries, a provider, and a provider with supplied relevance. The native Smart Stack
 host supplies the watch presentation and timeline controls.
-The command owns the service connection until rendering ends. Cancellation stops
-the command and runs the existing Simulator cleanup. The render's
-Simulator, containing application, extension process, and client application are
-removed by the existing Simulator cleanup owner; cleanup failures are reported
-alongside the original failure.
+The command owns the service connection for each render. The workspace's preview
+session retains the Simulator and staged applications between successful requests.
 
 On watchOS Simulator, legacy ClockKit complication `PreviewProvider` contexts
 supported by native RenderPreview use ClockKit's timeline construction and
@@ -415,9 +412,11 @@ Activity labels use the containing application's localized name when that
 application is available, falling back to the extension's name.
 Other display controls retain the native pipeline for Live Activity previews.
 
-Each Simulator render creates a device matching the selected destination's device
-type and runtime. macOS and Mac Catalyst launch a staged application process and
-return its snapshot through inherited stdout, including when the app is sandboxed.
+Each workspace owns a preview session that retains its staged products and renderer
+processes. Simulator previews reuse an owned device matching the selected
+destination's device type and runtime. macOS and Mac Catalyst reuse a staged
+application process, including when the app is sandboxed. The host sends each
+render request to the process's session directory and reads its new result there.
 Destination selection retains the decoded native RenderPreview input and the
 selected source's translation unit. Xcode's source graph and update plan choose
 the destination; the correction consumes the first native update record whose
@@ -430,28 +429,31 @@ returned. The correction preserves that setting, the native destination fields,
 and any unmatched-preference warning. `renderedDestination` describes the native
 plan's chosen destination. Destinations unsupported by the direct renderer retain
 the native pipeline.
-For registry and provider previews, a first renderer process evaluates the preview
+For registry and provider previews, the renderer first evaluates the preview
 declaration and traits, then returns native preview metadata without invoking the
 deferred view body. Providers also return the selected child's native preview
 description, which supplies evaluated source-device preferences. The host decodes
 these native property lists and plans again with
 the evaluated content domain and effective destination preferences. Nonempty
 operation preferences take precedence over source preferences. These RenderPreview
-requests use the native Location's `none` requirements. The final renderer
-evaluates the declaration again and renders its body. When the native destination
-is unchanged, the host reuses the build and staged product; otherwise it builds
-and stages the selected destination. Native platform-specific context, orientation,
-and on-device support policies are preserved in the evaluated metadata.
+requests use the native Location's `none` requirements. The session retains metadata
+for each definition and localization while its build products and destination
+remain unchanged. Each request evaluates the declaration and view body again and
+captures a new image. The host builds the active scheme before checking whether
+it can reuse staged products and processes. Changes to built code, resources,
+dependencies, or destination invalidate the retained metadata and staged products.
+A changed Simulator destination also replaces the owned device. Native
+platform-specific context, orientation, and on-device support policies are preserved
+in the evaluated metadata.
 Preview forms unsupported by the direct renderer retain
 their existing native fallback behavior.
-The correction deletes its temporary Simulator after success, failure, timeout, or
-cancellation, and reports cleanup failures. The correction does not boot, install
-to, or delete existing Simulator devices or change the workspace's active run
-destination. Framework diagnostics and
-subprocess logs remain in the request's artifacts directory.
-The owned desktop process is stopped on cancellation or timeout. The staged
-application bundle is removed after rendering or failure; snapshots
-and diagnostics remain available.
+Closing a workspace or shutting down the host stops its renderer processes,
+deletes its owned Simulator, and removes its staged products. Failure, timeout, or
+cancellation invalidates the affected preview session and runs the same cleanup;
+cleanup failures are reported alongside the original failure. The correction does
+not boot, install to, or delete existing Simulator devices or change the workspace's
+active run destination. Snapshots, framework diagnostics, and subprocess logs
+remain available in the request artifacts directories.
 The renderer starts its own application and scene lifecycle. Its executable,
 package type, scene manifest, principal class, main storyboard, and extension
 settings are replaced together, including platform- and device-qualified keys.
