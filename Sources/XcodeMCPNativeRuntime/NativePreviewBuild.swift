@@ -437,6 +437,7 @@ final class NativePreviewBuild {
         var pending = Array(canonicalBuildables.reversed())
         var edges: [ObjectIdentifier: [NSObject]] = [:]
         var codeIdentities: Set<ObjectIdentifier> = []
+        var dynamicLibraryCandidates: Set<ObjectIdentifier> = []
         var resourceBlueprints: [ObjectIdentifier: NSObject] = [:]
         while let buildable = pending.popLast() {
             try Task.checkCancellation()
@@ -455,7 +456,12 @@ final class NativePreviewBuild {
                 resourceBlueprints[identifier] = blueprint
             } else {
                 let productType = try runtime.object(buildable).resolveMethodAndWait(selector: "productTypeIdentifier", as: (() -> String?).self)
-                if let product = try unsafe productType.unsafeInvoke(), linkableProducts.contains(product) { codeIdentities.insert(identifier) }
+                if let product = try unsafe productType.unsafeInvoke() {
+                    if linkableProducts.contains(product) { codeIdentities.insert(identifier) }
+                    if product == "com.apple.product-type.framework" || product == "com.apple.product-type.library.dynamic" {
+                        dynamicLibraryCandidates.insert(identifier)
+                    }
+                }
             }
         }
         let codeEdges = edges.mapValues { $0.filter { codeIdentities.contains(ObjectIdentifier($0)) } }
@@ -495,8 +501,8 @@ final class NativePreviewBuild {
         }
         var queriedDescriptions: [NativeSwiftValue] = []
         defer { withExtendedLifetime((graph, queriedDescriptions)) {} }
-        let codeAncestors = ancestors.filter { codeIdentities.contains(ObjectIdentifier($0)) }
-        let missingAncestors = codeAncestors.filter { candidates[ObjectIdentifier($0)] == nil }
+        let dynamicAncestors = ancestors.filter { dynamicLibraryCandidates.contains(ObjectIdentifier($0)) }
+        let missingAncestors = dynamicAncestors.filter { candidates[ObjectIdentifier($0)] == nil }
         if !missingAncestors.isEmpty {
             let nativeAncestors = try await buildableArray(missingAncestors, matching: buildables)
             let descriptions = try await targetDescriptions(for: nativeAncestors, workspace: workspace, priorBuild: priorBuild, image: image)
@@ -504,7 +510,7 @@ final class NativePreviewBuild {
             try addRecords(await targetRecords(descriptions, image: image, runnable: nil))
         }
         var dynamicBuildables: Set<ObjectIdentifier> = []
-        for buildable in codeAncestors {
+        for buildable in dynamicAncestors {
             let record = try record(for: buildable)
             guard let output = record.target.outputURL else {
                 throw NativeRuntimeError.unsupportedContract("Native dependency \(record.target.buildableName) has no linked product")
