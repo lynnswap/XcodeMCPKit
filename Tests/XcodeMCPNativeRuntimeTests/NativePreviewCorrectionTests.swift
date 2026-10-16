@@ -518,6 +518,198 @@ struct NativePreviewCorrectionTests {
         #expect(!FileManager.default.fileExists(atPath: staged.appendingPathComponent("Contents/Frameworks/FixtureKit.framework").path))
     }
 
+    @Test func staticWidgetPreviewRetainsItsNativeExtensionHost() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let parent = root.appendingPathComponent("Container.app")
+        let product = parent.appendingPathComponent("Contents/PlugIns/Widget.appex")
+        let image = product.appendingPathComponent("Contents/MacOS/Widget.debug.dylib")
+        let executable = product.appendingPathComponent("Contents/MacOS/Widget")
+        let existing = parent.appendingPathComponent("Contents/Frameworks/Existing.framework/Existing")
+        let dependency = root.appendingPathComponent("Products/PreviewOnly.framework/PreviewOnly")
+        let leaf = root.appendingPathComponent("Products/libPreviewLeaf.dylib")
+        let archive = root.appendingPathComponent("StaticWidget.a")
+        for (bundle, name, type) in [(parent, "Container", "APPL"), (product, "Widget", "XPC!")] {
+            try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents/Resources"), withIntermediateDirectories: true)
+            var info: [String: Any] = ["CFBundleIdentifier": "dev.lynnswap." + name, "CFBundleExecutable": name,
+                                     "CFBundleName": name, "CFBundlePackageType": type]
+            if type == "XPC!" { info["NSExtension"] = ["NSExtensionPointIdentifier": "com.apple.widgetkit-extension"] }
+            try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+                .write(to: bundle.appendingPathComponent("Contents/Info.plist"))
+            try Data((name + " resource").utf8).write(to: bundle.appendingPathComponent("Contents/Resources/Marker.txt"))
+        }
+        for binary in [existing, dependency] {
+            let resources = binary.deletingLastPathComponent().appendingPathComponent("Resources")
+            try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+            let info = ["CFBundleIdentifier": "dev.lynnswap." + binary.lastPathComponent,
+                        "CFBundleExecutable": binary.lastPathComponent, "CFBundlePackageType": "FMWK"]
+            try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+                .write(to: resources.appendingPathComponent("Info.plist"))
+            try Data((binary.lastPathComponent + " resource").utf8).write(to: resources.appendingPathComponent("Marker.txt"))
+        }
+        let leafCode = root.appendingPathComponent("Leaf.c")
+        try Data("int preview_leaf_value(void) { return 5; }".utf8).write(to: leafCode)
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-dynamiclib", leafCode.path,
+            "-install_name", "@rpath/libPreviewLeaf.dylib", "-o", leaf.path])
+        for (binary, token, function, value) in [(existing, "NativeExistingToken", "existing_value", "11"),
+                                                (dependency, "NativePreviewOnlyToken", "preview_dependency_value", "13 + preview_leaf_value()")] {
+            let code = root.appendingPathComponent(binary.lastPathComponent + ".m")
+            try Data("""
+            #import <Foundation/Foundation.h>
+            extern int preview_leaf_value(void);
+            @interface \(token) : NSObject @end
+            @implementation \(token) @end
+            int \(function)(void) { return \(value); }
+            """.utf8).write(to: code)
+            try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-dynamiclib", "-framework", "Foundation", code.path,
+                "-install_name", "@rpath/\(binary.lastPathComponent).framework/\(binary.lastPathComponent)",
+                "-Wl,-headerpad_max_install_names", "-o", binary.path] + (binary == dependency ? [leaf.path] : []))
+        }
+        let coreCode = root.appendingPathComponent("Core.m")
+        let coreObject = root.appendingPathComponent("Core.o")
+        let previewCode = root.appendingPathComponent("PreviewValue.c")
+        let previewObject = root.appendingPathComponent("PreviewValue.o")
+        let source = root.appendingPathComponent("WidgetPreview.swift")
+        let registryObject = root.appendingPathComponent("WidgetPreview.o")
+        try Data("""
+        #import <Foundation/Foundation.h>
+        @interface NativeWidgetToken : NSObject @end
+        @implementation NativeWidgetToken @end
+        int static_core_value(void) { return 7; }
+        """.utf8).write(to: coreCode)
+        try Data("""
+        __asm__(".linker_option \\\"-framework\\\", \\\"PreviewOnly\\\"");
+        extern int preview_dependency_value(void);
+        int static_preview_value(void) { return preview_dependency_value() + 3; }
+        """.utf8).write(to: previewCode)
+        for (code, object) in [(coreCode, coreObject), (previewCode, previewObject)] {
+            try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-c", code.path, "-o", object.path])
+        }
+        try Data("import SwiftUI\n#Preview { Text(\"Static widget preview\") }\n".utf8).write(to: source)
+        let compileCommand = ["swiftc", "-parse-as-library", "-c", "-module-name", "StaticWidget", "-target",
+            NativePreviewPlatform.macOS.triple, "-F", dependency.deletingLastPathComponent().deletingLastPathComponent().path,
+            "-L", leaf.deletingLastPathComponent().path, source.path, "-o", registryObject.path]
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx"] + compileCommand)
+        let archiveCommand = ["libtool", "-static", coreObject.path, previewObject.path, registryObject.path, "-o", archive.path]
+        try previewBinaryOutput("/usr/bin/xcrun", archiveCommand)
+        let sourceTarget = NativePreviewBuild.Target(moduleName: "StaticWidget", buildableName: archive.lastPathComponent,
+            sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: archiveCommand,
+            linkerWorkingDirectory: root.path, objectFiles: [coreObject, previewObject, registryObject], sourceFiles: [source],
+            debugDylibEnabled: false, isRunnable: false, compileCommandLine: compileCommand)
+        let hostCode = root.appendingPathComponent("Widget.m")
+        let hostObject = root.appendingPathComponent("Widget.o")
+        try Data("""
+        #import <Foundation/Foundation.h>
+        extern int static_core_value(void), existing_value(void);
+        int widget_host_value(void) { return static_core_value() + existing_value(); }
+        """.utf8).write(to: hostCode)
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-c", hostCode.path, "-o", hostObject.path])
+        let compiler = try previewBinaryOutput("/usr/bin/xcrun", ["--find", "clang"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let sdk = try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "--show-sdk-path"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let swiftLibraries = URL(filePath: compiler).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("lib/swift/macosx")
+        let hostCommand = [compiler, "-target", NativePreviewPlatform.macOS.triple, "-isysroot", sdk, "-dynamiclib", "-fobjc-link-runtime",
+            hostObject.path, archive.path, "-framework", "Foundation", "-F", existing.deletingLastPathComponent().deletingLastPathComponent().path,
+            "-framework", "Existing", "-L" + swiftLibraries.path, "-L/usr/lib/swift", "-install_name", "@rpath/Widget.debug.dylib",
+            "-Wl,-no_adhoc_codesign", "-o", image.path]
+        let developer = try previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
+        try await process.run(compiler, Array(hostCommand.dropFirst()), directory: root)
+        let host = NativePreviewBuild.Target(moduleName: "Widget", buildableName: "Widget.appex", sdkRoot: "macosx",
+            sdkVariant: nil, architecture: "arm64", linkCommandLine: hostCommand, linkerWorkingDirectory: root.path,
+            objectFiles: [hostObject], sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
+        let loader = root.appendingPathComponent("WidgetStub.m")
+        try Data("""
+        #import <Foundation/Foundation.h>
+        #include <dlfcn.h>
+        extern int widget_host_value(void);
+        int main(void) {
+            @autoreleasepool {
+                int (*preview)(void) = dlsym(RTLD_DEFAULT, "static_preview_value");
+                NSMutableDictionary *result = [@{@"hostValue": @(widget_host_value()),
+                    @"previewValue": preview ? @(preview()) : NSNull.null} mutableCopy];
+                for (NSString *name in @[@"main", @"NativeWidgetToken", @"NativeExistingToken", @"NativePreviewOnlyToken"]) {
+                    Class token = NSClassFromString(name);
+                    NSBundle *bundle = [name isEqualToString:@"main"] ? NSBundle.mainBundle : token ? [NSBundle bundleForClass:token] : nil;
+                    if (!bundle) continue;
+                    result[name] = @{@"identifier": bundle.bundleIdentifier ?: NSNull.null,
+                        @"path": bundle.bundleURL.URLByResolvingSymlinksInPath.path,
+                        @"resource": [[NSString alloc] initWithContentsOfURL:[bundle URLForResource:@"Marker" withExtension:@"txt"]
+                            encoding:NSUTF8StringEncoding error:nil] ?: NSNull.null};
+                }
+                NSData *data = [NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
+                fwrite(data.bytes, 1, data.length, stdout);
+            }
+        }
+        """.utf8).write(to: loader)
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", "-framework", "Foundation", loader.path, image.path,
+            "-Wl,-rpath,@executable_path", "-Wl,-rpath,@executable_path/../../../../Frameworks", "-o", executable.path])
+        let parentCode = root.appendingPathComponent("Container.c")
+        try Data("int main(void) { return 0; }".utf8).write(to: parentCode)
+        try previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang", parentCode.path,
+            "-o", parent.appendingPathComponent("Contents/MacOS/Container").path])
+        for binary in [leaf, dependency.deletingLastPathComponent(), existing.deletingLastPathComponent(), image] {
+            try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", binary.path])
+        }
+        let entitlements = root.appendingPathComponent("Entitlements.plist")
+        try PropertyListSerialization.data(fromPropertyList: ["com.apple.security.get-task-allow": true], format: .xml, options: 0)
+            .write(to: entitlements)
+        for bundle in [product, parent] {
+            try previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", "--entitlements", entitlements.path, bundle.path])
+        }
+        let originalSymbols = try previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", image.path])
+        #expect(!originalSymbols.contains("_static_preview_value"))
+        #expect(NativePreviewCorrection.registryNames(in: originalSymbols).isEmpty)
+        let baseline = try await process.run(executable.path, [])
+        let files = try #require(FileManager.default.enumerator(at: parent, includingPropertiesForKeys: [.isRegularFileKey]))
+        let protectedFiles = try files.compactMap { $0 as? URL }.filter { try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true }
+            + [archive, dependency, leaf]
+        let originalBytes = try protectedFiles.map { try Data(contentsOf: $0) }
+        let staged = try await NativePreviewCorrection.prepareNativeExtension(source: sourceTarget, host: host, containingApp: parent,
+            in: root.appendingPathComponent("NativePreview"), targets: [sourceTarget, host], platform: .macOS, process: process)
+        let stagedProduct = staged.appendingPathComponent("Contents/PlugIns/Widget.appex")
+        let stagedImage = stagedProduct.appendingPathComponent("Contents/MacOS/Widget.debug.dylib")
+        let augmented = try await process.run(stagedProduct.appendingPathComponent("Contents/MacOS/Widget").path, [])
+        for (output, app, hasPreview) in [(baseline, parent, false), (augmented, staged, true)] {
+            let result = try #require(JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+            #expect(result["hostValue"] as? Int == 18)
+            if hasPreview { #expect(result["previewValue"] as? Int == 21) }
+            else { #expect(result["previewValue"] is NSNull) }
+            for key in ["main", "NativeWidgetToken"] {
+                let bundle = try #require(result[key] as? [String: Any])
+                #expect(bundle["identifier"] as? String == "dev.lynnswap.Widget")
+                #expect(bundle["path"] as? String == app.appendingPathComponent("Contents/PlugIns/Widget.appex").resolvingSymlinksInPath().path)
+                #expect(bundle["resource"] as? String == "Widget resource")
+            }
+            let existingBundle = try #require(result["NativeExistingToken"] as? [String: Any])
+            #expect(existingBundle["identifier"] as? String == "dev.lynnswap.Existing")
+            #expect(existingBundle["path"] as? String == app.appendingPathComponent("Contents/Frameworks/Existing.framework").resolvingSymlinksInPath().path)
+            #expect(existingBundle["resource"] as? String == "Existing resource")
+            if hasPreview {
+                let previewBundle = try #require(result["NativePreviewOnlyToken"] as? [String: Any])
+                #expect(previewBundle["identifier"] as? String == "dev.lynnswap.PreviewOnly")
+                #expect(previewBundle["resource"] as? String == "PreviewOnly resource")
+                let path = try #require(previewBundle["path"] as? String)
+                var relationship: FileManager.URLRelationship = .other
+                try FileManager.default.getRelationship(&relationship,
+                    ofDirectoryAt: app.appendingPathComponent("Contents/Frameworks/PreviewDependencies"), toItemAt: URL(filePath: path))
+                #expect(relationship == .contains)
+            } else { #expect(result["NativePreviewOnlyToken"] == nil) }
+        }
+        let symbols = try previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", stagedImage.path])
+        #expect(symbols.contains("_static_preview_value"))
+        #expect(!NativePreviewCorrection.registryNames(in: symbols).isEmpty)
+        #expect(try NativePreviewBinary.dynamicLibrary(at: stagedImage)?.identifier == "@rpath/Widget.debug.dylib")
+        #expect(try NativePreviewBinary.matches(executable, stagedProduct.appendingPathComponent("Contents/MacOS/Widget")))
+        for bundle in [stagedProduct, staged] {
+            try previewBinaryOutput("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundle.path])
+            let output = try await process.run("/usr/bin/codesign", ["-d", "--entitlements", ":-", bundle.path])
+            let preserved = try #require(PropertyListSerialization.propertyList(from: Data(output.utf8), format: nil) as? [String: Any])
+            #expect(preserved["com.apple.security.get-task-allow"] as? Bool == true)
+        }
+        for (file, original) in zip(protectedFiles, originalBytes) { #expect(try Data(contentsOf: file) == original, "\(file.path)") }
+    }
+
     @Test func staticFrameworkSidecarRetainsCodeAndStagesItsDynamicDependency() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
