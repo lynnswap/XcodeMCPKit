@@ -1,4 +1,5 @@
 import ABIBridge
+import AppKit
 import Foundation
 import ObjectiveC
 
@@ -10,6 +11,41 @@ final class NativeWorkspaceDocument: NSObject {
     private let closeDocument: NativeBoundObjCMethod<Void>
     private var failure: (any Error)?
 
+    @MainActor
+    struct Loaded {
+        let document: NSDocument
+        let workspace: AnyObject
+        let wasAlreadyOpen: Bool
+
+        init(document: NSDocument, wasAlreadyOpen: Bool) throws {
+            self.document = document
+            self.wasAlreadyOpen = wasAlreadyOpen
+            do {
+                let getter = try ABIRuntime.shared.object(document).resolveMethodAndWait(
+                    selector: "workspace", as: (() -> AnyObject?).self)
+                guard let workspace = try unsafe getter.unsafeInvoke() else {
+                    throw NativeRuntimeError.invocation("The native document has no workspace")
+                }
+                self.workspace = workspace
+            } catch {
+                if !wasAlreadyOpen { document.close() }
+                throw error
+            }
+        }
+    }
+
+    static func load(at url: URL) async throws -> Loaded {
+        let document: NSDocument
+        let wasAlreadyOpen: Bool
+        do {
+            (document, wasAlreadyOpen) = try await NSDocumentController.shared.openDocument(withContentsOf: url, display: false)
+        } catch {
+            if error is CancellationError { throw error }
+            throw NativeToolExecutionError(message: error.localizedDescription)
+        }
+        return try Loaded(document: document, wasAlreadyOpen: wasAlreadyOpen)
+    }
+
     init(document: AnyObject) throws {
         self.document = document
         let runtime = ABIRuntime.shared
@@ -19,6 +55,9 @@ final class NativeWorkspaceDocument: NSObject {
         let setDelegate = try runtime.object(repository).resolveMethodAndWait(selector: "setDelegate:", as: ((AnyObject?) -> Void).self)
         closeDocument = try runtime.object(document).resolveMethodAndWait(selector: "close", as: (() -> Void).self)
         super.init()
+        if let nativeProtocol = unsafe objc_getProtocol("DVTStateRepositoryDelegate") {
+            _ = class_addProtocol(Self.self, nativeProtocol)
+        }
         try unsafe setDelegate.unsafeInvoke(self)
     }
 
