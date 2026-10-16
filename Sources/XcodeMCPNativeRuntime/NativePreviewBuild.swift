@@ -191,12 +191,21 @@ final class NativePreviewBuild {
             destination: destinationContext(destination?.selected.value))
     }
 
-    func workspaceBuilder(for destination: DestinationSelection) async throws -> AnyObject {
-        let hostType = try await runtime.resolveSwiftType(named: "PreviewsXcode.XcodeWorkspaceSceneHost",
-            in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
-        let makeBuilder = try await hostType.resolveMethod(
-            named: "makeBuilder() throws -> PreviewsXcode.XcodeWorkspaceBuilder", as: (() throws -> AnyObject).self)
-        return try unsafe makeBuilder.unsafeInvoke(on: destination.resolution.host)
+    func workspaceBuilder(for destination: DestinationSelection) async throws -> AnyObject? {
+        guard let field = Mirror(reflecting: destination.resolution.host).children.first(where: { $0.label == "lastWorkspaceBuilder" }) else {
+            throw NativeRuntimeError.unsupportedContract("The native preview host has no cached workspace builder")
+        }
+        let mirror = Mirror(reflecting: field.value)
+        let value: Any
+        if mirror.displayStyle == .optional {
+            guard let payload = mirror.children.first else { return nil }
+            value = payload.value
+        } else { value = field.value }
+        guard Mirror(reflecting: value).displayStyle == .class else {
+            throw NativeRuntimeError.unsupportedContract("The native preview workspace builder is not a class")
+        }
+        // Creating a builder after restoring the agentic source would invalidate this native cache.
+        return value as AnyObject
     }
 
     func inputRoots(workspace: AnyObject, build: Result, source: URL) throws -> [URL] {
@@ -215,18 +224,23 @@ final class NativePreviewBuild {
             sources.formUnion(target.sourceFiles)
             pending += target.dependencies
         }
-        let sourceDirectories = Set(sources.map { $0.deletingLastPathComponent().standardizedFileURL })
-        var packageSearches: Set<URL> = []
+        let sourceDirectories = try Set(sources.map { source in
+            guard source.isFileURL, source.path.hasPrefix("/") else {
+                throw NativeRuntimeError.unsupportedContract("A native build source has no absolute file URL: \(source)")
+            }
+            return source.deletingLastPathComponent().standardizedFileURL
+        })
+        var packageSearches: Set<String> = []
         for sourceDirectory in sourceDirectories {
             roots.insert(sourceDirectory)
             var directory = sourceDirectory
-            while packageSearches.insert(directory).inserted {
+            while packageSearches.insert(directory.path).inserted {
                 if FileManager.default.fileExists(atPath: directory.appendingPathComponent("Package.swift").path) {
                     roots.insert(directory)
                     break
                 }
-                let parent = directory.deletingLastPathComponent()
-                if parent == directory { break }
+                let parent = directory.deletingLastPathComponent().standardizedFileURL
+                if parent.path == directory.path { break }
                 directory = parent
             }
         }

@@ -65,5 +65,17 @@ struct NativePreviewInputSnapshotTests {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: second)
 
         #expect(try NativePreviewInputSnapshot.capture(roots: [root]) != changed)
+
+        let later = external.appendingPathComponent("Later.txt")
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: later)
+        let dangling = try NativePreviewInputSnapshot.capture(roots: [root])
+
+        try Data("created".utf8).write(to: later)
+        let created = try NativePreviewInputSnapshot.capture(roots: [root])
+        #expect(created != dangling)
+
+        try FileManager.default.removeItem(at: later)
+        #expect(try NativePreviewInputSnapshot.capture(roots: [root]) == dangling)
     }
 }

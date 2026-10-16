@@ -45,30 +45,35 @@ struct NativePreviewInputSnapshot: Equatable {
     }
 
     static func capture(roots: [URL]) throws -> Self {
-        var pending = roots
+        var pending = roots.map { (path: $0.standardizedFileURL.path, isCanonical: false) }
         var visited: Set<String> = []
         var expandedDirectories: Set<String> = []
         var entries: [Entry] = []
         while let next = pending.popLast() {
-            let url = next.standardizedFileURL
-            let path = url.path
+            let path = next.path
             guard visited.insert(path).inserted else { continue }
             var value = stat()
             guard lstat(path, &value) == 0 else {
                 let code = errno
+                if code == ENOENT || code == ENOTDIR { continue }
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
             }
             let symbolicLinkDestination: String?
             if value.st_mode & S_IFMT == S_IFLNK {
                 let destination = try FileManager.default.destinationOfSymbolicLink(atPath: path)
                 symbolicLinkDestination = destination
-                pending.append(URL(filePath: destination, relativeTo: url.deletingLastPathComponent()).absoluteURL)
+                let destinationURL = URL(filePath: destination, relativeTo: URL(filePath: path).deletingLastPathComponent())
+                pending.append((path: destinationURL.absoluteURL.standardizedFileURL.path, isCanonical: false))
             } else {
                 symbolicLinkDestination = nil
-                let canonical = url.resolvingSymlinksInPath()
-                if canonical.path != path { pending.append(canonical) }
-                if value.st_mode & S_IFMT == S_IFDIR, expandedDirectories.insert(canonical.path).inserted {
-                    pending += try FileManager.default.contentsOfDirectory(at: canonical, includingPropertiesForKeys: nil)
+                let canonical = next.isCanonical ? path : URL(filePath: path).resolvingSymlinksInPath().path
+                if canonical != path { pending.append((path: canonical, isCanonical: true)) }
+                if value.st_mode & S_IFMT == S_IFDIR, expandedDirectories.insert(canonical).inserted {
+                    // Names enumerated from canonical directories already have canonical parents.
+                    let prefix = canonical == "/" ? canonical : canonical + "/"
+                    pending += try FileManager.default.contentsOfDirectory(atPath: canonical).map {
+                        (path: prefix + $0, isCanonical: true)
+                    }
                 }
             }
             entries.append(Entry(path: path, value: value, symbolicLinkDestination: symbolicLinkDestination))
