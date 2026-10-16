@@ -17,6 +17,7 @@ package protocol NativeToolBackend: AnyObject {
     var origin: [String: JSONValue]? { get }
     func listTools() async throws -> [NativeTool]
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data>
+    func finishExecution(context: NativeToolContext) throws
     /// Prepares pending requests to drain before shutdown performs final cleanup.
     func beginShutdown()
     func shutdown() async throws
@@ -25,6 +26,7 @@ package protocol NativeToolBackend: AnyObject {
 extension NativeToolBackend {
     package var origin: [String: JSONValue]? { nil }
     package func beginShutdown() {}
+    package func finishExecution(context: NativeToolContext) throws {}
 }
 
 @safe
@@ -87,8 +89,12 @@ package final class NativeXcodeBackend: NativeToolBackend {
             try Task.checkCancellation()
         }
         var arguments = arguments
+        if name == "XcodeOpenWorkspace", case .string(let path) = arguments["path"] {
+            try await workspaces.prepareOpen(path: path, request: context.artifactsDirectory)
+        }
         if tool.acceptsWorkspaceIdentifier, case .string(let selector) = arguments["workspaceIdentifier"] {
-            arguments["workspaceIdentifier"] = .string(try await workspaces.resolve(selector, opensIfMissing: name != "XcodeCloseWorkspace"))
+            arguments["workspaceIdentifier"] = .string(try await workspaces.resolve(
+                selector, opensIfMissing: name != "XcodeCloseWorkspace", request: context.artifactsDirectory))
             try Task.checkCancellation()
             if tool.workspaceScoped, case .string(let identifier) = arguments["workspaceIdentifier"] {
                 try await workspaces.prepareDebugger(for: identifier)
@@ -118,6 +124,10 @@ package final class NativeXcodeBackend: NativeToolBackend {
     package func beginShutdown() {
         crashCorrection.cancelPendingOperations()
         previewCorrection.cancelPendingOperations()
+    }
+
+    package func finishExecution(context: NativeToolContext) throws {
+        try workspaces.finishOpen(request: context.artifactsDirectory)
     }
 
     package func shutdown() async throws {

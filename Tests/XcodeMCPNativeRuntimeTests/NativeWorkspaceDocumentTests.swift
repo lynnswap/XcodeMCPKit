@@ -1,10 +1,35 @@
 import ABIBridge
+import AppKit
 import Foundation
 import Testing
 @testable import XcodeMCPNativeRuntime
 
 @MainActor
 struct NativeWorkspaceDocumentTests {
+    @Test func aLoadedDocumentPreservesItsWorkspaceAndOwnership() throws {
+        let document = LoadedWorkspaceDocumentFixture()
+
+        let loaded = try NativeWorkspaceDocument.Loaded(document: document, wasAlreadyOpen: true)
+
+        #expect(loaded.document === document)
+        let expectedWorkspace = try #require(document.workspace)
+        #expect(ObjectIdentifier(loaded.workspace) == ObjectIdentifier(expectedWorkspace))
+        #expect(loaded.wasAlreadyOpen)
+        #expect(!document.closed)
+    }
+
+    @Test(arguments: [false, true])
+    func aDocumentWithoutAWorkspaceIsClosedOnlyWhenNew(wasAlreadyOpen: Bool) throws {
+        let document = LoadedWorkspaceDocumentFixture()
+        document.workspace = nil
+
+        #expect(throws: NativeRuntimeError.self) {
+            try NativeWorkspaceDocument.Loaded(document: document, wasAlreadyOpen: wasAlreadyOpen)
+        }
+
+        #expect(document.closed == !wasAlreadyOpen)
+    }
+
     @Test func nativeChangesUpdateTheDocumentRestoreIdentityAcrossSelections() throws {
         let document = WorkspaceDocumentFixture()
         let owner = try NativeWorkspaceDocument(document: document)
@@ -40,6 +65,13 @@ struct NativeWorkspaceDocumentTests {
         #expect(try NativeWorkspaceDocument.open(workspace: workspace) == nil)
         #expect(store ? workspace.activeRunContextStore === original : workspace.workspaceDelegate === original)
     }
+}
+
+@MainActor
+private final class LoadedWorkspaceDocumentFixture: NSDocument {
+    @objc var workspace: AnyObject? = NSObject()
+    private(set) var closed = false
+    override func close() { closed = true }
 }
 
 private final class WorkspaceDocumentFixture: NSObject {

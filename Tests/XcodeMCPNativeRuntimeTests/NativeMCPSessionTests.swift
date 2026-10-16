@@ -218,6 +218,7 @@ struct NativeMCPSessionTests {
             #expect(try nativeTestObject(response)["error"] == nil)
             #expect(try nativeTestField(response, "result", "isError") == .bool(true))
             #expect(try nativeTestField(response, "result", "structuredContent") == detail)
+            #expect(harness.backend.finishedContexts.map(\.artifactsDirectory) == [execution.context.artifactsDirectory])
         }
     }
 
@@ -233,6 +234,7 @@ struct NativeMCPSessionTests {
                 .object(["type": .string("text"), "text": .string("The project does not exist")]),
             ]))
             #expect(harness.backend.executions.isEmpty)
+            #expect(harness.backend.finishedContexts.count == 1)
 
             harness.backend.executeError = nil
             try harness.call("XcodeLS", id: "existing-project")
@@ -263,6 +265,41 @@ struct NativeMCPSessionTests {
             try harness.call("OpenOtherWorkspace", id: "after-save-error")
             try await harness.backend.nextExecution().complete(.object([:]))
             #expect(try nativeTestField(await harness.nextMessage(), "result", "isError") == .bool(false))
+        }
+    }
+
+    @Test func completionCleanupFailurePreservesTheNativeResult() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            let cleanup = NSError(domain: "WorkspaceCleanup", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "Cannot close pending document"])
+            harness.backend.onFinish = { _ in throw cleanup }
+            try harness.call("Open", id: "cleanup-failure")
+            let execution = try await harness.backend.nextExecution()
+            let output: JSONValue = .object(["workspaceIdentifier": .string("native-workspace")])
+            try execution.complete(output)
+
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "result", "structuredContent") == output)
+            #expect(try nativeTestField(response, "result", "isError") == .bool(true))
+            let content = try nativeTestField(response, "result", "content")
+            guard case .array(let values) = content else { Issue.record("Missing content"); return }
+            #expect(values.last == .object(["type": .string("text"), "text": .string(cleanup.description)]))
+            #expect(harness.backend.finishedContexts.count == 1)
+        }
+    }
+
+    @Test func executionAndCleanupFailuresAreBothReported() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            harness.backend.executeError = NativeRuntimeError.unsupportedContract("Native output contract changed")
+            harness.backend.onFinish = { _ in throw NativeRuntimeError.invocation("Pending document could not close") }
+            try harness.call("Open", id: "original-and-cleanup")
+
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "error", "message") == .string(
+                "Native output contract changed; workspace cleanup failed: Pending document could not close"))
+            #expect(harness.backend.finishedContexts.count == 1)
         }
     }
 
@@ -471,6 +508,7 @@ struct NativeMCPSessionTests {
             #expect(try nativeTestField(response, "id") == .string("cancel-me"))
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32800)))
             #expect(await cancelled.wasCancelled())
+            #expect(harness.backend.finishedContexts.map(\.artifactsDirectory) == [cancelled.context.artifactsDirectory])
             try retained.complete(.string("Still running"))
             #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("keep-me"))
 
@@ -580,6 +618,8 @@ struct NativeMCPSessionTests {
             }
             harness.backend.onBeginShutdown = { begun.continuation.yield(()) }
             harness.backend.onShutdown = { registry.closeAll() }
+            var finishedBeforeShutdown = false
+            harness.backend.onFinish = { _ in finishedBeforeShutdown = harness.backend.shutdownCalls == 0 }
             try harness.call("OpenThenExecute", id: "late-workspace-open")
             await registry.openReply.waitUntilEntered()
             let shutdown = Task { @MainActor in try await harness.session.shutdown() }
@@ -603,6 +643,8 @@ struct NativeMCPSessionTests {
             #expect(registry.workspaceIDs.isEmpty)
             #expect(harness.backend.executions.isEmpty)
             #expect(harness.backend.shutdownCalls == 1)
+            #expect(finishedBeforeShutdown)
+            #expect(harness.backend.finishedContexts.count == 1)
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32800)))
         }
     }
@@ -828,7 +870,9 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     var beforeExecute: (@MainActor () async throws -> Void)?
     var onBeginShutdown: (@MainActor () -> Void)?
     var onShutdown: (@MainActor () -> Void)?
+    var onFinish: (@MainActor (NativeToolContext) throws -> Void)?
     private(set) var executions: [NativeSessionExecution] = []
+    private(set) var finishedContexts: [NativeToolContext] = []
     private(set) var listCalls = 0
     private(set) var shutdownCalls = 0
     private(set) var beginShutdownCalls = 0
@@ -866,6 +910,11 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     func beginShutdown() {
         beginShutdownCalls += 1
         onBeginShutdown?()
+    }
+
+    func finishExecution(context: NativeToolContext) throws {
+        finishedContexts.append(context)
+        try onFinish?(context)
     }
 
     func shutdown() async throws {

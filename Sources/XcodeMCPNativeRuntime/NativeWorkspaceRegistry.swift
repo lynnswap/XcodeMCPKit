@@ -10,12 +10,26 @@ final class NativeWorkspaceRegistry {
     private let setChangeHandler: NativeBoundSwiftMethod<(NativeSwiftValue) -> Void>
     private let previousChangeHandler: NativeSwiftValue
     private let callPreviousChangeHandler: NativeSwiftClosure<@MainActor () -> Void>?
+    private let identifyWorkspace: NativeBoundSwiftMethod<(AnyObject) -> String>
     private var documents: [String: NativeWorkspaceDocument] = [:]
+    private var openingDocuments: [String: OpeningDocument] = [:]
+    private var openingRequests: [URL: OpeningDocument] = [:]
+
+    private final class OpeningDocument {
+        let path: String
+        var requests: Set<URL> = []
+        var identifier: String?
+        var document: NativeWorkspaceDocument?
+
+        init(path: String) { self.path = path }
+    }
 
     init(installation: NativeXcodeInstallation) async throws {
         let type = try await runtime.resolveSwiftType(named: "IDEFoundation.IDEWorkspaceRegistry", in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
         let shared = try await type.resolveStaticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)
         registry = try unsafe shared.unsafeInvoke()
+        identifyWorkspace = try await runtime.object(registry).resolveMethod(
+            named: "identifier(for: __C.IDEWorkspace) -> Swift.String", as: ((AnyObject) -> String).self)
         listEntries = try await runtime.object(registry).resolveMethod(
             named: "list() -> Swift.Array<IDEFoundation.IDEWorkspaceRegistry.WorkspaceInfo>", as: (() -> NativeSwiftValue).self)
         let callbackType = try await runtime.resolveSwiftType(named: "Swift.Optional", genericArguments: [.type(WorkspaceCallback.self)])
@@ -48,7 +62,49 @@ final class NativeWorkspaceRegistry {
         try unsafe setChangeHandler.unsafeInvoke(callback)
     }
 
-    func resolve(_ selector: String, opensIfMissing: Bool = true) async throws -> String {
+    func prepareOpen(path: String, request: URL) async throws {
+        let path = URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        let opening = openingDocuments[path] ?? OpeningDocument(path: path)
+        openingDocuments[path] = opening
+        opening.requests.insert(request)
+        openingRequests[request] = opening
+        let loaded = try await NativeWorkspaceDocument.load(at: URL(filePath: path))
+        if !loaded.wasAlreadyOpen {
+            do { opening.document = try NativeWorkspaceDocument(document: loaded.document) }
+            catch {
+                loaded.document.close()
+                throw error
+            }
+        }
+        opening.identifier = try unsafe identifyWorkspace.unsafeInvoke(loaded.workspace)
+        try opening.document?.checkFailure()
+        // AppKit may finish loading after cancellation. Acquire its document
+        // before propagating cancellation so request cleanup can close it.
+        try Task.checkCancellation()
+    }
+
+    func finishOpen(request: URL) throws {
+        guard let opening = openingRequests.removeValue(forKey: request) else { return }
+        opening.requests.remove(request)
+        defer {
+            if opening.requests.isEmpty, opening.document == nil {
+                openingDocuments.removeValue(forKey: opening.path)
+            }
+        }
+        if let identifier = opening.identifier, let document = opening.document,
+           try entries().contains(where: { $0.identifier == identifier }) {
+            documents[identifier] = document
+            opening.document = nil
+            try document.checkFailure()
+        }
+        guard opening.requests.isEmpty else { return }
+        if let document = opening.document {
+            try document.close()
+            opening.document = nil
+        }
+    }
+
+    func resolve(_ selector: String, opensIfMissing: Bool = true, request: URL) async throws -> String {
         if selector.hasPrefix("/") {
             let path = URL(fileURLWithPath: selector).standardizedFileURL.resolvingSymlinksInPath().path
             let matches = try entries().filter { entry in
@@ -64,6 +120,7 @@ final class NativeWorkspaceRegistry {
             guard opensIfMissing else {
                 throw NativeRuntimeError.invalidRequest("No open native workspace matches '\(selector)'")
             }
+            try await prepareOpen(path: path, request: request)
             let open = try await runtime.object(registry).resolveMethod(named: "open(path: Swift.String) async throws -> __C.IDEWorkspace", as: (@concurrent (String) async throws -> AnyObject).self)
             try Task.checkCancellation()
             let workspace: AnyObject
@@ -75,6 +132,7 @@ final class NativeWorkspaceRegistry {
             }
             let getter = try await runtime.object(workspace).resolveGetter(named: "workspaceIdentifier", as: (() -> String).self)
             let identifier = try unsafe getter.unsafeInvoke()
+            try finishOpen(request: request)
             try prepareDocument(workspace: workspace, identifier: identifier)
             return identifier
         }
@@ -171,6 +229,16 @@ final class NativeWorkspaceRegistry {
         } catch {
             failures.append(String(describing: error))
         }
+        for (path, opening) in openingDocuments {
+            do {
+                try opening.document?.close()
+                opening.document = nil
+                openingDocuments.removeValue(forKey: path)
+            } catch {
+                failures.append("Cannot close pending workspace document '\(path)': \(error)")
+            }
+        }
+        openingRequests.removeAll()
         do { try unsafe setChangeHandler.unsafeInvoke(previousChangeHandler.copy()) }
         catch { failures.append("Cannot restore native workspace change handler: \(error)") }
         if !failures.isEmpty {

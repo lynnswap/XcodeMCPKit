@@ -143,6 +143,23 @@ package final class NativeMCPSession {
         let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID)
+        do {
+            let result = try await consumeTool(params: params, name: name, arguments: arguments, context: context)
+            do { try backend.finishExecution(context: context) }
+            catch { NativeErrorPresentation.report(error as NSError) }
+            return result
+        } catch {
+            let original = error
+            do { try backend.finishExecution(context: context) }
+            catch {
+                throw NativeRuntimeError.invocation("\(original); workspace cleanup failed: \(error)")
+            }
+            throw original
+        }
+    }
+
+    private func consumeTool(params: JSONValue?, name: String, arguments: [String: JSONValue],
+                             context: NativeToolContext) async throws -> JSONValue {
         let updates: AsyncStream<Data>
         do {
             updates = try await backend.execute(name, arguments: arguments, context: context)
