@@ -62,12 +62,59 @@ struct NativePreviewProductSignatureTests {
         #expect(try fixture.signature() != removed)
     }
 
+    @Test func detectsAtomicallyReplacedResources() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let resource = fixture.product.appendingPathComponent("Label.txt")
+        try Data("old".utf8).write(to: resource)
+        var original = stat()
+        try #require(lstat(resource.path, &original) == 0)
+        let before = try fixture.signature()
+
+        let replacement = fixture.root.appendingPathComponent("Replacement.txt")
+        try Data("new".utf8).write(to: replacement)
+        let times = [original.st_atimespec, original.st_mtimespec]
+        try #require(times.withUnsafeBufferPointer {
+            utimensat(AT_FDCWD, replacement.path, $0.baseAddress, 0)
+        } == 0)
+        try #require(rename(replacement.path, resource.path) == 0)
+        var changed = stat()
+        try #require(lstat(resource.path, &changed) == 0)
+
+        #expect(changed.st_ino != original.st_ino)
+        #expect(changed.st_size == original.st_size)
+        #expect(changed.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec)
+        #expect(changed.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec)
+        #expect(try fixture.signature() != before)
+    }
+
+    @Test func detectsSymbolicLinkRetargetingAndTargetChanges() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let first = fixture.root.appendingPathComponent("First.txt")
+        let second = fixture.root.appendingPathComponent("Second.txt")
+        let link = fixture.product.appendingPathComponent("Label.txt")
+        try Data("old".utf8).write(to: first)
+        try Data("old".utf8).write(to: second)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
+        let before = try fixture.signature()
+
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: second)
+        let retargeted = try fixture.signature()
+        #expect(retargeted != before)
+
+        try Data("new".utf8).write(to: second)
+        #expect(try fixture.signature() != retargeted)
+    }
+
     @MainActor
     private struct Fixture {
         let root: URL
         let product: URL
         let helper: URL
         let source: URL
+        let digestCache = NativePreviewProductSignature.DigestCache()
         var target: NativePreviewBuild.Target
 
         init() throws {
@@ -88,7 +135,8 @@ struct NativePreviewProductSignatureTests {
             let build = NativePreviewBuild.Result(targets: [target], previewRoots: [], destinationIdentifier: "destination",
                 previewDestinationIdentifier: "preview-destination", platformIdentifier: "com.apple.platform.iphonesimulator",
                 previewPlatform: .iOS, platformName: "iOS", deviceModelName: "iPhone", systemVersion: "27.1")
-            return try NativePreviewProductSignature(build: build, source: source, helper: helper)
+            return try NativePreviewProductSignature(build: build, source: source, helper: helper,
+                digestCache: digestCache)
         }
     }
 }
