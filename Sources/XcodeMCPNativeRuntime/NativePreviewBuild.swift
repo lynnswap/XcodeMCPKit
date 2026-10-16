@@ -396,13 +396,11 @@ final class NativePreviewBuild {
         try Task.checkCancellation()
         let info = selection.selected
         let destination = info.value
-        guard let manager = try object(workspace, selector: "runContextManager"),
-              let scheme = try object(manager, selector: "activeRunContext"),
-              let environment = try object(workspace, selector: "executionEnvironment") else {
-            throw NativeRuntimeError.invalidRequest("The workspace has no active scheme, run destination, or execution environment")
-        }
-        let runnable = try runnableBuildable(in: scheme)
         let image = installation.framework("PreviewsIDEAPI", in: "PlugIns")
+        let buildSystem = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.BuildSystem", in: .path(image))
+        let buildables = try await buildSystem.resolveStaticMethod(
+            named: "buildables(scheme: __C.IDEScheme, workspace: __C.IDEWorkspace, runContextManager: __C.IDERunContextManager, executionEnvironment: __C.IDEExecutionEnvironment) -> [__C.IDEBuildable]",
+            as: ((AnyObject, AnyObject, AnyObject, AnyObject) -> NativeSwiftValue).self)
         let clientType = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.BuildOperationClient", in: .path(image))
         let initialize = try await clientType.resolveInitializer(named: "init() -> PreviewsIDEAPI.BuildOperationClient", as: (() -> AnyObject).self)
         let client = try unsafe initialize.unsafeInvoke()
@@ -412,10 +410,18 @@ final class NativePreviewBuild {
         clients[identifier] = cancellation
         defer { clients[identifier] = nil }
 
-        let parameters = try operationParameters(environment: environment, destination: destination, client: client)
         let perform = try await prepare(workspace: workspace)
         let workspaceBuilder = try? await self.workspaceBuilder(for: selection)
         try Task.checkCancellation()
+        // Match BuildSystem.buildScheme: capture the selection before the task can update the model.
+        guard let manager = try object(workspace, selector: "runContextManager"),
+              let scheme = try object(manager, selector: "activeRunContext"),
+              let environment = try object(workspace, selector: "executionEnvironment") else {
+            throw NativeRuntimeError.invalidRequest("The workspace has no active scheme, run destination, or execution environment")
+        }
+        let runnable = try runnableBuildable(in: scheme)
+        let selectedBuildables = try unsafe buildables.unsafeInvoke(scheme, workspace, manager, environment)
+        let parameters = try operationParameters(environment: environment, destination: destination, client: client)
         let buildStartedAt = Date()
         let operation: AnyObject = try await withTaskCancellationHandler {
             try Task.checkCancellation()
@@ -430,11 +436,6 @@ final class NativePreviewBuild {
             throw NativeRuntimeError.invocation("The native scheme task returned no IDEBuildOperation")
         }
         try checkBuildResults(operations)
-        let buildSystem = try await runtime.resolveSwiftType(named: "PreviewsIDEAPI.BuildSystem", in: .path(image))
-        let buildables = try await buildSystem.resolveStaticMethod(
-            named: "buildables(scheme: __C.IDEScheme, workspace: __C.IDEWorkspace, runContextManager: __C.IDERunContextManager, executionEnvironment: __C.IDEExecutionEnvironment) -> [__C.IDEBuildable]",
-            as: ((AnyObject, AnyObject, AnyObject, AnyObject) -> NativeSwiftValue).self)
-        let selectedBuildables = try unsafe buildables.unsafeInvoke(scheme, workspace, manager, environment)
         let descriptions = try await targetDescriptions(for: selectedBuildables, workspace: workspace, priorBuild: priorBuild, image: image)
         try Task.checkCancellation()
         let records = try await targets(descriptions, buildables: selectedBuildables, image: image, runnable: runnable, priorBuild: priorBuild,
