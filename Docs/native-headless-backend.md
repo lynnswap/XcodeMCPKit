@@ -186,7 +186,8 @@ when their image must be linked from static inputs. Other static roots are stage
 outside the agent under the native product directory's name for `Bundle(for:)`.
 Dynamic dependencies beyond a package root retain their original framework bundles.
 Package resource bundles reachable from the roots with available build products
-are copied to the staged products directory.
+are copied to the staged products directory. Resource traversal stops at any
+root omitted because its build product is unavailable.
 The renderer sets
 `PACKAGE_RESOURCE_BUNDLE_PATH` to that directory for `Bundle.module` lookups,
 resolving the path after Simulator installation when necessary.
@@ -338,8 +339,9 @@ the resulting native `PreviewDescription` for destination selection and renderin
 including contexts that forward their keys to another `PreviewContext`.
 Activity `PreviewProvider` contexts outside this extension path use the original Widget or WidgetBundle
 program root to find the Activity configuration whose native attributes type
-matches the context. The root is discovered from compiler main symbols in the
-built host's debug library, identified by its Mach-O UUID. WidgetBundle descriptor
+matches the context. The renderer discovers the root from compiler main symbols
+in the host's debug image for hosted previews. Hostless previews use the generated
+or built images of the preview roots that contain the source. WidgetBundle descriptor
 preferences retain the original configuration modifiers. If the root or private
 host/preference contract is unavailable, the request uses the native pipeline.
 Other unsupported display traits, variants, or controls still use the native pipeline.
