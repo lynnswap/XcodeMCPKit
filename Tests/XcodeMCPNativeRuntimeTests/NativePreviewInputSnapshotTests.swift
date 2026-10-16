@@ -56,10 +56,12 @@ struct NativePreviewInputSnapshotTests {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
         try FileManager.default.createSymbolicLink(at: first.appendingPathComponent("Back"), withDestinationURL: root)
         let before = try NativePreviewInputSnapshot.capture(roots: [root])
+        #expect(try NativePreviewInputSnapshot.capture(roots: [root, first]) == before)
 
         try Data("after".utf8).write(to: file)
         let changed = try NativePreviewInputSnapshot.capture(roots: [root])
         #expect(changed != before)
+        #expect(try NativePreviewInputSnapshot.capture(roots: [root, first]) == changed)
 
         try FileManager.default.removeItem(at: link)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: second)

@@ -10,6 +10,7 @@ final class NativePreviewCorrection {
     private var operations: [UUID: Task<Void, Never>] = [:]
     private var sessions: [String: WorkspaceSession] = [:]
     private let renderQueue = NativePreviewRenderQueue()
+    let snapshotImages = SnapshotImages()
     private var renders: [UUID: (workspace: String, task: Task<JSONValue, any Error>)] = [:]
 
     private final class WorkspaceSession {

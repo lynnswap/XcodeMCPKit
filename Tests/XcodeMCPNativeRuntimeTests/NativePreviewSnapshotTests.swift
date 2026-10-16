@@ -67,10 +67,49 @@ struct NativePreviewSnapshotTests {
         #expect(NSBitmapImageRep(cgImage: thumbnail).colorAt(x: 0, y: 750)?.alphaComponent == 1)
     }
 
-    private func image(width: Int, height: Int) throws -> CGImage {
+    @Test func deviceMaskChangesAtTheSameResourceURL() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let resources = root.appendingPathComponent("Contents/Resources")
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let profile = try PropertyListSerialization.data(fromPropertyList: ["framebufferMask": "Mask.png"],
+            format: .xml, options: 0)
+        try profile.write(to: resources.appendingPathComponent("profile.plist"))
+        let resource = resources.appendingPathComponent("Mask.png")
+        try pngData(image(width: 40, height: 80)).write(to: resource)
+        let images = NativePreviewCorrection.SnapshotImages()
+        let source = try image(width: 40, height: 80)
+        func thumbnail() throws -> NSBitmapImageRep {
+            let mask = try #require(try images.framebufferMask(in: root, geometry: CGSize(width: 40, height: 80)))
+            return try NSBitmapImageRep(cgImage: #require(NativePreviewCorrection.thumbnail(from: source,
+                maximumDimension: 1500, framebufferMask: mask, rotationDegrees: 0, swapsAxes: false)))
+        }
+        #expect(try thumbnail().colorAt(x: 20, y: 40)?.alphaComponent == 1)
+        #expect(try thumbnail().colorAt(x: 20, y: 40)?.alphaComponent == 1)
+
+        try pngData(image(width: 40, height: 80, color: CGColor(gray: 1, alpha: 0))).write(to: resource)
+
+        #expect(try thumbnail().colorAt(x: 20, y: 40)?.alphaComponent == 0)
+    }
+
+    @Test func displayExclusionChangesWithItsEncodedPixels() throws {
+        let images = NativePreviewCorrection.SnapshotImages()
+        let white = try pngData(image(width: 20, height: 20))
+        let black = try pngData(image(width: 20, height: 20, color: CGColor(gray: 0, alpha: 1)))
+        #expect(try NSBitmapImageRep(cgImage: images.exclusionImage(from: white)).colorAt(x: 10, y: 10)?.redComponent == 1)
+        #expect(try NSBitmapImageRep(cgImage: images.exclusionImage(from: white)).colorAt(x: 10, y: 10)?.redComponent == 1)
+
+        #expect(try NSBitmapImageRep(cgImage: images.exclusionImage(from: black)).colorAt(x: 10, y: 10)?.redComponent == 0)
+    }
+
+    private func pngData(_ image: CGImage) throws -> Data {
+        try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
+    }
+
+    private func image(width: Int, height: Int, color: CGColor = CGColor(gray: 1, alpha: 1)) throws -> CGImage {
         let context = try #require(unsafe CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
             bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.setFillColor(color)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return try #require(context.makeImage())
     }

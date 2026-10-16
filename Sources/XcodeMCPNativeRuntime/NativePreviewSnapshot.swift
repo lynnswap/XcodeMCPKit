@@ -11,14 +11,13 @@ extension NativePreviewCorrection {
               let image = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
             throw NativeRuntimeError.invocation("The preview snapshot could not be decoded")
         }
-        let mask = try usesDeviceLayout ? deviceType.flatMap(Self.framebufferMask) : nil
+        let mask: NSImage?
+        if usesDeviceLayout, let deviceType {
+            mask = try snapshotImages.framebufferMask(in: deviceType, geometry: CGSize(width: image.width, height: image.height))
+        } else { mask = nil }
         let exclusionImage: CGImage?
         if usesDeviceLayout, let exclusion {
-            guard let source = CGImageSourceCreateWithData(exclusion as CFData, nil),
-                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-                throw NativeRuntimeError.invocation("The preview display exclusion could not be decoded")
-            }
-            exclusionImage = image
+            exclusionImage = try snapshotImages.exclusionImage(from: exclusion)
         } else { exclusionImage = nil }
         let degrees: Double?
         if mask != nil || exclusionImage != nil {
@@ -38,20 +37,42 @@ extension NativePreviewCorrection {
         }
     }
 
-    static func framebufferMask(in deviceType: URL) throws -> NSImage? {
-        let resources = deviceType.appendingPathComponent("Contents/Resources", isDirectory: true)
-        let data = try Data(contentsOf: resources.appendingPathComponent("profile.plist"))
-        guard let profile = try unsafe PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
-            throw NativePipelineRequired()
+    @MainActor
+    final class SnapshotImages {
+        private var mask: (resource: URL, data: Data, geometry: CGSize, image: NSImage)?
+        private var exclusion: (data: Data, image: CGImage)?
+
+        func framebufferMask(in deviceType: URL, geometry: CGSize) throws -> NSImage? {
+            let resources = deviceType.appendingPathComponent("Contents/Resources", isDirectory: true)
+            let data = try Data(contentsOf: resources.appendingPathComponent("profile.plist"))
+            guard let profile = try unsafe PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+                throw NativePipelineRequired()
+            }
+            guard let value = profile["framebufferMask"] else { return nil }
+            guard let name = value as? String else { throw NativePipelineRequired() }
+            var resource = resources.appendingPathComponent(name)
+            if resource.pathExtension.isEmpty { resource.appendPathExtension("pdf") }
+            // The Simulator retains a device-type URL, so the resource bytes must still be checked.
+            guard let maskData = try? Data(contentsOf: resource) else {
+                throw NativeRuntimeError.unavailable("The selected device's framebuffer mask could not be loaded: \(resource.path)")
+            }
+            if let mask, mask.resource == resource, mask.data == maskData, mask.geometry == geometry { return mask.image }
+            guard let image = NSImage(data: maskData) else {
+                throw NativeRuntimeError.unavailable("The selected device's framebuffer mask could not be loaded: \(resource.path)")
+            }
+            mask = (resource, maskData, geometry, image)
+            return image
         }
-        guard let value = profile["framebufferMask"] else { return nil }
-        guard let name = value as? String else { throw NativePipelineRequired() }
-        var resource = resources.appendingPathComponent(name)
-        if resource.pathExtension.isEmpty { resource.appendPathExtension("pdf") }
-        guard let mask = NSImage(contentsOf: resource) else {
-            throw NativeRuntimeError.unavailable("The selected device's framebuffer mask could not be loaded: \(resource.path)")
+
+        func exclusionImage(from data: Data) throws -> CGImage {
+            if let exclusion, exclusion.data == data { return exclusion.image }
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                throw NativeRuntimeError.invocation("The preview display exclusion could not be decoded")
+            }
+            exclusion = (data, image)
+            return image
         }
-        return mask
     }
 
     private func snapshotRotationDegrees(_ rawValue: String) async throws -> Double {

@@ -1,8 +1,10 @@
 import Darwin
+import Dispatch
 import Foundation
+import Synchronization
 
-struct NativePreviewInputSnapshot: Equatable {
-    private struct Entry: Equatable {
+struct NativePreviewInputSnapshot: Equatable, Sendable {
+    private struct Entry: Equatable, Sendable {
         let path: String
         let device: dev_t
         let inode: ino_t
@@ -44,7 +46,52 @@ struct NativePreviewInputSnapshot: Equatable {
         }
     }
 
+    private struct CaptureWork: Sendable {
+        var nextRoot = 0
+        var snapshots: [NativePreviewInputSnapshot] = []
+        var failure: (any Error)?
+    }
+
+    private struct ConflictingEntry: Error {
+        let path: String
+    }
+
     static func capture(roots: [URL]) throws -> Self {
+        let workers = min(roots.count, ProcessInfo.processInfo.activeProcessorCount, 4)
+        guard workers > 1 else { return try captureSerial(roots: roots) }
+        let work = Mutex(CaptureWork())
+        DispatchQueue.concurrentPerform(iterations: workers) { _ in
+            while let root = work.withLock({ state -> URL? in
+                guard state.failure == nil, state.nextRoot < roots.count else { return nil }
+                let index = state.nextRoot
+                state.nextRoot += 1
+                return roots[index]
+            }) {
+                do {
+                    let snapshot = try captureSerial(roots: [root])
+                    work.withLock { $0.snapshots.append(snapshot) }
+                } catch {
+                    work.withLock { if $0.failure == nil { $0.failure = error } }
+                    return
+                }
+            }
+        }
+        let snapshots = try work.withLock { state in
+            if let failure = state.failure { throw failure }
+            return state.snapshots
+        }
+        let ordered = snapshots.flatMap { $0.entries }.sorted { $0.path < $1.path }
+        var entries: [Entry] = []
+        entries.reserveCapacity(ordered.count)
+        for entry in ordered {
+            if let existing = entries.last, existing.path == entry.path {
+                guard existing == entry else { throw ConflictingEntry(path: entry.path) }
+            } else { entries.append(entry) }
+        }
+        return Self(entries: entries)
+    }
+
+    private static func captureSerial(roots: [URL]) throws -> Self {
         let fileMetadata = NativePreviewFileMetadata()
         var pending = roots.map { (path: $0.standardizedFileURL.path, isCanonical: false, metadata: Optional<stat>.none) }
         var visited: Set<String> = []

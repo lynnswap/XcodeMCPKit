@@ -38,19 +38,19 @@ struct NativePreviewProductSignatureTests {
         let resource = fixture.product.appendingPathComponent("Label.txt")
         try Data("old".utf8).write(to: resource)
         var original = stat()
-        try #require(lstat(resource.path, &original) == 0)
+        try #require(unsafe lstat(resource.path, &original) == 0)
         let before = try fixture.signature()
 
         let file = try FileHandle(forWritingTo: resource)
         try file.write(contentsOf: Data("new".utf8))
         try file.close()
         let times = [original.st_atimespec, original.st_mtimespec]
-        let restored = times.withUnsafeBufferPointer {
-            utimensat(AT_FDCWD, resource.path, $0.baseAddress, 0)
+        let restored = unsafe times.withUnsafeBufferPointer {
+            unsafe utimensat(AT_FDCWD, resource.path, $0.baseAddress, 0)
         }
         try #require(restored == 0)
         var changed = stat()
-        try #require(lstat(resource.path, &changed) == 0)
+        try #require(unsafe lstat(resource.path, &changed) == 0)
 
         #expect(changed.st_ino == original.st_ino)
         #expect(changed.st_size == original.st_size)
@@ -82,18 +82,18 @@ struct NativePreviewProductSignatureTests {
         let resource = fixture.product.appendingPathComponent("Label.txt")
         try Data("old".utf8).write(to: resource)
         var original = stat()
-        try #require(lstat(resource.path, &original) == 0)
+        try #require(unsafe lstat(resource.path, &original) == 0)
         let before = try fixture.signature()
 
         let replacement = fixture.root.appendingPathComponent("Replacement.txt")
         try Data("new".utf8).write(to: replacement)
         let times = [original.st_atimespec, original.st_mtimespec]
-        try #require(times.withUnsafeBufferPointer {
-            utimensat(AT_FDCWD, replacement.path, $0.baseAddress, 0)
+        try #require(unsafe times.withUnsafeBufferPointer {
+            unsafe utimensat(AT_FDCWD, replacement.path, $0.baseAddress, 0)
         } == 0)
-        try #require(rename(replacement.path, resource.path) == 0)
+        try #require(unsafe rename(replacement.path, resource.path) == 0)
         var changed = stat()
-        try #require(lstat(resource.path, &changed) == 0)
+        try #require(unsafe lstat(resource.path, &changed) == 0)
 
         #expect(changed.st_ino != original.st_ino)
         #expect(changed.st_size == original.st_size)
