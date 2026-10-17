@@ -80,6 +80,7 @@ final class NativePreviewCorrection {
         let roots: [URL]
         let exclusions: Set<URL>
         let inputs: NativePreviewInputSnapshot
+        let generatedInputs: NativePreviewInputSnapshot
     }
 
     private final class RendererStage {
@@ -312,6 +313,11 @@ final class NativePreviewCorrection {
                    try NativePreviewInputSnapshot.capture(
                        roots: certificate.inputs.prioritizedRoots(certificate.roots),
                        excluding: certificate.exclusions, missingInputs: certificate.build.missingInputFiles) == certificate.inputs,
+                   try NativePreviewInputSnapshot.capture(
+                       roots: certificate.generatedInputs.prioritizedRoots(
+                           certificate.build.generatedInputFiles.sorted { $0.path < $1.path }),
+                       excluding: certificate.build.generatedInputExclusions,
+                       missingInputs: certificate.build.generatedMissingInputFiles) == certificate.generatedInputs,
                    inputRevision == session.inputRevision {
                     inputsAreCurrent = true
                     if plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
@@ -380,16 +386,23 @@ final class NativePreviewCorrection {
     private func certifyBuild(_ build: NativePreviewBuild.Result, workspace: AnyObject,
                              destination: NativePreviewBuild.DestinationSelection, source: URL,
                              session: WorkspaceSession, inputRevision: UInt64) async throws -> BuildCertificate? {
-        guard let buildStartedAt = build.buildStartedAt, let workspaceBuilder = build.workspaceBuilder else { return nil }
+        guard let buildStartedAt = build.buildStartedAt, let buildCompletedAt = build.buildCompletedAt,
+              let workspaceBuilder = build.workspaceBuilder else { return nil }
         let outputPaths = build.inputCaptureExclusions.union([session.artifactsRoot])
         guard let roots = try builder.inputRoots(workspace: workspace, build: build, source: source, excluding: outputPaths) else { return nil }
         let exclusions = NativePreviewInputSnapshot.coalescedExclusions(outputPaths, roots: roots)
         let inputs = try NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions, missingInputs: build.missingInputFiles)
         // A post-build snapshot must not certify source edits that arrived during the build.
         guard inputs.predates(buildStartedAt) else { return nil }
+        let generatedInputs = try NativePreviewInputSnapshot.capture(
+            roots: build.generatedInputFiles.sorted { $0.path < $1.path },
+            excluding: build.generatedInputExclusions, missingInputs: build.generatedMissingInputFiles)
+        // Generated inputs may be written by this build, but never after its native operation completed.
+        guard generatedInputs.predates(buildCompletedAt) else { return nil }
         let currentBuilder = try await builder.workspaceBuilder(for: destination)
         guard currentBuilder === workspaceBuilder, inputRevision == session.inputRevision else { return nil }
-        return BuildCertificate(build: build, workspaceBuilder: workspaceBuilder, roots: roots, exclusions: exclusions, inputs: inputs)
+        return BuildCertificate(build: build, workspaceBuilder: workspaceBuilder, roots: roots, exclusions: exclusions,
+            inputs: inputs, generatedInputs: generatedInputs)
     }
 
     private func render(_ input: Input, artifactsRoot: URL) async throws -> JSONValue {

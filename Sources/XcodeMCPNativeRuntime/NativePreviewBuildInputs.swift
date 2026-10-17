@@ -6,12 +6,20 @@ struct NativePreviewBuildInputs {
         let files: Set<URL>
         let missing: Set<URL>
         let generatedPaths: Set<URL>
+        let discoveryFiles: Set<URL>
+        let generatedFiles: Set<URL>
+        let generatedMissingFiles: Set<URL>
 
-        init(files: Set<URL>, missing: Set<URL>, generatedPaths: Set<URL> = []) {
+        init(files: Set<URL>, missing: Set<URL>, generatedPaths: Set<URL> = [], discoveryFiles: Set<URL> = []) {
             self.generatedPaths = generatedPaths
-            self.files = NativePreviewBuildInputs.removingGeneratedPaths(from: files, generatedPaths: generatedPaths)
-            self.missing = NativePreviewBuildInputs.removingGeneratedPaths(from: missing, generatedPaths: generatedPaths)
+            self.discoveryFiles = discoveryFiles
+            self.files = NativePreviewBuildInputs.removingGeneratedPaths(from: files, generatedPaths: discoveryFiles)
+            self.missing = NativePreviewBuildInputs.removingGeneratedPaths(from: missing, generatedPaths: discoveryFiles)
                 .subtracting(self.files)
+            generatedFiles = self.files.subtracting(
+                NativePreviewBuildInputs.removingGeneratedPaths(from: self.files, generatedPaths: generatedPaths))
+            generatedMissingFiles = self.missing.subtracting(
+                NativePreviewBuildInputs.removingGeneratedPaths(from: self.missing, generatedPaths: generatedPaths))
         }
     }
 
@@ -49,11 +57,32 @@ struct NativePreviewBuildInputs {
         let deps: Paths?
         let dependencyStyle: String?
         let workingDirectory: String?
+        let description: String?
+        let alwaysOutOfDate: Bool?
+
+        func permitsBuildReuse(immutableRoots: [URL]) -> Bool {
+            guard alwaysOutOfDate == true else { return true }
+            // This sentinel varies only with the native build command, which is fixed for retained builds.
+            if tool == "link-assetcatalog", description == "LinkAssetCatalogSignature" { return true }
+            guard tool == "shell", let arguments = args, arguments.count >= 2,
+                  arguments[0].hasPrefix("/"), arguments[1].hasPrefix("/"),
+                  URL(filePath: arguments[0]).lastPathComponent == "clang-stat-cache" else { return false }
+            // The SDK cache cannot change compilation inputs when both its tool and SDK are immutable.
+            return arguments.prefix(2).allSatisfy { path in
+                let input = URL(filePath: path).standardizedFileURL
+                return immutableRoots.contains { root in
+                    input.pathComponents.starts(with: root.standardizedFileURL.pathComponents)
+                        && input.resolvingSymlinksInPath().pathComponents.starts(
+                            with: root.resolvingSymlinksInPath().pathComponents)
+                }
+            }
+        }
 
         enum CodingKeys: String, CodingKey {
-            case tool, inputs, outputs, args, deps
+            case tool, inputs, outputs, args, deps, description
             case dependencyStyle = "deps-style"
             case workingDirectory = "working-directory"
+            case alwaysOutOfDate = "always-out-of-date"
         }
     }
 
@@ -191,7 +220,10 @@ struct NativePreviewBuildInputs {
                 return data
             }
             let manifest = try JSONDecoder().decode(Manifest.self, from: readDescription(manifestURL))
-            guard !manifest.commands.isEmpty else { throw Unsupported.inputDescription }
+            guard !manifest.commands.isEmpty,
+                  manifest.commands.values.allSatisfy({ $0.permitsBuildReuse(immutableRoots: immutableRoots) }) else {
+                throw Unsupported.inputDescription
+            }
             let produced = try Set(manifest.commands.values.flatMap(\.outputs).compactMap { path in
                 try absoluteNode(path)
             })
@@ -340,7 +372,8 @@ struct NativePreviewBuildInputs {
                     }
                 }
             }
-            return Inputs(files: tracked(inputs), missing: tracked(missing), generatedPaths: produced.union(discoveryFiles))
+            return Inputs(files: tracked(inputs), missing: tracked(missing), generatedPaths: produced.union(discoveryFiles),
+                discoveryFiles: discoveryFiles)
         } catch {
             // Failure to certify inputs disables reuse; the completed native build remains usable.
             return nil

@@ -17,11 +17,15 @@ final class NativePreviewBuild {
         let deviceModelName: String?
         let systemVersion: String?
         var buildStartedAt: Date? = nil
+        var buildCompletedAt: Date? = nil
         var workspaceBuilder: AnyObject? = nil
         var declaredInputFiles: Set<URL>? = nil
         var missingInputFiles: Set<URL> = []
         var inputProducts: Set<URL> = []
         var generatedInputPaths: Set<URL> = []
+        var generatedInputFiles: Set<URL> = []
+        var generatedMissingInputFiles: Set<URL> = []
+        var generatedInputExclusions: Set<URL> = []
         var inputCaptureExclusions: Set<URL> = []
 
         var productURLs: [URL] { targets.compactMap(\.outputURL) }
@@ -446,6 +450,7 @@ final class NativePreviewBuild {
         } onCancel: {
             Task { @MainActor in cancellation.cancel() }
         }
+        let buildCompletedAt = Date()
         try Task.checkCancellation()
         try cancellation.checkFailure()
         let operations = try buildOperations(in: operation)
@@ -462,6 +467,7 @@ final class NativePreviewBuild {
                       platformIdentifier: info.platformIdentifier, previewPlatform: info.previewPlatform,
                       platformName: info.platformName, deviceModelName: info.deviceModelName, systemVersion: info.systemVersion)
         result.buildStartedAt = buildStartedAt
+        result.buildCompletedAt = buildCompletedAt
         result.workspaceBuilder = workspaceBuilder
         do {
             var compilerCommands: [NativePreviewBuildInputs.CompilerCommand] = []
@@ -479,6 +485,9 @@ final class NativePreviewBuild {
                 result.missingInputFiles = inputs.missing
                 result.inputProducts = inputs.products
                 result.generatedInputPaths = inputs.generated
+                result.generatedInputFiles = inputs.generatedFiles
+                result.generatedMissingInputFiles = inputs.generatedMissingFiles
+                result.generatedInputExclusions = inputs.discovery
                 result.inputCaptureExclusions = inputs.exclusions
             }
         } catch {
@@ -673,7 +682,8 @@ final class NativePreviewBuild {
 
     private func declaredInputs(for buildables: NativeSwiftValue, workspace: AnyObject, priorBuild: AnyObject,
                                 compilerCommands: [NativePreviewBuildInputs.CompilerCommand]) async throws ->
-        (files: Set<URL>, missing: Set<URL>, products: Set<URL>, generated: Set<URL>, exclusions: Set<URL>)? {
+        (files: Set<URL>, missing: Set<URL>, products: Set<URL>, generated: Set<URL>, exclusions: Set<URL>,
+         generatedFiles: Set<URL>, generatedMissingFiles: Set<URL>, discovery: Set<URL>)? {
         let (graph, roots) = try await dependencyGraph(for: buildables, workspace: workspace, priorBuild: priorBuild)
         defer { withExtendedLifetime(graph) {} }
         let dependencies = try await runtime.object(graph).resolveMethod(
@@ -817,9 +827,10 @@ final class NativePreviewBuild {
         guard let nativeFiles = try await completedBuildInputs(workspace: workspace, priorBuild: priorBuild,
             compilerCommands: commands) else { return nil }
         let inputs = NativePreviewBuildInputs.Inputs(files: files.union(nativeFiles.files), missing: nativeFiles.missing,
-            generatedPaths: nativeFiles.generatedPaths)
+            generatedPaths: nativeFiles.generatedPaths, discoveryFiles: nativeFiles.discoveryFiles)
         let exclusions = outputDirectories.union(inputs.generatedPaths)
-        return (inputs.files, inputs.missing, products, inputs.generatedPaths, exclusions)
+        return (inputs.files.subtracting(inputs.generatedFiles), inputs.missing.subtracting(inputs.generatedMissingFiles),
+            products, inputs.generatedPaths, exclusions, inputs.generatedFiles, inputs.generatedMissingFiles, inputs.discoveryFiles)
     }
 
     private func completedBuildInputs(workspace: AnyObject, priorBuild: AnyObject,

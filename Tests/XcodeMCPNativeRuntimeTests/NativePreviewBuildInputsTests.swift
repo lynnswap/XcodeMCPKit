@@ -20,7 +20,8 @@ struct NativePreviewBuildInputsTests {
         let data = try json(["commands": [
             "plist": ["tool": "info-plist-processor", "inputs": ["/user/External Inputs/Info.plist", "<entry>"],
                 "outputs": ["/build/App.app/Info.plist"]],
-            "generated": ["tool": "auxiliary-file", "outputs": ["/build/generated.h", "/build/GeneratedResources/"]],
+            "generated": ["tool": "auxiliary-file", "outputs": ["/build/generated.h", "/build/GeneratedResources/", "/build/Schema.json"]],
+            "codegen": ["tool": "shell", "inputs": ["/build/Schema.json"], "outputs": ["/build/Generated.swift"]],
             "compile": ["tool": "shell", "inputs": ["/build/generated.h/", "/build/GeneratedResources/Icon.txt",
                 "/SelectedXcode/SDK/Header.h",
                 "/System/Library/Frameworks/UIKit.framework/UIKit", "/System/Library/AssetsV2/Mutable.asset"],
@@ -30,7 +31,46 @@ struct NativePreviewBuildInputsTests {
             immutableRoots: [URL(filePath: "/SelectedXcode"), URL(filePath: "/System/Library/Frameworks")],
             read: reader([manifest: data]))
         #expect(files?.files == [URL(filePath: "/user/External Inputs/Info.plist"),
-            URL(filePath: "/System/Library/AssetsV2/Mutable.asset")])
+            URL(filePath: "/System/Library/AssetsV2/Mutable.asset"), URL(filePath: "/build/generated.h"),
+            URL(filePath: "/build/GeneratedResources/Icon.txt"), URL(filePath: "/build/Schema.json")])
+    }
+
+    @Test func alwaysExecutingCommandsRequireKnownStableEffects() throws {
+        let immutableRoot = URL(filePath: "/SelectedXcode")
+        func inputs(_ commands: [String: [String: Any]]) throws -> NativePreviewBuildInputs.Inputs? {
+            let data = try json(["commands": commands])
+            return NativePreviewBuildInputs.files(manifest: manifest, immutableRoots: [immutableRoot],
+                read: reader([manifest: data]))
+        }
+        let external: [String: Any] = ["tool": "shell", "description": "ExternalBuildToolExecution Generator",
+            "inputs": [], "outputs": ["<build-tool-generator>"],
+            "args": ["/tools/generate-header"], "always-out-of-date": true]
+        #expect(try inputs(["external": external]) == nil)
+
+        let statCache: [String: Any] = ["tool": "shell", "description": "ClangStatCache",
+            "inputs": [], "outputs": ["/build/SDK.sdkstatcache", "<ClangStatCache /build/SDK.sdkstatcache>"],
+            "args": ["/SelectedXcode/usr/bin/clang-stat-cache", "/SelectedXcode/SDK", "-o", "/build/SDK.sdkstatcache"],
+            "always-out-of-date": true]
+        let assetSignature: [String: Any] = ["tool": "link-assetcatalog", "description": "LinkAssetCatalogSignature",
+            "inputs": [], "outputs": ["/build/assetcatalog_signature"], "always-out-of-date": true]
+        let compile: [String: Any] = ["tool": "shell", "inputs": ["/user/A.swift"], "outputs": ["/build/A.o"]]
+        var commands = ["stat": statCache, "assets": assetSignature, "compile": compile]
+        #expect(try inputs(commands)?.files == [URL(filePath: "/user/A.swift")])
+
+        for arguments in [
+            ["/mutable/clang-stat-cache", "/SelectedXcode/SDK", "-o", "/build/SDK.sdkstatcache"],
+            ["/SelectedXcode/usr/bin/clang-stat-cache", "/mutable/SDK", "-o", "/build/SDK.sdkstatcache"]
+        ] {
+            var mutableCache = statCache
+            mutableCache["args"] = arguments
+            commands["stat"] = mutableCache
+            #expect(try inputs(commands) == nil)
+        }
+        commands["stat"] = statCache
+        var unknownAssetAction = assetSignature
+        unknownAssetAction["description"] = "OtherAssetAction"
+        commands["assets"] = unknownAssetAction
+        #expect(try inputs(commands) == nil)
     }
 
     @Test func generatedPathFilteringPreservesNonFileSourceIdentifiers() throws {
@@ -60,7 +100,7 @@ struct NativePreviewBuildInputsTests {
             objectDependencies: Data("/build/A.o: /user/A.swift /user/Bridge\\ Header.h /user/Leaf.h /build/Generated.swift\n".utf8),
             moduleDependencies: Data("/build/Target.swiftmodule: /user/ModuleOnly.h\n".utf8)
         ]))
-        #expect(files?.files == Set(["/user/A.swift", "/user/Bridge Header.h", "/user/Leaf.h", "/user/ModuleOnly.h"].map { URL(filePath: $0) }))
+        #expect(files?.files == Set(["/user/A.swift", "/user/Bridge Header.h", "/user/Leaf.h", "/user/ModuleOnly.h", generated].map { URL(filePath: $0) }))
         #expect(files?.files.contains(map) == false)
         #expect(files?.files.contains(objectDependencies) == false)
         #expect(files?.files.contains(moduleDependencies) == false)
@@ -125,7 +165,7 @@ struct NativePreviewBuildInputsTests {
             manifest: data, dependency: Data("/build/A.o: local\\ header.h ../external\\ header.h Generated/\n".utf8),
             outer: Data("'@/user/Inner Flags.rsp' -DNUMBER=42".utf8), inner: Data("-DSECOND=1".utf8)
         ]))
-        #expect(files?.files == Set(["/user/A.c", "/project/local header.h", "/external header.h", outer.path, inner.path].map { URL(filePath: $0) }))
+        #expect(files?.files == Set(["/user/A.c", "/project/local header.h", "/external header.h", "/project/Generated", outer.path, inner.path].map { URL(filePath: $0) }))
     }
 
     @Test func nativeClangScanTracksHeadersModulesAndNestedResponseFiles() throws {
@@ -153,7 +193,7 @@ struct NativePreviewBuildInputsTests {
         ]
         let inputs = NativePreviewBuildInputs.files(manifest: manifest, read: reader(descriptions))
         #expect(inputs?.files == Set(["/user/A.c", "/external/Leaf.h", "/external/ModuleLeaf.h",
-            "/external/SharedLeaf.h", module.path, sharedModule.path, outer.path, inner.path].map { URL(filePath: $0) }))
+            "/external/SharedLeaf.h", "/build/Generated.h", module.path, sharedModule.path, outer.path, inner.path].map { URL(filePath: $0) }))
         #expect(inputs?.files.isDisjoint(with: [scan, moduleScan, sharedScan]) == true)
     }
 
@@ -192,15 +232,19 @@ struct NativePreviewBuildInputsTests {
         info.append(0x10); info.append(Data("/user/libSupport.a\0".utf8))
         info.append(0x11); info.append(Data("/user/libSupport.a\0".utf8))
         info.append(0x11); info.append(Data("/user/Optional.tbd\0".utf8))
+        info.append(0x10); info.append(Data("/build/Search/Present.a\0".utf8))
+        info.append(0x11); info.append(Data("/build/Search/Present.a\0".utf8))
+        info.append(0x11); info.append(Data("/build/Search/Optional.tbd\0".utf8))
         info.append(0x40); info.append(Data("/build/App\0".utf8))
         for tool in ["shell", "linker", "embed-swift-stdlib"] {
             var command: [String: Any] = ["tool": tool, "inputs": [], "outputs": ["/build/App"],
                 "deps": [dependency.path]]
             if tool == "shell" { command["deps-style"] = "dependency-info" }
-            let data = try json(["commands": ["link": command]])
+            let data = try json(["commands": ["link": command,
+                "directory": ["tool": "mkdir", "outputs": ["/build/Search/"]]]])
             let inputs = NativePreviewBuildInputs.files(manifest: manifest, read: reader([manifest: data, dependency: info]))
-            #expect(inputs?.files == [URL(filePath: "/user/libSupport.a")])
-            #expect(inputs?.missing == [URL(filePath: "/user/Optional.tbd")])
+            #expect(inputs?.files == [URL(filePath: "/user/libSupport.a"), URL(filePath: "/build/Search/Present.a")])
+            #expect(inputs?.missing == [URL(filePath: "/user/Optional.tbd"), URL(filePath: "/build/Search/Optional.tbd")])
         }
     }
 

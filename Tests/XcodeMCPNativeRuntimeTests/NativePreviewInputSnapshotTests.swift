@@ -199,9 +199,27 @@ struct NativePreviewInputSnapshotTests {
         try Data("updated log".utf8).write(to: log)
         try Data("new product".utf8).write(to: products.appendingPathComponent("App"))
         try Data("generated after build started".utf8).write(to: generated)
+        let freshGenerated = derivedData.appendingPathComponent("Fresh.swift")
+        try Data("generated".utf8).write(to: freshGenerated)
+        let buildCompleted = Date()
+        let generatedRoots = [generated, freshGenerated]
+        let generatedInputs = try NativePreviewInputSnapshot.capture(roots: generatedRoots)
+        #expect(!generatedInputs.predates(buildStarted))
+        #expect(generatedInputs.predates(buildCompleted))
+        #expect(try NativePreviewInputSnapshot.capture(roots: generatedRoots) == generatedInputs)
+
         let afterOutputs = try NativePreviewInputSnapshot.capture(roots: [project], excluding: exclusions)
         #expect(afterOutputs == before)
         #expect(afterOutputs.predates(buildStarted))
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: freshGenerated.path)
+        let modificationDate = try #require(attributes[.modificationDate] as? Date)
+        try Data("rewritten".utf8).write(to: freshGenerated)
+        try FileManager.default.setAttributes([.modificationDate: modificationDate], ofItemAtPath: freshGenerated.path)
+        let afterGenerated = try NativePreviewInputSnapshot.capture(roots: generatedRoots)
+        #expect(afterGenerated != generatedInputs)
+        #expect(!afterGenerated.predates(buildCompleted))
+        #expect(try NativePreviewInputSnapshot.capture(roots: [project], excluding: exclusions) == before)
 
         try Data("changed source".utf8).write(to: source)
         let afterSource = try NativePreviewInputSnapshot.capture(roots: [project], excluding: exclusions)
