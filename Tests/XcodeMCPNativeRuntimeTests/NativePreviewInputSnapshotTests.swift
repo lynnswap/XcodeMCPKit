@@ -227,6 +227,26 @@ struct NativePreviewInputSnapshotTests {
         #expect(!afterSource.predates(buildStarted))
     }
 
+    @Test func keepsNarrowerExclusionsWhenAnInputReopensTheirParent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let output = root.appendingPathComponent("Output", isDirectory: true)
+        let nested = output.appendingPathComponent("Generated", isDirectory: true)
+        let sibling = root.appendingPathComponent("OutputExtra", isDirectory: true)
+        for directory in [nested, sibling] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let alias = root.appendingPathComponent("OutputAlias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: output)
+        let exclusions: Set<URL> = [output, nested, sibling]
+        let expected = Set(exclusions.flatMap { [$0.standardizedFileURL, $0.resolvingSymlinksInPath()] })
+
+        #expect(NativePreviewInputSnapshot.coalescedExclusions(exclusions, roots: [output]) == expected)
+        #expect(NativePreviewInputSnapshot.coalescedExclusions(exclusions, roots: [alias]) == expected)
+        let withoutReopening = Set([output, sibling].flatMap { [$0.standardizedFileURL, $0.resolvingSymlinksInPath()] })
+        #expect(NativePreviewInputSnapshot.coalescedExclusions(exclusions, roots: []) == withoutReopening)
+    }
+
     @Test func preservesExplicitInputsInsideExcludedBuildDirectories() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let project = root.appendingPathComponent("Project", isDirectory: true)

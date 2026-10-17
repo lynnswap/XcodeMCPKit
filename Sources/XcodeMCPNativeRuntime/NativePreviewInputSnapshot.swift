@@ -17,7 +17,9 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         let symbolicLinkDestination: String?
 
         init(path: String, value: stat, symbolicLinkDestination: String?) {
-            self.path = path
+            var storedPath = path
+            storedPath.makeContiguousUTF8()
+            self.path = storedPath
             device = value.st_dev
             inode = value.st_ino
             mode = value.st_mode
@@ -74,8 +76,13 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         }.map(\.root)
     }
 
+    private enum CaptureInput: Sendable {
+        case root(URL)
+        case missing(Set<String>)
+    }
+
     private struct CaptureWork: Sendable {
-        var nextRoot = 0
+        var nextInput = 0
         var snapshots: [NativePreviewInputSnapshot] = []
         var failure: (any Error)?
     }
@@ -85,34 +92,65 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
     }
 
     static func coalescedExclusions(_ exclusions: Set<URL>, roots: [URL]) -> Set<URL> {
-        let inputPaths = roots.flatMap { [$0.standardizedFileURL.pathComponents, $0.resolvingSymlinksInPath().pathComponents] }
+        let inputPaths = Set(roots.flatMap {
+            [$0.standardizedFileURL.pathComponents, $0.resolvingSymlinksInPath().pathComponents]
+        })
         let paths = Set(exclusions.flatMap { [$0.standardizedFileURL, $0.resolvingSymlinksInPath()] })
-        return paths.sorted { $0.pathComponents.count < $1.pathComponents.count }.reduce(into: Set<URL>()) { result, candidate in
-            if !result.contains(where: { parent in
-                guard candidate.pathComponents.starts(with: parent.pathComponents) else { return false }
-                // Keep narrower exclusions when an explicit input reopens part of the broad output tree.
-                return !inputPaths.contains {
-                    $0.starts(with: parent.pathComponents) && candidate.pathComponents.starts(with: $0)
-                }
-            }) { result.insert(candidate) }
+        let candidates = paths.map { (url: $0, components: $0.pathComponents) }
+            .sorted { $0.components.count < $1.components.count }
+        var retained: Set<[String]> = []
+        var result: Set<URL> = []
+        for candidate in candidates {
+            var prefix: [String] = []
+            prefix.reserveCapacity(candidate.components.count)
+            var maxParent = retained.contains(prefix) ? 0 : -1
+            var maxInput = inputPaths.contains(prefix) ? 0 : -1
+            for component in candidate.components {
+                prefix.append(component)
+                if retained.contains(prefix) { maxParent = prefix.count }
+                if inputPaths.contains(prefix) { maxInput = prefix.count }
+            }
+            // An explicit input at or below a parent reopens it, so that parent cannot absorb this exclusion.
+            if maxParent <= maxInput {
+                result.insert(candidate.url)
+                retained.insert(candidate.components)
+            }
         }
+        return result
     }
 
     static func capture(roots: [URL], excluding: Set<URL> = [], missingInputs: Set<URL> = []) throws -> Self {
-        let workers = min(roots.count, ProcessInfo.processInfo.activeProcessorCount, 4)
+        var exclusionAliases: [String: Set<String>] = [:]
+        for excluded in excluding {
+            var standardPath = excluded.standardizedFileURL.path
+            var canonicalPath = excluded.resolvingSymlinksInPath().path
+            standardPath.makeContiguousUTF8()
+            canonicalPath.makeContiguousUTF8()
+            let paths = Set([standardPath, canonicalPath])
+            for path in paths { exclusionAliases[path, default: []].formUnion(paths) }
+        }
+        let exclusions = exclusionAliases
+        let missingPaths = Set(missingInputs.map { $0.standardizedFileURL.path })
+        let missing = missingPaths.sorted()
+        let processorCount = ProcessInfo.processInfo.activeProcessorCount
+        let batchSize = max(1, (missing.count + processorCount - 1) / processorCount)
+        let inputs = roots.map(CaptureInput.root) + stride(from: 0, to: missing.count, by: batchSize).map {
+            CaptureInput.missing(Set(missing[$0..<min(missing.count, $0 + batchSize)]))
+        }
+        let workers = min(inputs.count, processorCount)
         let snapshots: [Self]
-        if workers <= 1 { snapshots = try roots.map { try captureSerial(root: $0, excluding: excluding) } }
+        if workers <= 1 { snapshots = try inputs.map { try capture($0, excluding: exclusions) } }
         else {
             let work = Mutex(CaptureWork())
             DispatchQueue.concurrentPerform(iterations: workers) { _ in
-                while let root = work.withLock({ state -> URL? in
-                    guard state.failure == nil, state.nextRoot < roots.count else { return nil }
-                    let index = state.nextRoot
-                    state.nextRoot += 1
-                    return roots[index]
+                while let input = work.withLock({ state -> CaptureInput? in
+                    guard state.failure == nil, state.nextInput < inputs.count else { return nil }
+                    let index = state.nextInput
+                    state.nextInput += 1
+                    return inputs[index]
                 }) {
                     do {
-                        let snapshot = try captureSerial(root: root, excluding: excluding)
+                        let snapshot = try capture(input, excluding: exclusions)
                         work.withLock { $0.snapshots.append(snapshot) }
                     } catch {
                         work.withLock { if $0.failure == nil { $0.failure = error } }
@@ -125,9 +163,7 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                 return state.snapshots
             }
         }
-        let missingPaths = Set(missingInputs.map { $0.standardizedFileURL.path })
-        let ordered = (snapshots.flatMap { $0.entries } + (try inputPathAncestors(missingPaths: missingPaths, routes: [])))
-            .sorted { $0.path < $1.path }
+        let ordered = snapshots.flatMap { $0.entries }.sorted { $0.path < $1.path }
         var entries: [Entry] = []
         entries.reserveCapacity(ordered.count)
         for entry in ordered {
@@ -136,6 +172,15 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
             } else { entries.append(entry) }
         }
         return Self(entries: entries, missingPaths: missingPaths)
+    }
+
+    private static func capture(_ input: CaptureInput, excluding: [String: Set<String>]) throws -> Self {
+        switch input {
+        case .root(let root):
+            return try captureSerial(root: root, excluding: excluding)
+        case .missing(let paths):
+            return Self(entries: try inputPathAncestors(missingPaths: paths, routes: []), missingPaths: [])
+        }
     }
 
     private static func inputPathAncestors(missingPaths: Set<String>, routes: [URL]) throws -> [Entry] {
@@ -178,14 +223,15 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         var visited: Set<String> = []
         while let route = routes.popLast() {
             guard visited.insert(route.path).inserted else { continue }
-            var prefix = URL(filePath: "/", directoryHint: .isDirectory)
+            var prefix = ""
             for component in route.pathComponents.dropFirst() {
-                prefix.appendPathComponent(component)
-                let value = try metadata(prefix.path)
+                prefix.append("/")
+                prefix.append(component)
+                let value = try metadata(prefix)
                 if value.st_mode & S_IFMT == S_IFLNK {
-                    let destination = try FileManager.default.destinationOfSymbolicLink(atPath: prefix.path)
-                    entries.append(Entry(path: prefix.path, value: value, symbolicLinkDestination: destination))
-                    let parent = prefix.deletingLastPathComponent()
+                    let destination = try FileManager.default.destinationOfSymbolicLink(atPath: prefix)
+                    entries.append(Entry(path: prefix, value: value, symbolicLinkDestination: destination))
+                    let parent = URL(filePath: prefix).deletingLastPathComponent()
                     try append(parent.path, metadata(parent.path))
                     routes.append(URL(filePath: destination, relativeTo: parent).absoluteURL.standardizedFileURL)
                 }
@@ -196,17 +242,31 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         return entries
     }
 
-    private static func captureSerial(root: URL, excluding: Set<URL>) throws -> Self {
+    private static func ancestorPaths(of path: String) -> [String] {
+        var paths: [String] = []
+        var prefix = ""
+        for component in (path as NSString).pathComponents {
+            if component == "/" {
+                if prefix.isEmpty { prefix = "/" }
+            } else {
+                if !prefix.isEmpty, prefix != "/" { prefix.append("/") }
+                prefix.append(component)
+            }
+            paths.append(prefix)
+        }
+        return paths.reversed()
+    }
+
+    private static func captureSerial(root: URL, excluding: [String: Set<String>]) throws -> Self {
         let fileMetadata = NativePreviewFileMetadata()
-        let rootPaths = [root.standardizedFileURL.pathComponents, root.resolvingSymlinksInPath().pathComponents]
-        let exclusions = excluding.flatMap { url -> [String] in
-            let paths = [url.standardizedFileURL.pathComponents, url.resolvingSymlinksInPath().pathComponents]
-            // Explicit inputs and checkouts can live inside a native output directory.
-            guard !rootPaths.contains(where: { root in paths.contains { root.starts(with: $0) } }) else { return [] }
-            return paths.map { NSString.path(withComponents: $0) }
+        let rootPaths = Set([root.standardizedFileURL.path, root.resolvingSymlinksInPath().path])
+        // Explicit inputs and checkouts can live inside a native output directory.
+        lazy var reopenedPaths = rootPaths.flatMap { ancestorPaths(of: $0) }.reduce(into: Set<String>()) { paths, ancestor in
+            paths.formUnion(excluding[ancestor, default: []])
         }
         func isExcluded(_ path: String) -> Bool {
-            exclusions.contains { path == $0 || path.hasPrefix($0 == "/" ? $0 : $0 + "/") }
+            if rootPaths.contains(path) { return false }
+            return ancestorPaths(of: path).contains { excluding[$0] != nil && !reopenedPaths.contains($0) }
         }
         var pending = [(path: root.standardizedFileURL.path, isCanonical: false, metadata: Optional<stat>.none)]
         var visited: Set<String> = []
@@ -251,4 +311,5 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         entries += try inputPathAncestors(missingPaths: [], routes: routes)
         return Self(entries: entries.sorted { $0.path < $1.path }, missingPaths: [])
     }
+
 }

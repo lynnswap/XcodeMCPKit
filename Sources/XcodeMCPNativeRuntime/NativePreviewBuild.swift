@@ -388,29 +388,56 @@ final class NativePreviewBuild {
                 directory = parent
             }
         }
-        let normalized = Set(roots.map(\.standardizedFileURL))
-            .sorted { left, right in
-                let leftCount = left.pathComponents.count
-                let rightCount = right.pathComponents.count
-                return leftCount == rightCount ? left.path < right.path : leftCount < rightCount
-            }
-        let exclusions = excluding.union(build.inputCaptureExclusions).flatMap {
-            [$0.standardizedFileURL.pathComponents, $0.resolvingSymlinksInPath().pathComponents]
+        struct RootFact {
+            let url: URL
+            let path: String
+            let components: [String]
         }
-        return normalized.reduce(into: [URL]()) { result, candidate in
-            let candidatePaths = [candidate.pathComponents, candidate.resolvingSymlinksInPath().pathComponents]
-            if !result.contains(where: { parent in
-                guard candidate.pathComponents.starts(with: parent.pathComponents) else { return false }
-                let parentPaths = [parent.pathComponents, parent.resolvingSymlinksInPath().pathComponents]
-                // A broad tree cannot replace an explicit input reached through an excluded output directory.
-                return !exclusions.contains { excluded in
-                    candidatePaths.contains { $0.starts(with: excluded) }
-                        && !parentPaths.contains { $0.starts(with: excluded) }
+        let unique = Set(roots.map(\.standardizedFileURL))
+        let facts: [RootFact] = unique.map {
+            RootFact(url: $0, path: $0.path, components: $0.pathComponents)
+        }
+        let normalized = facts.sorted { left, right in
+            if left.components.count == right.components.count { return left.path < right.path }
+            return left.components.count < right.components.count
+        }
+        var exclusionIDs: [[String]: Int] = [:]
+        for excluded in excluding.union(build.inputCaptureExclusions) {
+            for path in [excluded.standardizedFileURL.pathComponents,
+                         excluded.resolvingSymlinksInPath().pathComponents] {
+                if exclusionIDs[path] == nil { exclusionIDs[path] = exclusionIDs.count }
+            }
+        }
+        var result: [URL] = []
+        var retained: [[String]: [Set<Int>]] = [:]
+        for candidate in normalized {
+            var candidateExclusions: Set<Int> = []
+            for path in [candidate.components, candidate.url.resolvingSymlinksInPath().pathComponents] {
+                var prefix: [String] = []
+                prefix.reserveCapacity(path.count)
+                for component in path {
+                    prefix.append(component)
+                    if let id = exclusionIDs[prefix] { candidateExclusions.insert(id) }
                 }
-            }) {
-                result.append(candidate)
+            }
+            var prefix: [String] = []
+            prefix.reserveCapacity(candidate.components.count)
+            var covered = false
+            for component in candidate.components {
+                prefix.append(component)
+                if let parents = retained[prefix], parents.contains(where: {
+                    candidateExclusions.isSubset(of: $0)
+                }) {
+                    covered = true
+                    break
+                }
+            }
+            if !covered {
+                result.append(candidate.url)
+                retained[candidate.components, default: []].append(candidateExclusions)
             }
         }
+        return result
     }
 
     func build(workspace: AnyObject, destination selection: DestinationSelection, source: URL) async throws -> Result {
