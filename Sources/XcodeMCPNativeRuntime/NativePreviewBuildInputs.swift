@@ -115,22 +115,25 @@ struct NativePreviewBuildInputs {
     private struct ClangScan {
         let moduleOutput: String?
         let files: [String]
+        let directories: [String]
         let modules: [String]
         let workingDirectory: URL
         let scanningArguments: [String]
 
         init(_ data: Data) throws {
             var reader = ClangScanReader(bytes: Array(data))
-            // Swift Build's DependencyInfo record includes the file and module dependency edges.
-            guard try reader.arrayCount() == 10, try reader.arrayCount() == 2 else {
-                throw Unsupported.inputDescription
-            }
+            // Swift Build's known layouts differ in directory dependencies and include-tree ID order.
+            let fieldCount = try reader.arrayCount()
+            guard fieldCount == 10 || fieldCount == 11 else { throw Unsupported.inputDescription }
+            if fieldCount == 11 { _ = try reader.strings() } // Transitive include-tree CAS IDs.
+            guard try reader.arrayCount() == 2 else { throw Unsupported.inputDescription }
             let kind = try reader.integer()
             moduleOutput = try reader.optionalString()
             guard (kind == 0 && moduleOutput == nil) || (kind == 1 && moduleOutput != nil) else {
                 throw Unsupported.inputDescription
             }
             files = try reader.strings()
+            directories = fieldCount == 11 ? try reader.strings() : []
             _ = try reader.optionalString() // Include-tree CAS ID.
             modules = try reader.strings()
             workingDirectory = URL(filePath: try absolutePath(reader.string()).path, directoryHint: .isDirectory)
@@ -141,7 +144,7 @@ struct NativePreviewBuildInputs {
                 _ = try reader.strings()
             }
             scanningArguments = try reader.strings()
-            _ = try reader.strings() // Transitive include-tree CAS IDs.
+            if fieldCount == 10 { _ = try reader.strings() } // Transitive include-tree CAS IDs.
             _ = try reader.strings() // Transitive compile-command cache keys.
             try reader.boolean()
             guard reader.isAtEnd else { throw Unsupported.inputDescription }
@@ -256,6 +259,35 @@ struct NativePreviewBuildInputs {
             let produced = try Set(manifest.commands.values.flatMap(\.outputs).compactMap { path in
                 try filesystemNode(path)
             })
+            let linkedAssetCatalogInputs = try manifest.commands.values.filter {
+                $0.tool == "link-assetcatalog" && !($0.deps?.values.isEmpty ?? true)
+            }.map { command in
+                try Set((command.inputs ?? []).compactMap { try filesystemNode($0) })
+            }
+            var linkedAssetCatalogDependencies: Set<URL> = []
+            for command in manifest.commands.values {
+                guard command.tool == "shell", command.dependencyStyle == "dependency-info",
+                      let arguments = command.args,
+                      let executable = arguments.first, executable.hasPrefix("/"),
+                      URL(filePath: executable).lastPathComponent == "actool" else { continue }
+                func argument(after option: String) -> String? {
+                    guard let index = arguments.firstIndex(of: option), arguments.indices.contains(index + 1) else { return nil }
+                    return arguments[index + 1]
+                }
+                guard let outputPath = argument(after: "--compile"),
+                      let dependencyPath = argument(after: "--export-dependency-info") else { continue }
+                let directory = try command.workingDirectory.map { URL(filePath: try absolutePath($0).path, directoryHint: .isDirectory) }
+                let output = try pathURL(outputPath, relativeTo: directory)
+                let dependency = try pathURL(dependencyPath, relativeTo: directory)
+                let commandInputs = try Set((command.inputs ?? []).compactMap { try filesystemNode($0) })
+                let commandOutputs = try Set(command.outputs.compactMap { try filesystemNode($0) })
+                let declaredDependencies = try Set((command.deps?.values ?? []).map { try pathURL($0, relativeTo: directory) })
+                guard commandOutputs.contains(output),
+                      declaredDependencies.contains(dependency),
+                      linkedAssetCatalogInputs.contains(where: { $0.contains(output) && commandInputs.isSubset(of: $0) }) else { continue }
+                // The native link action copies the selected actool variant's dependency info to its own depfile.
+                linkedAssetCatalogDependencies.insert(dependency)
+            }
             let clangScanOutputs = try Set(manifest.commands.values.filter { $0.tool == "clang-scan-modules" }
                 .flatMap(\.outputs).compactMap { try filesystemNode($0) })
             var nativeClangScans: Set<URL> = []
@@ -297,6 +329,7 @@ struct NativePreviewBuildInputs {
                     guard !paths.isEmpty else { throw Unsupported.inputDescription }
                     for path in paths {
                         let url = try pathURL(path, relativeTo: directory)
+                        if linkedAssetCatalogDependencies.contains(url) { continue }
                         dependencyFiles.insert(url)
                         let data = try readDescription(url)
                         switch (command.dependencyStyle, command.tool) {
@@ -384,7 +417,7 @@ struct NativePreviewBuildInputs {
                 }
                 guard newlyRead else { continue }
                 let directory = scan.workingDirectory
-                inputs.formUnion(try scan.files.map { try pathURL($0, relativeTo: directory) })
+                inputs.formUnion(try (scan.files + scan.directories).map { try pathURL($0, relativeTo: directory) })
                 for path in scan.modules {
                     let module = try pathURL(path, relativeTo: directory)
                     inputs.insert(module)

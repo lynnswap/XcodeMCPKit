@@ -239,6 +239,28 @@ struct NativePreviewBuildInputsTests {
         #expect(inputs?.files.isDisjoint(with: [scan, moduleScan, sharedScan]) == true)
     }
 
+    @Test func nativeClangDirectoryScansTrackModuleListingsWithoutTreatingCASAsPaths() throws {
+        let scan = URL(filePath: "/build/A.o.scan")
+        let module = URL(filePath: "/build/Modules/Support.pcm")
+        let moduleScan = URL(filePath: "/build/Modules/Support.scan")
+        let source = URL(filePath: "/user/A.c")
+        let header = URL(filePath: "/external/Support.framework/Headers/Leaf.h")
+        let headers = URL(filePath: "/external/Support.framework/Headers")
+        let data = try json(["commands": [
+            "scan": ["tool": "clang-scan-modules", "inputs": [source.path], "outputs": [scan.path]],
+            "compile": ["tool": "ccompile", "inputs": [source.path, scan.path], "outputs": ["/build/A.o"]]
+        ]])
+        let descriptions = [
+            manifest: data,
+            scan: clangScan(files: [source.path], modules: [module.path], directories: []),
+            moduleScan: clangScan(module: module.path, files: [header.path], directories: [headers.path])
+        ]
+        let inputs = NativePreviewBuildInputs.files(manifest: manifest, read: reader(descriptions))
+        // The directory listing is a dependency even though the TU only names the PCM.
+        // Exact equality also excludes nonempty CAS/cache strings and .scan metadata paths.
+        #expect(inputs?.files == Set([source, module, header, headers]))
+    }
+
     @Test func incompleteNativeClangScansDisableCertification() throws {
         let scan = URL(filePath: "/build/A.o.scan")
         let data = try json(["commands": [
@@ -311,7 +333,8 @@ struct NativePreviewBuildInputsTests {
     }
 
     private func clangScan(module: String? = nil, files: [String], modules: [String] = [],
-                           arguments: [String] = ["clang", "-c"], unknownSchema: Bool = false) -> Data {
+                           arguments: [String] = ["clang", "-c"], directories: [String]? = nil,
+                           unknownSchema: Bool = false) -> Data {
         func array(_ elements: [Data]) -> Data {
             var data = elements.count < 16 ? Data([0x90 | UInt8(elements.count)])
                 : Data([0xdc, UInt8(truncatingIfNeeded: elements.count >> 8), UInt8(truncatingIfNeeded: elements.count)])
@@ -329,9 +352,19 @@ struct NativePreviewBuildInputsTests {
         }
         let nilValue = Data([0xc0])
         let kind = array([Data([0xd3, 0, 0, 0, 0, 0, 0, 0, module == nil ? 0 : 1]), module.map(string) ?? nilValue])
-        let command = array([nilValue, array(["clang", "-cc1", "-o", module ?? "/build/A.o"].map(string))])
-        var fields = [kind, array(files.map(string)), nilValue, array(modules.map(string)), string("/project"),
-            array([command]), array(arguments.map(string)), array([]), array([]), Data([0xc3])]
+        let cacheKey = directories == nil ? nilValue : string("llvmcas://command-cache-key")
+        let command = array([cacheKey, array(["clang", "-cc1", "-o", module ?? "/build/A.o"].map(string))])
+        var fields: [Data]
+        if let directories {
+            let includeTrees = module == nil ? [string("llvmcas://transitive-include-tree")] : []
+            let cacheKeys = module == nil ? [string("llvmcas://transitive-command-cache-key")] : []
+            fields = [array(includeTrees), kind, array(files.map(string)), array(directories.map(string)),
+                string("llvmcas://include-tree"), array(modules.map(string)), string("/project"),
+                array([command]), array(arguments.map(string)), array(cacheKeys), Data([0xc3])]
+        } else {
+            fields = [kind, array(files.map(string)), nilValue, array(modules.map(string)), string("/project"),
+                array([command]), array(arguments.map(string)), array([]), array([]), Data([0xc3])]
+        }
         if unknownSchema { fields.append(nilValue) }
         return array(fields)
     }
@@ -346,4 +379,67 @@ struct NativePreviewBuildInputsTests {
             return data
         }
     }
+
+    @Test func linkedAssetCatalogDependencyInfoCoversSelectedVariant() throws {
+        let descriptions = try linkedAssetCatalogFixture()
+        let inputs = try #require(NativePreviewBuildInputs.files(manifest: manifest, read: reader(descriptions)))
+        #expect(inputs.files.isSuperset(of: Set(["/user/App.xcassets", "/user/Particle.xcassets", "/user/Preview.xcassets",
+            "/external/Shared.asset"].map { URL(filePath: $0) })))
+        #expect(inputs.missing == [URL(filePath: "/external/Optional.asset")])
+        #expect(inputs.discoveryFiles == [manifest, URL(filePath: "/build/assetcatalog_dependencies")])
+        #expect(inputs.generatedFiles.isSuperset(of: [URL(filePath: "/build/assetcatalog_output/thinned"),
+            URL(filePath: "/build/assetcatalog_output/unthinned")]))
+    }
+
+    @Test func linkedAssetCatalogRequiresFinalDependencyInfoAndUnrelatedCompileDependencies() throws {
+        let dependency = URL(filePath: "/build/assetcatalog_dependencies")
+        for replacement in [Optional<Data>.none, Data([0xff])] {
+            var descriptions = try linkedAssetCatalogFixture()
+            descriptions[dependency] = replacement
+            #expect(NativePreviewBuildInputs.files(manifest: manifest, read: reader(descriptions)) == nil)
+        }
+        var noConsumer = try linkedAssetCatalogFixture()
+        var noConsumerContents = try #require(JSONSerialization.jsonObject(with: noConsumer[manifest]!) as? [String: Any])
+        var noConsumerCommands = try #require(noConsumerContents["commands"] as? [String: [String: Any]])
+        noConsumerCommands.removeValue(forKey: "link")
+        noConsumerContents["commands"] = noConsumerCommands
+        noConsumer[manifest] = try json(noConsumerContents)
+        #expect(NativePreviewBuildInputs.files(manifest: manifest, read: reader(noConsumer)) == nil)
+        var descriptions = try linkedAssetCatalogFixture()
+        var contents = try #require(JSONSerialization.jsonObject(with: descriptions[manifest]!) as? [String: Any])
+        var commands = try #require(contents["commands"] as? [String: [String: Any]])
+        commands["unrelated-compile"] = ["tool": "shell", "inputs": ["/user/Other.c"], "outputs": ["/build/Other.o"],
+            "deps": "/build/Other.d", "deps-style": "makefile"]
+        contents["commands"] = commands
+        descriptions[manifest] = try json(contents)
+        #expect(NativePreviewBuildInputs.files(manifest: manifest, read: reader(descriptions)) == nil)
+    }
+
+    private func linkedAssetCatalogFixture() throws -> [URL: Data] {
+        let assets = ["/user/App.xcassets/", "/user/Particle.xcassets/", "/user/Preview.xcassets/"]
+        var commands: [String: [String: Any]] = [:]
+        for variant in ["thinned", "unthinned"] {
+            let output = "/build/assetcatalog_output/" + variant
+            let dependency = "/build/assetcatalog_dependencies_" + variant
+            commands[variant] = ["tool": "shell", "inputs": assets + [output],
+                "outputs": [output + "/", dependency, "/build/assetcatalog_generated_info.plist_" + variant],
+                "args": ["/SelectedXcode/usr/bin/actool", "--compile", output, "--export-dependency-info", dependency],
+                "working-directory": "/project", "deps": [dependency], "deps-style": "dependency-info"]
+            commands["mkdir-" + variant] = ["tool": "mkdir", "inputs": [], "outputs": [output]]
+        }
+        commands["signature"] = ["tool": "link-assetcatalog", "description": "LinkAssetCatalogSignature",
+            "inputs": [], "outputs": ["/build/assetcatalog_signature"], "always-out-of-date": true]
+        commands["link"] = ["tool": "link-assetcatalog",
+            "inputs": assets + ["/build/assetcatalog_output/thinned/", "/build/assetcatalog_output/unthinned/", "/build/assetcatalog_signature"],
+            "outputs": ["/build/App.app/Assets.car", "/build/assetcatalog_generated_info.plist"],
+            "deps": "/build/assetcatalog_dependencies"]
+        var dependencyInfo = Data([0]); dependencyInfo.append(Data("actool\0".utf8))
+        for asset in assets.map({ String($0.dropLast()) }) + ["/external/Shared.asset"] {
+            dependencyInfo.append(0x10); dependencyInfo.append(Data((asset + "\0").utf8))
+        }
+        dependencyInfo.append(0x11); dependencyInfo.append(Data("/external/Optional.asset\0".utf8))
+        dependencyInfo.append(0x40); dependencyInfo.append(Data("/build/assetcatalog_output/unthinned/Assets.car\0".utf8))
+        return [manifest: try json(["commands": commands]), URL(filePath: "/build/assetcatalog_dependencies"): dependencyInfo]
+    }
+
 }
