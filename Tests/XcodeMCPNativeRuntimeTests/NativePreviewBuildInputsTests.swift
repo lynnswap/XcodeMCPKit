@@ -33,6 +33,14 @@ struct NativePreviewBuildInputsTests {
             URL(filePath: "/System/Library/AssetsV2/Mutable.asset")])
     }
 
+    @Test func generatedPathFilteringPreservesNonFileSourceIdentifiers() throws {
+        let relative = try #require(URL(string: "relative.swift"))
+        let remote = try #require(URL(string: "https://example.invalid/build/Generated/Source.swift"))
+        let files: Set<URL> = [relative, remote]
+        #expect(NativePreviewBuildInputs.removingGeneratedPaths(from: files,
+            generatedPaths: [URL(filePath: "/build/Generated")]) == files)
+    }
+
     @Test func swiftOutputMapFindsTransitiveHeadersAndModuleDependencies() throws {
         let map = URL(filePath: "/build/Target-OutputFileMap.json")
         let objectDependencies = URL(filePath: "/build/A.d")

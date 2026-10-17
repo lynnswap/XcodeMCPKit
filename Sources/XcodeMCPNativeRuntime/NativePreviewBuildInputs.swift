@@ -18,13 +18,14 @@ struct NativePreviewBuildInputs {
     static func removingGeneratedPaths(from files: Set<URL>, generatedPaths: Set<URL>) -> Set<URL> {
         let paths = Set(generatedPaths.map { $0.standardizedFileURL.path })
         return files.filter { file in
-            var candidate = file.standardizedFileURL
-            while true {
-                if paths.contains(candidate.path) { return false }
-                let parent = candidate.deletingLastPathComponent()
-                if parent.path == candidate.path { return true }
-                candidate = parent
+            // Non-filesystem source identifiers remain subject to the caller's input validation.
+            guard file.isFileURL, file.path.hasPrefix("/") else { return true }
+            var components = file.standardizedFileURL.pathComponents
+            while !components.isEmpty {
+                if paths.contains(NSString.path(withComponents: components)) { return false }
+                components.removeLast()
             }
+            return true
         }
     }
 
