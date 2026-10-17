@@ -24,29 +24,38 @@ func runPreviewRendererSession(in directory: URL,
     try FileHandle.standardOutput.write(contentsOf: Data(("XcodeMCPPreviewSession:\(directory.path)\n"
         + "XcodeMCPPreviewProcess:\(ProcessInfo.processInfo.processIdentifier)\n").utf8))
     let requestURL = directory.appendingPathComponent("PreviewRequest.json")
-    var completedIdentifier: String?
-    while true {
-        try Task.checkCancellation()
-        if FileManager.default.fileExists(atPath: requestURL.path) {
-            let command = try JSONDecoder().decode(PreviewRendererCommand.self, from: Data(contentsOf: requestURL))
-            if command.identifier != completedIdentifier {
-                let output = directory.appendingPathComponent(command.identifier, isDirectory: true)
-                try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-                var result: PreviewRendererResult
-                do { result = try await render(command.request, output) }
-                catch is CancellationError { throw CancellationError() }
-                catch is NativePreviewPipelineRequired { result = PreviewRendererResult(requiresNativePipeline: true) }
-                catch { result = PreviewRendererResult(error: String(describing: error)) }
-                if let data = result.snapshotData {
-                    try data.write(to: output.appendingPathComponent("Preview.png"), options: .atomic)
-                    result.snapshotName = "Preview.png"
-                    result.snapshotData = nil
+    try await PreviewRendererFileEvents.withEvents(in: directory) { changes, _ in
+        var completedIdentifier: String?
+        var events = changes.makeAsyncIterator()
+        while true {
+            try Task.checkCancellation()
+            if FileManager.default.fileExists(atPath: requestURL.path) {
+                let command = try JSONDecoder().decode(PreviewRendererCommand.self, from: Data(contentsOf: requestURL))
+                if command.identifier != completedIdentifier {
+                    let output = directory.appendingPathComponent(command.identifier, isDirectory: true)
+                    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+                    var result: PreviewRendererResult
+                    do { result = try await render(command.request, output) }
+                    catch is CancellationError { throw CancellationError() }
+                    catch is NativePreviewPipelineRequired { result = PreviewRendererResult(requiresNativePipeline: true) }
+                    catch { result = PreviewRendererResult(error: String(describing: error)) }
+                    if let data = result.snapshotData {
+                        try data.write(to: output.appendingPathComponent("Preview.png"), options: .atomic)
+                        result.snapshotName = "Preview.png"
+                        result.snapshotData = nil
+                    }
+                    try JSONEncoder().encode(result).write(to: output.appendingPathComponent("PreviewResult.json"), options: .atomic)
+                    completedIdentifier = command.identifier
                 }
-                try JSONEncoder().encode(result).write(to: output.appendingPathComponent("PreviewResult.json"), options: .atomic)
-                completedIdentifier = command.identifier
+            }
+            guard let event = await events.next() else {
+                try Task.checkCancellation()
+                throw PreviewRendererError("The preview session directory event stream ended")
+            }
+            if case .invalidated = event {
+                throw PreviewRendererError("The preview session directory is no longer available")
             }
         }
-        try await Task.sleep(for: .milliseconds(25))
     }
 }
 #endif

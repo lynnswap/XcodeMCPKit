@@ -1746,7 +1746,7 @@ struct NativePreviewCorrectionTests {
         let correction = NativePreviewCorrection(installation: try NativeXcodeInstallation(developerDirectory: app))
         let input = try JSONEncoder().encode(PreviewInput(temporaryArtifactsPath: root.path, sourceFilePath: "ContentView.swift"))
         let nativeEvent = Data(#"{"type":"completed","data":{"native":true}}"#.utf8)
-        let stream = try await correction.execute(inputType: PreviewInput.self, input: input) {
+        let stream = try await correction.execute(inputType: PreviewInput.self, input: input, artifactsRoot: root) {
             AsyncStream { continuation in
                 continuation.yield(nativeEvent)
                 continuation.finish()

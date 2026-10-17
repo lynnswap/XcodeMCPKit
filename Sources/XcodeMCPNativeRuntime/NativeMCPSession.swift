@@ -142,7 +142,7 @@ package final class NativeMCPSession {
         }
         let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let context = NativeToolContext(artifactsDirectory: directory, conversationID: conversationID)
+        let context = NativeToolContext(artifactsDirectory: directory, artifactsRoot: artifactsRoot, conversationID: conversationID)
         do {
             let result = try await consumeTool(params: params, name: name, arguments: arguments, context: context)
             do { try await backend.finishExecution(context: context) }

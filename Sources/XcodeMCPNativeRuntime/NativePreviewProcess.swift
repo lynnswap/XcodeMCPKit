@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Synchronization
 
 @MainActor
@@ -37,25 +38,43 @@ final class NativePreviewProcess {
         process.environment = environment
         process.standardOutput = output
         process.standardError = errors
-        let cancelled = Mutex(false)
+        let cancellation = Mutex((cancelled: false, terminationErrno: Optional<Int32>.none))
         let status: Int32 = try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
                 process.terminationHandler = { completed in
-                    continuation.resume(returning: completed.terminationStatus)
+                    let terminationErrno = cancellation.withLock { $0.terminationErrno }
+                    if let terminationErrno {
+                        let failure = NSError(domain: NSPOSIXErrorDomain, code: Int(terminationErrno))
+                        continuation.resume(throwing: NativeRuntimeError.invocation(
+                            "Could not send SIGKILL to \(executable) (PID \(completed.processIdentifier)): \(failure)"))
+                    } else {
+                        continuation.resume(returning: completed.terminationStatus)
+                    }
                 }
                 do {
-                    try cancelled.withLock { cancelled in
-                        guard !cancelled else { throw CancellationError() }
+                    try cancellation.withLock { state in
+                        guard !state.cancelled else { throw CancellationError() }
                         try process.run()
                     }
                 }
                 catch { continuation.resume(throwing: error) }
             }
         } onCancel: {
-            cancelled.withLock { cancelled in
-                cancelled = true
-                if process.isRunning { process.terminate() }
+            cancellation.withLock { state in
+                state.cancelled = true
+                if process.isRunning {
+                    process.terminate()
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+                        cancellation.withLock { state in
+                            guard process.isRunning else { return }
+                            if kill(process.processIdentifier, SIGKILL) != 0 {
+                                let failure = errno
+                                if failure != ESRCH { state.terminationErrno = failure }
+                            }
+                        }
+                    }
+                }
             }
         }
         let text = String(decoding: try Data(contentsOf: logURL), as: UTF8.self)
