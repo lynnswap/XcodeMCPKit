@@ -130,6 +130,32 @@ struct NativePreviewProcessTests {
         #expect(kill(pid, 0) == -1)
     }
 
+    @Test func cancelledCommandThatIgnoresTerminationIsReaped() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let marker = fixture.root.appendingPathComponent("pid")
+        let command = "trap '' TERM; echo $$ > '\(marker.path)'; exec /bin/sleep 12"
+        let readinessDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let task = Task { try await fixture.process.run("/bin/sh", ["-c", command]) }
+        defer { task.cancel() }
+        var identifier: Int32?
+        while identifier == nil, ContinuousClock.now < readinessDeadline {
+            if let value = try? String(contentsOf: marker, encoding: .utf8) {
+                identifier = Int32(value.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            if identifier == nil { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        let pid = try #require(identifier)
+        let cancelledAt = ContinuousClock.now
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("A cancelled preview command returned success")
+        } catch is CancellationError {}
+        #expect(cancelledAt.duration(to: ContinuousClock.now) < .seconds(5))
+        #expect(kill(pid, 0) == -1)
+    }
+
     @MainActor
     private struct Fixture {
         let root: URL
