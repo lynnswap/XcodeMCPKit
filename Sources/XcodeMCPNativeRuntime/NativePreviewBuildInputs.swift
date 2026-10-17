@@ -44,6 +44,118 @@ struct NativePreviewBuildInputs {
         }
     }
 
+    private struct ClangScan {
+        let moduleOutput: String?
+        let files: [String]
+        let modules: [String]
+        let workingDirectory: URL
+        let scanningArguments: [String]
+
+        init(_ data: Data) throws {
+            var reader = ClangScanReader(bytes: Array(data))
+            // Swift Build's DependencyInfo record includes the file and module dependency edges.
+            guard try reader.arrayCount() == 10, try reader.arrayCount() == 2 else {
+                throw Unsupported.inputDescription
+            }
+            let kind = try reader.integer()
+            moduleOutput = try reader.optionalString()
+            guard (kind == 0 && moduleOutput == nil) || (kind == 1 && moduleOutput != nil) else {
+                throw Unsupported.inputDescription
+            }
+            files = try reader.strings()
+            _ = try reader.optionalString() // Include-tree CAS ID.
+            modules = try reader.strings()
+            workingDirectory = URL(filePath: try absolutePath(reader.string()).path, directoryHint: .isDirectory)
+            let commandCount = try reader.arrayCount()
+            for _ in 0..<commandCount {
+                guard try reader.arrayCount() == 2 else { throw Unsupported.inputDescription }
+                _ = try reader.optionalString() // Compile-command cache key.
+                _ = try reader.strings()
+            }
+            scanningArguments = try reader.strings()
+            _ = try reader.strings() // Transitive include-tree CAS IDs.
+            _ = try reader.strings() // Transitive compile-command cache keys.
+            try reader.boolean()
+            guard reader.isAtEnd else { throw Unsupported.inputDescription }
+        }
+    }
+
+    /// Reads only the MessagePack types used by the native Clang DependencyInfo record.
+    private struct ClangScanReader {
+        let bytes: [UInt8]
+        private var offset = 0
+
+        init(bytes: [UInt8]) { self.bytes = bytes }
+
+        var isAtEnd: Bool { offset == bytes.count }
+
+        private mutating func byte() throws -> UInt8 {
+            guard offset < bytes.count else { throw Unsupported.inputDescription }
+            defer { offset += 1 }
+            return bytes[offset]
+        }
+
+        private mutating func unsigned(_ count: Int) throws -> UInt64 {
+            var value: UInt64 = 0
+            for _ in 0..<count { value = (value << 8) | UInt64(try byte()) }
+            return value
+        }
+
+        mutating func integer() throws -> Int {
+            let marker = try byte()
+            if marker <= 0x7f { return Int(marker) }
+            guard marker == 0xd3 else { throw Unsupported.inputDescription }
+            return Int(Int64(bitPattern: try unsigned(8)))
+        }
+
+        mutating func arrayCount() throws -> Int {
+            let marker = try byte()
+            let count: Int
+            switch marker {
+            case 0x90...0x9f: count = Int(marker & 0x0f)
+            case 0xdc: count = Int(try unsigned(2))
+            case 0xdd: count = Int(try unsigned(4))
+            default: throw Unsupported.inputDescription
+            }
+            guard count <= bytes.count - offset else { throw Unsupported.inputDescription }
+            return count
+        }
+
+        mutating func string() throws -> String {
+            let marker = try byte()
+            let count: Int
+            switch marker {
+            case 0xa0...0xbf: count = Int(marker & 0x1f)
+            case 0xd9: count = Int(try unsigned(1))
+            case 0xda: count = Int(try unsigned(2))
+            case 0xdb: count = Int(try unsigned(4))
+            default: throw Unsupported.inputDescription
+            }
+            guard count <= bytes.count - offset,
+                  let value = String(bytes: bytes[offset..<(offset + count)], encoding: .utf8) else {
+                throw Unsupported.inputDescription
+            }
+            offset += count
+            return value
+        }
+
+        mutating func optionalString() throws -> String? {
+            guard offset < bytes.count else { throw Unsupported.inputDescription }
+            if bytes[offset] == 0xc0 { offset += 1; return nil }
+            return try string()
+        }
+
+        mutating func strings() throws -> [String] {
+            let count = try arrayCount()
+            return try (0..<count).map { _ in try string() }
+        }
+
+        mutating func boolean() throws {
+            let marker = try byte()
+            guard marker == 0xc2 || marker == 0xc3 else { throw Unsupported.inputDescription }
+        }
+    }
+
     private enum Unsupported: Error { case inputDescription }
 
     static func files(manifest manifestURL: URL, compilerCommands: [CompilerCommand] = [],
@@ -61,6 +173,9 @@ struct NativePreviewBuildInputs {
             let produced = try Set(manifest.commands.values.flatMap(\.outputs).compactMap { path in
                 try absoluteNode(path)
             })
+            let clangScanOutputs = try Set(manifest.commands.values.filter { $0.tool == "clang-scan-modules" }
+                .flatMap(\.outputs).compactMap { try absoluteNode($0) })
+            var nativeClangScans: Set<URL> = []
             let swiftCommands = manifest.commands.values.filter {
                 $0.tool == "swift-driver-compilation" || $0.tool == "swift-driver-compilation-requirement"
             }
@@ -96,6 +211,12 @@ struct NativePreviewBuildInputs {
                         default: throw Unsupported.inputDescription
                         }
                     }
+                }
+                if command.tool == "ccompile", command.deps == nil {
+                    let scans = try Set((command.inputs ?? []).compactMap { try absoluteNode($0) })
+                        .intersection(clangScanOutputs)
+                    guard !scans.isEmpty else { throw Unsupported.inputDescription }
+                    nativeClangScans.formUnion(scans)
                 }
                 if command.tool == "swift-driver-compilation" || command.tool == "swift-driver-compilation-requirement" {
                     let objectOutputs = try Set(command.outputs.compactMap { path -> URL? in
@@ -150,6 +271,36 @@ struct NativePreviewBuildInputs {
                 }
                 if let arguments = command.args, arguments.contains("-c") {
                     try collectResponseFiles(arguments, relativeTo: directory, read: readDescription, into: &responseFiles)
+                }
+            }
+            var pendingClangScans = nativeClangScans.map { (url: $0, moduleOutput: Optional<URL>.none) }
+            var parsedClangScans: [URL: ClangScan] = [:]
+            while let next = pendingClangScans.popLast() {
+                let scan: ClangScan
+                let newlyRead: Bool
+                if let existing = parsedClangScans[next.url] { scan = existing; newlyRead = false }
+                else {
+                    scan = try ClangScan(readDescription(next.url))
+                    parsedClangScans[next.url] = scan
+                    dependencyFiles.insert(next.url)
+                    newlyRead = true
+                }
+                guard try scan.moduleOutput.map({ try absolutePath($0) }) == next.moduleOutput else {
+                    throw Unsupported.inputDescription
+                }
+                guard newlyRead else { continue }
+                let directory = scan.workingDirectory
+                inputs.formUnion(try scan.files.map { try pathURL($0, relativeTo: directory) })
+                for path in scan.modules {
+                    let module = try pathURL(path, relativeTo: directory)
+                    inputs.insert(module)
+                    // Swift Build stores each PCM's own file and module dependencies beside it.
+                    pendingClangScans.append((module.deletingPathExtension().appendingPathExtension("scan"), module))
+                }
+                if next.moduleOutput == nil {
+                    // Module records can repeat another scan's argv with an intentionally ignored CWD.
+                    try collectResponseFiles(scan.scanningArguments, relativeTo: directory, syntax: .llvmGNU,
+                        read: readDescription, into: &responseFiles)
                 }
             }
             for command in compilerCommands {

@@ -119,6 +119,49 @@ struct NativePreviewBuildInputsTests {
         #expect(files?.files == Set(["/user/A.c", "/project/local header.h", "/external header.h", outer.path, inner.path].map { URL(filePath: $0) }))
     }
 
+    @Test func nativeClangScanTracksHeadersModulesAndNestedResponseFiles() throws {
+        let scan = URL(filePath: "/build/A.o.scan")
+        let module = URL(filePath: "/build/Modules/Support.pcm")
+        let moduleScan = URL(filePath: "/build/Modules/Support.scan")
+        let sharedModule = URL(filePath: "/build/Modules/Shared.pcm")
+        let sharedScan = URL(filePath: "/build/Modules/Shared.scan")
+        let outer = URL(filePath: "/external/Compiler Flags.rsp")
+        let inner = URL(filePath: "/external/Nested Flags.rsp")
+        let data = try json(["commands": [
+            "scan": ["tool": "clang-scan-modules", "inputs": ["/user/A.c"], "outputs": [scan.path]],
+            "compile": ["tool": "ccompile", "inputs": ["/user/A.c", scan.path], "outputs": ["/build/A.o"]],
+            "generated": ["tool": "auxiliary-file", "outputs": ["/build/Generated.h"]]
+        ]])
+        let descriptions = [
+            manifest: data,
+            scan: clangScan(files: ["/user/A.c", "/external/Leaf.h", "/build/Generated.h"],
+                modules: [module.path, sharedModule.path],
+                arguments: ["clang", "-c", "@../external/Compiler Flags.rsp"]),
+            moduleScan: clangScan(module: module.path, files: ["/external/ModuleLeaf.h"], modules: [sharedModule.path]),
+            sharedScan: clangScan(module: sharedModule.path, files: ["/external/SharedLeaf.h"]),
+            outer: Data("'@../external/Nested Flags.rsp' -DNUMBER=42".utf8),
+            inner: Data("-DSECOND=1".utf8)
+        ]
+        let inputs = NativePreviewBuildInputs.files(manifest: manifest, read: reader(descriptions))
+        #expect(inputs?.files == Set(["/user/A.c", "/external/Leaf.h", "/external/ModuleLeaf.h",
+            "/external/SharedLeaf.h", module.path, sharedModule.path, outer.path, inner.path].map { URL(filePath: $0) }))
+        #expect(inputs?.files.isDisjoint(with: [scan, moduleScan, sharedScan]) == true)
+    }
+
+    @Test func incompleteNativeClangScansDisableCertification() throws {
+        let scan = URL(filePath: "/build/A.o.scan")
+        let data = try json(["commands": [
+            "scan": ["tool": "clang-scan-modules", "inputs": ["/user/A.c"], "outputs": [scan.path]],
+            "compile": ["tool": "ccompile", "inputs": ["/user/A.c", scan.path], "outputs": ["/build/A.o"]]
+        ]])
+        for unknownSchema in [false, true] {
+            let description = clangScan(files: ["/user/A.c"], modules: unknownSchema ? [] : ["/build/Modules/Missing.pcm"],
+                unknownSchema: unknownSchema)
+            #expect(NativePreviewBuildInputs.files(manifest: manifest,
+                read: reader([manifest: data, scan: description])) == nil)
+        }
+    }
+
     @Test func unknownOrUnreadDynamicDependenciesDisableOnlyTheCertificate() throws {
         let dependency = URL(filePath: "/build/A.deps")
         for style in ["unknown-format", "makefile"] {
@@ -170,6 +213,32 @@ struct NativePreviewBuildInputsTests {
             read: reader([manifest: data, outer: Data("// @Ignored.rsp\n@'First File.rsp'\n-DVALUE=1\u{a0}@Second.rsp".utf8),
                 first: Data(), second: Data()]))
         #expect(swift?.files == Set([outer, first, second]))
+    }
+
+    private func clangScan(module: String? = nil, files: [String], modules: [String] = [],
+                           arguments: [String] = ["clang", "-c"], unknownSchema: Bool = false) -> Data {
+        func array(_ elements: [Data]) -> Data {
+            var data = elements.count < 16 ? Data([0x90 | UInt8(elements.count)])
+                : Data([0xdc, UInt8(truncatingIfNeeded: elements.count >> 8), UInt8(truncatingIfNeeded: elements.count)])
+            for element in elements { data.append(element) }
+            return data
+        }
+        func string(_ value: String) -> Data {
+            let bytes = Data(value.utf8)
+            var data: Data
+            if bytes.count < 32 { data = Data([0xa0 | UInt8(bytes.count)]) }
+            else if bytes.count < 256 { data = Data([0xd9, UInt8(bytes.count)]) }
+            else { data = Data([0xda, UInt8(truncatingIfNeeded: bytes.count >> 8), UInt8(truncatingIfNeeded: bytes.count)]) }
+            data.append(bytes)
+            return data
+        }
+        let nilValue = Data([0xc0])
+        let kind = array([Data([0xd3, 0, 0, 0, 0, 0, 0, 0, module == nil ? 0 : 1]), module.map(string) ?? nilValue])
+        let command = array([nilValue, array(["clang", "-cc1", "-o", module ?? "/build/A.o"].map(string))])
+        var fields = [kind, array(files.map(string)), nilValue, array(modules.map(string)), string("/project"),
+            array([command]), array(arguments.map(string)), array([]), array([]), Data([0xc3])]
+        if unknownSchema { fields.append(nilValue) }
+        return array(fields)
     }
 
     private func json(_ value: [String: Any]) throws -> Data {
