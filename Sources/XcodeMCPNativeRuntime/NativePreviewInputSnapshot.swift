@@ -31,6 +31,7 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
     }
 
     private let entries: [Entry]
+    private let missingPaths: Set<String>
 
     func predates(_ date: Date) -> Bool {
         let cutoff = date.timeIntervalSince1970
@@ -83,31 +84,36 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         let path: String
     }
 
-    static func capture(roots: [URL]) throws -> Self {
+    static func capture(roots: [URL], missingInputs: Set<URL> = []) throws -> Self {
         let workers = min(roots.count, ProcessInfo.processInfo.activeProcessorCount, 4)
-        guard workers > 1 else { return try captureSerial(roots: roots) }
-        let work = Mutex(CaptureWork())
-        DispatchQueue.concurrentPerform(iterations: workers) { _ in
-            while let root = work.withLock({ state -> URL? in
-                guard state.failure == nil, state.nextRoot < roots.count else { return nil }
-                let index = state.nextRoot
-                state.nextRoot += 1
-                return roots[index]
-            }) {
-                do {
-                    let snapshot = try captureSerial(roots: [root])
-                    work.withLock { $0.snapshots.append(snapshot) }
-                } catch {
-                    work.withLock { if $0.failure == nil { $0.failure = error } }
-                    return
+        let snapshots: [Self]
+        if workers <= 1 { snapshots = [try captureSerial(roots: roots)] }
+        else {
+            let work = Mutex(CaptureWork())
+            DispatchQueue.concurrentPerform(iterations: workers) { _ in
+                while let root = work.withLock({ state -> URL? in
+                    guard state.failure == nil, state.nextRoot < roots.count else { return nil }
+                    let index = state.nextRoot
+                    state.nextRoot += 1
+                    return roots[index]
+                }) {
+                    do {
+                        let snapshot = try captureSerial(roots: [root])
+                        work.withLock { $0.snapshots.append(snapshot) }
+                    } catch {
+                        work.withLock { if $0.failure == nil { $0.failure = error } }
+                        return
+                    }
                 }
             }
+            snapshots = try work.withLock { state in
+                if let failure = state.failure { throw failure }
+                return state.snapshots
+            }
         }
-        let snapshots = try work.withLock { state in
-            if let failure = state.failure { throw failure }
-            return state.snapshots
-        }
-        let ordered = snapshots.flatMap { $0.entries }.sorted { $0.path < $1.path }
+        let missingPaths = Set(missingInputs.map { $0.standardizedFileURL.path })
+        let ordered = (snapshots.flatMap { $0.entries } + (try missingInputAncestors(missingPaths)))
+            .sorted { $0.path < $1.path }
         var entries: [Entry] = []
         entries.reserveCapacity(ordered.count)
         for entry in ordered {
@@ -115,7 +121,65 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                 guard existing == entry else { throw ConflictingEntry(path: entry.path) }
             } else { entries.append(entry) }
         }
-        return Self(entries: entries)
+        return Self(entries: entries, missingPaths: missingPaths)
+    }
+
+    private static func missingInputAncestors(_ paths: Set<String>) throws -> [Entry] {
+        var entries: [Entry] = []
+        var routes: [URL] = []
+        func metadata(_ path: String) throws -> stat {
+            var value = stat()
+            guard unsafe lstat(path, &value) == 0 else {
+                let code = errno
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
+            }
+            return value
+        }
+        func append(_ path: String, _ value: stat) throws {
+            let destination = value.st_mode & S_IFMT == S_IFLNK
+                ? try FileManager.default.destinationOfSymbolicLink(atPath: path) : nil
+            entries.append(Entry(path: path, value: value, symbolicLinkDestination: destination))
+        }
+        for path in paths {
+            var ancestor = URL(filePath: path)
+            while true {
+                do {
+                    let value = try metadata(ancestor.path)
+                    guard ancestor.path != path else {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(EEXIST), userInfo: [NSFilePathErrorKey: path])
+                    }
+                    try append(ancestor.path, value)
+                    routes.append(ancestor)
+                    break
+                } catch let error as NSError where error.domain == NSPOSIXErrorDomain
+                    && (error.code == Int(ENOENT) || error.code == Int(ENOTDIR)) {
+                    let parent = ancestor.deletingLastPathComponent()
+                    guard parent.path != ancestor.path else { throw error }
+                    ancestor = parent
+                }
+            }
+        }
+        // A negative lookup depends on its nearest existing parent and on every symlink used to reach it.
+        // Observe these entries without walking unrelated directory contents.
+        var visited: Set<String> = []
+        while let route = routes.popLast() {
+            guard visited.insert(route.path).inserted else { continue }
+            var prefix = URL(filePath: "/", directoryHint: .isDirectory)
+            for component in route.pathComponents.dropFirst() {
+                prefix.appendPathComponent(component)
+                let value = try metadata(prefix.path)
+                if value.st_mode & S_IFMT == S_IFLNK {
+                    let destination = try FileManager.default.destinationOfSymbolicLink(atPath: prefix.path)
+                    entries.append(Entry(path: prefix.path, value: value, symbolicLinkDestination: destination))
+                    let parent = prefix.deletingLastPathComponent()
+                    try append(parent.path, metadata(parent.path))
+                    routes.append(URL(filePath: destination, relativeTo: parent).absoluteURL.standardizedFileURL)
+                }
+            }
+            let canonical = route.resolvingSymlinksInPath().path
+            try append(canonical, metadata(canonical))
+        }
+        return entries
     }
 
     private static func captureSerial(roots: [URL]) throws -> Self {
@@ -156,6 +220,6 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
             }
             entries.append(Entry(path: path, value: value, symbolicLinkDestination: symbolicLinkDestination))
         }
-        return Self(entries: entries.sorted { $0.path < $1.path })
+        return Self(entries: entries.sorted { $0.path < $1.path }, missingPaths: [])
     }
 }

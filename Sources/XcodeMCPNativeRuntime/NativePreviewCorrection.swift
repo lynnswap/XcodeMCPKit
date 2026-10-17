@@ -305,7 +305,8 @@ final class NativePreviewCorrection {
                 let currentBuilder = try await builder.workspaceBuilder(for: plan.destination)
                 if currentBuilder === certificate.workspaceBuilder,
                    try NativePreviewInputSnapshot.capture(
-                       roots: certificate.inputs.prioritizedRoots(certificate.roots)) == certificate.inputs,
+                       roots: certificate.inputs.prioritizedRoots(certificate.roots),
+                       missingInputs: certificate.build.missingInputFiles) == certificate.inputs,
                    inputRevision == session.inputRevision {
                     inputsAreCurrent = true
                     if plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
@@ -376,7 +377,7 @@ final class NativePreviewCorrection {
                              session: WorkspaceSession, inputRevision: UInt64) async throws -> BuildCertificate? {
         guard let buildStartedAt = build.buildStartedAt, let workspaceBuilder = build.workspaceBuilder else { return nil }
         guard let roots = try builder.inputRoots(workspace: workspace, build: build, source: source) else { return nil }
-        let inputs = try NativePreviewInputSnapshot.capture(roots: roots)
+        let inputs = try NativePreviewInputSnapshot.capture(roots: roots, missingInputs: build.missingInputFiles)
         // A post-build snapshot must not certify source edits that arrived during the build.
         guard inputs.predates(buildStartedAt) else { return nil }
         let currentBuilder = try await builder.workspaceBuilder(for: destination)

@@ -2,6 +2,11 @@ import Foundation
 
 /// Reads the input side of one completed native build; generated descriptions and depfiles are discovery data.
 struct NativePreviewBuildInputs {
+    struct Inputs: Equatable {
+        let files: Set<URL>
+        let missing: Set<URL>
+    }
+
     enum ResponseFileSyntax: Equatable { case llvmGNU, swiftDriver }
 
     struct CompilerCommand {
@@ -42,7 +47,7 @@ struct NativePreviewBuildInputs {
     private enum Unsupported: Error { case inputDescription }
 
     static func files(manifest manifestURL: URL, compilerCommands: [CompilerCommand] = [],
-                      immutableRoots: [URL] = [], read: (URL) throws -> Data = { try Data(contentsOf: $0) }) -> Set<URL>? {
+                      immutableRoots: [URL] = [], read: (URL) throws -> Data = { try Data(contentsOf: $0) }) -> Inputs? {
         do {
             var descriptions: [URL: Data] = [:]
             func readDescription(_ url: URL) throws -> Data {
@@ -56,7 +61,16 @@ struct NativePreviewBuildInputs {
             let produced = try Set(manifest.commands.values.flatMap(\.outputs).compactMap { path in
                 try absoluteNode(path)
             })
+            let swiftCommands = manifest.commands.values.filter {
+                $0.tool == "swift-driver-compilation" || $0.tool == "swift-driver-compilation-requirement"
+            }
+            let swiftObjectOutputs = try Set(swiftCommands.flatMap(\.outputs).compactMap { path -> URL? in
+                guard let url = try absoluteNode(path), url.pathExtension == "o" else { return nil }
+                return url
+            })
+            var parsedSwiftMaps: Set<URL> = []
             var inputs: Set<URL> = []
+            var missing: Set<URL> = []
             var dependencyFiles: Set<URL> = []
             var responseFiles: Set<URL> = []
             for command in manifest.commands.values {
@@ -72,23 +86,22 @@ struct NativePreviewBuildInputs {
                         let url = try pathURL(path, relativeTo: directory)
                         dependencyFiles.insert(url)
                         let data = try readDescription(url)
-                        switch command.dependencyStyle {
-                        case "makefile":
+                        switch (command.dependencyStyle, command.tool) {
+                        case ("makefile", _):
                             inputs.formUnion(try makefileInputs(data, relativeTo: directory))
-                        case "dependency-info":
-                            inputs.formUnion(try dependencyInfoInputs(data, relativeTo: directory))
-                        case nil where command.tool == "embed-swift-stdlib":
-                            inputs.formUnion(try dependencyInfoInputs(data, relativeTo: directory))
+                        case ("dependency-info", _), (nil, "linker"), (nil, "embed-swift-stdlib"):
+                            let dependencies = try dependencyInfoInputs(data, relativeTo: directory)
+                            inputs.formUnion(dependencies.files)
+                            missing.formUnion(dependencies.missing)
                         default: throw Unsupported.inputDescription
                         }
                     }
                 }
-                if command.tool == "swift-driver-compilation" {
+                if command.tool == "swift-driver-compilation" || command.tool == "swift-driver-compilation-requirement" {
                     let objectOutputs = try Set(command.outputs.compactMap { path -> URL? in
                         guard let url = try absoluteNode(path), url.pathExtension == "o" else { return nil }
                         return url
                     })
-                    guard !objectOutputs.isEmpty else { throw Unsupported.inputDescription }
                     var candidates: [(URL, [String: [String: String]])] = []
                     for path in command.inputs ?? [] {
                         guard let url = try absoluteNode(path), url.pathExtension == "json" else { continue }
@@ -97,24 +110,43 @@ struct NativePreviewBuildInputs {
                         let mappedObjects = try Set(map.values.compactMap { entry in
                             try entry["object"].map { try pathURL($0, relativeTo: directory) }
                         })
-                        if objectOutputs.isSubset(of: mappedObjects) { candidates.append((url, map)) }
+                        if !mappedObjects.isEmpty, mappedObjects.isSubset(of: swiftObjectOutputs),
+                           objectOutputs.isSubset(of: mappedObjects) { candidates.append((url, map)) }
                     }
                     guard candidates.count == 1, let (mapURL, map) = candidates.first else {
                         throw Unsupported.inputDescription
                     }
-                    dependencyFiles.insert(mapURL)
-                    var hasDependencies = false
-                    for entry in map.values {
-                        if entry["object"] != nil, entry["dependencies"] == nil { throw Unsupported.inputDescription }
-                        for key in ["dependencies", "emit-module-dependencies"] {
-                            guard let path = entry[key] else { continue }
+                    if parsedSwiftMaps.insert(mapURL).inserted {
+                        dependencyFiles.insert(mapURL)
+                        let mappedObjects = try Set(map.values.compactMap { entry in
+                            try entry["object"].map { try pathURL($0, relativeTo: directory) }
+                        })
+                        let moduleOutputs = try Set(swiftCommands.filter { sibling in
+                            try (sibling.inputs ?? []).contains { try absoluteNode($0) == mapURL }
+                        }.flatMap(\.outputs).compactMap { path -> URL? in
+                            guard let url = try absoluteNode(path), url.pathExtension == "swiftmodule" else { return nil }
+                            return url
+                        })
+                        var coveredOutputs: Set<URL> = []
+                        func loadDependencies(_ path: String) throws {
                             let url = try pathURL(path, relativeTo: directory)
                             dependencyFiles.insert(url)
-                            inputs.formUnion(try makefileInputs(readDescription(url), relativeTo: directory))
-                            hasDependencies = true
+                            let rule = try makefileDescription(readDescription(url), relativeTo: directory)
+                            inputs.formUnion(rule.inputs)
+                            coveredOutputs.formUnion(try rule.targets.map { try pathURL($0, relativeTo: directory) })
                         }
+                        for entry in map.values {
+                            if let path = entry["dependencies"] { try loadDependencies(path) }
+                        }
+                        guard mappedObjects.isSubset(of: coveredOutputs) else { throw Unsupported.inputDescription }
+                        // WMO can emit modules in the primary job; its map still lists an unused split-job depfile.
+                        if moduleOutputs.isEmpty || !moduleOutputs.isSubset(of: coveredOutputs) {
+                            for entry in map.values {
+                                if let path = entry["emit-module-dependencies"] { try loadDependencies(path) }
+                            }
+                        }
+                        guard moduleOutputs.isSubset(of: coveredOutputs) else { throw Unsupported.inputDescription }
                     }
-                    guard hasDependencies else { throw Unsupported.inputDescription }
                 }
                 if let arguments = command.args, arguments.contains("-c") {
                     try collectResponseFiles(arguments, relativeTo: directory, read: readDescription, into: &responseFiles)
@@ -125,16 +157,17 @@ struct NativePreviewBuildInputs {
                     syntax: command.responseFileSyntax, read: readDescription, into: &responseFiles)
             }
             inputs.formUnion(responseFiles)
-            inputs.subtract(produced)
-            inputs.subtract(dependencyFiles)
-            inputs.remove(manifestURL.standardizedFileURL)
-            return inputs.filter { input in
-                !immutableRoots.contains { root in
-                    input.pathComponents.starts(with: root.standardizedFileURL.pathComponents)
-                        && input.resolvingSymlinksInPath().pathComponents.starts(
-                            with: root.resolvingSymlinksInPath().pathComponents)
+            let discoveryFiles = dependencyFiles.union([manifestURL.standardizedFileURL])
+            func tracked(_ files: Set<URL>) -> Set<URL> {
+                files.subtracting(produced).subtracting(discoveryFiles).filter { input in
+                    !immutableRoots.contains { root in
+                        input.pathComponents.starts(with: root.standardizedFileURL.pathComponents)
+                            && input.resolvingSymlinksInPath().pathComponents.starts(
+                                with: root.resolvingSymlinksInPath().pathComponents)
+                    }
                 }
             }
+            return Inputs(files: tracked(inputs), missing: tracked(missing.subtracting(inputs)))
         } catch {
             // Failure to certify inputs disables reuse; the completed native build remains usable.
             return nil
@@ -143,6 +176,10 @@ struct NativePreviewBuildInputs {
 
     /// LLVM/GCC dependency rules, including escaped spaces, punctuation, dollars, continuations and phony rules.
     static func makefileInputs(_ data: Data, relativeTo directory: URL?) throws -> Set<URL> {
+        try makefileDescription(data, relativeTo: directory).inputs
+    }
+
+    private static func makefileDescription(_ data: Data, relativeTo directory: URL?) throws -> (inputs: Set<URL>, targets: Set<String>) {
         guard let text = String(data: data, encoding: .utf8), !text.utf8.contains(0) else {
             throw Unsupported.inputDescription
         }
@@ -154,6 +191,7 @@ struct NativePreviewBuildInputs {
         var inDependencies = false
         var ruleCount = 0
         var result: Set<URL> = []
+        var outputTargets: Set<String> = []
         func flush() {
             guard !token.isEmpty else { return }
             if inDependencies { dependencies.append(token) }
@@ -165,6 +203,7 @@ struct NativePreviewBuildInputs {
             if targets.isEmpty, dependencies.isEmpty, !inDependencies { return }
             guard inDependencies, !targets.isEmpty else { throw Unsupported.inputDescription }
             for dependency in dependencies { result.insert(try pathURL(dependency, relativeTo: directory)) }
+            outputTargets.formUnion(targets)
             targets = []
             dependencies = []
             inDependencies = false
@@ -198,14 +237,15 @@ struct NativePreviewBuildInputs {
         }
         try finishRule()
         guard ruleCount > 0 else { throw Unsupported.inputDescription }
-        return result
+        return (result, outputTargets)
     }
 
-    private static func dependencyInfoInputs(_ data: Data, relativeTo directory: URL?) throws -> Set<URL> {
+    private static func dependencyInfoInputs(_ data: Data, relativeTo directory: URL?) throws -> Inputs {
         let bytes = Array(data)
         var index = 0
         var versionSeen = false
         var result: Set<URL> = []
+        var missing: Set<URL> = []
         while index < bytes.count {
             let kind = bytes[index]
             index += 1
@@ -219,16 +259,19 @@ struct NativePreviewBuildInputs {
             case 0:
                 guard !versionSeen, !value.isEmpty else { throw Unsupported.inputDescription }
                 versionSeen = true
-            case 0x10, 0x11:
+            case 0x10:
                 guard versionSeen else { throw Unsupported.inputDescription }
                 result.insert(try pathURL(value, relativeTo: directory))
+            case 0x11:
+                guard versionSeen else { throw Unsupported.inputDescription }
+                missing.insert(try pathURL(value, relativeTo: directory))
             case 0x40:
                 guard versionSeen else { throw Unsupported.inputDescription }
             default: throw Unsupported.inputDescription
             }
         }
         guard versionSeen else { throw Unsupported.inputDescription }
-        return result
+        return Inputs(files: result, missing: missing)
     }
 
     private static func collectResponseFiles(_ arguments: [String], relativeTo directory: URL?,

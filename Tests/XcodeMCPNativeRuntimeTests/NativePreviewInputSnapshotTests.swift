@@ -99,4 +99,54 @@ struct NativePreviewInputSnapshotTests {
             try NativePreviewInputSnapshot.capture(roots: [project, external])
         }
     }
+
+    @Test func tracksMissingLinkerCandidatesAndTransientCreation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("Search", isDirectory: true)
+        let candidate = directory.appendingPathComponent("libOptional.tbd")
+        let buildStarted = Date()
+        let before = try NativePreviewInputSnapshot.capture(roots: [], missingInputs: [candidate])
+        #expect(before.predates(buildStarted))
+        #expect(try NativePreviewInputSnapshot.capture(roots: [], missingInputs: [candidate]) == before)
+
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        try Data("temporary library".utf8).write(to: candidate)
+        try FileManager.default.removeItem(at: directory)
+
+        let after = try NativePreviewInputSnapshot.capture(roots: [], missingInputs: [candidate])
+        #expect(after != before)
+        #expect(!after.predates(buildStarted))
+
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        try Data("new library".utf8).write(to: candidate)
+        #expect(throws: (any Error).self) {
+            try NativePreviewInputSnapshot.capture(roots: [], missingInputs: [candidate])
+        }
+    }
+
+    @Test func missingLookupTracksIntermediateSymbolicLinkRetargeting() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let first = root.appendingPathComponent("First", isDirectory: true)
+        let second = root.appendingPathComponent("Second", isDirectory: true)
+        try FileManager.default.createDirectory(at: first.appendingPathComponent("Subdir"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: second.appendingPathComponent("Subdir"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let link = root.appendingPathComponent("Search")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
+        let missing = link.appendingPathComponent("Subdir/libOptional.tbd")
+        let buildStarted = Date()
+        let before = try NativePreviewInputSnapshot.capture(roots: [], missingInputs: [missing])
+        #expect(before.predates(buildStarted))
+
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: second)
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
+
+        let after = try NativePreviewInputSnapshot.capture(roots: [], missingInputs: [missing])
+        #expect(after != before)
+        #expect(!after.predates(buildStarted))
+    }
 }

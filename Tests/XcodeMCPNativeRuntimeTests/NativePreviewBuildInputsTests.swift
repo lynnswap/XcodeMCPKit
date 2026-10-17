@@ -26,7 +26,7 @@ struct NativePreviewBuildInputsTests {
         ]])
         let files = NativePreviewBuildInputs.files(manifest: manifest, immutableRoots: [URL(filePath: "/SelectedXcode")],
             read: reader([manifest: data]))
-        #expect(files == [URL(filePath: "/user/External Inputs/Info.plist")])
+        #expect(files?.files == [URL(filePath: "/user/External Inputs/Info.plist")])
     }
 
     @Test func swiftOutputMapFindsTransitiveHeadersAndModuleDependencies() throws {
@@ -35,7 +35,10 @@ struct NativePreviewBuildInputsTests {
         let moduleDependencies = URL(filePath: "/build/Target-module.d")
         let generated = "/build/Generated.swift"
         let data = try json(["commands": [
-            "swift": ["tool": "swift-driver-compilation", "inputs": [map.path, generated], "outputs": ["/build/A.o"]],
+            "swift": ["tool": "swift-driver-compilation", "inputs": [map.path, generated, "<target-GeneratedHeaders>"],
+                "outputs": ["/build/Swift Compilation Finished", "/build/A.o"]],
+            "requirements": ["tool": "swift-driver-compilation-requirement", "inputs": [map.path, generated],
+                "outputs": ["/build/Swift Compilation Requirements Finished", "/build/Target.swiftmodule"]],
             "generated": ["tool": "auxiliary-file", "outputs": [generated]]
         ]])
         let mapData = try json(["/user/A.swift": ["object": "/build/A.o", "dependencies": objectDependencies.path],
@@ -45,10 +48,57 @@ struct NativePreviewBuildInputsTests {
             objectDependencies: Data("/build/A.o: /user/A.swift /user/Bridge\\ Header.h /user/Leaf.h /build/Generated.swift\n".utf8),
             moduleDependencies: Data("/build/Target.swiftmodule: /user/ModuleOnly.h\n".utf8)
         ]))
-        #expect(files == Set(["/user/A.swift", "/user/Bridge Header.h", "/user/Leaf.h", "/user/ModuleOnly.h"].map { URL(filePath: $0) }))
-        #expect(files?.contains(map) == false)
-        #expect(files?.contains(objectDependencies) == false)
-        #expect(files?.contains(moduleDependencies) == false)
+        #expect(files?.files == Set(["/user/A.swift", "/user/Bridge Header.h", "/user/Leaf.h", "/user/ModuleOnly.h"].map { URL(filePath: $0) }))
+        #expect(files?.files.contains(map) == false)
+        #expect(files?.files.contains(objectDependencies) == false)
+        #expect(files?.files.contains(moduleDependencies) == false)
+    }
+
+    @Test func wholeModuleDepfileCoversRequirementObjectsAndModuleWithoutUnusedSplitDepfile() throws {
+        let map = URL(filePath: "/build/Target-OutputFileMap.json")
+        let primary = URL(filePath: "/build/Target-primary.d")
+        let data = try json(["commands": [
+            "swift": ["tool": "swift-driver-compilation", "inputs": [map.path],
+                "outputs": ["/build/Swift Compilation Finished"]],
+            "requirements": ["tool": "swift-driver-compilation-requirement", "inputs": [map.path],
+                "outputs": ["/build/A.o", "/build/B.o", "/build/Target.swiftmodule"]]
+        ]])
+        let mapData = try json(["/user/A.swift": ["object": "/build/A.o"],
+            "/user/B.swift": ["object": "/build/B.o"],
+            "": ["dependencies": primary.path, "emit-module-dependencies": "/build/unused-emit-module.d"]])
+        let files = NativePreviewBuildInputs.files(manifest: manifest, read: reader([
+            manifest: data, map: mapData,
+            primary: Data("/build/A.o /build/B.o: /user/A.swift /user/B.swift /user/Bridge\\ Header.h /user/Leaf.h\n/build/Target.swiftmodule: /user/ModuleOnly.h\n".utf8)
+        ]))
+        #expect(files?.files == Set(["/user/A.swift", "/user/B.swift", "/user/Bridge Header.h", "/user/Leaf.h",
+            "/user/ModuleOnly.h"].map { URL(filePath: $0) }))
+    }
+
+    @Test func swiftDepfileMustCoverEveryMappedObject() throws {
+        let map = URL(filePath: "/build/Target-OutputFileMap.json")
+        let primary = URL(filePath: "/build/Target-primary.d")
+        let data = try json(["commands": ["swift": ["tool": "swift-driver-compilation",
+            "inputs": [map.path], "outputs": ["/build/A.o", "/build/B.o"]]]])
+        let mapData = try json(["/user/A.swift": ["object": "/build/A.o"],
+            "/user/B.swift": ["object": "/build/B.o"], "": ["dependencies": primary.path]])
+        #expect(NativePreviewBuildInputs.files(manifest: manifest, read: reader([
+            manifest: data, map: mapData, primary: Data("/build/A.o: /user/A.swift\n".utf8)
+        ])) == nil)
+    }
+
+    @Test func missingSeparateModuleDepfileDisablesCertification() throws {
+        let map = URL(filePath: "/build/Target-OutputFileMap.json")
+        let objectDependencies = URL(filePath: "/build/A.d")
+        let data = try json(["commands": [
+            "swift": ["tool": "swift-driver-compilation", "inputs": [map.path], "outputs": ["/build/A.o"]],
+            "requirements": ["tool": "swift-driver-compilation-requirement", "inputs": [map.path],
+                "outputs": ["/build/Target.swiftmodule"]]
+        ]])
+        let mapData = try json(["/user/A.swift": ["object": "/build/A.o", "dependencies": objectDependencies.path],
+            "": ["emit-module-dependencies": "/build/Target-emit-module.d"]])
+        #expect(NativePreviewBuildInputs.files(manifest: manifest, read: reader([
+            manifest: data, map: mapData, objectDependencies: Data("/build/A.o: /user/A.swift\n".utf8)
+        ])) == nil)
     }
 
     @Test func clangDeclaredDepfileAndNestedResponseFiles() throws {
@@ -62,7 +112,7 @@ struct NativePreviewBuildInputsTests {
             manifest: data, dependency: Data("/build/A.o: local\\ header.h ../external\\ header.h\n".utf8),
             outer: Data("'@/user/Inner Flags.rsp' -DNUMBER=42".utf8), inner: Data("-DSECOND=1".utf8)
         ]))
-        #expect(files == Set(["/user/A.c", "/project/local header.h", "/external header.h", outer.path, inner.path].map { URL(filePath: $0) }))
+        #expect(files?.files == Set(["/user/A.c", "/project/local header.h", "/external header.h", outer.path, inner.path].map { URL(filePath: $0) }))
     }
 
     @Test func unknownOrUnreadDynamicDependenciesDisableOnlyTheCertificate() throws {
@@ -82,14 +132,20 @@ struct NativePreviewBuildInputsTests {
 
     @Test func nativeDependencyInfoKeepsMissingInputsAndIgnoresProducedOutputs() throws {
         let dependency = URL(filePath: "/build/link.dat")
-        let data = try json(["commands": ["link": ["tool": "shell", "inputs": [], "outputs": ["/build/App"],
-            "deps": [dependency.path], "deps-style": "dependency-info"]]])
         var info = Data([0]); info.append(Data("ld64\0".utf8))
         info.append(0x10); info.append(Data("/user/libSupport.a\0".utf8))
+        info.append(0x11); info.append(Data("/user/libSupport.a\0".utf8))
         info.append(0x11); info.append(Data("/user/Optional.tbd\0".utf8))
         info.append(0x40); info.append(Data("/build/App\0".utf8))
-        #expect(NativePreviewBuildInputs.files(manifest: manifest, read: reader([manifest: data, dependency: info]))
-            == Set([URL(filePath: "/user/libSupport.a"), URL(filePath: "/user/Optional.tbd")]))
+        for tool in ["shell", "linker", "embed-swift-stdlib"] {
+            var command: [String: Any] = ["tool": tool, "inputs": [], "outputs": ["/build/App"],
+                "deps": [dependency.path]]
+            if tool == "shell" { command["deps-style"] = "dependency-info" }
+            let data = try json(["commands": ["link": command]])
+            let inputs = NativePreviewBuildInputs.files(manifest: manifest, read: reader([manifest: data, dependency: info]))
+            #expect(inputs?.files == [URL(filePath: "/user/libSupport.a")])
+            #expect(inputs?.missing == [URL(filePath: "/user/Optional.tbd")])
+        }
     }
 
     @Test func responseFileDialectsKeepTheirNativeNestedPaths() throws {
@@ -101,7 +157,7 @@ struct NativePreviewBuildInputsTests {
             compilerCommands: [.init(arguments: ["clang", "-c", "@" + outer.path], workingDirectory: URL(filePath: "/project"))],
             read: reader([manifest: data, outer: Data("@Line\\\nBreak.rsp @Wide\u{a0}Name.rsp".utf8),
                 newline: Data(), nonbreakingSpace: Data()]))
-        #expect(gnu == Set([outer, newline, nonbreakingSpace]))
+        #expect(gnu?.files == Set([outer, newline, nonbreakingSpace]))
         let first = URL(filePath: "/custom/First File.rsp")
         let second = URL(filePath: "/custom/Second.rsp")
         let swift = NativePreviewBuildInputs.files(manifest: manifest,
@@ -109,7 +165,7 @@ struct NativePreviewBuildInputsTests {
                 responseFileSyntax: .swiftDriver)],
             read: reader([manifest: data, outer: Data("// @Ignored.rsp\n@'First File.rsp'\n-DVALUE=1\u{a0}@Second.rsp".utf8),
                 first: Data(), second: Data()]))
-        #expect(swift == Set([outer, first, second]))
+        #expect(swift?.files == Set([outer, first, second]))
     }
 
     private func json(_ value: [String: Any]) throws -> Data {

@@ -19,6 +19,7 @@ final class NativePreviewBuild {
         var buildStartedAt: Date? = nil
         var workspaceBuilder: AnyObject? = nil
         var declaredInputFiles: Set<URL>? = nil
+        var missingInputFiles: Set<URL> = []
         var inputProducts: Set<URL> = []
 
         var productURLs: [URL] { targets.compactMap(\.outputURL) }
@@ -463,6 +464,7 @@ final class NativePreviewBuild {
             if let inputs = try await declaredInputs(for: selectedBuildables, workspace: workspace, priorBuild: priorBuild,
                 compilerCommands: compilerCommands) {
                 result.declaredInputFiles = inputs.files
+                result.missingInputFiles = inputs.missing
                 result.inputProducts = inputs.products
             }
         } catch {
@@ -657,7 +659,7 @@ final class NativePreviewBuild {
 
     private func declaredInputs(for buildables: NativeSwiftValue, workspace: AnyObject, priorBuild: AnyObject,
                                 compilerCommands: [NativePreviewBuildInputs.CompilerCommand]) async throws ->
-        (files: Set<URL>, products: Set<URL>)? {
+        (files: Set<URL>, missing: Set<URL>, products: Set<URL>)? {
         let (graph, roots) = try await dependencyGraph(for: buildables, workspace: workspace, priorBuild: priorBuild)
         defer { withExtendedLifetime(graph) {} }
         let dependencies = try await runtime.object(graph).resolveMethod(
@@ -792,12 +794,12 @@ final class NativePreviewBuild {
         }
         guard let nativeFiles = try await completedBuildInputs(workspace: workspace, priorBuild: priorBuild,
             compilerCommands: commands) else { return nil }
-        files.formUnion(nativeFiles)
-        return (files, products)
+        files.formUnion(nativeFiles.files)
+        return (files, nativeFiles.missing.subtracting(files), products)
     }
 
     private func completedBuildInputs(workspace: AnyObject, priorBuild: AnyObject,
-                                      compilerCommands: [NativePreviewBuildInputs.CompilerCommand]) async throws -> Set<URL>? {
+                                      compilerCommands: [NativePreviewBuildInputs.CompilerCommand]) async throws -> NativePreviewBuildInputs.Inputs? {
         guard let field = Mirror(reflecting: priorBuild).children.first(where: { $0.label == "buildDescriptionID" }),
               let identifier = Mirror(reflecting: field.value).children.first?.value as? String,
               !identifier.isEmpty, !identifier.contains("/") else { return nil }
