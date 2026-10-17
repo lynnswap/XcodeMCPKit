@@ -133,7 +133,6 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                 value = stat()
                 guard unsafe lstat(path, &value) == 0 else {
                     let code = errno
-                    if code == ENOENT || code == ENOTDIR { continue }
                     throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
                 }
             }

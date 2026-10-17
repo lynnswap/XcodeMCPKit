@@ -71,13 +71,32 @@ struct NativePreviewInputSnapshotTests {
         let later = external.appendingPathComponent("Later.txt")
         try FileManager.default.removeItem(at: link)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: later)
-        let dangling = try NativePreviewInputSnapshot.capture(roots: [root])
+        #expect(throws: (any Error).self) {
+            try NativePreviewInputSnapshot.capture(roots: [root])
+        }
 
         try Data("created".utf8).write(to: later)
         let created = try NativePreviewInputSnapshot.capture(roots: [root])
-        #expect(created != dangling)
+        #expect(created != changed)
 
         try FileManager.default.removeItem(at: later)
-        #expect(try NativePreviewInputSnapshot.capture(roots: [root]) == dangling)
+        #expect(throws: (any Error).self) {
+            try NativePreviewInputSnapshot.capture(roots: [root])
+        }
+    }
+
+    @Test func rejectsRemovedExplicitInputsOutsideCapturedDirectories() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let project = root.appendingPathComponent("Project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let external = root.appendingPathComponent("External Info.plist")
+        try Data("consumed input".utf8).write(to: external)
+
+        try FileManager.default.removeItem(at: external)
+
+        #expect(throws: (any Error).self) {
+            try NativePreviewInputSnapshot.capture(roots: [project, external])
+        }
     }
 }

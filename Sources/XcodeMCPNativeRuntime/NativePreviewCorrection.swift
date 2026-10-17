@@ -310,10 +310,13 @@ final class NativePreviewCorrection {
                     inputsAreCurrent = true
                     if plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
                        certificate.build.previewPlatform != nil, let signature = session.signature {
-                        if try signature.matchesCurrentFiles(digestCache: session.productDigests), inputRevision == session.inputRevision,
+                        let resolution = try await builder.resolveDestination(workspace: workspace, input: input.nativeValue)
+                        if try await builder.destinationResolution(resolution, matches: plan.destination.resolution),
+                           try signature.matchesCurrentFiles(digestCache: session.productDigests), inputRevision == session.inputRevision,
                            plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
+                            let destination = NativePreviewBuild.DestinationSelection(selected: plan.destination.selected, resolution: resolution)
                             return Prepared(workspace: workspace, source: plan.source, location: plan.location,
-                                destination: plan.destination, context: currentContext,
+                                destination: destination, context: currentContext,
                                 retainedBuild: (certificate.build, signature), reusesDestination: true,
                                 inputRevision: inputRevision, reusedCertificate: certificate)
                         }
