@@ -315,7 +315,7 @@ final class NativePreviewCorrection {
                        excluding: certificate.exclusions, missingInputs: certificate.build.missingInputFiles) == certificate.inputs,
                    try NativePreviewInputSnapshot.capture(
                        roots: certificate.generatedInputs.prioritizedRoots(
-                           certificate.build.generatedInputFiles.sorted { $0.path < $1.path }),
+                           Array(certificate.build.generatedInputFiles)),
                        excluding: certificate.build.generatedInputExclusions,
                        missingInputs: certificate.build.generatedMissingInputFiles) == certificate.generatedInputs,
                    inputRevision == session.inputRevision {
@@ -395,7 +395,7 @@ final class NativePreviewCorrection {
         // A post-build snapshot must not certify source edits that arrived during the build.
         guard inputs.predates(buildStartedAt) else { return nil }
         let generatedInputs = try NativePreviewInputSnapshot.capture(
-            roots: build.generatedInputFiles.sorted { $0.path < $1.path },
+            roots: Array(build.generatedInputFiles),
             excluding: build.generatedInputExclusions, missingInputs: build.generatedMissingInputFiles)
         // Generated inputs may be written by this build, but never after its native operation completed.
         guard generatedInputs.predates(buildCompletedAt) else { return nil }
