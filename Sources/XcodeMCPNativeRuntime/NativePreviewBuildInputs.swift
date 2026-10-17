@@ -290,7 +290,8 @@ struct NativePreviewBuildInputs {
                         switch (command.dependencyStyle, command.tool) {
                         case ("makefile", _):
                             inputs.formUnion(try makefileInputs(data, relativeTo: directory))
-                        case ("dependency-info", _), (nil, "linker"), (nil, "embed-swift-stdlib"):
+                        case ("dependency-info", _), (nil, "linker"), (nil, "embed-swift-stdlib"),
+                             (nil, "link-assetcatalog"):
                             let dependencies = try dependencyInfoInputs(data, relativeTo: directory)
                             inputs.formUnion(dependencies.files)
                             missing.formUnion(dependencies.missing)

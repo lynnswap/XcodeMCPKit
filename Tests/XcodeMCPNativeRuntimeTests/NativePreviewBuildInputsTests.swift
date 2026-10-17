@@ -278,7 +278,7 @@ struct NativePreviewBuildInputsTests {
         info.append(0x11); info.append(Data("/build/Search/Present.a\0".utf8))
         info.append(0x11); info.append(Data("/build/Search/Optional.tbd\0".utf8))
         info.append(0x40); info.append(Data("/build/App\0".utf8))
-        for tool in ["shell", "linker", "embed-swift-stdlib"] {
+        for tool in ["shell", "linker", "embed-swift-stdlib", "link-assetcatalog"] {
             var command: [String: Any] = ["tool": tool, "inputs": [], "outputs": ["/build/App"],
                 "deps": [dependency.path]]
             if tool == "shell" { command["deps-style"] = "dependency-info" }
