@@ -98,12 +98,12 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
     }
 
     private func makePreview(_ request: PreviewRendererRequest, in window: UIWindow, directory: URL) async throws -> PreviewRendererResult {
-        defer {
-            window.rootViewController = nil
-            window.isHidden = true
-        }
         try loadPreviewLibraries(request)
         if request.metadataOnly == true {
+            defer {
+                window.rootViewController = nil
+                window.isHidden = true
+            }
             let value = try await nativePreviewMetadata(request)
             return PreviewRendererResult(nativeMetadata: value.metadata,
                 nativeProviderPreviewDescription: value.providerDescription)
@@ -354,6 +354,10 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         }
 
         if widget == nil && activity == nil {
+            defer {
+                window.rootViewController = nil
+                window.isHidden = true
+            }
             let snapshot = try await PreviewSnapshotWindow.open(from: window, orientation: orientation)
             let capture: @MainActor (URL) async throws -> PreviewRendererResult
             do { capture = try await mount(in: snapshot.window) }
@@ -368,8 +372,22 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
             if request.nativeSource != nil || request.isLegacyComplication == true { try await closeMountedPreview() }
             return result
         }
-        let capture = try await mount(in: window)
-        return try await capture(directory)
+        let close: @MainActor () async throws -> Void = {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let capture: @MainActor (URL) async throws -> PreviewRendererResult
+        do { capture = try await mount(in: window) }
+        catch {
+            let original = error
+            do { try await close() }
+            catch { throw PreviewRendererError("\(original); preview window cleanup also failed: \(error)") }
+            throw original
+        }
+        mountedPreview = (request, capture, close)
+        let result = try await capture(directory)
+        if request.nativeSource != nil || request.isLegacyComplication == true { try await closeMountedPreview() }
+        return result
     }
 
     private var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
