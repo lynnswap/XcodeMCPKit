@@ -3,10 +3,12 @@ import XcodeMCPWire
 
 package struct NativeToolContext: Sendable {
     package let artifactsDirectory: URL
+    package let artifactsRoot: URL
     package let conversationID: String
 
-    package init(artifactsDirectory: URL, conversationID: String) {
+    package init(artifactsDirectory: URL, artifactsRoot: URL, conversationID: String) {
         self.artifactsDirectory = artifactsDirectory
+        self.artifactsRoot = artifactsRoot
         self.conversationID = conversationID
     }
 
@@ -129,7 +131,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
             return try unsafe crashCorrection.execute(kind, inputType: scope.inputType(for: action), input: input)
         }
         if isPreview {
-            return try unsafe await previewCorrection.execute(inputType: scope.inputType(for: action), input: input) { [self] in
+            return try unsafe await previewCorrection.execute(inputType: scope.inputType(for: action), input: input, artifactsRoot: context.artifactsRoot) { [self] in
                 guard let action = unsafe actions[name] else {
                     throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
                 }

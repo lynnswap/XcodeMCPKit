@@ -175,4 +175,88 @@ struct NativePreviewInputSnapshotTests {
         #expect(after != before)
         #expect(!after.predates(buildStarted))
     }
+    @Test func ignoresBuildOutputsInsideSourceRoots() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let project = root.appendingPathComponent("Project", isDirectory: true)
+        let sources = project.appendingPathComponent("Sources", isDirectory: true)
+        let derivedData = project.appendingPathComponent("DerivedData", isDirectory: true)
+        let logs = derivedData.appendingPathComponent("Logs", isDirectory: true)
+        let products = project.appendingPathComponent("CustomProducts", isDirectory: true)
+        for directory in [sources, logs, products] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = sources.appendingPathComponent("View.swift")
+        let generated = sources.appendingPathComponent("Generated.swift")
+        let log = logs.appendingPathComponent("Build.log")
+        for file in [source, generated, log] { try Data("before".utf8).write(to: file) }
+        let exclusions: Set<URL> = [derivedData, products, generated]
+        let buildStarted = Date()
+        let before = try NativePreviewInputSnapshot.capture(roots: [project], excluding: exclusions)
+        #expect(before.predates(buildStarted))
+
+        try Data("new log".utf8).write(to: logs.appendingPathComponent("Next.log"))
+        try Data("updated log".utf8).write(to: log)
+        try Data("new product".utf8).write(to: products.appendingPathComponent("App"))
+        try Data("generated after build started".utf8).write(to: generated)
+        let afterOutputs = try NativePreviewInputSnapshot.capture(roots: [project], excluding: exclusions)
+        #expect(afterOutputs == before)
+        #expect(afterOutputs.predates(buildStarted))
+
+        try Data("changed source".utf8).write(to: source)
+        let afterSource = try NativePreviewInputSnapshot.capture(roots: [project], excluding: exclusions)
+        #expect(afterSource != before)
+        #expect(!afterSource.predates(buildStarted))
+    }
+
+    @Test func preservesExplicitInputsInsideExcludedBuildDirectories() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let project = root.appendingPathComponent("Project", isDirectory: true)
+        let derivedData = project.appendingPathComponent("DerivedData", isDirectory: true)
+        let logs = derivedData.appendingPathComponent("Logs", isDirectory: true)
+        let generated = derivedData.appendingPathComponent("Generated", isDirectory: true)
+        let resources = derivedData.appendingPathComponent("Resources", isDirectory: true)
+        let checkout = derivedData.appendingPathComponent("SourcePackages/checkouts/Library", isDirectory: true)
+        let nestedSources = checkout.appendingPathComponent("Sources/Feature", isDirectory: true)
+        let checkoutOutputs = checkout.appendingPathComponent(".build", isDirectory: true)
+        for directory in [logs, generated, resources, nestedSources, checkoutOutputs] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let header = generated.appendingPathComponent("Input.h")
+        let log = logs.appendingPathComponent("Build.log")
+        for file in [header, log, resources.appendingPathComponent("Label.txt"),
+                     nestedSources.appendingPathComponent("Existing.swift"), checkoutOutputs.appendingPathComponent("Build.log")] {
+            try Data("before".utf8).write(to: file)
+        }
+        let alias = project.appendingPathComponent("Headers")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: generated)
+        let input = alias.appendingPathComponent("Input.h")
+        let roots = [project, input, resources, checkout]
+        let exclusions = NativePreviewInputSnapshot.coalescedExclusions([derivedData, checkoutOutputs], roots: roots)
+        let buildStarted = Date()
+        let before = try NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions)
+        #expect(before.predates(buildStarted))
+
+        try Data("new output".utf8).write(to: logs.appendingPathComponent("Next.log"))
+        try Data("changed log".utf8).write(to: log)
+        try Data("new checkout product".utf8).write(to: checkoutOutputs.appendingPathComponent("Next.o"))
+        try Data("changed checkout log".utf8).write(to: checkoutOutputs.appendingPathComponent("Build.log"))
+        let afterLogs = try NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions)
+        #expect(afterLogs == before)
+        #expect(afterLogs.predates(buildStarted))
+
+        try Data("changed header".utf8).write(to: header)
+        let afterHeader = try NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions)
+        #expect(afterHeader != before)
+        #expect(!afterHeader.predates(buildStarted))
+
+        try Data("new resource".utf8).write(to: resources.appendingPathComponent("New.txt"))
+        let afterResource = try NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions)
+        #expect(afterResource != afterHeader)
+
+        try Data("new source".utf8).write(to: nestedSources.appendingPathComponent("Added.swift"))
+        #expect(try NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions) != afterResource)
+    }
+
 }

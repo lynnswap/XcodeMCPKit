@@ -20,8 +20,9 @@ struct NativePreviewBuildInputsTests {
         let data = try json(["commands": [
             "plist": ["tool": "info-plist-processor", "inputs": ["/user/External Inputs/Info.plist", "<entry>"],
                 "outputs": ["/build/App.app/Info.plist"]],
-            "generated": ["tool": "auxiliary-file", "outputs": ["/build/generated.h"]],
-            "compile": ["tool": "shell", "inputs": ["/build/generated.h/", "/SelectedXcode/SDK/Header.h",
+            "generated": ["tool": "auxiliary-file", "outputs": ["/build/generated.h", "/build/GeneratedResources/"]],
+            "compile": ["tool": "shell", "inputs": ["/build/generated.h/", "/build/GeneratedResources/Icon.txt",
+                "/SelectedXcode/SDK/Header.h",
                 "/System/Library/Frameworks/UIKit.framework/UIKit", "/System/Library/AssetsV2/Mutable.asset"],
                 "outputs": ["/build/A.o"]]
         ]])

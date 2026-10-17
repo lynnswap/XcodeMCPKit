@@ -21,6 +21,8 @@ final class NativePreviewBuild {
         var declaredInputFiles: Set<URL>? = nil
         var missingInputFiles: Set<URL> = []
         var inputProducts: Set<URL> = []
+        var generatedInputPaths: Set<URL> = []
+        var inputCaptureExclusions: Set<URL> = []
 
         var productURLs: [URL] { targets.compactMap(\.outputURL) }
     }
@@ -335,7 +337,7 @@ final class NativePreviewBuild {
         return (baseFiles, watchedFiles)
     }
 
-    func inputRoots(workspace: AnyObject, build: Result, source: URL) throws -> [URL]? {
+    func inputRoots(workspace: AnyObject, build: Result, source: URL, excluding: Set<URL> = []) throws -> [URL]? {
         guard let declaredInputFiles = build.declaredInputFiles,
               let containers = try object(workspace, selector: "referencedContainers") as? NSSet,
               let configurationPaths = try configurationFilePaths(in: containers) else { return nil }
@@ -358,12 +360,10 @@ final class NativePreviewBuild {
         var sources: Set<URL> = [source]
         var pending = build.targets + build.previewRoots
         while let target = pending.popLast() {
-            if let directory = target.linkerWorkingDirectory, !directory.isEmpty {
-                roots.insert(URL(filePath: directory, directoryHint: .isDirectory))
-            }
             sources.formUnion(target.sourceFiles)
             pending += target.dependencies
         }
+        sources = NativePreviewBuildInputs.removingGeneratedPaths(from: sources, generatedPaths: build.generatedInputPaths)
         let sourceDirectories = try Set(sources.map { source in
             guard source.isFileURL, source.path.hasPrefix("/") else {
                 throw NativeRuntimeError.unsupportedContract("A native build source has no absolute file URL: \(source)")
@@ -390,8 +390,20 @@ final class NativePreviewBuild {
                 let rightCount = right.pathComponents.count
                 return leftCount == rightCount ? left.path < right.path : leftCount < rightCount
             }
+        let exclusions = excluding.union(build.inputCaptureExclusions).flatMap {
+            [$0.standardizedFileURL.pathComponents, $0.resolvingSymlinksInPath().pathComponents]
+        }
         return normalized.reduce(into: [URL]()) { result, candidate in
-            if !result.contains(where: { candidate.pathComponents.starts(with: $0.pathComponents) }) {
+            let candidatePaths = [candidate.pathComponents, candidate.resolvingSymlinksInPath().pathComponents]
+            if !result.contains(where: { parent in
+                guard candidate.pathComponents.starts(with: parent.pathComponents) else { return false }
+                let parentPaths = [parent.pathComponents, parent.resolvingSymlinksInPath().pathComponents]
+                // A broad tree cannot replace an explicit input reached through an excluded output directory.
+                return !exclusions.contains { excluded in
+                    candidatePaths.contains { $0.starts(with: excluded) }
+                        && !parentPaths.contains { $0.starts(with: excluded) }
+                }
+            }) {
                 result.append(candidate)
             }
         }
@@ -466,6 +478,8 @@ final class NativePreviewBuild {
                 result.declaredInputFiles = inputs.files
                 result.missingInputFiles = inputs.missing
                 result.inputProducts = inputs.products
+                result.generatedInputPaths = inputs.generated
+                result.inputCaptureExclusions = inputs.exclusions
             }
         } catch {
             try Task.checkCancellation()
@@ -659,7 +673,7 @@ final class NativePreviewBuild {
 
     private func declaredInputs(for buildables: NativeSwiftValue, workspace: AnyObject, priorBuild: AnyObject,
                                 compilerCommands: [NativePreviewBuildInputs.CompilerCommand]) async throws ->
-        (files: Set<URL>, missing: Set<URL>, products: Set<URL>)? {
+        (files: Set<URL>, missing: Set<URL>, products: Set<URL>, generated: Set<URL>, exclusions: Set<URL>)? {
         let (graph, roots) = try await dependencyGraph(for: buildables, workspace: workspace, priorBuild: priorBuild)
         defer { withExtendedLifetime(graph) {} }
         let dependencies = try await runtime.object(graph).resolveMethod(
@@ -675,7 +689,11 @@ final class NativePreviewBuild {
             in: .path(installation.framework("IDEXCBuildSupportCore", in: "PlugIns")))
         let allocateLevel = try runtime.object(levelClass as AnyObject).resolveMethodAndWait(selector: "alloc",
             as: (() -> AnyObject).self)
+        let evaluateRoot = try await serviceType.resolveMethod(
+            named: "evaluateMacroAsString(_: Swift.String, level: __C.IDEMacroEvaluation_Level, buildParameters: __C.IDEBuildParameters?, overrides: [Swift.String : Swift.String]?) async throws -> Swift.String",
+            as: (@concurrent (String, AnyObject, AnyObject?, NativePreviewMacroOverrides) async throws -> String).self)
         var files: Set<URL> = []
+        var outputDirectories: Set<URL> = []
         var commands = compilerCommands
         var products: Set<URL> = []
         var pending = roots
@@ -694,6 +712,13 @@ final class NativePreviewBuild {
             guard let level = try unsafe initializeLevel.unsafeInvoke(blueprint) else {
                 throw NativeRuntimeError.invocation("IDEMacroEvaluation_Level_Blueprint.initWithBlueprint: returned nil")
             }
+            for macro in ["DERIVED_DATA_DIR", "SYMROOT", "OBJROOT", "SHARED_PRECOMPS_DIR"] {
+                let path = try unsafe await evaluateRoot.unsafeInvoke(on: service, macro, level,
+                    buildParameters, NativePreviewMacroOverrides(value: nil))
+                if path.isEmpty { continue }
+                guard path.hasPrefix("/") else { return nil }
+                outputDirectories.insert(URL(filePath: path, directoryHint: .isDirectory).standardizedFileURL)
+            }
             let evaluateFlags = try await serviceType.resolveMethod(
                 named: "evaluateMacroAsStringList(_: Swift.String, level: __C.IDEMacroEvaluation_Level, buildParameters: __C.IDEBuildParameters?, overrides: [Swift.String : Swift.String]?) async throws -> [Swift.String]",
                 as: (@concurrent (String, AnyObject, AnyObject?, NativePreviewMacroOverrides) async throws -> [String]).self)
@@ -701,9 +726,6 @@ final class NativePreviewBuild {
                 buildParameters, NativePreviewMacroOverrides(value: nil))
             if flags.contains(where: { $0.hasPrefix("@") }) {
                 guard !flags.contains("-frontend"), !flags.contains("-disallow-use-new-driver") else { return nil }
-                let evaluateRoot = try await serviceType.resolveMethod(
-                    named: "evaluateMacroAsString(_: Swift.String, level: __C.IDEMacroEvaluation_Level, buildParameters: __C.IDEBuildParameters?, overrides: [Swift.String : Swift.String]?) async throws -> Swift.String",
-                    as: (@concurrent (String, AnyObject, AnyObject?, NativePreviewMacroOverrides) async throws -> String).self)
                 let workingDirectoryOverride = try unsafe await evaluateRoot.unsafeInvoke(on: service, "COMPILER_WORKING_DIRECTORY", level,
                     buildParameters, NativePreviewMacroOverrides(value: nil))
                 let directory: String
@@ -794,8 +816,10 @@ final class NativePreviewBuild {
         }
         guard let nativeFiles = try await completedBuildInputs(workspace: workspace, priorBuild: priorBuild,
             compilerCommands: commands) else { return nil }
-        files.formUnion(nativeFiles.files)
-        return (files, nativeFiles.missing.subtracting(files), products)
+        let inputs = NativePreviewBuildInputs.Inputs(files: files.union(nativeFiles.files), missing: nativeFiles.missing,
+            generatedPaths: nativeFiles.generatedPaths)
+        let exclusions = outputDirectories.union(inputs.generatedPaths)
+        return (inputs.files, inputs.missing, products, inputs.generatedPaths, exclusions)
     }
 
     private func completedBuildInputs(workspace: AnyObject, priorBuild: AnyObject,

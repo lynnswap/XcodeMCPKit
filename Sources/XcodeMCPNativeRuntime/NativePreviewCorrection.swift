@@ -16,6 +16,7 @@ final class NativePreviewCorrection {
 
     private final class WorkspaceSession {
         let directory: URL
+        let artifactsRoot: URL
         let productDigests = NativePreviewProductSignature.DigestCache()
         var signature: NativePreviewProductSignature?
         var additionalProducts: [URL] = []
@@ -32,7 +33,10 @@ final class NativePreviewCorrection {
         var simulatorDeviceSet: URL { directory.appendingPathComponent("Devices", isDirectory: true) }
         var simctlArguments: [String] { ["simctl", "--set", simulatorDeviceSet.path] }
 
-        init(directory: URL) { self.directory = directory }
+        init(directory: URL, artifactsRoot: URL) {
+            self.directory = directory
+            self.artifactsRoot = artifactsRoot
+        }
     }
 
     private struct MetadataKey: Hashable {
@@ -74,6 +78,7 @@ final class NativePreviewCorrection {
         let build: NativePreviewBuild.Result
         let workspaceBuilder: AnyObject
         let roots: [URL]
+        let exclusions: Set<URL>
         let inputs: NativePreviewInputSnapshot
     }
 
@@ -136,7 +141,7 @@ final class NativePreviewCorrection {
         return NativeTool(name: tool.name, descriptor: .object(fields), workspaceScoped: tool.workspaceScoped)
     }
 
-    func execute(inputType: Any.Type, input: Data,
+    func execute(inputType: Any.Type, input: Data, artifactsRoot: URL,
                  native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws -> AsyncStream<Data> {
         guard let inputType = inputType as? any Decodable.Type else {
             return try await native()
@@ -159,7 +164,7 @@ final class NativePreviewCorrection {
                 stream.continuation.yield(try event("update", .object([
                     "message": .string("Building the preview target..."), "progress": .number(.int(10)), "total": .number(.int(100)),
                 ])))
-                try await produce(parameters, continuation: stream.continuation, native: native)
+                try await produce(parameters, artifactsRoot: artifactsRoot, continuation: stream.continuation, native: native)
             } catch {
                 if !Task.isCancelled {
                     stream.continuation.yield(errorEvent(error))
@@ -214,7 +219,7 @@ final class NativePreviewCorrection {
         }
     }
 
-    private func produce(_ input: Input, continuation: AsyncStream<Data>.Continuation,
+    private func produce(_ input: Input, artifactsRoot: URL, continuation: AsyncStream<Data>.Continuation,
                          native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws {
         if input.requiresNativePipeline {
             try await relayNative(native, continuation: continuation)
@@ -222,7 +227,7 @@ final class NativePreviewCorrection {
         }
         let result: JSONValue? = try await Self.withTimeout(seconds: input.timeout) {
             do {
-                return try await self.render(input)
+                return try await self.render(input, artifactsRoot: artifactsRoot)
             } catch is NativePipelineRequired {
                 try await self.relayNative(native, continuation: continuation)
                 return nil
@@ -306,7 +311,7 @@ final class NativePreviewCorrection {
                 if currentBuilder === certificate.workspaceBuilder,
                    try NativePreviewInputSnapshot.capture(
                        roots: certificate.inputs.prioritizedRoots(certificate.roots),
-                       missingInputs: certificate.build.missingInputFiles) == certificate.inputs,
+                       excluding: certificate.exclusions, missingInputs: certificate.build.missingInputFiles) == certificate.inputs,
                    inputRevision == session.inputRevision {
                     inputsAreCurrent = true
                     if plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
@@ -376,16 +381,18 @@ final class NativePreviewCorrection {
                              destination: NativePreviewBuild.DestinationSelection, source: URL,
                              session: WorkspaceSession, inputRevision: UInt64) async throws -> BuildCertificate? {
         guard let buildStartedAt = build.buildStartedAt, let workspaceBuilder = build.workspaceBuilder else { return nil }
-        guard let roots = try builder.inputRoots(workspace: workspace, build: build, source: source) else { return nil }
-        let inputs = try NativePreviewInputSnapshot.capture(roots: roots, missingInputs: build.missingInputFiles)
+        let outputPaths = build.inputCaptureExclusions.union([session.artifactsRoot])
+        guard let roots = try builder.inputRoots(workspace: workspace, build: build, source: source, excluding: outputPaths) else { return nil }
+        let exclusions = NativePreviewInputSnapshot.coalescedExclusions(outputPaths, roots: roots)
+        let inputs = try NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions, missingInputs: build.missingInputFiles)
         // A post-build snapshot must not certify source edits that arrived during the build.
         guard inputs.predates(buildStartedAt) else { return nil }
         let currentBuilder = try await builder.workspaceBuilder(for: destination)
         guard currentBuilder === workspaceBuilder, inputRevision == session.inputRevision else { return nil }
-        return BuildCertificate(build: build, workspaceBuilder: workspaceBuilder, roots: roots, inputs: inputs)
+        return BuildCertificate(build: build, workspaceBuilder: workspaceBuilder, roots: roots, exclusions: exclusions, inputs: inputs)
     }
 
-    private func render(_ input: Input) async throws -> JSONValue {
+    private func render(_ input: Input, artifactsRoot: URL) async throws -> JSONValue {
         guard let workspace = input.workspaceIdentifier else { throw NativeRuntimeError.invalidRequest("A workspaceIdentifier is required") }
         let identifier = UUID()
         let task = Task { @MainActor in
@@ -397,7 +404,7 @@ final class NativePreviewCorrection {
                     let directory = URL(filePath: input.artifacts, directoryHint: .isDirectory)
                         .appendingPathComponent("PreviewSession-\(UUID().uuidString)", isDirectory: true)
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-                    session = WorkspaceSession(directory: directory)
+                    session = WorkspaceSession(directory: directory, artifactsRoot: artifactsRoot)
                     self.sessions[workspace] = session
                 }
                 do {

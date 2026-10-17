@@ -5,6 +5,27 @@ struct NativePreviewBuildInputs {
     struct Inputs: Equatable {
         let files: Set<URL>
         let missing: Set<URL>
+        let generatedPaths: Set<URL>
+
+        init(files: Set<URL>, missing: Set<URL>, generatedPaths: Set<URL> = []) {
+            self.generatedPaths = generatedPaths
+            self.files = NativePreviewBuildInputs.removingGeneratedPaths(from: files, generatedPaths: generatedPaths)
+            self.missing = NativePreviewBuildInputs.removingGeneratedPaths(from: missing, generatedPaths: generatedPaths)
+                .subtracting(self.files)
+        }
+    }
+
+    static func removingGeneratedPaths(from files: Set<URL>, generatedPaths: Set<URL>) -> Set<URL> {
+        let paths = Set(generatedPaths.map { $0.standardizedFileURL.path })
+        return files.filter { file in
+            var candidate = file.standardizedFileURL
+            while true {
+                if paths.contains(candidate.path) { return false }
+                let parent = candidate.deletingLastPathComponent()
+                if parent.path == candidate.path { return true }
+                candidate = parent
+            }
+        }
     }
 
     enum ResponseFileSyntax: Equatable { case llvmGNU, swiftDriver }
@@ -310,7 +331,7 @@ struct NativePreviewBuildInputs {
             inputs.formUnion(responseFiles)
             let discoveryFiles = dependencyFiles.union([manifestURL.standardizedFileURL])
             func tracked(_ files: Set<URL>) -> Set<URL> {
-                files.subtracting(produced).subtracting(discoveryFiles).filter { input in
+                files.filter { input in
                     !immutableRoots.contains { root in
                         input.pathComponents.starts(with: root.standardizedFileURL.pathComponents)
                             && input.resolvingSymlinksInPath().pathComponents.starts(
@@ -318,7 +339,7 @@ struct NativePreviewBuildInputs {
                     }
                 }
             }
-            return Inputs(files: tracked(inputs), missing: tracked(missing.subtracting(inputs)))
+            return Inputs(files: tracked(inputs), missing: tracked(missing), generatedPaths: produced.union(discoveryFiles))
         } catch {
             // Failure to certify inputs disables reuse; the completed native build remains usable.
             return nil

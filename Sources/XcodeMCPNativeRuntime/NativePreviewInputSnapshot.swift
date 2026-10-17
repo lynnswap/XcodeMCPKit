@@ -84,10 +84,24 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         let path: String
     }
 
-    static func capture(roots: [URL], missingInputs: Set<URL> = []) throws -> Self {
+    static func coalescedExclusions(_ exclusions: Set<URL>, roots: [URL]) -> Set<URL> {
+        let inputPaths = roots.flatMap { [$0.standardizedFileURL.pathComponents, $0.resolvingSymlinksInPath().pathComponents] }
+        let paths = Set(exclusions.flatMap { [$0.standardizedFileURL, $0.resolvingSymlinksInPath()] })
+        return paths.sorted { $0.pathComponents.count < $1.pathComponents.count }.reduce(into: Set<URL>()) { result, candidate in
+            if !result.contains(where: { parent in
+                guard candidate.pathComponents.starts(with: parent.pathComponents) else { return false }
+                // Keep narrower exclusions when an explicit input reopens part of the broad output tree.
+                return !inputPaths.contains {
+                    $0.starts(with: parent.pathComponents) && candidate.pathComponents.starts(with: $0)
+                }
+            }) { result.insert(candidate) }
+        }
+    }
+
+    static func capture(roots: [URL], excluding: Set<URL> = [], missingInputs: Set<URL> = []) throws -> Self {
         let workers = min(roots.count, ProcessInfo.processInfo.activeProcessorCount, 4)
         let snapshots: [Self]
-        if workers <= 1 { snapshots = [try captureSerial(roots: roots)] }
+        if workers <= 1 { snapshots = try roots.map { try captureSerial(root: $0, excluding: excluding) } }
         else {
             let work = Mutex(CaptureWork())
             DispatchQueue.concurrentPerform(iterations: workers) { _ in
@@ -98,7 +112,7 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                     return roots[index]
                 }) {
                     do {
-                        let snapshot = try captureSerial(roots: [root])
+                        let snapshot = try captureSerial(root: root, excluding: excluding)
                         work.withLock { $0.snapshots.append(snapshot) }
                     } catch {
                         work.withLock { if $0.failure == nil { $0.failure = error } }
@@ -182,15 +196,27 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         return entries
     }
 
-    private static func captureSerial(roots: [URL]) throws -> Self {
+    private static func captureSerial(root: URL, excluding: Set<URL>) throws -> Self {
         let fileMetadata = NativePreviewFileMetadata()
-        var pending = roots.map { (path: $0.standardizedFileURL.path, isCanonical: false, metadata: Optional<stat>.none) }
+        let rootPaths = [root.standardizedFileURL.pathComponents, root.resolvingSymlinksInPath().pathComponents]
+        let exclusions = excluding.flatMap { url -> [String] in
+            let paths = [url.standardizedFileURL.pathComponents, url.resolvingSymlinksInPath().pathComponents]
+            // Explicit inputs and checkouts can live inside a native output directory.
+            guard !rootPaths.contains(where: { root in paths.contains { root.starts(with: $0) } }) else { return [] }
+            return paths.map { NSString.path(withComponents: $0) }
+        }
+        func isExcluded(_ path: String) -> Bool {
+            exclusions.contains { path == $0 || path.hasPrefix($0 == "/" ? $0 : $0 + "/") }
+        }
+        var pending = [(path: root.standardizedFileURL.path, isCanonical: false, metadata: Optional<stat>.none)]
         var visited: Set<String> = []
         var expandedDirectories: Set<String> = []
         var entries: [Entry] = []
         var routes: [URL] = []
         while let next = pending.popLast() {
             let path = next.path
+            guard !isExcluded(path) else { continue }
+            if !next.isCanonical, isExcluded(URL(filePath: path).resolvingSymlinksInPath().path) { continue }
             if !next.isCanonical { routes.append(URL(filePath: path)) }
             guard visited.insert(path).inserted else { continue }
             var value: stat
