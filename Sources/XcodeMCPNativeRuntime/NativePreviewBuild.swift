@@ -811,8 +811,11 @@ final class NativePreviewBuild {
               cacheURL.isFileURL, cacheURL.path.hasPrefix("/") else { return nil }
         let manifest = cacheURL.appendingPathComponent(identifier + ".xcbuilddata", isDirectory: true)
             .appendingPathComponent("manifest.json")
+        // System library install names can refer to immutable dyld-cache images without a standalone file.
         return NativePreviewBuildInputs.files(manifest: manifest, compilerCommands: compilerCommands,
-            immutableRoots: [installation.contentsDirectory])
+            immutableRoots: [installation.contentsDirectory, URL(filePath: "/usr/lib"),
+                URL(filePath: "/System/Library/Frameworks"), URL(filePath: "/System/Library/PrivateFrameworks"),
+                URL(filePath: "/System/Library/SubFrameworks")])
     }
 
     private func dependencyGraph(for buildables: NativeSwiftValue, workspace: AnyObject,

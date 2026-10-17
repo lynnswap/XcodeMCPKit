@@ -21,12 +21,15 @@ struct NativePreviewBuildInputsTests {
             "plist": ["tool": "info-plist-processor", "inputs": ["/user/External Inputs/Info.plist", "<entry>"],
                 "outputs": ["/build/App.app/Info.plist"]],
             "generated": ["tool": "auxiliary-file", "outputs": ["/build/generated.h"]],
-            "compile": ["tool": "shell", "inputs": ["/build/generated.h", "/SelectedXcode/SDK/Header.h"],
+            "compile": ["tool": "shell", "inputs": ["/build/generated.h/", "/SelectedXcode/SDK/Header.h",
+                "/System/Library/Frameworks/UIKit.framework/UIKit", "/System/Library/AssetsV2/Mutable.asset"],
                 "outputs": ["/build/A.o"]]
         ]])
-        let files = NativePreviewBuildInputs.files(manifest: manifest, immutableRoots: [URL(filePath: "/SelectedXcode")],
+        let files = NativePreviewBuildInputs.files(manifest: manifest,
+            immutableRoots: [URL(filePath: "/SelectedXcode"), URL(filePath: "/System/Library/Frameworks")],
             read: reader([manifest: data]))
-        #expect(files?.files == [URL(filePath: "/user/External Inputs/Info.plist")])
+        #expect(files?.files == [URL(filePath: "/user/External Inputs/Info.plist"),
+            URL(filePath: "/System/Library/AssetsV2/Mutable.asset")])
     }
 
     @Test func swiftOutputMapFindsTransitiveHeadersAndModuleDependencies() throws {
@@ -107,9 +110,10 @@ struct NativePreviewBuildInputsTests {
         let inner = URL(filePath: "/user/Inner Flags.rsp")
         let data = try json(["commands": ["compile": ["tool": "shell", "inputs": ["/user/A.c"],
             "outputs": ["/build/A.o"], "args": ["clang", "-c", "@" + outer.path],
-            "deps": [dependency.path], "deps-style": "makefile", "working-directory": "/project"]]])
+            "deps": [dependency.path], "deps-style": "makefile", "working-directory": "/project"],
+            "generated": ["tool": "auxiliary-file", "outputs": ["/project/Generated"]]]])
         let files = NativePreviewBuildInputs.files(manifest: manifest, read: reader([
-            manifest: data, dependency: Data("/build/A.o: local\\ header.h ../external\\ header.h\n".utf8),
+            manifest: data, dependency: Data("/build/A.o: local\\ header.h ../external\\ header.h Generated/\n".utf8),
             outer: Data("'@/user/Inner Flags.rsp' -DNUMBER=42".utf8), inner: Data("-DSECOND=1".utf8)
         ]))
         #expect(files?.files == Set(["/user/A.c", "/project/local header.h", "/external header.h", outer.path, inner.path].map { URL(filePath: $0) }))

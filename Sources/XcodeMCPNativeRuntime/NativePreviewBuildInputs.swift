@@ -358,7 +358,9 @@ struct NativePreviewBuildInputs {
 
     private static func absolutePath(_ path: String) throws -> URL {
         guard path.hasPrefix("/"), !path.utf8.contains(0) else { throw Unsupported.inputDescription }
-        return URL(filePath: path).standardizedFileURL
+        let normalized = URL(filePath: path).standardizedFileURL
+        // XCBuild directory-tree nodes can name a file output with a trailing slash.
+        return URL(filePath: normalized.path, directoryHint: .notDirectory)
     }
 
     private static func pathURL(_ path: String, relativeTo directory: URL?) throws -> URL {
@@ -366,6 +368,6 @@ struct NativePreviewBuildInputs {
         if path.hasPrefix("/") { return try absolutePath(path) }
         guard let directory else { throw Unsupported.inputDescription }
         let base = URL(filePath: directory.path, directoryHint: .isDirectory)
-        return URL(filePath: path, relativeTo: base).standardizedFileURL.absoluteURL
+        return try absolutePath(URL(filePath: path, relativeTo: base).standardizedFileURL.absoluteURL.path)
     }
 }
