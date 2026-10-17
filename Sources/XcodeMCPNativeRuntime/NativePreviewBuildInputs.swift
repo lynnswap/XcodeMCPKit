@@ -266,6 +266,18 @@ struct NativePreviewBuildInputs {
                 guard let url = try filesystemNode(path), url.pathExtension == "o" else { return nil }
                 return url
             })
+            var swiftModuleOutputsByInput: [URL: Set<URL>] = [:]
+            for command in swiftCommands {
+                let moduleOutputs = try Set(command.outputs.compactMap { path -> URL? in
+                    guard let url = try filesystemNode(path), url.pathExtension == "swiftmodule" else { return nil }
+                    return url
+                })
+                for path in command.inputs ?? [] {
+                    if let url = try filesystemNode(path) {
+                        swiftModuleOutputsByInput[url, default: []].formUnion(moduleOutputs)
+                    }
+                }
+            }
             var parsedSwiftMaps: Set<URL> = []
             var inputs: Set<URL> = []
             var missing: Set<URL> = []
@@ -329,12 +341,7 @@ struct NativePreviewBuildInputs {
                         let mappedObjects = try Set(map.values.compactMap { entry in
                             try entry["object"].map { try pathURL($0, relativeTo: directory) }
                         })
-                        let moduleOutputs = try Set(swiftCommands.filter { sibling in
-                            try (sibling.inputs ?? []).contains { try filesystemNode($0) == mapURL }
-                        }.flatMap(\.outputs).compactMap { path -> URL? in
-                            guard let url = try filesystemNode(path), url.pathExtension == "swiftmodule" else { return nil }
-                            return url
-                        })
+                        let moduleOutputs = swiftModuleOutputsByInput[mapURL, default: []]
                         var coveredOutputs: Set<URL> = []
                         func loadDependencies(_ path: String) throws {
                             let url = try pathURL(path, relativeTo: directory)
