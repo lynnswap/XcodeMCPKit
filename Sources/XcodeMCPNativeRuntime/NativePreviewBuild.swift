@@ -451,7 +451,17 @@ final class NativePreviewBuild {
         result.buildStartedAt = buildStartedAt
         result.workspaceBuilder = workspaceBuilder
         do {
-            if let inputs = try await declaredInputs(for: selectedBuildables, workspace: workspace, priorBuild: priorBuild) {
+            var compilerCommands: [NativePreviewBuildInputs.CompilerCommand] = []
+            var pendingInputs = result.targets + result.previewRoots
+            while let target = pendingInputs.popLast() {
+                if !target.compileCommandLine.isEmpty {
+                    // The preview-info adapter exposes no compiler CWD; linker CWD is a separate contract.
+                    compilerCommands.append(.init(arguments: target.compileCommandLine, workingDirectory: nil))
+                }
+                pendingInputs += target.dependencies
+            }
+            if let inputs = try await declaredInputs(for: selectedBuildables, workspace: workspace, priorBuild: priorBuild,
+                compilerCommands: compilerCommands) {
                 result.declaredInputFiles = inputs.files
                 result.inputProducts = inputs.products
             }
@@ -645,7 +655,8 @@ final class NativePreviewBuild {
         return canonical
     }
 
-    private func declaredInputs(for buildables: NativeSwiftValue, workspace: AnyObject, priorBuild: AnyObject) async throws ->
+    private func declaredInputs(for buildables: NativeSwiftValue, workspace: AnyObject, priorBuild: AnyObject,
+                                compilerCommands: [NativePreviewBuildInputs.CompilerCommand]) async throws ->
         (files: Set<URL>, products: Set<URL>)? {
         let (graph, roots) = try await dependencyGraph(for: buildables, workspace: workspace, priorBuild: priorBuild)
         defer { withExtendedLifetime(graph) {} }
@@ -663,6 +674,7 @@ final class NativePreviewBuild {
         let allocateLevel = try runtime.object(levelClass as AnyObject).resolveMethodAndWait(selector: "alloc",
             as: (() -> AnyObject).self)
         var files: Set<URL> = []
+        var commands = compilerCommands
         var products: Set<URL> = []
         var pending = roots
         var seen: Set<ObjectIdentifier> = []
@@ -673,10 +685,6 @@ final class NativePreviewBuild {
             guard let children = try values.withCopy({ $0 as? [NSObject] }),
                   let blueprint = try object(buildable, selector: "blueprint") as? NSObject else { return nil }
             pending.append(contentsOf: children)
-            guard blueprint.responds(to: NSSelectorFromString("pbxTarget")) else { continue }
-            guard let target = try object(blueprint, selector: "pbxTarget") else { return nil }
-            let phases: [NSObject] = try array(target, selector: "buildPhases")
-            let groups: [NSObject] = try array(target, selector: "fileSystemSynchronizedGroupsArray")
             let buildParameters = try unsafe parameters.unsafeInvoke(buildable)
             let allocatedLevel = try unsafe allocateLevel.unsafeInvoke()
             let initializeLevel = try runtime.object(allocatedLevel).resolveMethodAndWait(selector: "initWithBlueprint:",
@@ -684,6 +692,33 @@ final class NativePreviewBuild {
             guard let level = try unsafe initializeLevel.unsafeInvoke(blueprint) else {
                 throw NativeRuntimeError.invocation("IDEMacroEvaluation_Level_Blueprint.initWithBlueprint: returned nil")
             }
+            let evaluateFlags = try await serviceType.resolveMethod(
+                named: "evaluateMacroAsStringList(_: Swift.String, level: __C.IDEMacroEvaluation_Level, buildParameters: __C.IDEBuildParameters?, overrides: [Swift.String : Swift.String]?) async throws -> [Swift.String]",
+                as: (@concurrent (String, AnyObject, AnyObject?, NativePreviewMacroOverrides) async throws -> [String]).self)
+            let flags = try unsafe await evaluateFlags.unsafeInvoke(on: service, "OTHER_SWIFT_FLAGS", level,
+                buildParameters, NativePreviewMacroOverrides(value: nil))
+            if flags.contains(where: { $0.hasPrefix("@") }) {
+                guard !flags.contains("-frontend"), !flags.contains("-disallow-use-new-driver") else { return nil }
+                let evaluateRoot = try await serviceType.resolveMethod(
+                    named: "evaluateMacroAsString(_: Swift.String, level: __C.IDEMacroEvaluation_Level, buildParameters: __C.IDEBuildParameters?, overrides: [Swift.String : Swift.String]?) async throws -> Swift.String",
+                    as: (@concurrent (String, AnyObject, AnyObject?, NativePreviewMacroOverrides) async throws -> String).self)
+                let workingDirectoryOverride = try unsafe await evaluateRoot.unsafeInvoke(on: service, "COMPILER_WORKING_DIRECTORY", level,
+                    buildParameters, NativePreviewMacroOverrides(value: nil))
+                let directory: String
+                if workingDirectoryOverride.isEmpty {
+                    directory = try unsafe await evaluateRoot.unsafeInvoke(on: service, "PROJECT_DIR", level,
+                        buildParameters, NativePreviewMacroOverrides(value: nil))
+                } else { directory = workingDirectoryOverride }
+                guard directory.hasPrefix("/") else { return nil }
+                // Relative @files use the compiler process CWD before -working-directory is parsed.
+                commands.append(.init(arguments: flags,
+                    workingDirectory: URL(filePath: directory, directoryHint: .isDirectory).standardizedFileURL,
+                    responseFileSyntax: .swiftDriver))
+            }
+            guard blueprint.responds(to: NSSelectorFromString("pbxTarget")) else { continue }
+            guard let target = try object(blueprint, selector: "pbxTarget") else { return nil }
+            let phases: [NSObject] = try array(target, selector: "buildPhases")
+            let groups: [NSObject] = try array(target, selector: "fileSystemSynchronizedGroupsArray")
             var references: Set<ObjectIdentifier> = []
             func addReference(_ reference: NSObject) throws -> Bool {
                 guard references.insert(ObjectIdentifier(reference)).inserted else { return true }
@@ -755,7 +790,27 @@ final class NativePreviewBuild {
                 }
             }
         }
+        guard let nativeFiles = try await completedBuildInputs(workspace: workspace, priorBuild: priorBuild,
+            compilerCommands: commands) else { return nil }
+        files.formUnion(nativeFiles)
         return (files, products)
+    }
+
+    private func completedBuildInputs(workspace: AnyObject, priorBuild: AnyObject,
+                                      compilerCommands: [NativePreviewBuildInputs.CompilerCommand]) async throws -> Set<URL>? {
+        guard let field = Mirror(reflecting: priorBuild).children.first(where: { $0.label == "buildDescriptionID" }),
+              let identifier = Mirror(reflecting: field.value).children.first?.value as? String,
+              !identifier.isEmpty, !identifier.contains("/") else { return nil }
+        let getCache = try await runtime.object(workspace).resolveGetter(
+            named: "(extension in IDEXCBuildSupportCore):__C.IDEWorkspace.xcbuildDataCachePath.getter : __C.DVTFilePath?",
+            as: (() -> AnyObject?).self)
+        guard let cachePath = try unsafe getCache.unsafeInvoke(),
+              let cacheURL = try object(cachePath, selector: "fileURL") as? URL,
+              cacheURL.isFileURL, cacheURL.path.hasPrefix("/") else { return nil }
+        let manifest = cacheURL.appendingPathComponent(identifier + ".xcbuilddata", isDirectory: true)
+            .appendingPathComponent("manifest.json")
+        return NativePreviewBuildInputs.files(manifest: manifest, compilerCommands: compilerCommands,
+            immutableRoots: [installation.contentsDirectory])
     }
 
     private func dependencyGraph(for buildables: NativeSwiftValue, workspace: AnyObject,
