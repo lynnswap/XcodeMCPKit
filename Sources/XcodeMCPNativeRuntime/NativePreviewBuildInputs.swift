@@ -47,6 +47,23 @@ struct NativePreviewBuildInputs {
 
     private struct Manifest: Decodable {
         let commands: [String: Command]
+        let nodes: [String: Node]?
+    }
+
+    private struct Node: Decodable {
+        let isVirtual: Bool?
+        let isCommandTimestamp: Bool?
+        let isDirectory: Bool?
+        let isDirectoryStructure: Bool?
+        let isMutated: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case isVirtual = "is-virtual"
+            case isCommandTimestamp = "is-command-timestamp"
+            case isDirectory = "is-directory"
+            case isDirectoryStructure = "is-directory-structure"
+            case isMutated = "is-mutated"
+        }
     }
 
     private struct Command: Decodable {
@@ -224,17 +241,29 @@ struct NativePreviewBuildInputs {
                   manifest.commands.values.allSatisfy({ $0.permitsBuildReuse(immutableRoots: immutableRoots) }) else {
                 throw Unsupported.inputDescription
             }
+            func filesystemNode(_ path: String) throws -> URL? {
+                let node = manifest.nodes?[path]
+                guard node?.isVirtual != true, node?.isCommandTimestamp != true else { return nil }
+                return try absoluteNode(path)
+            }
+            let orderingDirectories = try Set(manifest.commands.values.filter { $0.tool == "create-build-directory" }
+                .flatMap(\.outputs).filter { path in
+                    let node = manifest.nodes?[path]
+                    guard node?.isMutated == true, node?.isDirectory != true, node?.isDirectoryStructure != true,
+                          !path.hasSuffix("/") else { return false }
+                    return try filesystemNode(path) != nil
+                })
             let produced = try Set(manifest.commands.values.flatMap(\.outputs).compactMap { path in
-                try absoluteNode(path)
+                try filesystemNode(path)
             })
             let clangScanOutputs = try Set(manifest.commands.values.filter { $0.tool == "clang-scan-modules" }
-                .flatMap(\.outputs).compactMap { try absoluteNode($0) })
+                .flatMap(\.outputs).compactMap { try filesystemNode($0) })
             var nativeClangScans: Set<URL> = []
             let swiftCommands = manifest.commands.values.filter {
                 $0.tool == "swift-driver-compilation" || $0.tool == "swift-driver-compilation-requirement"
             }
             let swiftObjectOutputs = try Set(swiftCommands.flatMap(\.outputs).compactMap { path -> URL? in
-                guard let url = try absoluteNode(path), url.pathExtension == "o" else { return nil }
+                guard let url = try filesystemNode(path), url.pathExtension == "o" else { return nil }
                 return url
             })
             var parsedSwiftMaps: Set<URL> = []
@@ -243,8 +272,11 @@ struct NativePreviewBuildInputs {
             var dependencyFiles: Set<URL> = []
             var responseFiles: Set<URL> = []
             for command in manifest.commands.values {
-                for path in command.inputs ?? [] {
-                    if let url = try absoluteNode(path) { inputs.insert(url) }
+                // These native tools group or order work without consuming the input contents.
+                if command.tool != "phony", command.tool != "mkdir", command.tool != "create-build-directory" {
+                    for path in command.inputs ?? [] where !orderingDirectories.contains(path) {
+                        if let url = try filesystemNode(path) { inputs.insert(url) }
+                    }
                 }
                 let directory = try command.workingDirectory.map {
                     URL(filePath: try absolutePath($0).path, directoryHint: .isDirectory)
@@ -267,19 +299,19 @@ struct NativePreviewBuildInputs {
                     }
                 }
                 if command.tool == "ccompile", command.deps == nil {
-                    let scans = try Set((command.inputs ?? []).compactMap { try absoluteNode($0) })
+                    let scans = try Set((command.inputs ?? []).compactMap { try filesystemNode($0) })
                         .intersection(clangScanOutputs)
                     guard !scans.isEmpty else { throw Unsupported.inputDescription }
                     nativeClangScans.formUnion(scans)
                 }
                 if command.tool == "swift-driver-compilation" || command.tool == "swift-driver-compilation-requirement" {
                     let objectOutputs = try Set(command.outputs.compactMap { path -> URL? in
-                        guard let url = try absoluteNode(path), url.pathExtension == "o" else { return nil }
+                        guard let url = try filesystemNode(path), url.pathExtension == "o" else { return nil }
                         return url
                     })
                     var candidates: [(URL, [String: [String: String]])] = []
                     for path in command.inputs ?? [] {
-                        guard let url = try absoluteNode(path), url.pathExtension == "json" else { continue }
+                        guard let url = try filesystemNode(path), url.pathExtension == "json" else { continue }
                         let data = try readDescription(url)
                         guard let map = try? JSONDecoder().decode([String: [String: String]].self, from: data) else { continue }
                         let mappedObjects = try Set(map.values.compactMap { entry in
@@ -297,9 +329,9 @@ struct NativePreviewBuildInputs {
                             try entry["object"].map { try pathURL($0, relativeTo: directory) }
                         })
                         let moduleOutputs = try Set(swiftCommands.filter { sibling in
-                            try (sibling.inputs ?? []).contains { try absoluteNode($0) == mapURL }
+                            try (sibling.inputs ?? []).contains { try filesystemNode($0) == mapURL }
                         }.flatMap(\.outputs).compactMap { path -> URL? in
-                            guard let url = try absoluteNode(path), url.pathExtension == "swiftmodule" else { return nil }
+                            guard let url = try filesystemNode(path), url.pathExtension == "swiftmodule" else { return nil }
                             return url
                         })
                         var coveredOutputs: Set<URL> = []

@@ -73,6 +73,48 @@ struct NativePreviewBuildInputsTests {
         #expect(try inputs(commands) == nil)
     }
 
+    @Test func nativeOrderingNodesDoNotBecomeFilesystemInputs() throws {
+        let parent = "/build"
+        let cache = "/global/ModuleCache.noindex"
+        let generated = "/build/Generated.swift"
+        let schema = "/build/Schema.json"
+        let object = "/build/Generated.o"
+        let marker = "/build/Swift Compilation Finished"
+        let tree = "/build/Resources/"
+        let virtual = "/build/Virtual"
+        let timestamp = "/build/Command Timestamp"
+        let dependency = URL(filePath: "/build/Generated.d")
+        let nodes: [String: [String: Bool]] = [
+            parent: ["is-mutated": true], cache: ["is-mutated": true],
+            schema: ["is-mutated": true], tree: ["is-mutated": true, "is-directory": true],
+            virtual: ["is-virtual": true], timestamp: ["is-command-timestamp": true]
+        ]
+        var commands: [String: [String: Any]] = [
+            "all": ["tool": "phony", "inputs": [cache, marker], "outputs": ["<all>"]],
+            "parent": ["tool": "create-build-directory", "inputs": ["/ordering/Ancestor"], "outputs": [parent]],
+            "cache": ["tool": "create-build-directory", "inputs": [], "outputs": [cache]],
+            "tree": ["tool": "create-build-directory", "inputs": [], "outputs": [tree]],
+            "app": ["tool": "mkdir", "inputs": ["/ordering/Mkdir"], "outputs": ["/build/App"]],
+            "generated": ["tool": "auxiliary-file", "inputs": [parent], "outputs": [generated, schema, marker]],
+            "codegen": ["tool": "shell", "inputs": [schema], "outputs": ["/build/Other.swift"]],
+            "compile": ["tool": "shell", "inputs": [generated, parent, virtual, timestamp, "/external/Header.h"], "outputs": [object]],
+            "link": ["tool": "shell", "inputs": [object, parent, tree], "outputs": ["/build/App/Executable"]]
+        ]
+        let expected = Set([generated, schema, object, String(tree.dropLast()), "/external/Header.h"].map { URL(filePath: $0) })
+        let data = try json(["commands": commands, "nodes": nodes])
+        let inputs = NativePreviewBuildInputs.files(manifest: manifest, read: reader([manifest: data]))
+        #expect(inputs?.files == expected)
+
+        // Dynamic dependency records identify actual content even when a plain build-directory node also exists.
+        commands["compile"]?["deps"] = dependency.path
+        commands["compile"]?["deps-style"] = "makefile"
+        let dynamic = try json(["commands": commands, "nodes": nodes])
+        let dynamicInputs = NativePreviewBuildInputs.files(manifest: manifest, read: reader([
+            manifest: dynamic, dependency: Data("/build/Generated.o: /build/\n".utf8)
+        ]))
+        #expect(dynamicInputs?.files == expected.union([URL(filePath: parent)]))
+    }
+
     @Test func generatedPathFilteringPreservesNonFileSourceIdentifiers() throws {
         let relative = try #require(URL(string: "relative.swift"))
         let remote = try #require(URL(string: "https://example.invalid/build/Generated/Source.swift"))
