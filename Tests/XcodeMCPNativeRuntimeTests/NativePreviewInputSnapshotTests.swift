@@ -126,6 +126,32 @@ struct NativePreviewInputSnapshotTests {
         }
     }
 
+    @Test func requiredInputTracksIntermediateSymbolicLinkRetargeting() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let first = root.appendingPathComponent("First", isDirectory: true)
+        let second = root.appendingPathComponent("Second", isDirectory: true)
+        try FileManager.default.createDirectory(at: first.appendingPathComponent("Subdir"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: second.appendingPathComponent("Subdir"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("first input".utf8).write(to: first.appendingPathComponent("Subdir/Leaf.h"))
+        try Data("second input".utf8).write(to: second.appendingPathComponent("Subdir/Leaf.h"))
+        let link = root.appendingPathComponent("Current")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
+        let input = link.appendingPathComponent("Subdir/Leaf.h")
+        let before = try NativePreviewInputSnapshot.capture(roots: [input])
+        let buildStarted = Date()
+        #expect(before.predates(buildStarted))
+
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: second)
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
+
+        let after = try NativePreviewInputSnapshot.capture(roots: [input])
+        #expect(after != before)
+        #expect(!after.predates(buildStarted))
+    }
+
     @Test func missingLookupTracksIntermediateSymbolicLinkRetargeting() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let first = root.appendingPathComponent("First", isDirectory: true)

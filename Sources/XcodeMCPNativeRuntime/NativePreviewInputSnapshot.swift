@@ -112,7 +112,7 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
             }
         }
         let missingPaths = Set(missingInputs.map { $0.standardizedFileURL.path })
-        let ordered = (snapshots.flatMap { $0.entries } + (try missingInputAncestors(missingPaths)))
+        let ordered = (snapshots.flatMap { $0.entries } + (try inputPathAncestors(missingPaths: missingPaths, routes: [])))
             .sorted { $0.path < $1.path }
         var entries: [Entry] = []
         entries.reserveCapacity(ordered.count)
@@ -124,9 +124,9 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         return Self(entries: entries, missingPaths: missingPaths)
     }
 
-    private static func missingInputAncestors(_ paths: Set<String>) throws -> [Entry] {
+    private static func inputPathAncestors(missingPaths: Set<String>, routes: [URL]) throws -> [Entry] {
         var entries: [Entry] = []
-        var routes: [URL] = []
+        var routes = routes
         func metadata(_ path: String) throws -> stat {
             var value = stat()
             guard unsafe lstat(path, &value) == 0 else {
@@ -140,7 +140,7 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                 ? try FileManager.default.destinationOfSymbolicLink(atPath: path) : nil
             entries.append(Entry(path: path, value: value, symbolicLinkDestination: destination))
         }
-        for path in paths {
+        for path in missingPaths {
             var ancestor = URL(filePath: path)
             while true {
                 do {
@@ -159,7 +159,7 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                 }
             }
         }
-        // A negative lookup depends on its nearest existing parent and on every symlink used to reach it.
+        // Input paths depend on intermediate symlinks; negative lookups also depend on their nearest existing parent.
         // Observe these entries without walking unrelated directory contents.
         var visited: Set<String> = []
         while let route = routes.popLast() {
@@ -188,8 +188,10 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         var visited: Set<String> = []
         var expandedDirectories: Set<String> = []
         var entries: [Entry] = []
+        var routes: [URL] = []
         while let next = pending.popLast() {
             let path = next.path
+            if !next.isCanonical { routes.append(URL(filePath: path)) }
             guard visited.insert(path).inserted else { continue }
             var value: stat
             if let metadata = next.metadata { value = metadata }
@@ -220,6 +222,7 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
             }
             entries.append(Entry(path: path, value: value, symbolicLinkDestination: symbolicLinkDestination))
         }
+        entries += try inputPathAncestors(missingPaths: [], routes: routes)
         return Self(entries: entries.sorted { $0.path < $1.path }, missingPaths: [])
     }
 }
