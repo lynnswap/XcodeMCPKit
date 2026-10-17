@@ -33,6 +33,7 @@ extension NativeToolBackend {
 @MainActor
 package final class NativeXcodeBackend: NativeToolBackend {
     private let installation: NativeXcodeInstallation
+    private let testableStateCorrection: NativeTestableStateCorrection
     private let bridge: NativeActionBridge
     private let selection: NativeToolSelection
     private let scope: NativeWorkspaceScope
@@ -44,6 +45,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
     private var previewBuildInvalidations: [URL: String?] = [:]
 
     package init(installation: NativeXcodeInstallation) async throws {
+        testableStateCorrection = try NativeTestableStateCorrection()
         self.installation = installation
         bridge = NativeActionBridge(installation: installation)
         selection = try await NativeToolSelection(installation: installation)
@@ -51,6 +53,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         workspaces = try await NativeWorkspaceRegistry(installation: installation)
         crashCorrection = NativeCrashToolCorrection(installation: installation)
         previewCorrection = NativePreviewCorrection(installation: installation)
+        try testableStateCorrection.checkFailure()
     }
 
     package var origin: [String: JSONValue]? {
@@ -79,6 +82,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
     }
 
     package func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data> {
+        try testableStateCorrection.checkFailure()
         if tools[name] == nil { _ = try await listTools() }
         try Task.checkCancellation()
         guard let tool = tools[name], let action = unsafe actions[name] else {
@@ -148,8 +152,18 @@ package final class NativeXcodeBackend: NativeToolBackend {
             // A native action's stream can overlap rendering before its mutation finishes.
             previewCorrection.invalidateReusableBuild(workspaceIdentifier: identifier)
         }
-        try workspaces.finishOpen(request: context.artifactsDirectory)
-        try await previewCorrection.retainWorkspaces(workspaces.registeredIdentifiers())
+        do {
+            try workspaces.finishOpen(request: context.artifactsDirectory)
+            try await previewCorrection.retainWorkspaces(workspaces.registeredIdentifiers())
+        } catch {
+            let original = error
+            do { try testableStateCorrection.checkFailure() }
+            catch {
+                throw NativeRuntimeError.invocation("\(error); workspace cleanup failed: \(original)")
+            }
+            throw original
+        }
+        try testableStateCorrection.checkFailure()
     }
 
     package func shutdown() async throws {
@@ -157,6 +171,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         var failures: [String] = []
         do { try await previewCorrection.shutdown() } catch { failures.append(String(describing: error)) }
         do { try await workspaces.closeAllWorkspaces() } catch { failures.append(String(describing: error)) }
+        do { try testableStateCorrection.checkFailure() } catch { failures.append(String(describing: error)) }
         if !failures.isEmpty { throw NativeRuntimeError.invocation(failures.joined(separator: "; ")) }
     }
 }
