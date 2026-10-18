@@ -138,6 +138,7 @@ struct PermissionDialogScanner {
         var inspectedWindowCount = 0
 
         for processID in processIDs {
+            guard Task.isCancelled == false else { break }
             let inspectionStartedAt = dependencies.uptimeNanoseconds()
             let processBundleIdentifier = NSRunningApplication(processIdentifier: processID)?
                 .bundleIdentifier
@@ -264,6 +265,7 @@ struct PermissionDialogScanner {
                 nowUptimeNanoseconds
 
             do {
+                guard Task.isCancelled == false else { break }
                 try dependencies.axClient.pressDefaultButton(in: matchedWindow.window)
                 approvedWindowCount += 1
                 dependencies.logger.info(
