@@ -10,6 +10,7 @@ private struct HostArguments {
     var developerDirectory: String?
     var artifactsDirectory: String?
     var maxMessageBytes = 32 * 1024 * 1024
+    var sharesCompilationCache = false
     var help = false
 
     init(_ values: [String]) throws {
@@ -18,6 +19,7 @@ private struct HostArguments {
             let argument = values[index]
             index += 1
             if argument == "--help" || argument == "-h" { help = true; continue }
+            if argument == "--share-compilation-cache" { sharesCompilationCache = true; continue }
             guard index < values.count else { throw NativeRuntimeError.invalidRequest("Missing value for \(argument)") }
             let value = values[index]
             index += 1
@@ -39,12 +41,12 @@ private enum NativeHostMain {
         do {
             let arguments = try HostArguments(Array(CommandLine.arguments.dropFirst()))
             if arguments.help {
-                print("Usage: xcode-mcp-native-host [--developer-dir path] [--artifacts-root path] [--max-message-bytes bytes]\nRun from the packaged native host application to provide headless Xcode MCP over STDIO.")
+                print("Usage: xcode-mcp-native-host [--developer-dir path] [--artifacts-root path] [--max-message-bytes bytes] [--share-compilation-cache]\nRun from the packaged native host application to provide headless Xcode MCP over STDIO.")
                 return
             }
             let developerDirectory = try selectedDeveloperDirectory(arguments)
             let installation = try NativeXcodeInstallation(developerDirectory: developerDirectory)
-            try prepareLoaderEnvironment(installation)
+            try prepareLoaderEnvironment(installation, sharesCompilationCache: arguments.sharesCompilationCache)
             guard Bundle.main.bundleIdentifier == "com.apple.dt.mcp-server" else {
                 throw NativeRuntimeError.unavailable("Run the packaged XcodeMCPNativeHost.app executable. Use scripts/build-native-host.sh to assemble it.")
             }
@@ -57,7 +59,7 @@ private enum NativeHostMain {
             signal(SIGPIPE, SIG_IGN)
             let output = FileHandle(fileDescriptor: outputDescriptor, closeOnDealloc: true)
             let bootstrap = NativeApplicationBootstrap()
-            let application = try bootstrap.application(for: installation)
+            let application = try bootstrap.application(for: installation, sharesCompilationCache: arguments.sharesCompilationCache)
             let artifacts = arguments.artifactsDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? FileManager.default.temporaryDirectory.appendingPathComponent("XcodeMCPNativeHost", isDirectory: true)
             Task { @MainActor in
@@ -130,9 +132,9 @@ private enum NativeHostMain {
         ).developerDirectory
     }
 
-    private static func prepareLoaderEnvironment(_ installation: NativeXcodeInstallation) throws {
+    private static func prepareLoaderEnvironment(_ installation: NativeXcodeInstallation, sharesCompilationCache: Bool) throws {
         let current = ProcessInfo.processInfo.environment
-        let prepared = installation.launchEnvironment(base: current)
+        let prepared = installation.launchEnvironment(base: current, sharesCompilationCache: sharesCompilationCache)
         let loaderChanged = current["DYLD_FRAMEWORK_PATH"] != prepared["DYLD_FRAMEWORK_PATH"]
             || current["DYLD_LIBRARY_PATH"] != prepared["DYLD_LIBRARY_PATH"]
         for (key, value) in prepared where current[key] != value {

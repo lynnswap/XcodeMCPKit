@@ -20,11 +20,18 @@ enum NativeHostRuntime {
     struct Configuration: Sendable {
         let nativeHostBundleURL: URL?
         let developerDirectoryURL: URL?
+        let sharesCompilationCache: Bool
         let maxBodyBytes: Int
 
-        init(nativeHostBundleURL: URL? = nil, developerDirectoryURL: URL? = nil, maxBodyBytes: Int) {
+        init(
+            nativeHostBundleURL: URL? = nil,
+            developerDirectoryURL: URL? = nil,
+            sharesCompilationCache: Bool = false,
+            maxBodyBytes: Int
+        ) {
             self.nativeHostBundleURL = nativeHostBundleURL
             self.developerDirectoryURL = developerDirectoryURL
+            self.sharesCompilationCache = sharesCompilationCache
             self.maxBodyBytes = maxBodyBytes
         }
     }
@@ -49,6 +56,7 @@ enum NativeHostRuntime {
         let invocation = try NativeHostInvocation.resolve(
             bundleURL: config.nativeHostBundleURL,
             developerDirectoryURL: developerDirectoryURL,
+            sharesCompilationCache: config.sharesCompilationCache,
             environment: environment)
         if let developerDirectoryURL { environment["DEVELOPER_DIR"] = developerDirectoryURL.path }
         let messageLimit = maxQueuedWriteBytes(for: config)

@@ -11,6 +11,7 @@ extension NativeHostRuntime.Configuration {
         self.init(
             nativeHostBundleURL: config.nativeHostBundleURL,
             developerDirectoryURL: config.developerDirectoryURL,
+            sharesCompilationCache: config.sharesCompilationCache,
             maxBodyBytes: config.maxMessageBytes
         )
     }

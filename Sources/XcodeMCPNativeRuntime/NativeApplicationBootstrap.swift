@@ -10,15 +10,17 @@ package final class NativeApplicationBootstrap {
 
     package init() {}
 
-    package func application(for installation: NativeXcodeInstallation) throws -> NSApplication {
+    package func application(for installation: NativeXcodeInstallation, sharesCompilationCache: Bool = false) throws -> NSApplication {
         let defaults = UserDefaults.standard
         defaults.addSuite(named: "com.apple.dt.Xcode")
-        var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
-        let buildSettingsKey = "IDEApplicationwideBuildSettings"
-        arguments[buildSettingsKey] = Self.compilationCacheSettings(
-            existing: defaults.dictionary(forKey: buildSettingsKey) ?? [:],
-            environment: ProcessInfo.processInfo.environment)
-        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        if sharesCompilationCache {
+            var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+            let buildSettingsKey = "IDEApplicationwideBuildSettings"
+            arguments[buildSettingsKey] = Self.compilationCacheSettings(
+                existing: defaults.dictionary(forKey: buildSettingsKey) ?? [:],
+                environment: ProcessInfo.processInfo.environment)
+            defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        }
         // Configure the installed index before Xcode initializes its chat settings.
         // The downloadable-asset coordinator can have no location in a headless host.
         do {
@@ -56,14 +58,31 @@ package final class NativeApplicationBootstrap {
 
     static func compilationCacheSettings(existing: [String: Any], environment: [String: String]) -> [String: Any] {
         var settings = existing
+        // Xcode's coverage reader needs real source paths.
+        let prefixDefault = "$(XCODE_MCPKIT_PREFIX_MAPPING_FOR_COVERAGE_$(CLANG_COVERAGE_MAPPING):default=YES)"
+        // Swift #92545 crashes cached diagnostic replay for mixed mapped/unmapped
+        // inputs with multiple primaries. Single-file jobs preserve cache reuse.
+        let batchDefault = "$(XCODE_MCPKIT_BATCH_MODE_$(SWIFT_ENABLE_COMPILE_CACHE)_$(SWIFT_ENABLE_PREFIX_MAPPING):default=YES)"
+        let projectPrefixDefault = "$(XCODE_MCPKIT_PROJECT_PREFIX_FOR_BATCH_$(SWIFT_ENABLE_BATCH_MODE):default=YES)"
+        let values = [
+            "COMPILATION_CACHE_ENABLE_CACHING_DEFAULT": "YES",
+            "SWIFT_ENABLE_PREFIX_MAPPING": prefixDefault,
+            "SWIFT_ENABLE_PROJECT_PREFIX_MAPPING": projectPrefixDefault,
+            "CLANG_ENABLE_PREFIX_MAPPING": prefixDefault,
+            "CLANG_ENABLE_PROJECT_PREFIX_MAPPING": "YES",
+        ]
         // IDE builds sanitize their build-setting environment. Supply defaults through
         // the application's build table, inheriting each project's explicit setting.
-        for key in [
-            "COMPILATION_CACHE_ENABLE_CACHING_DEFAULT",
-            "SWIFT_ENABLE_PREFIX_MAPPING", "SWIFT_ENABLE_PROJECT_PREFIX_MAPPING",
-            "CLANG_ENABLE_PREFIX_MAPPING", "CLANG_ENABLE_PROJECT_PREFIX_MAPPING",
+        for (key, value) in values where settings[key] == nil {
+            settings[key] = "$(inherited:default=\(environment[key] ?? value))"
+        }
+        for (key, value) in [
+            "XCODE_MCPKIT_PREFIX_MAPPING_FOR_COVERAGE_YES": "NO",
+            "XCODE_MCPKIT_BATCH_MODE_YES_YES": "NO",
+            "XCODE_MCPKIT_PROJECT_PREFIX_FOR_BATCH_YES": "NO",
+            "SWIFT_ENABLE_BATCH_MODE": environment["SWIFT_ENABLE_BATCH_MODE"] ?? batchDefault,
         ] where settings[key] == nil {
-            settings[key] = "$(inherited:default=\(environment[key] ?? "YES"))"
+            settings[key] = value
         }
         return settings
     }

@@ -56,6 +56,7 @@ may be incomplete, even though the server lifecycle has stopped.
 - `bindAddress`: host and port; port `0` requests an ephemeral port.
 - `nativeHostBundleURL`: signed native helper app bundle, or `nil` for automatic lookup.
 - `developerDirectoryURL`: preferred Xcode app/developer directory. Unavailable selections fall through to installed-Xcode discovery.
+- `sharesCompilationCache`: enables shared compilation caching and Swift/Clang prefix mapping in native hosts. Defaults to `false`; see [compilation caching](../../Docs/configuration.md#compilation-caching) for behavior and limits.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
 - `initializeHandshake`: typed upstream initialization for embedding.

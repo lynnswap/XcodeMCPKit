@@ -25,10 +25,10 @@ Requests already admitted before the change finish on their original host.
 To use the same Xcode installation in another independent host, add
 `"createsNewHost": true`. Select an existing host identifier to return to a
 previous host. Hosts can share an installation while keeping workspace models,
-schemes, destinations, and test-plan selections separate. Hosts enable a shared
-compilation cache and Swift/Clang prefix mapping by default, so compatible
-compilation results can be reused across worktrees. See
-[compilation caching](configuration.md#compilation-caching) for settings and limits.
+schemes, destinations, and test-plan selections separate. Start the server with
+`--share-compilation-cache` to enable shared compilation caching and Swift/Clang
+prefix mapping across its hosts. This option is off by default. See
+[compilation caching](configuration.md#compilation-caching) for usage and limits.
 
 DerivedData and build databases retain Xcode's existing locations. Builds targeting
 the same build database can encounter Xcode's native lock, including when a GUI

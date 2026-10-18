@@ -41,6 +41,9 @@ package struct ProxyServerCommand: ParsableCommand {
     )
     var requestTimeout: CLIRequestTimeout?
 
+    @Flag(help: "Share compilation caches across worktrees using compiler prefix mapping.")
+    var shareCompilationCache = false
+
     @Flag(help: "Terminate an existing proxy server on the listen port before starting.")
     var forceRestart = false
 
