@@ -77,8 +77,6 @@ final class NativePreviewCorrection {
     private struct BuildCertificate {
         let build: NativePreviewBuild.Result
         let workspaceBuilder: AnyObject
-        let roots: [URL]
-        let exclusions: Set<URL>
         let inputs: NativePreviewInputSnapshot
         let generatedInputs: NativePreviewInputSnapshot
     }
@@ -310,14 +308,8 @@ final class NativePreviewCorrection {
             do {
                 let currentBuilder = try await builder.workspaceBuilder(for: plan.destination)
                 if currentBuilder === certificate.workspaceBuilder,
-                   try NativePreviewInputSnapshot.capture(
-                       roots: certificate.inputs.prioritizedRoots(certificate.roots),
-                       excluding: certificate.exclusions, missingInputs: certificate.build.missingInputFiles) == certificate.inputs,
-                   try NativePreviewInputSnapshot.capture(
-                       roots: certificate.generatedInputs.prioritizedRoots(
-                           Array(certificate.build.generatedInputFiles)),
-                       excluding: certificate.build.generatedInputExclusions,
-                       missingInputs: certificate.build.generatedMissingInputFiles) == certificate.generatedInputs,
+                   try NativePreviewInputSnapshot.matchesCurrentFiles(
+                       source: certificate.inputs, generated: certificate.generatedInputs),
                    inputRevision == session.inputRevision {
                     inputsAreCurrent = true
                     if plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
@@ -401,7 +393,7 @@ final class NativePreviewCorrection {
         guard generatedInputs.predates(buildCompletedAt) else { return nil }
         let currentBuilder = try await builder.workspaceBuilder(for: destination)
         guard currentBuilder === workspaceBuilder, inputRevision == session.inputRevision else { return nil }
-        return BuildCertificate(build: build, workspaceBuilder: workspaceBuilder, roots: roots, exclusions: exclusions,
+        return BuildCertificate(build: build, workspaceBuilder: workspaceBuilder,
             inputs: inputs, generatedInputs: generatedInputs)
     }
 
