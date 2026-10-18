@@ -98,6 +98,11 @@ Restart the server to apply environment or preference changes to running hosts.
 These defaults apply to XcodeMCPKit's hosts; they do not change saved projects,
 GUI Xcode preferences, or shell commands.
 
+Compiler source locations such as Swift's `#filePath` can contain mapped virtual
+paths. Tests or tools that read source files or fixtures at runtime need the real
+checkout path as a separate runtime input, or bundled resources; deriving a file
+URL from `#filePath` can fail after prefix mapping.
+
 Reuse depends on compiler support and matching compilation inputs. Custom paths
 outside Xcode's standard mappings may require project-specific
 `SWIFT_OTHER_PREFIX_MAPPINGS` / `CLANG_OTHER_PREFIX_MAPPINGS`. Projects using
