@@ -359,6 +359,16 @@ final class NativePreviewBuild {
         }
         // Native builder invalidation owns workspace configuration; these trees also detect disk edits synchronously.
         var roots: Set<URL> = [workspaceURL]
+        for case let container as NSObject in containers.allObjects
+            where container.responds(to: NSSelectorFromString("pbxProject")) {
+            let dataFiles = try runtime.object(container).resolveMethodAndWait(
+                selector: "_containerDataFilePaths", as: (() -> NSArray).self)
+            for filePath in try unsafe dataFiles.unsafeInvoke() {
+                guard let url = try object(filePath as AnyObject, selector: "fileURL") as? URL,
+                      url.isFileURL, url.path.hasPrefix("/") else { return nil }
+                roots.insert(url)
+            }
+        }
         roots.formUnion(configurationFiles)
         roots.formUnion(declaredInputFiles)
         var sources: Set<URL> = [source]
