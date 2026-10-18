@@ -45,7 +45,7 @@ struct PreviewVerifierTests {
         #expect(values["DEVELOPMENT_TEAM"] as? String == "EXAMPLE")
     }
 
-    @Test(arguments: ["general", "hostless-package"])
+    @Test(arguments: ["general", "hostless-package", "remote-package"])
     func failedSelectionStopsRenderingAndClosesOnlyTheOwnedWorkspace(fixtureID: String) async throws {
         let repository = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let definition = try #require(PreviewFixtureDefinition.load(in: repository).first { $0.id == fixtureID })
