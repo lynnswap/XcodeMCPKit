@@ -100,7 +100,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         }
         var arguments = arguments
         let isPreview = unsafe NativePreviewCorrection.handles(action)
-        let invalidatesPreviewBuild = !isPreview && !tool.isReadOnly
+        let invalidatesPreviewBuild = !isPreview && tool.requiresPreviewBuildInvalidation
         if invalidatesPreviewBuild, !tool.workspaceScoped {
             previewBuildInvalidations.updateValue(nil, forKey: context.artifactsDirectory)
             previewCorrection.invalidateReusableBuild(workspaceIdentifier: nil)
@@ -175,13 +175,5 @@ package final class NativeXcodeBackend: NativeToolBackend {
         do { try await workspaces.closeAllWorkspaces() } catch { failures.append(String(describing: error)) }
         do { try testableStateCorrection.checkFailure() } catch { failures.append(String(describing: error)) }
         if !failures.isEmpty { throw NativeRuntimeError.invocation(failures.joined(separator: "; ")) }
-    }
-}
-
-private extension NativeTool {
-    var isReadOnly: Bool {
-        guard case .object(let fields) = descriptor,
-              case .object(let annotations) = fields["annotations"] else { return false }
-        return annotations["readOnlyHint"] == .bool(true)
     }
 }

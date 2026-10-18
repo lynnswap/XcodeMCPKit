@@ -6,6 +6,26 @@ package struct NativeTool: Equatable, Sendable {
     package let descriptor: JSONValue
     package let workspaceScoped: Bool
 
+    package var requiresPreviewBuildInvalidation: Bool {
+        if case .object(let fields) = descriptor,
+           case .object(let annotations) = fields["annotations"],
+           case .bool(let readOnly) = annotations["readOnlyHint"] {
+            return !readOnly
+        }
+        return !Self.knownQueries.contains(name)
+    }
+
+    // Xcode's native ToolSchema omits annotations, so known queries need a local
+    // classification to preserve reusable builds without changing advertised schemas.
+    private static let knownQueries: Set<String> = [
+        "DocumentationSearch", "GetBuildLog", "GetConsoleOutput", "GetFileCompilerFlags",
+        "GetTargetBuildSettings", "GetTestList", "GetTopCrashIssues", "GetCrashIssueLogs",
+        "GetTopFieldPerformanceIssues", "GetFieldPerformanceIssueLogs",
+        "StringCatalogContext", "StringCatalogRead", "XcodeGlob", "XcodeGrep", "XcodeLS",
+        "XcodeRead", "XcodeListRunDestinations", "XcodeListSchemes", "XcodeListTargets",
+        "XcodeListTemplates", "XcodeListTestPlans", "XcodeListWorkspaces",
+    ]
+
     package var acceptsWorkspaceIdentifier: Bool {
         guard case .object(let fields) = descriptor,
               case .object(let input) = fields["inputSchema"],
