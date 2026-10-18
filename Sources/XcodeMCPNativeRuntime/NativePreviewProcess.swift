@@ -1,14 +1,31 @@
 import Foundation
+import Darwin
 import Synchronization
 
 @MainActor
 final class NativePreviewProcess {
+    nonisolated struct TerminationFailure: Error, CustomStringConvertible {
+        let process: Process
+        let executable: String
+        let errnoValue: Int32
+
+        var processIdentifier: Int32 { process.processIdentifier }
+
+        var description: String {
+            let failure = NSError(domain: NSPOSIXErrorDomain, code: Int(errnoValue))
+            return "Could not send SIGKILL to \(executable) (PID \(processIdentifier)): \(failure); the process may still be running"
+        }
+    }
+
     private let installation: NativeXcodeInstallation
     private let artifacts: URL
+    private let sendSignal: @Sendable (Int32, Int32) -> Int32
 
-    init(installation: NativeXcodeInstallation, artifacts: URL) {
+    init(installation: NativeXcodeInstallation, artifacts: URL,
+         sendSignal: @escaping @Sendable (Int32, Int32) -> Int32 = { kill($0, $1) }) {
         self.installation = installation
         self.artifacts = artifacts
+        self.sendSignal = sendSignal
     }
 
     func run(_ executable: String, _ arguments: [String], environment launchEnvironment: [String: String] = [:],
@@ -37,25 +54,56 @@ final class NativePreviewProcess {
         process.environment = environment
         process.standardOutput = output
         process.standardError = errors
-        let cancelled = Mutex(false)
+        let sendSignal = sendSignal
+        let cancellation = Mutex((cancelled: false, continuation: Optional<CheckedContinuation<Int32, any Error>>.none))
         let status: Int32 = try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
-                process.terminationHandler = { completed in
-                    continuation.resume(returning: completed.terminationStatus)
+                process.terminationHandler = { [process] completed in
+                    defer { process.terminationHandler = nil }
+                    let pending = cancellation.withLock { state in
+                        let pending = state.continuation
+                        state.continuation = nil
+                        return pending
+                    }
+                    pending?.resume(returning: completed.terminationStatus)
                 }
                 do {
-                    try cancelled.withLock { cancelled in
-                        guard !cancelled else { throw CancellationError() }
+                    try cancellation.withLock { state in
+                        state.continuation = continuation
+                        guard !state.cancelled else { throw CancellationError() }
                         try process.run()
                     }
                 }
-                catch { continuation.resume(throwing: error) }
+                catch {
+                    process.terminationHandler = nil
+                    let pending = cancellation.withLock { state in
+                        let pending = state.continuation
+                        state.continuation = nil
+                        return pending
+                    }
+                    pending?.resume(throwing: error)
+                }
             }
         } onCancel: {
-            cancelled.withLock { cancelled in
-                cancelled = true
-                if process.isRunning { process.terminate() }
+            let running = cancellation.withLock { state in
+                state.cancelled = true
+                return process.isRunning
+            }
+            if running {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+                    let pending = cancellation.withLock { state -> (CheckedContinuation<Int32, any Error>, TerminationFailure)? in
+                        guard process.isRunning, sendSignal(process.processIdentifier, SIGKILL) != 0 else { return nil }
+                        let failure = errno
+                        guard failure != ESRCH, let continuation = state.continuation else { return nil }
+                        state.continuation = nil
+                        return (continuation, TerminationFailure(process: process, executable: executable, errnoValue: failure))
+                    }
+                    if let (continuation, failure) = pending {
+                        continuation.resume(throwing: failure)
+                    }
+                }
             }
         }
         let text = String(decoding: try Data(contentsOf: logURL), as: UTF8.self)

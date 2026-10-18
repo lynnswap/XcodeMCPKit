@@ -89,6 +89,32 @@ struct NativePreviewBuildTests {
         return (NativePreviewBuild(installation: try NativeXcodeInstallation(developerDirectory: app)), root)
     }
 
+    @Test func inputRootsDetectReferencedProjectConfigurationChangesOutsideWorkspace() throws {
+        let (builder, root) = try sourceSelectionBuilder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspaceURL = root.appendingPathComponent("Workspace/Fixture.xcworkspace")
+        let projectFile = root.appendingPathComponent("Project/Fixture.xcodeproj/project.pbxproj")
+        let source = root.appendingPathComponent("Sources/View.swift")
+        for directory in [workspaceURL, projectFile.deletingLastPathComponent(), source.deletingLastPathComponent()] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        try Data("SWIFT_VERSION = 6.0".utf8).write(to: projectFile)
+        try Data("struct View {}".utf8).write(to: source)
+        let container = PreviewBuildProjectContainer(dataFiles: [PreviewBuildFilePath(url: projectFile)])
+        let workspace = PreviewBuildWorkspace(url: workspaceURL, containers: [container])
+        let build = NativePreviewBuild.Result(targets: [], previewRoots: [], destinationIdentifier: "destination",
+            previewDestinationIdentifier: "preview", platformIdentifier: nil, previewPlatform: nil, platformName: nil,
+            deviceModelName: nil, systemVersion: nil, declaredInputFiles: [])
+        let roots = try #require(try builder.inputRoots(workspace: workspace, build: build, source: source))
+        let before = try NativePreviewInputSnapshot.capture(roots: roots)
+        #expect(try before.matchesCurrentFiles())
+
+        try Data("SWIFT_VERSION = 6.3".utf8).write(to: projectFile)
+
+        #expect(try NativePreviewInputSnapshot.capture(roots: roots) != before)
+        #expect(try !before.matchesCurrentFiles())
+    }
+
     @Test func resolvesRunnableAndUsesNativeBuildableEquality() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let app = root.appendingPathComponent("Xcode.app")
@@ -224,4 +250,34 @@ private final class PreviewBuildBuildable: NSObject {
         (object as? PreviewBuildBuildable)?.identity == identity
     }
     override var hash: Int { identity.hashValue }
+}
+
+private final class PreviewBuildFilePath: NSObject {
+    @objc let fileURL: URL
+    init(url: URL) { fileURL = url }
+}
+
+private final class PreviewBuildWorkspace: NSObject {
+    @objc let representingFilePath: PreviewBuildFilePath
+    @objc let referencedContainers: NSSet
+    init(url: URL, containers: [PreviewBuildProjectContainer]) {
+        representingFilePath = PreviewBuildFilePath(url: url)
+        referencedContainers = NSSet(array: containers)
+    }
+}
+
+private final class PreviewBuildProjectContainer: NSObject {
+    @objc let pbxProject = PreviewBuildProject()
+    private let dataFiles: NSArray
+    init(dataFiles: [PreviewBuildFilePath]) { self.dataFiles = dataFiles as NSArray }
+    @objc func _containerDataFilePaths() -> NSArray { dataFiles }
+}
+
+private final class PreviewBuildProject: NSObject {
+    @objc let targets: NSArray = []
+    @objc let buildConfigurationList = PreviewBuildConfigurationList()
+}
+
+private final class PreviewBuildConfigurationList: NSObject {
+    @objc let buildConfigurations: NSArray = []
 }

@@ -1,10 +1,56 @@
 import Foundation
 import Testing
+import XcodeMCPWire
 @testable import XcodeMCPNativeRuntime
 
 @Suite
 @MainActor
 struct NativePreviewProcessTests {
+    @Test func rendererDirectoryEventsObserveAtomicReplacements() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let file = fixture.root.appendingPathComponent("PreviewRequest.json")
+        try Data("before".utf8).write(to: file, options: .atomic)
+
+        let value = try await PreviewRendererFileEvents.withEvents(in: fixture.root) { changes, _ in
+            #expect(try String(contentsOf: file, encoding: .utf8) == "before")
+            var events = changes.makeAsyncIterator()
+            let registered = await events.next()
+            #expect(registered != nil)
+
+            try Data("after".utf8).write(to: file, options: .atomic)
+            let changed = await events.next()
+            #expect(changed != nil)
+            return try String(contentsOf: file, encoding: .utf8)
+        }
+        #expect(value == "after")
+    }
+
+    @Test func cancelledRendererDirectoryWaitFinishes() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let ready = AsyncStream<Void>.makeStream()
+        let task = Task {
+            defer { ready.continuation.finish() }
+            try await PreviewRendererFileEvents.withEvents(in: fixture.root) { changes, _ in
+                var events = changes.makeAsyncIterator()
+                _ = await events.next()
+                ready.continuation.yield(())
+                while await events.next() != nil { try Task.checkCancellation() }
+                try Task.checkCancellation()
+            }
+        }
+        defer { task.cancel() }
+        var readiness = ready.stream.makeAsyncIterator()
+        _ = await readiness.next()
+        task.cancel()
+
+        do {
+            try await task.value
+            Issue.record("A cancelled renderer directory wait returned success")
+        } catch is CancellationError {}
+    }
+
     @Test func localizedRendererUsesRequestedBundleResourcesAndLocale() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -84,16 +130,97 @@ struct NativePreviewProcessTests {
         #expect(kill(pid, 0) == -1)
     }
 
+    @Test func cancelledCommandThatIgnoresTerminationIsReaped() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let marker = fixture.root.appendingPathComponent("pid")
+        let command = "trap '' TERM; echo $$ > '\(marker.path)'; exec /bin/sleep 12"
+        let readinessDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let task = Task { try await fixture.process.run("/bin/sh", ["-c", command]) }
+        defer { task.cancel() }
+        var identifier: Int32?
+        while identifier == nil, ContinuousClock.now < readinessDeadline {
+            if let value = try? String(contentsOf: marker, encoding: .utf8) {
+                identifier = Int32(value.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            if identifier == nil { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        let pid = try #require(identifier)
+        let cancelledAt = ContinuousClock.now
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("A cancelled preview command returned success")
+        } catch is CancellationError {}
+        #expect(cancelledAt.duration(to: ContinuousClock.now) < .seconds(5))
+        #expect(kill(pid, 0) == -1)
+    }
+
+    @Test func failedCancellationReportsItsLiveChildAndObservesItsEventualExit() async throws {
+        let fixture = try Fixture(sendSignal: { identifier, signal in
+            if signal == SIGKILL {
+                errno = EPERM
+                return -1
+            }
+            return kill(identifier, signal)
+        })
+        defer { fixture.remove() }
+        let marker = fixture.root.appendingPathComponent("pid")
+        let command = "trap '' TERM; echo $$ > '\(marker.path)'; exec /bin/sleep 12"
+        let readinessDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let task = Task { try await fixture.process.run("/bin/sh", ["-c", command]) }
+        defer { task.cancel() }
+        var identifier: Int32?
+        while identifier == nil, ContinuousClock.now < readinessDeadline {
+            if let value = try? String(contentsOf: marker, encoding: .utf8) {
+                identifier = Int32(value.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            if identifier == nil { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        let pid = try #require(identifier)
+        defer { _ = kill(pid, SIGKILL) }
+        let cancelledAt = ContinuousClock.now
+        task.cancel()
+        var terminationFailure: NativePreviewProcess.TerminationFailure?
+        do {
+            _ = try await task.value
+            Issue.record("A failed cancellation returned success")
+        } catch let error as NativePreviewProcess.TerminationFailure {
+            terminationFailure = error
+        }
+        let failure = try #require(terminationFailure)
+        #expect(cancelledAt.duration(to: ContinuousClock.now) < .seconds(5))
+        #expect(failure.errnoValue == EPERM)
+        #expect(failure.executable == "/bin/sh")
+        #expect(failure.processIdentifier == pid)
+        #expect(failure.description.contains("may still be running"))
+        #expect(failure.process.isRunning)
+        #expect(kill(pid, 0) == 0)
+
+        #expect(kill(pid, SIGKILL) == 0)
+        let exitDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while failure.process.terminationHandler != nil, ContinuousClock.now < exitDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!failure.process.isRunning)
+        #expect(failure.process.terminationHandler == nil)
+        let alive = kill(pid, 0)
+        let exitErrno = errno
+        #expect(alive == -1)
+        #expect(exitErrno == ESRCH)
+    }
+
     @MainActor
     private struct Fixture {
         let root: URL
         let process: NativePreviewProcess
 
-        init() throws {
+        init(sendSignal: @escaping @Sendable (Int32, Int32) -> Int32 = { kill($0, $1) }) throws {
             root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
             let app = root.appendingPathComponent("Xcode.app")
             try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"), withIntermediateDirectories: true)
-            process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: app), artifacts: root)
+            process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: app), artifacts: root,
+                                           sendSignal: sendSignal)
         }
 
         func remove() { try? FileManager.default.removeItem(at: root) }
