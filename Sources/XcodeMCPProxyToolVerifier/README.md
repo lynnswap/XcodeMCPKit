@@ -86,6 +86,7 @@ swift run xcode-mcp-proxy-tool-verifier previews prepare \
 | `widget` | iOS app display previews, WidgetKit, Intent/AppIntent configuration, Live Activity, empty timelines, and cancellation |
 | `framework` | Standalone framework previews and a bundle resource |
 | `hostless-package` | macOS Swift package library with a SwiftUI preview and no app host |
+| `remote-package` | macOS app using a remote Swift package product, for automatic dependency-resolution checks |
 | `general` | UIKit views/controllers, grouped and legacy SwiftUI previews, shared context, and preview state |
 | `physical` | App and Widget extension with a source-selected physical device |
 | `physical-bare` | The existing app fixture without a Widget extension, using the physical source variant |
