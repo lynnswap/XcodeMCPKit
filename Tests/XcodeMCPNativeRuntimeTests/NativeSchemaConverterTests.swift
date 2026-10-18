@@ -5,6 +5,28 @@ import XcodeMCPWire
 
 @Suite
 struct NativeSchemaConverterTests {
+    @Test(arguments: ["GetBuildLog", "XcodeRead"])
+    func nativeQueriesPreservePreviewBuildsWithoutAddingAnnotations(name: String) throws {
+        let tool = try NativeSchemaConverter.tool(from: Data(#"{"name":"\#(name)","inputSchema":{"properties":[]}}"#.utf8), workspaceScoped: false)
+        #expect(!tool.requiresPreviewBuildInvalidation)
+        #expect(tool.descriptor == .object([
+            "name": .string(name),
+            "inputSchema": .object(["type": .string("object"), "properties": .object([:]), "required": .array([])]),
+        ]))
+    }
+
+    @Test func unknownToolsInvalidatePreviewBuilds() throws {
+        let tool = try NativeSchemaConverter.tool(from: Data(#"{"name":"FutureNativeTool","inputSchema":{"properties":[]}}"#.utf8), workspaceScoped: false)
+        #expect(tool.requiresPreviewBuildInvalidation)
+    }
+
+    @Test func explicitNativeHintsOverridePreviewBuildClassification() throws {
+        let query = try NativeSchemaConverter.tool(from: Data(#"{"name":"GetBuildLog","annotations":{"readOnlyHint":false},"inputSchema":{"properties":[]}}"#.utf8), workspaceScoped: false)
+        #expect(query.requiresPreviewBuildInvalidation)
+        let futureQuery = try NativeSchemaConverter.tool(from: Data(Self.richNativeSchema.utf8), workspaceScoped: false)
+        #expect(!futureQuery.requiresPreviewBuildInvalidation)
+    }
+
     @Test func explicitWorkspaceInputsRemainResolvableWithoutStatefulConformance() throws {
         let tool = try NativeSchemaConverter.tool(from: Data(#"{"name":"CloseWorkspace","inputSchema":{"properties":[{"name":"workspaceIdentifier","type":{"string":{}},"isRequired":true}]}}"#.utf8), workspaceScoped: false)
         #expect(!tool.workspaceScoped)
