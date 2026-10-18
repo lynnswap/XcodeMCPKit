@@ -5,7 +5,7 @@ import XcodeMCPWire
 
 @Suite
 struct NativeSchemaConverterTests {
-    @Test(arguments: ["GetBuildLog", "XcodeRead"])
+    @Test(arguments: ["GetBuildLog", "GetTestList", "XcodeRead"])
     func nativeQueriesPreservePreviewBuildsWithoutAddingAnnotations(name: String) throws {
         let tool = try NativeSchemaConverter.tool(from: Data(#"{"name":"\#(name)","inputSchema":{"properties":[]}}"#.utf8), workspaceScoped: false)
         #expect(!tool.requiresPreviewBuildInvalidation)
