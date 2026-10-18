@@ -9,6 +9,8 @@ struct ServerCommandTests {
         #expect(config.bindAddress == .localhost())
         #expect(config.nativeHostBundleURL == nil)
         #expect(config.developerDirectoryURL == nil)
+        #expect(!config.sharesCompilationCache)
+        #expect(!(try config.runtimeConfiguration()).sharesCompilationCache)
         #expect(config.maxBodyBytes == 1_048_576)
         #expect(config.requestTimeout == .seconds(300))
     }
@@ -18,10 +20,13 @@ struct ServerCommandTests {
             "--listen", "0.0.0.0:9999",
             "--max-body-bytes", "2048",
             "--request-timeout", "12.5",
+            "--share-compilation-cache",
         ])
         #expect(config.bindAddress == .init(host: "0.0.0.0", port: 9999))
         #expect(config.maxBodyBytes == 2048)
         #expect(config.requestTimeout == .seconds(12.5))
+        #expect(config.sharesCompilationCache)
+        #expect((try config.runtimeConfiguration()).sharesCompilationCache)
     }
 
     @Test func serverCommandAllowsPortZeroAndZeroTimeout() throws {
@@ -91,6 +96,15 @@ struct ServerCommandTests {
         )
         guard case .dryRun(let command) = action else { Issue.record("expected dry run"); return }
         #expect(command == "xcode-mcp-proxy-server --listen localhost:8765")
+    }
+
+    @Test func dryRunPreservesCompilationCacheSharing() throws {
+        let action = try XcodeMCPProxyServer.resolveLaunchAction(
+            arguments: ["xcode-mcp-proxy-server", "--share-compilation-cache", "--dry-run"],
+            environment: [:]
+        )
+        guard case .dryRun(let command) = action else { Issue.record("expected dry run"); return }
+        #expect(command == "xcode-mcp-proxy-server --listen localhost:8765 --share-compilation-cache")
     }
 
     @Test func serverCommandRejectsConflictingAddressOptions() {

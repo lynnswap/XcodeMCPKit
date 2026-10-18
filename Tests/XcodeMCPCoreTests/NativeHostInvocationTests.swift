@@ -24,15 +24,18 @@ struct NativeHostInvocationTests {
         #expect(invocation.command == helper.resolvingSymlinksInPath().path)
     }
 
-    @Test func explicitBundlePreservesTheSelectedXcode() throws {
+    @Test(arguments: [false, true])
+    func explicitBundlePreservesTheSelectedXcode(sharesCompilationCache: Bool) throws {
         var fileSystem = FileSystemClient.testValue
         fileSystem.isExecutableFile = { $0 == "/embedded/Owned.app/Contents/MacOS/xcode-mcp-native-host" }
         let invocation = try NativeHostInvocation.resolve(
             bundleURL: URL(fileURLWithPath: "/embedded/Owned.app"),
             developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app"),
+            sharesCompilationCache: sharesCompilationCache,
             environment: [:], executableURL: nil, fileSystem: fileSystem)
         #expect(invocation.command == "/embedded/Owned.app/Contents/MacOS/xcode-mcp-native-host")
-        #expect(invocation.arguments == ["--developer-dir", "/Applications/Xcode.app"])
+        #expect(invocation.arguments == ["--developer-dir", "/Applications/Xcode.app"]
+            + (sharesCompilationCache ? ["--share-compilation-cache"] : []))
     }
 
     @Test func explicitMissingBundleDoesNotSelectAnotherInstalledHelper() {

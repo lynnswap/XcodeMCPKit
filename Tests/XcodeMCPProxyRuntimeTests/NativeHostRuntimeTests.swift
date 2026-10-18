@@ -208,6 +208,17 @@ struct NativeHostRuntimeTests {
         #expect(configuration.environment["XCODE_PID"] == nil)
         #expect(configuration.environment["DEVELOPER_DIR"] == "/Parent/Developer")
         #expect(configuration.environment["PATH"] == "/usr/bin")
+        #expect(!configuration.args.contains("--share-compilation-cache"))
+    }
+
+    @Test(arguments: [false, true])
+    func compilationCacheSharingReachesTheOwnedHost(sharesCompilationCache: Bool) throws {
+        var config = makeConfig(requestTimeout: 5)
+        config.sharesCompilationCache = sharesCompilationCache
+        let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
+            config: makeBridgeRuntimeConfig(config), baseEnvironment: [:])
+
+        #expect(configuration.args.contains("--share-compilation-cache") == sharesCompilationCache)
     }
 
     @Test func launchdBuildServicePathReachesNativeHostConfiguration() async throws {

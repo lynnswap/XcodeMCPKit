@@ -63,6 +63,7 @@ private extension ProxyServerCommand {
             developerDirectoryURL: environment["DEVELOPER_DIR"].flatMap { value in
                 value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : URL(fileURLWithPath: value)
             },
+            sharesCompilationCache: shareCompilationCache,
             maxBodyBytes: maxBodyBytes ?? 1_048_576,
             requestTimeout: timeout > 0 ? .seconds(timeout) : nil,
             discovery: .file(ProxyFilesystemLocations.discoveryFileURL(environment: environment))
@@ -113,6 +114,9 @@ private extension ProxyServerCommand {
         }
         if let requestTimeout {
             arguments += ["--request-timeout", requestTimeout.description]
+        }
+        if configuration.sharesCompilationCache {
+            arguments.append("--share-compilation-cache")
         }
         if forceRestart {
             arguments.append("--force-restart")

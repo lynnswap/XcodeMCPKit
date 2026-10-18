@@ -13,6 +13,7 @@ struct CLIUsageContractTests {
             "--port <port>",
             "--max-body-bytes <max-body-bytes>",
             "--request-timeout <request-timeout>",
+            "--share-compilation-cache",
             "--force-restart",
             "--dry-run",
             "--version",

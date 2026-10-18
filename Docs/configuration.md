@@ -53,6 +53,7 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. Port `0` selects an available port. |
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialization remains bounded. |
 | `--max-body-bytes bytes` | Maximum accepted HTTP request body size. |
+| `--share-compilation-cache` | Enable shared compilation caching and Swift/Clang prefix mapping in native hosts. Off by default; see [compilation caching](#compilation-caching). |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port before starting. |
 | `--dry-run` | Print the resolved server command without starting it. |
 
@@ -68,6 +69,73 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `XCODE_MCP_PROXY_ENDPOINT` | STDIO adapter upstream URL. `--url` takes precedence. |
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
 | `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root for the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
+
+### Compilation caching
+
+Start the server with `--share-compilation-cache` to reuse compatible
+compilation results across worktrees:
+
+```bash
+xcode-mcp-proxy-server --share-compilation-cache
+```
+
+This opt-in enables compilation caching and Swift/Clang prefix mapping in native
+hosts for builds, tests, runs, and previews. Xcode maps project, intermediate,
+product, SDK, and toolchain paths to common virtual paths. Without the flag,
+hosts preserve existing build settings and cache preferences.
+
+The compilation cache uses the existing `CompilationCachingCASPath` preference
+from `org.swift.swift-build` (with `com.apple.dt.XCBuild` as a fallback). Without
+a preference, hosts use
+`~/Library/Developer/Xcode/DerivedData/CompilationCache.noindex`. This location
+stays the same when workspaces use different DerivedData directories. DerivedData
+locations and build databases are not changed.
+
+With the flag enabled, inherited environment values take precedence over these
+defaults:
+
+| Variable | Default |
+| --- | --- |
+| `COMPILATION_CACHE_ENABLE_CACHING_DEFAULT` | `YES` |
+| `SWIFT_ENABLE_PREFIX_MAPPING` / `CLANG_ENABLE_PREFIX_MAPPING` | `YES`, except in code-coverage builds. |
+| `SWIFT_ENABLE_PROJECT_PREFIX_MAPPING` | `YES` when Swift batch mode is disabled. |
+| `CLANG_ENABLE_PROJECT_PREFIX_MAPPING` | `YES`. |
+| `SWIFT_ENABLE_BATCH_MODE` | `NO` when Swift compilation caching and prefix mapping are enabled; otherwise the normal default. |
+| `CompilationCachingCASPath` | Existing preference or the shared path above. |
+
+Coverage builds keep compilation caching enabled but disable prefix mapping by
+default, so Xcode and `xccov` can resolve source paths in coverage reports.
+Their compilation keys remain dependent on checkout and DerivedData paths.
+
+Swift uses single-file compilation jobs to avoid
+[Swift #92545](https://github.com/swiftlang/swift/issues/92545), a crash when
+replaying cached diagnostics for batched jobs with mixed mapped and unmapped
+inputs. Job-level parallelism and cache reuse remain enabled. If a target
+explicitly enables batch mode, project prefix mapping defaults to `NO` for that
+target. With a toolchain containing the [compiler fix](https://github.com/swiftlang/swift/pull/92779),
+callers can explicitly enable both batch mode and project prefix mapping.
+
+Project build settings can override caching and prefix mapping. For example,
+`COMPILATION_CACHE_ENABLE_CACHING=NO` disables caching for that project.
+Restart the server to apply environment or preference changes to running hosts.
+These defaults apply to XcodeMCPKit's hosts; they do not change saved projects,
+GUI Xcode preferences, or shell commands.
+
+Compiler source locations such as Swift's `#filePath` can contain mapped virtual
+paths. Tests or tools that read source files or fixtures at runtime need the real
+checkout path as a separate runtime input, or bundled resources; deriving a file
+URL from `#filePath` can fail after prefix mapping.
+
+Debugger source lookup can also require manual LLDB source-map settings for
+sources in dependency projects. If the debugger cannot display source files,
+configure the relevant source maps or restart the server without
+`--share-compilation-cache`.
+
+Reuse depends on compiler support and matching compilation inputs. Custom paths
+outside Xcode's standard mappings may require project-specific
+`SWIFT_OTHER_PREFIX_MAPPINGS` / `CLANG_OTHER_PREFIX_MAPPINGS`. Projects using
+Swift macros can also require a build service that normalizes macro executable
+paths, such as the [custom Swift Build service](https://github.com/lynnswap/swift-build/tree/main/Utilities/CustomXcodeBuildService).
 
 ### Custom build services
 

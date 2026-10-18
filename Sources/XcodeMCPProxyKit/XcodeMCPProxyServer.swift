@@ -95,6 +95,9 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Preferred Xcode app or developer directory. Unavailable selections use discovery.
     public var developerDirectoryURL: URL?
 
+    /// Whether to share compilation caches across worktrees using compiler prefix mapping.
+    public var sharesCompilationCache: Bool
+
     /// Maximum accepted HTTP request body size in bytes.
     public var maxBodyBytes: Int
 
@@ -117,6 +120,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///   - nativeHostBundleURL: Native helper application bundle, or `nil` to use the installed helper.
     ///   - developerDirectoryURL: Preferred Xcode app or developer directory.
     ///     Unavailable selections fall through to installed-Xcode discovery.
+    ///   - sharesCompilationCache: Whether to share compilation caches across worktrees. Defaults to `false`.
     ///   - maxBodyBytes: Maximum accepted HTTP request body size.
     ///   - requestTimeout: Request timeout, or `nil` to disable it.
     ///   - discovery: Endpoint discovery policy.
@@ -126,6 +130,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         bindAddress: BindAddress = .localhost(),
         nativeHostBundleURL: URL? = nil,
         developerDirectoryURL: URL? = nil,
+        sharesCompilationCache: Bool = false,
         maxBodyBytes: Int = 1_048_576,
         requestTimeout: Duration? = .seconds(300),
         initializeHandshake: InitializeHandshake? = nil,
@@ -135,6 +140,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         self.bindAddress = bindAddress
         self.nativeHostBundleURL = nativeHostBundleURL
         self.developerDirectoryURL = developerDirectoryURL
+        self.sharesCompilationCache = sharesCompilationCache
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
         self.initializeHandshake = initializeHandshake
@@ -353,7 +359,8 @@ public final class XcodeMCPProxyServer: Sendable {
                 makeRuntime: { config in
                     let invocation = try NativeHostInvocation.resolve(
                         bundleURL: config.nativeHostBundleURL,
-                        developerDirectoryURL: config.developerDirectoryURL
+                        developerDirectoryURL: config.developerDirectoryURL,
+                        sharesCompilationCache: config.sharesCompilationCache
                     )
                     var resolved = config
                     resolved.nativeHostBundleURL = URL(fileURLWithPath: invocation.command)
@@ -460,6 +467,7 @@ extension XcodeMCPProxyServerConfiguration {
         let configuration = ProxyRuntimeConfiguration(
             nativeHostBundleURL: nativeHostBundleURL,
             developerDirectoryURL: developerDirectoryURL,
+            sharesCompilationCache: sharesCompilationCache,
             maxMessageBytes: maxBodyBytes,
             requestTimeout: timeout,
             prewarmToolsList: prewarmToolsList,
