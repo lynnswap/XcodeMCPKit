@@ -122,6 +122,52 @@ struct NativePreviewBuildTests {
         #expect(try !afterRemoval.matchesCurrentFiles())
     }
 
+    @Test func projectSynchronizationSkipsSourceChangesButRefreshesSavedProjects() async throws {
+        let (builder, root) = try sourceSelectionBuilder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let projectFile = root.appendingPathComponent("Fixture.xcodeproj/project.pbxproj")
+        let alternate = projectFile.deletingLastPathComponent().appendingPathComponent("project.xcproj")
+        let source = root.appendingPathComponent("View.swift")
+        try FileManager.default.createDirectory(at: projectFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("first project".utf8).write(to: projectFile)
+        try Data("first view".utf8).write(to: source)
+        let container = PreviewBuildProjectContainer(dataFiles: [projectFile, alternate].map(PreviewBuildFilePath.init(url:)))
+        let workspace = PreviewBuildWorkspace(url: root.appendingPathComponent("Fixture.xcworkspace"), containers: [container])
+
+        try await builder.synchronizeProjectContainers(in: workspace)
+        #expect(container.synchronizationCount == 1)
+        try Data("edited view".utf8).write(to: source)
+        try await builder.synchronizeProjectContainers(in: workspace)
+        #expect(container.synchronizationCount == 1)
+
+        try Data("edited project".utf8).write(to: projectFile)
+        try await builder.synchronizeProjectContainers(in: workspace)
+        #expect(container.synchronizationCount == 2)
+        try Data("alternate project".utf8).write(to: alternate)
+        try await builder.synchronizeProjectContainers(in: workspace)
+        #expect(container.synchronizationCount == 3)
+
+        // A new workspace must refresh even when it opens the same files.
+        let replacement = PreviewBuildWorkspace(url: workspace.representingFilePath.fileURL, containers: [container])
+        try await builder.synchronizeProjectContainers(in: replacement)
+        #expect(container.synchronizationCount == 4)
+    }
+
+    @Test func untrackableProjectSettingsContinueRefreshing() async throws {
+        let (builder, root) = try sourceSelectionBuilder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let projectFile = root.appendingPathComponent("project.pbxproj")
+        try Data("project".utf8).write(to: projectFile)
+        let container = PreviewBuildProjectContainer(dataFiles: [PreviewBuildFilePath(url: projectFile)])
+        container.pbxProject.targets = nil
+        let workspace = PreviewBuildWorkspace(url: root.appendingPathComponent("Fixture.xcworkspace"), containers: [container])
+
+        try await builder.synchronizeProjectContainers(in: workspace)
+        try await builder.synchronizeProjectContainers(in: workspace)
+
+        #expect(container.synchronizationCount == 2)
+    }
+
     @Test func resolvesRunnableAndUsesNativeBuildableEquality() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let app = root.appendingPathComponent("Xcode.app")
@@ -262,26 +308,48 @@ private final class PreviewBuildBuildable: NSObject {
 private final class PreviewBuildFilePath: NSObject {
     @objc let fileURL: URL
     init(url: URL) { fileURL = url }
+    @objc func invalidateFilePath() {}
+    @objc func modificationDate() -> NSDate? { nil }
 }
 
 private final class PreviewBuildWorkspace: NSObject {
     @objc let representingFilePath: PreviewBuildFilePath
     @objc let referencedContainers: NSSet
+    @objc let executionEnvironment = PreviewBuildExecutionEnvironment()
     init(url: URL, containers: [PreviewBuildProjectContainer]) {
         representingFilePath = PreviewBuildFilePath(url: url)
         referencedContainers = NSSet(array: containers)
     }
+    @objc(_cancelOngoingBuildWithCompletionBlockIfNeeded:)
+    func cancelOngoingBuild(_ completion: (@convention(block) () -> Void)?) -> Bool { false }
 }
 
 private final class PreviewBuildProjectContainer: NSObject {
     @objc let pbxProject = PreviewBuildProject()
+    @objc let isValid = true
+    @objc let containerEditedByUserInUI = false
+    @objc let objectGraph = PreviewBuildObjectGraph()
+    private(set) var synchronizationCount = 0
     private let dataFiles: NSArray
     init(dataFiles: [PreviewBuildFilePath]) { self.dataFiles = dataFiles as NSArray }
     @objc func _containerDataFilePaths() -> NSArray { dataFiles }
+    @objc(_invalidateContainerToDiscardInMemoryRepresentation:)
+    func invalidateContainer(_ discard: Bool) { synchronizationCount += 1 }
+}
+
+private final class PreviewBuildObjectGraph: NSObject {
+    @objc let changeQueue = OperationQueue()
+}
+
+private final class PreviewBuildExecutionEnvironment: NSObject {
+    @objc(disableSubmissionOfBuildOperationsWithReason:)
+    func disableBuilds(_ reason: String) {}
+    @objc(enableSubmissionOfBuildOperationsWithReason:)
+    func enableBuilds(_ reason: String) {}
 }
 
 private final class PreviewBuildProject: NSObject {
-    @objc let targets: NSArray = []
+    @objc var targets: NSArray? = []
     @objc let buildConfigurationList = PreviewBuildConfigurationList()
 }
 
