@@ -14,6 +14,7 @@ final class NativePreviewCorrection {
     let snapshotImages = SnapshotImages()
     private var renders: [UUID: (workspace: String, task: Task<JSONValue, any Error>)] = [:]
 
+    @MainActor
     private final class WorkspaceSession {
         let directory: URL
         let artifactsRoot: URL
@@ -59,6 +60,11 @@ final class NativePreviewCorrection {
         init(_ build: NativePreviewBuild.Result) {
             identifier = build.destinationIdentifier
             systemVersion = build.systemVersion
+        }
+
+        init(_ destination: NativePreviewBuild.Destination) {
+            identifier = destination.identifier
+            systemVersion = destination.systemVersion
         }
     }
 
@@ -831,9 +837,13 @@ final class NativePreviewCorrection {
         let workspace = prepared.workspace
         let location = prepared.location
         var destination = prepared.destination
+        async let simulatorPreparation: Void = { @MainActor in
+            try await self.prepareSimulator(session: session, destination: prepared.destination.selected, process: process)
+        }()
         var build: NativePreviewBuild.Result
         if let retained = prepared.retainedBuild { build = retained.build }
         else { build = try await builder.build(workspace: workspace, destination: destination, source: prepared.source) }
+        try await simulatorPreparation
         guard var platform = build.previewPlatform else { throw NativePipelineRequired() }
         try await update(session, build: build, source: prepared.source, platform: platform,
                          signature: prepared.retainedBuild?.signature, process: process)
@@ -1132,16 +1142,8 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.unsupportedContract("The preview product has no bundle identifier")
         }
         let simctl = session.simctlArguments
-        if session.simulator == nil {
-            let allocation = Task { @MainActor in
-                try await self.createSimulator(build: build, deviceSet: session.simulatorDeviceSet, process: process)
-            }
-            let simulator = try await allocation.value
-            session.simulator = simulator
-            session.simulatorDestination = SimulatorDestination(build)
-            _ = try await process.xcrun(simctl + ["boot", simulator.identifier])
-            _ = try await process.xcrun(simctl + ["bootstatus", simulator.identifier, "-b"])
-        }
+        try await prepareSimulator(session: session, destination: SimulatorDestination(build),
+            platformName: build.platformName, deviceModelName: build.deviceModelName, process: process)
         guard let simulator = session.simulator else { throw NativeRuntimeError.invocation("The preview Simulator was not created") }
         if !stage.installed {
             if stage.processIdentifier != nil { try await stop(stage, session: session, process: process) }
@@ -2265,7 +2267,35 @@ final class NativePreviewCorrection {
         let deviceType: URL
     }
 
-    private func createSimulator(build: NativePreviewBuild.Result, deviceSet: URL,
+    private func prepareSimulator(session: WorkspaceSession, destination: NativePreviewBuild.Destination,
+                                  process: NativePreviewProcess) async throws {
+        guard destination.previewPlatform?.isSimulator == true else { return }
+        try await prepareSimulator(session: session, destination: SimulatorDestination(destination),
+            platformName: destination.platformName, deviceModelName: destination.deviceModelName, process: process)
+    }
+
+    private func prepareSimulator(session: WorkspaceSession, destination: SimulatorDestination,
+                                  platformName: String?, deviceModelName: String?, process: NativePreviewProcess) async throws {
+        if let simulator = session.simulator, session.simulatorDestination != destination {
+            _ = try await process.xcrun(session.simctlArguments + ["delete", simulator.identifier])
+            session.simulator = nil
+            session.simulatorDestination = nil
+            session.installedApplications.removeAll()
+        }
+        guard session.simulator == nil else { return }
+        // Finish allocation before cancellation cleanup so the session owns every created device.
+        let allocation = Task { @MainActor in
+            try await self.createSimulator(destination: destination, platformName: platformName,
+                deviceModelName: deviceModelName, deviceSet: session.simulatorDeviceSet, process: process)
+        }
+        let simulator = try await allocation.value
+        session.simulator = simulator
+        session.simulatorDestination = destination
+        _ = try await process.xcrun(session.simctlArguments + ["boot", simulator.identifier])
+        _ = try await process.xcrun(session.simctlArguments + ["bootstatus", simulator.identifier, "-b"])
+    }
+
+    private func createSimulator(destination: SimulatorDestination, platformName: String?, deviceModelName: String?, deviceSet: URL,
                                  process: NativePreviewProcess) async throws -> Simulator {
         let inventoryData = Data(try await process.xcrun(["simctl", "list", "--json"]).utf8)
         guard let inventory = try JSONSerialization.jsonObject(with: inventoryData) as? [String: Any] else {
@@ -2273,9 +2303,9 @@ final class NativePreviewCorrection {
         }
         let destinations = inventory["devices"] as? [String: [[String: Any]]] ?? [:]
         guard let selected = destinations.compactMap({ runtime, devices -> (String, [String: Any])? in
-            devices.first(where: { $0["udid"] as? String == build.destinationIdentifier }).map { (runtime, $0) }
+            devices.first(where: { $0["udid"] as? String == destination.identifier }).map { (runtime, $0) }
         }).first, let deviceID = selected.1["deviceTypeIdentifier"] as? String else {
-            throw NativeRuntimeError.unavailable("The selected Simulator \(build.destinationIdentifier) is no longer installed")
+            throw NativeRuntimeError.unavailable("The selected Simulator \(destination.identifier) is no longer installed")
         }
         let runtimeID = selected.0
         let type = (inventory["devicetypes"] as? [[String: Any]])?.first { $0["identifier"] as? String == deviceID }
@@ -2286,10 +2316,10 @@ final class NativePreviewCorrection {
             "XcodeMCPPreview-\(UUID().uuidString)", deviceID, runtimeID])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return Simulator(identifier: identifier,
-            destination: ["identifier": .string(build.destinationIdentifier),
-                "platformName": .string(build.platformName ?? "iOS"),
-                "deviceModelName": .string(build.deviceModelName ?? selected.1["name"] as? String ?? deviceID),
-                "systemVersion": .string(build.systemVersion ?? runtimeID)], deviceType: deviceType)
+            destination: ["identifier": .string(destination.identifier),
+                "platformName": .string(platformName ?? "iOS"),
+                "deviceModelName": .string(deviceModelName ?? selected.1["name"] as? String ?? deviceID),
+                "systemVersion": .string(destination.systemVersion ?? runtimeID)], deviceType: deviceType)
     }
 
     private static func bundleInfo(at bundle: URL) throws -> [String: Any] {

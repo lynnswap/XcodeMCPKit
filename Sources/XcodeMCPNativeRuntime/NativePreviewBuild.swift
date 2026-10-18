@@ -146,6 +146,17 @@ final class NativePreviewBuild {
     private var clients: [UUID: Cancellation] = [:]
     private var performMethod: NativeSwiftMethod<@concurrent (AnyObject, AnyObject) async throws -> AnyObject>?
     private var sourceSelections: [ObjectIdentifier: [SourceSelectionWaiter]] = [:]
+    private var synchronizedProjects: [ObjectIdentifier: ProjectSynchronization] = [:]
+
+    private final class ProjectSynchronization {
+        weak var workspace: AnyObject?
+        let inputs: NativePreviewInputSnapshot
+
+        init(workspace: AnyObject, inputs: NativePreviewInputSnapshot) {
+            self.workspace = workspace
+            self.inputs = inputs
+        }
+    }
 
     private struct SourceSelectionWaiter {
         let identifier: UUID
@@ -171,6 +182,14 @@ final class NativePreviewBuild {
 
     func synchronizeProjectContainers(in workspace: AnyObject) async throws {
         try Task.checkCancellation()
+        synchronizedProjects = synchronizedProjects.filter { $0.value.workspace != nil }
+        let identifier = ObjectIdentifier(workspace)
+        if let previous = synchronizedProjects[identifier], previous.workspace === workspace,
+           let current = try? projectConfigurationSnapshot(in: workspace), current == previous.inputs {
+            return
+        }
+        synchronizedProjects[identifier] = nil
+        let synchronizationStartedAt = Date()
         guard let containers = try object(workspace, selector: "referencedContainers") as? NSSet else {
             throw NativeRuntimeError.unsupportedContract("The native workspace has no referenced containers")
         }
@@ -260,6 +279,31 @@ final class NativePreviewBuild {
             throw NativeRuntimeError.invocation("\(operation); failed to resume native build submissions: \(error)")
         }
         try outcome.get()
+        // A source edit or invalidated build certificate does not require replacing project models.
+        // Only certify settings that were already saved before those models were refreshed.
+        if let inputs = try? projectConfigurationSnapshot(in: workspace), inputs.predates(synchronizationStartedAt) {
+            synchronizedProjects[identifier] = ProjectSynchronization(workspace: workspace, inputs: inputs)
+        }
+    }
+
+    private func projectConfigurationSnapshot(in workspace: AnyObject) throws -> NativePreviewInputSnapshot? {
+        guard let containers = try object(workspace, selector: "referencedContainers") as? NSSet,
+              let configurationPaths = try configurationFilePaths(in: containers),
+              let configurationFiles = trackableConfigurationFiles(configurationPaths) else { return nil }
+        var roots = configurationFiles
+        var missing: Set<URL> = []
+        for case let container as NSObject in containers.allObjects
+            where container !== workspace && container.responds(to: NSSelectorFromString("pbxProject")) {
+            let dataFiles = try runtime.object(container).resolveMethodAndWait(
+                selector: "_containerDataFilePaths", as: (() -> NSArray).self)
+            for filePath in try unsafe dataFiles.unsafeInvoke() {
+                guard let url = try object(filePath as AnyObject, selector: "fileURL") as? URL,
+                      url.isFileURL, url.path.hasPrefix("/") else { return nil }
+                if FileManager.default.fileExists(atPath: url.path) { roots.insert(url) }
+                else { missing.insert(url) }
+            }
+        }
+        return try NativePreviewInputSnapshot.capture(roots: Array(roots), missingInputs: missing)
     }
 
     func prepare(workspace: AnyObject) async throws -> NativeSwiftMethod<@concurrent (AnyObject, AnyObject) async throws -> AnyObject> {
@@ -341,10 +385,7 @@ final class NativePreviewBuild {
         return (baseFiles, watchedFiles)
     }
 
-    func inputRoots(workspace: AnyObject, build: Result, source: URL, excluding: Set<URL> = []) throws -> (roots: [URL], missing: Set<URL>)? {
-        guard let declaredInputFiles = build.declaredInputFiles,
-              let containers = try object(workspace, selector: "referencedContainers") as? NSSet,
-              let configurationPaths = try configurationFilePaths(in: containers) else { return nil }
+    private func trackableConfigurationFiles(_ configurationPaths: (bases: [URL: AnyObject], watched: [URL: AnyObject])) -> Set<URL>? {
         let baseFiles = Set(configurationPaths.bases.keys)
         let watchedFiles = Set(configurationPaths.watched.keys)
         let configurationFiles = baseFiles.union(watchedFiles)
@@ -353,6 +394,14 @@ final class NativePreviewBuild {
             guard let text = try? String(contentsOf: file, encoding: .utf8), !text.utf8.contains(0x3f) else { return nil }
             if baseFiles.contains(file), text.utf8.contains(0x23), !watchedFiles.contains(file) { return nil }
         }
+        return configurationFiles
+    }
+
+    func inputRoots(workspace: AnyObject, build: Result, source: URL, excluding: Set<URL> = []) throws -> (roots: [URL], missing: Set<URL>)? {
+        guard let declaredInputFiles = build.declaredInputFiles,
+              let containers = try object(workspace, selector: "referencedContainers") as? NSSet,
+              let configurationPaths = try configurationFilePaths(in: containers),
+              let configurationFiles = trackableConfigurationFiles(configurationPaths) else { return nil }
         guard let filePath = try object(workspace, selector: "representingFilePath"),
               let workspaceURL = try object(filePath, selector: "fileURL") as? URL else {
             throw NativeRuntimeError.unsupportedContract("The native workspace has no representing file URL")
