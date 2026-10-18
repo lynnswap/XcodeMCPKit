@@ -279,6 +279,30 @@ struct PreviewVerifierTests {
         #expect(stale.image?.exactPixels == true)
     }
 
+    @Test(arguments: ["no-op-edit", "changed-repeat", "unexpected-condition"])
+    func comparisonRejectsMatchingButInvalidRequestSequences(scenario: String) throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let native = root.appendingPathComponent("native")
+        let headless = root.appendingPathComponent("headless")
+        let conditions = ["initial", "unchanged-repeat", scenario == "unexpected-condition" ? "other" : "source-edit"]
+        let digests = ["original", scenario == "changed-repeat" ? "changed" : "original",
+            scenario == "no-op-edit" ? "original" : "edited"]
+        for (backend, directory) in [(PreviewBackend.native, native), (.headless, headless)] {
+            try createPreviewOutput(directory)
+            var report = successfulReport(backend: backend)
+            report.samples = zip(conditions, digests).map { condition, digest in
+                PreviewCaptureSample(condition: condition, elapsedSeconds: 1, sourceSHA256: digest,
+                    metadata: .object(["displayName": "Preview"]), snapshot: "preview.png")
+            }
+            try writePNG(directory.appendingPathComponent("preview.png"), red: 1)
+            try writePreviewJSON(report, to: directory.appendingPathComponent("capture.json"))
+            #expect(!report.passed)
+        }
+        let comparison = try PreviewComparison.compare(native: native, headless: headless)
+        #expect(!comparison.passed)
+    }
+
     private func captureReport(backend: PreviewBackend) -> PreviewCaptureReport {
         PreviewCaptureReport(backend: backend, fixture: "fixture",
             preview: PreviewVerificationCase(id: "preview", sourceFile: "View.swift", navigatorPath: "Fixture/View.swift",

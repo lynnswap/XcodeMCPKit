@@ -69,11 +69,7 @@ struct PreviewComparison: Codable {
             result.image = try comparePreviewImages(native.appendingPathComponent(nativeSnapshot), headless.appendingPathComponent(headlessSnapshot))
         } catch { result.unavailableReasons.append("Cannot compare snapshots: \(errorDescription(error))") }
         if nativeCapture.samples != nil || headlessCapture.samples != nil {
-            let lhs = nativeCapture.samples ?? []
-            let rhs = headlessCapture.samples ?? []
-            if lhs.map(\.condition) != rhs.map(\.condition) || lhs.count != 3 {
-                result.unavailableReasons.append("Both captures need the same complete request sequence")
-            } else {
+            if let lhs = nativeCapture.samples, let rhs = headlessCapture.samples {
                 for (nativeSample, headlessSample) in zip(lhs, rhs) {
                     do {
                         result.samples.append(PreviewSampleComparison(condition: nativeSample.condition,
@@ -83,6 +79,8 @@ struct PreviewComparison: Codable {
                                 headless.appendingPathComponent(headlessSample.snapshot))))
                     } catch { result.unavailableReasons.append("Cannot compare \(nativeSample.condition): \(errorDescription(error))") }
                 }
+            } else {
+                result.unavailableReasons.append("Both captures need the same complete request sequence")
             }
         }
         result.passed = result.unavailableReasons.isEmpty && result.metadata.values.allSatisfy(\.matches)

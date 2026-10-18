@@ -40,7 +40,12 @@ struct PreviewCaptureReport: Codable {
     var clientClosed = false
 
     var passed: Bool {
-        operationSucceeded && failure == nil && cleanupErrors.isEmpty && clientClosed
+        if let samples {
+            guard samples.map(\.condition) == ["initial", "unchanged-repeat", "source-edit"],
+                  samples[0].sourceSHA256 == samples[1].sourceSHA256,
+                  samples[0].sourceSHA256 != samples[2].sourceSHA256 else { return false }
+        }
+        return operationSucceeded && failure == nil && cleanupErrors.isEmpty && clientClosed
             && (backend == .headless ? workspaceClosed : nativeDocumentClosed)
     }
 }
