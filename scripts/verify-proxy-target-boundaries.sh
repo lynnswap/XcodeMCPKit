@@ -31,6 +31,11 @@ reject_matches() {
 }
 
 reject_matches \
+    "permission automation must not import native execution, proxy routing, or SDK modules" \
+    '^[[:space:]]*import[[:space:]]+(XcodeMCPCore|XcodeMCPKit|XcodeMCPNative[A-Za-z0-9_]*|XcodeMCPProxy[A-Za-z0-9_]*)([[:space:].;]|$)' \
+    Sources/XcodeMCPPermissionAutomation
+
+reject_matches \
     "XcodeMCPProxyRuntime must not import NIOHTTP1" \
     '^import NIOHTTP1$' \
     Sources/XcodeMCPProxyRuntime
@@ -70,11 +75,14 @@ if ! jq -e '
     def directlyUses($target; $dependency):
         ($graph[$target] | index($dependency)) != null;
     def hasOnlyNativeDependencies($target):
-        dependencies($target) | all(test("^(NIO|CNIO|_NIO|XcodeMCPCore$|XcodeMCPKit$|XcodeMCPProxy)") | not);
+        dependencies($target) | all(test("^(NIO|CNIO|_NIO|XcodeMCPCore$|XcodeMCPKit$|XcodeMCPProxy|XcodeMCPPermissionAutomation$)") | not);
     hasOnlyNativeDependencies("XcodeMCPNativeHost") and
     hasOnlyNativeDependencies("XcodeMCPNativeRuntime") and
     ($graph["XcodeMCPInstallation"] == []) and
     ($graph["XcodeMCPWire"] == []) and
+    ($graph["XcodeMCPPermissionAutomation"] == ["Logging"]) and
+    excludes("XcodeMCPProxyRuntime"; ["XcodeMCPPermissionAutomation"]) and
+    excludes("XcodeMCPProxyHTTP"; ["XcodeMCPPermissionAutomation"]) and
     directlyUses("XcodeMCPNativeHost"; "XcodeMCPInstallation") and
     directlyUses("XcodeMCPNativeRuntime"; "XcodeMCPInstallation") and
     directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPInstallation") and
@@ -100,7 +108,8 @@ if ! jq -e '
     directlyUses("XcodeMCPProxyHTTP"; "XcodeMCPProxyRuntimeContract") and
     directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPProxyRuntimeContract") and
     directlyUses("XcodeMCPProxyKit"; "XcodeMCPProxyRuntime") and
-    directlyUses("XcodeMCPProxyKit"; "XcodeMCPProxyHTTP")
+    directlyUses("XcodeMCPProxyKit"; "XcodeMCPProxyHTTP") and
+    directlyUses("XcodeMCPProxyKit"; "XcodeMCPPermissionAutomation")
 ' <<< "${package_description}" >/dev/null; then
     echo "error: package dependencies violate the native-host, shared-core, or proxy ownership boundaries" >&2
     exit 1

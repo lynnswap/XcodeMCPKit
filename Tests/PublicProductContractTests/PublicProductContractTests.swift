@@ -1105,6 +1105,7 @@ func compileOnlyProxyConfigurationSurface() {
             ]
         ),
         discovery: .file(URL(fileURLWithPath: "/tmp/xcode-mcp-discovery.json")),
+        approvalPolicy: .automatic,
         prewarmToolsList: false
     )
     let typedHandshake = config.initializeHandshake

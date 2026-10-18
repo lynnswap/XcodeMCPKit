@@ -39,6 +39,11 @@ waits for the previous host to stop.
 Shutdown first cancels shared catalog callers, then retires the host and drains
 owned request and event tasks. The host closes workspace resources it owns.
 
+With `--auto-approve`, the server also owns a permission-dialog monitor using
+`XcodeMCPPermissionAutomation`. It approves GUI Xcode MCP connections for all
+agents through Accessibility and stops during server shutdown. This monitor
+does not participate in tool routing.
+
 ## Ports and discovery
 
 The server binds `localhost:8765` by default. `--listen`, `--host`, `--port`, and

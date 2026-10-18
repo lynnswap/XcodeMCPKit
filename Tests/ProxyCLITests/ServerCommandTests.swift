@@ -10,6 +10,7 @@ struct ServerCommandTests {
         #expect(config.nativeHostBundleURL == nil)
         #expect(config.developerDirectoryURL == nil)
         #expect(!config.sharesCompilationCache)
+        #expect(config.approvalPolicy == .manual)
         #expect(!(try config.runtimeConfiguration()).sharesCompilationCache)
         #expect(config.maxBodyBytes == 1_048_576)
         #expect(config.requestTimeout == .seconds(300))
@@ -21,11 +22,13 @@ struct ServerCommandTests {
             "--max-body-bytes", "2048",
             "--request-timeout", "12.5",
             "--share-compilation-cache",
+            "--auto-approve",
         ])
         #expect(config.bindAddress == .init(host: "0.0.0.0", port: 9999))
         #expect(config.maxBodyBytes == 2048)
         #expect(config.requestTimeout == .seconds(12.5))
         #expect(config.sharesCompilationCache)
+        #expect(config.approvalPolicy == .automatic)
         #expect((try config.runtimeConfiguration()).sharesCompilationCache)
     }
 
@@ -49,7 +52,7 @@ struct ServerCommandTests {
     }
 
     @Test(arguments: [
-        "--auto-approve", "--config", "--native-host-bundle", "--developer-dir", "--refresh-code-issues-mode",
+        "--config", "--native-host-bundle", "--developer-dir", "--refresh-code-issues-mode",
         "--upstream-processes", "--xcode-mode", "--session-id", "--upstream-command",
         "--upstream-args", "--upstream-arg",
     ])
@@ -87,6 +90,7 @@ struct ServerCommandTests {
         ])
         #expect(config.initializeHandshake == nil)
         #expect(config.prewarmToolsList)
+        #expect(config.approvalPolicy == .manual)
     }
 
     @Test func dryRunUsesAutomaticNativeSelection() throws {
@@ -105,6 +109,15 @@ struct ServerCommandTests {
         )
         guard case .dryRun(let command) = action else { Issue.record("expected dry run"); return }
         #expect(command == "xcode-mcp-proxy-server --listen localhost:8765 --share-compilation-cache")
+    }
+
+    @Test func dryRunPreservesAutomaticApproval() throws {
+        let action = try XcodeMCPProxyServer.resolveLaunchAction(
+            arguments: ["xcode-mcp-proxy-server", "--auto-approve", "--dry-run"],
+            environment: [:]
+        )
+        guard case .dryRun(let command) = action else { Issue.record("expected dry run"); return }
+        #expect(command == "xcode-mcp-proxy-server --listen localhost:8765 --auto-approve")
     }
 
     @Test func serverCommandRejectsConflictingAddressOptions() {

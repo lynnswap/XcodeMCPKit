@@ -18,18 +18,22 @@ extension XcodeMCPProxyServer {
             let httpGateway: any ProxyHTTPGatewayServing
             let runtime: any ProxyRuntimeServing
             let endpoint: Endpoint
+            let autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
 
             init(
                 httpGateway: any ProxyHTTPGatewayServing,
                 runtime: any ProxyRuntimeServing,
-                endpoint: Endpoint
+                endpoint: Endpoint,
+                autoApprover: (any ProxyServerPermissionDialogAutoApprover)?
             ) {
                 self.httpGateway = httpGateway
                 self.runtime = runtime
                 self.endpoint = endpoint
+                self.autoApprover = autoApprover
             }
 
             func signalCancellation() {
+                autoApprover?.cancel()
                 httpGateway.cancelForDeinit()
                 runtime.cancelForDeinit()
             }
@@ -105,6 +109,7 @@ extension XcodeMCPProxyServer {
             resources = acquired
             lastEndpoint = acquired.endpoint
 
+            acquired.autoApprover?.start()
             acquired.runtime.start()
             logStartupSummary(for: acquired)
             phase = .running
@@ -291,7 +296,9 @@ extension XcodeMCPProxyServer {
                 return Resources(
                     httpGateway: httpGateway,
                     runtime: runtime,
-                    endpoint: boundEndpoint
+                    endpoint: boundEndpoint,
+                    autoApprover: configuration.approvalPolicy == .automatic
+                        ? dependencies.makeAutoApprover(configuration) : nil
                 )
             } catch {
                 let operationError = error
@@ -361,6 +368,7 @@ extension XcodeMCPProxyServer {
                 firstError = error
             }
 
+            await resources.autoApprover?.shutdown()
             await resources.runtime.shutdown()
 
             if let firstError {

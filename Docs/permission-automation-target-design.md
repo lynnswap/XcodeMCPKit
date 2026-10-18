@@ -1,7 +1,9 @@
 # Xcode Permission Automation Target Design
 
-> Historical design/investigation. Accessibility permission automation was removed.
-> See [native routing migration](migrations/native-backend.md) for the current automatic native permission flow.
+> Historical extraction design. The package-internal Accessibility module and
+> `--auto-approve` monitor are available; the diagnostic executable described
+> below is not restored. See [automatic connection approval](configuration.md#automatic-connection-approval)
+> for current usage and [maintainer architecture](maintainer-architecture.md) for current ownership.
 
 
 ## Scope contract

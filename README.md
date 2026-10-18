@@ -38,6 +38,16 @@ xcode-mcp-proxy-server
 
 Keep this terminal open while using MCP. You can leave Xcode closed.
 
+To also automatically allow MCP connections to the Xcode app, start the server
+with `--auto-approve`. This includes other agents connecting directly to Xcode:
+
+```bash
+xcode-mcp-proxy-server --auto-approve
+```
+
+Grant macOS Accessibility access to the server's host process when prompted.
+Without the flag, GUI connection dialogs require manual approval.
+
 ### Connect your MCP client
 
 In another terminal, run the command for your client.

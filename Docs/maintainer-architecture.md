@@ -78,7 +78,10 @@
   DocumentationSearch directly. The runtime serving protocol in `XcodeMCPProxyRuntimeContract` connects these
   two owners. The contract retains the NIOCore timeout value without exposing
   channels or event loops.
-- `XcodeMCPProxyKit` composes Runtime, HTTP, and the SDK
+- `XcodeMCPPermissionAutomation` owns Accessibility dialog matching, process
+  discovery, and the opt-in approval monitor. It depends only on Logging and
+  system frameworks; native hosts and request routing do not depend on it.
+- `XcodeMCPProxyKit` composes Runtime, HTTP, permission automation, and the SDK
   session authority used by its STDIO adapter. Its internal files contain
   facade, CLI, installation, and launch concerns.
 - `XcodeMCPProxyCLI`, `XcodeMCPProxyServer`, and `XcodeMCPProxyInstall` depend on

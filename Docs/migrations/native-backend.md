@@ -10,11 +10,13 @@ schemes, or destinations. See [Select a workspace](../usage.md#select-a-workspac
 
 ## Server and CLI
 
-Remove `--auto-approve` and `XcodeMCPProxyServerConfiguration.approvalPolicy`.
-The `ApprovalPolicy` type and Accessibility permission automation are removed.
-The helper executes headless tools without updating Xcode's agent permission
-store. Startup neither registers an agent identity nor grants access to other
-clients. Existing permission settings from earlier builds are left as they are.
+`--auto-approve` and `XcodeMCPProxyServerConfiguration.approvalPolicy` remain
+available as explicit opt-ins for GUI Xcode MCP connection dialogs, including
+external agents. They require macOS Accessibility access. The default is manual
+approval. See [automatic connection approval](../configuration.md#automatic-connection-approval).
+The native helper executes headless tools independently of this monitor.
+Server startup does not register agent identities or rewrite Xcode's permission
+store; automatic approval operates the visible `Allow` button.
 
 Remove `--upstream-processes` and `upstreamProcessCount`. One native host serves
 concurrent requests; there is no replacement process-count setting.

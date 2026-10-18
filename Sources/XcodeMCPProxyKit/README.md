@@ -57,6 +57,7 @@ may be incomplete, even though the server lifecycle has stopped.
 - `nativeHostBundleURL`: signed native helper app bundle, or `nil` for automatic lookup.
 - `developerDirectoryURL`: preferred Xcode app/developer directory. Unavailable selections fall through to installed-Xcode discovery.
 - `sharesCompilationCache`: enables shared compilation caching and Swift/Clang prefix mapping in native hosts. Defaults to `false`; see [compilation caching](../../Docs/configuration.md#compilation-caching) for behavior and limits.
+- `approvalPolicy`: `.manual` by default. `.automatic` approves GUI Xcode MCP connection dialogs for all agents, including clients outside this proxy, using macOS Accessibility access.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
 - `initializeHandshake`: typed upstream initialization for embedding.
@@ -70,7 +71,9 @@ lazily; tool definitions come from the selected Xcode's headless catalog.
 Install `XcodeMCPNativeHost.app` beside the proxy executable, or supply its bundle
 URL. Missing helpers or required native contracts return diagnostics. The helper
 owns its AppKit event loop. Server startup does not require a GUI workspace or
-Xcode Service and does not change Xcode's agent permission store.
+Xcode Service. With `.automatic` approval, a separate monitor presses `Allow` on
+GUI Xcode MCP connection dialogs until server shutdown. It does not change tool
+routing or directly rewrite Xcode's agent permission store.
 
 Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` do not select a proxy backend.
 For a standalone headless or generic MCP process, use `XcodeMCPKit`'s explicit
