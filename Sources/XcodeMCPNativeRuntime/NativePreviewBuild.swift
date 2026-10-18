@@ -341,7 +341,7 @@ final class NativePreviewBuild {
         return (baseFiles, watchedFiles)
     }
 
-    func inputRoots(workspace: AnyObject, build: Result, source: URL, excluding: Set<URL> = []) throws -> [URL]? {
+    func inputRoots(workspace: AnyObject, build: Result, source: URL, excluding: Set<URL> = []) throws -> (roots: [URL], missing: Set<URL>)? {
         guard let declaredInputFiles = build.declaredInputFiles,
               let containers = try object(workspace, selector: "referencedContainers") as? NSSet,
               let configurationPaths = try configurationFilePaths(in: containers) else { return nil }
@@ -359,6 +359,7 @@ final class NativePreviewBuild {
         }
         // Native builder invalidation owns workspace configuration; these trees also detect disk edits synchronously.
         var roots: Set<URL> = [workspaceURL]
+        var missing: Set<URL> = []
         for case let container as NSObject in containers.allObjects
             where container.responds(to: NSSelectorFromString("pbxProject")) {
             let dataFiles = try runtime.object(container).resolveMethodAndWait(
@@ -366,7 +367,9 @@ final class NativePreviewBuild {
             for filePath in try unsafe dataFiles.unsafeInvoke() {
                 guard let url = try object(filePath as AnyObject, selector: "fileURL") as? URL,
                       url.isFileURL, url.path.hasPrefix("/") else { return nil }
-                roots.insert(url)
+                // Native containers include alternate project formats that need not exist on disk.
+                if FileManager.default.fileExists(atPath: url.path) { roots.insert(url) }
+                else { missing.insert(url) }
             }
         }
         roots.formUnion(configurationFiles)
@@ -447,7 +450,7 @@ final class NativePreviewBuild {
                 retained[candidate.components, default: []].append(candidateExclusions)
             }
         }
-        return result
+        return (result, missing)
     }
 
     func build(workspace: AnyObject, destination selection: DestinationSelection, source: URL) async throws -> Result {

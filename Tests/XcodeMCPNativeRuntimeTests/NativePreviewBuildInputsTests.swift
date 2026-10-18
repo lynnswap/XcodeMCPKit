@@ -123,6 +123,17 @@ struct NativePreviewBuildInputsTests {
             generatedPaths: [URL(filePath: "/build/Generated")]) == files)
     }
 
+    @Test func generatedPathFilteringUsesWholeNormalizedAncestors() {
+        let root = URL(filePath: "/build/生成物")
+        let direct = root.appendingPathComponent("Source.swift")
+        let nested = root.appendingPathComponent("Nested/../子/Source.swift")
+        let sibling = URL(filePath: "/build/生成物-other/Source.swift")
+        let inputs: Set<URL> = [root, direct, nested, sibling]
+        #expect(NativePreviewBuildInputs.removingGeneratedPaths(from: inputs, generatedPaths: [root]) == [sibling])
+        #expect(NativePreviewBuildInputs.removingGeneratedPaths(from: inputs, generatedPaths: [URL(filePath: "/")]).isEmpty)
+        #expect(NativePreviewBuildInputs.removingGeneratedPaths(from: inputs, generatedPaths: []) == inputs)
+    }
+
     @Test func swiftOutputMapFindsTransitiveHeadersAndModuleDependencies() throws {
         let map = URL(filePath: "/build/Target-OutputFileMap.json")
         let objectDependencies = URL(filePath: "/build/A.d")

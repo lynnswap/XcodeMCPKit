@@ -24,16 +24,24 @@ struct NativePreviewBuildInputs {
     }
 
     static func removingGeneratedPaths(from files: Set<URL>, generatedPaths: Set<URL>) -> Set<URL> {
-        let paths = Set(generatedPaths.map { $0.standardizedFileURL.path })
+        guard !files.isEmpty, !generatedPaths.isEmpty else { return files }
+        let paths = Set(generatedPaths.map { file in
+            var path = file.standardizedFileURL.path
+            path.makeContiguousUTF8()
+            return path
+        })
         return files.filter { file in
             // Non-filesystem source identifiers remain subject to the caller's input validation.
             guard file.isFileURL, file.path.hasPrefix("/") else { return true }
-            var components = file.standardizedFileURL.pathComponents
-            while !components.isEmpty {
-                if paths.contains(NSString.path(withComponents: components)) { return false }
-                components.removeLast()
+            var path = file.standardizedFileURL.path
+            // Foundation path strings can retain UTF-16 storage; keep ancestor lookups in Swift's native storage.
+            path.makeContiguousUTF8()
+            while true {
+                if paths.contains(path) { return false }
+                guard path != "/", let slash = path.lastIndex(of: "/") else { return true }
+                if slash == path.startIndex { path = "/" }
+                else { path.removeSubrange(slash...) }
             }
-            return true
         }
     }
 

@@ -113,7 +113,10 @@ enum PreviewVerifierCommand {
                 transport: .localBridge(.custom(command: executable.path, arguments: arguments, environment: environment)),
                 clientName: "PreviewToolVerifier", clientVersion: "1", requestTimeout: .seconds(timeout + 60)))
             client = connection
-            await runner.capture(client: connection)
+            let sequenceEdit = try options.url("sequence-edit").map {
+                try JSONDecoder().decode(PreviewSourceEdit.self, from: Data(contentsOf: $0))
+            }
+            await runner.capture(client: connection, sequenceEdit: sequenceEdit)
         } catch {
             runner.report.failure = errorDescription(error)
         }
@@ -151,6 +154,7 @@ enum PreviewVerifierCommand {
       xcode-mcp-proxy-tool-verifier previews capture --fixture DIRECTORY --case NAME
         --developer-dir PATH --destination TITLE --output DIRECTORY
         [--backend headless|native] [--native-host APP] [--xcode-pid PID] [--timeout SECONDS]
+        [--sequence-edit JSON_FILE]
       xcode-mcp-proxy-tool-verifier previews compare --native CAPTURE --headless CAPTURE --output DIRECTORY
 
     prepare copies a tracked project and its source variant. build-settings JSON is
@@ -160,6 +164,9 @@ enum PreviewVerifierCommand {
     without --native-host it builds the repository's signed debug host first.
     compare requires successful captures of the same case, inputs, and Xcode build.
     Captures retain raw responses, PNGs, selection, source hashes, and cleanup results.
+    --sequence-edit runs an initial capture, an unchanged repeat, then XcodeUpdate and
+    a third capture in the same workspace. JSON supplies oldString and newString.
+    Each condition retains its source hash, metadata, PNG, and elapsed seconds.
     """
 }
 
@@ -174,7 +181,7 @@ struct PreviewVerifierOptions {
         }
         action = arguments[0]
         let known: Set<String> = ["fixture", "output", "device-name", "build-settings", "case", "developer-dir",
-            "destination", "backend", "native-host", "xcode-pid", "timeout", "native", "headless"]
+            "destination", "backend", "native-host", "xcode-pid", "timeout", "native", "headless", "sequence-edit"]
         var parsed: [String: String] = [:]
         var index = 1
         while index < arguments.count {

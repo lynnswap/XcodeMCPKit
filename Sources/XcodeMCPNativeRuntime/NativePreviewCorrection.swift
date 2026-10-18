@@ -381,9 +381,10 @@ final class NativePreviewCorrection {
         guard let buildStartedAt = build.buildStartedAt, let buildCompletedAt = build.buildCompletedAt,
               let workspaceBuilder = build.workspaceBuilder else { return nil }
         let outputPaths = build.inputCaptureExclusions.union([session.artifactsRoot])
-        guard let roots = try builder.inputRoots(workspace: workspace, build: build, source: source, excluding: outputPaths) else { return nil }
-        let exclusions = NativePreviewInputSnapshot.coalescedExclusions(outputPaths, roots: roots)
-        let inputs = try await NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions, missingInputs: build.missingInputFiles)
+        guard let inputsToCapture = try builder.inputRoots(workspace: workspace, build: build, source: source, excluding: outputPaths) else { return nil }
+        let exclusions = NativePreviewInputSnapshot.coalescedExclusions(outputPaths, roots: inputsToCapture.roots)
+        let inputs = try await NativePreviewInputSnapshot.capture(roots: inputsToCapture.roots, excluding: exclusions,
+            missingInputs: build.missingInputFiles.union(inputsToCapture.missing))
         // A post-build snapshot must not certify source edits that arrived during the build.
         guard inputs.predates(buildStartedAt) else { return nil }
         let generatedInputs = try await NativePreviewInputSnapshot.capture(

@@ -434,8 +434,9 @@ and any unmatched-preference warning. `renderedDestination` describes the native
 plan's chosen destination. Destinations unsupported by the direct renderer retain
 the native pipeline.
 Every request resolves destination preferences and availability through Xcode and
-retains its current warnings. It also runs an incremental build of the active
-scheme. When the compiled products, workspace execution context, selected
+retains its current warnings. Repeated requests can reuse a validated build when
+its inputs, settings, and products remain unchanged. Other requests run an incremental
+build of the active scheme. When the compiled products, workspace execution context, selected
 definition and localization, and native destination resolution are unchanged, the
 session reuses its previous native source plan. If those inputs change or building
 with a retained plan fails, the host repeats native source planning.
@@ -448,9 +449,9 @@ the evaluated content domain and effective destination preferences. Nonempty
 operation preferences take precedence over source preferences. These RenderPreview
 requests use the native Location's `none` requirements. The session retains metadata
 for each definition and localization while its build products and destination
-remain unchanged. Each request evaluates the declaration and view body again and
-captures a new image. The current build also determines whether the host can
-reuse staged products and processes. Changes to built code, resources,
+remain unchanged. Identical direct requests retain their mounted content and
+capture a new image; changed preview options remount that content. The current
+build also determines whether the host can reuse staged products and processes. Changes to built code, resources,
 dependencies, or destination invalidate the retained metadata and staged products.
 Before staging replacements, the host stops the retired renderers and uninstalls
 their applications from the owned Simulator.

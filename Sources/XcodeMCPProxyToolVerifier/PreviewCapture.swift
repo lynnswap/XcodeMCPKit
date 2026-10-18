@@ -3,6 +3,19 @@ import XcodeMCPKit
 
 enum PreviewBackend: String, Codable, Sendable { case native, headless }
 
+struct PreviewSourceEdit: Codable, Sendable {
+    let oldString: String
+    let newString: String
+}
+
+struct PreviewCaptureSample: Codable {
+    let condition: String
+    let elapsedSeconds: TimeInterval
+    let sourceSHA256: String
+    let metadata: MCPJSONValue
+    let snapshot: String
+}
+
 struct PreviewCaptureReport: Codable {
     let backend: PreviewBackend
     let fixture: String
@@ -16,6 +29,7 @@ struct PreviewCaptureReport: Codable {
     var executableSHA256: String?
     var selectedDestination: MCPJSONValue?
     var records: [ToolVerificationRecord] = []
+    var samples: [PreviewCaptureSample]?
     var metadata: MCPJSONValue?
     var snapshot: String?
     var operationSucceeded = false
@@ -26,7 +40,12 @@ struct PreviewCaptureReport: Codable {
     var clientClosed = false
 
     var passed: Bool {
-        operationSucceeded && failure == nil && cleanupErrors.isEmpty && clientClosed
+        if let samples {
+            guard samples.map(\.condition) == ["initial", "unchanged-repeat", "source-edit"],
+                  samples[0].sourceSHA256 == samples[1].sourceSHA256,
+                  samples[0].sourceSHA256 != samples[2].sourceSHA256 else { return false }
+        }
+        return operationSucceeded && failure == nil && cleanupErrors.isEmpty && clientClosed
             && (backend == .headless ? workspaceClosed : nativeDocumentClosed)
     }
 }
@@ -37,7 +56,7 @@ struct PreviewCaptureRunner {
     let project: URL
     var report: PreviewCaptureReport
 
-    mutating func capture(client: XcodeMCP) async {
+    mutating func capture(client: XcodeMCP, sequenceEdit: PreviewSourceEdit? = nil) async {
         var openedWorkspace: String?
         do {
             let tools = try await client.listTools()
@@ -79,14 +98,20 @@ struct PreviewCaptureRunner {
             arguments["sourceFilePath"] = .string(report.preview.navigatorPath)
             arguments["previewDefinitionIndexInFile"] = .integer(Int64(report.preview.index))
             arguments["timeout"] = .integer(Int64(report.timeout))
-            let rendered = try await call("RenderPreview", arguments: arguments, client: client)
-            guard let raw = rendered.rawResult, let metadata = previewStructuredContent(raw) else {
-                throw VerifierFailure("RenderPreview returned no structured metadata")
+            let initial = try await captureSample(condition: "initial", arguments: arguments, client: client)
+            report.metadata = initial.metadata
+            report.snapshot = initial.snapshot
+            if let sequenceEdit {
+                report.samples = [initial]
+                let repeated = try await captureSample(condition: "unchanged-repeat", arguments: arguments, client: client)
+                report.samples?.append(repeated)
+                _ = try await call("XcodeUpdate", arguments: selector.merging([
+                    "filePath": .string(report.preview.navigatorPath),
+                    "oldString": .string(sequenceEdit.oldString), "newString": .string(sequenceEdit.newString),
+                ]) { _, value in value }, client: client)
+                let edited = try await captureSample(condition: "source-edit", arguments: arguments, client: client)
+                report.samples?.append(edited)
             }
-            report.metadata = .object(metadata)
-            let snapshot = output.appendingPathComponent("preview.png")
-            try savePreviewSnapshot(raw: raw, metadata: metadata, to: snapshot)
-            report.snapshot = snapshot.lastPathComponent
             report.operationSucceeded = true
         } catch { report.failure = errorDescription(error) }
         if let openedWorkspace {
@@ -96,6 +121,20 @@ struct PreviewCaptureRunner {
             } catch { report.cleanupErrors.append(errorDescription(error)) }
         }
         do { try save() } catch { report.cleanupErrors.append("Cannot save capture: \(errorDescription(error))") }
+    }
+
+    private mutating func captureSample(condition: String, arguments: [String: MCPJSONValue], client: XcodeMCP) async throws -> PreviewCaptureSample {
+        let digest = try previewSHA256(projectRoot.appendingPathComponent(report.preview.sourceFile))
+        let rendered = try await call("RenderPreview", arguments: arguments, client: client)
+        guard let raw = rendered.rawResult, let metadata = previewStructuredContent(raw) else {
+            throw VerifierFailure("RenderPreview returned no structured metadata")
+        }
+        let name = condition == "initial" ? "preview.png" : "preview-\(condition).png"
+        try savePreviewSnapshot(raw: raw, metadata: metadata, to: output.appendingPathComponent(name))
+        let sample = PreviewCaptureSample(condition: condition, elapsedSeconds: rendered.elapsedSeconds,
+            sourceSHA256: digest, metadata: .object(metadata), snapshot: name)
+        try writePreviewJSON(sample, to: output.appendingPathComponent("capture-\(condition).json"))
+        return sample
     }
 
     private mutating func call(_ name: String, arguments: [String: MCPJSONValue], client: XcodeMCP) async throws -> ToolVerificationRecord {
