@@ -247,6 +247,14 @@ struct NativePreviewBuildInputs {
                 descriptions[url] = data
                 return data
             }
+            var dependencyPaths: [URL?: [String: URL]] = [:]
+            func resolveDependencyPath(_ path: String, relativeTo directory: URL?) throws -> URL {
+                let context = path.hasPrefix("/") ? nil : directory
+                if let url = dependencyPaths[context]?[path] { return url }
+                let url = try pathURL(path, relativeTo: directory)
+                dependencyPaths[context, default: [:]][path] = url
+                return url
+            }
             let manifest = try JSONDecoder().decode(Manifest.self, from: readDescription(manifestURL))
             guard !manifest.commands.isEmpty,
                   manifest.commands.values.allSatisfy({ $0.permitsBuildReuse(immutableRoots: immutableRoots) }) else {
@@ -342,7 +350,7 @@ struct NativePreviewBuildInputs {
                         let data = try readDescription(url)
                         switch (command.dependencyStyle, command.tool) {
                         case ("makefile", _):
-                            inputs.formUnion(try makefileInputs(data, relativeTo: directory))
+                            inputs.formUnion(try makefileDescription(data, relativeTo: directory, resolvePath: resolveDependencyPath).inputs)
                         case ("dependency-info", _), (nil, "linker"), (nil, "embed-swift-stdlib"),
                              (nil, "link-assetcatalog"):
                             let dependencies = try dependencyInfoInputs(data, relativeTo: directory)
@@ -387,7 +395,7 @@ struct NativePreviewBuildInputs {
                         func loadDependencies(_ path: String) throws {
                             let url = try pathURL(path, relativeTo: directory)
                             dependencyFiles.insert(url)
-                            let rule = try makefileDescription(readDescription(url), relativeTo: directory)
+                            let rule = try makefileDescription(readDescription(url), relativeTo: directory, resolvePath: resolveDependencyPath)
                             inputs.formUnion(rule.inputs)
                             coveredOutputs.formUnion(try rule.targets.map { try pathURL($0, relativeTo: directory) })
                         }
@@ -463,10 +471,11 @@ struct NativePreviewBuildInputs {
 
     /// LLVM/GCC dependency rules, including escaped spaces, punctuation, dollars, continuations and phony rules.
     static func makefileInputs(_ data: Data, relativeTo directory: URL?) throws -> Set<URL> {
-        try makefileDescription(data, relativeTo: directory).inputs
+        try makefileDescription(data, relativeTo: directory, resolvePath: pathURL).inputs
     }
 
-    private static func makefileDescription(_ data: Data, relativeTo directory: URL?) throws -> (inputs: Set<URL>, targets: Set<String>) {
+    private static func makefileDescription(_ data: Data, relativeTo directory: URL?,
+                                            resolvePath: (String, URL?) throws -> URL) throws -> (inputs: Set<URL>, targets: Set<String>) {
         guard let text = String(data: data, encoding: .utf8), !text.utf8.contains(0) else {
             throw Unsupported.inputDescription
         }
@@ -489,7 +498,7 @@ struct NativePreviewBuildInputs {
             flush()
             if targets.isEmpty, dependencies.isEmpty, !inDependencies { return }
             guard inDependencies, !targets.isEmpty else { throw Unsupported.inputDescription }
-            for dependency in dependencies { result.insert(try pathURL(dependency, relativeTo: directory)) }
+            for dependency in dependencies { result.insert(try resolvePath(dependency, directory)) }
             outputTargets.formUnion(targets)
             targets = []
             dependencies = []

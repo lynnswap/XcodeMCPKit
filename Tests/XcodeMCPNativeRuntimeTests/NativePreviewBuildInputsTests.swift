@@ -16,6 +16,23 @@ struct NativePreviewBuildInputsTests {
             "/user/Colon:value.h", "/user/Back\\slash.h"].map { URL(filePath: $0) }))
     }
 
+    @Test func relativeDepfileInputsUseEachCommandWorkingDirectory() throws {
+        let first = URL(filePath: "/build/First.d")
+        let second = URL(filePath: "/build/Second.d")
+        let data = try json(["commands": [
+            "first": ["tool": "shell", "outputs": ["/build/First.o"], "deps": first.path,
+                "deps-style": "makefile", "working-directory": "/project/first"],
+            "second": ["tool": "shell", "outputs": ["/build/Second.o"], "deps": second.path,
+                "deps-style": "makefile", "working-directory": "/project/second"]
+        ]])
+        let files = NativePreviewBuildInputs.files(manifest: manifest, read: reader([
+            manifest: data,
+            first: Data("/build/First.o: Shared.h\n".utf8),
+            second: Data("/build/Second.o: Shared.h\n".utf8)
+        ]))
+        #expect(files?.files == [URL(filePath: "/project/first/Shared.h"), URL(filePath: "/project/second/Shared.h")])
+    }
+
     @Test func externalPlistSurvivesProducedAndInstallationInputExclusion() throws {
         let data = try json(["commands": [
             "plist": ["tool": "info-plist-processor", "inputs": ["/user/External Inputs/Info.plist", "<entry>"],
