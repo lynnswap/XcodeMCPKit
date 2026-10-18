@@ -101,6 +101,7 @@ struct PreviewVerifierTests {
         let project = root.appendingPathComponent("Fixture.xcworkspace")
         let snapshot = root.appendingPathComponent("native.png")
         try writePNG(snapshot, red: 1)
+        try "initial source".write(to: root.appendingPathComponent("View.swift"), atomically: true, encoding: .utf8)
         let readiness = PreviewDestinationReadiness()
         let availableTitle = requestedDestinationExists ? "My Mac" : "Another Mac"
         let runtime = XcodeMCPTestRuntime(tools: [
@@ -152,6 +153,62 @@ struct PreviewVerifierTests {
         }
     }
 
+    @Test(arguments: [false, true])
+    func sequenceCapturesRetainEachImageAndStopAfterAFailedEdit(editSucceeds: Bool) async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("View.swift")
+        try "initial source".write(to: source, atomically: true, encoding: .utf8)
+        let initial = root.appendingPathComponent("initial.png")
+        let edited = root.appendingPathComponent("edited.png")
+        try writePNG(initial, red: 1)
+        try writePNG(edited, red: 0)
+        let runtime = XcodeMCPTestRuntime(tools: [
+            previewTool("XcodeOpenWorkspace"), previewTool("XcodeSwitchScheme"), previewTool("XcodeListRunDestinations"),
+            previewTool("XcodeSwitchRunDestination"), previewTool("RenderPreview"), previewTool("XcodeUpdate"),
+            previewTool("XcodeCloseWorkspace"),
+        ])
+        await runtime.setToolHandler { call in
+            switch call.name {
+            case "XcodeOpenWorkspace": return previewResult(["workspaceIdentifier": "owned-workspace"])
+            case "XcodeListRunDestinations":
+                return previewResult(["activeSchemeName": "Fixture", "activeDestinationDisplayTitle": "My Mac"])
+            case "XcodeUpdate":
+                #expect(call.arguments["workspaceIdentifier"] == "owned-workspace")
+                #expect(call.arguments["filePath"] == "Fixture/View.swift")
+                #expect(call.arguments["oldString"] == "initial source")
+                #expect(call.arguments["newString"] == "edited source")
+                if !editSucceeds { return previewResult(["success": false, "errorDescription": "Edit failed"])}
+                try "edited source".write(to: source, atomically: true, encoding: .utf8)
+            case "RenderPreview":
+                let changed = try String(contentsOf: source, encoding: .utf8) == "edited source"
+                return previewResult(["previewSnapshotPath": .string((changed ? edited : initial).path)])
+            case "XcodeCloseWorkspace": #expect(call.arguments["workspaceIdentifier"] == "owned-workspace")
+            default: break
+            }
+            return previewResult(["success": true])
+        }
+        let client = try await runtime.makeClient()
+        var runner = PreviewCaptureRunner(output: root, projectRoot: root,
+            project: root.appendingPathComponent("Fixture.xcworkspace"), report: captureReport(backend: .headless))
+        await runner.capture(client: client, sequenceEdit: PreviewSourceEdit(oldString: "initial source", newString: "edited source"))
+        await client.close()
+        let samples = try #require(runner.report.samples)
+        #expect(samples.map(\.condition) == (editSucceeds ? ["initial", "unchanged-repeat", "source-edit"] : ["initial", "unchanged-repeat"]))
+        #expect(samples[0].sourceSHA256 == samples[1].sourceSHA256)
+        #expect(try comparePreviewImages(root.appendingPathComponent(samples[0].snapshot), root.appendingPathComponent(samples[1].snapshot)).exactPixels)
+        if editSucceeds {
+            #expect(samples[2].sourceSHA256 != samples[0].sourceSHA256)
+            #expect(try !comparePreviewImages(root.appendingPathComponent(samples[0].snapshot), root.appendingPathComponent(samples[2].snapshot)).exactPixels)
+        }
+        #expect(runner.report.operationSucceeded == editSucceeds)
+        #expect(runner.report.workspaceClosed)
+        let calls = await runtime.recordedToolCalls()
+        #expect(calls.filter { $0.name == "XcodeOpenWorkspace" }.count == 1)
+        #expect(calls.filter { $0.name == "XcodeCloseWorkspace" }.count == 1)
+        #expect(calls.filter { $0.name == "RenderPreview" }.count == samples.count)
+    }
+
     @Test func failedNativeCaptureCannotProduceAPassingComparison() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -193,6 +250,33 @@ struct PreviewVerifierTests {
         let pixels = try PreviewComparison.compare(native: native, headless: headless)
         #expect(!pixels.passed)
         #expect(pixels.image?.differentPixels == 4)
+    }
+
+    @Test func comparisonIncludesEditedSequenceImages() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let native = root.appendingPathComponent("native")
+        let headless = root.appendingPathComponent("headless")
+        try createPreviewOutput(native)
+        try createPreviewOutput(headless)
+        for (backend, directory) in [(PreviewBackend.native, native), (.headless, headless)] {
+            var report = successfulReport(backend: backend)
+            report.samples = ["initial", "unchanged-repeat", "source-edit"].map { condition in
+                PreviewCaptureSample(condition: condition, elapsedSeconds: 1,
+                    sourceSHA256: condition == "source-edit" ? "edited" : "original", metadata: .object(["displayName": "Preview"]),
+                    snapshot: condition == "initial" ? "preview.png" : "preview-\(condition).png")
+            }
+            for sample in report.samples ?? [] { try writePNG(directory.appendingPathComponent(sample.snapshot), red: 1) }
+            try writePreviewJSON(report, to: directory.appendingPathComponent("capture.json"))
+        }
+        let matching = try PreviewComparison.compare(native: native, headless: headless)
+        #expect(matching.passed)
+        #expect(matching.samples.count == 3)
+        try writePNG(headless.appendingPathComponent("preview-source-edit.png"), red: 0)
+        let stale = try PreviewComparison.compare(native: native, headless: headless)
+        #expect(!stale.passed)
+        #expect(stale.samples.last?.image.exactPixels == false)
+        #expect(stale.image?.exactPixels == true)
     }
 
     private func captureReport(backend: PreviewBackend) -> PreviewCaptureReport {

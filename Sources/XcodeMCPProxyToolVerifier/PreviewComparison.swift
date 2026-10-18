@@ -16,12 +16,22 @@ struct PreviewImageComparison: Codable {
     let exactPixels: Bool
 }
 
+struct PreviewSampleComparison: Codable {
+    let condition: String
+    let sourceMatches: Bool
+    let metadata: [String: PreviewMetadataComparison]
+    let image: PreviewImageComparison
+
+    var passed: Bool { sourceMatches && metadata.values.allSatisfy(\.matches) && image.exactPixels }
+}
+
 struct PreviewComparison: Codable {
     let nativeDirectory: String
     let headlessDirectory: String
     var unavailableReasons: [String] = []
     var metadata: [String: PreviewMetadataComparison] = [:]
     var image: PreviewImageComparison?
+    var samples: [PreviewSampleComparison] = []
     var inputsMatch = false
     var passed = false
 
@@ -54,15 +64,37 @@ struct PreviewComparison: Codable {
             result.unavailableReasons.append("Both captures need metadata and a snapshot")
             return result
         }
-        for key in ["displayName", "sourceLineNumber", "errors", "supportedLocalizations",
-                    "supportedPreviewVariantOverrides", "supportedCanvasControlOverrides", "renderedDestination"] {
-            result.metadata[key] = PreviewMetadataComparison(native: nativeMetadata[key], headless: headlessMetadata[key])
-        }
+        result.metadata = compareMetadata(nativeMetadata, headlessMetadata)
         do {
             result.image = try comparePreviewImages(native.appendingPathComponent(nativeSnapshot), headless.appendingPathComponent(headlessSnapshot))
         } catch { result.unavailableReasons.append("Cannot compare snapshots: \(errorDescription(error))") }
-        result.passed = result.unavailableReasons.isEmpty && result.metadata.values.allSatisfy(\.matches) && result.image?.exactPixels == true
+        if nativeCapture.samples != nil || headlessCapture.samples != nil {
+            let lhs = nativeCapture.samples ?? []
+            let rhs = headlessCapture.samples ?? []
+            if lhs.map(\.condition) != rhs.map(\.condition) || lhs.count != 3 {
+                result.unavailableReasons.append("Both captures need the same complete request sequence")
+            } else {
+                for (nativeSample, headlessSample) in zip(lhs, rhs) {
+                    do {
+                        result.samples.append(PreviewSampleComparison(condition: nativeSample.condition,
+                            sourceMatches: nativeSample.sourceSHA256 == headlessSample.sourceSHA256,
+                            metadata: compareMetadata(nativeSample.metadata.objectValue ?? [:], headlessSample.metadata.objectValue ?? [:]),
+                            image: try comparePreviewImages(native.appendingPathComponent(nativeSample.snapshot),
+                                headless.appendingPathComponent(headlessSample.snapshot))))
+                    } catch { result.unavailableReasons.append("Cannot compare \(nativeSample.condition): \(errorDescription(error))") }
+                }
+            }
+        }
+        result.passed = result.unavailableReasons.isEmpty && result.metadata.values.allSatisfy(\.matches)
+            && result.image?.exactPixels == true && result.samples.allSatisfy(\.passed)
         return result
+    }
+
+    private static func compareMetadata(_ native: [String: MCPJSONValue], _ headless: [String: MCPJSONValue]) -> [String: PreviewMetadataComparison] {
+        Dictionary(uniqueKeysWithValues: ["displayName", "sourceLineNumber", "errors", "supportedLocalizations",
+            "supportedPreviewVariantOverrides", "supportedCanvasControlOverrides", "renderedDestination"].map {
+                ($0, PreviewMetadataComparison(native: native[$0], headless: headless[$0]))
+            })
     }
 }
 

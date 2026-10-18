@@ -100,19 +100,26 @@ struct NativePreviewBuildTests {
         }
         try Data("SWIFT_VERSION = 6.0".utf8).write(to: projectFile)
         try Data("struct View {}".utf8).write(to: source)
-        let container = PreviewBuildProjectContainer(dataFiles: [PreviewBuildFilePath(url: projectFile)])
+        let alternateProjectFile = projectFile.deletingLastPathComponent().appendingPathComponent("project.xcproj")
+        let container = PreviewBuildProjectContainer(dataFiles: [projectFile, alternateProjectFile].map(PreviewBuildFilePath.init(url:)))
         let workspace = PreviewBuildWorkspace(url: workspaceURL, containers: [container])
         let build = NativePreviewBuild.Result(targets: [], previewRoots: [], destinationIdentifier: "destination",
             previewDestinationIdentifier: "preview", platformIdentifier: nil, previewPlatform: nil, platformName: nil,
             deviceModelName: nil, systemVersion: nil, declaredInputFiles: [])
         let roots = try #require(try builder.inputRoots(workspace: workspace, build: build, source: source))
-        let before = try NativePreviewInputSnapshot.capture(roots: roots)
+        #expect(roots.missing == [alternateProjectFile])
+        let before = try NativePreviewInputSnapshot.capture(roots: roots.roots, missingInputs: roots.missing)
         #expect(try before.matchesCurrentFiles())
 
+        try Data("alternate project".utf8).write(to: alternateProjectFile)
+        #expect(throws: (any Error).self) { try before.matchesCurrentFiles() }
+        try FileManager.default.removeItem(at: alternateProjectFile)
+        let afterRemoval = try NativePreviewInputSnapshot.capture(roots: roots.roots, missingInputs: roots.missing)
+        #expect(try afterRemoval.matchesCurrentFiles())
         try Data("SWIFT_VERSION = 6.3".utf8).write(to: projectFile)
 
-        #expect(try NativePreviewInputSnapshot.capture(roots: roots) != before)
-        #expect(try !before.matchesCurrentFiles())
+        #expect(try NativePreviewInputSnapshot.capture(roots: roots.roots, missingInputs: roots.missing) != afterRemoval)
+        #expect(try !afterRemoval.matchesCurrentFiles())
     }
 
     @Test func resolvesRunnableAndUsesNativeBuildableEquality() throws {

@@ -138,6 +138,33 @@ releases its preview processes, owned Simulator, and staged products. The verifi
 does not remove other devices or applications. Output files remain available for
 inspection; choose a new output directory for each run.
 
+To measure initial capture, an unchanged repeat, and a saved source edit in one
+workspace, pass `--sequence-edit` to either backend. For timing runs, prepare the
+fixture and place capture outputs outside this checkout, for example under
+`~/Dev/work/preview-latency`. Otherwise its enclosing `Package.swift` can include
+this repository's files in headless input validation. The JSON file specifies the
+text replacement for the case's source file:
+
+```json
+{"oldString": "UIVIEW ACTUAL PREVIEW", "newString": "UPDATED ACTUAL PREVIEW"}
+```
+
+```sh
+swift run xcode-mcp-proxy-tool-verifier previews capture \
+  --fixture "$HOME/Dev/work/preview-latency/general" --case uiview \
+  --developer-dir "$developer_dir" --destination "$destination" \
+  --sequence-edit /path/to/edit.json --native-host /path/to/XcodeMCPNativeHost.app \
+  --output "$HOME/Dev/work/preview-latency/headless-sequence"
+```
+
+Use a destination title reported by `XcodeListRunDestinations`. The replacement
+runs through `XcodeUpdate` on the owned project copy after the unchanged repeat.
+`capture.json` records each condition's tool duration and source hash in `samples`;
+`capture-initial.json`, `capture-unchanged-repeat.json`, and `capture-source-edit.json`
+retain its metadata and PNG path. The initial image remains `preview.png`; the
+other conditions have separate PNGs. `previews compare` checks all three conditions
+when both captures contain a sequence. Use the same edit JSON for both backends.
+
 Comparison requires successful captures, matching source/project inputs, the
 same case, Xcode build, and requested destination. It compares the response's
 name, source line, errors, localizations, variant and canvas catalogs, and rendered
