@@ -11,7 +11,14 @@ package final class NativeApplicationBootstrap {
     package init() {}
 
     package func application(for installation: NativeXcodeInstallation) throws -> NSApplication {
-        UserDefaults.standard.addSuite(named: "com.apple.dt.Xcode")
+        let defaults = UserDefaults.standard
+        defaults.addSuite(named: "com.apple.dt.Xcode")
+        var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        let buildSettingsKey = "IDEApplicationwideBuildSettings"
+        arguments[buildSettingsKey] = Self.compilationCacheSettings(
+            existing: defaults.dictionary(forKey: buildSettingsKey) ?? [:],
+            environment: ProcessInfo.processInfo.environment)
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         // Configure the installed index before Xcode initializes its chat settings.
         // The downloadable-asset coordinator can have no location in a headless host.
         do {
@@ -45,6 +52,20 @@ package final class NativeApplicationBootstrap {
         try NativeErrorPresentation.install(on: application)
         workspaceOpenConfirmation = NativeWorkspaceOpenConfirmation(application: application)
         return application
+    }
+
+    static func compilationCacheSettings(existing: [String: Any], environment: [String: String]) -> [String: Any] {
+        var settings = existing
+        // IDE builds sanitize their build-setting environment. Supply defaults through
+        // the application's build table, inheriting each project's explicit setting.
+        for key in [
+            "COMPILATION_CACHE_ENABLE_CACHING_DEFAULT",
+            "SWIFT_ENABLE_PREFIX_MAPPING", "SWIFT_ENABLE_PROJECT_PREFIX_MAPPING",
+            "CLANG_ENABLE_PREFIX_MAPPING", "CLANG_ENABLE_PROJECT_PREFIX_MAPPING",
+        ] where settings[key] == nil {
+            settings[key] = "$(inherited:default=\(environment[key] ?? "YES"))"
+        }
+        return settings
     }
 
     package func initialize(installation: NativeXcodeInstallation) async throws {

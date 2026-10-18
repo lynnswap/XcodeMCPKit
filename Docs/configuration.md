@@ -69,6 +69,41 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
 | `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root for the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
 
+### Compilation caching
+
+Native hosts enable compilation caching and Swift/Clang prefix mapping by
+default for builds, tests, runs, and previews. Xcode maps project, intermediate,
+product, SDK, and toolchain paths to common virtual paths, allowing
+compatible compilations from different worktrees to reuse cached results.
+
+The compilation cache uses the existing `CompilationCachingCASPath` preference
+from `org.swift.swift-build` (with `com.apple.dt.XCBuild` as a fallback). Without
+a preference, hosts use
+`~/Library/Developer/Xcode/DerivedData/CompilationCache.noindex`. This location
+stays the same when workspaces use different DerivedData directories. DerivedData
+locations and build databases are not changed.
+
+Inherited environment values take precedence over these defaults:
+
+| Variable | Default |
+| --- | --- |
+| `COMPILATION_CACHE_ENABLE_CACHING_DEFAULT` | `YES` |
+| `SWIFT_ENABLE_PREFIX_MAPPING` / `SWIFT_ENABLE_PROJECT_PREFIX_MAPPING` | `YES` |
+| `CLANG_ENABLE_PREFIX_MAPPING` / `CLANG_ENABLE_PROJECT_PREFIX_MAPPING` | `YES` |
+| `CompilationCachingCASPath` | Existing preference or the shared path above. |
+
+Project build settings can override caching and prefix mapping. For example,
+`COMPILATION_CACHE_ENABLE_CACHING=NO` disables caching for that project.
+Restart the server to apply environment or preference changes to running hosts.
+These defaults apply to XcodeMCPKit's hosts; they do not change saved projects,
+GUI Xcode preferences, or shell commands.
+
+Reuse depends on compiler support and matching compilation inputs. Custom paths
+outside Xcode's standard mappings may require project-specific
+`SWIFT_OTHER_PREFIX_MAPPINGS` / `CLANG_OTHER_PREFIX_MAPPINGS`. Projects using
+Swift macros can also require a build service that normalizes macro executable
+paths, such as the [custom Swift Build service](https://github.com/lynnswap/swift-build/tree/main/Utilities/CustomXcodeBuildService).
+
 ### Custom build services
 
 The native host inherits Swift Build's service overrides:

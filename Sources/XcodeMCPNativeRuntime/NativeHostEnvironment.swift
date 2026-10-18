@@ -24,6 +24,15 @@ package struct NativeXcodeInstallation: Sendable {
     package func launchEnvironment(base: [String: String]) -> [String: String] {
         var environment = base
         environment["DEVELOPER_DIR"] = developerDirectory.path
+        let cacheDefaults = UserDefaults(suiteName: "org.swift.swift-build")
+        cacheDefaults?.addSuite(named: "com.apple.dt.XCBuild")
+        let cachePath = cacheDefaults?.string(forKey: "CompilationCachingCASPath")
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Developer/Xcode/DerivedData/CompilationCache.noindex").path
+        // Swift Build reads this preference from its process environment independently of DerivedData.
+        if environment["CompilationCachingCASPath"] == nil {
+            environment["CompilationCachingCASPath"] = cachePath
+        }
         let frameworks = ["SharedFrameworks", "Frameworks", "PlugIns"].map {
             contentsDirectory.appendingPathComponent($0).path
         }
