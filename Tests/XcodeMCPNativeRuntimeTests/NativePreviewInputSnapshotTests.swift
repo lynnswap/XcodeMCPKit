@@ -4,6 +4,35 @@ import Testing
 
 @Suite
 struct NativePreviewInputSnapshotTests {
+    @Test(arguments: [false, true])
+    func cancelledSnapshotOperationsThrow(verify: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Source.swift")
+        let generated = root.appendingPathComponent("Generated.swift")
+        try Data("source".utf8).write(to: source)
+        try Data("generated".utf8).write(to: generated)
+        let sourceInputs = try await NativePreviewInputSnapshot.capture(roots: [source])
+        let generatedInputs = try await NativePreviewInputSnapshot.capture(roots: [generated])
+        #expect(try await NativePreviewInputSnapshot.matchesCurrentFiles(source: sourceInputs, generated: generatedInputs))
+        let release = AsyncStream<Void>.makeStream()
+        let task = Task {
+            for await _ in release.stream { break }
+            if verify {
+                _ = try await NativePreviewInputSnapshot.matchesCurrentFiles(source: sourceInputs, generated: generatedInputs)
+            } else {
+                _ = try await NativePreviewInputSnapshot.capture(roots: [root])
+            }
+        }
+        task.cancel()
+        release.continuation.finish()
+        do {
+            try await task.value
+            Issue.record("A cancelled snapshot operation returned success")
+        } catch is CancellationError {}
+    }
+
     @Test func parallelVerificationRequiresBothSnapshotsToMatch() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

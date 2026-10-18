@@ -15,9 +15,14 @@ final class NativePreviewFileMetadata {
     // Bulk metadata is used only for regular children. Roots and other kinds
     // keep lstat, whose directory values include mounted roots and firmlink targets.
     // The optional stat contains only fields consumed by snapshots and digest caches.
-    func directoryEntries(atPath path: String) throws -> [(name: String, metadata: stat?)] {
+    func directoryEntries(atPath path: String,
+                          checkCancellation: @Sendable () throws -> Void = {}) throws -> [(name: String, metadata: stat?)] {
+        try checkCancellation()
         func fallbackNames() throws -> [(name: String, metadata: stat?)] {
-            try FileManager.default.contentsOfDirectory(atPath: path).map { ($0, nil) }
+            try checkCancellation()
+            let names = try FileManager.default.contentsOfDirectory(atPath: path)
+            try checkCancellation()
+            return names.map { ($0, nil) }
         }
         let descriptor = unsafe open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard descriptor >= 0 else {
@@ -33,15 +38,19 @@ final class NativePreviewFileMetadata {
         requested.fileattr = attrgroup_t(ATTR_FILE_DATALENGTH)
         var result: [(name: String, metadata: stat?)] = []
         while true {
+            try checkCancellation()
             let count = unsafe getattrlistbulk(descriptor, &requested, buffer, capacity, UInt64(FSOPT_PACK_INVAL_ATTRS))
             if count < 0 {
                 let code = errno
+                try checkCancellation()
                 if code == ENOTSUP { return try fallbackNames() }
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
             }
+            try checkCancellation()
             if count == 0 { return result }
             var offset = 0
             for _ in 0..<count {
+                try checkCancellation()
                 // FSOPT_PACK_INVAL_ATTRS fixes this 64-bit prefix at 96 bytes.
                 // getattrlist aligns even timespec and inode fields on 4-byte boundaries.
                 guard offset <= capacity - 36 else { return try fallbackNames() }

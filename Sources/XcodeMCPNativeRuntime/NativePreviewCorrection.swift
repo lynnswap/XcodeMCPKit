@@ -84,7 +84,7 @@ final class NativePreviewCorrection {
     private final class RendererStage {
         var preparation: RendererPreparation
         var requestDirectory: URL?
-        var task: Task<Void, Never>?
+        var task: Task<Void, any Error>?
         @MainActor var processFailure: (any Error)? { didSet { processFailureWake?() } }
         var processFailureWake: (@MainActor () -> Void)?
         var installed = false
@@ -308,7 +308,7 @@ final class NativePreviewCorrection {
             do {
                 let currentBuilder = try await builder.workspaceBuilder(for: plan.destination)
                 if currentBuilder === certificate.workspaceBuilder,
-                   try NativePreviewInputSnapshot.matchesCurrentFiles(
+                   try await NativePreviewInputSnapshot.matchesCurrentFiles(
                        source: certificate.inputs, generated: certificate.generatedInputs),
                    inputRevision == session.inputRevision {
                     inputsAreCurrent = true
@@ -383,10 +383,10 @@ final class NativePreviewCorrection {
         let outputPaths = build.inputCaptureExclusions.union([session.artifactsRoot])
         guard let roots = try builder.inputRoots(workspace: workspace, build: build, source: source, excluding: outputPaths) else { return nil }
         let exclusions = NativePreviewInputSnapshot.coalescedExclusions(outputPaths, roots: roots)
-        let inputs = try NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions, missingInputs: build.missingInputFiles)
+        let inputs = try await NativePreviewInputSnapshot.capture(roots: roots, excluding: exclusions, missingInputs: build.missingInputFiles)
         // A post-build snapshot must not certify source edits that arrived during the build.
         guard inputs.predates(buildStartedAt) else { return nil }
-        let generatedInputs = try NativePreviewInputSnapshot.capture(
+        let generatedInputs = try await NativePreviewInputSnapshot.capture(
             roots: Array(build.generatedInputFiles),
             excluding: build.generatedInputExclusions, missingInputs: build.generatedMissingInputFiles)
         // Generated inputs may be written by this build, but never after its native operation completed.
@@ -441,7 +441,12 @@ final class NativePreviewCorrection {
             try await Self.terminateRenderer(identifier, executable: executable)
         }
         stage.task?.cancel()
-        if let task = stage.task { await task.value }
+        if let task = stage.task {
+            do { try await task.value }
+            catch let failure as NativePreviewProcess.TerminationFailure {
+                if failure.process.isRunning { throw failure }
+            }
+        }
         stage.task = nil
         if stage.requestDirectory == nil, let log = stage.processLog, FileManager.default.fileExists(atPath: log.path) {
             let lines = String(decoding: try Data(contentsOf: log), as: UTF8.self).split(whereSeparator: \.isNewline)
@@ -1029,8 +1034,10 @@ final class NativePreviewCorrection {
                 if !Task.isCancelled {
                     stage.processFailure = NativeRuntimeError.invocation("The preview renderer exited before the session ended; see \(log.path)")
                 }
+            } catch is CancellationError {
             } catch {
-                if !Task.isCancelled { stage.processFailure = error }
+                stage.processFailure = error
+                if Task.isCancelled { throw error }
             }
         }
     }

@@ -90,18 +90,56 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         lhs.entries == rhs.entries && lhs.missingPaths == rhs.missingPaths
     }
 
+    private typealias CancellationCheck = @Sendable () throws -> Void
+
     static func matchesCurrentFiles(source: Self, generated: Self) throws -> Bool {
+        try matchesCurrentFiles(source: source, generated: generated, checkCancellation: {})
+    }
+
+    @concurrent
+    static func matchesCurrentFiles(source: Self, generated: Self) async throws -> Bool {
+        try await withCancellation { check in
+            try matchesCurrentFiles(source: source, generated: generated, checkCancellation: check)
+        }
+    }
+
+    private static func withCancellation<Output: Sendable>(
+        _ operation: @Sendable (CancellationCheck) throws -> Output
+    ) async throws -> Output {
+        let cancelled = Atomic(false)
+        return try await withTaskCancellationHandler {
+            let check: CancellationCheck = {
+                if cancelled.load(ordering: .relaxed) { throw CancellationError() }
+            }
+            try Task.checkCancellation()
+            do {
+                let result = try operation(check)
+                try check()
+                return result
+            } catch {
+                try check()
+                throw error
+            }
+        } onCancel: {
+            cancelled.store(true, ordering: .relaxed)
+        }
+    }
+
+    private static func matchesCurrentFiles(source: Self, generated: Self,
+                                            checkCancellation: CancellationCheck) throws -> Bool {
+        try checkCancellation()
         let results = Mutex((source: Result<Bool, any Error>.success(false),
                              generated: Result<Bool, any Error>.success(false)))
         DispatchQueue.concurrentPerform(iterations: 2) { index in
             let result = Result<Bool, any Error> {
-                try (index == 0 ? source : generated).matchesCurrentFiles()
+                try (index == 0 ? source : generated).matchesCurrentFiles(checkCancellation: checkCancellation)
             }
             results.withLock { state in
                 if index == 0 { state.source = result }
                 else { state.generated = result }
             }
         }
+        try checkCancellation()
         let completed = results.withLock { $0 }
         // Both operations finish before returning; source still determines whether the generated result is used.
         guard try completed.source.get() else { return false }
@@ -109,22 +147,29 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
     }
 
     func matchesCurrentFiles() throws -> Bool {
+        try matchesCurrentFiles(checkCancellation: {})
+    }
+
+    private func matchesCurrentFiles(checkCancellation: CancellationCheck) throws -> Bool {
         do {
-            if try verifyCurrentFiles() { return true }
+            if try verifyCurrentFiles(checkCancellation: checkCancellation) { return true }
         } catch is CancellationError {
             throw CancellationError()
         } catch {}
         return try Self.capture(roots: prioritizedRoots(verification.roots), excluding: verification.exclusions,
-            missingInputs: verification.missingInputs) == self
+            missingInputs: verification.missingInputs, checkCancellation: checkCancellation) == self
     }
 
-    private func verifyCurrentFiles() throws -> Bool {
+    private func verifyCurrentFiles(checkCancellation: CancellationCheck) throws -> Bool {
+        try checkCancellation()
         guard let checks = verification.checks,
-              Self.exclusionAliases(verification.exclusions) == verification.exclusionAliases else { return false }
+              try Self.exclusionAliases(verification.exclusions, checkCancellation: checkCancellation) == verification.exclusionAliases else { return false }
         for path in verification.plainAncestors {
+            try checkCancellation()
             guard try Self.metadata(path).st_mode & S_IFMT != S_IFLNK else { return false }
         }
         for path in missingPaths {
+            try checkCancellation()
             var value = stat()
             if unsafe lstat(path, &value) == 0 { return false }
             let code = errno
@@ -134,27 +179,30 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         }
         if checks.count <= 1 {
             for check in checks {
-                guard try verify(check) else { return false }
+                guard try verify(check, checkCancellation: checkCancellation) else { return false }
             }
             return true
         }
         let work = Mutex(VerificationWork())
         DispatchQueue.concurrentPerform(iterations: checks.count) { index in
             do {
-                if try !verify(checks[index]) {
+                try checkCancellation()
+                if try !verify(checks[index], checkCancellation: checkCancellation) {
                     work.withLock { $0.matches = false }
                 }
             } catch {
                 work.withLock { if $0.failure == nil { $0.failure = error } }
             }
         }
+        try checkCancellation()
         return try work.withLock { state in
             if let failure = state.failure { throw failure }
             return state.matches
         }
     }
 
-    private func verify(_ check: VerificationCheck) throws -> Bool {
+    private func verify(_ check: VerificationCheck, checkCancellation: CancellationCheck) throws -> Bool {
+        try checkCancellation()
         switch check {
         case .aliases(let root, let rootPaths, let canonicalAliases):
             if let root {
@@ -164,15 +212,17 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                       canonicalAliases[root] == canonical else { return false }
             }
             for (url, canonical) in canonicalAliases {
+                try checkCancellation()
                 if url == root { continue }
                 guard url.resolvingSymlinksInPath().path == canonical else { return false }
             }
         case .directory(let directory):
             let reader = NativePreviewFileMetadata()
-            let children = try reader.directoryEntries(atPath: directory.path)
+            let children = try reader.directoryEntries(atPath: directory.path, checkCancellation: checkCancellation)
             let prefix = directory.path == "/" ? directory.path : directory.path + "/"
             var names: Set<String> = []
             for child in children {
+                try checkCancellation()
                 let path = prefix + child.name
                 if directory.ignoredNames.contains(child.name) { continue }
                 names.insert(child.name)
@@ -180,19 +230,20 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                     guard let index = verification.entryIndices[path] else { return false }
                     if let value = child.metadata {
                         guard Entry(path: path, value: value, symbolicLinkDestination: nil) == entries[index] else { return false }
-                    } else if try !verifyEntry(index) { return false }
+                    } else if try !verifyEntry(index, checkCancellation: checkCancellation) { return false }
                 }
             }
             guard names == directory.includedNames else { return false }
         case .entries(let indices):
             for index in indices {
-                guard try verifyEntry(index) else { return false }
+                guard try verifyEntry(index, checkCancellation: checkCancellation) else { return false }
             }
         }
         return true
     }
 
-    private func verifyEntry(_ index: Int) throws -> Bool {
+    private func verifyEntry(_ index: Int, checkCancellation: CancellationCheck) throws -> Bool {
+        try checkCancellation()
         let expected = entries[index]
         let value = try Self.metadata(expected.path)
         let destination = value.st_mode & S_IFMT == S_IFLNK
@@ -285,8 +336,24 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
     }
 
     static func capture(roots: [URL], excluding: Set<URL> = [], missingInputs: Set<URL> = []) throws -> Self {
-        let exclusions = exclusionAliases(excluding)
-        let missingPaths = Set(missingInputs.map { $0.standardizedFileURL.path })
+        try capture(roots: roots, excluding: excluding, missingInputs: missingInputs, checkCancellation: {})
+    }
+
+    @concurrent
+    static func capture(roots: [URL], excluding: Set<URL> = [], missingInputs: Set<URL> = []) async throws -> Self {
+        try await withCancellation { check in
+            try capture(roots: roots, excluding: excluding, missingInputs: missingInputs, checkCancellation: check)
+        }
+    }
+
+    private static func capture(roots: [URL], excluding: Set<URL>, missingInputs: Set<URL>,
+                                checkCancellation: CancellationCheck) throws -> Self {
+        try checkCancellation()
+        let exclusions = try exclusionAliases(excluding, checkCancellation: checkCancellation)
+        let missingPaths = Set(try missingInputs.map {
+            try checkCancellation()
+            return $0.standardizedFileURL.path
+        })
         let missing = missingPaths.sorted()
         let processorCount = ProcessInfo.processInfo.activeProcessorCount
         let batchSize = max(1, (missing.count + processorCount - 1) / processorCount)
@@ -295,8 +362,9 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         }
         let workers = min(inputs.count, processorCount)
         let snapshots: [CaptureResult]
-        if workers <= 1 { snapshots = try inputs.map { try capture($0, excluding: exclusions) } }
-        else {
+        if workers <= 1 {
+            snapshots = try inputs.map { try capture($0, excluding: exclusions, checkCancellation: checkCancellation) }
+        } else {
             let work = Mutex(CaptureWork())
             DispatchQueue.concurrentPerform(iterations: workers) { _ in
                 while let input = work.withLock({ state -> CaptureInput? in
@@ -306,7 +374,8 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                     return inputs[index]
                 }) {
                     do {
-                        let snapshot = try capture(input, excluding: exclusions)
+                        try checkCancellation()
+                        let snapshot = try capture(input, excluding: exclusions, checkCancellation: checkCancellation)
                         work.withLock { $0.snapshots.append(snapshot) }
                     } catch {
                         work.withLock { if $0.failure == nil { $0.failure = error } }
@@ -314,15 +383,18 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                     }
                 }
             }
+            try checkCancellation()
             snapshots = try work.withLock { state in
                 if let failure = state.failure { throw failure }
                 return state.snapshots
             }
         }
+        try checkCancellation()
         let ordered = snapshots.flatMap { $0.entries }.sorted { $0.path < $1.path }
         var entries: [Entry] = []
         entries.reserveCapacity(ordered.count)
         for entry in ordered {
+            try checkCancellation()
             if let existing = entries.last, existing.path == entry.path {
                 guard existing == entry else { throw ConflictingEntry(path: entry.path) }
             } else { entries.append(entry) }
@@ -334,10 +406,12 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         var plainAncestors: Set<String> = []
         var complete = true
         for captured in snapshots {
+            try checkCancellation()
             let input = captured.verification
             complete = complete && input.isComplete
             plainAncestors.formUnion(captured.plainAncestors)
             for (url, canonical) in input.canonicalAliases {
+                try checkCancellation()
                 if let previous = observedAliases.updateValue(canonical, forKey: url), previous != canonical {
                     complete = false
                 }
@@ -346,9 +420,11 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
             if inputIndices.count != Set(captured.entries.map(\.path)).count { complete = false }
             var bulkIndices: Set<Int> = []
             for directory in input.directories {
+                try checkCancellation()
                 let prefix = directory.path == "/" ? directory.path : directory.path + "/"
                 if directory.includedNames.contains(where: { indices[prefix + $0] == nil }) { complete = false }
                 for path in directory.bulkPaths {
+                    try checkCancellation()
                     if let index = indices[path] { bulkIndices.insert(index) }
                     else { complete = false }
                 }
@@ -371,18 +447,21 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         let plan = VerificationPlan(roots: roots, exclusions: excluding, missingInputs: missingInputs,
             exclusionAliases: exclusions, entryIndices: indices, plainAncestors: plainAncestors,
             checks: complete ? checks : nil)
+        try checkCancellation()
         return Self(entries: entries, missingPaths: missingPaths, verification: plan)
     }
 
-    private static func capture(_ input: CaptureInput, excluding: [String: Set<String>]) throws -> CaptureResult {
+    private static func capture(_ input: CaptureInput, excluding: [String: Set<String>],
+                                checkCancellation: CancellationCheck) throws -> CaptureResult {
+        try checkCancellation()
         switch input {
         case .root(let root):
-            return try captureSerial(root: root, excluding: excluding)
+            return try captureSerial(root: root, excluding: excluding, checkCancellation: checkCancellation)
         case .missing(let paths):
             var verification = InputVerification()
             var plainAncestors: Set<String> = []
             let entries = try inputPathAncestors(missingPaths: paths, routes: [], verification: &verification,
-                plainAncestors: &plainAncestors)
+                plainAncestors: &plainAncestors, checkCancellation: checkCancellation)
             return CaptureResult(entries: entries, verification: verification, plainAncestors: plainAncestors)
         }
     }
@@ -391,9 +470,10 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         ancestorPaths(of: path).contains { excluding[$0] != nil && !reopenedPaths.contains($0) }
     }
 
-    private static func exclusionAliases(_ excluding: Set<URL>) -> [String: Set<String>] {
+    private static func exclusionAliases(_ excluding: Set<URL>, checkCancellation: CancellationCheck) throws -> [String: Set<String>] {
         var exclusionAliases: [String: Set<String>] = [:]
         for excluded in excluding {
+            try checkCancellation()
             var standardPath = excluded.standardizedFileURL.path
             var canonicalPath = excluded.resolvingSymlinksInPath().path
             standardPath.makeContiguousUTF8()
@@ -412,17 +492,21 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         }
         return value
     }
-    private static func inputPathAncestors(missingPaths: Set<String>, routes: [URL], verification: inout InputVerification, plainAncestors: inout Set<String>) throws -> [Entry] {
+    private static func inputPathAncestors(missingPaths: Set<String>, routes: [URL], verification: inout InputVerification,
+                                           plainAncestors: inout Set<String>, checkCancellation: CancellationCheck) throws -> [Entry] {
         var entries: [Entry] = []
         var routes = routes
         func append(_ path: String, _ value: stat) throws {
+            try checkCancellation()
             let destination = value.st_mode & S_IFMT == S_IFLNK
                 ? try FileManager.default.destinationOfSymbolicLink(atPath: path) : nil
             entries.append(Entry(path: path, value: value, symbolicLinkDestination: destination))
         }
         for path in missingPaths {
+            try checkCancellation()
             var ancestor = URL(filePath: path)
             while true {
+                try checkCancellation()
                 do {
                     let value = try metadata(ancestor.path)
                     guard ancestor.path != path else {
@@ -443,9 +527,11 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         // Observe these entries without walking unrelated directory contents.
         var visited: Set<String> = []
         while let route = routes.popLast() {
+            try checkCancellation()
             guard visited.insert(route.path).inserted else { continue }
             var prefix = ""
             for component in route.pathComponents.dropFirst() {
+                try checkCancellation()
                 prefix.append("/")
                 prefix.append(component)
                 let value = try metadata(prefix)
@@ -479,7 +565,9 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         return paths.reversed()
     }
 
-    private static func captureSerial(root: URL, excluding: [String: Set<String>]) throws -> CaptureResult {
+    private static func captureSerial(root: URL, excluding: [String: Set<String>],
+                                      checkCancellation: CancellationCheck) throws -> CaptureResult {
+        try checkCancellation()
         let fileMetadata = NativePreviewFileMetadata()
         let standardRootPath = root.standardizedFileURL.path
         let canonicalRootPath = root.resolvingSymlinksInPath().path
@@ -501,6 +589,7 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
         var entries: [Entry] = []
         var routes: [URL] = []
         while let next = pending.popLast() {
+            try checkCancellation()
             let path = next.path
             guard !isExcluded(path) else { continue }
             if !next.isCanonical {
@@ -539,29 +628,33 @@ struct NativePreviewInputSnapshot: Equatable, Sendable {
                 if value.st_mode & S_IFMT == S_IFDIR, expandedDirectories.insert(canonical).inserted {
                     // Names enumerated from canonical directories already have canonical parents.
                     let prefix = canonical == "/" ? canonical : canonical + "/"
-                    let children = try fileMetadata.directoryEntries(atPath: canonical)
+                    let children = try fileMetadata.directoryEntries(atPath: canonical, checkCancellation: checkCancellation)
                     var ignoredNames: Set<String> = []
-                    let retained = children.filter {
+                    let retained = try children.filter {
+                        try checkCancellation()
                         let excluded = isExcluded(prefix + $0.name)
                         if excluded { ignoredNames.insert($0.name) }
                         return !excluded
                     }
                     // Also retain absent direct exclusions so their later creation remains ignored.
                     for alias in excluding.keys where alias.hasPrefix(prefix) {
+                        try checkCancellation()
                         let name = String(alias.dropFirst(prefix.count))
                         if !name.isEmpty, !name.contains("/"), isExcluded(alias) { ignoredNames.insert(name) }
                     }
                     verification.directories.append(DirectoryVerification(path: canonical,
                         includedNames: Set(retained.map(\.name)), ignoredNames: ignoredNames,
                         bulkPaths: Set(retained.compactMap { $0.metadata == nil ? nil : prefix + $0.name })))
-                    pending += children.map {
-                        (path: prefix + $0.name, isCanonical: true, metadata: $0.metadata)
+                    pending += try children.map {
+                        try checkCancellation()
+                        return (path: prefix + $0.name, isCanonical: true, metadata: $0.metadata)
                     }
                 }
             }
             entries.append(Entry(path: path, value: value, symbolicLinkDestination: symbolicLinkDestination))
         }
-        entries += try inputPathAncestors(missingPaths: [], routes: routes, verification: &verification, plainAncestors: &plainAncestors)
+        entries += try inputPathAncestors(missingPaths: [], routes: routes, verification: &verification,
+            plainAncestors: &plainAncestors, checkCancellation: checkCancellation)
         return CaptureResult(entries: entries.sorted { $0.path < $1.path }, verification: verification, plainAncestors: plainAncestors)
     }
 
