@@ -80,6 +80,8 @@ package final class NativeApplicationBootstrap {
             "XCODE_MCPKIT_PREFIX_MAPPING_FOR_COVERAGE_YES": "NO",
             "XCODE_MCPKIT_BATCH_MODE_YES_YES": "NO",
             "XCODE_MCPKIT_PROJECT_PREFIX_FOR_BATCH_YES": "NO",
+            // App-wide settings already sit below project and target settings.
+            // Inheriting Xcode's built-in YES here would bypass the compiler workaround.
             "SWIFT_ENABLE_BATCH_MODE": environment["SWIFT_ENABLE_BATCH_MODE"] ?? batchDefault,
         ] where settings[key] == nil {
             settings[key] = value
