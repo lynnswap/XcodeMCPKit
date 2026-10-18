@@ -79,8 +79,11 @@ Xcode outside the proxy. Grant macOS Accessibility access to the process hosting
 the server when prompted; otherwise dialogs remain for manual approval.
 
 The monitor runs until the server shuts down. It recognizes the English
-`Allow “…” to access Xcode?` heading and an `Allow` button, as well as the existing
-configured-agent identity matches. Other dialogs keep their normal behavior.
+`Allow “…” to access Xcode?` heading and the supported English and Japanese
+sentences naming an agent that requests Xcode's tools. The default button must
+be `Allow` or `許可`, or use `action-button-1` when its title is unavailable.
+Agent names, PIDs, and executable paths alone do not identify a connection
+request. Other dialogs keep their normal behavior.
 The proxy's tools continue to run in its headless native host.
 
 ### Compilation caching

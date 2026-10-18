@@ -17,19 +17,31 @@ extension XcodePermissionDialogAutomation {
         ) -> XcodePermissionDialogAutomation.MatchDecision? {
             guard passesStructuralChecks(snapshot),
                 normalizedText(snapshot.defaultButton?.role) == "axbutton",
-                normalizedText(snapshot.defaultButton?.title) == "allow"
+                looksLikeAllowButton(normalizedButtonDescription(snapshot.defaultButton))
             else {
                 return nil
             }
 
             // Xcode can expose the heading as AXStaticText while AXTitle is empty.
-            let hasConnectionTitle = normalizedTextNodes(for: snapshot).contains { text in
+            let textNodes = normalizedTextNodes(for: snapshot).map {
+                $0.replacingOccurrences(of: "’", with: "'")
+            }
+            let hasConnectionTitle = textNodes.contains { text in
                 text.range(
                     of: #"(?s)^allow (?:“.+”|".+") to access xcode\?$"#,
                     options: .regularExpression
                 ) != nil
             }
-            guard hasConnectionTitle else {
+            let namedToolRequests = [
+                #"^エージェント .+ が xcode のツール使用を要求しています。$"#,
+                #"^the agent .+ wants to use xcode's tools(?: for .+)?\.$"#,
+            ]
+            let hasNamedToolRequest = textNodes.contains { text in
+                namedToolRequests.contains { request in
+                    text.range(of: request, options: .regularExpression) != nil
+                }
+            }
+            guard hasConnectionTitle || hasNamedToolRequest else {
                 return nil
             }
             return XcodePermissionDialogAutomation.MatchDecision(
@@ -45,7 +57,7 @@ extension XcodePermissionDialogAutomation {
             assistantNameCandidates: Set<String>,
             serverProcessIDCandidates: Set<pid_t> = [ProcessInfo.processInfo.processIdentifier]
         ) -> XcodePermissionDialogAutomation.MatchDecision? {
-            guard passesStructuralChecks(snapshot) else {
+            guard let connection = connectionDecision(for: snapshot, processID: processID) else {
                 return nil
             }
 
@@ -53,23 +65,18 @@ extension XcodePermissionDialogAutomation {
             let normalizedAssistantNames = normalizedCandidates(assistantNameCandidates)
             let pidCandidates = normalizedPIDCandidates(serverProcessIDCandidates)
             let normalizedTextNodes = normalizedTextNodes(for: snapshot)
-            let defaultButtonDescription = normalizedButtonDescription(snapshot.defaultButton)
             guard
-                containsAssistantNameAndPID(
+                matchesConfiguredAgent(
                     in: normalizedTextNodes,
                     agentPathCandidates: normalizedAgentPaths,
                     assistantNameCandidates: normalizedAssistantNames,
-                    serverProcessIDCandidates: pidCandidates,
-                    defaultButtonDescription: defaultButtonDescription
+                    serverProcessIDCandidates: pidCandidates
                 )
             else {
                 return nil
             }
 
-            return XcodePermissionDialogAutomation.MatchDecision(
-                fingerprint: fingerprint(for: snapshot, processID: processID),
-                defaultButtonTitle: defaultButtonDescription
-            )
+            return connection
         }
 
         static func fingerprint(
@@ -136,79 +143,28 @@ extension XcodePermissionDialogAutomation {
             ([snapshot.title] + snapshot.textValues).compactMap(normalizedText)
         }
 
-        /// The evidence a dialog snapshot can offer, computed once so the
-        /// accept/reject rules below read as policy instead of as the stack of
-        /// nested conditionals this grew from (one per historical fix).
-        private struct MatchEvidence {
-            let pathInAnyNode: Bool
-            let pidAndNameInSameNode: Bool
-            let pathAndNameInSameNode: Bool
-            let nameInAnyNode: Bool
-            let pidInAnyNode: Bool
-            let unmatchedPIDLabel: Bool
-            let allowLikeDefaultButton: Bool
-        }
-
-        private static func containsAssistantNameAndPID(
+        private static func matchesConfiguredAgent(
             in normalizedTextNodes: [String],
             agentPathCandidates: Set<String>,
             assistantNameCandidates: Set<String>,
-            serverProcessIDCandidates: Set<String>,
-            defaultButtonDescription: String
+            serverProcessIDCandidates: Set<String>
         ) -> Bool {
-            let evidence = MatchEvidence(
-                pathInAnyNode: normalizedTextNodes.contains { text in
-                    agentPathCandidates.contains(where: { text.contains($0) })
-                },
-                pidAndNameInSameNode: normalizedTextNodes.contains { text in
-                    serverProcessIDCandidates.contains(where: { containsNumericToken($0, in: text) })
-                        && assistantNameCandidates.contains(where: { text.contains($0) })
-                },
-                pathAndNameInSameNode: normalizedTextNodes.contains { text in
-                    agentPathCandidates.contains(where: { text.contains($0) })
-                        && assistantNameCandidates.contains(where: { text.contains($0) })
-                },
-                nameInAnyNode: normalizedTextNodes.contains { text in
-                    assistantNameCandidates.contains(where: { text.contains($0) })
-                },
-                pidInAnyNode: normalizedTextNodes.contains { text in
-                    serverProcessIDCandidates.contains(where: { containsNumericToken($0, in: text) })
-                },
-                unmatchedPIDLabel: normalizedTextNodes.contains(where: containsPIDReference),
-                allowLikeDefaultButton: looksLikeAllowButton(defaultButtonDescription)
-            )
-
-            // No assistant names configured: the agent path is the only signal.
             if assistantNameCandidates.isEmpty {
-                return evidence.pathInAnyNode
+                return normalizedTextNodes.contains { text in
+                    agentPathCandidates.contains(where: { text.contains($0) })
+                }
             }
-            // Strongest evidence: our PID and the assistant name in one node.
-            if evidence.pidAndNameInSameNode {
-                return true
-            }
-            // The name plus our PID anywhere in the dialog.
-            if evidence.nameInAnyNode && evidence.pidInAnyNode {
-                return true
-            }
-            // A pid-labelled number that is not ours: the dialog belongs to a
-            // different client process; never auto-approve it.
-            if evidence.nameInAnyNode && evidence.unmatchedPIDLabel {
+            guard normalizedTextNodes.contains(where: { text in
+                assistantNameCandidates.contains(where: { text.contains($0) })
+            }) else {
                 return false
             }
-            // Dialog copy that names the assistant but omits any pid label, with
-            // a default button that looks like Allow.
-            if evidence.nameInAnyNode && evidence.allowLikeDefaultButton {
+            if normalizedTextNodes.contains(where: { text in
+                serverProcessIDCandidates.contains(where: { containsNumericToken($0, in: text) })
+            }) {
                 return true
             }
-            // Only path-based acceptance remains; a pid token without the name
-            // means the dialog references some other process.
-            guard evidence.pidInAnyNode == false, evidence.pathInAnyNode else {
-                return false
-            }
-            if evidence.pathAndNameInSameNode {
-                return true
-            }
-            return evidence.nameInAnyNode
+            return normalizedTextNodes.contains(where: containsPIDReference) == false
         }
 
         private static func looksLikeAllowButton(_ description: String) -> Bool {

@@ -36,6 +36,7 @@ struct XcodePermissionDialogAutoApproverTests {
     }
 
     @Test(arguments: [
+        ("Allow “PreviewToolVerifier” to access Xcode?", [String]()),
         (#"Allow "Codex Release benchmark" to access Xcode?"#, [String]()),
         ("Allow “Other agent” to access Xcode?", ["An updated explanation."]),
         ("Allow “別のエージェント” to access Xcode?", ["PID: 7001", "Path: /unrelated/python"]),
@@ -92,9 +93,8 @@ struct XcodePermissionDialogAutoApproverTests {
     }
 
     @Test(arguments: [
-        XcodePermissionDialogAutomation.ButtonSnapshot(role: "AXButton", identifier: "action-button-1"),
-        makeButton(title: "許可"),
         makeButton(title: "Allow", role: "AXStaticText"),
+        makeButton(title: "OK"),
     ])
     func connectionMatcherRequiresAnAllowButton(button: XcodePermissionDialogAutomation.ButtonSnapshot) {
         let snapshot = makeSnapshot(
@@ -135,10 +135,10 @@ struct XcodePermissionDialogAutoApproverTests {
     }
 
     @Test(arguments: [
-        ("Allow “Codex Release benchmark” to access a folder?", "The agent wants to access this folder."),
-        ("Allow “Codex Release benchmark” to run a shell command?", "The agent wants to run a shell command."),
+        ("Allow “XcodeMCPKit” to access a folder?", "The agent wants to access this folder."),
+        ("Allow “XcodeMCPKit” to run a shell command?", "The agent wants to run a shell command."),
         ("Allow access", "The agent wants to use Xcode’s tools to perform actions like building, testing, or modifying code."),
-        ("許可", "エージェント 別のエージェント がフォルダへのアクセスを要求しています。"),
+        ("許可", "エージェント XcodeMCPKit がフォルダへのアクセスを要求しています。"),
         ("Allow access", "The agent wants to use Xcode's tools."),
         ("Allow “Codex Release benchmark” to access Xcode? Extra text", ""),
         ("Allow “Codex Release benchmark to access Xcode?", ""),
@@ -156,6 +156,28 @@ struct XcodePermissionDialogAutoApproverTests {
                 processID: 10620
             ) == nil
         )
+        let axClient = RecordingAXClient(
+            status: .trusted,
+            windowsByProcessID: [10620: [XcodePermissionDialogAutomation.AXWindow(
+                processID: 10620,
+                snapshot: snapshot,
+                defaultButton: AXUIElementCreateSystemWide()
+            )]]
+        )
+        var scanner = PermissionDialogScanner(dependencies: .init(
+            configuration: .init(
+                permissionDialogProcessIDs: { [10620] },
+                agentPathCandidates: { ["/usr/bin/python3"] },
+                assistantNameCandidates: { ["XcodeMCPKit"] },
+                agentProcessIDCandidates: { [21719] },
+                agentScope: .allAgents
+            ),
+            axClient: axClient,
+            uptimeNanoseconds: { 0 },
+            logger: Logger(label: "tests.permission")
+        ))
+        #expect(scanner.scanAndApprove().approvedWindowCount == 0)
+        #expect(axClient.snapshot().pressCalls == 0)
     }
 
     @Test func scannerApprovesIndependentConnectionWithoutAgentCandidates() {
@@ -203,20 +225,17 @@ struct XcodePermissionDialogAutoApproverTests {
         #expect(axClient.snapshot().pressCalls == 1)
     }
 
-    private static let legacyApprovalCases: [
+    private static let namedToolRequestCases: [
         ([String], XcodePermissionDialogAutomation.ButtonSnapshot, Set<String>, Set<String>)
     ] = [
-        (["XcodeMCPKit PID 6119"], makeButton(title: "OK"), Set(["XcodeMCPKit"]), Set<String>()),
-        (["XcodeMCPKit", "6119"], makeButton(title: "Zulassen"), Set(["XcodeMCPKit"]), Set<String>()),
         (["エージェント XcodeMCPKit が Xcode のツール使用を要求しています。"], makeButton(title: "許可"), Set(["XcodeMCPKit"]), Set<String>()),
-        (["XcodeMCPKit"], XcodePermissionDialogAutomation.ButtonSnapshot(role: "AXButton", identifier: "action-button-1"), Set(["XcodeMCPKit"]), Set<String>()),
-        (["XcodeMCPKit at /tmp/xcode-mcp-proxy-server"], makeButton(title: "OK"), Set(["XcodeMCPKit"]), Set(["/tmp/xcode-mcp-proxy-server"])),
+        (["The agent XcodeMCPKit wants to use Xcode's tools."], XcodePermissionDialogAutomation.ButtonSnapshot(role: "AXButton", identifier: "action-button-1"), Set(["XcodeMCPKit"]), Set<String>()),
         (["The agent at /tmp/xcode-mcp-proxy-server wants to use Xcode's tools."], makeButton(title: "Allow"), Set<String>(), Set(["/tmp/xcode-mcp-proxy-server"])),
         (["The agent Custom MCP, PID 6119 wants to use Xcode's tools."], makeButton(title: "Allow"), Set(["Custom MCP"]), Set<String>()),
     ]
 
-    @Test(arguments: Self.legacyApprovalCases)
-    func allAgentScannerPreservesLegacyApprovalsWithoutConnectionHeading(
+    @Test(arguments: Self.namedToolRequestCases)
+    func scannerApprovesNamedXcodeToolRequests(
         textValues: [String],
         button: XcodePermissionDialogAutomation.ButtonSnapshot,
         names: Set<String>,
@@ -242,7 +261,7 @@ struct XcodePermissionDialogAutoApproverTests {
             XcodePermissionDialogAutomation.Matcher.connectionDecision(
                 for: snapshot,
                 processID: processID
-            ) == nil
+            ) != nil
         )
         let axClient = RecordingAXClient(
             status: .trusted,
@@ -754,7 +773,7 @@ struct XcodePermissionDialogAutoApproverTests {
                         snapshot: makeSnapshot(
                             processBundleIdentifier: "com.apple.dt.Xcode",
                             title: "Access",
-                            textValues: ["XcodeMCPKit PID 6119"]
+                            textValues: ["The agent XcodeMCPKit, PID 6119 wants to use Xcode's tools."]
                         ),
                         defaultButton: AXUIElementCreateSystemWide()
                     )
@@ -765,7 +784,7 @@ struct XcodePermissionDialogAutoApproverTests {
                         snapshot: makeSnapshot(
                             processBundleIdentifier: "com.apple.dt.Xcode",
                             title: "Access",
-                            textValues: ["XcodeMCPKit PID 6119"]
+                            textValues: ["The agent XcodeMCPKit, PID 6119 wants to use Xcode's tools."]
                         ),
                         defaultButton: AXUIElementCreateSystemWide()
                     )
@@ -880,8 +899,16 @@ struct XcodePermissionDialogAutoApproverTests {
             )
         )
 
-        #expect(scanner.scanAndApprove().approvedWindowCount == 0)
-        #expect(scanner.scanAndApprove().approvedWindowCount == 1)
+        let firstScan = scanner.scanAndApprove()
+        let secondScan = scanner.scanAndApprove()
+        switch scope {
+        case .configuredAgent:
+            #expect(firstScan.approvedWindowCount == 0)
+            #expect(secondScan.approvedWindowCount == 1)
+        case .allAgents:
+            #expect(firstScan.approvedWindowCount == 1)
+            #expect(secondScan.approvedWindowCount == 0)
+        }
         #expect(axClient.snapshot().pressCalls == 1)
     }
 
@@ -897,7 +924,7 @@ struct XcodePermissionDialogAutoApproverTests {
                         snapshot: makeSnapshot(
                             processBundleIdentifier: "com.apple.dt.Xcode",
                             title: "Access",
-                            textValues: ["XcodeMCPKit 6119"]
+                            textValues: ["The agent XcodeMCPKit, PID 6119 wants to use Xcode's tools."]
                         ),
                         defaultButton: AXUIElementCreateSystemWide()
                     )
@@ -968,7 +995,7 @@ struct XcodePermissionDialogAutoApproverTests {
                 snapshot: makeSnapshot(
                     processBundleIdentifier: "com.apple.dt.Xcode",
                     title: "Access",
-                    textValues: ["XcodeMCPKit PID 6119"]
+                    textValues: ["The agent XcodeMCPKit, PID 6119 wants to use Xcode's tools."]
                 ),
                 defaultButton: AXUIElementCreateSystemWide()
             ),
