@@ -1,7 +1,7 @@
 # MCP Connection Permission Dialog Investigation (Xcode 26.3)
 
-> Historical design/investigation. Accessibility permission automation was removed.
-> See [native routing migration](migrations/native-backend.md) for the current automatic native permission flow.
+> Historical investigation. See [automatic connection approval](configuration.md#automatic-connection-approval)
+> for current GUI dialog handling and [native routing migration](migrations/native-backend.md) for tool routing.
 
 
 ## Summary

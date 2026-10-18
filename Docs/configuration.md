@@ -54,6 +54,7 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialization remains bounded. |
 | `--max-body-bytes bytes` | Maximum accepted HTTP request body size. |
 | `--share-compilation-cache` | Enable shared compilation caching and Swift/Clang prefix mapping in native hosts. Off by default; see [compilation caching](#compilation-caching). |
+| `--auto-approve` | Automatically allow GUI Xcode MCP connection dialogs for all agents, including external clients. Off by default; requires macOS Accessibility access. |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port before starting. |
 | `--dry-run` | Print the resolved server command without starting it. |
 
@@ -69,6 +70,21 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `XCODE_MCP_PROXY_ENDPOINT` | STDIO adapter upstream URL. `--url` takes precedence. |
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
 | `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root for the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
+
+### Automatic connection approval
+
+`--auto-approve` monitors running Xcode permission-dialog processes and presses
+`Allow` on MCP connection dialogs. It includes agents connecting directly to
+Xcode outside the proxy. Grant macOS Accessibility access to the process hosting
+the server when prompted; otherwise dialogs remain for manual approval.
+
+The monitor runs until the server shuts down. It recognizes the English
+`Allow “…” to access Xcode?` heading and the supported English and Japanese
+sentences naming an agent that requests Xcode's tools. The default button must
+be `Allow` or `許可`, or use `action-button-1` when its title is unavailable.
+Agent names, PIDs, and executable paths alone do not identify a connection
+request. Other dialogs keep their normal behavior.
+The proxy's tools continue to run in its headless native host.
 
 ### Compilation caching
 

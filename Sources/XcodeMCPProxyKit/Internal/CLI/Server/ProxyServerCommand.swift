@@ -44,6 +44,9 @@ package struct ProxyServerCommand: ParsableCommand {
     @Flag(help: "Share compilation caches across worktrees using compiler prefix mapping.")
     var shareCompilationCache = false
 
+    @Flag(help: "Automatically allow Xcode MCP connections for all agents, including external clients. Requires Accessibility permission.")
+    var autoApprove = false
+
     @Flag(help: "Terminate an existing proxy server on the listen port before starting.")
     var forceRestart = false
 

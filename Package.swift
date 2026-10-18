@@ -152,6 +152,20 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .target(
+            name: "XcodeMCPPermissionAutomation",
+            dependencies: [.product(name: "Logging", package: "swift-log")],
+            swiftSettings: strictSwiftSettings
+        ),
+        .testTarget(
+            name: "XcodeMCPPermissionAutomationTests",
+            dependencies: [
+                "XcodeMCPPermissionAutomation",
+                "XcodeMCPCoreTestSupport",
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            swiftSettings: strictSwiftSettings
+        ),
+        .target(
             name: "XcodeMCPProxyKit",
             dependencies: [
                 "XcodeMCPProxyRuntimeContract",
@@ -159,6 +173,7 @@ let package = Package(
                 "XcodeMCPKit",
                 "XcodeMCPProxyRuntime",
                 "XcodeMCPProxyHTTP",
+                "XcodeMCPPermissionAutomation",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
             ],

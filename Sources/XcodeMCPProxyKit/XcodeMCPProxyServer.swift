@@ -5,6 +5,7 @@ import Logging
 import XcodeMCPKit
 import XcodeMCPProxyHTTP
 import XcodeMCPProxyRuntime
+import XcodeMCPPermissionAutomation
 
 /// Public configuration for an embedded Xcode MCP proxy server.
 ///
@@ -44,6 +45,18 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
 
         /// Publish to an explicit file URL.
         case file(URL)
+    }
+
+    /// Xcode MCP connection dialog automation policy.
+    public enum ApprovalPolicy: Equatable, Sendable {
+        /// Leave Xcode permission dialogs for the user to approve.
+        case manual
+
+        /// Automatically approve Xcode MCP connection dialogs for all agents,
+        /// including clients connecting to Xcode outside this proxy.
+        ///
+        /// Requires macOS Accessibility permission for the server process.
+        case automatic
     }
 
     /// Initialize handshake values sent from the proxy to native helpers.
@@ -98,6 +111,9 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Whether to share compilation caches across worktrees using compiler prefix mapping.
     public var sharesCompilationCache: Bool
 
+    /// Whether to automate GUI Xcode MCP connection dialogs. Defaults to manual approval.
+    public var approvalPolicy: ApprovalPolicy
+
     /// Maximum accepted HTTP request body size in bytes.
     public var maxBodyBytes: Int
 
@@ -124,6 +140,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///   - maxBodyBytes: Maximum accepted HTTP request body size.
     ///   - requestTimeout: Request timeout, or `nil` to disable it.
     ///   - discovery: Endpoint discovery policy.
+    ///   - approvalPolicy: Xcode MCP connection dialog automation policy. Defaults to `.manual`.
     ///   - prewarmToolsList: Whether to fetch native tool catalogs during startup.
     ///   - initializeHandshake: Explicit upstream initialize handshake override.
     public init(
@@ -135,12 +152,14 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         requestTimeout: Duration? = .seconds(300),
         initializeHandshake: InitializeHandshake? = nil,
         discovery: Discovery = .defaultLocation,
+        approvalPolicy: ApprovalPolicy = .manual,
         prewarmToolsList: Bool = true
     ) {
         self.bindAddress = bindAddress
         self.nativeHostBundleURL = nativeHostBundleURL
         self.developerDirectoryURL = developerDirectoryURL
         self.sharesCompilationCache = sharesCompilationCache
+        self.approvalPolicy = approvalPolicy
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
         self.initializeHandshake = initializeHandshake
@@ -323,6 +342,7 @@ public final class XcodeMCPProxyServer: Sendable {
         var discoveryClient: DiscoveryClient
         var processID: @Sendable () -> Int
         var makeRuntime: @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing
+        var makeAutoApprover: @Sendable (XcodeMCPProxyServerConfiguration) -> any ProxyServerPermissionDialogAutoApprover
         var makeHTTPGateway:
             @Sendable (
                 ProxyHTTPConfiguration,
@@ -336,6 +356,11 @@ public final class XcodeMCPProxyServer: Sendable {
                 Int(ProcessInfo.processInfo.processIdentifier)
             },
             makeRuntime: @escaping @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing,
+            makeAutoApprover: @escaping @Sendable (XcodeMCPProxyServerConfiguration) -> any ProxyServerPermissionDialogAutoApprover = { configuration in
+                XcodePermissionDialogAutomation.AutoApprover.liveForAllAgents(
+                    assistantName: configuration.initializeHandshake?.clientInfo?.name
+                )
+            },
             makeHTTPGateway: @escaping @Sendable (
                 ProxyHTTPConfiguration,
                 any ProxyRuntimeServing,
@@ -351,6 +376,7 @@ public final class XcodeMCPProxyServer: Sendable {
             self.discoveryClient = discoveryClient
             self.processID = processID
             self.makeRuntime = makeRuntime
+            self.makeAutoApprover = makeAutoApprover
             self.makeHTTPGateway = makeHTTPGateway
         }
 

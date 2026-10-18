@@ -187,6 +187,37 @@ struct XcodeMCPProxyServerTests {
         try await server.shutdown()
     }
 
+    @Test(arguments: [
+        XcodeMCPProxyServerConfiguration.ApprovalPolicy.manual, .automatic,
+    ])
+    func automaticApprovalFollowsTheServerLifetime(
+        policy: XcodeMCPProxyServerConfiguration.ApprovalPolicy
+    ) async throws {
+        let approver = RecordingPermissionDialogAutoApprover()
+        let creations = NIOLockedValueBox(0)
+        let server = XcodeMCPProxyServer(
+            configuration: .init(
+                bindAddress: .localhost(port: 0), discovery: .disabled, approvalPolicy: policy
+            ),
+            dependencies: .init(
+                discoveryClient: .testValue,
+                makeRuntime: { _ in StartupTestRuntime() },
+                makeAutoApprover: { _ in
+                    creations.withLockedValue { $0 += 1 }
+                    return approver
+                }
+            )
+        )
+        #expect(creations.withLockedValue { $0 } == 0)
+        _ = try await server.start()
+        let expected = policy == .automatic ? 1 : 0
+        #expect(creations.withLockedValue { $0 } == expected)
+        #expect(approver.counts.start == expected)
+        try await server.shutdown()
+        try await server.shutdown()
+        #expect(approver.counts.shutdown == expected)
+    }
+
     @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {
         let upstream = RecordingUpstreamSlot()
         let config = XcodeMCPProxyServerConfiguration(
@@ -245,10 +276,12 @@ struct XcodeMCPProxyServerTests {
     @Test func startedServerDeinitSynchronouslyCancelsRuntimeRetainTasks() async throws {
         let runtimeReference = WeakRuntimeReference()
         let upstream = RecordingUpstreamSlot()
+        let approver = RecordingPermissionDialogAutoApprover()
         var server: XcodeMCPProxyServer? = XcodeMCPProxyServer(
             configuration: .init(
                 bindAddress: .init(host: "127.0.0.1", port: 0),
-                discovery: .disabled
+                discovery: .disabled,
+                approvalPolicy: .automatic
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
@@ -258,7 +291,8 @@ struct XcodeMCPProxyServerTests {
                         upstream: upstream,
                         runtimeReference: runtimeReference
                     )
-                }
+                },
+                makeAutoApprover: { _ in approver }
             )
         )
 
@@ -275,6 +309,7 @@ struct XcodeMCPProxyServerTests {
         ) {
             await runtimeTaskDrains.wait()
         }
+        #expect(approver.counts.cancel == 1)
 
         // This test deliberately omits the server's explicit shutdown contract.
         // Deinit guarantees cancellation signaling rather than awaiting teardown.
@@ -629,6 +664,14 @@ private final class ControlledShutdownGateway: ProxyHTTPGatewayServing, Sendable
     }
 
     func cancelForDeinit() {}
+}
+
+private final class RecordingPermissionDialogAutoApprover: Sendable, ProxyServerPermissionDialogAutoApprover {
+    private let state = NIOLockedValueBox((start: 0, cancel: 0, shutdown: 0))
+    var counts: (start: Int, cancel: Int, shutdown: Int) { state.withLockedValue { $0 } }
+    func start() { state.withLockedValue { $0.start += 1 } }
+    func cancel() { state.withLockedValue { $0.cancel += 1 } }
+    func shutdown() async { state.withLockedValue { $0.shutdown += 1 } }
 }
 
 private final class StartupTestRuntime: @unchecked Sendable, ProxyRuntimeServing {

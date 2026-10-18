@@ -14,6 +14,7 @@ struct CLIUsageContractTests {
             "--max-body-bytes <max-body-bytes>",
             "--request-timeout <request-timeout>",
             "--share-compilation-cache",
+            "--auto-approve",
             "--force-restart",
             "--dry-run",
             "--version",
@@ -21,7 +22,7 @@ struct CLIUsageContractTests {
         ] {
             #expect(help.contains(option))
         }
-        for option in ["--auto-approve", "--config", "--native-host-bundle", "--developer-dir", "--refresh-code-issues-mode"] {
+        for option in ["--config", "--native-host-bundle", "--developer-dir", "--refresh-code-issues-mode"] {
             #expect(!help.contains(option))
         }
         #expect(help.contains("--upstream-processes") == false)
