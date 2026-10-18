@@ -13,14 +13,17 @@ package final class NativeApplicationBootstrap {
     package func application(for installation: NativeXcodeInstallation, sharesCompilationCache: Bool = false) throws -> NSApplication {
         let defaults = UserDefaults.standard
         defaults.addSuite(named: "com.apple.dt.Xcode")
+        var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        // Xcode's SCM service accepts Apple-signed clients. SwiftPM's built-in
+        // provider uses system Git while retaining the native package workspace.
+        arguments["IDEPackageSupportUseBuiltinSCM"] = true
         if sharesCompilationCache {
-            var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
             let buildSettingsKey = "IDEApplicationwideBuildSettings"
             arguments[buildSettingsKey] = Self.compilationCacheSettings(
                 existing: defaults.dictionary(forKey: buildSettingsKey) ?? [:],
                 environment: ProcessInfo.processInfo.environment)
-            defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         }
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         // Configure the installed index before Xcode initializes its chat settings.
         // The downloadable-asset coordinator can have no location in a headless host.
         do {

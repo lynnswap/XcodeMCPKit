@@ -260,6 +260,21 @@
     ]
   },
   {
+    "id": "remote-package",
+    "directory": "RemotePackage",
+    "project": "RemotePackagePreviewFixture.xcodeproj",
+    "cases": [
+      {
+        "id": "remote-package-basic",
+        "sourceFile": "RemotePackagePreviewFixture/ContentView.swift",
+        "navigatorPath": "RemotePackagePreviewFixture/RemotePackagePreviewFixture/ContentView.swift",
+        "scheme": "RemotePackagePreviewFixture",
+        "index": 0,
+        "arguments": {}
+      }
+    ]
+  },
+  {
     "id": "general",
     "directory": "../ProxyToolVerifierFixture",
     "project": "ProxyToolVerifierFixture.xcodeproj",
