@@ -41,10 +41,13 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
         var callbacks: [@Sendable (Result<ProxyRuntimeReply, any Error>) -> Void] = []
         var task: Task<Void, Never>?
         var timer: Task<Void, Never>?
+        var workFinished = false
+        var workCallbacks: [@Sendable () -> Void] = []
     }
 
     private let state = NIOLockedValueBox(State())
     let cancellation = NativeHostBrokerCancellation()
+    private let workCompletion = AsyncTerminalSignal()
     private let cancelledReply: ProxyRuntimeReply
     let requestIDKey: String?
 
@@ -61,6 +64,7 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
         let task = Task { [self] in
             let reply = await work(cancellation)
             finish(.success(reply))
+            finishWork()
         }
         let timer = deadline.flatMap { deadline -> Task<Void, Never>? in
             guard let timeoutReply else { return nil }
@@ -87,6 +91,28 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
         }
         if let result { completion(result) }
     }
+
+    func whenWorkComplete(_ completion: @escaping @Sendable () -> Void) {
+        let finished = state.withLockedValue { state in
+            if state.workFinished { return true }
+            state.workCallbacks.append(completion)
+            return false
+        }
+        if finished { completion() }
+    }
+
+    private func finishWork() {
+        let callbacks = state.withLockedValue { state in
+            state.workFinished = true
+            let callbacks = state.workCallbacks
+            state.workCallbacks.removeAll()
+            return callbacks
+        }
+        for callback in callbacks { callback() }
+        workCompletion.signal()
+    }
+
+    func waitForWorkCompletion() async { await workCompletion.wait() }
 
     func cancel(reason: ProxyRuntimeCancellationReason) {
         interrupt(with: cancelledReply, reason: reason)

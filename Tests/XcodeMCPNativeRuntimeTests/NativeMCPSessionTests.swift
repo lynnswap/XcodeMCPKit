@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import XcodeMCPNativeRuntime
 import XcodeMCPWire
@@ -30,12 +31,12 @@ struct NativeMCPSessionTests {
     func invalidJSONNeverDispatchesAndTheNextRequestStillSucceeds(raw: String) async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.session.receive(Data(raw.utf8))
+            try await harness.session.receive(Data(raw.utf8))
             let error = try await harness.nextMessage()
             #expect(try nativeTestField(error, "error", "code") == .number(.int(-32700)))
             #expect(harness.backend.executions.isEmpty)
             #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
-            try harness.request("ping", id: "after-invalid-json")
+            try await harness.request("ping", id: "after-invalid-json")
             #expect(try nativeTestField(await harness.nextMessage(), "result") == .object([:]))
         }
     }
@@ -56,18 +57,18 @@ struct NativeMCPSessionTests {
     func invalidInitializeParametersDoNotInitializeTheSession(raw: String) async throws {
         try await withNativeSession { harness in
             let parameters = raw == "missing" ? nil : try nativeTestJSON(Data(raw.utf8))
-            try harness.request("initialize", id: "invalid-initialize", params: parameters)
+            try await harness.request("initialize", id: "invalid-initialize", params: parameters)
             let invalid = try await harness.nextMessage()
             #expect(try nativeTestField(invalid, "id") == .string("invalid-initialize"))
             #expect(try nativeTestField(invalid, "error", "code") == .number(.int(-32602)))
-            try harness.request("tools/list", id: "uninitialized")
+            try await harness.request("tools/list", id: "uninitialized")
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
             #expect(harness.backend.listCalls == 0)
             #expect(harness.backend.executions.isEmpty)
             #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
 
             _ = try await harness.initialize()
-            try harness.request("tools/list", id: "valid-initialize")
+            try await harness.request("tools/list", id: "valid-initialize")
             #expect(try nativeTestField(await harness.nextMessage(), "result", "tools") == .array([]))
             #expect(harness.backend.listCalls == 1)
         }
@@ -81,7 +82,7 @@ struct NativeMCPSessionTests {
                 "annotations": .object(["readOnlyHint": .bool(true)]),
             ]), workspaceScoped: false)
             harness.backend.tools = [first]
-            try harness.request("tools/list", id: "catalog-1")
+            try await harness.request("tools/list", id: "catalog-1")
             #expect(try nativeTestField(await harness.nextMessage(), "result", "tools") == .array([first.descriptor]))
 
             let second = NativeTool(name: "ToolAddedByXcode", descriptor: .object([
@@ -89,7 +90,7 @@ struct NativeMCPSessionTests {
                 "outputSchema": .object(["type": .string("object")]),
             ]), workspaceScoped: true)
             harness.backend.tools = [second]
-            try harness.request("tools/list", id: "catalog-2")
+            try await harness.request("tools/list", id: "catalog-2")
             #expect(try nativeTestField(await harness.nextMessage(), "result", "tools") == .array([second.descriptor]))
             #expect(harness.backend.listCalls == 2)
         }
@@ -102,7 +103,7 @@ struct NativeMCPSessionTests {
                 "workspaceIdentifier": .string("/tmp/Project.xcodeproj"),
                 "nested": .object(["values": .array([.number(.int(4)), .bool(true), .null])]),
             ]
-            try harness.call("DynamicNativeAction", id: "call", arguments: arguments, progressToken: .number(.int(73)))
+            try await harness.call("DynamicNativeAction", id: "call", arguments: arguments, progressToken: .number(.int(73)))
             let execution = try await harness.backend.nextExecution()
             #expect(execution.name == "DynamicNativeAction")
             #expect(execution.arguments == arguments)
@@ -137,7 +138,7 @@ struct NativeMCPSessionTests {
     @Test func progressWithoutATokenDoesNotEmitAnUncorrelatedNotification() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("Action", id: "call")
+            try await harness.call("Action", id: "call")
             let execution = try await harness.backend.nextExecution()
             try execution.emit("update", data: .object(["progress": .number(.int(1))]))
             try execution.complete(.string("Finished"))
@@ -154,7 +155,7 @@ struct NativeMCPSessionTests {
     func invalidProgressTokensDoNotEmitNotifications(token: JSONValue) async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("Action", id: "invalid-token", progressToken: token)
+            try await harness.call("Action", id: "invalid-token", progressToken: token)
             let execution = try await harness.backend.nextExecution()
             try execution.emit("update", data: .object(["progress": .number(.int(1))]))
             try execution.complete(.string("Completed"))
@@ -168,19 +169,16 @@ struct NativeMCPSessionTests {
     func outputFailureStopsDispatchAndNotifiesTheHostOnce(kind: String) async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("LongRunning", id: "pending")
+            try await harness.call("LongRunning", id: "pending")
             let pending = try await harness.backend.nextExecution()
-            try harness.call("OutputProducer", id: "output-producer", progressToken: .string("progress"))
+            try await harness.call("OutputProducer", id: "output-producer", progressToken: .string("progress"))
             let producer = try await harness.backend.nextExecution()
             let failure = NativeRuntimeError.invocation("Output pipe closed")
             harness.outputControl.failure = failure
-            let failureEvents = AsyncStream<Void>.makeStream()
-            var failures: [String] = []
-            var shutdownTask: Task<Void, any Error>?
-            harness.session.onOutputFailure = { [weak session = harness.session] error in
-                failures.append(String(describing: error))
-                failureEvents.continuation.yield(())
-                if let session { shutdownTask = Task { try await session.shutdown() } }
+            let failureEvents = AsyncStream<(String, Task<Void, any Error>?)>.makeStream()
+            await harness.session.setOutputFailureHandler { [weak session = harness.session] error in
+                let shutdown = session.map { session in Task { try await session.shutdown() } }
+                failureEvents.continuation.yield((String(describing: error), shutdown))
             }
 
             switch kind {
@@ -194,22 +192,24 @@ struct NativeMCPSessionTests {
             }
 
             var failureIterator = failureEvents.stream.makeAsyncIterator()
-            #expect(await failureIterator.next(isolation: MainActor.shared) != nil)
-            #expect(throws: NativeRuntimeError.self) { try harness.call("MustNotRun", id: "after-output-failure") }
+            let (reportedFailure, shutdownTask) = try #require(await failureIterator.next(isolation: MainActor.shared))
+            await #expect(throws: NativeRuntimeError.self) { try await harness.call("MustNotRun", id: "after-output-failure") }
             #expect(harness.backend.executions.map(\.name) == ["LongRunning", "OutputProducer"])
             let shutdown = try #require(shutdownTask)
             try await shutdown.value
             #expect(await pending.wasCancelled())
             #expect(harness.backend.shutdownCalls == 1)
-            #expect(failures == [failure.description])
-            harness.session.onOutputFailure = nil
+            #expect(reportedFailure == failure.description)
+            await harness.session.setOutputFailureHandler(nil)
+            failureEvents.continuation.finish()
+            #expect(await failureIterator.next(isolation: MainActor.shared) == nil)
         }
     }
 
     @Test func nativeToolErrorsRemainToolResultsWithStructuredDetails() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("Action", id: "failure")
+            try await harness.call("Action", id: "failure")
             let execution = try await harness.backend.nextExecution()
             let detail: JSONValue = .object(["message": .string("Build failed"), "diagnostics": .array([.string("Missing import")])])
             try execution.emit("error", data: detail)
@@ -226,7 +226,7 @@ struct NativeMCPSessionTests {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
             harness.backend.executeError = NativeToolExecutionError(message: "The project does not exist")
-            try harness.call("XcodeLS", id: "missing-project")
+            try await harness.call("XcodeLS", id: "missing-project")
             let response = try await harness.nextMessage()
             #expect(try nativeTestObject(response)["error"] == nil)
             #expect(try nativeTestField(response, "result", "isError") == .bool(true))
@@ -237,7 +237,7 @@ struct NativeMCPSessionTests {
             #expect(harness.backend.finishedContexts.count == 1)
 
             harness.backend.executeError = nil
-            try harness.call("XcodeLS", id: "existing-project")
+            try await harness.call("XcodeLS", id: "existing-project")
             try await harness.backend.nextExecution().complete(.object(["items": .array([])]))
             #expect(try nativeTestField(await harness.nextMessage(), "result", "isError") == .bool(false))
         }
@@ -249,7 +249,7 @@ struct NativeMCPSessionTests {
             let error = NSError(domain: "com.apple.dt.PBXProject", code: -1,
                                 userInfo: [NSLocalizedDescriptionKey: "Failed to save removed project"])
             harness.backend.beforeExecute = { NativeErrorPresentation.report(error) }
-            try harness.call("Save", id: "save-error")
+            try await harness.call("Save", id: "save-error")
             let output: JSONValue = .object(["filesWritten": .number(.int(1))])
             try await harness.backend.nextExecution().complete(output)
             let response = try await harness.nextMessage()
@@ -262,7 +262,7 @@ struct NativeMCPSessionTests {
             #expect(content.last == .object(["type": .string("text"), "text": .string(error.description)]))
 
             harness.backend.beforeExecute = nil
-            try harness.call("OpenOtherWorkspace", id: "after-save-error")
+            try await harness.call("OpenOtherWorkspace", id: "after-save-error")
             try await harness.backend.nextExecution().complete(.object([:]))
             #expect(try nativeTestField(await harness.nextMessage(), "result", "isError") == .bool(false))
         }
@@ -274,7 +274,7 @@ struct NativeMCPSessionTests {
             let cleanup = NSError(domain: "WorkspaceCleanup", code: 1,
                                   userInfo: [NSLocalizedDescriptionKey: "Cannot close pending document"])
             harness.backend.onFinish = { _ in throw cleanup }
-            try harness.call("Open", id: "cleanup-failure")
+            try await harness.call("Open", id: "cleanup-failure")
             let execution = try await harness.backend.nextExecution()
             let output: JSONValue = .object(["workspaceIdentifier": .string("native-workspace")])
             try execution.complete(output)
@@ -294,7 +294,7 @@ struct NativeMCPSessionTests {
             _ = try await harness.initialize()
             harness.backend.executeError = NativeRuntimeError.unsupportedContract("Native output contract changed")
             harness.backend.onFinish = { _ in throw NativeRuntimeError.invocation("Pending document could not close") }
-            try harness.call("Open", id: "original-and-cleanup")
+            try await harness.call("Open", id: "original-and-cleanup")
 
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "error", "message") == .string(
@@ -311,9 +311,9 @@ struct NativeMCPSessionTests {
                 failed.backend.beforeExecute = {
                     NativeErrorPresentation.report(NSError(domain: NSCocoaErrorDomain, code: CocoaError.fileWriteNoPermission.rawValue))
                 }
-                try failed.call("Save", id: "failed")
+                try await failed.call("Save", id: "failed")
                 let first = try await failed.backend.nextExecution()
-                try unaffected.call("ReadOtherWorkspace", id: "unaffected")
+                try await unaffected.call("ReadOtherWorkspace", id: "unaffected")
                 let second = try await unaffected.backend.nextExecution()
                 try second.complete(.string("Read successfully"))
                 #expect(try nativeTestField(await unaffected.nextMessage(), "result", "isError") == .bool(false))
@@ -326,7 +326,7 @@ struct NativeMCPSessionTests {
     @Test func completedOutputDoesNotChangeTheMeaningOfAnErrorField() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("Action", id: "completed")
+            try await harness.call("Action", id: "completed")
             let execution = try await harness.backend.nextExecution()
             let output: JSONValue = .object(["error": .string("A tool-specific value")])
             try execution.complete(output)
@@ -340,7 +340,7 @@ struct NativeMCPSessionTests {
     func nonObjectNativeOutputRemainsValidMCPText(raw: String) async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("Action", id: "scalar")
+            try await harness.call("Action", id: "scalar")
             let execution = try await harness.backend.nextExecution()
             let output = try nativeTestJSON(Data(raw.utf8))
             try execution.complete(output)
@@ -356,11 +356,11 @@ struct NativeMCPSessionTests {
     @Test func eachCallGetsItsOwnArtifactsInTheSameConversation() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("Action", id: "first")
+            try await harness.call("Action", id: "first")
             let first = try await harness.backend.nextExecution()
             try first.complete(.object([:]))
             _ = try await harness.nextMessage()
-            try harness.call("Action", id: "second")
+            try await harness.call("Action", id: "second")
             let second = try await harness.backend.nextExecution()
             try second.complete(.object([:]))
             _ = try await harness.nextMessage()
@@ -374,16 +374,16 @@ struct NativeMCPSessionTests {
     @Test func invalidParametersAndUnknownToolsPreserveRequestErrors() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.request("tools/call", id: "missing-name", params: .object([:]))
+            try await harness.request("tools/call", id: "missing-name", params: .object([:]))
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
-            try harness.request("tools/call", id: "bad-arguments", params: .object([
+            try await harness.request("tools/call", id: "bad-arguments", params: .object([
                 "name": .string("Action"), "arguments": .array([]),
             ]))
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
             #expect(harness.backend.executions.isEmpty)
 
             harness.backend.executeError = NativeRuntimeError.invalidRequest("Unknown native tool 'RemovedTool'")
-            try harness.call("RemovedTool", id: "removed")
+            try await harness.call("RemovedTool", id: "removed")
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32602)))
             #expect(try nativeTestField(response, "error", "message") == .string("Unknown native tool 'RemovedTool'"))
@@ -394,7 +394,7 @@ struct NativeMCPSessionTests {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
             harness.backend.listError = .unsupportedContract("Selected Xcode changed its native schema")
-            try harness.request("tools/list", id: "catalog")
+            try await harness.request("tools/list", id: "catalog")
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32603)))
             #expect(try nativeTestField(response, "error", "message") == .string("Selected Xcode changed its native schema"))
@@ -405,7 +405,7 @@ struct NativeMCPSessionTests {
     func invalidNativeStreamsDoNotReportToolSuccess(scenario: String) async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("Action", id: scenario)
+            try await harness.call("Action", id: scenario)
             let execution = try await harness.backend.nextExecution()
             switch scenario {
             case "unknown-event": try execution.emit("unexpected", data: .object([:]))
@@ -423,7 +423,7 @@ struct NativeMCPSessionTests {
     @Test func unknownMethodsUseTheJSONRPCMethodNotFoundError() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.request("unsupported/future-method", id: "unknown")
+            try await harness.request("unsupported/future-method", id: "unknown")
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "id") == .string("unknown"))
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32601)))
@@ -432,12 +432,12 @@ struct NativeMCPSessionTests {
 
     @Test func requestsBeforeInitializeDoNotReachTheBackend() async throws {
         try await withNativeSession { harness in
-            try harness.request("tools/list", id: "early")
+            try await harness.request("tools/list", id: "early")
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32602)))
             #expect(harness.backend.listCalls == 0)
             _ = try await harness.initialize()
-            try harness.request("ping", id: "alive")
+            try await harness.request("ping", id: "alive")
             #expect(try nativeTestField(await harness.nextMessage(), "result") == .object([:]))
         }
     }
@@ -445,9 +445,9 @@ struct NativeMCPSessionTests {
     @Test func duplicateRequestIDsDoNotStartAnotherNativeOperation() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("Action", id: "in-use")
+            try await harness.call("Action", id: "in-use")
             let execution = try await harness.backend.nextExecution()
-            try harness.call("OtherAction", id: "in-use")
+            try await harness.call("OtherAction", id: "in-use")
             let duplicate = try await harness.nextMessage()
             #expect(try nativeTestField(duplicate, "error", "code") == .number(.int(-32600)))
             #expect(harness.backend.executions.count == 1)
@@ -462,7 +462,7 @@ struct NativeMCPSessionTests {
             let initialized = try await harness.initialize()
             let origin = try nativeTestField(initialized, "result", "_meta", "com.lynnswap.xcode-mcpkit/origin")
             #expect(origin == .object(try #require(harness.backend.origin)))
-            try harness.request("tools/list", id: "origin-catalog")
+            try await harness.request("tools/list", id: "origin-catalog")
             #expect(try nativeTestField(await harness.nextMessage(), "result", "_meta", "com.lynnswap.xcode-mcpkit/origin") == origin)
             #expect(try nativeTestObject(origin)["xcodeVersion"] == nil)
         }
@@ -473,19 +473,22 @@ struct NativeMCPSessionTests {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
             // STDIO may deliver both messages in one chunk before the request Task runs.
-            try harness.call("QueuedAction", id: "cancel-before-dispatch")
-            try harness.notification("notifications/cancelled", params: .object([
-                "requestId": .string("cancel-before-dispatch"),
-            ]))
+            let call = try JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
+                id: "cancel-before-dispatch", method: "tools/call",
+                params: .object(["name": .string("QueuedAction")])))
+            let cancellation = try JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(
+                method: "notifications/cancelled",
+                params: .object(["requestId": .string("cancel-before-dispatch")])))
+            try await harness.session.receive([call, cancellation])
             let cancelled = try await harness.nextMessage()
             #expect(try nativeTestField(cancelled, "id") == .string("cancel-before-dispatch"))
             #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
             #expect(harness.backend.executions.isEmpty)
             #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
 
-            try harness.request("ping", id: "after-cancellation")
+            try await harness.request("ping", id: "after-cancellation")
             #expect(try nativeTestField(await harness.nextMessage(), "result") == .object([:]))
-            try harness.call("ReplacementAction", id: "cancel-before-dispatch")
+            try await harness.call("ReplacementAction", id: "cancel-before-dispatch")
             let replacement = try await harness.backend.nextExecution()
             #expect(replacement.name == "ReplacementAction")
             #expect(harness.backend.executions.count == 1)
@@ -499,11 +502,11 @@ struct NativeMCPSessionTests {
     @Test func cancellationOnlyEndsTheMatchingRequestAndAllowsIDReuse() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("First", id: "cancel-me")
+            try await harness.call("First", id: "cancel-me")
             let cancelled = try await harness.backend.nextExecution()
-            try harness.call("Second", id: "keep-me")
+            try await harness.call("Second", id: "keep-me")
             let retained = try await harness.backend.nextExecution()
-            try harness.notification("notifications/cancelled", params: .object(["requestId": .string("cancel-me")]))
+            try await harness.notification("notifications/cancelled", params: .object(["requestId": .string("cancel-me")]))
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "id") == .string("cancel-me"))
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32800)))
@@ -512,37 +515,245 @@ struct NativeMCPSessionTests {
             try retained.complete(.string("Still running"))
             #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("keep-me"))
 
-            try harness.call("Replacement", id: "cancel-me")
+            try await harness.call("Replacement", id: "cancel-me")
             let replacement = try await harness.backend.nextExecution()
             try replacement.complete(.object([:]))
             #expect(try nativeTestField(await harness.nextMessage(), "result", "isError") == .bool(false))
         }
     }
 
-    @Test func cancellationPreservesANativeCompletionThatAlreadyArrived() async throws {
+    @Test func cancellationBeforeReplyDoesNotReportACompletedNativeResult() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("Open", id: "completed-before-cancellation")
+            let cleanup = NativeSessionSuspendedCallback()
+            harness.backend.onFinish = { _ in await cleanup.waitForReply() }
+            defer { cleanup.release(fromShutdown: false) }
+            try await harness.call("Open", id: "completed-before-cancellation")
             let execution = try await harness.backend.nextExecution()
             let output: JSONValue = .object(["workspaceIdentifier": .string("owned-workspace")])
             try execution.complete(output)
-            try harness.notification("notifications/cancelled", params: .object([
+            await cleanup.waitUntilEntered()
+            try await harness.notification("notifications/cancelled", params: .object([
                 "requestId": .string("completed-before-cancellation"),
             ]))
+            cleanup.release(fromShutdown: false)
 
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32800)))
         }
     }
 
+    @Test func workspaceExecutionRemainsExclusiveThroughCleanupWhileAnotherWorkspaceRuns() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            harness.backend.resources = [
+                "First": .init(workspace: "A"), "Second": .init(workspace: "A"),
+                "Third": .init(workspace: "A"), "Other": .init(workspace: "B"),
+            ]
+            try await harness.call("First", id: "first")
+            let first = try await harness.backend.nextExecution()
+            let cleanup = NativeSessionSuspendedCallback()
+            harness.backend.onFinish = { context in
+                if context.artifactsDirectory == first.context.artifactsDirectory { await cleanup.waitForReply() }
+            }
+            defer { cleanup.release(fromShutdown: false) }
+            try await harness.call("Second", id: "second")
+            try await harness.call("Third", id: "third")
+            try await harness.call("Other", id: "other")
+            let other = try await harness.backend.nextExecution()
+            #expect(other.name == "Other")
+            try first.complete(.string("First finished"))
+            await cleanup.waitUntilEntered()
+            try other.complete(.string("Other workspace finished"))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("other"))
+            #expect(harness.backend.executions.map(\.name) == ["First", "Other"])
+            cleanup.release(fromShutdown: false)
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("first"))
+            let second = try await harness.backend.nextExecution()
+            #expect(second.name == "Second")
+            try second.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("second"))
+            let third = try await harness.backend.nextExecution()
+            #expect(third.name == "Third")
+            try third.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("third"))
+        }
+    }
+
+    @Test func cancellationDrainsTheNativeStreamBeforeTheNextWorkspaceOperation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = root.appendingPathComponent("Xcode.app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"),
+                                                withIntermediateDirectories: true)
+        let bridge = NativeActionBridge(installation: try NativeXcodeInstallation(developerDirectory: app))
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            harness.backend.resources = ["First": .init(workspace: "A"), "Same": .init(workspace: "A"),
+                                         "Other": .init(workspace: "B")]
+            harness.backend.transformStream = { stream, context in await bridge.relay(stream, context: context) }
+            let finishing = AsyncStream<URL>.makeStream()
+            harness.backend.onFinish = { context in
+                finishing.continuation.yield(context.artifactsDirectory)
+                await bridge.finishExecution(request: context.artifactsDirectory)
+            }
+            try await harness.call("First", id: "first")
+            let first = try await harness.backend.nextExecution()
+            defer { first.finish() }
+            try await harness.notification("notifications/cancelled", params: .object(["requestId": .string("first")]))
+            var iterator = finishing.stream.makeAsyncIterator()
+            #expect(await iterator.next(isolation: MainActor.shared) == first.context.artifactsDirectory)
+
+            try await harness.call("Same", id: "same")
+            try await harness.call("Other", id: "other")
+            let other = try await harness.backend.nextExecution()
+            #expect(other.name == "Other")
+            try other.complete(.object(["message": .string("Other workspace finished")]))
+            let otherReply = try await harness.nextMessage()
+            #expect(try nativeTestField(otherReply, "id") == .string("other"))
+            #expect(try nativeTestField(otherReply, "result", "structuredContent", "message") == .string("Other workspace finished"))
+            #expect(harness.backend.executions.map(\.name) == ["First", "Other"])
+
+            first.finish()
+            #expect(await first.wasCancelled() == false)
+            let cancelled = try await harness.nextMessage()
+            #expect(try nativeTestField(cancelled, "id") == .string("first"))
+            #expect(try nativeTestField(cancelled, "error", "code") == .number(.int(-32800)))
+            let same = try await harness.backend.nextExecution()
+            #expect(same.name == "Same")
+            try same.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("same"))
+            await bridge.shutdown()
+        }
+    }
+
+    @Test func aProcessMutationRunsBetweenEarlierAndLaterWorkspaceOperations() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            harness.backend.resources = ["First": .init(workspace: "A"),
+                "Mutation": .init(processExclusive: true), "Later": .init(workspace: "B")]
+            try await harness.call("First", id: "first")
+            let first = try await harness.backend.nextExecution()
+            try await harness.call("Mutation", id: "mutation")
+            try await harness.call("Later", id: "later")
+            try first.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("first"))
+            let mutation = try await harness.backend.nextExecution()
+            #expect(mutation.name == "Mutation")
+            #expect(harness.backend.executions.map(\.name) == ["First", "Mutation"])
+            try mutation.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("mutation"))
+            let later = try await harness.backend.nextExecution()
+            #expect(later.name == "Later")
+            try later.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("later"))
+        }
+    }
+
+    @Test func theHostBoundsConcurrentAndHeavyExecutionsIndependently() async throws {
+        try await withNativeSession(maximumConcurrentOperations: 2) { harness in
+            _ = try await harness.initialize()
+            harness.backend.resources = ["HeavyFirst": .init(workspace: "A", heavy: true),
+                "HeavySecond": .init(workspace: "B", heavy: true)]
+            try await harness.call("HeavyFirst", id: "heavy-first")
+            let heavyFirst = try await harness.backend.nextExecution()
+            try await harness.call("HeavySecond", id: "heavy-second")
+            try await harness.call("LightFirst", id: "light-first")
+            let lightFirst = try await harness.backend.nextExecution()
+            #expect(lightFirst.name == "LightFirst")
+            try await harness.call("LightSecond", id: "light-second")
+            try lightFirst.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("light-first"))
+            let lightSecond = try await harness.backend.nextExecution()
+            #expect(lightSecond.name == "LightSecond")
+            #expect(harness.backend.executions.map(\.name) == ["HeavyFirst", "LightFirst", "LightSecond"])
+            try heavyFirst.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("heavy-first"))
+            let heavySecond = try await harness.backend.nextExecution()
+            #expect(heavySecond.name == "HeavySecond")
+            try lightSecond.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("light-second"))
+            try heavySecond.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("heavy-second"))
+        }
+    }
+
+    @Test func queuedCancellationDoesNotPrepareTheBackendOrCreateArtifacts() async throws {
+        try await withNativeSession(maximumConcurrentOperations: 1) { harness in
+            _ = try await harness.initialize()
+            try await harness.call("Running", id: "running")
+            let running = try await harness.backend.nextExecution()
+            try await harness.call("Queued", id: "queued")
+            try await harness.notification("notifications/cancelled", params: .object(["requestId": .string("queued")]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("queued"))
+            #expect(harness.backend.executions.map(\.name) == ["Running"])
+            let artifacts = try FileManager.default.contentsOfDirectory(at: harness.artifactsRoot, includingPropertiesForKeys: nil)
+            #expect(artifacts.map { $0.resolvingSymlinksInPath() }
+                == [running.context.artifactsDirectory.resolvingSymlinksInPath()])
+            #expect(harness.backend.finishedContexts.isEmpty)
+            try running.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("running"))
+            try await harness.call("Replacement", id: "queued")
+            let replacement = try await harness.backend.nextExecution()
+            try replacement.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("queued"))
+        }
+    }
+
+    @Test func queuedRequestBytesAreBoundedBeforeCreatingArtifacts() async throws {
+        try await withNativeSession(maximumConcurrentOperations: 1, maximumQueuedBytes: 256) { harness in
+            _ = try await harness.initialize()
+            try await harness.call("Running", id: "running")
+            let running = try await harness.backend.nextExecution()
+            let arguments: [String: JSONValue] = ["payload": .string(String(repeating: "x", count: 80))]
+            try await harness.call("Queued", id: "queued-a", arguments: arguments)
+            try await harness.call("Queued", id: "queued-b", arguments: arguments)
+            let rejected = try await harness.nextMessage()
+            #expect(try nativeTestField(rejected, "error", "code") == .number(.int(-32603)))
+            #expect(try nativeTestField(rejected, "error", "message") == .string(
+                "Native execution queue exceeds its queued request limit (256 bytes)"))
+            #expect(harness.backend.executions.map(\.name) == ["Running"])
+            #expect(try FileManager.default.contentsOfDirectory(atPath: harness.artifactsRoot.path).count == 1)
+            try running.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("running"))
+            let queued = try await harness.backend.nextExecution()
+            #expect(queued.name == "Queued")
+            try queued.complete(.object([:]))
+            #expect(try nativeTestField(await harness.nextMessage(), "result", "isError") == .bool(false))
+        }
+    }
+
+    @Test func cancellationRemainsScopedToTheOwningSessionWhenRequestIDsMatch() async throws {
+        try await withNativeSession { cancelledSession in
+            try await withNativeSession { retainedSession in
+                _ = try await cancelledSession.initialize()
+                _ = try await retainedSession.initialize()
+                cancelledSession.backend.resources["First"] = .init(workspace: "A", heavy: true)
+                retainedSession.backend.resources["Second"] = .init(workspace: "B", heavy: true)
+                try await cancelledSession.call("First", id: "shared-id")
+                let cancelled = try await cancelledSession.backend.nextExecution()
+                try await retainedSession.call("Second", id: "shared-id")
+                let retained = try await retainedSession.backend.nextExecution()
+                try await cancelledSession.notification("notifications/cancelled", params: .object([
+                    "requestId": .string("shared-id"),
+                ]))
+                #expect(try nativeTestField(await cancelledSession.nextMessage(), "error", "code") == .number(.int(-32800)))
+                #expect(await cancelled.wasCancelled())
+                try retained.complete(.string("Other session remains active"))
+                #expect(try nativeTestField(await retainedSession.nextMessage(), "result", "isError") == .bool(false))
+                #expect(retainedSession.backend.finishedContexts.count == 1)
+            }
+        }
+    }
+
     @Test func stringAndNumericRequestIDsRemainIndependent() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.request("tools/call", id: 7, params: .object(["name": .string("Numeric")]))
+            try await harness.request("tools/call", id: 7, params: .object(["name": .string("Numeric")]))
             let numeric = try await harness.backend.nextExecution()
-            try harness.call("String", id: "7")
+            try await harness.call("String", id: "7")
             let string = try await harness.backend.nextExecution()
-            try harness.notification("notifications/cancelled", params: .object(["requestId": .number(.int(7))]))
+            try await harness.notification("notifications/cancelled", params: .object(["requestId": .number(.int(7))]))
             #expect(try nativeTestField(await harness.nextMessage(), "id") == .number(.int(7)))
             #expect(await numeric.wasCancelled())
             try string.complete(.object([:]))
@@ -550,16 +761,24 @@ struct NativeMCPSessionTests {
         }
     }
 
-    @Test func shutdownCancelsStreamsBeforeClosingTheBackend() async throws {
-        try await withNativeSession { harness in
+    @Test func shutdownCancelsRunningAndQueuedRequestsBeforeClosingTheBackend() async throws {
+        try await withNativeSession(maximumConcurrentOperations: 1) { harness in
             _ = try await harness.initialize()
-            try harness.call("LongRunning", id: "pending")
+            try await harness.call("LongRunning", id: "pending")
             let pending = try await harness.backend.nextExecution()
+            try await harness.call("Queued", id: "queued")
             try await harness.session.shutdown()
             #expect(await pending.wasCancelled())
+            #expect(harness.backend.executions.map(\.name) == ["LongRunning"])
             #expect(harness.backend.shutdownCalls == 1)
-            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32800)))
-            try harness.request("ping", id: "after-shutdown")
+            let first = try await harness.nextMessage()
+            let second = try await harness.nextMessage()
+            let identifiers = [try nativeTestField(first, "id"), try nativeTestField(second, "id")]
+            #expect(identifiers.contains(.string("pending")))
+            #expect(identifiers.contains(.string("queued")))
+            #expect(try nativeTestField(first, "error", "code") == .number(.int(-32800)))
+            #expect(try nativeTestField(second, "error", "code") == .number(.int(-32800)))
+            try await harness.request("ping", id: "after-shutdown")
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32000)))
         }
     }
@@ -580,7 +799,7 @@ struct NativeMCPSessionTests {
             harness.backend.beforeExecute = { await callback.waitForReply() }
             harness.backend.onBeginShutdown = { callback.release(fromShutdown: true) }
             if failsCleanup { harness.backend.shutdownError = .invocation("Owned native cleanup failed") }
-            try harness.call("AwaitNativeReply", id: "pending-native-callback")
+            try await harness.call("AwaitNativeReply", id: "pending-native-callback")
             await callback.waitUntilEntered()
             let watchdog = Task { @MainActor in
                 do { try await Task.sleep(for: .seconds(2)) }
@@ -620,7 +839,7 @@ struct NativeMCPSessionTests {
             harness.backend.onShutdown = { registry.closeAll() }
             var finishedBeforeShutdown = false
             harness.backend.onFinish = { _ in finishedBeforeShutdown = harness.backend.shutdownCalls == 0 }
-            try harness.call("OpenThenExecute", id: "late-workspace-open")
+            try await harness.call("OpenThenExecute", id: "late-workspace-open")
             await registry.openReply.waitUntilEntered()
             let shutdown = Task { @MainActor in try await harness.session.shutdown() }
             defer { shutdown.cancel(); registry.openReply.release(fromShutdown: false) }
@@ -651,11 +870,11 @@ struct NativeMCPSessionTests {
 
     @Test func malformedRequestObjectsReceiveAnInvalidRequestResponse() async throws {
         try await withNativeSession { harness in
-            try harness.session.receive(Data(#"{"jsonrpc":"2.0","id":"bad","method":42}"#.utf8))
+            try await harness.session.receive(Data(#"{"jsonrpc":"2.0","id":"bad","method":42}"#.utf8))
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "id") == .string("bad"))
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32600)))
-            try harness.session.receive(Data("[]".utf8))
+            try await harness.session.receive(Data("[]".utf8))
             let nonObject = try await harness.nextMessage()
             #expect(try nativeTestField(nonObject, "id") == .null)
             #expect(try nativeTestField(nonObject, "error", "code") == .number(.int(-32600)))
@@ -664,12 +883,12 @@ struct NativeMCPSessionTests {
 
     @Test func malformedJSONReturnsAParseErrorAndKeepsTheSessionUsable() async throws {
         try await withNativeSession { harness in
-            try harness.session.receive(Data(#"{"jsonrpc":"2.0","method":"initialize""#.utf8))
+            try await harness.session.receive(Data(#"{"jsonrpc":"2.0","method":"initialize""#.utf8))
             let parseError = try await harness.nextMessage()
             #expect(try nativeTestField(parseError, "id") == .null)
             #expect(try nativeTestField(parseError, "error", "code") == .number(.int(-32700)))
             _ = try await harness.initialize()
-            try harness.request("ping", id: "still-usable")
+            try await harness.request("ping", id: "still-usable")
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "id") == .string("still-usable"))
             #expect(try nativeTestField(response, "result") == .object([:]))
@@ -690,26 +909,26 @@ struct NativeMCPSessionTests {
     func invalidEnvelopesCannotStartNativeOperations(raw: String) async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.session.receive(Data(raw.utf8))
+            try await harness.session.receive(Data(raw.utf8))
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "error", "code") == .number(.int(-32600)))
             #expect(try nativeTestField(response, "id") == (raw.contains(#""id":"invalid""#) ? .string("invalid") : .null))
             #expect(harness.backend.executions.isEmpty)
             #expect(!FileManager.default.fileExists(atPath: harness.artifactsRoot.path))
-            try harness.request("ping", id: "after-invalid-envelope")
+            try await harness.request("ping", id: "after-invalid-envelope")
             #expect(try nativeTestField(await harness.nextMessage(), "result") == .object([:]))
         }
     }
 
     @Test func invalidInitializeEnvelopeCannotInitializeTheSession() async throws {
         try await withNativeSession { harness in
-            try harness.session.receive(Data(#"{"id":"invalid-initialize","method":"initialize"}"#.utf8))
+            try await harness.session.receive(Data(#"{"id":"invalid-initialize","method":"initialize"}"#.utf8))
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32600)))
-            try harness.request("tools/list", id: "still-uninitialized")
+            try await harness.request("tools/list", id: "still-uninitialized")
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32602)))
             #expect(harness.backend.listCalls == 0)
             _ = try await harness.initialize()
-            try harness.request("tools/list", id: "initialized-catalog")
+            try await harness.request("tools/list", id: "initialized-catalog")
             #expect(try nativeTestField(await harness.nextMessage(), "result", "tools") == .array([]))
             #expect(harness.backend.listCalls == 1)
         }
@@ -720,9 +939,9 @@ struct NativeMCPSessionTests {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
             let identifier: Int64 = boolean ? 1 : 0
-            try harness.request("tools/call", id: identifier, params: .object(["name": .string("MustComplete")]))
+            try await harness.request("tools/call", id: identifier, params: .object(["name": .string("MustComplete")]))
             let execution = try await harness.backend.nextExecution()
-            try harness.notification("notifications/cancelled", params: .object(["requestId": .bool(boolean)]))
+            try await harness.notification("notifications/cancelled", params: .object(["requestId": .bool(boolean)]))
             try execution.complete(.string("Completed"))
             let response = try await harness.nextMessage()
             #expect(try nativeTestField(response, "id") == .number(.int(identifier)))
@@ -733,9 +952,9 @@ struct NativeMCPSessionTests {
     @Test func cancellationWithAnInvalidEnvelopeCannotCancelAnActiveRequest() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
-            try harness.call("MustComplete", id: "active")
+            try await harness.call("MustComplete", id: "active")
             let execution = try await harness.backend.nextExecution()
-            try harness.session.receive(Data(#"{"jsonrpc":"1.0","method":"notifications/cancelled","params":{"requestId":"active"}}"#.utf8))
+            try await harness.session.receive(Data(#"{"jsonrpc":"1.0","method":"notifications/cancelled","params":{"requestId":"active"}}"#.utf8))
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32600)))
             try execution.complete(.string("Completed"))
             #expect(try nativeTestField(await harness.nextMessage(), "result", "isError") == .bool(false))
@@ -748,7 +967,7 @@ struct NativeMCPSessionTests {
             _ = try await harness.initialize()
             let badFrame = contentLength ? "Content-Length: \(raw.utf8.count)\r\n\r\n\(raw)" : raw + "\n"
             let valid = #"{"jsonrpc":"2.0","id":"after-frame-error","method":"ping"}"#
-            let framing = try harness.receiveChunk(Data((badFrame + valid + "\n").utf8))
+            let framing = try await harness.receiveChunk(Data((badFrame + valid + "\n").utf8))
             #expect(framing.messages == [Data(raw.utf8), Data(valid.utf8)])
             #expect(framing.bufferedByteCount == 0)
             let error = try await harness.nextMessage()
@@ -766,12 +985,12 @@ struct NativeMCPSessionTests {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
             let raw = #"{"jsonrpc":"2.0","id":"never-execute","method":"tools/call","params":{"name":"DoNotExecute"}} trailing garbage"#
-            let partial = try harness.receiveChunk(Data(raw.utf8))
+            let partial = try await harness.receiveChunk(Data(raw.utf8))
             #expect(partial.messages.isEmpty)
             #expect(partial.bufferedByteCount == raw.utf8.count)
             #expect(harness.backend.executions.isEmpty)
             let valid = #"{"jsonrpc":"2.0","id":"after-delimiter","method":"ping"}"#
-            let completed = try harness.receiveChunk(Data(("\n" + valid + "\n").utf8))
+            let completed = try await harness.receiveChunk(Data(("\n" + valid + "\n").utf8))
             #expect(completed.messages == [Data(raw.utf8), Data(valid.utf8)])
             #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32700)))
             #expect(try nativeTestField(await harness.nextMessage(), "id") == .string("after-delimiter"))
@@ -782,8 +1001,11 @@ struct NativeMCPSessionTests {
 }
 
 @MainActor
-private func withNativeSession(_ body: @MainActor (NativeSessionHarness) async throws -> Void) async throws {
-    let harness = NativeSessionHarness()
+private func withNativeSession(maximumConcurrentOperations: Int = 4,
+                               maximumQueuedBytes: Int = 32 * 1024 * 1024,
+                               _ body: @MainActor (NativeSessionHarness) async throws -> Void) async throws {
+    let harness = NativeSessionHarness(maximumConcurrentOperations: maximumConcurrentOperations,
+                                       maximumQueuedBytes: maximumQueuedBytes)
     defer { try? FileManager.default.removeItem(at: harness.artifactsRoot) }
     do {
         try await body(harness)
@@ -803,48 +1025,49 @@ private final class NativeSessionHarness {
     private let framer = StdioFramer(mode: .delimitedMessages)
     private var outputIterator: AsyncStream<Data>.Iterator
 
-    init() {
+    init(maximumConcurrentOperations: Int = 4, maximumQueuedBytes: Int = 32 * 1024 * 1024) {
         let output = AsyncStream<Data>.makeStream()
         let control = NativeSessionOutputControl()
         outputControl = control
         outputIterator = output.stream.makeAsyncIterator()
-        session = NativeMCPSession(backend: backend, artifactsRoot: artifactsRoot) { data in
+        session = NativeMCPSession(backend: backend, artifactsRoot: artifactsRoot,
+            maximumConcurrentOperations: maximumConcurrentOperations, maximumQueuedBytes: maximumQueuedBytes) { data in
             if let failure = control.failure { throw failure }
             output.continuation.yield(data)
         }
     }
 
     func initialize(clientInfo: [String: JSONValue] = ["name": .string("Native Runtime Tests"), "version": .string("1")]) async throws -> JSONValue {
-        try request("initialize", id: "initialize", params: .object([
+        try await request("initialize", id: "initialize", params: .object([
             "protocolVersion": .string(MCPProtocolVersion.current),
             "capabilities": .object([:]), "clientInfo": .object(clientInfo),
         ]))
         return try await nextMessage()
     }
 
-    func request(_ method: String, id: String, params: JSONValue? = nil) throws {
-        try session.receive(JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: id, method: method, params: params)))
+    func request(_ method: String, id: String, params: JSONValue? = nil) async throws {
+        try await session.receive(JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: id, method: method, params: params)))
     }
 
-    func request(_ method: String, id: Int64, params: JSONValue? = nil) throws {
-        try session.receive(JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: id, method: method, params: params)))
+    func request(_ method: String, id: Int64, params: JSONValue? = nil) async throws {
+        try await session.receive(JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(id: id, method: method, params: params)))
     }
 
-    func notification(_ method: String, params: JSONValue? = nil) throws {
-        try session.receive(JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(method: method, params: params)))
+    func notification(_ method: String, params: JSONValue? = nil) async throws {
+        try await session.receive(JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(method: method, params: params)))
     }
 
-    func receiveChunk(_ data: Data) throws -> StdioFramer.AppendResult {
+    func receiveChunk(_ data: Data) async throws -> StdioFramer.AppendResult {
         let result = framer.append(data)
         #expect(result.protocolViolation == nil)
-        for message in result.messages { try session.receive(message) }
+        try await session.receive(result.messages)
         return result
     }
 
-    func call(_ name: String, id: String, arguments: [String: JSONValue] = [:], progressToken: JSONValue? = nil) throws {
+    func call(_ name: String, id: String, arguments: [String: JSONValue] = [:], progressToken: JSONValue? = nil) async throws {
         var params: [String: JSONValue] = ["name": .string(name), "arguments": .object(arguments)]
         if let progressToken { params["_meta"] = .object(["progressToken": progressToken]) }
-        try request("tools/call", id: id, params: .object(params))
+        try await request("tools/call", id: id, params: .object(params))
     }
 
     func nextMessage() async throws -> JSONValue {
@@ -855,22 +1078,28 @@ private final class NativeSessionHarness {
     }
 }
 
-@MainActor
-private final class NativeSessionOutputControl {
-    var failure: NativeRuntimeError?
+private final class NativeSessionOutputControl: Sendable {
+    private let storage = Mutex<NativeRuntimeError?>(nil)
+
+    var failure: NativeRuntimeError? {
+        get { storage.withLock { $0 } }
+        set { storage.withLock { $0 = newValue } }
+    }
 }
 
 @MainActor
 private final class NativeSessionBackendProbe: NativeToolBackend {
     var origin: [String: JSONValue]?
     var tools: [NativeTool] = []
+    var resources: [String: NativeExecutionResource] = [:]
     var listError: NativeRuntimeError?
     var executeError: (any Error)?
     var shutdownError: NativeRuntimeError?
     var beforeExecute: (@MainActor () async throws -> Void)?
     var onBeginShutdown: (@MainActor () -> Void)?
     var onShutdown: (@MainActor () -> Void)?
-    var onFinish: (@MainActor (NativeToolContext) throws -> Void)?
+    var onFinish: (@MainActor (NativeToolContext) async throws -> Void)?
+    var transformStream: (@MainActor (AsyncStream<Data>, NativeToolContext) async -> AsyncStream<Data>)?
     private(set) var executions: [NativeSessionExecution] = []
     private(set) var finishedContexts: [NativeToolContext] = []
     private(set) var listCalls = 0
@@ -885,6 +1114,10 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
         listCalls += 1
         if let listError { throw listError }
         return tools
+    }
+
+    func executionResource(for name: String, arguments: [String: JSONValue]) async throws -> NativeExecutionResource {
+        resources[name] ?? NativeExecutionResource()
     }
 
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data> {
@@ -904,6 +1137,7 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
                                               continuation: stream.continuation, termination: termination.stream)
         executions.append(execution)
         executionEvents.continuation.yield(execution)
+        if let transformStream { return await transformStream(stream.stream, context) }
         return stream.stream
     }
 
@@ -912,9 +1146,9 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
         onBeginShutdown?()
     }
 
-    func finishExecution(context: NativeToolContext) throws {
+    func finishExecution(context: NativeToolContext) async throws {
         finishedContexts.append(context)
-        try onFinish?(context)
+        try await onFinish?(context)
     }
 
     func shutdown() async throws {

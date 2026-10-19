@@ -66,7 +66,10 @@ selection fails. Project and target creation runs after build, runtime, and
 device checks so a new target's automatic scheme cannot change those checks.
 
 `--no-open-xcode` is removed because catalog runs are headless. `--upstream-processes`
-and `--xcode-mode` remain unsupported. The proxy owns one multiplexed native host.
+and `--xcode-mode` remain unsupported. The default catalog run uses the proxy's
+default headless host. The shared server also supports selecting other headless
+hosts and running GUI Xcode processes; the verifier's default run does not test
+those targets or their concurrent execution.
 
 ## Preview probes
 

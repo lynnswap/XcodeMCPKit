@@ -6,7 +6,9 @@ import Foundation
 nonisolated(nonsending) private func invokeNativeAsyncFrame(_ invocation: OpaquePointer) async
 
 @unsafe
-package struct NativeActionClass: ABIBridgeValue, BitwiseCopyable {
+// Xcode owns these immutable type metadata and conformance records for the
+// lifetime of its loaded frameworks; no workspace or action instance is shared.
+package struct NativeActionClass: ABIBridgeValue, BitwiseCopyable, @unchecked Sendable {
     package let metadata: UnsafeRawPointer
     package let conformance: UnsafeRawPointer
 
@@ -19,14 +21,13 @@ struct NativeMetadataResponse {
     var state: UInt64
 }
 
-@MainActor
 @safe
 final class NativeABI {
     private var valueTypes: [OpaquePointer] = unsafe []
     private var callInterfaces: [OpaquePointer] = unsafe []
     private var asyncInterfaces: [OpaquePointer] = unsafe []
 
-    isolated deinit {
+    deinit {
         for unsafe interface in unsafe asyncInterfaces { unsafe ABIReleaseSwiftAsyncCallInterface(interface) }
         for unsafe interface in unsafe callInterfaces { unsafe ABIReleaseSwiftCallInterface(interface) }
         for unsafe type in unsafe valueTypes.reversed() { unsafe ABIReleaseValueType(type) }
@@ -48,7 +49,7 @@ final class NativeABI {
         return unsafe type
     }
 
-    func typeMetadata(named name: String, in image: URL) async throws -> Any.Type {
+    nonisolated(nonsending) func typeMetadata(named name: String, in image: URL) async throws -> Any.Type {
         let accessor = try await ABIRuntime.shared.resolve(
             .init(name: "type metadata accessor for " + name, language: .swift),
             in: .path(image), loading: .loadedOnly)
@@ -130,7 +131,7 @@ final class NativeABI {
 
     // Async inputs and Swift self storage must stay live through completion;
     // cancellation does not abandon the active native async frame.
-    @unsafe func invokeAsync<T>(symbol: ResolvedSymbol, interface: OpaquePointer,
+    @unsafe nonisolated(nonsending) func invokeAsync<T>(symbol: ResolvedSymbol, interface: OpaquePointer,
                         arguments: [UnsafeMutableRawPointer?], context: UnsafeRawPointer?,
                         returning: T.Type) async throws -> T {
         var failure: OpaquePointer?

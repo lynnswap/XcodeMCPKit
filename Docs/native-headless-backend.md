@@ -2,16 +2,22 @@
 
 ## Scope
 
-XcodeMCPKit owns one MCP endpoint and independently managed headless native
-workspace hosts. Each host loads its selected Xcode's tool definitions and
-implementations; ABIBridge invokes those contracts inside the helper. Build,
+XcodeMCPKit owns one MCP endpoint with selectable headless hosts and running GUI
+Xcode processes. This document describes the owned headless execution path.
+Each host loads its selected Xcode's tool definitions and implementations;
+ABIBridge invokes those contracts inside the helper. Build,
 test, editing, and other actions use saved project models without a GUI window.
 
-The host does not connect to GUI Xcode, launch `mcpbridge` or Xcode Service, or
-modify Xcode's agent permission store. The GUI path required Apple-restricted
-entitlements that an independently signed executable cannot use under normal
-AMFI enforcement. Headless execution removes that dependency. The approved
-scope is recorded in [issue #276](https://github.com/lynnswap/XcodeMCPKit/issues/276).
+The helper initializes Xcode's headless runtime without connecting to a GUI
+application or Xcode Service. It preserves Xcode's agent permission store. A
+direct custom GUI-service connection required Apple-restricted entitlements;
+headless execution avoids that dependency under normal AMFI enforcement. The
+headless scope is recorded in
+[issue #276](https://github.com/lynnswap/XcodeMCPKit/issues/276).
+
+GUI selection is a separate proxy path through Apple's `mcpbridge`, shared per
+running Xcode process. The proxy preserves that target's raw native catalog and
+workspace selectors. See [host selection](usage.md#select-an-xcode-host).
 
 ## Ownership
 
@@ -28,8 +34,11 @@ frameworks are loaded from the selected installation and are not redistributed.
 | Host launch, process I/O, exit and restart | Process runtime |
 | Xcode images, ABI handles and native values | Native runtime |
 | Workspace identifiers, saved project models and selected operation settings | Native workspace registry |
-| Action streams and native cancellation | Native runtime using Apple's executor |
-| Per-request artifacts and conversation context | Native runtime |
+| Request Tasks, JSON-RPC, output, artifacts, and conversation context | Native MCP session actor |
+| Workspace permits, concurrent execution, and queued byte budget | Execution queue actor in each owned host |
+| Native workspace models and ABI-bound UI state | MainActor native backend |
+| ABI bindings and relays that drain original native streams | Native action bridge actor |
+| Native execution and observed Operation cancellation/completion | Apple's executor and request execution scope |
 | Build engine | Native host and its Swift Build child |
 | Preview sessions, staged products, rendering, and owned process/Simulator cleanup | Native preview correction |
 
@@ -39,11 +48,46 @@ identities and client selections; each host keeps an independent runtime,
 native catalog, and recovery path. A client can select another host while
 earlier calls remain attached to their original backend channels.
 
-One host can serve several clients, and a client disconnect does not close its
-shared workspaces. Restart invalidates that host's native identifiers without
-restarting other hosts. Mutations whose delivery is unknown are not replayed
-against a replacement or another host. See the
+One host can serve several clients. The default headless host and ordinary
+installation candidates remain registered when clients disconnect. An independent
+headless host is reclaimed after its final selection, request, and backend
+channel are released; reclaiming it closes its workspace resources. Restart or
+reclamation invalidates that host's native identifiers without restarting other
+hosts. A replacement must load the workspace from its path again. Mutations
+whose delivery is unknown are not replayed against a replacement or another host. See the
 [concurrent-host design](concurrent-native-hosts-design.md).
+
+## Execution ownership
+
+The session actor owns request admission and its request Tasks. The MainActor
+backend owns native workspace models. An execution permit remains held across
+async suspension until model preparation, stream consumption, and
+`finishExecution` complete. Calls for the same workspace are exclusive; calls
+for separate workspaces can progress independently. Mutations without a
+workspace selector hold the whole host.
+
+Each host admits up to four concurrent tool calls and one heavy call. Heavy
+calls are `BuildProject`, `RunProject`, `RunAllTests`, `RunSomeTests`, and
+`RenderPreview`. The queue budgets waiting calls by their original JSON-RPC byte
+sizes, up to 32 MiB in total. Requests that exceed the available budget fail
+before creating artifacts. These queues belong to
+individual hosts, so one Xcode process's heavy call does not block another
+process's queue. GUI work uses the selected application's bridge and native
+execution contracts.
+
+The native action bridge actor owns a relay Task for each original native stream.
+Cancelling the request-facing iterator signals its execution scope's observed
+Operations and leaves the relay consuming the original stream until its natural
+terminal. `finishExecution` awaits the relay, observed Operation completions,
+and the preview/crash producer Tasks owned by the helper before workspace
+cleanup and permit release. A subsequent call for the same workspace cannot
+overtake this drain.
+
+Build, run, and test actions install the native Operation observer when needed.
+An action without a cancellable Operation can require waiting for natural stream
+completion after cancellation. Draining the stream and observed resources does
+not join opaque native Swift Task handles. Shutdown cancels waiting requests,
+drains owned Tasks, and closes native models.
 
 ## Workspace access
 
@@ -56,6 +100,11 @@ Models use saved files. Open GUI windows, unsaved buffers, and GUI scheme or
 destination selection do not configure the host. Agents inspect and select the
 host's scheme, destination, and test plan through the corresponding native tools.
 Unscoped tools such as documentation search do not require a workspace.
+
+The registry records each executing request's already resolved workspace key.
+Automatic cleanup of removed directories skips workspaces claimed by another
+active request. The claim remains held until native stream drain, Operation
+completion, and request cleanup finish.
 
 ## Dynamic tool contracts
 
@@ -73,10 +122,11 @@ and `toolCancellation: "task"`.
 
 Most actions use `DVTStatelessAction.executeStream(inputJSON:)` with concrete ABI
 metadata and conformance handles. JSON decoding, action behavior, output encoding,
-and native errors remain Apple's implementation. Images and values stay alive
-for the action stream. Progress and completion become MCP notifications/results;
-a stream ending without a final result is an error. Cancellation cancels the
-matching task and is cooperative after native dispatch.
+and native errors remain Apple's implementation. The bridge retains an owned
+relay to consume the native stream through its terminal. Progress and completion
+become MCP notifications/results; a stream ending without a final result is an
+error. Cancellation is cooperative after native dispatch; its drain boundary is
+described in [execution ownership](#execution-ownership).
 
 New tools require no per-tool source changes when they use these shared
 contracts. Changes to the registry, schema representation, scope protocols, or

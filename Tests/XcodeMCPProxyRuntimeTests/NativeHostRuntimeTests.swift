@@ -198,6 +198,22 @@ struct NativeHostRuntimeTests {
         #expect(manager.debugSnapshot().upstreams.count == 1)
     }
 
+    @Test func guiTargetConnectsUsingItsOwnBridgeAndPID() throws {
+        var config = makeConfig(requestTimeout: 5)
+        config.guiProcess = XcodeGUIProcess(processID: 2468, launchDate: Date(timeIntervalSince1970: 100),
+            installation: XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/GUI.app")))
+        let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
+            config: makeBridgeRuntimeConfig(config),
+            baseEnvironment: ["MCP_XCODE_PID": "old", "MCP_XCODE_SESSION_ID": "old-session",
+                              "XCODE_PID": "old", "PATH": "/usr/bin"])
+        #expect(configuration.command == "/Fixture/GUI.app/Contents/Developer/usr/bin/mcpbridge")
+        #expect(configuration.args.isEmpty)
+        #expect(configuration.environment["MCP_XCODE_PID"] == "2468")
+        #expect(configuration.environment["DEVELOPER_DIR"] == "/Fixture/GUI.app/Contents/Developer")
+        #expect(configuration.environment["MCP_XCODE_SESSION_ID"] == nil)
+        #expect(configuration.environment["XCODE_PID"] == nil)
+    }
+
     @Test func nativeHostIgnoresInheritedGUIRoutingConfiguration() throws {
         let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)),

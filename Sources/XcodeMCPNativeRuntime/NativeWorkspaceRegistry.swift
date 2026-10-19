@@ -14,6 +14,22 @@ final class NativeWorkspaceRegistry {
     private var documents: [String: NativeWorkspaceDocument] = [:]
     private var openingDocuments: [String: OpeningDocument] = [:]
     private var openingRequests: [URL: OpeningDocument] = [:]
+    private var activeExecutions: [URL: WorkspaceExecution] = [:]
+
+    struct WorkspaceExecution {
+        let workspace: String
+        var identifiers: Set<String>
+
+        init(workspace: String, entries: [(identifier: String, path: String?)]) {
+            self.workspace = workspace
+            // A deleted model may no longer resolve through its original symlink.
+            identifiers = Set(entries.compactMap { entry in
+                guard let path = entry.path,
+                      URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path == workspace else { return nil }
+                return entry.identifier
+            })
+        }
+    }
 
     private final class OpeningDocument {
         let path: String
@@ -77,6 +93,9 @@ final class NativeWorkspaceRegistry {
             }
         }
         opening.identifier = try unsafe identifyWorkspace.unsafeInvoke(loaded.workspace)
+        if let identifier = opening.identifier {
+            activeExecutions[request]?.identifiers.insert(identifier)
+        }
         try opening.document?.checkFailure()
         // AppKit may finish loading after cancellation. Acquire its document
         // before propagating cancellation so request cleanup can close it.
@@ -102,6 +121,12 @@ final class NativeWorkspaceRegistry {
             try document.close()
             opening.document = nil
         }
+    }
+
+    func executionKey(for selector: String) throws -> String {
+        let path = selector.hasPrefix("/") ? selector : try entries().first(where: { $0.identifier == selector })?.path
+        guard let path else { return "identifier:" + selector }
+        return URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     func resolve(_ selector: String, opensIfMissing: Bool = true, request: URL) async throws -> String {
@@ -176,7 +201,16 @@ final class NativeWorkspaceRegistry {
         documents[identifier] = try NativeWorkspaceDocument.open(workspace: workspace)
     }
 
-    func closeRemovedWorkspaces() async throws {
+    func beginExecution(request: URL, workspace: String?) throws {
+        guard let workspace else { return }
+        activeExecutions[request] = WorkspaceExecution(workspace: workspace, entries: try entries())
+    }
+
+    func endExecution(request: URL) {
+        activeExecutions.removeValue(forKey: request)
+    }
+
+    func closeRemovedWorkspaces(request: URL) async throws {
         let close = try await runtime.object(registry).resolveMethod(
             named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self
         )
@@ -184,8 +218,26 @@ final class NativeWorkspaceRegistry {
         var failures: [String] = []
         do { try closeUnregisteredDocuments() }
         catch { failures.append(String(describing: error)) }
-        for entry in snapshot {
+        do {
+            try Self.closeRemovedEntries(snapshot, request: request, activeExecutions: activeExecutions) { identifier in
+                try unsafe close.unsafeInvoke(identifier)
+                try documents[identifier]?.checkFailure()
+            }
+        } catch { failures.append(String(describing: error)) }
+        if !failures.isEmpty {
+            throw NativeRuntimeError.invocation(failures.joined(separator: "; "))
+        }
+    }
+
+    static func closeRemovedEntries(_ entries: [(identifier: String, path: String?)], request: URL,
+                                   activeExecutions: [URL: WorkspaceExecution], close: (String) throws -> Void) throws {
+        var failures: [String] = []
+        for entry in entries {
             guard let path = entry.path else { continue }
+            let key = URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path
+            guard !activeExecutions.contains(where: {
+                $0.key != request && ($0.value.identifiers.contains(entry.identifier) || $0.value.workspace == key)
+            }) else { continue }
             do {
                 _ = try URL(filePath: path).resourceValues(forKeys: [.isDirectoryKey])
                 continue
@@ -196,8 +248,7 @@ final class NativeWorkspaceRegistry {
                 continue
             }
             do {
-                try unsafe close.unsafeInvoke(entry.identifier)
-                try documents[entry.identifier]?.checkFailure()
+                try close(entry.identifier)
             } catch {
                 failures.append("Cannot close removed native workspace '\(path)': \(error)")
             }

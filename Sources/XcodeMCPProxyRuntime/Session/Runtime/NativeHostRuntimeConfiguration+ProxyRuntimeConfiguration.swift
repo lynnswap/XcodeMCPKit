@@ -10,6 +10,7 @@ extension NativeHostRuntime.Configuration {
     init(proxyConfig config: ProxyRuntimeConfiguration) {
         self.init(
             nativeHostBundleURL: config.nativeHostBundleURL,
+            guiProcess: config.guiProcess,
             developerDirectoryURL: config.developerDirectoryURL,
             sharesCompilationCache: config.sharesCompilationCache,
             maxBodyBytes: config.maxMessageBytes
