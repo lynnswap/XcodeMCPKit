@@ -134,7 +134,7 @@ final class NativeWorkspaceRegistry {
     static func workspacePath(for path: String) -> String {
         var url = URL(filePath: path).standardizedFileURL
         if url.lastPathComponent == "Package.swift",
-           (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+           (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
             url.deleteLastPathComponent()
         }
         return url.resolvingSymlinksInPath().path
