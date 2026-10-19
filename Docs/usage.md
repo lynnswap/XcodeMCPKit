@@ -69,7 +69,7 @@ GUI tools commonly accept a `tabIdentifier` returned by `XcodeListWindows`;
 headless tools accept `workspaceIdentifier`. Xcode supplies these schemas, so
 inspect the catalog when switching targets.
 
-For a headless target, pass an absolute project or workspace path as
+For a headless target, pass an absolute project, workspace, or Swift package path as
 `workspaceIdentifier`. For example, call `BuildProject` with:
 
 ```json
@@ -81,6 +81,11 @@ For a headless target, pass an absolute project or workspace path as
 The native registry loads the project model when needed. Opening Xcode or calling
 `XcodeOpenWorkspace` first is optional for ordinary file, scheme, destination,
 build, and test operations that accept `workspaceIdentifier`.
+
+Swift packages accept either their directory or `Package.swift`. Both paths refer
+to the same native workspace and can also be passed to `XcodeOpenWorkspace`.
+The host waits for package dependencies to resolve before waiting for the
+workspace's initial run destination.
 
 `XcodeOpenWorkspace` explicitly preloads a model and returns its native identifier.
 `XcodeListWorkspaces` lists the host's models. `XcodeCloseWorkspace` closes an

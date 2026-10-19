@@ -4,6 +4,18 @@ import Testing
 
 @MainActor
 struct NativeWorkspaceRegistryTests {
+    @Test func packageManifestAndDirectoryResolveToTheSameWorkspacePath() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NativeWorkspaceRegistryTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifest = directory.appendingPathComponent("Package.swift")
+        try "import PackageDescription".write(to: manifest, atomically: true, encoding: .utf8)
+
+        #expect(NativeWorkspaceRegistry.workspacePath(for: manifest.path)
+            == NativeWorkspaceRegistry.workspacePath(for: directory.path))
+    }
+
     @Test func removedModelsStayOpenUntilAnotherRequestReleasesTheirWorkspace() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("NativeWorkspaceRegistryTests-\(UUID().uuidString)", isDirectory: true)
