@@ -6,6 +6,7 @@ import XcodeMCPWire
 
 @MainActor
 final class NativePreviewCorrection {
+    private static let defaultTimeout: Int64 = 300
     private let installation: NativeXcodeInstallation
     private let builder: NativePreviewBuild
     private var operations: [UUID: (request: URL?, task: Task<Void, Never>)] = [:]
@@ -118,10 +119,21 @@ final class NativePreviewCorrection {
     }
 
     static func describe(_ tool: NativeTool) -> NativeTool {
-        guard case .object(var fields) = tool.descriptor,
-              case .object(var output) = fields["outputSchema"],
+        guard case .object(var fields) = tool.descriptor else { return tool }
+        if case .object(var input) = fields["inputSchema"],
+           case .object(var properties) = input["properties"],
+           case .object(var timeout) = properties["timeout"] {
+            timeout["default"] = .number(.int(defaultTimeout))
+            timeout["description"] = .string("The time in seconds to wait for the preview, including building and preparing its render destination. Defaults to \(defaultTimeout) seconds.")
+            properties["timeout"] = .object(timeout)
+            input["properties"] = .object(properties)
+            fields["inputSchema"] = .object(input)
+        }
+        guard case .object(var output) = fields["outputSchema"],
               case .object(var properties) = output["properties"],
-              case .object(var snapshot) = properties["previewSnapshotPath"] else { return tool }
+              case .object(var snapshot) = properties["previewSnapshotPath"] else {
+            return NativeTool(name: tool.name, descriptor: .object(fields), workspaceScoped: tool.workspaceScoped)
+        }
         snapshot["description"] = .string("The full path to the preview snapshot. Direct previews make areas outside the selected device's display transparent for device layouts. Fixed-size previews retain their rectangular layout; WidgetKit previews use the widget's size and rounded corners. Direct snapshots are downsampled to at most 1500 pixels per dimension. Other previews use Xcode's native snapshot format.")
         properties["previewSnapshotPath"] = .object(snapshot)
         if case .object(var controls) = properties["supportedCanvasControlOverrides"],
@@ -144,6 +156,12 @@ final class NativePreviewCorrection {
         output["properties"] = .object(properties)
         fields["outputSchema"] = .object(output)
         return NativeTool(name: tool.name, descriptor: .object(fields), workspaceScoped: tool.workspaceScoped)
+    }
+
+    static func prepareArguments(_ arguments: [String: JSONValue]) -> [String: JSONValue] {
+        var arguments = arguments
+        if arguments["timeout"] == nil { arguments["timeout"] = .number(.int(defaultTimeout)) }
+        return arguments
     }
 
     func execute(inputType: Any.Type, input: Data, artifactsRoot: URL, request: URL? = nil,
