@@ -110,7 +110,7 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
     /// `elicitation`, are intentionally not exposed by this API.
     public var capabilities: [String: MCPJSONValue]
 
-    /// Maximum duration to wait for each request.
+    /// Maximum duration to wait for each request. Defaults to 600 seconds.
     ///
     /// Set this to `nil` to disable client-side request timeouts.
     public var requestTimeout: Duration?
@@ -130,7 +130,7 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
         clientName: String = "XcodeMCPKit",
         clientVersion: String = "dev",
         capabilities: [String: MCPJSONValue] = [:],
-        requestTimeout: Duration? = .seconds(60)
+        requestTimeout: Duration? = .seconds(600)
     ) {
         self.transport = transport
         self.clientName = clientName

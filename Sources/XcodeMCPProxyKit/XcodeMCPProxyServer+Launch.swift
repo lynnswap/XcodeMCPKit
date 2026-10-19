@@ -56,7 +56,6 @@ extension XcodeMCPProxyServer {
 private extension ProxyServerCommand {
     func resolveConfiguration(environment: [String: String]) throws -> XcodeMCPProxyServerConfiguration {
         let listenAddress = try resolvedListenAddress(environment: environment)
-        let timeout = requestTimeout?.seconds ?? 300
         return XcodeMCPProxyServerConfiguration(
             bindAddress: .init(host: listenAddress.host, port: listenAddress.port),
             nativeHostBundleURL: environment["XCODE_MCP_NATIVE_HOST_BUNDLE"].map { URL(fileURLWithPath: $0) },
@@ -65,7 +64,8 @@ private extension ProxyServerCommand {
             },
             sharesCompilationCache: shareCompilationCache,
             maxBodyBytes: maxBodyBytes ?? 1_048_576,
-            requestTimeout: timeout > 0 ? .seconds(timeout) : nil,
+            requestTimeout: requestTimeout.map { $0.duration }
+                ?? XcodeMCPProxyServerConfiguration().requestTimeout,
             discovery: .file(ProxyFilesystemLocations.discoveryFileURL(environment: environment)),
             approvalPolicy: autoApprove ? .automatic : .manual
         )

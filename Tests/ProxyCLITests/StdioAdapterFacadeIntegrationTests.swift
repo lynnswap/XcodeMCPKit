@@ -674,7 +674,7 @@ private struct StdioAdapterFacadeHarness {
         let serverURL = server.url
         let requestTimeout: Duration? = proxyArguments == ["--request-timeout", "0"]
             ? nil
-            : .seconds(300)
+            : XcodeMCPProxyStdioAdapterConfiguration().requestTimeout
         let adapter = try XcodeMCPProxyStdioAdapter(
             configuration: .init(
                 endpoint: .url(serverURL),

@@ -117,7 +117,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Maximum accepted HTTP request body size in bytes.
     public var maxBodyBytes: Int
 
-    /// Request timeout. `nil` disables request timeouts.
+    /// Request timeout. Defaults to 600 seconds. `nil` disables request timeouts.
     public var requestTimeout: Duration?
 
     /// Initialize handshake overrides. `nil` uses the built-in defaults.
@@ -149,7 +149,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         developerDirectoryURL: URL? = nil,
         sharesCompilationCache: Bool = false,
         maxBodyBytes: Int = 1_048_576,
-        requestTimeout: Duration? = .seconds(300),
+        requestTimeout: Duration? = .seconds(600),
         initializeHandshake: InitializeHandshake? = nil,
         discovery: Discovery = .defaultLocation,
         approvalPolicy: ApprovalPolicy = .manual,

@@ -20,7 +20,7 @@ import XcodeMCPProxyKit
 let server = XcodeMCPProxyServer(
     configuration: .init(
         bindAddress: .localhost(port: 0),
-        requestTimeout: .seconds(300),
+        requestTimeout: .seconds(600),
         discovery: .defaultLocation
     )
 )
@@ -59,7 +59,7 @@ may be incomplete, even though the server lifecycle has stopped.
 - `sharesCompilationCache`: enables shared compilation caching and Swift/Clang prefix mapping in native hosts. Defaults to `false`; see [compilation caching](../../Docs/configuration.md#compilation-caching) for behavior and limits.
 - `approvalPolicy`: `.manual` by default. `.automatic` approves GUI Xcode MCP connection dialogs for all agents, including clients outside this proxy, using macOS Accessibility access.
 - `maxBodyBytes`: positive maximum HTTP request body size.
-- `requestTimeout`: a positive `Duration`, or `nil` to disable the timeout.
+- `requestTimeout`: a positive `Duration` (600 seconds by default), or `nil` to disable the timeout.
 - `initializeHandshake`: typed upstream initialization for embedding.
 - `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
 - `prewarmToolsList`: whether discovery begins during startup.
@@ -109,7 +109,7 @@ import XcodeMCPProxyKit
 let adapter = try XcodeMCPProxyStdioAdapter(
     configuration: .init(
         endpoint: .url(URL(string: "http://localhost:8765/mcp")!),
-        requestTimeout: .seconds(300)
+        requestTimeout: .seconds(600)
     )
 )
 
@@ -156,6 +156,7 @@ let exitCode = await XcodeMCPProxyServer.run(
 
 `XcodeMCPProxyStdioAdapter.run(...)` has the same callback and exit-code shape.
 The adapter CLI accepts `--url` as its only explicit endpoint flag.
+Its request timeout defaults to 600 seconds.
 `--request-timeout 0` disables its timeout; negative, non-finite, or nonnumeric
 values are rejected. The removed `--stdio` spelling is not redirected.
 

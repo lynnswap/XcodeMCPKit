@@ -106,7 +106,7 @@ Increase `tool_timeout_sec` in `~/.codex/config.toml` (this is client-side and s
 [mcp_servers.xcode]
 command = "xcode-mcp-proxy"
 args = []
-tool_timeout_sec = 300
+tool_timeout_sec = 600
 ```
 
 If you configured Codex via `--url`, set `tool_timeout_sec` on the URL server entry instead:
@@ -114,7 +114,7 @@ If you configured Codex via `--url`, set `tool_timeout_sec` on the URL server en
 ```toml
 [mcp_servers.xcode]
 url = "http://localhost:8765/mcp"
-tool_timeout_sec = 300
+tool_timeout_sec = 600
 ```
 
 ## Codex shows `Transport closed` (then hangs)
