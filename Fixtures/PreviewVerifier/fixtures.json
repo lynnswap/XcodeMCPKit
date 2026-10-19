@@ -218,6 +218,18 @@
         "scheme": "ProxyToolVerifierFixture",
         "index": 5,
         "arguments": {}
+      },
+      {
+        "id": "timeline-portrait",
+        "sourceFile": "ProxyToolVerifierFixture/ContentView.swift",
+        "navigatorPath": "ProxyToolVerifierFixture/ContentView.swift",
+        "scheme": "ProxyToolVerifierFixture",
+        "index": 6,
+        "arguments": {
+          "previewVariantOverrides": {
+            "Orientation": "Portrait"
+          }
+        }
       }
     ]
   },

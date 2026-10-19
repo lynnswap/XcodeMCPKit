@@ -342,6 +342,9 @@ counterrotation controller and a dedicated preview window scene. Orientation
 overrides use the same scene. The renderer creates a local FrontBoard pseudo scene
 with the device's display configuration and native display-edge settings, so UIKit
 computes preview safe areas without the original app scene's populated resolver.
+Before connecting UIKit, it delivers the native scene-creation notification on
+the scene's call-out queue. This completes the lifecycle needed by scene-action
+producers such as SwiftUI's `TimelineView` during their first layout.
 Its reference frame stays in the display's fixed coordinate space; native scene
 bounds apply the requested orientation. This path was verified on iOS 27.2 with
 Xcode 27.1 and uses ABIBridge 0.9.0's existing Objective-C APIs. Unavailable private
