@@ -21,7 +21,7 @@ public struct XcodeMCPProxyStdioAdapterConfiguration: Equatable, Sendable {
     public var endpoint: Endpoint
 
     /// Maximum duration for one logical request, or `nil` to disable the
-    /// client-side timeout.
+    /// client-side timeout. Defaults to 600 seconds.
     public var requestTimeout: Duration?
 
     /// Creates an adapter configuration.
@@ -29,7 +29,7 @@ public struct XcodeMCPProxyStdioAdapterConfiguration: Equatable, Sendable {
         endpoint: Endpoint = .proxyDefault(
             environment: ProcessInfo.processInfo.environment
         ),
-        requestTimeout: Duration? = .seconds(300)
+        requestTimeout: Duration? = .seconds(600)
     ) {
         self.endpoint = endpoint
         self.requestTimeout = requestTimeout
@@ -234,7 +234,7 @@ extension XcodeMCPProxyStdioAdapter {
                     endpoint: command.url.map { .url($0.url) }
                         ?? .proxyDefault(environment: environment),
                     requestTimeout: command.requestTimeout.map { $0.duration }
-                        ?? .seconds(300)
+                        ?? XcodeMCPProxyStdioAdapterConfiguration().requestTimeout
                 )
                 let adapter = try dependencies.makeAdapter(
                     configuration,

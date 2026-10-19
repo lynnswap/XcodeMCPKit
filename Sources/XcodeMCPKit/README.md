@@ -183,7 +183,7 @@ let symbols = try await xcode.request(
 - `.localBridge(.custom(command:arguments:environment:))` supports an explicit
   generic MCP process.
 - `clientName`, `clientVersion`, and `capabilities` are sent in `initialize`.
-- `requestTimeout: Duration?` is the default logical deadline. `nil` disables
+- `requestTimeout: Duration?` is the default logical deadline (600 seconds). `nil` disables
   the default timeout; nonpositive durations are rejected.
 
 Each request can override the default with `XcodeMCPRequestOptions.Timeout`:

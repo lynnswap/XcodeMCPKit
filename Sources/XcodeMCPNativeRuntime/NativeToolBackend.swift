@@ -164,6 +164,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         try Task.checkCancellation()
         arguments["temporaryArtifactsPath"] = .string(context.artifactsDirectory.path)
         arguments["conversationID"] = .string(context.conversationID)
+        if isPreview { arguments = NativePreviewCorrection.prepareArguments(arguments) }
         let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
         if let kind = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
             return try unsafe crashCorrection.execute(kind, inputType: scope.inputType(for: action), input: input,

@@ -109,6 +109,11 @@ before an MCP operation. Opening the same project in Xcode does not transfer its
 unsaved buffers, active scheme, selected destination, or debugger session to the host.
 
 `RenderPreview` builds saved changes and captures a new image for each request.
+Its `timeout` defaults to 300 seconds, including building and preparing the render
+destination. Pass an explicit `timeout` to use a different duration.
+The SDK, proxy server, and STDIO adapter default to a 600-second request timeout
+to allow time for setup and cleanup. Set an external MCP client's timeout above
+the preview timeout as well.
 Repeated requests reuse preview planning when build products and preview settings
 are unchanged.
 Successful calls retain the workspace's preview processes and owned Simulator for

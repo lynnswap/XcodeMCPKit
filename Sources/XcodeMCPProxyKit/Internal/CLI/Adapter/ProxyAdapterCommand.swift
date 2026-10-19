@@ -24,7 +24,7 @@ package struct ProxyAdapterCommand: ParsableCommand {
 
     @Option(
         parsing: .unconditional,
-        help: "Request timeout in seconds. Zero disables request timeouts.",
+        help: "Request timeout in seconds. Defaults to 600. Zero disables request timeouts.",
         transform: CLIRequestTimeout.parse
     )
     var requestTimeout: CLIRequestTimeout?

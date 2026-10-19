@@ -54,7 +54,7 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | --- | --- |
 | `--listen host:port` | Listen address. Defaults to `localhost:8765`; cannot be combined with `--host` or `--port`. |
 | `--host host` / `--port port` | Listen host and port when `--listen` is not used. Port `0` selects an available port. |
-| `--request-timeout seconds` | Request timeout. `0` disables non-initialize timeouts; initialization remains bounded. |
+| `--request-timeout seconds` | Request timeout, default 600 seconds. `0` disables non-initialize timeouts; initialization remains bounded. |
 | `--max-body-bytes bytes` | Maximum accepted HTTP request body size. |
 | `--share-compilation-cache` | Enable shared compilation caching and Swift/Clang prefix mapping in native hosts. Off by default; see [compilation caching](#compilation-caching). |
 | `--auto-approve` | Automatically allow GUI Xcode MCP connection dialogs for all agents, including external clients. Off by default; requires macOS Accessibility access. |

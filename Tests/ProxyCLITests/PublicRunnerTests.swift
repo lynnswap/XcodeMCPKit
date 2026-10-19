@@ -7,6 +7,12 @@ import XcodeMCPProxyKit
 
 @Suite
 struct PublicRunnerTests {
+    @Test func requestTimeoutDefaultsAllowFiveMinutePreviews() {
+        #expect(XcodeMCPConfiguration().requestTimeout == .seconds(600))
+        #expect(XcodeMCPProxyServerConfiguration().requestTimeout == .seconds(600))
+        #expect(XcodeMCPProxyStdioAdapterConfiguration().requestTimeout == .seconds(600))
+    }
+
     @Test(arguments: [true, false])
     func adapterInitializerPropagatesDescriptorErrors(invalidInput: Bool) throws {
         let pipe = Pipe()

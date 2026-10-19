@@ -38,7 +38,8 @@ struct StdioAdapterRunnerTests {
         }
     }
 
-    @Test func adapterLauncherStartsInjectedAdapterWithDurationConfiguration() async throws {
+    @Test(arguments: [Optional<String>.none, "12.5"])
+    func adapterLauncherStartsInjectedAdapterWithDurationConfiguration(_ timeout: String?) async throws {
         let createdAdapter = RecordingLaunchAdapter()
         let captured = LockedBox<XcodeMCPProxyStdioAdapterConfiguration?>(nil)
         let launcher = XcodeMCPProxyStdioAdapter.Launcher(
@@ -52,12 +53,10 @@ struct StdioAdapterRunnerTests {
             )
         )
 
+        var arguments = ["xcode-mcp-proxy", "--url", "http://localhost:9001/mcp"]
+        if let timeout { arguments += ["--request-timeout", timeout] }
         let exitCode = await launcher.run(
-            arguments: [
-                "xcode-mcp-proxy",
-                "--url", "http://localhost:9001/mcp",
-                "--request-timeout", "12.5",
-            ],
+            arguments: arguments,
             environment: [:],
             stdout: { _ in },
             stderr: { _ in }
@@ -65,7 +64,7 @@ struct StdioAdapterRunnerTests {
 
         #expect(exitCode == 0)
         #expect(captured.snapshot()?.endpoint == .url(URL(string: "http://localhost:9001/mcp")!))
-        #expect(captured.snapshot()?.requestTimeout == .milliseconds(12_500))
+        #expect(captured.snapshot()?.requestTimeout == (timeout == nil ? .seconds(600) : .milliseconds(12_500)))
         #expect(await createdAdapter.startCount() == 1)
         #expect(await createdAdapter.waitCount() == 1)
     }

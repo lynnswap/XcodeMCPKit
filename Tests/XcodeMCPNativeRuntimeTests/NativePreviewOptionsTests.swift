@@ -6,6 +6,26 @@ import XcodeMCPWire
 @Suite
 @MainActor
 struct NativePreviewOptionsTests {
+    @Test func advertisesFiveMinutePreviewTimeout() throws {
+        let native = #"{"name":"RenderPreview","inputSchema":{"properties":[{"name":"timeout","isRequired":false,"description":"Defaults to 120 seconds.","type":{"integer":{}}}]}}"#
+        let tool = try NativeSchemaConverter.tool(from: Data(native.utf8), workspaceScoped: true)
+        let corrected = NativePreviewCorrection.describe(tool)
+        let timeout = try nativeTestField(corrected.descriptor, "inputSchema", "properties", "timeout")
+        #expect(try nativeTestField(timeout, "default") == .number(.int(300)))
+        #expect(try nativeTestField(timeout, "description") == .string("The time in seconds to wait for the preview, including building and preparing its render destination. Defaults to 300 seconds."))
+    }
+
+    @Test(arguments: [Optional<Int>.none, 60])
+    func previewTimeoutDefaultsPreserveExplicitValues(_ timeout: Int?) throws {
+        var arguments: [String: JSONValue] = ["sourceFilePath": .string("ContentView.swift")]
+        if let timeout { arguments["timeout"] = .number(.int(Int64(timeout))) }
+        let prepared = NativePreviewCorrection.prepareArguments(arguments)
+        let input = try JSONSerialization.data(withJSONObject: prepared.mapValues(\.foundationObject))
+        let decoded = try JSONDecoder().decode(PreviewTimeoutInput.self, from: input)
+        #expect(decoded.timeout == timeout ?? 300)
+        #expect(decoded.sourceFilePath == "ContentView.swift")
+    }
+
     @Test func generalPreviewReportsUnsupportedControlsAndVariantGroups() {
         let request = PreviewRendererRequest(libraryNames: [], registryNames: [], fileName: "View.swift",
             moduleName: nil, lineNumber: nil, columnNumber: nil, definitionIndex: 0, localization: nil,
@@ -136,4 +156,9 @@ struct NativePreviewOptionsTests {
         #expect(options.activityViewStyle == nil)
         #expect(!options.requiresNativePipeline)
     }
+}
+
+private struct PreviewTimeoutInput: Decodable {
+    let sourceFilePath: String
+    let timeout: Int
 }
