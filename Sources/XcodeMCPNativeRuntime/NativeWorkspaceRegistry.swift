@@ -79,7 +79,7 @@ final class NativeWorkspaceRegistry {
     }
 
     func prepareOpen(path: String, request: URL) async throws {
-        let path = URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        let path = Self.workspacePath(for: path)
         let opening = openingDocuments[path] ?? OpeningDocument(path: path)
         openingDocuments[path] = opening
         opening.requests.insert(request)
@@ -100,6 +100,8 @@ final class NativeWorkspaceRegistry {
         // AppKit may finish loading after cancellation. Acquire its document
         // before propagating cancellation so request cleanup can close it.
         try Task.checkCancellation()
+        // Dependency resolution can outlast the native registry's initial destination timer.
+        try await Self.waitForSourcePackages(in: loaded.workspace)
     }
 
     func finishOpen(request: URL) throws {
@@ -126,12 +128,34 @@ final class NativeWorkspaceRegistry {
     func executionKey(for selector: String) throws -> String {
         let path = selector.hasPrefix("/") ? selector : try entries().first(where: { $0.identifier == selector })?.path
         guard let path else { return "identifier:" + selector }
-        return URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        return Self.workspacePath(for: path)
+    }
+
+    static func workspacePath(for path: String) -> String {
+        var url = URL(filePath: path).standardizedFileURL
+        if url.lastPathComponent == "Package.swift",
+           (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+            url.deleteLastPathComponent()
+        }
+        return url.resolvingSymlinksInPath().path
+    }
+
+    static func waitForSourcePackages(in workspace: AnyObject) async throws {
+        try Task.checkCancellation()
+        let wait = try await ABIRuntime.shared.object(workspace).resolveMethod(
+            named: "(extension in IDEFoundation):__C.IDEWorkspace.waitForFinishedResolvingSourcePackages() async throws -> ()",
+            as: (@concurrent () async throws -> Void).self)
+        do { try unsafe await wait.unsafeInvoke() }
+        catch let error as NativeSwiftError {
+            if error.withUnderlyingError({ $0 is CancellationError }) { throw CancellationError() }
+            throw NativeToolExecutionError(message: error.description)
+        }
+        try Task.checkCancellation()
     }
 
     func resolve(_ selector: String, opensIfMissing: Bool = true, request: URL) async throws -> String {
         if selector.hasPrefix("/") {
-            let path = URL(fileURLWithPath: selector).standardizedFileURL.resolvingSymlinksInPath().path
+            let path = Self.workspacePath(for: selector)
             let matches = try entries().filter { entry in
                 entry.path.map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path } == path
             }

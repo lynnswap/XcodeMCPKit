@@ -51,8 +51,16 @@ package enum NativeSchemaConverter {
            case .object(var properties) = inputFields["properties"] {
             properties["workspaceIdentifier"] = .object([
                 "type": .string("string"),
-                "description": .string("Native workspace identifier or absolute path to a .xcworkspace or .xcodeproj. The project is loaded without a window when needed."),
+                "description": .string("Native workspace identifier or absolute path to a .xcworkspace, .xcodeproj, Swift package directory, or Package.swift. The workspace is loaded without a window when needed."),
             ])
+            inputFields["properties"] = .object(properties)
+            inputSchema = .object(inputFields)
+        }
+        if name == "XcodeOpenWorkspace", case .object(var inputFields) = inputSchema,
+           case .object(var properties) = inputFields["properties"],
+           case .object(var path) = properties["path"] {
+            path["description"] = .string("Absolute path to the .xcworkspace, .xcodeproj, Swift package directory, or Package.swift to open.")
+            properties["path"] = .object(path)
             inputFields["properties"] = .object(properties)
             inputSchema = .object(inputFields)
         }

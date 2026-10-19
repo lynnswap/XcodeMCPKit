@@ -144,6 +144,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
             previewCorrection.invalidateReusableBuild(workspaceIdentifier: nil)
         }
         if name == "XcodeOpenWorkspace", case .string(let path) = arguments["path"] {
+            arguments["path"] = .string(NativeWorkspaceRegistry.workspacePath(for: path))
             try await workspaces.prepareOpen(path: path, request: context.artifactsDirectory)
         }
         if tool.acceptsWorkspaceIdentifier, case .string(let selector) = arguments["workspaceIdentifier"] {

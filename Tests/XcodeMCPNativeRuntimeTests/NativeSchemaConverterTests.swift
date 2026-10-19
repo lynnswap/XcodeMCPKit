@@ -5,6 +5,13 @@ import XcodeMCPWire
 
 @Suite
 struct NativeSchemaConverterTests {
+    @Test func explicitWorkspaceOpeningAdvertisesSwiftPackagePaths() throws {
+        let native = #"{"name":"XcodeOpenWorkspace","inputSchema":{"properties":[{"name":"path","type":{"string":{}},"isRequired":true}]}}"#
+        let tool = try NativeSchemaConverter.tool(from: Data(native.utf8), workspaceScoped: false)
+        #expect(try nativeTestField(tool.descriptor, "inputSchema", "properties", "path", "description")
+            == .string("Absolute path to the .xcworkspace, .xcodeproj, Swift package directory, or Package.swift to open."))
+    }
+
     @Test(arguments: ["GetBuildLog", "GetTestList", "XcodeRead"])
     func nativeQueriesPreservePreviewBuildsWithoutAddingAnnotations(name: String) throws {
         let tool = try NativeSchemaConverter.tool(from: Data(#"{"name":"\#(name)","inputSchema":{"properties":[]}}"#.utf8), workspaceScoped: false)

@@ -4,6 +4,26 @@ import Testing
 
 @MainActor
 struct NativeWorkspaceRegistryTests {
+    @Test(arguments: [false, true])
+    func packageManifestAndDirectoryResolveToTheSameWorkspacePath(symlinkedManifest: Bool) throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NativeWorkspaceRegistryTests-\(UUID().uuidString)", isDirectory: true)
+        let package = directory.appendingPathComponent("Package", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manifest = package.appendingPathComponent("Package.swift")
+        if symlinkedManifest {
+            let template = directory.appendingPathComponent("Template.swift")
+            try "import PackageDescription".write(to: template, atomically: true, encoding: .utf8)
+            try FileManager.default.createSymbolicLink(at: manifest, withDestinationURL: template)
+        } else {
+            try "import PackageDescription".write(to: manifest, atomically: true, encoding: .utf8)
+        }
+
+        #expect(NativeWorkspaceRegistry.workspacePath(for: manifest.path)
+            == NativeWorkspaceRegistry.workspacePath(for: package.path))
+    }
+
     @Test func removedModelsStayOpenUntilAnotherRequestReleasesTheirWorkspace() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("NativeWorkspaceRegistryTests-\(UUID().uuidString)", isDirectory: true)

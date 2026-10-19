@@ -91,8 +91,12 @@ drains owned Tasks, and closes native models.
 
 ## Workspace access
 
-`workspaceIdentifier` accepts a native identifier or an absolute `.xcworkspace`
-or `.xcodeproj` path. The common resolver loads a model lazily for scoped
+`workspaceIdentifier` accepts a native identifier or an absolute `.xcworkspace`,
+`.xcodeproj`, Swift package directory, or `Package.swift` path. Package manifests
+resolve to their parent directory so opening, execution permits, and closing use
+the same native workspace identity. The loader waits for source package resolution
+before the native registry starts its initial run-destination wait.
+The common resolver loads a model lazily for scoped
 operations. `XcodeOpenWorkspace` supports explicit preloading and
 `XcodeCloseWorkspace` closes an existing model without opening a missing one.
 

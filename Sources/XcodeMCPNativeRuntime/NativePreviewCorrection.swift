@@ -330,7 +330,7 @@ final class NativePreviewCorrection {
         try Task.checkCancellation()
         let inputRevision = session.inputRevision
         let workspace = try await workspace(input.workspaceIdentifier)
-        try await builder.waitForSourcePackages(in: workspace)
+        try await NativeWorkspaceRegistry.waitForSourcePackages(in: workspace)
         let currentContext = try builder.planningContext(workspace: workspace)
         var inputsAreCurrent = false
         if let plan = session.plan, let certificate = plan.certificate,
@@ -364,7 +364,7 @@ final class NativePreviewCorrection {
         if !inputsAreCurrent {
             session.plan = nil
             try await builder.synchronizeProjectContainers(in: workspace)
-            try await builder.waitForSourcePackages(in: workspace)
+            try await NativeWorkspaceRegistry.waitForSourcePackages(in: workspace)
         }
         session.plan?.certificate = nil
         let source = try await sourceURL(input.sourcePath, workspace: workspace)
