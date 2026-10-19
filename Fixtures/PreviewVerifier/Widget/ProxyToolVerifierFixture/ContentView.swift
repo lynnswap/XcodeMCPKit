@@ -73,3 +73,9 @@ private struct CompactDisplay: View {
     button.titleLabel?.font = .systemFont(ofSize: 24)
     return button
 }
+
+#Preview("DISPLAY TIMELINE") {
+    TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
+        DisplayParityView()
+    }
+}

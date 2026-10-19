@@ -209,6 +209,21 @@ final class PreviewSnapshotWindow {
             }
             try unsafe update.unsafeInvoke(configure)
             if let updateError { throw updateError }
+            let created = try await runtime.object(nativeScene).resolveMethod(
+                selector: "_callOutQueue_didCreateWithTransitionContext:alternativeCreationCallout:completion:",
+                as: ((AnyObject?, QueueAction?, QueueAction?) -> Void).self)
+            // UIKit content can send scene actions during its first layout.
+            // Complete the native creation lifecycle before connecting its scene.
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let notify: QueueAction = {
+                    do {
+                        try unsafe created.unsafeInvoke(transition, nil, nil)
+                        continuation.resume()
+                    } catch { continuation.resume(throwing: error) }
+                }
+                do { try unsafe enqueue.unsafeInvoke(notify) }
+                catch { continuation.resume(throwing: error) }
+            }
             guard let scene = try unsafe connect.unsafeInvoke(nativeScene, transition) as? UIWindowScene else { throw NativePreviewPipelineRequired() }
             connectedScene = scene
             try await synchronizeInitialSettings(of: nativeScene, transitionContext: transition)
