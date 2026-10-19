@@ -8,7 +8,7 @@ import XcodeMCPWire
 final class NativePreviewCorrection {
     private let installation: NativeXcodeInstallation
     private let builder: NativePreviewBuild
-    private var operations: [UUID: Task<Void, Never>] = [:]
+    private var operations: [UUID: (request: URL?, task: Task<Void, Never>)] = [:]
     private var sessions: [String: WorkspaceSession] = [:]
     private let renderQueue = NativePreviewRenderQueue()
     let snapshotImages = SnapshotImages()
@@ -146,7 +146,7 @@ final class NativePreviewCorrection {
         return NativeTool(name: tool.name, descriptor: .object(fields), workspaceScoped: tool.workspaceScoped)
     }
 
-    func execute(inputType: Any.Type, input: Data, artifactsRoot: URL,
+    func execute(inputType: Any.Type, input: Data, artifactsRoot: URL, request: URL? = nil,
                  native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws -> AsyncStream<Data> {
         guard let inputType = inputType as? any Decodable.Type else {
             return try await native()
@@ -178,20 +178,26 @@ final class NativePreviewCorrection {
                 }
             }
         }
-        operations[identifier] = task
+        operations[identifier] = (request, task)
         stream.continuation.onTermination = { @Sendable _ in task.cancel() }
         return stream.stream
     }
 
     func cancelPendingOperations() {
-        for task in operations.values { task.cancel() }
+        for operation in operations.values { operation.task.cancel() }
         builder.cancelPendingOperations()
     }
 
     func shutdown() async throws {
         cancelPendingOperations()
-        for task in Array(operations.values) { await task.value }
+        for operation in Array(operations.values) { await operation.task.value }
         try await retainWorkspaces([])
+    }
+
+    func finishExecution(request: URL) async {
+        let pending = operations.values.filter { $0.request == request }.map(\.task)
+        if Task.isCancelled { for task in pending { task.cancel() } }
+        for task in pending { await task.value }
     }
 
     func retainWorkspaces(_ identifiers: Set<String>) async throws {

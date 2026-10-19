@@ -23,7 +23,7 @@ final class NativeCrashToolCorrection {
     private let installation: NativeXcodeInstallation
     private var topMethod: NativeSwiftMethod<@concurrent (String, AnyObject, NativeAnalyticsBoolean, String?, NativeAnalyticsInteger) async throws -> NativeAnalyticsDictionary>?
     private var logsMethod: NativeSwiftMethod<@concurrent (String, String, AnyObject, NativeAnalyticsBoolean, String?) async throws -> NativeAnalyticsDictionary>?
-    private var operations: [UUID: Task<Void, Never>] = [:]
+    private var operations: [UUID: (request: URL?, task: Task<Void, Never>)] = [:]
 
     init(installation: NativeXcodeInstallation) {
         self.installation = installation
@@ -32,7 +32,7 @@ final class NativeCrashToolCorrection {
     // Remove this correction when OrganizerMCPLogDownloader selects a product
     // by bundle identifier and platform before its App Store-ID fast path.
     // The catalog and schemas still come from the installed native actions.
-    func execute(_ kind: Kind, inputType: Any.Type, input: Data) throws -> AsyncStream<Data> {
+    func execute(_ kind: Kind, inputType: Any.Type, input: Data, request: URL? = nil) throws -> AsyncStream<Data> {
         guard let type = inputType as? any Decodable.Type else {
             throw NativeRuntimeError.unsupportedContract("Native crash action input has no Decodable contract")
         }
@@ -91,19 +91,25 @@ final class NativeCrashToolCorrection {
                 result.continuation.yield(errorEvent(error))
             }
         }
-        operations[identifier] = task
+        operations[identifier] = (request, task)
         result.continuation.onTermination = { _ in task.cancel() }
         return result.stream
     }
 
     func cancelPendingOperations() {
-        for operation in Array(operations.values) { operation.cancel() }
+        for operation in Array(operations.values) { operation.task.cancel() }
     }
 
     func shutdown() async {
-        let pending = Array(operations.values)
+        let pending = operations.values.map(\.task)
         for operation in pending { operation.cancel() }
         for operation in pending { await operation.value }
+    }
+
+    func finishExecution(request: URL) async {
+        let pending = operations.values.filter { $0.request == request }.map(\.task)
+        if Task.isCancelled { for task in pending { task.cancel() } }
+        for task in pending { await task.value }
     }
 
     private func fetch(_ kind: Kind, input: NativeCrashInput, context: NativeCrashContext) async throws -> String {

@@ -69,7 +69,7 @@ private enum NativeHostMain {
                     let session = NativeMCPSession(backend: backend, artifactsRoot: artifacts) { data in
                         try output.write(contentsOf: data + Data([0x0A]))
                     }
-                    session.onOutputFailure = { [weak session] error in
+                    await session.setOutputFailureHandler { [weak session] error in
                         guard let session else { return }
                         Task { @MainActor in
                             do { try await session.shutdown() }
@@ -96,8 +96,8 @@ private enum NativeHostMain {
                                 guard message.count <= arguments.maxMessageBytes else {
                                     throw NativeRuntimeError.invalidRequest("Native MCP message exceeds the configured message limit")
                                 }
-                                try session.receive(message)
                             }
+                            try await session.receive(result.messages)
                         }
                     } catch {
                         do { try await session.shutdown() }

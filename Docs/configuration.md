@@ -40,8 +40,11 @@ DEVELOPER_DIR=/Applications/Xcode_27.0.app/Contents/Developer xcode-mcp-proxy-se
 ```
 
 Use `XcodeMCPKitListHosts` and `XcodeMCPKitSelectHost` to change a client
-session's host without restarting the shared server. See
-[host selection](usage.md#select-an-xcode-host).
+session's host without restarting the shared server. The list includes owned
+headless hosts, installed candidates, and running GUI Xcode processes. GUI
+selection binds to that process's identity; restarting the application requires
+selecting its new entry. Different selected processes can operate concurrently.
+See [host selection](usage.md#select-an-xcode-host).
 
 ## Server options
 
@@ -57,6 +60,23 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `--auto-approve` | Automatically allow GUI Xcode MCP connection dialogs for all agents, including external clients. Off by default; requires macOS Accessibility access. |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port before starting. |
 | `--dry-run` | Print the resolved server command without starting it. |
+
+## Owned headless execution limits
+
+Each owned headless process has an independent execution queue with these limits:
+
+| Resource | Limit |
+| --- | --- |
+| Concurrent tool calls | 4 |
+| Heavy calls (`BuildProject`, `RunProject`, `RunAllTests`, `RunSomeTests`, `RenderPreview`) | 1 |
+| Queued request budget, measured by incoming JSON-RPC sizes | 32 MiB |
+
+Calls for the same workspace remain exclusive through preparation, native stream
+consumption, and cleanup. Mutations without a workspace selector are exclusive
+with every workspace in that process. The limits have no public configuration
+option and do not serialize other headless hosts or GUI Xcode processes. See
+[concurrent operations](usage.md#concurrent-operations) for admission and
+[cancellation](usage.md#cancellation) for completion boundaries.
 
 ## Environment variables
 
@@ -84,7 +104,8 @@ sentences naming an agent that requests Xcode's tools. The default button must
 be `Allow` or `許可`, or use `action-button-1` when its title is unavailable.
 Agent names, PIDs, and executable paths alone do not identify a connection
 request. Other dialogs keep their normal behavior.
-The proxy's tools continue to run in its headless native host.
+Select a running GUI target with `XcodeMCPKitSelectHost` to use its bridge tools.
+The default target remains the owned headless host.
 
 ### Compilation caching
 

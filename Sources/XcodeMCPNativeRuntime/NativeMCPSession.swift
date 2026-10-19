@@ -1,12 +1,12 @@
 import Foundation
 import XcodeMCPWire
 
-@MainActor
-package final class NativeMCPSession {
+package actor NativeMCPSession {
     private let backend: any NativeToolBackend
-    private let output: @MainActor (Data) throws -> Void
-    package var onOutputFailure: (@MainActor (any Error) -> Void)?
+    private let output: @Sendable (Data) throws -> Void
+    private var onOutputFailure: (@Sendable (any Error) -> Void)?
     private let artifactsRoot: URL
+    private let executionQueue: NativeExecutionQueue
     private let conversationID = UUID().uuidString
     private var initialized = false
     private var stopping = false
@@ -14,10 +14,22 @@ package final class NativeMCPSession {
     private var requests: [String: Task<Void, Never>] = [:]
 
     package init(backend: any NativeToolBackend, artifactsRoot: URL,
-                 output: @escaping @MainActor (Data) throws -> Void) {
+                 maximumConcurrentOperations: Int = 4, maximumHeavyOperations: Int = 1,
+                 maximumQueuedBytes: Int = 32 * 1024 * 1024,
+                 output: @escaping @Sendable (Data) throws -> Void) {
         self.backend = backend
         self.artifactsRoot = artifactsRoot
         self.output = output
+        executionQueue = NativeExecutionQueue(maximumConcurrentOperations: maximumConcurrentOperations,
+            maximumHeavyOperations: maximumHeavyOperations, maximumQueuedBytes: maximumQueuedBytes)
+    }
+
+    package func setOutputFailureHandler(_ handler: (@Sendable (any Error) -> Void)?) {
+        onOutputFailure = handler
+    }
+
+    package func receive(_ messages: [Data]) throws {
+        for message in messages { try receive(message) }
     }
 
     package func receive(_ data: Data) throws {
@@ -56,11 +68,12 @@ package final class NativeMCPSession {
                 return
             }
             let params = object["params"].flatMap(JSONValue.init(any:))
-            requests[id.key] = Task { @MainActor in
+            let requestBytes = data.count
+            requests[id.key] = Task {
                 defer { requests[id.key] = nil }
                 do {
                     try Task.checkCancellation()
-                    let result = try await perform(method, params: params)
+                    let result = try await perform(method, params: params, requestBytes: requestBytes)
                     try Task.checkCancellation()
                     try sendResult(id: id, result: result)
                 } catch {
@@ -97,7 +110,7 @@ package final class NativeMCPSession {
         }
     }
 
-    private func perform(_ method: String, params: JSONValue?) async throws -> JSONValue {
+    private func perform(_ method: String, params: JSONValue?, requestBytes: Int) async throws -> JSONValue {
         if method == "initialize" {
             guard case .object(let fields) = params,
                   case .string = fields["protocolVersion"],
@@ -107,7 +120,7 @@ package final class NativeMCPSession {
                 throw NativeRuntimeError.invalidRequest("initialize requires protocolVersion, capabilities and clientInfo name/version")
             }
             initialized = true
-            return withOrigin([
+            return await withOrigin([
                 "protocolVersion": .string(MCPProtocolVersion.current),
                 "capabilities": .object(["tools": .object([:])]),
                 "serverInfo": .object(["name": .string("XcodeMCPKit Native Host"), "version": .string("1")]),
@@ -118,18 +131,18 @@ package final class NativeMCPSession {
         switch method {
         case "tools/list":
             let tools = try await backend.listTools()
-            return withOrigin(["tools": .array(tools.map(\.descriptor))])
+            return await withOrigin(["tools": .array(tools.map(\.descriptor))])
         case "tools/call":
             let capture = NativeErrorPresentation.Capture()
             return try await NativeErrorPresentation.$capture.withValue(capture) {
-                capture.addingDiagnostics(to: try await performTool(params: params))
+                await capture.addingDiagnostics(to: try await performTool(params: params, requestBytes: requestBytes))
             }
         default:
             throw NativeRuntimeError.methodNotFound("Unsupported MCP method '\(method)'")
         }
     }
 
-    private func performTool(params: JSONValue?) async throws -> JSONValue {
+    private func performTool(params: JSONValue?, requestBytes: Int) async throws -> JSONValue {
         guard case .object(let fields) = params, case .string(let name) = fields["name"] else {
             throw NativeRuntimeError.invalidRequest("tools/call requires a tool name")
         }
@@ -140,13 +153,41 @@ package final class NativeMCPSession {
             }
             arguments = object
         }
+        try Task.checkCancellation()
+        let resource = try await backend.executionResource(for: name, arguments: arguments)
+        let permit = try await executionQueue.acquire(resource, requestBytes: requestBytes)
+        do {
+            try Task.checkCancellation()
+            let result = try await executeTool(params: params, name: name, arguments: arguments, resource: resource)
+            await executionQueue.release(permit)
+            return result
+        } catch {
+            await executionQueue.release(permit)
+            throw error
+        }
+    }
+
+    private func executeTool(params: JSONValue?, name: String, arguments: [String: JSONValue],
+                             resource: NativeExecutionResource) async throws -> JSONValue {
         let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let context = NativeToolContext(artifactsDirectory: directory, artifactsRoot: artifactsRoot, conversationID: conversationID)
+        let context = NativeToolContext(artifactsDirectory: directory, artifactsRoot: artifactsRoot,
+                                       conversationID: conversationID, executionResource: resource)
+        return try await NativeExecutionOperations.$scope.withValue(context.executionScope) {
+            try await withTaskCancellationHandler {
+                try await executeTool(params: params, name: name, arguments: arguments, context: context)
+            } onCancel: {
+                context.executionScope.cancel()
+            }
+        }
+    }
+
+    private func executeTool(params: JSONValue?, name: String, arguments: [String: JSONValue],
+                             context: NativeToolContext) async throws -> JSONValue {
         do {
             let result = try await consumeTool(params: params, name: name, arguments: arguments, context: context)
             do { try await backend.finishExecution(context: context) }
-            catch { NativeErrorPresentation.report(error as NSError) }
+            catch { await NativeErrorPresentation.report(error as NSError) }
             return result
         } catch {
             let original = error
@@ -201,9 +242,9 @@ package final class NativeMCPSession {
         return completed
     }
 
-    private func withOrigin(_ fields: [String: JSONValue]) -> JSONValue {
+    private func withOrigin(_ fields: [String: JSONValue]) async -> JSONValue {
         var result = fields
-        if let origin = backend.origin {
+        if let origin = await backend.origin {
             result["_meta"] = .object(["com.lynnswap.xcode-mcpkit/origin": .object(origin)])
         }
         return .object(result)
@@ -266,7 +307,8 @@ package final class NativeMCPSession {
         stopping = true
         let pending = Array(requests.values)
         for request in pending { request.cancel() }
-        backend.beginShutdown()
+        await executionQueue.shutdown()
+        await backend.beginShutdown()
         for request in pending { await request.value }
         try await backend.shutdown()
     }

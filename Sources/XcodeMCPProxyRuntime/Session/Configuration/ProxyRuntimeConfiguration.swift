@@ -55,6 +55,7 @@ package struct ProxyRuntimeConfiguration: Sendable {
         }
     }
 
+    var guiProcess: XcodeGUIProcess?
     package var nativeHostBundleURL: URL?
     package var developerDirectoryURL: URL?
     package var sharesCompilationCache: Bool

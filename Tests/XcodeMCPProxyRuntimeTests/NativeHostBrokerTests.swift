@@ -9,6 +9,106 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .timeLimit(.minutes(1)), .asyncTestCleanup)
 struct NativeHostBrokerTests {
+    @Test func guiProcessesHaveSeparateTargetsAndShareEachProcessConnection() async throws {
+        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+        let processes = [
+            XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
+            XcodeGUIProcess(processID: 102, launchDate: Date(timeIntervalSince1970: 2), installation: installation),
+        ]
+        let fixture = try BrokerFixture(guiProcesses: processes)
+        let a = try await fixture.initialize("gui-a")
+        let b = try await fixture.initialize("gui-b")
+        let c = try await fixture.initialize("gui-c")
+        let targets = try await fixture.list(a).filter { $0["kind"] == .string("gui") }
+        #expect(targets.count == 2)
+        #expect(fixture.factory.transports.withLockedValue { $0.isEmpty })
+        let first = try #require(targets.first?["hostIdentifier"])
+        let second = try #require(targets.last?["hostIdentifier"])
+        for session in [a, b] {
+            _ = try await fixture.call(session, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": first])
+        }
+        _ = try await fixture.call(c, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": second])
+        let firstResult = try await fixture.echo(a)
+        let sharedResult = try await fixture.echo(b)
+        let secondResult = try await fixture.echo(c)
+        #expect(firstResult == sharedResult)
+        #expect(firstResult != secondResult)
+        let catalog = try await fixture.request(a, method: "tools/list")
+        guard case .object(let fields) = catalog, case .array(let tools)? = fields["tools"],
+              case .object(let tool)? = tools.first, case .object(let schema)? = tool["inputSchema"],
+              case .object(let properties)? = schema["properties"] else {
+            Issue.record("Missing GUI tool schema"); return
+        }
+        #expect(properties["tabIdentifier"] != nil)
+        #expect(properties["workspaceIdentifier"] == nil)
+        let selectedTargets = try await fixture.list(a).filter { $0["kind"] == .string("gui") }
+        #expect(selectedTargets.first?["processIdentifier"] == .number(.int(101)))
+        #expect(fixture.factory.transports.withLockedValue { $0.count } == 2)
+    }
+
+    @Test func unusedGUIBridgeClosesAndReconnectsToTheSameProcessTarget() async throws {
+        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+        let process = XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation)
+        let fixture = try BrokerFixture(guiProcesses: [process])
+        let session = try await fixture.initialize("gui-first")
+        let targets = try await fixture.list(session)
+        let id = try #require(targets.first { $0["kind"] == .string("gui") }?["hostIdentifier"])
+        _ = try await fixture.call(session, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": id])
+        let first = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        fixture.broker.removeSession(session)
+        try await first.stopped.wait(description: "unused GUI bridge closed")
+        let next = try await fixture.initialize("gui-next")
+        let available = try await fixture.list(next)
+        #expect(available.contains { $0["hostIdentifier"] == id && $0["isRunning"] == .bool(true) })
+        _ = try await fixture.call(next, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": id])
+        #expect(try await fixture.echo(next) == .number(.int(2)))
+        #expect(fixture.factory.transports.withLockedValue { $0.count } == 2)
+    }
+
+    @Test func guiExitDuringConnectionKeepsThePreviousSelection() async throws {
+        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+        let process = XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation)
+        let fixture = try BrokerFixture(holdsInitialization: true, guiProcesses: [process])
+        let session = try await fixture.initialize("gui-connecting")
+        let targets = try await fixture.list(session)
+        let id = try #require(targets.first { $0["kind"] == .string("gui") }?["hostIdentifier"])
+        let selection = Task { try await fixture.request(session, method: "tools/call", parameters: .object([
+            "name": .string(NativeHostBroker.selectTool), "arguments": .object(["hostIdentifier": id]),
+        ])) }
+        try await fixture.factory.created.wait(description: "GUI connection created")
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        try await transport.initializationStarted.wait(description: "GUI initialization started")
+        fixture.guiProcesses.withLockedValue { $0.removeAll() }
+        try transport.releaseInitialization()
+        guard case .object(let result) = try await selection.value else {
+            Issue.record("missing failed GUI selection"); return
+        }
+        #expect(result["isError"] == .bool(true))
+        let hosts = try await fixture.list(session)
+        #expect(hosts.first { $0["isSelected"] == .bool(true) }?["hostIdentifier"] == .string(NativeHostBroker.defaultHostIdentifier))
+    }
+
+    @Test func exitedGUIProcessDoesNotFallBackWhenItsPIDIsReused() async throws {
+        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+        let original = XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation)
+        let fixture = try BrokerFixture(guiProcesses: [original])
+        let session = try await fixture.initialize("gui-exit")
+        let targets = try await fixture.list(session)
+        let originalID = try #require(targets.first { $0["kind"] == .string("gui") }?["hostIdentifier"])
+        _ = try await fixture.call(session, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": originalID])
+        fixture.guiProcesses.withLockedValue {
+            $0 = [XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 2), installation: installation)]
+        }
+        guard case .mcpError(_, -32000, _, _, _) = try await fixture.reply(session, method: "tools/call", parameters: .object([
+            "name": .string("Echo-1"), "arguments": .object([:]),
+        ])) else {
+            Issue.record("An exited GUI target was used"); return
+        }
+        let refreshed = try await fixture.list(session).filter { $0["kind"] == .string("gui") }
+        #expect(refreshed.contains { $0["hostIdentifier"] != originalID && $0["isRunning"] == .bool(true) })
+        #expect(fixture.factory.transports.withLockedValue { $0.count } == 1)
+    }
+
     @Test func selectionAndCatalogsAreScopedToTheClientSession() async throws {
         let fixture = try BrokerFixture()
         let a = try await fixture.initialize("client-a")
@@ -145,6 +245,45 @@ struct NativeHostBrokerTests {
         _ = try await pending.value
     }
 
+    @Test(arguments: [false, true])
+    func independentHostStopsAfterItsLastClientClosesOrExpires(expires: Bool) async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("independent-a")
+        let b = try await fixture.initialize("independent-b")
+        let id = try await fixture.selectIndependentHost(a)
+        _ = try await fixture.call(b, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": id])
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        fixture.broker.removeSession(a)
+        #expect(!transport.stopped.isSignaled())
+        _ = try await fixture.echo(b)
+        if expires { fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1)) }
+        else { fixture.broker.removeSession(b) }
+        try await transport.stopped.wait(description: "last independent host client released")
+        let observer = try await fixture.initialize("observer")
+        let hosts = try await fixture.list(observer)
+        #expect(!hosts.contains { $0["hostIdentifier"] == id })
+    }
+
+    @Test func switchingKeepsAnIndependentHostUntilItsAdmittedRequestFinishes() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("switching-independent")
+        let id = try await fixture.selectIndependentHost(session)
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let pending = Task { try await fixture.request(session, method: "tools/call", parameters: .object([
+            "name": .string("Wait"), "arguments": .object([:]),
+        ]), id: 307) }
+        try await transport.waiting.wait(description: "independent host request admitted")
+        _ = try await fixture.call(session, name: NativeHostBroker.selectTool,
+            arguments: ["hostIdentifier": .string(NativeHostBroker.defaultHostIdentifier)])
+        #expect(!transport.stopped.isSignaled())
+        await transport.releaseWait()
+        _ = try await pending.value
+        try await transport.stopped.wait(description: "unselected independent host drained")
+        let hosts = try await fixture.list(session)
+        #expect(!hosts.contains { $0["hostIdentifier"] == id })
+        #expect(try await fixture.echo(session) != .number(.int(1)))
+    }
+
     @Test func closingOneClientKeepsAnotherClientAndTheSharedHostAlive() async throws {
         let fixture = try BrokerFixture()
         let a = try await fixture.initialize("client-a")
@@ -204,6 +343,27 @@ struct NativeHostBrokerTests {
         fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1))
         #expect(fixture.broker.sessionState(session) == .missing)
         #expect(!fixture.broker.clientEventStreamOpened(session))
+    }
+
+    @Test func resetWaitsForTheIndependentHostToStop() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("reset-independent")
+        let id = try await fixture.selectIndependentHost(session)
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        transport.holdsStop.withLockedValue { $0 = true }
+        defer { transport.releaseStop.signal() }
+        let completed = TestSignal()
+        let resetting = Task {
+            await fixture.broker.reset()
+            completed.signal()
+        }
+        try await transport.stopped.wait(description: "independent host stop began")
+        #expect(!completed.isSignaled())
+        transport.releaseStop.signal()
+        await resetting.value
+        let next = try await fixture.initialize("after-independent-reset")
+        let available = try await fixture.list(next)
+        #expect(!available.contains { $0["hostIdentifier"] == id })
     }
 
     @Test func resetInvalidatesExternalSessionsAndAllowsAReconnectedClient() async throws {
@@ -335,23 +495,35 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
     let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
     let waiting = TestSignal()
+    let stopped = TestSignal()
+    let holdsStop = NIOLockedValueBox(false)
+    let releaseStop = TestSignal()
     let initializationStarted = TestSignal()
     private let initialization = NIOLockedValueBox((held: false, pending: [JSONRPC.ID]()))
     let cancelled = TestSignal()
     let serverResponseReceived = TestSignal()
     let serverResponseIDs = NIOLockedValueBox<[JSONValue]>([])
     let index: Int64
+    let gui: Bool
     private let pending = NIOLockedValueBox<[JSONRPC.ID]>([])
 
-    init(index: Int64, holdsInitialization: Bool) {
+    init(index: Int64, holdsInitialization: Bool, gui: Bool = false) {
         self.index = index
+        self.gui = gui
         initialization.withLockedValue { $0.held = holdsInitialization }
         let pair = AsyncStream<Upstream.Event>.makeStream()
         events = pair.stream
         continuation = pair.continuation
     }
     func start() async {}
-    func stop() async { continuation.finish() }
+    func stop() async {
+        stopped.signal()
+        if holdsStop.withLockedValue({ $0 }) {
+            do { try await releaseStop.wait(description: "release held bridge stop") }
+            catch { Issue.record(error) }
+        }
+        continuation.finish()
+    }
 
     func send(_ data: Data) async -> Upstream.SendResult {
         do {
@@ -378,7 +550,8 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
             case "tools/list":
                 result = .object(["tools": .array(["Echo-\(index)", "Wait"].map { name in
                     .object(["name": .string(name), "description": .string(name),
-                        "inputSchema": .object(["type": .string("object"), "properties": .object([:])])])
+                        "inputSchema": .object(["type": .string("object"), "properties": .object(
+                            gui ? ["tabIdentifier": .object(["type": .string("string")])] : [:])])])
                 }), "_meta": .object(["com.lynnswap.xcode-mcpkit/origin": .object([
                     "kind": .string("nativeHost"), "processID": .number(.int(1000 + index)),
                 ])])])
@@ -457,7 +630,8 @@ private final class BrokerRuntimeFactory: Sendable {
         if failNewHosts.withLockedValue({ $0 }) { throw NativeHostBrokerError("fixture startup failed") }
         let upstream = transports.withLockedValue { values in
             let transport = BrokerTransport(index: Int64(values.count + 1),
-                                            holdsInitialization: holdsInitialization.withLockedValue { $0 })
+                                            holdsInitialization: holdsInitialization.withLockedValue { $0 },
+                                            gui: configuration.guiProcess != nil)
             values.append(transport)
             return transport
         }
@@ -467,7 +641,7 @@ private final class BrokerRuntimeFactory: Sendable {
                 config: configuration, eventLoop: eventLoop, upstreams: [upstream],
                 nativeUpstreamFactory: { [self] in
                     let replacement = BrokerTransport(index: upstream.index,
-                        holdsInitialization: holdsInitialization.withLockedValue { $0 })
+                        holdsInitialization: holdsInitialization.withLockedValue { $0 }, gui: upstream.gui)
                     transports.withLockedValue { $0.append(replacement) }
                     return replacement
                 }, notificationSink: notification, sessionClosedSink: closed,
@@ -484,14 +658,20 @@ private final class BrokerFixture: Sendable {
     let events = NIOLockedValueBox<[ProxyRuntimeEvent]>([])
     let serverRequestDelivered = TestSignal()
     let catalogChangedDelivered = TestSignal()
+    let guiProcesses = NIOLockedValueBox<[XcodeGUIProcess]>([])
     let defaultInstallation = XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Default.app"))
 
-    init(clock: ClockClient = .liveValue, holdsInitialization: Bool = false) throws {
+    init(clock: ClockClient = .liveValue, holdsInitialization: Bool = false,
+         guiProcesses: [XcodeGUIProcess] = []) throws {
         let factory = factory
         factory.holdsInitialization.withLockedValue { $0 = holdsInitialization }
         let events = events
         let defaultInstallation = defaultInstallation
-        let inventory = XcodeHostInventory(defaultInstallation: defaultInstallation) {
+        let processes = self.guiProcesses
+        processes.withLockedValue { $0 = guiProcesses }
+        let inventory = XcodeHostInventory(defaultInstallation: defaultInstallation,
+            runningGUIProcesses: { processes.withLockedValue { $0 } },
+            isGUIProcessRunning: { process in processes.withLockedValue { $0.contains(process) } }) {
             [defaultInstallation, XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Other.app"))]
         }
         broker = try NativeHostBroker(configuration: makeConfig(requestTimeout: 5),
@@ -516,6 +696,17 @@ private final class BrokerFixture: Sendable {
             await broker.shutdown()
             cancel()
         })
+    }
+
+    func selectIndependentHost(_ session: ProxySessionID) async throws -> JSONValue {
+        let value = try await call(session, name: NativeHostBroker.selectTool, arguments: [
+            "hostIdentifier": .string(NativeHostBroker.defaultHostIdentifier), "createsNewHost": .bool(true),
+        ])
+        guard case .object(let result) = value, case .object(let host)? = result["host"],
+              let identifier = host["hostIdentifier"] else {
+            throw NativeHostBrokerError("missing independent host")
+        }
+        return identifier
     }
 
     func initialize(_ name: String) async throws -> ProxySessionID {

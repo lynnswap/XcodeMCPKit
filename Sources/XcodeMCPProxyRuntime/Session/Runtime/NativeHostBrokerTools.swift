@@ -15,12 +15,12 @@ extension NativeHostBroker {
         [
             .object([
                 "name": .string(listTool),
-                "description": .string("List native Xcode hosts and installed Xcode candidates. Shows host identities, the terminal-default host, and the host selected for this MCP session. Listing does not launch all hosts."),
+                "description": .string("List headless Xcode hosts, installed Xcode candidates, and running GUI Xcode processes. Shows host identities, the terminal-default host, and the host selected for this MCP session. Listing does not launch all hosts."),
                 "inputSchema": .object(["type": .string("object"), "properties": .object([:])]),
             ]),
             .object([
                 "name": .string(selectTool),
-                "description": .string("Select a host returned by XcodeMCPKitListHosts for this MCP session. Starts an available candidate when needed. Set createsNewHost to true to create an independent instance using that host's Xcode installation. Other sessions and already admitted requests retain their hosts."),
+                "description": .string("Select a host returned by XcodeMCPKitListHosts for this MCP session. Starts an available candidate when needed. GUI hosts share one bridge per Xcode process. For headless hosts, set createsNewHost to true to create an independent instance using that host's Xcode installation. Other sessions and already admitted requests retain their hosts."),
                 "inputSchema": .object([
                     "type": .string("object"),
                     "properties": .object([

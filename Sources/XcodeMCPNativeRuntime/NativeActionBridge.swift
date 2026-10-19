@@ -3,8 +3,7 @@ import ABIBridgeCore
 import Foundation
 
 @safe
-@MainActor
-final class NativeActionBridge {
+actor NativeActionBridge {
     private let runtime = ABIRuntime.shared
     private let installation: NativeXcodeInstallation
     private let abi = NativeABI()
@@ -12,12 +11,13 @@ final class NativeActionBridge {
     private var schemaEntry: ResolvedSymbol?
     private var streamInterface: OpaquePointer?
     private var schemaInterface: OpaquePointer?
+    private var executions: [UUID: (request: URL, task: Task<Void, Never>)] = [:]
 
     init(installation: NativeXcodeInstallation) {
         self.installation = installation
     }
 
-    func registeredActions() throws -> [String: AnyObject] {
+    @MainActor func registeredActions() throws -> [String: AnyObject] {
         guard let type = NSClassFromString("DVTFoundation.DVTStatelessActionManager") else {
             throw NativeRuntimeError.unavailable("Xcode's native action registry is unavailable")
         }
@@ -30,7 +30,7 @@ final class NativeActionBridge {
         return values
     }
 
-    func actionClass(for metadata: AnyObject) async throws -> NativeActionClass {
+    @MainActor func actionClass(for metadata: AnyObject) async throws -> NativeActionClass {
         let getter = try unsafe await runtime.object(metadata).resolveGetter(
             named: "actionClass.getter : DVTFoundation.DVTStatelessAction.Type", as: (() -> NativeActionClass).self
         )
@@ -71,7 +71,7 @@ final class NativeActionBridge {
         return try JSONEncoder().encode(value)
     }
 
-    func execute(action: NativeActionClass, input: Data) async throws -> AsyncStream<Data> {
+    func execute(action: NativeActionClass, input: Data, context: NativeToolContext) async throws -> AsyncStream<Data> {
         if streamEntry == nil {
             streamEntry = try await runtime.resolve(.init(
                 name: "static (extension in DVTFoundation):DVTFoundation.DVTStatelessAction.executeStream(inputJSON: Foundation.Data) -> Swift.AsyncStream<Foundation.Data>", language: .swift
@@ -89,7 +89,7 @@ final class NativeActionBridge {
         var input = input
         var metadata = unsafe action.metadata
         var witness = unsafe action.conformance
-        return try withUnsafeMutablePointer(to: &input) { input in
+        let stream: AsyncStream<Data> = try withUnsafeMutablePointer(to: &input) { input in
             try withUnsafeMutablePointer(to: &metadata) { metadata in
                 try withUnsafeMutablePointer(to: &witness) { witness in
                     try unsafe abi.invoke(symbol: entry, interface: interface,
@@ -98,5 +98,34 @@ final class NativeActionBridge {
                 }
             }
         }
+        return relay(stream, context: context)
+    }
+
+    func relay(_ stream: AsyncStream<Data>, context: NativeToolContext) -> AsyncStream<Data> {
+        let identifier = UUID()
+        let result = AsyncStream<Data>.makeStream()
+        let task = Task {
+            defer {
+                executions[identifier] = nil
+                result.continuation.finish()
+            }
+            // Cancelling a native stream's iterator only signals its private
+            // producer. Keep consuming until its cleanup reaches the terminal.
+            for await update in stream { result.continuation.yield(update) }
+        }
+        executions[identifier] = (context.artifactsDirectory, task)
+        result.continuation.onTermination = { termination in
+            if case .cancelled = termination { context.executionScope.cancel() }
+        }
+        return result.stream
+    }
+
+    func finishExecution(request: URL) async {
+        let pending = executions.values.filter { $0.request == request }.map(\.task)
+        for task in pending { await task.value }
+    }
+
+    func shutdown() async {
+        for task in executions.values.map(\.task) { await task.value }
     }
 }
