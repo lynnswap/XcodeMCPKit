@@ -148,7 +148,7 @@ final class NativeWorkspaceRegistry {
         do { try unsafe await wait.unsafeInvoke() }
         catch let error as NativeSwiftError {
             if error.withUnderlyingError({ $0 is CancellationError }) { throw CancellationError() }
-            throw error
+            throw NativeToolExecutionError(message: error.description)
         }
         try Task.checkCancellation()
     }
