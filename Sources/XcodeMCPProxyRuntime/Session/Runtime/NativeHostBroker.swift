@@ -698,10 +698,11 @@ private extension NativeHostBroker {
     private func bindWorkspace(in session: NativeBrokerSession, host: NativeBrokerHost,
                                source: ProxyRuntimeUpstreamSource, nativeIdentifier: String,
                                path: String?, name: String?) throws -> NativeBrokerWorkspace {
-        let workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: nativeIdentifier,
-                                                  path: path, name: name)
+        let (workspace, created) = try session.bindWorkspace(host: host, source: source,
+                                                             nativeIdentifier: nativeIdentifier, path: path, name: name)
         // Checked after binding: an election that ran first left its mark, and one that runs later sees this handle.
-        let closing = state.withLockedValue { storage in
+        // A handle that already existed is the closing session's restored handle after a failed close.
+        let closing = created && state.withLockedValue { storage in
             guard storage.closingWorkspaces.contains(workspace.scope) else { return false }
             _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
             return true
