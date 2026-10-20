@@ -689,8 +689,9 @@ private extension NativeHostBroker {
 
     private func finishNativeClose(of workspace: NativeBrokerWorkspace, in session: NativeBrokerSession,
                                    host: NativeBrokerHost, closed: Bool) {
-        _ = state.withLockedValue { $0.closingWorkspaces.remove(workspace.scope) }
+        // Restore while the mark still refuses other handles, so no other session can elect a close first.
         if !closed { session.restoreWorkspace(workspace, host: host) }
+        _ = state.withLockedValue { $0.closingWorkspaces.remove(workspace.scope) }
     }
 
     /// Binds a handle unless its native model is being closed; a model mid-close is about to disappear.
