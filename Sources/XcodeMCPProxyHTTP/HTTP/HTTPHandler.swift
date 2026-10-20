@@ -29,7 +29,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         var isSSE = false
         var sseSessionID: String?
         var bodyTooLarge = false
-        var originRejected = false
+        var securityDecision: HTTPRequestSecurityPolicy.Decision = .allow
         var activePostRequests: [String: ActivePostRequest] = [:]
         var responseWriteTail: EventLoopFuture<Void>?
     }
@@ -67,19 +67,18 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let part = unwrapInboundIn(data)
         switch part {
         case .head(let head):
-            let originRejected =
-                requestSecurityPolicy.evaluate(
-                    head,
-                    localAddress: context.channel.localAddress
-                ) == .rejectOrigin
+            let securityDecision = requestSecurityPolicy.evaluate(
+                head,
+                localAddress: context.channel.localAddress
+            )
             state.withLockedValue { state in
                 state.requestHead = head
                 state.bodyBuffer =
-                    originRejected
-                    ? nil
-                    : context.channel.allocator.buffer(capacity: 0)
+                    securityDecision == .allow
+                    ? context.channel.allocator.buffer(capacity: 0)
+                    : nil
                 state.bodyTooLarge = false
-                state.originRejected = originRejected
+                state.securityDecision = securityDecision
             }
         case .body(var buffer):
             var shouldReturn = false
@@ -145,16 +144,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleRequest(context: ChannelHandlerContext) {
-        let request = state.withLockedValue { state -> (HTTPRequestHead, Bool)? in
+        let request = state.withLockedValue { state -> (HTTPRequestHead, HTTPRequestSecurityPolicy.Decision)? in
             guard let head = state.requestHead else {
                 return nil
             }
             state.requestHead = nil
-            let originRejected = state.originRejected
-            state.originRejected = false
-            return (head, originRejected)
+            let securityDecision = state.securityDecision
+            state.securityDecision = .allow
+            return (head, securityDecision)
         }
-        guard let (head, originRejected) = request else { return }
+        guard let (head, securityDecision) = request else { return }
 
         let path = head.uri.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? head.uri
         let requestLog = RequestLogContext(
@@ -165,11 +164,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         )
         logRequest(requestLog)
 
-        if originRejected {
+        let rejection: String? = switch securityDecision {
+        case .allow: nil
+        case .rejectHost: "host not allowed"
+        case .rejectOrigin: "origin not allowed"
+        }
+        if let rejection {
             _ = sendPlain(
                 on: context.channel,
                 status: .forbidden,
-                body: "origin not allowed",
+                body: rejection,
                 keepAlive: head.isKeepAlive,
                 sessionID: nil,
                 requestLog: requestLog
@@ -211,7 +215,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleDebugSnapshot(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        guard isLoopbackDebugEndpointEnabled else {
+        guard debugEndpointsEnabled else {
             _ = sendPlain(
                 on: context.channel,
                 status: .notFound,
@@ -250,7 +254,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleDebugReset(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        guard isLoopbackDebugEndpointEnabled else {
+        guard debugEndpointsEnabled else {
             _ = sendPlain(
                 on: context.channel,
                 status: .notFound,

@@ -5,6 +5,7 @@ import NIOHTTP1
 struct HTTPRequestSecurityPolicy: Sendable {
     enum Decision: Sendable, Equatable {
         case allow
+        case rejectHost
         case rejectOrigin
     }
 
@@ -15,6 +16,14 @@ struct HTTPRequestSecurityPolicy: Sendable {
         _ head: HTTPRequestHead,
         localAddress: SocketAddress?
     ) -> Decision {
+        let hostFields = head.headers["Host"]
+        if hostFields.isEmpty == false {
+            guard hostFields.count == 1,
+                requestHostIsAllowed(hostFields[0], localAddress: localAddress)
+            else {
+                return .rejectHost
+            }
+        }
         let originFields = head.headers["Origin"]
         guard originFields.isEmpty == false else {
             return .allow
@@ -27,32 +36,59 @@ struct HTTPRequestSecurityPolicy: Sendable {
         return .allow
     }
 
+    /// A DNS-rebinding page reaches the listener through a name its attacker controls, so the
+    /// `Host` must be an IP address, `localhost`, or the configured host, with the listener's port.
+    private func requestHostIsAllowed(
+        _ value: String,
+        localAddress: SocketAddress?
+    ) -> Bool {
+        guard let authority = Self.httpAuthority("http://" + value),
+            let endpointPort = endpointPort(localAddress: localAddress),
+            (authority.port ?? 80) == endpointPort
+        else {
+            return false
+        }
+        let host = Self.normalizedHost(authority.host)
+        return host == "localhost"
+            || Self.canonicalIPAddress(host) != nil
+            || Self.hostsAreEquivalent(host, Self.normalizedHost(configuredHost))
+    }
+
     private func originIsAllowed(
         _ origin: String,
         localAddress: SocketAddress?
     ) -> Bool {
-        guard origin.isEmpty == false,
-            origin.lowercased() != "null",
-            origin.contains(",") == false,
-            origin.contains("%") == false,
-            origin.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
-            origin.rangeOfCharacter(from: .controlCharacters) == nil,
-            let components = URLComponents(string: origin),
+        guard origin.lowercased() != "null",
+            let authority = Self.httpAuthority(origin),
+            hostIsAllowed(authority.host),
+            let endpointPort = endpointPort(localAddress: localAddress),
+            (authority.port ?? 80) == endpointPort
+        else {
+            return false
+        }
+        return true
+    }
+
+    /// The host and port of an `http` URL that consists of only a scheme and an authority.
+    private static func httpAuthority(_ value: String) -> (host: String, port: Int?)? {
+        guard value.isEmpty == false,
+            value.contains(",") == false,
+            value.contains("%") == false,
+            value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+            value.rangeOfCharacter(from: .controlCharacters) == nil,
+            let components = URLComponents(string: value),
             components.scheme?.lowercased() == "http",
             components.user == nil,
             components.password == nil,
             components.percentEncodedPath.isEmpty,
             components.query == nil,
             components.fragment == nil,
-            let originHost = components.host,
-            originHost.isEmpty == false,
-            hostIsAllowed(originHost),
-            let endpointPort = endpointPort(localAddress: localAddress),
-            (components.port ?? 80) == endpointPort
+            let host = components.host,
+            host.isEmpty == false
         else {
-            return false
+            return nil
         }
-        return true
+        return (host, components.port)
     }
 
     private func hostIsAllowed(_ originHost: String) -> Bool {

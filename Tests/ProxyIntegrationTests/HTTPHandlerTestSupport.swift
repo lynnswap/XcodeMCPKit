@@ -22,6 +22,7 @@ struct HTTPTestConfiguration: Sendable {
     var listenHost: String
     var listenPort: Int
     var maxBodyBytes: Int
+    var enablesDebugEndpoints = false
 
     var requestTimeout: TimeInterval {
         get { runtime.requestTimeout }
@@ -203,7 +204,8 @@ func addHTTPHandler(
         config: ProxyHTTPConfiguration(
             listenHost: config.listenHost,
             listenPort: config.listenPort,
-            maxBodyBytes: config.maxBodyBytes
+            maxBodyBytes: config.maxBodyBytes,
+            enablesDebugEndpoints: config.enablesDebugEndpoints
         ),
         controlService: HTTPControlService(runtime: runtime.broker),
         scheduleResponseCompletion: scheduleResponseCompletion ?? { _, operation in
@@ -351,7 +353,8 @@ struct TestHTTPHandlerServer {
                             config: ProxyHTTPConfiguration(
                                 listenHost: config.listenHost,
                                 listenPort: config.listenPort,
-                                maxBodyBytes: config.maxBodyBytes
+                                maxBodyBytes: config.maxBodyBytes,
+                                enablesDebugEndpoints: config.enablesDebugEndpoints
                             ),
                             controlService: controlService
                         )

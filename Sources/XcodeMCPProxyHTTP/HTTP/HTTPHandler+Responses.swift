@@ -188,7 +188,10 @@ extension HTTPHandler {
         return String(describing: address)
     }
 
-    var isLoopbackDebugEndpointEnabled: Bool {
+    /// Debug endpoints can reset the runtime and expose payloads, so they need an explicit opt-in
+    /// and a loopback listener.
+    var debugEndpointsEnabled: Bool {
+        guard config.enablesDebugEndpoints else { return false }
         switch config.listenHost.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "localhost", "127.0.0.1", "::1", "[::1]":
             return true
