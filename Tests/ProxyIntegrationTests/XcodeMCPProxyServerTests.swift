@@ -8,6 +8,7 @@ import XcodeMCPKit
 @testable import XcodeMCPProxyHTTP
 @testable import XcodeMCPProxyKit
 @testable import XcodeMCPProxyRuntime
+@testable import XcodeMCPProxyRuntimeTestSupport
 import Testing
 import XcodeMCPProxyTestSupport
 
@@ -117,7 +118,7 @@ struct XcodeMCPProxyServerTests {
             .get()
         let blockedPort = try #require(blocker.localAddress?.port)
 
-        let upstream = RecordingUpstreamSlot()
+        let runtime = StartupTestRuntime()
         let config = XcodeMCPProxyServerConfiguration(
             bindAddress: .init(host: "127.0.0.1", port: blockedPort),
 
@@ -128,9 +129,7 @@ struct XcodeMCPProxyServerTests {
             configuration: config,
             dependencies: .init(
                 discoveryClient: .testValue,
-                makeRuntime: { config in
-                    makeServerTestRuntime(config: config, upstream: upstream)
-                }
+                makeRuntime: { _ in runtime }
             )
         )
 
@@ -139,7 +138,7 @@ struct XcodeMCPProxyServerTests {
             Issue.record("expected bind failure")
         } catch {}
 
-        #expect(upstream.startCount == 0)
+        #expect(runtime.startCount == 0)
 
         try? await server.shutdown()
         try? await blocker.close().get()
@@ -219,7 +218,7 @@ struct XcodeMCPProxyServerTests {
     }
 
     @Test func startRejectsRepeatedStartsOnSameServerInstance() async throws {
-        let upstream = RecordingUpstreamSlot()
+        let hosts = FakeHostSessionFactory()
         let config = XcodeMCPProxyServerConfiguration(
             bindAddress: .init(host: "127.0.0.1", port: 0),
 
@@ -231,7 +230,7 @@ struct XcodeMCPProxyServerTests {
             dependencies: .init(
                 discoveryClient: .testValue,
                 makeRuntime: { config in
-                    makeServerTestRuntime(config: config, upstream: upstream)
+                    try makeServerTestRuntime(config: config, hosts: hosts)
                 }
             )
         )
@@ -273,9 +272,8 @@ struct XcodeMCPProxyServerTests {
         #expect(gatewayCreationCount.withLockedValue { $0 } == 0)
     }
 
-    @Test func startedServerDeinitSynchronouslyCancelsRuntimeRetainTasks() async throws {
-        let runtimeReference = WeakRuntimeReference()
-        let upstream = RecordingUpstreamSlot()
+    @Test func startedServerDeinitCancelsTheRuntimeHostProcess() async throws {
+        let hosts = FakeHostSessionFactory()
         let approver = RecordingPermissionDialogAutoApprover()
         var server: XcodeMCPProxyServer? = XcodeMCPProxyServer(
             configuration: .init(
@@ -286,29 +284,22 @@ struct XcodeMCPProxyServerTests {
             dependencies: .init(
                 discoveryClient: .testValue,
                 makeRuntime: { config in
-                    makeServerTestRuntime(
-                        config: config,
-                        upstream: upstream,
-                        runtimeReference: runtimeReference
-                    )
+                    try makeServerTestRuntime(config: config, hosts: hosts)
                 },
                 makeAutoApprover: { _ in approver }
             )
         )
 
         _ = try await server?.start()
-        #expect(runtimeReference.value != nil)
-        let runtimeTaskDrains = try #require(
-            runtimeReference.runtimeTaskDrains()
-        )
+        let host = try await waitWithTimeout("waiting for the default host to start", timeout: .seconds(5)) {
+            try await hosts.started.nextValue(at: 0)
+        }
+        try await waitWithTimeout("waiting for the host handshake", timeout: .seconds(5)) {
+            while host.requests("notifications/initialized").isEmpty { await Task.yield() }
+        }
         server = nil
 
-        try await waitWithTimeout(
-            "waiting for deinit-cancelled runtime tasks",
-            timeout: .seconds(2)
-        ) {
-            await runtimeTaskDrains.wait()
-        }
+        try await host.cancelled.wait(description: "waiting for deinit to cancel the host process")
         #expect(approver.counts.cancel == 1)
 
         // This test deliberately omits the server's explicit shutdown contract.
@@ -346,7 +337,7 @@ struct XcodeMCPProxyServerTests {
             recordedPort.withLockedValue { $0 = record.port }
             throw DiscoveryWriteFailure.expected
         }
-        let upstream = RecordingUpstreamSlot()
+        let runtime = StartupTestRuntime()
         let server = XcodeMCPProxyServer(
             configuration: .init(
                 bindAddress: .init(host: "127.0.0.1", port: 0),
@@ -354,17 +345,15 @@ struct XcodeMCPProxyServerTests {
             ),
             dependencies: .init(
                 discoveryClient: discoveryClient,
-                makeRuntime: { config in
-                    makeServerTestRuntime(config: config, upstream: upstream)
-                }
+                makeRuntime: { _ in runtime }
             )
         )
 
         await #expect(throws: DiscoveryWriteFailure.expected) {
             _ = try await server.start()
         }
-        #expect(upstream.startCount == 0)
-        #expect(upstream.stopCount == 1)
+        #expect(runtime.startCount == 0)
+        #expect(runtime.shutdownCount == 1)
         #expect((await server.snapshot()).phase == .stopped)
 
         let port = try #require(recordedPort.withLockedValue { $0 })
@@ -526,25 +515,26 @@ struct XcodeMCPProxyServerTests {
     }
 
     @Test func statusSnapshotExposesOnlySanitizedContractFields() async throws {
-        let upstream = RecordingUpstreamSlot()
+        let hosts = FakeHostSessionFactory()
         let config = XcodeMCPProxyServerConfiguration(
             bindAddress: .init(host: "127.0.0.1", port: 0),
 
             maxBodyBytes: 1_048_576,
-            requestTimeout: .seconds(300)
+            requestTimeout: .seconds(300),
+            prewarmToolsList: false
         )
         let server = XcodeMCPProxyServer(
             configuration: config,
             dependencies: .init(
                 discoveryClient: .testValue,
                 makeRuntime: { config in
-                    makeServerTestRuntime(config: config, upstream: upstream)
+                    try makeServerTestRuntime(config: config, hosts: hosts)
                 }
             )
         )
 
         let endpoint = try await server.start()
-        let status = await server.snapshot()
+        let status = try await waitUntilDefaultHostIsHealthy(server)
         #expect(status.phase == .running)
         #expect(status.endpoint == endpoint)
         #expect(status.queuedRequestCount == 0)
@@ -567,21 +557,24 @@ struct XcodeMCPProxyServerTests {
     }
 
     @Test func concurrentShutdownCompletesAllOwnedResourcesExactlyOnce() async throws {
-        let upstream = RecordingUpstreamSlot()
+        let hosts = FakeHostSessionFactory()
         let server = XcodeMCPProxyServer(
             configuration: .init(
                 bindAddress: .init(host: "127.0.0.1", port: 0),
-                discovery: .disabled
+                discovery: .disabled,
+                prewarmToolsList: false
             ),
             dependencies: .init(
                 discoveryClient: .testValue,
                 makeRuntime: { config in
-                    makeServerTestRuntime(config: config, upstream: upstream)
+                    try makeServerTestRuntime(config: config, hosts: hosts)
                 }
             )
         )
 
         let endpoint = try await server.start()
+        _ = try await waitUntilDefaultHostIsHealthy(server)
+        let host = try #require(hosts.sessions.withLockedValue { $0.first })
         let clientGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let acceptedClient = try await ClientBootstrap(group: clientGroup)
             .connect(host: endpoint.host, port: endpoint.port)
@@ -593,7 +586,8 @@ struct XcodeMCPProxyServerTests {
         try await secondShutdown
         try await acceptedClient.closeFuture.get()
 
-        #expect(upstream.stopCount == 1)
+        #expect(hosts.sessions.withLockedValue { $0.count } == 1)
+        #expect(host.stopCount == 1)
         let status = await server.snapshot()
         #expect(status.phase == .stopped)
         #expect(status.upstreams.map(\.health) == [.stopped])
@@ -676,16 +670,17 @@ private final class RecordingPermissionDialogAutoApprover: Sendable, ProxyServer
 
 private final class StartupTestRuntime: @unchecked Sendable, ProxyRuntimeServing {
     private struct State {
-        var started = false
+        var startCount = 0
         var shutdownCount = 0
     }
 
     private let state = NIOLockedValueBox(State())
 
+    var startCount: Int { state.withLockedValue(\.startCount) }
     var shutdownCount: Int { state.withLockedValue(\.shutdownCount) }
 
     func start() {
-        state.withLockedValue { $0.started = true }
+        state.withLockedValue { $0.startCount += 1 }
     }
 
     func cancelForDeinit() {}
@@ -736,102 +731,29 @@ private final class StartupTestRuntime: @unchecked Sendable, ProxyRuntimeServing
     func reset() async {}
 }
 
-private final class WeakRuntimeReference: @unchecked Sendable {
-    struct TaskDrains: Sendable {
-        let runtime: AsyncTaskSupervisor.Drain
-        let upstreamEvents: AsyncTaskSupervisor.Drain
-
-        func wait() async {
-            await upstreamEvents.wait()
-            await runtime.wait()
-        }
-    }
-
-    private let lock = NSLock()
-    private weak var storage: RuntimeCoordinator?
-
-    var value: RuntimeCoordinator? {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return storage
-        }
-        set {
-            lock.lock()
-            storage = newValue
-            lock.unlock()
-        }
-    }
-
-    func runtimeTaskDrains() -> TaskDrains? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let runtime = storage else {
-            return nil
-        }
-        return TaskDrains(
-            runtime: runtime.runtimeTasks.drainCurrentTasks(),
-            upstreamEvents: runtime.upstreamEventTasks.drainCurrentTasks()
-        )
-    }
-}
-
+/// The production runtime over scripted host processes.
 private func makeServerTestRuntime(
     config: ProxyRuntimeConfiguration,
-    upstream: any UpstreamSlotControlling,
-    runtimeReference: WeakRuntimeReference? = nil
-) -> ProxyRuntime {
-    ProxyRuntime.testing(configuration: config) {
-        eventLoop,
-        notificationSink,
-        sessionClosedSink,
-        catalogChangedSink in
-        let coordinator = RuntimeCoordinator(
-            config: config,
-            eventLoop: eventLoop,
-            upstreams: [upstream],
-            notificationSink: notificationSink,
-            sessionClosedSink: sessionClosedSink,
-            catalogChangedSink: catalogChangedSink,
-            startImmediately: false
-        )
-        runtimeReference?.value = coordinator
-        return coordinator
-    }
+    hosts: FakeHostSessionFactory
+) throws -> NativeHostBroker {
+    let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+    return try NativeHostBroker(
+        configuration: config,
+        inventory: XcodeHostInventory(defaultInstallation: installation) { [installation] },
+        sessionFactory: { _ in hosts }
+    )
 }
 
-private final class RecordingUpstreamSlot: @unchecked Sendable, UpstreamSlotControlling {
-    private let startCountBox = NIOLockedValueBox(0)
-    private let stopCountBox = NIOLockedValueBox(0)
-    private let eventStream: AsyncStream<Upstream.Event>
-
-    var startCount: Int {
-        startCountBox.withLockedValue { $0 }
-    }
-
-    var stopCount: Int {
-        stopCountBox.withLockedValue { $0 }
-    }
-
-    var events: AsyncStream<Upstream.Event> {
-        eventStream
-    }
-
-    init() {
-        eventStream = AsyncStream { _ in }
-    }
-
-    func start() async {
-        startCountBox.withLockedValue { $0 += 1 }
-    }
-
-    func stop() async {
-        stopCountBox.withLockedValue { $0 += 1 }
-    }
-
-    func send(_ data: Data) async -> Upstream.SendResult {
-        _ = data
-        return .accepted
+/// The runtime lists a host once it starts, which `start()` requests without waiting for it.
+private func waitUntilDefaultHostIsHealthy(
+    _ server: XcodeMCPProxyServer
+) async throws -> XcodeMCPProxyServer.Status {
+    try await waitWithTimeout("waiting for the default host to become healthy", timeout: .seconds(5)) {
+        while true {
+            let status = await server.snapshot()
+            if status.upstreams.map(\.health) == [.healthy] { return status }
+            await Task.yield()
+        }
     }
 }
 

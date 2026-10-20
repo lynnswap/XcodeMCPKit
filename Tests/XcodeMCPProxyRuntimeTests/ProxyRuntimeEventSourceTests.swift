@@ -4,6 +4,8 @@ import Foundation
 import NIO
 import NIOConcurrencyHelpers
 import Testing
+import XcodeMCPCore
+import XcodeMCPProxyTestSupport
 
 @testable import XcodeMCPProxyRuntime
 
@@ -47,32 +49,33 @@ struct ProxyRuntimeEventSourceTests {
         #expect(payloads.withLockedValue { $0 } == [Data("before".utf8)])
     }
 
-    @Test func debugResetPublishesClosureForEveryRemovedSession() {
-        let source = ProxyRuntimeEventSource()
+    @Test func debugResetPublishesClosureForEveryRemovedSession() async throws {
+        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+        let broker = try NativeHostBroker(
+            configuration: makeConfig(requestTimeout: 0),
+            inventory: XcodeHostInventory(defaultInstallation: installation) { [installation] },
+            sessionFactory: { _ in FakeHostSessionFactory() })
         let closedSessionIDs = NIOLockedValueBox<[String]>([])
-        let cancel = source.subscribe { event in
+        let cancel = broker.subscribeToEvents { event in
             guard case .sessionClosed(let sessionID) = event else { return }
             closedSessionIDs.withLockedValue { $0.append(sessionID.rawValue) }
         }
         defer { cancel() }
-        let config = makeConfig(requestTimeout: 0)
-        let coordinator = RuntimeCoordinator(
-            config: config,
-            eventLoop: MultiThreadedEventLoopGroup.singleton.next(),
-            upstreams: [TestUpstreamClient()],
-            sessionClosedSink: { sessionID in
-                source.emit(
-                    .sessionClosed(sessionID: ProxySessionID(rawValue: sessionID))
-                )
-            },
-            startImmediately: false
-        )
-        defer { coordinator.shutdownAndWait() }
-        _ = coordinator.session(id: "session-b")
-        _ = coordinator.session(id: "session-a")
+        #expect(registerAsyncTestCleanup(description: "broker shutdown") { await broker.shutdown() })
+        for name in ["session-b", "session-a"] {
+            let request = try ProxyRuntimeRequest(json: .object([
+                "jsonrpc": .string("2.0"), "id": .number(.int(1)), "method": .string("initialize"),
+                "params": .object(["protocolVersion": .string(MCPProtocolVersion.current)]),
+            ]), headerSessionExists: false, prefersEventStream: false)
+            let operation = try #require(broker.beginRequest(request, in: ProxySessionID(rawValue: name)))
+            _ = try await withCheckedThrowingContinuation { continuation in
+                operation.whenComplete { continuation.resume(with: $0) }
+            }
+            broker.clientRequestFinished(ProxySessionID(rawValue: name))
+        }
 
-        coordinator.debugReset()
+        await broker.reset()
 
-        #expect(closedSessionIDs.withLockedValue { $0 } == ["session-a", "session-b"])
+        #expect(closedSessionIDs.withLockedValue { $0 }.sorted() == ["session-a", "session-b"])
     }
 }

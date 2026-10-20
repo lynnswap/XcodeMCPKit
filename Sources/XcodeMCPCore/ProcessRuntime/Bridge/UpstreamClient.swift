@@ -43,10 +43,3 @@ package protocol UpstreamSession: AnyObject, Sendable {
 package protocol UpstreamSessionFactory: Sendable {
     func startSession() async throws -> any UpstreamSession
 }
-
-package protocol UpstreamSlotControlling: Sendable {
-    var events: AsyncStream<Upstream.Event> { get }
-    func start() async
-    func stop() async
-    func send(_ data: Data) async -> Upstream.SendResult
-}

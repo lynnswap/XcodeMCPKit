@@ -139,10 +139,10 @@ private struct StressHTTPServer {
     let group: MultiThreadedEventLoopGroup
     let channel: Channel
     let url: URL
-    let sessionManager: RuntimeCoordinator
+    let broker: NativeHostBroker
     let childChannelTracker: HTTPTestServerChannelTracker
 
-    static func start(upstream: any UpstreamSlotControlling) throws -> StressHTTPServer {
+    static func start(upstream: DocumentationSearchStressUpstreamClient) throws -> StressHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 4)
         let childChannelTracker = HTTPTestServerChannelTracker()
@@ -154,18 +154,12 @@ private struct StressHTTPServer {
                 requestTimeout: 60,
                 prewarmToolsList: false
             )
-        let sessionManager = RuntimeCoordinator(
-            config: config,
-            eventLoop: group.next(),
-            upstreams: [upstream]
-        )
-        let runtime = ProxyRuntime(
-            config: config,
-            coordinator: sessionManager,
-            eventLoop: group.next(),
-            eventSource: ProxyRuntimeEventSource()
-        )
-        let controlService = HTTPControlService(runtime: runtime)
+        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+        let broker = try NativeHostBroker(
+            configuration: config,
+            inventory: XcodeHostInventory(defaultInstallation: installation) { [installation] },
+            sessionFactory: { _ in SingleProcessFactory(session: upstream) })
+        let controlService = HTTPControlService(runtime: broker)
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 1024)
@@ -196,7 +190,7 @@ private struct StressHTTPServer {
             group: group,
             channel: channel,
             url: url,
-            sessionManager: sessionManager,
+            broker: broker,
             childChannelTracker: childChannelTracker
         )
     }
@@ -207,13 +201,18 @@ private struct StressHTTPServer {
             childChannelTracker: childChannelTracker,
             group: group,
             beforeClose: {
-                await sessionManager.shutdown()
+                await broker.shutdown()
             }
         )
     }
 }
 
-private actor DocumentationSearchStressUpstreamClient: UpstreamSlotControlling {
+private struct SingleProcessFactory: UpstreamSessionFactory {
+    let session: DocumentationSearchStressUpstreamClient
+    func startSession() async throws -> any UpstreamSession { session }
+}
+
+private actor DocumentationSearchStressUpstreamClient: UpstreamSession {
     nonisolated let events: AsyncStream<Upstream.Event>
     private let continuation: AsyncStream<Upstream.Event>.Continuation
     private var countsBySessionIndex: [Int]
@@ -227,7 +226,9 @@ private actor DocumentationSearchStressUpstreamClient: UpstreamSlotControlling {
         self.countsBySessionIndex = Array(repeating: 0, count: sessionCount)
     }
 
-    func start() async {}
+    nonisolated func cancel() {
+        continuation.finish()
+    }
 
     func stop() async {
         continuation.finish()
@@ -258,6 +259,16 @@ private actor DocumentationSearchStressUpstreamClient: UpstreamSlotControlling {
         let method = object["method"] as? String
         if method == "initialize" {
             continuation.yield(.message(makeInitializeResponse(id: id)))
+            return
+        }
+        if method == "tools/list" {
+            let response: [String: Any] = ["jsonrpc": "2.0", "id": id, "result": ["tools": [[
+                "name": "DocumentationSearch", "description": "Search documentation",
+                "inputSchema": ["type": "object", "properties": [
+                    "query": ["type": "string"], "sessionIndex": ["type": "integer"], "requestIndex": ["type": "integer"],
+                ]],
+            ]]]]
+            continuation.yield(.message(try! JSONSerialization.data(withJSONObject: response, options: [])))
             return
         }
 

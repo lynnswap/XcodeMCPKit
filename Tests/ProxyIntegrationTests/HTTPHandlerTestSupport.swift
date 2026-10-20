@@ -15,7 +15,6 @@ import XcodeMCPProxyTestSupport
 
 enum HTTPTestError: Error {
     case missingResponseHead
-    case missingPendingResponse
 }
 
 struct HTTPTestConfiguration: Sendable {
@@ -36,28 +35,13 @@ struct HTTPTestConfiguration: Sendable {
 
 }
 
-private let httpTestSessionRegistry = NIOLockedValueBox<[String: any RuntimeCoordinating]>([:])
 private let embeddedCompletionExecutors = NIOLockedValueBox<
     [ObjectIdentifier: EmbeddedEventLoopCompletionExecutor]
 >([:])
 
-private actor HTTPTestUpstreamSlot: UpstreamSlotControlling {
-    nonisolated let events: AsyncStream<Upstream.Event> = AsyncStream { _ in }
-
-    func start() async {}
-    func stop() async {}
-    func send(_ data: Data) async -> Upstream.SendResult { .accepted }
-}
-
 private final class EmbeddedEventLoopCompletionExecutor: @unchecked Sendable {
     private let lock = NSLock()
     private var operations: [() -> Void] = []
-
-    var executor: EventLoopCompletionExecutor {
-        EventLoopCompletionExecutor { [weak self] _, operation in
-            self?.enqueue(operation)
-        }
-    }
 
     func enqueue(_ operation: @escaping () -> Void) {
         lock.withLock {
@@ -74,21 +58,6 @@ private final class EmbeddedEventLoopCompletionExecutor: @unchecked Sendable {
         for operation in pending {
             operation()
         }
-    }
-}
-
-private func registerHTTPTestServer(
-    url: URL,
-    sessionManager: any RuntimeCoordinating
-) {
-    httpTestSessionRegistry.withLockedValue { registry in
-        registry[url.absoluteString] = sessionManager
-    }
-}
-
-private func unregisterHTTPTestServer(url: URL) {
-    _ = httpTestSessionRegistry.withLockedValue { registry in
-        registry.removeValue(forKey: url.absoluteString)
     }
 }
 
@@ -113,925 +82,86 @@ func drainEmbeddedCompletions(for channel: EmbeddedChannel) {
     embeddedCompletionExecutor(for: channel)?.drain()
 }
 
-private func prepareHTTPTestSession(url: URL, sessionID: String) {
-    let sessionManager = httpTestSessionRegistry.withLockedValue { registry in
-        registry[url.absoluteString]
-    }
-    _ = sessionManager?.session(id: sessionID)
-}
+/// The production runtime, `NativeHostBroker`, over scripted host processes.
+///
+/// Every start of the default host creates a `FakeHostSession` that answers `initialize` and
+/// `tools/list` with `tools`, and asks `handle` for every other request, including `tools/call`.
+/// The runtime shuts down when the test ends, so tests need an `AsyncTestCleanupTrait` scope.
+final class HTTPTestRuntime: Sendable {
+    static let defaultTools = JSONValue.object(["tools": .array([
+        .object([
+            "name": .string("DocumentationSearch"), "description": .string("Search documentation"),
+            "inputSchema": .object(["type": .string("object"), "properties": .object([
+                "query": .object(["type": .string("string")]),
+            ])]),
+        ]),
+        .object([
+            "name": .string("XcodeListTemplates"), "description": .string("List templates"),
+            "inputSchema": .object(["type": .string("object"), "properties": .object([:])]),
+        ]),
+    ])])
 
-struct UpstreamResponsePlan {
-    let data: Data
-    let deliverManually: Bool
-
-    static func immediate(_ data: Data) -> UpstreamResponsePlan {
-        UpstreamResponsePlan(data: data, deliverManually: false)
-    }
-
-    static func manual(_ data: Data) -> UpstreamResponsePlan {
-        UpstreamResponsePlan(data: data, deliverManually: true)
-    }
-}
-
-final class TestRuntimeCoordinator: RuntimeCoordinating {
-    private struct UpstreamIDMapping: Sendable {
-        let sessionID: String
-        let originalID: JSONRPC.ID
-    }
-
-    private struct ChooseUpstreamCall: Sendable {
-        let sessionID: String?
-    }
-
-    private struct SentRequest: Sendable {
-        let method: String
-        let toolName: String?
-        let upstreamIndex: Int
-    }
-
-    private struct State: Sendable {
-        struct PendingResponse: Sendable {
-            let sessionID: String
-            let data: Data
-        }
-
-        var sessions: [String: SessionContext] = [:]
-        var initializedSessionIDs: Set<String> = []
-        var sessionProtocolVersions: [String: String] = [:]
-        var nextUpstreamID: Int64 = 1
-        var assignUpstreamIDCount = 0
-        var initialized = false
-        var cachedToolsList: JSONValue?
-        var refreshToolsListCalls = 0
-        var upstreamSendCount = 0
-        var upstreamIDMapping: [Int64: UpstreamIDMapping] = [:]
-        var chooseUpstreamCalls: [ChooseUpstreamCall] = []
-        var availableUpstreamIndex: Int? = 0
-        var requestTimeoutNotifications = 0
-        var requestSuccessNotifications = 0
-        var abandonedRequestHadOperationLease: [Bool] = []
-        var pendingResponses: [PendingResponse] = []
-        var sentRequests: [SentRequest] = []
-        var sentUpstreamPayloads: [Data] = []
-        var availableUpstreamIndices: [Int?] = []
-        var requestLeaseActivationHook: (@Sendable () -> Void)?
-        var requeuedLeaseCount = 0
-        var rejectNextUpstreamSend = false
-        var removeSessionOnNextClientRequestAdmission = false
-        var serverRequestResponseSendResults: [Upstream.SendResult] = []
-        var begunClientRequestCount = 0
-        var finishedClientRequestCount = 0
-    }
-
-    private let state = NIOLockedValueBox(State())
-    private let sentUpstreamCountRecords = LockedRecordedValues<Int>()
-    private let pendingResponseCountRecords = LockedRecordedValues<Int>()
-    private let config: ProxyRuntimeConfiguration
-    private let upstreamRequestResponder:
-        (@Sendable (_ method: String, _ toolName: String?, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?
-    private let upstreamResponder:
-        (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?
-    private let legacyUpstreamResponder:
-        (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> Data)?
-    private let cancelAfterStartingEnqueueRequest: Bool
-    private let requestLeaseRegistry = LeaseManager()
-    private let upstreamTopology = UpstreamTopologyAuthority(
-        (0..<64).map { _ in HTTPTestUpstreamSlot() as any UpstreamSlotControlling }
-    )
+    let broker: NativeHostBroker
+    let hosts: FakeHostSessionFactory
 
     init(
         config: HTTPTestConfiguration,
-        upstreamResponder: (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> Data)? = nil,
-        cancelAfterStartingEnqueueRequest: Bool = false
-    ) {
-        self.config = config.runtime
-        self.upstreamRequestResponder = nil
-        self.upstreamResponder = nil
-        self.legacyUpstreamResponder = upstreamResponder
-        self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
+        tools: JSONValue = HTTPTestRuntime.defaultTools,
+        clock: ClockClient = .liveValue,
+        handle: @escaping @Sendable (_ method: String, _ params: [String: JSONValue]) -> FakeHostSession.Reply = { _, _ in
+            .result(.object(["content": .array([])]))
+        }
+    ) throws {
+        let hosts = FakeHostSessionFactory { _ in FakeHostSession(tools: tools, handle: handle) }
+        self.hosts = hosts
+        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+        let broker = try NativeHostBroker(
+            configuration: config.runtime,
+            inventory: XcodeHostInventory(defaultInstallation: installation) { [installation] },
+            clock: clock,
+            sessionFactory: { _ in hosts })
+        self.broker = broker
+        #expect(registerAsyncTestCleanup(description: "HTTP test runtime shutdown") { await broker.shutdown() })
     }
 
-    init(
-        config: HTTPTestConfiguration,
-        upstreamPlanResponder: (@Sendable (_ method: String, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?,
-        cancelAfterStartingEnqueueRequest: Bool = false
-    ) {
-        self.config = config.runtime
-        self.upstreamRequestResponder = nil
-        self.upstreamResponder = upstreamPlanResponder
-        self.legacyUpstreamResponder = nil
-        self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
+    /// The most recently started host process.
+    var host: FakeHostSession? { hosts.sessions.withLockedValue { $0.last } }
+
+    var startedHostCount: Int { hosts.sessions.withLockedValue { $0.count } }
+
+    func hasSession(_ id: String) -> Bool {
+        broker.sessionState(ProxySessionID(rawValue: id)) != .missing
     }
 
-    init(
-        config: HTTPTestConfiguration,
-        upstreamRequestResponder: (@Sendable (_ method: String, _ toolName: String?, _ originalID: JSONRPC.ID) throws -> UpstreamResponsePlan)?,
-        cancelAfterStartingEnqueueRequest: Bool = false
-    ) {
-        self.config = config.runtime
-        self.upstreamRequestResponder = upstreamRequestResponder
-        self.upstreamResponder = nil
-        self.legacyUpstreamResponder = nil
-        self.cancelAfterStartingEnqueueRequest = cancelAfterStartingEnqueueRequest
+    /// Waits until the hosts have received `count` tool calls.
+    func waitForToolCalls(_ count: Int) async throws {
+        try await waitWithTimeout("\(count) tool call(s) reached the host", timeout: .seconds(5)) { [self] in
+            while toolCalls().count < count { await Task.yield() }
+        }
     }
 
-    func session(id: String) -> SessionContext {
-        state.withLockedValue { state in
-            if let existing = state.sessions[id] {
-                return existing
+    /// Waits until the latest host has received `method`, and returns those messages.
+    @discardableResult
+    func waitForHostMessages(_ method: String, count: Int = 1) async throws -> [[String: JSONValue]] {
+        try await waitWithTimeout("\(method) reached the host", timeout: .seconds(5)) { [self] in
+            while (host?.requests(method).count ?? 0) < count { await Task.yield() }
+            return host?.requests(method) ?? []
+        }
+    }
+
+    /// Tool calls the hosts received, in order.
+    func toolCalls() -> [(name: String, arguments: [String: JSONValue])] {
+        hosts.sessions.withLockedValue { $0 }.flatMap { $0.requests("tools/call") }.compactMap { request in
+            guard case .object(let params)? = request["params"], case .string(let name)? = params["name"] else {
+                return nil
             }
-            let context = SessionContext(id: id, config: config)
-            state.sessions[id] = context
-            state.initializedSessionIDs.insert(id)
-            state.sessionProtocolVersions[id] = MCP.ProtocolVersion.current
-            return context
+            var arguments: [String: JSONValue] = [:]
+            if case .object(let values)? = params["arguments"] { arguments = values }
+            return (name, arguments)
         }
     }
 
-    var clientRequestActivityCounts: (begun: Int, finished: Int) {
-        state.withLockedValue { state in
-            (state.begunClientRequestCount, state.finishedClientRequestCount)
-        }
-    }
-
-    func beginClientRequest(id: String, createIfMissing: Bool) -> Bool {
-        state.withLockedValue { state in
-            if state.removeSessionOnNextClientRequestAdmission {
-                state.removeSessionOnNextClientRequestAdmission = false
-                state.initializedSessionIDs.remove(id)
-                state.sessionProtocolVersions.removeValue(forKey: id)
-                state.sessions.removeValue(forKey: id)
-                return false
-            }
-            if state.sessions[id] == nil {
-                guard createIfMissing else { return false }
-                state.sessions[id] = SessionContext(id: id, config: config)
-            }
-            state.begunClientRequestCount += 1
-            return true
-        }
-    }
-
-    func endClientRequest(id _: String) {
-        state.withLockedValue { $0.finishedClientRequestCount += 1 }
-    }
-
-    func uninitializedSession(id: String) -> SessionContext {
-        state.withLockedValue { state in
-            if let existing = state.sessions[id] {
-                state.initializedSessionIDs.remove(id)
-                state.sessionProtocolVersions.removeValue(forKey: id)
-                return existing
-            }
-            let context = SessionContext(id: id, config: config)
-            state.sessions[id] = context
-            state.initializedSessionIDs.remove(id)
-            state.sessionProtocolVersions.removeValue(forKey: id)
-            return context
-        }
-    }
-
-    func initializedSessionWithoutProtocolVersion(id: String) -> SessionContext {
-        state.withLockedValue { state in
-            let context = state.sessions[id] ?? SessionContext(id: id, config: config)
-            state.sessions[id] = context
-            state.initializedSessionIDs.insert(id)
-            state.sessionProtocolVersions.removeValue(forKey: id)
-            return context
-        }
-    }
-
-    func hasSession(id: String) -> Bool {
-        state.withLockedValue { state in
-            state.sessions[id] != nil
-        }
-    }
-
-    func isSessionInitialized(id: String) -> Bool {
-        state.withLockedValue { state in
-            state.initializedSessionIDs.contains(id)
-        }
-    }
-
-    func negotiatedProtocolVersion(id: String) -> String? {
-        state.withLockedValue { state in
-            state.sessionProtocolVersions[id]
-        }
-    }
-
-    func removeSession(id: String) {
-        _ = state.withLockedValue { state in
-            state.initializedSessionIDs.remove(id)
-            state.sessionProtocolVersions.removeValue(forKey: id)
-            return state.sessions.removeValue(forKey: id)
-        }
-    }
-
-    func debugReset() {
-        state.withLockedValue { state in
-            state.sessions.removeAll()
-            state.initializedSessionIDs.removeAll()
-            state.sessionProtocolVersions.removeAll()
-            state.cachedToolsList = nil
-            state.pendingResponses.removeAll()
-            state.sentRequests.removeAll()
-            state.sentUpstreamPayloads.removeAll()
-            state.upstreamIDMapping.removeAll()
-        }
-    }
-
-    func shutdown() async {}
-
-    func isInitialized() -> Bool {
-        state.withLockedValue { state in
-            state.initialized
-        }
-    }
-
-    func cachedToolsListResult() -> JSONValue? {
-        state.withLockedValue { $0.cachedToolsList }
-    }
-
-    func setCachedToolsListResult(_ result: JSONValue, sourceUpstream _: Int) {
-        state.withLockedValue { state in
-            state.cachedToolsList = result
-        }
-    }
-
-    func refreshToolsListIfNeeded() {
-        state.withLockedValue { state in
-            state.refreshToolsListCalls += 1
-        }
-    }
-
-    func registerInitialize(
-        sessionID: String,
-        originalID: JSONRPC.ID,
-        requestObject: [String: Any],
-        on eventLoop: EventLoop
-    ) -> EventLoopFuture<ByteBuffer> {
-        let negotiatedProtocolVersion =
-            ((requestObject["params"] as? [String: Any])?["protocolVersion"] as? String)
-            ?? MCP.ProtocolVersion.current
-        _ = session(id: sessionID)
-        state.withLockedValue { state in
-            state.initialized = true
-            state.initializedSessionIDs.insert(sessionID)
-            state.sessionProtocolVersions[sessionID] = negotiatedProtocolVersion
-        }
-        _ = chooseUpstreamIndex()
-        let response: [String: Any] = [
-            "jsonrpc": "2.0",
-            "id": originalID.value.foundationObject,
-            "result": [
-                "protocolVersion": negotiatedProtocolVersion,
-                "capabilities": [String: Any]()
-            ],
-        ]
-        let data = (try? JSONSerialization.data(withJSONObject: response, options: [])) ?? Data()
-        var buffer = ByteBufferAllocator().buffer(capacity: data.count)
-        buffer.writeBytes(data)
-        return eventLoop.makeSucceededFuture(buffer)
-    }
-
-    func sharedToolsList(
-        sessionID: String,
-        requestTimeoutOverride: TimeAmount?,
-        prefersCachedToolsCatalog: Bool
-    ) async throws -> JSONValue {
-        _ = requestTimeoutOverride
-        if let cached = state.withLockedValue({ $0.cachedToolsList }) {
-            return cached
-        }
-        let responseData = try await performSharedControlPlaneRequest(
-            method: "tools/list",
-            toolName: nil,
-            sessionID: sessionID
-        )
-        guard let object = try JSONSerialization.jsonObject(
-            with: responseData,
-            options: []
-        ) as? [String: Any],
-            let resultAny = object["result"],
-            let result = JSONValue(any: resultAny)
-        else {
-            throw NSError(domain: "TestRuntimeCoordinator", code: 2)
-        }
-        state.withLockedValue { state in
-            state.cachedToolsList = result
-        }
-        return result
-    }
-
-    func chooseUpstreamOperationLease() -> UpstreamOperationLease? {
-        let upstreamIndex = state.withLockedValue { state in
-            state.chooseUpstreamCalls.append(
-                ChooseUpstreamCall(sessionID: nil)
-            )
-            if state.availableUpstreamIndices.isEmpty == false {
-                return state.availableUpstreamIndices.removeFirst()
-            }
-            return state.availableUpstreamIndex
-        }
-        return upstreamIndex.flatMap {
-            upstreamTopology.operationLease(for: UpstreamSlotID(rawValue: $0))
-        }
-    }
-
-    func chooseUpstreamIndex() -> Int? {
-        chooseUpstreamOperationLease()?.upstreamIndex
-    }
-
-    func enqueueOnUpstreamSlot<Output: Sendable>(
-        leaseID _: LeaseManager.ID,
-        descriptor _: SessionRequestPipeline.Descriptor,
-        on eventLoop: EventLoop,
-        preferredUpstreamIndices: [Int]?,
-        starter: @escaping @Sendable (UpstreamOperationLease) -> EventLoopFuture<Output>
-    ) -> EventLoopFuture<Output> {
-        let upstreamIndex: Int?
-        if let preferredUpstreamIndices, preferredUpstreamIndices.isEmpty == false {
-            upstreamIndex = preferredUpstreamIndices.first
-        } else {
-            upstreamIndex = chooseUpstreamOperationLease()?.upstreamIndex
-        }
-        guard let upstreamIndex else {
-            return eventLoop.makeFailedFuture(
-                UpstreamSlotScheduler.AcquisitionError.unavailable
-            )
-        }
-        guard let operationLease = upstreamTopology.operationLease(
-            for: UpstreamSlotID(rawValue: upstreamIndex)
-        ) else {
-            return eventLoop.makeFailedFuture(
-                UpstreamSlotScheduler.AcquisitionError.unavailable
-            )
-        }
-        if cancelAfterStartingEnqueueRequest {
-            _ = starter(operationLease)
-            return eventLoop.makeFailedFuture(CancellationError())
-        }
-        return starter(operationLease)
-    }
-
-    func assignUpstreamID(
-        sessionID: String,
-        originalID: JSONRPC.ID,
-        operationLease _: UpstreamOperationLease
-    ) -> Int64? {
-        state.withLockedValue { state in
-            state.assignUpstreamIDCount += 1
-            let id = state.nextUpstreamID
-            state.nextUpstreamID += 1
-            state.upstreamIDMapping[id] = UpstreamIDMapping(
-                sessionID: sessionID, originalID: originalID)
-            return id
-        }
-    }
-
-    func removeUpstreamIDMapping(
-        sessionID: String,
-        requestIDKey: String,
-        operationLease _: UpstreamOperationLease
-    ) {
-        state.withLockedValue { state in
-            let removed = state.upstreamIDMapping.first { _, mapping in
-                mapping.sessionID == sessionID && mapping.originalID.key == requestIDKey
-            }?.key
-            if let removed {
-                state.upstreamIDMapping.removeValue(forKey: removed)
-            }
-        }
-    }
-
-    func onRequestTimeout(
-        sessionID: String,
-        requestIDKey: String,
-        operationLease: UpstreamOperationLease
-    ) {
-        state.withLockedValue { state in
-            state.requestTimeoutNotifications += 1
-        }
-        removeUpstreamIDMapping(
-            sessionID: sessionID,
-            requestIDKey: requestIDKey,
-            operationLease: operationLease
-        )
-    }
-
-    func onRequestSucceeded(
-        sessionID _: String,
-        requestIDKey _: String,
-        operationLease _: UpstreamOperationLease
-    ) {
-        state.withLockedValue { state in
-            state.requestSuccessNotifications += 1
-        }
-    }
-
-    func sendUpstream(
-        _ data: Data,
-        operationLease: UpstreamOperationLease,
-        ensureRunning: Bool,
-        requestSendCompletion: UpstreamRequestSendCompletion?,
-        onRejected: @escaping @Sendable () -> Void
-    ) -> Bool {
-        let upstreamIndex = operationLease.upstreamIndex
-        _ = ensureRunning
-        guard upstreamTopology.validate(operationLease) else {
-            requestSendCompletion?.complete(.notSent)
-            onRejected()
-            return false
-        }
-        let sendUpdate = state.withLockedValue { state -> (accepted: Bool, count: Int) in
-            if state.rejectNextUpstreamSend {
-                state.rejectNextUpstreamSend = false
-                return (false, state.upstreamSendCount)
-            }
-            state.upstreamSendCount += 1
-            state.sentUpstreamPayloads.append(data)
-            return (true, state.upstreamSendCount)
-        }
-        guard sendUpdate.accepted else {
-            requestSendCompletion?.complete(.notSent)
-            onRejected()
-            return false
-        }
-        requestSendCompletion?.complete(.accepted)
-        sentUpstreamCountRecords.append(sendUpdate.count)
-
-        guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return true
-        }
-        guard let object = json as? [String: Any] else { return true }
-        handleSingleUpstreamRequest(object, upstreamIndex: upstreamIndex)
-        return true
-    }
-
-    func forwardServerRequestResponse(
-        responseData: Data,
-        sessionID: String,
-        responseID: JSONRPC.ID,
-        on eventLoop: EventLoop
-    ) -> EventLoopFuture<ServerRequestResponseForwardingResult> {
-        let session = session(id: sessionID)
-        guard let route = session.serverRequestTracker.lookup(clientID: responseID) else {
-            return eventLoop.makeSucceededFuture(.missingRoute)
-        }
-        guard var rewritten = try? JSONSerialization.jsonObject(
-            with: responseData,
-            options: []
-        ) as? [String: Any] else {
-            return eventLoop.makeSucceededFuture(.invalidResponse)
-        }
-        rewritten["id"] = route.upstreamID.value.foundationObject
-        guard JSONSerialization.isValidJSONObject(rewritten),
-            let data = try? JSONSerialization.data(withJSONObject: rewritten, options: [])
-        else {
-            return eventLoop.makeSucceededFuture(.invalidResponse)
-        }
-
-        let sendUpdate = state.withLockedValue { state -> (Int, Upstream.SendResult) in
-            state.upstreamSendCount += 1
-            state.sentUpstreamPayloads.append(data)
-            if state.serverRequestResponseSendResults.isEmpty {
-                return (state.upstreamSendCount, .accepted)
-            }
-            return (state.upstreamSendCount, state.serverRequestResponseSendResults.removeFirst())
-        }
-        sentUpstreamCountRecords.append(sendUpdate.0)
-        let sendResult = sendUpdate.1
-        switch sendResult {
-        case .accepted:
-            _ = session.serverRequestTracker.complete(clientID: responseID, route: route)
-            return eventLoop.makeSucceededFuture(.accepted)
-        case .backpressure, .unavailable:
-            return eventLoop.makeSucceededFuture(.upstreamUnavailable)
-        }
-    }
-
-    func setServerRequestResponseSendResults(_ results: [Upstream.SendResult]) {
-        state.withLockedValue { state in
-            state.serverRequestResponseSendResults = results
-        }
-    }
-
-    private func handleSingleUpstreamRequest(_ object: [String: Any], upstreamIndex: Int) {
-        guard let method = object["method"] as? String,
-            let upstreamIDValue = object["id"]
-        else {
-            return
-        }
-        let toolName = ((object["params"] as? [String: Any])?["name"] as? String)
-        state.withLockedValue { state in
-            state.sentRequests.append(
-                SentRequest(
-                    method: method,
-                    toolName: toolName,
-                    upstreamIndex: upstreamIndex
-                )
-            )
-        }
-        let upstreamID = (upstreamIDValue as? NSNumber)?.int64Value ?? (upstreamIDValue as? Int64)
-        guard let upstreamID,
-            let mapping = state.withLockedValue({ $0.upstreamIDMapping[upstreamID] })
-        else {
-            return
-        }
-
-        let responsePlan = responsePlan(
-            method: method,
-            toolName: toolName,
-            originalID: mapping.originalID
-        )
-        let deliverResponse = { [self] in
-            let session = self.session(id: mapping.sessionID)
-            session.router.handleIncoming(responsePlan.data)
-        }
-        if responsePlan.deliverManually {
-            let pendingCount = state.withLockedValue { state in
-                state.pendingResponses.append(
-                    State.PendingResponse(
-                        sessionID: mapping.sessionID,
-                        data: responsePlan.data
-                    )
-                )
-                return state.pendingResponses.count
-            }
-            pendingResponseCountRecords.append(pendingCount)
-        } else {
-            deliverResponse()
-        }
-    }
-
-    private func responsePlan(
-        method: String,
-        toolName: String?,
-        originalID: JSONRPC.ID
-    ) -> UpstreamResponsePlan {
-        if let upstreamRequestResponder,
-            let planned = try? upstreamRequestResponder(method, toolName, originalID)
-        {
-            return planned
-        }
-        if let upstreamResponder,
-            let planned = try? upstreamResponder(method, originalID)
-        {
-            return planned
-        }
-        if let legacyUpstreamResponder,
-            let responseData = try? legacyUpstreamResponder(method, originalID)
-        {
-            return .immediate(responseData)
-        }
-        return .immediate(Data())
-    }
-
-    private func performSharedControlPlaneRequest(
-        method: String,
-        toolName: String?,
-        sessionID: String
-    ) async throws -> Data {
-        _ = session(id: sessionID)
-        guard let upstreamIndex = chooseUpstreamIndex() else {
-            throw UpstreamSlotScheduler.AcquisitionError.unavailable
-        }
-        state.withLockedValue { state in
-            state.upstreamSendCount += 1
-            state.sentRequests.append(
-                SentRequest(
-                    method: method,
-                    toolName: toolName,
-                    upstreamIndex: upstreamIndex
-                )
-            )
-        }
-
-        let originalID = JSONRPC.ID(any: "__shared-\(method)-\(UUID().uuidString)")!
-        let plan = responsePlan(
-            method: method,
-            toolName: toolName,
-            originalID: originalID
-        )
-        guard plan.deliverManually == false else {
-            throw TimeoutError()
-        }
-        guard let object = try? JSONSerialization.jsonObject(
-            with: plan.data,
-            options: []
-        ) as? [String: Any] else {
-            throw ControlPlane.Error.invalidResponse("invalid response")
-        }
-        if let errorObject = object["error"] as? [String: Any] {
-            throw ControlPlane.Error.upstreamRPC(
-                code: (errorObject["code"] as? NSNumber)?.intValue ?? -32000,
-                message: errorObject["message"] as? String ?? "upstream error"
-            )
-        }
-        state.withLockedValue { state in
-            state.requestSuccessNotifications += 1
-        }
-        return plan.data
-    }
-
-    func upstreamSource() -> ProxyRuntimeUpstreamSource? { nil }
-
-    func debugSnapshot() -> ProxyDebug.Snapshot {
-        debugSnapshot(includeSensitiveDebugPayloads: false)
-    }
-
-    func createRequestLease(descriptor: SessionRequestPipeline.Descriptor) -> LeaseManager.ID {
-        requestLeaseRegistry.createLease(descriptor: descriptor)
-    }
-
-    func activateRequestLease(
-        _ leaseID: LeaseManager.ID,
-        requestIDKey: String?,
-        upstreamIndex: Int?,
-        timeout: TimeAmount?,
-        progressTokenMapping: ProgressTokenMapping? = nil
-    ) {
-        requestLeaseRegistry.activateLease(
-            leaseID,
-            requestIDKey: requestIDKey,
-            upstreamIndex: upstreamIndex,
-            timeoutAt: timeout.map {
-                Date().addingTimeInterval(Double($0.nanoseconds) / 1_000_000_000)
-            },
-            progressTokenMapping: progressTokenMapping
-        )
-        state.withLockedValue { $0.requestLeaseActivationHook }?()
-    }
-
-    func completeRequestLease(_ leaseID: LeaseManager.ID) {
-        _ = requestLeaseRegistry.completeLease(leaseID)
-    }
-
-    func requeueRequestLease(_ leaseID: LeaseManager.ID) {
-        state.withLockedValue { state in
-            state.requeuedLeaseCount += 1
-        }
-        _ = requestLeaseRegistry.requeueLease(leaseID)
-    }
-
-    func failRequestLease(
-        _ leaseID: LeaseManager.ID,
-        terminalState: LeaseManager.State,
-        reason: LeaseManager.ReleaseReason
-    ) {
-        _ = requestLeaseRegistry.failLease(
-            leaseID,
-            terminalState: terminalState,
-            reason: reason
-        )
-    }
-
-    func handleRequestLeaseTimeout(
-        _ leaseID: LeaseManager.ID,
-        sessionID: String,
-        requestIDKeys: [String],
-        operationLease: UpstreamOperationLease?,
-        after _: UpstreamRequestSendCompletion?
-    ) {
-        _ = leaseID
-        if let operationLease, let first = requestIDKeys.first {
-            onRequestTimeout(
-                sessionID: sessionID,
-                requestIDKey: first,
-                operationLease: operationLease
-            )
-            for requestIDKey in requestIDKeys.dropFirst() {
-                removeUpstreamIDMapping(
-                    sessionID: sessionID,
-                    requestIDKey: requestIDKey,
-                    operationLease: operationLease
-                )
-            }
-        }
-        _ = requestLeaseRegistry.timeoutLease(leaseID)
-    }
-
-    func abandonRequestLease(
-        _ leaseID: LeaseManager.ID,
-        sessionID: String,
-        requestIDKeys: [String],
-        operationLease: UpstreamOperationLease?,
-        after _: UpstreamRequestSendCompletion?
-    ) {
-        state.withLockedValue {
-            $0.abandonedRequestHadOperationLease.append(operationLease != nil)
-        }
-        if let operationLease {
-            for requestIDKey in requestIDKeys {
-                removeUpstreamIDMapping(
-                    sessionID: sessionID,
-                    requestIDKey: requestIDKey,
-                    operationLease: operationLease
-                )
-            }
-        }
-        _ = requestLeaseRegistry.failLease(
-            leaseID,
-            terminalState: .abandoned,
-            reason: .clientDisconnected
-        )
-    }
-
-    func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
-        ProxyDebug.Snapshot(
-            generatedAt: Date(timeIntervalSince1970: 0),
-            proxyInitialized: isInitialized(),
-            cachedToolsListAvailable: cachedToolsListResult() != nil,
-            warmupInFlight: false,
-            controlPlane: nil,
-            upstreams: [
-                ProxyDebug.UpstreamSnapshot(
-                    upstreamIndex: 0,
-                    isInitialized: isInitialized(),
-                    initInFlight: false,
-                    didSendInitialized: false,
-                    healthState: "healthy",
-                    consecutiveRequestTimeouts: 0,
-                    consecutiveToolsListFailures: 0,
-                    lastToolsListSuccessUptimeNs: nil,
-                    recentStderr: [],
-                    lastDecodeError: nil,
-                    lastBridgeError: nil,
-                    protocolViolationCount: 0,
-                    lastProtocolViolationAt: nil,
-                    lastProtocolViolationReason: nil,
-                    lastProtocolViolationBufferedBytes: nil,
-                    lastProtocolViolationPreview: includeSensitiveDebugPayloads ? "raw-preview" : nil,
-                    lastProtocolViolationPreviewHex: includeSensitiveDebugPayloads ? "61 62" : nil,
-                    lastProtocolViolationLeadingByteHex: includeSensitiveDebugPayloads ? "61" : nil,
-                    bufferedStdoutBytes: 0
-                )
-            ],
-            recentTraffic: [],
-            sessions: [],
-            leases: requestLeaseRegistry.debugSnapshots(),
-            queuedRequestCount: 0
-        )
-    }
-
-    func leaseDebugSnapshots() -> [LeaseManager.DebugSnapshot] {
-        requestLeaseRegistry.debugSnapshots()
-    }
-
-    func sentUpstreamCount() -> Int {
-        state.withLockedValue { $0.upstreamSendCount }
-    }
-
-    func sentUpstreamPayloads() -> [Data] {
-        state.withLockedValue { $0.sentUpstreamPayloads }
-    }
-
-    func sentToolNames() -> [String] {
-        state.withLockedValue { state in
-            state.sentRequests.compactMap(\.toolName)
-        }
-    }
-
-    func sentToolRequests() -> [String] {
-        state.withLockedValue { state in
-            state.sentRequests.compactMap { request in
-                guard let toolName = request.toolName else { return nil }
-                return "\(toolName)@\(request.upstreamIndex)"
-            }
-        }
-    }
-
-    func sentMethods() -> [String] {
-        state.withLockedValue { state in
-            state.sentRequests.map(\.method)
-        }
-    }
-
-    func assignedUpstreamIDCount() -> Int {
-        state.withLockedValue { $0.assignUpstreamIDCount }
-    }
-
-    func chooseUpstreamIndexCallCount() -> Int {
-        state.withLockedValue { $0.chooseUpstreamCalls.count }
-    }
-
-    func lastChooseUpstreamShouldPin() -> Bool {
-        false
-    }
-
-    func chooseUpstreamShouldPinValues() -> [Bool] {
-        []
-    }
-
-    func refreshToolsListCallCount() -> Int {
-        state.withLockedValue { $0.refreshToolsListCalls }
-    }
-
-    func mappedUpstreamRequestCount() -> Int {
-        state.withLockedValue { $0.upstreamIDMapping.count }
-    }
-
-    func lastAbandonedRequestHadOperationLease() -> Bool? {
-        state.withLockedValue { $0.abandonedRequestHadOperationLease.last }
-    }
-
-    func rejectNextUpstreamSend() {
-        state.withLockedValue { $0.rejectNextUpstreamSend = true }
-    }
-
-    func removeSessionOnNextClientRequestAdmission() {
-        state.withLockedValue { $0.removeSessionOnNextClientRequestAdmission = true }
-    }
-
-    func setAvailableUpstreamIndex(_ value: Int?) {
-        state.withLockedValue { $0.availableUpstreamIndex = value }
-    }
-
-    func setAvailableUpstreamIndices(_ values: [Int?]) {
-        state.withLockedValue { $0.availableUpstreamIndices = values }
-    }
-
-    func setRequestLeaseActivationHook(_ hook: (@Sendable () -> Void)?) {
-        state.withLockedValue { $0.requestLeaseActivationHook = hook }
-    }
-
-    func requestTimeoutNotificationCount() -> Int {
-        state.withLockedValue { $0.requestTimeoutNotifications }
-    }
-
-    func requestSuccessNotificationCount() -> Int {
-        state.withLockedValue { $0.requestSuccessNotifications }
-    }
-
-    func requeuedLeaseCount() -> Int {
-        state.withLockedValue { $0.requeuedLeaseCount }
-    }
-
-    func pendingResponseCount() -> Int {
-        state.withLockedValue { $0.pendingResponses.count }
-    }
-
-    func waitForSentUpstreamCount(
-        _ expectedCount: Int,
-        timeout: Duration = .seconds(2)
-    ) async throws {
-        try await waitWithTimeout(
-            "waiting for sent upstream count \(expectedCount)",
-            timeout: timeout
-        ) {
-            var nextIndex = self.sentUpstreamCountRecords.count()
-            if self.sentUpstreamCount() >= expectedCount {
-                return
-            }
-            while true {
-                let observed = try await self.sentUpstreamCountRecords.nextValue(at: nextIndex)
-                if observed >= expectedCount {
-                    return
-                }
-                nextIndex += 1
-            }
-        }
-    }
-
-    func waitForPendingResponseCount(
-        _ expectedCount: Int,
-        timeout: Duration = .seconds(2)
-    ) async throws {
-        try await waitWithTimeout(
-            "waiting for pending response count \(expectedCount)",
-            timeout: timeout
-        ) {
-            var nextIndex = self.pendingResponseCountRecords.count()
-            if self.pendingResponseCount() == expectedCount {
-                return
-            }
-            while true {
-                let observed = try await self.pendingResponseCountRecords.nextValue(at: nextIndex)
-                if observed == expectedCount {
-                    return
-                }
-                nextIndex += 1
-            }
-        }
-    }
-
-    func setInitialized(_ value: Bool) {
-        state.withLockedValue { $0.initialized = value }
-    }
-
-    func deliverNextPendingResponse() throws {
-        let update = state.withLockedValue { state -> (State.PendingResponse, Int)? in
-            guard state.pendingResponses.isEmpty == false else { return nil }
-            let pending = state.pendingResponses.removeFirst()
-            return (pending, state.pendingResponses.count)
-        }
-        guard let (pending, pendingCount) = update else {
-            throw HTTPTestError.missingPendingResponse
-        }
-        pendingResponseCountRecords.append(pendingCount)
-        let session = session(id: pending.sessionID)
-        session.router.handleIncoming(pending.data)
-    }
+    func shutdown() async { await broker.shutdown() }
 }
 
 func makeHTTPConfig(
@@ -1049,60 +179,33 @@ func makeHTTPConfig(
     )
 }
 
-func makeHTTPTemporaryWorkspaceRoot() -> String {
-    let url = FileManager.default.temporaryDirectory
-        .appendingPathComponent(UUID().uuidString, isDirectory: true)
-    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    return url.path
-}
-
-final class ManualDateClock: @unchecked Sendable {
-    private let nowBox: NIOLockedValueBox<Date>
-
-    init(now: Date = Date(timeIntervalSince1970: 0)) {
-        self.nowBox = NIOLockedValueBox(now)
-    }
-
-    var client: ClockClient {
-        ClockClient(
-            now: { self.nowBox.withLockedValue { $0 } },
-            uptimeNanoseconds: { 0 },
-            sleep: { _ in },
-            sleepForTimeInterval: { _ in }
-        )
-    }
-
-    func advance(by interval: TimeInterval) {
-        nowBox.withLockedValue { date in
-            date = date.addingTimeInterval(interval)
-        }
-    }
+/// A runtime clock whose sleeps end only when `clock` advances past them, so request deadlines
+/// fire when a test advances the clock.
+func makeHTTPTestClock(_ clock: TestClock) -> ClockClient {
+    ClockClient(
+        now: { Date(timeIntervalSince1970: 0) },
+        uptimeNanoseconds: { 0 },
+        sleep: { duration in try? await clock.sleep(for: duration) },
+        sleepForTimeInterval: { _ in }
+    )
 }
 
 func addHTTPHandler(
     to channel: EmbeddedChannel,
     config: HTTPTestConfiguration,
-    sessionManager: any RuntimeCoordinating,
+    runtime: HTTPTestRuntime,
     scheduleResponseCompletion:
         (@Sendable (EventLoop, @escaping @Sendable () -> Void) -> Void)? = nil
 ) throws {
     let completionExecutor = EmbeddedEventLoopCompletionExecutor()
     registerEmbeddedCompletionExecutor(completionExecutor, for: channel)
-    let runtimeEventSource = ProxyRuntimeEventSource()
-    let runtime = ProxyRuntime(
-        config: config.runtime,
-        coordinator: sessionManager,
-        eventLoop: channel.eventLoop,
-        eventSource: runtimeEventSource,
-        eventLoopCompletionExecutor: completionExecutor.executor
-    )
     let handler = HTTPHandler(
         config: ProxyHTTPConfiguration(
             listenHost: config.listenHost,
             listenPort: config.listenPort,
             maxBodyBytes: config.maxBodyBytes
         ),
-        controlService: HTTPControlService(runtime: runtime),
+        controlService: HTTPControlService(runtime: runtime.broker),
         scheduleResponseCompletion: scheduleResponseCompletion ?? { _, operation in
             completionExecutor.enqueue(operation)
         }
@@ -1164,10 +267,6 @@ private enum SelfContainedHTTPResponse {
         }
         return bodyBuffer.readableBytes > 0
     }
-}
-
-func advanceEventLoopTime(on channel: EmbeddedChannel, by amount: TimeAmount) {
-    channel.embeddedEventLoop.advanceTime(by: amount)
 }
 
 func toolsCallPayload(
@@ -1234,22 +333,14 @@ struct TestHTTPHandlerServer {
     let group: MultiThreadedEventLoopGroup
     let channel: Channel
     let url: URL
-    let sessionManager: any RuntimeCoordinating
+    let runtime: HTTPTestRuntime
+    let controlService: HTTPControlService
     let childChannelTracker: HTTPTestServerChannelTracker
 
-    static func start(
-        config: HTTPTestConfiguration,
-        sessionManager: any RuntimeCoordinating,
-) throws -> TestHTTPHandlerServer {
+    static func start(config: HTTPTestConfiguration, runtime: HTTPTestRuntime) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let childChannelTracker = HTTPTestServerChannelTracker()
-        let runtime = ProxyRuntime(
-            config: config.runtime,
-            coordinator: sessionManager,
-            eventLoop: group.next(),
-            eventSource: ProxyRuntimeEventSource(),
-)
-        let controlService = HTTPControlService(runtime: runtime)
+        let controlService = HTTPControlService(runtime: runtime.broker)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -1275,24 +366,23 @@ struct TestHTTPHandlerServer {
         ).wait()
         let port = channel.localAddress?.port ?? 0
         let url = URL(string: "http://\(config.listenHost):\(port)/mcp")!
-        registerHTTPTestServer(url: url, sessionManager: sessionManager)
         return TestHTTPHandlerServer(
             group: group,
             channel: channel,
             url: url,
-            sessionManager: sessionManager,
+            runtime: runtime,
+            controlService: controlService,
             childChannelTracker: childChannelTracker
         )
     }
 
     func shutdown() async throws {
-        unregisterHTTPTestServer(url: url)
         try await shutdownHTTPTestServer(
             listenChannel: channel,
             childChannelTracker: childChannelTracker,
             group: group,
             beforeClose: {
-                await sessionManager.shutdown()
+                await runtime.shutdown()
             }
         )
     }
@@ -1306,12 +396,8 @@ struct RawHTTPResponse: Sendable {
 func postHTTPJSON(
     url: URL,
     sessionID: String,
-    payload: [String: Any],
-    prepareSession: Bool = true
+    payload: [String: Any]
 ) async throws -> (HTTPURLResponse, [String: Any]) {
-    if prepareSession {
-        prepareHTTPTestSession(url: url, sessionID: sessionID)
-    }
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
@@ -1333,43 +419,11 @@ func postHTTPJSON(
     }
 }
 
-func postHTTPAnyJSON(
-    url: URL,
-    sessionID: String,
-    payload: [Any],
-    prepareSession: Bool = true
-) async throws -> (HTTPURLResponse, Any) {
-    if prepareSession {
-        prepareHTTPTestSession(url: url, sessionID: sessionID)
-    }
-    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.httpBody = data
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
-    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-    request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
-
-    return try await withTestURLSession { session in
-        let (responseData, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw HTTPTestError.missingResponseHead
-        }
-        let object = try JSONSerialization.jsonObject(with: responseData, options: [])
-        return (httpResponse, object)
-    }
-}
-
 func postHTTPAnyData(
     url: URL,
     sessionID: String,
-    payload: [Any],
-    prepareSession: Bool = true
+    payload: [Any]
 ) async throws -> RawHTTPResponse {
-    if prepareSession {
-        prepareHTTPTestSession(url: url, sessionID: sessionID)
-    }
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
@@ -1391,68 +445,40 @@ func postHTTPAnyData(
 func assertHTTPBatchRejected(
     url: URL,
     sessionID: String,
-    payload: [Any],
-    prepareSession: Bool = true
+    payload: [Any]
 ) async throws -> RawHTTPResponse {
     let response = try await postHTTPAnyData(
         url: url,
         sessionID: sessionID,
-        payload: payload,
-        prepareSession: prepareSession
+        payload: payload
     )
     #expect(response.statusCode == 400)
     #expect(String(data: response.bodyData, encoding: .utf8) == "JSON-RPC batching is not supported")
     return response
 }
 
-func postHTTPData(
-    url: URL,
-    sessionID: String,
-    payload: [String: Any],
-    prepareSession: Bool = true
-) async throws -> RawHTTPResponse {
-    if prepareSession {
-        prepareHTTPTestSession(url: url, sessionID: sessionID)
-    }
-    let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+/// Initializes an MCP session over HTTP and returns its `MCP-Session-Id`.
+func initializeHTTPSession(url: URL, clientName: String = "HTTPTests") async throws -> String {
+    let data = try JSONSerialization.data(withJSONObject: [
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": [
+            "protocolVersion": MCP.ProtocolVersion.current, "capabilities": [String: Any](),
+            "clientInfo": ["name": clientName, "version": "1"],
+        ],
+    ] as [String: Any])
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = data
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
-    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
-    request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
-
     return try await withTestURLSession { session in
-        let (responseData, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
+        let (_, response) = try await session.data(for: request)
+        guard let sessionID = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Mcp-Session-Id") else {
             throw HTTPTestError.missingResponseHead
         }
-        return RawHTTPResponse(statusCode: httpResponse.statusCode, bodyData: responseData)
+        return sessionID
     }
 }
-
-func getHTTPData(url: URL) async throws -> (HTTPURLResponse, Data) {
-    try await withTestURLSession { session in
-        let (data, response) = try await session.data(from: url)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw HTTPTestError.missingResponseHead
-        }
-        return (httpResponse, data)
-    }
-}
-
-func makeDebugSnapshotURL(from mcpURL: URL, includeSensitive: Bool = false) -> URL {
-    var components = URLComponents(url: mcpURL, resolvingAgainstBaseURL: false)!
-    components.path = "/debug/upstreams"
-    components.queryItems = includeSensitive
-        ? [URLQueryItem(name: "includeSensitive", value: "1")]
-        : nil
-    return components.url!
-}
-
-typealias AsyncSignal = TestSignal
-typealias SyncSignal = TestSignal
 
 func initializeHTTPChannel(_ channel: EmbeddedChannel) async throws -> String {
     let initPayload: [String: Any] = [
@@ -1475,46 +501,4 @@ func initializeHTTPChannel(_ channel: EmbeddedChannel) async throws -> String {
 
     let initResponse = try await collectResponse(from: channel)
     return try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))
-}
-
-func makeToolSuccessResponse(id: JSONRPC.ID, text: String) throws -> Data {
-    let response: [String: Any] = [
-        "jsonrpc": "2.0",
-        "id": id.value.foundationObject,
-        "result": [
-            "content": [
-                [
-                    "type": "text",
-                    "text": text,
-                ]
-            ]
-        ],
-    ]
-    return try JSONSerialization.data(withJSONObject: response, options: [])
-}
-
-func makeToolResultResponse(id: JSONRPC.ID, result: [String: Any]) throws -> Data {
-    let response: [String: Any] = [
-        "jsonrpc": "2.0",
-        "id": id.value.foundationObject,
-        "result": result,
-    ]
-    return try JSONSerialization.data(withJSONObject: response, options: [])
-}
-
-func makeToolErrorResponse(id: JSONRPC.ID, text: String) throws -> Data {
-    let response: [String: Any] = [
-        "jsonrpc": "2.0",
-        "id": id.value.foundationObject,
-        "result": [
-            "content": [
-                [
-                    "type": "text",
-                    "text": text,
-                ]
-            ],
-            "isError": true,
-        ],
-    ]
-    return try JSONSerialization.data(withJSONObject: response, options: [])
 }
