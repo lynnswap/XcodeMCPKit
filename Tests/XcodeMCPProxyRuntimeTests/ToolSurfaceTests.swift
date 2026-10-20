@@ -1,3 +1,4 @@
+import XcodeMCPProxyRuntimeContract
 @testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPCore
 import Foundation
@@ -353,7 +354,8 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
 
     func sharedToolsList(
         sessionID: String,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        prefersCachedToolsCatalog: Bool
     ) async throws -> JSONValue {
         fatalError("unused in ToolSurfaceTests")
     }
@@ -404,6 +406,8 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
         requestSendCompletion?.complete(.notSent)
         return false
     }
+    func upstreamSource() -> ProxyRuntimeUpstreamSource? { nil }
+
     func debugSnapshot() -> ProxyDebug.Snapshot { fatalError("unused in ToolSurfaceTests") }
     func debugSnapshot(includeSensitiveDebugPayloads: Bool) -> ProxyDebug.Snapshot {
         fatalError("unused in ToolSurfaceTests")

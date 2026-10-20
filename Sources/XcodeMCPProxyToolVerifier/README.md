@@ -27,9 +27,9 @@ its owned server and helpers.
 
 Every run records the complete live catalog in
 `ProxyToolVerifierOutput/tool-catalog.json` and operation results in
-`ProxyToolVerifierOutput/report.json`. Xcode supplies the catalog dynamically.
-The tool-specific argument plans describe verifier coverage; they are not a
-second definition of the available tools.
+`ProxyToolVerifierOutput/report.json`. The catalog describes the proxy's public
+operations. Tool-specific argument plans describe verifier coverage; a listed
+operation can still be unsupported by the fixture's backend.
 
 A tool without a safe fixture plan, including an unknown new tool, remains in
 the report as not planned. The report records skip reasons and raw descriptors
@@ -53,7 +53,7 @@ swift run xcode-mcp-proxy-tool-verifier --keep-server
 
 Use `--run-destination` with a display title from `XcodeListRunDestinations` to
 choose the fixture's build and run destination. Use `--device-identifier` with
-an owned Simulator UUID for both device-interaction session tools. The caller
+an owned Simulator UUID for device-interaction session preparation. The caller
 creates and removes that Simulator. For example:
 
 ```sh
@@ -65,11 +65,9 @@ The verifier stops fixture operations if scheme, destination, or test-plan
 selection fails. Project and target creation runs after build, runtime, and
 device checks so a new target's automatic scheme cannot change those checks.
 
-`--no-open-xcode` is removed because catalog runs are headless. `--upstream-processes`
-and `--xcode-mode` remain unsupported. The default catalog run uses the proxy's
-default headless host. The shared server also supports selecting other headless
-hosts and running GUI Xcode processes; the verifier's default run does not test
-those targets or their concurrent execution.
+The default catalog run uses the proxy's default headless host. It does not
+verify GUI workspaces, other installations, or concurrent execution across hosts.
+Removed options are listed in the [migration guide](../../Docs/migrations/native-backend.md).
 
 ## Preview probes
 

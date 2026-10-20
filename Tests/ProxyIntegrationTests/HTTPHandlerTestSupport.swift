@@ -1,3 +1,4 @@
+import XcodeMCPProxyRuntimeContract
 @testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPCore
 import Darwin
@@ -395,7 +396,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func sharedToolsList(
         sessionID: String,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        prefersCachedToolsCatalog: Bool
     ) async throws -> JSONValue {
         _ = requestTimeoutOverride
         if let cached = state.withLockedValue({ $0.cachedToolsList }) {
@@ -731,6 +733,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
         return plan.data
     }
+
+    func upstreamSource() -> ProxyRuntimeUpstreamSource? { nil }
 
     func debugSnapshot() -> ProxyDebug.Snapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)

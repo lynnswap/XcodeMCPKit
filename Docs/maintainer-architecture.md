@@ -1,251 +1,226 @@
-# Maintainer Architecture
+# Maintainer guide
 
-## Module Layout
+## Module ownership
 
-- `XcodeMCPCore`
-  - Package-internal JSON-RPC, framing, clocks, HTTP wire I/O, and subprocess ownership.
-  - Shared by the SDK and proxy without depending on either consumer.
-- `XcodeMCPKit`
-  - Public client SDK facade and MCP value types.
-  - Package-scoped `MCPClientSessionAuthority` owns transport recipes,
-    connection identity, HTTP session recovery, connection state, and close
-    completion for both the direct SDK and the proxy STDIO adapter.
-  - `InitializedMCPClientSession` owns request IDs, response correlation, and
-    request-scoped progress lanes; it does not own transport/session lifecycle.
-- `XcodeMCPNativeRuntime` and `XcodeMCPNativeHost`
-  - Load selected Xcode frameworks and invoke native tool contracts through
-    ABIBridge method handles with complete function signatures. Workspace
-    snapshots use owned runtime values without importing Xcode's entry type.
-  - Own workspace-model resources, native action streams, installed documentation
-    asset selection, and helper STDIO framing/initialization.
-  - Missing native contracts return diagnostics; tool failures and transport
-    failures retain their separate MCP meanings.
-- `XcodeMCPProxyRuntimeContract`
-  - Package request/reply/session/snapshot values and serving protocols shared
-    by Runtime, HTTP, and facade composition. No execution state or I/O owner.
-- `XcodeMCPProxyRuntime`
-  - Proxy control plane, request/session ownership, native request forwarding,
-    connection topology, canonical native catalogs, and feature workflows.
-- `XcodeMCPProxyHTTP`
-  - HTTP listener lifecycle, transport validation, response encoding, and SSE delivery.
-  - Depends on the runtime contract and Core without linking the concrete Runtime.
-    It does not own runtime policy.
-- `XcodeMCPProxyKit`
-  - Public server/adapter embedding facades and composition of runtime, HTTP,
-    and discovery publication.
-  - CLI composition, installer implementation, build metadata, and launch
-    diagnostics are package/executable concerns rather than public library API.
-
-## Ownership Boundaries
-
-- `ToolsCatalogAuthority`
-  - Owns the native catalog and refresh leases. Transitions return cancellation
-    and notification effects for execution outside the lock. Invalidating a
-    retired connection prevents its late response from replacing current data.
-- `UpstreamTopologyAuthority`
-  - Owns actual upstream slots, stable IDs, membership/order, and topology
-    epoch. Routers, health state, schedulers, and debug views key local state by
-    those IDs instead of mirroring the slot array.
-- `CanonicalHandshakeState` and `ControlPlaneCoordinator`
-  - Handshake state is independent from catalog epochs. The coordinator
-    owns shared load tasks and waiters, but writes semantic state only through
-    authority leases and transitions.
-- `XcodeMCPProxyHTTP` gateway
-  - `HTTPRequestSecurityPolicy` validates Origin for every route before any
-    side effect. The gateway enforces session headers and negotiated protocol
-    versions using runtime-owned session state and parses individual messages.
-  - Rejects JSON-RPC batch arrays at the HTTP boundary without invoking the
-    session or upstream.
-  - Tool-specific response shaping lives in dedicated surface helpers, not inline in forwarding hot paths.
-- CLI commands
-  - `ProxyServerCommand`, `ProxyAdapterCommand`, and `ProxyInstallCommand` own
-    the `swift-argument-parser` option, help, version, and input-validation
-    contracts. Each invocation is parsed once into typed values.
-  - Server environment and file configuration precedence is resolved after
-    parsing and before the existing launcher/runtime lifecycle begins.
-
-## Dependency Direction
-
-- `XcodeMCPCore` contains package implementation shared by the SDK and proxy.
-  It depends on Logging, NIOCore, and NIOConcurrencyHelpers; no consumer target
-  may become a dependency of Core. Shared declarations retain package access.
-- `XcodeMCPKit` depends on Core and owns the public client API, domain values,
-  session authority, progress, and transport wrappers. Core wire values are
-  converted at this SDK boundary and do not become public aliases.
-- Runtime and HTTP depend on Core rather than the public SDK. Runtime owns
-  execution policy and request lifetimes; HTTP owns network delivery. The native
-  host selects the latest installed documentation index and executes
-  DocumentationSearch directly. The runtime serving protocol in `XcodeMCPProxyRuntimeContract` connects these
-  two owners. The contract retains the NIOCore timeout value without exposing
-  channels or event loops.
-- `XcodeMCPPermissionAutomation` owns Accessibility dialog matching, process
-  discovery, and the opt-in approval monitor. It depends only on Logging and
-  system frameworks; native hosts and request routing do not depend on it.
-- `XcodeMCPProxyKit` composes Runtime, HTTP, permission automation, and the SDK
-  session authority used by its STDIO adapter. Its internal files contain
-  facade, CLI, installation, and launch concerns.
-- `XcodeMCPProxyCLI`, `XcodeMCPProxyServer`, and `XcodeMCPProxyInstall` depend on
-  `XcodeMCPProxyKit`; `XcodeMCPProxyToolVerifier` depends on `XcodeMCPKit`;
-  `ProxyBuildInfoTool` is a standalone build-tool dependency of
-  `ProxyBuildInfoPlugin`.
-
-Use the relevant `xcodebuild test` schemes with an explicit macOS destination
-when moving files or changing imports. Core tests use Core directly; SDK and
-proxy integration tests keep their actual consumer dependencies. Documentation
-backend tests use lower process fakes and shared filesystem fixtures without
-linking the runtime coordinator. Public product
-contract tests compile consumers from a separate package. Run
-`scripts/verify-proxy-target-boundaries.sh` to check dependency direction;
-private implementation targets are not new public products.
-
-## Focused Test Ownership
-
-| Test target | Owner and coverage |
+| Module | Responsibility |
 | --- | --- |
-| `XcodeMCPCoreTests` | Wire/framing primitives and low-level HTTP transport lifecycle; no SDK or proxy implementation dependency. |
-| `XcodeMCPProcessRuntimeTests` | Process I/O and termination through fake drivers and opt-in live smoke cases; no SDK dependency. |
-| `XcodeMCPNativeRuntimeTests` | Native schemas, MCP execution, workspace lifecycle, and documentation asset selection. |
-| `XcodeMCPProxyHTTPTests` | HTTP/SSE delivery and gateway lifecycle using the runtime contract fake. |
-| `XcodeMCPProxyRuntimeTests` | Coordination, scheduling, routing and provider policy; no HTTP or facade dependency. |
-| `ProxyIntegrationTests` | Actual HTTP/runtime composition and public configuration paths. |
+| `XcodeMCPCore` | Package-internal JSON-RPC, framing, clocks, wire I/O, and subprocess primitives. No dependency on SDK or proxy consumers. |
+| `XcodeMCPInstallation` | Installation discovery and path normalization shared by proxy and native host. |
+| `XcodeMCPKit` | Public Swift client and MCP values. `MCPClientSessionAuthority` owns transport identity/recovery; `InitializedMCPClientSession` owns request correlation and progress lanes. |
+| `XcodeMCPNativeRuntime` / `XcodeMCPNativeHost` | Xcode framework integration, native actions, headless workspace models, execution queues, and owned preview resources. |
+| `XcodeMCPProxyRuntimeContract` | Package request/reply/session values and serving protocols. No execution or I/O state. |
+| `XcodeMCPProxyRuntime` | Public tool contract, handle routing, backend catalogs, request lifetimes, scheduling, and recovery. |
+| `XcodeMCPProxyHTTP` | Listener, protocol validation, responses, and SSE delivery. Depends on the runtime contract rather than concrete Runtime. |
+| `XcodeMCPPermissionAutomation` | Accessibility dialog recognition and opt-in approval monitor. Independent of native execution and routing. |
+| `XcodeMCPProxyKit` | Public server/adapter facades, runtime/HTTP composition, discovery, CLI hosting, and installation. |
 
-When Xcode provides a matching test scheme, run it directly. For example:
+Runtime and HTTP use Core rather than importing the public SDK. Internal targets
+remain package implementation, not library products. The STDIO adapter and SDK
+share the same client session authority. Keep transport/session recovery there
+instead of adding a second recovery loop in either consumer.
+
+## State and lifetime boundaries
+
+The broker owns public workspace and device-session references and binds them to
+native resources. It must preserve a GUI tab's identity even when another tab
+uses the same path. Native workspace state remains authoritative for contents,
+scheme, destination, and test plan. A handle must not become a cached second copy
+of those values or silently move to a replacement host.
+
+Native catalogs remain tied to their source connection. `ToolsCatalogAuthority`
+owns refresh leases and returns cancellation/notification effects for execution
+outside its lock. `UpstreamTopologyAuthority` owns slot membership and topology;
+`CanonicalHandshakeState` owns initialization independently of catalog epochs.
+Coordinators arrange I/O through those owners. A late response from a retired
+connection cannot update current definitions.
+
+A headless request holds its workspace execution permit through preparation,
+native stream drain, observed Operation completion, and cleanup. The action
+bridge owns the relay consuming the original native stream. Cancelling the
+request-facing iterator signals observed Operations but does not abandon that
+relay. The next request for the same workspace waits for this boundary. An action
+with no cancellable Operation can take until natural completion; opaque native
+Swift Task handles are not joined by this mechanism.
+
+Shutdown stops admission and awaits owned tasks before closing workspace and
+transport resources. `deinit` is a synchronous cancellation backstop and must not
+spawn an unowned task or promise graceful shutdown. Report cleanup failure
+alongside the original failure. Do not replay mutations with unknown delivery.
+
+Keep stdout exclusively for protocol messages and stderr for diagnostics. Parse
+an HTTP body once and pass its parsed message onward. Origin validation happens
+before routing or side effects; JSON-RPC arrays are rejected at the HTTP boundary.
+See the [HTTP contract](architecture.md#streamable-http-contract) for session,
+header, and notification-buffer behavior.
+
+## Native integration constraints
+
+The native host runs as an AppKit application with a retained document controller
+and prohibited activation policy. Its separate process contains loaded Xcode
+images, ABI values, termination handlers, and native workspace state. ABIBridge
+resolves complete method signatures from the selected installation; missing
+contracts produce diagnostics instead of guessed offsets or layouts.
+
+The host reads the native action registry and `enabledHeadlessMCPTools` to obtain
+backend capabilities. Native registration alone does not expose an internal
+action. The action adapter supplies conversation and request-artifact context.
+Workspace scope comes from the native contract. A stream ending without a final
+result is an error. Public operations and backend metadata have separate owners;
+a backend schema change must not replace the public contract.
+
+Saved models are loaded lazily. A Swift package directory and its `Package.swift`
+resolve to one model. Package resolution precedes initial destination readiness.
+Removed workspace directories are cleaned up before later operations, while
+models claimed by another active request remain open until that request drains.
+Native error panels are suppressed in headless execution and their diagnostics
+are attached to tool failures or stderr, so a locked desktop cannot block the
+host waiting for modal dismissal.
+
+Process-local corrections select the latest installed documentation index and
+installed Metal toolchain without changing persisted Xcode preferences. The
+Metal provider receives the directory containing `.xctoolchain` bundles, not the
+bundle itself. Restart the host after replacing either asset. The breakpoint
+manager is prepared on the main thread before debugger launch to avoid native
+global-store initialization assertions. Crash-product lookup matches both bundle
+ID and platform; a bundle-ID-only match can choose another platform's cache.
+Cached analytics results do not establish online account access.
+
+### Preview rendering
+
+The direct renderer handles supported SwiftUI/UIKit/AppKit preview definitions
+and WidgetKit contexts using packaged platform applications. Xcode still owns
+build planning, definition identity, destination resolution, and supported native
+metadata. Unsupported source/display contracts use the native preview pipeline,
+including its service and entitlement requirements. Build failures must be
+reported before capture so stale products are never presented as a new preview.
+
+Source selection follows native build records and complete preflight identity.
+Prefer the active scheme's compatible runnable; use a unique compatible host
+when available. Ambiguous hosts retain the native route. Match embedded images
+by build UUID or exact bytes when UUIDs are absent, never by filename alone.
+Preserve source platform, architecture, and bundle ownership during staging.
+
+Applications and extensions retain their resources and entitlements. Hostless
+previews use the selected native recipe's preview agent identity. Dynamic images
+follow transitive Mach-O dependencies and retain framework bundles. Static and
+package roots use separate sidecars derived from Xcode's product graph, linker
+inputs, and resource paths. Do not infer package resource ownership solely from
+Mach-O type. `PACKAGE_RESOURCE_BUNDLE_PATH` points to staged package resources
+and is resolved after Simulator installation when needed.
+
+Packaged renderers own their application/scene lifecycle; they do not run the
+original app initializer or delegate. Preview bodies supply their dependencies.
+Original Simulator data, App Groups, and Keychain contents are not copied into
+the temporary device. Preserve both signed entitlements and any Simulator-only
+Mach-O entitlement section; putting the latter in the real signature can cause
+AMFI rejection. Extension clients use a separate identifier to coexist with the
+original extension; native Widget services use the original extension identity.
+
+Each render owns its temporary scene. UIKit scenes require the native creation
+notification, initial settings acknowledgement, and teardown on the call-out
+queue. Preserve the original application's connected scene and session. Device
+masking and orientation use native display configuration; fixed/fitting layouts
+retain their own geometry. Static snapshots cap the longest dimension at 1500
+pixels without upscaling. macOS capture uses the renderer window's own compositor
+context and sRGB IOSurface to preserve materials and window corners; exported
+snapshot mode objects must retain their identity. Unavailable private bindings
+use the native pipeline; allocation/capture failures remain rendering errors.
+
+Widgets use their registered extension and native preview description, controls,
+provider state, and static snapshot services. Keep the client from taking the
+foreground away from PreviewShell, which can suspend extension assertions.
+Activity and legacy complication contexts preserve native attributes, timelines,
+family, and appearance. Unknown reflected configurations or transforms use the
+native route instead of constructing a partial preview. SwiftUI readiness must
+be signalled after loading source code to avoid a graph waiting for injection.
+
+A workspace's preview session owns staged products, renderers, and its temporary
+Simulator. Reuse requires unchanged build inputs/products, execution context,
+definition, locale, and native destination resolution. Re-resolve current
+warnings and preferences on every call. Changed code, resources, or destination
+retire the affected state before staging replacements. Closing a workspace,
+failure, timeout, cancellation, and shutdown stop owned renderers and remove
+owned devices/products, never the user's existing Simulator devices. Preserve
+artifacts and report cleanup failures with the original error. Source resolution
+and initial ABI binding can precede the rendering timeout.
+
+### Packaging and signing
+
+`scripts/build-native-host.sh` owns app assembly, Info.plist, entitlement, and
+signing for source, Homebrew, and release builds. Launch the packaged executable;
+the bare SwiftPM binary lacks its required bundle. The app retains the native
+headless role identifier and uses its own code-signing identity. These identifiers
+do not grant Apple privileges.
+
+Only the public dynamic-loader entitlement is used for loading the selected
+Xcode's frameworks under hardened runtime. Apple-restricted Service entitlements
+and BoardServices registration are not copied. The helper does not connect to
+GUI Xcode or alter agent permissions. The separate opt-in Accessibility monitor
+presses recognized connection dialogs' Allow button.
+
+Verify helper startup and workspace operations under normal SIP/AMFI, including
+a Developer ID hardened-runtime build before distribution. Signing/notarization
+alone does not prove access to a privileged service. Preview, device, debugger,
+and account operations require their own checks.
+
+## Verification
+
+Run the relevant existing suite with an explicit macOS destination, for example:
 
 ```sh
 xcodebuild test -workspace XcodeMCPKit.xcworkspace -scheme XcodeMCPProxyRuntimeTests -destination 'platform=macOS'
 ```
 
-Use `swift build --target XcodeMCPProxyRuntimeTests -v` to inspect that target's
-compilation graph. `swift test --filter` selects execution and may build other
-test targets; it is not proof of compilation isolation. SDK transport-integration
-cases remain in `XcodeMCPKitTests`; use a package test scheme containing that
-target, or `swift test --filter XcodeMCPKitTests` if the generated SDK scheme
-has no test action. Xcode may group other targets into a package test scheme
-rather than generate a dedicated scheme for every target.
+| Test target | Boundary |
+| --- | --- |
+| `XcodeMCPCoreTests` | Wire/framing and low-level HTTP transport. |
+| `XcodeMCPProcessRuntimeTests` | Process I/O and termination with fake drivers and opt-in live cases. |
+| `XcodeMCPNativeRuntimeTests` | Native schemas, workspace/execution lifetime, previews, and documentation assets. |
+| `XcodeMCPProxyRuntimeTests` | Public/backend contracts, handle routing, scheduling, and recovery. |
+| `XcodeMCPProxyHTTPTests` | HTTP/SSE gateway with a runtime-contract fake. |
+| `ProxyIntegrationTests` | Actual HTTP/runtime and configuration composition. |
+| `PublicProductContractTests` | Supported library consumers compiled from an external package. |
 
-`XcodeMCPCoreTestSupport` owns generic clocks and process-I/O fakes. Shared
-proxy synchronization and filesystem fixtures stay in `XcodeMCPProxyTestSupport`.
-`XcodeMCPProxyRuntimeTestSupport` shares lower upstream fakes and coordinator
-fixture helpers between unit and integration tests through testable imports;
-it does not add production API or test-only production branches. Fixtures used
-by only one suite remain with that suite.
+Core fixtures live in `XcodeMCPCoreTestSupport`, shared proxy fixtures in
+`XcodeMCPProxyTestSupport`, and coordinator/upstream fixtures in
+`XcodeMCPProxyRuntimeTestSupport`. A fixture used by one suite stays with that
+suite. Keep deterministic observations at owner boundaries instead of adding
+production test hooks or reproducing internal branch order in assertions.
 
-The four coordinator suites keep their CI filter names and live in separate
-files. HTTP/configuration integration cases run in the remaining shard. When
-moving tests, compare discovery identifiers with module/suite moves accounted
-for, then verify each identifier is selected by exactly one CI shard.
+`scripts/verify-proxy-target-boundaries.sh` checks dependency direction;
+`scripts/check.sh` runs the full local maintainer checks. Package test schemes
+can include several targets. Filtering execution does not prove compilation
+isolation; inspect `swift build --target <target> -v` when that boundary matters.
+When moving suites, verify each discovery identifier belongs to exactly one CI
+shard. CI compilation caches still require an actual incremental build.
 
-## Protocol Boundaries
+Process suites opt in with `XCODE_MCP_RUN_PROCESS_TESTS=1`. Stress tests opt in
+with `XCODE_MCP_RUN_STRESS_TESTS=1` and are excluded from normal checks/CI. The
+manual live-server benchmark is:
 
-- `stdout`
-  - Protocol payloads only. Do not send logs or debug text here.
-- `stderr`
-  - Human-readable logging only.
-- HTTP request bodies
-  - Parse once per request and pass the parsed payload through forwarding/local handling; do not re-parse in hot-path helpers unless the payload is synthesized internally.
-- Resource lifecycle
-  - Public `close()`, `stop()`, and `shutdown()` methods are the graceful
-    completion contracts. They stop admission, cancel and await owned tasks,
-    close transport/channel resources, then publish terminal state.
-  - `deinit` is a synchronous cancellation backstop only. It must not create an
-    unowned cleanup task or promise graceful protocol shutdown.
-- Discovery
-  - A discovery record is a URL hint. Only a connection plus standard
-    initialize handshake establishes reachability; PID liveness is not truth.
-
-## Local Verification
-
-- Fast regression suite:
-  - `swift test -Xswiftc -strict-concurrency=minimal`
-- Process / pipe suite:
-  - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter XcodeMCPProcessRuntimeTests -Xswiftc -strict-concurrency=minimal`
-  - `XCODE_MCP_RUN_PROCESS_TESTS=1 swift test --no-parallel --filter ProxyStdioAdapterTests -Xswiftc -strict-concurrency=minimal`
-- Full local maintainer check:
-  - `scripts/check.sh`
-
-These checks use lower process/transport fixtures and do not require GUI Xcode
-or a live native helper unless explicitly selected.
-
-## Headless security boundary
-
-The helper does not connect to GUI Xcode or write agent permission settings. Its
-packaging uses the public dynamic-loader entitlement required for selected-Xcode
-framework loading and no Apple-restricted entitlements. Verify startup and
-workspace operations under normal SIP/AMFI settings, including a Developer ID
-hardened-runtime build before distribution. A valid signature or notarization
-alone does not prove that a tool can use a privileged service.
-
-## Release Flow
-
-[Homebrew distribution](../Homebrew/README.md) owns the maintainer setup,
-approval, publication, and recovery instructions. Start an approved release with
-`scripts/release.py start`; CI pins the target commit and publication content,
-prepares the source tag and Formula, and waits for `release-publish` approval
-before using the GitHub App key to dispatch the tap update. The tap publishes
-tested bottles, and source CI verifies the installed public bottle before
-publishing the same Draft.
-
-`scripts/build-native-host.sh` remains the sole owner of the native app's
-Info.plist, public loader entitlement, and signing. Both source
-installation and Homebrew builds use it. Homebrew keeps the signed bundle beside
-the commands in `libexec` and links the commands into `bin`.
-The source installer retains its atomic replacement and cleanup diagnostics.
-
-Release orchestration tests run in CI and locally with:
-
-```bash
-python3 -B -m unittest discover -s scripts/tests -v
+```sh
+python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100
 ```
 
-## Stress Suite
+It uses persistent sessions against a running server and deletes those sessions
+on exit. Non-loopback endpoints require `--allow-non-loopback`.
 
-- In-process entry point:
-  - `XCODE_MCP_RUN_STRESS_TESTS=1 swift test --no-parallel --filter ProxyStressTests -Xswiftc -strict-concurrency=minimal`
-- Purpose:
-  - Validate high-volume HTTP/session multiplexing without a live native helper.
-- Isolation rules:
-  - Opt-in only; excluded from default `swift test`, `scripts/check.sh`, and CI.
-  - Uses an in-process HTTP server and fake upstream.
-  - Current coverage opens 4 MCP sessions and sends 1,000 parallel `DocumentationSearch` calls per session.
+For live checks, use the [tool verifier](../Sources/XcodeMCPProxyToolVerifier/README.md)
+and disposable saved projects with an explicit scheme, destination, and test plan.
+The legacy `ProxyLiveMCPBridgeTests` suite name remains a test identifier for
+owned-host smoke cases. Keep GUI Xcode closed when proving headless independence.
+Isolate discovery, fixtures, and logs under a temporary root and stop only servers,
+models, devices, and processes created by the run. Do not use the user's default
+discovery file for tests. Match verification claims to the operations actually run.
 
-### Running Server Benchmark
+## Release
 
-- Entry point:
-  - `python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100`
-- Purpose:
-  - Benchmark an already-running `xcode-mcp-proxy-server` with real `DocumentationSearch` calls.
-- Isolation rules:
-  - Manual-only; excluded from default `swift test`, `scripts/check.sh`, and CI.
-  - Resolves the endpoint from `--endpoint`, `XCODE_MCP_PROXY_ENDPOINT`, discovery file, then `http://localhost:8765/mcp`.
-  - Rejects non-loopback endpoints by default; `--allow-non-loopback` is required to benchmark a remote endpoint.
-  - Defaults to 4 agents, each represented by one persistent HTTP connection and one MCP session.
-  - Each agent sends 100 `DocumentationSearch` requests in a closed loop, then reports throughput and per-request latency percentiles.
-  - Deletes benchmark MCP sessions before exit.
+[Homebrew distribution](../Homebrew/README.md) owns approval, publication, bottle
+verification, and recovery. Approved releases use `scripts/release.py start`;
+source CI pins the commit and content, prepares the draft and Formula, and waits
+for publication approval before tap dispatch. Both source and Homebrew installs
+keep the signed helper beside the commands. Release orchestration tests use:
 
-## Native live verification
-
-The legacy `ProxyLiveMCPBridgeTests` suite name remains a CI/test identifier.
-Its owned-host cases launch the signed native app, verify initialization and the
-catalog, and close their helper on EOF. They do not require an existing GUI
-process. Use the opt-in environment and explicit test scheme documented by the
-suite before starting a live run.
-
-Use a disposable saved project with an explicit scheme, run destination, and test
-plan for live build/test checks. Keep GUI Xcode closed when verifying headless
-independence. Isolate fixture files, discovery records, and logs under a temporary
-root and close only resources created by the run.
-
-## Cleanup Expectations
-
-- Live runs must terminate the dedicated in-process proxy server.
-- Live runs must write discovery output only under their temp root.
-- Do not rely on the user’s default `~/Library/Caches/XcodeMCPProxy/endpoint.json` during tests.
-
-## Review Checklist
-
-- `stdout` is never used for logging or debug formatting.
-- Shared state accessed across callbacks/tasks is either actor-isolated or explicitly synchronized.
-- Request parsing is not duplicated on the hot path.
-- Bind/start/stop failure paths clean up listeners, timers, and child tasks.
-- Canonical initialize/tools cache cannot survive upstream exit/quarantine/eager retry windows.
-- New feature code does not add tool-specific branching to forwarding when a dedicated helper/workflow can own it instead.
+```sh
+python3 -B -m unittest discover -s scripts/tests -v
+```

@@ -87,6 +87,7 @@ struct ManagedUpstreamSlotTests {
             return
         }
         await session.waitForStopToStart()
+        await slot.start()
         #expect(await slot.send(Data()) == .unavailable(.notStarted))
         #expect(await session.stopCount() == 1)
         await session.releaseStop()

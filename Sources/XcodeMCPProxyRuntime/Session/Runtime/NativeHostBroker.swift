@@ -20,6 +20,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         var closing: [UUID: Task<Void, Never>] = [:]
         var stopped = false
         var resetsInProgress = 0
+        var publicCatalog: JSONValue?
     }
     private let state = NIOLockedValueBox(State())
     private let eventSource = ProxyRuntimeEventSource()
@@ -29,7 +30,17 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private let clock: ClockClient
     static let defaultHostIdentifier = "host-default"
     static let listTool = "XcodeMCPKitListHosts"
-    static let selectTool = "XcodeMCPKitSelectHost"
+    static let listWorkspacesTool = "XcodeListWorkspaces"
+    static let openWorkspaceTool = "XcodeOpenWorkspace"
+    static let closeWorkspaceTool = "XcodeCloseWorkspace"
+
+    private struct Admission: Sendable {
+        let hostIdentifier: String
+        let workspace: NativeBrokerWorkspace?
+        let deviceSession: NativeBrokerDeviceSession?
+        let launchSession: NativeBrokerLaunchSession?
+        let error: String?
+    }
 
     package convenience init(configuration: ProxyRuntimeConfiguration) throws {
         try self.init(configuration: configuration,
@@ -108,8 +119,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             if case .object(let values)? = message.decodedJSON {
                 parameters = values["params"] ?? .object([:])
             } else { parameters = .object([:]) }
-            let session = NativeBrokerSession(identifier: sessionID, defaultHost: Self.defaultHostIdentifier,
-                                               initializeParameters: parameters)
+            let session = NativeBrokerSession(identifier: sessionID, initializeParameters: parameters)
             let registered = state.withLockedValue { storage in
                 guard !storage.stopped, storage.resetsInProgress == 0,
                       storage.sessions[sessionID] == nil else { return false }
@@ -120,31 +130,55 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             eventSource.emit(.sessionOpened(sessionID: sessionID))
         }
         guard let session = state.withLockedValue({ $0.resetsInProgress == 0 ? $0.sessions[sessionID] : nil }) else { return nil }
-        let admission = session.state.withLockedValue { storage -> (String, UInt64)? in
+        let admission = session.state.withLockedValue { storage -> Admission? in
             guard !storage.closed else { return nil }
             storage.activeRequests += 1
-            storage.hostRequests[storage.selectedHost, default: 0] += 1
             storage.activity = DispatchTime.now().uptimeNanoseconds
-            if Self.toolName(in: message) == Self.selectTool { storage.selectionRevision &+= 1 }
-            return (storage.selectedHost, storage.selectionRevision)
+            let arguments = (object?["params"] as? [String: Any])?["arguments"] as? [String: Any] ?? [:]
+            let device = (arguments["interactionSessionKey"] as? String).flatMap { storage.deviceSessions[$0] }
+            let launch = (arguments["launchSessionReference"] as? String).flatMap { storage.launchSessions[$0] }
+            let workspace: NativeBrokerWorkspace?
+            if let identifier = arguments["workspaceIdentifier"] as? String {
+                workspace = storage.workspaces[identifier]
+            } else {
+                workspace = device?.workspace ?? launch?.workspace
+            }
+            let host = workspace?.hostIdentifier ?? device?.hostIdentifier ?? launch?.hostIdentifier
+                ?? (arguments["hostIdentifier"] as? String) ?? Self.defaultHostIdentifier
+            var error: String?
+            if arguments["tabIdentifier"] != nil {
+                error = "Use workspaceIdentifier returned by XcodeListWorkspaces instead of a native tabIdentifier"
+            }
+            if let value = arguments["workspaceIdentifier"] as? String, workspace == nil,
+               !value.hasPrefix("/") {
+                error = "Unknown workspaceIdentifier '\(value)'; call XcodeListWorkspaces or XcodeOpenWorkspace"
+            }
+            if let value = arguments["interactionSessionKey"] as? String, device == nil {
+                error = "Unknown interactionSessionKey '\(value)'; start a device interaction session"
+            }
+            if let value = arguments["launchSessionReference"] as? String, launch == nil {
+                error = "Unknown launchSessionReference '\(value)'; use a reference returned by RunProject"
+            }
+            if let workspace, let conflict = Self.workspaceConflict(workspace, device: device, launch: launch) {
+                error = conflict
+            }
+            if let selector = ["hostIdentifier", "workspaceIdentifier", "interactionSessionKey", "launchSessionReference"].first(where: {
+                arguments[$0] != nil && !(arguments[$0] is String)
+            }) {
+                error = "\(selector) must be a string"
+            }
+            storage.hostRequests[host, default: 0] += 1
+            return Admission(hostIdentifier: host, workspace: workspace, deviceSession: device, launchSession: launch, error: error)
         }
         guard let admission else { return nil }
         let key = UUID()
         let admittedMessage = message
-        var timeoutReply = ProxyRuntimeReply.mcpError(id: requestID, code: -32000,
+        let timeoutReply = ProxyRuntimeReply.mcpError(id: requestID, code: -32000,
             message: "upstream timeout", sessionID: sessionID, prefersEventStream: message.prefersEventStream)
-        if let object, case .request("tools/list", _) = JSONRPC.Message.Inspector.kind(of: object),
-           (object["params"] as? [String: Any])?["cursor"] == nil {
-            timeoutReply = (try? Self.response(id: requestID, result: .object([
-                "tools": .array(Self.managementTools),
-                "_meta": .object(["com.lynnswap.xcode-mcpkit/nativeCatalogError": .string("upstream timeout")]),
-            ]), session: sessionID, eventStream: message.prefersEventStream)) ?? timeoutReply
-        }
         let operation = NativeHostBrokerOperation(cancelledReply: cancelled, requestIDKey: requestID?.key,
             deadline: message.deadline, clock: clock, timeoutReply: timeoutReply) { [self] cancellation in
-            let reply = await process(admittedMessage, in: session, hostIdentifier: admission.0,
-                                      selectionRevision: admission.1, cancellation: cancellation)
-            session.releaseHost(admission.0)
+            let reply = await process(admittedMessage, in: session, admission: admission, cancellation: cancellation)
+            session.releaseHost(admission.hostIdentifier)
             closeUnusedChannels(in: session)
             return reply
         }
@@ -161,7 +195,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     private func process(_ request: ProxyRuntimeRequest, in session: NativeBrokerSession,
-                         hostIdentifier: String, selectionRevision: UInt64,
+                         admission: Admission,
                          cancellation: NativeHostBrokerCancellation) async -> ProxyRuntimeReply {
         guard let json = request.decodedJSON else {
             return .mcpError(id: nil, code: -32700, message: "invalid json",
@@ -179,7 +213,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 session.state.withLockedValue { $0.protocolVersion = MCPProtocolVersion.current }
                 return try Self.response(id: id, result: .object([
                     "protocolVersion": .string(MCPProtocolVersion.current),
-                    "capabilities": .object(["tools": .object(["listChanged": .bool(true)])]),
+                    "capabilities": .object(["tools": .object(["listChanged": .bool(false)])]),
                     "serverInfo": .object(["name": .string("XcodeMCPKit"), "version": .string("1")]),
                 ]), session: session.identifier, eventStream: request.prefersEventStream)
             case .malformed(let invalidID):
@@ -203,63 +237,53 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 return try Self.response(id: id, result: .object([:]), session: session.identifier,
                                          eventStream: request.prefersEventStream)
             case .request("tools/list", _):
-                var catalog: [String: JSONValue]
-                do {
-                    let reply = try await forward(request, session: session,
-                                                  hostIdentifier: hostIdentifier, cancellation: cancellation)
-                    guard case .object(let value) = try Self.result(in: reply) else {
-                        throw NativeHostBrokerError("Native catalog is not an object")
-                    }
-                    catalog = value
-                } catch let error as NativeHostBrokerRPCError where error.isInputError {
-                    return error.reply
-                } catch {
-                    try Task.checkCancellation()
-                    catalog = ["tools": .array([]), "_meta": .object([
-                        "com.lynnswap.xcode-mcpkit/nativeCatalogError": .string(String(describing: error)),
-                    ])]
+                if (object["params"] as? [String: Any])?["cursor"] != nil {
+                    return .mcpError(id: id, code: -32602, message: "Invalid tools/list cursor",
+                        sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
                 }
-                if object["params"] == nil
-                    || (object["params"] as? [String: Any])?["cursor"] == nil {
-                    let native: [JSONValue]
-                    if case .array(let values)? = catalog["tools"] { native = values } else { native = [] }
-                    catalog["tools"] = .array(native + Self.managementTools)
+                if let catalog = state.withLockedValue({ $0.publicCatalog }) {
+                    return try Self.response(id: id, result: catalog, session: session.identifier,
+                                             eventStream: request.prefersEventStream)
                 }
-                return try Self.response(id: id, result: .object(catalog), session: session.identifier,
+                let reply = try await forward(request, session: session,
+                    hostIdentifier: Self.defaultHostIdentifier, cancellation: cancellation)
+                let catalog = try XcodeToolCatalog.publicResult(from: Self.result(in: reply),
+                                                              managementTools: Self.managementTools)
+                let published = state.withLockedValue { storage in
+                    if storage.publicCatalog == nil { storage.publicCatalog = catalog }
+                    return storage.publicCatalog ?? catalog
+                }
+                return try Self.response(id: id, result: published, session: session.identifier,
                                          eventStream: request.prefersEventStream)
             case .request("tools/call", _):
-                if let parameters = object["params"] as? [String: Any],
-                   let name = parameters["name"] as? String,
-                   name == Self.listTool || name == Self.selectTool {
-                    let result: JSONValue
-                    do {
-                        if name == Self.listTool {
-                            for installation in try await inventory.discover() {
-                                _ = try register(installation: installation)
-                            }
-                            for process in inventory.runningGUIProcesses() {
-                                _ = try register(installation: process.installation, guiProcess: process)
-                            }
-                            result = .object(["hosts": .array(hosts().map { descriptor($0, for: session) })])
-                        } else {
-                            result = try await select(parameters["arguments"] as? [String: Any] ?? [:],
-                                session: session, revision: selectionRevision, deadline: request.deadline)
-                        }
-                        return try Self.response(id: id, result: Self.toolResult(result),
-                            session: session.identifier, eventStream: request.prefersEventStream)
-                    } catch {
-                        try Task.checkCancellation()
-                        return try Self.response(id: id, result: Self.toolResult(.object([
-                            "message": .string(String(describing: error)),
-                            "selectedHostIdentifier": .string(session.state.withLockedValue { $0.selectedHost }),
-                        ]), isError: true), session: session.identifier, eventStream: request.prefersEventStream)
-                    }
+                if let arguments = (object["params"] as? [String: Any])?["arguments"],
+                   !(arguments is [String: Any]) {
+                    return .mcpError(id: id, code: -32602, message: "tools/call arguments must be an object",
+                        sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
                 }
-                return try await forward(request, session: session,
-                                         hostIdentifier: hostIdentifier, cancellation: cancellation)
+                do {
+                    if let error = admission.error { throw NativeHostBrokerError(error) }
+                    return try await callTool(request, session: session, admission: admission,
+                                              cancellation: cancellation)
+                } catch let error as NativeHostBrokerReplyError {
+                    return try Self.externalReply(error.reply, session: session.identifier, requestID: id)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    return try Self.response(id: id, result: Self.toolResult(.object([
+                        "message": .string(String(describing: error)),
+                    ]), isError: true), session: session.identifier, eventStream: request.prefersEventStream)
+                }
             case .request, .notification, .other:
                 return try await forward(request, session: session,
-                                         hostIdentifier: hostIdentifier, cancellation: cancellation)
+                                         hostIdentifier: admission.hostIdentifier, cancellation: cancellation)
+            }
+        } catch let error as NativeHostBrokerReplyError {
+            do {
+                return try Self.externalReply(error.reply, session: session.identifier, requestID: id)
+            } catch {
+                return .failure(kind: .invalidUpstreamResponse, message: "Invalid native error response: \(error)",
+                                sessionID: session.identifier)
             }
         } catch is CancellationError {
             return .mcpError(id: id, code: -32800, message: "request cancelled",
@@ -270,64 +294,10 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         }
     }
 
-    private func select(_ arguments: [String: Any], session: NativeBrokerSession,
-                        revision: UInt64, deadline: Date?) async throws -> JSONValue {
-        guard let id = arguments["hostIdentifier"] as? String,
-              var host = state.withLockedValue({ storage -> NativeBrokerHost? in
-                  guard let host = storage.hosts[id] else { return nil }
-                  session.state.withLockedValue { $0.hostRequests[host.identifier, default: 0] += 1 }
-                  return host
-              }) else {
-            throw NativeHostBrokerError("Choose a hostIdentifier returned by XcodeMCPKitListHosts")
-        }
-        let initiallyPinnedHost = host.identifier
-        defer { session.releaseHost(initiallyPinnedHost); closeUnusedChannels(in: session) }
-        let createsNew: Bool
-        if let value = arguments["createsNewHost"] {
-            guard let json = JSONValue(any: value), case .bool(let flag) = json else {
-                throw NativeHostBrokerError("createsNewHost must be a boolean")
-            }
-            createsNew = flag
-        } else { createsNew = false }
-        if createsNew {
-            guard host.guiProcess == nil else {
-                throw NativeHostBrokerError("A running Xcode process is shared; choose its existing host")
-            }
-            host = try register(installation: host.installation, independent: true, claiming: session)
-        }
-        let selectedHost = host
-        defer {
-            if selectedHost.identifier != initiallyPinnedHost {
-                session.releaseHost(selectedHost.identifier)
-                closeUnusedChannels(in: session)
-            }
-        }
-        let channel = try await channel(for: host, session: session)
-        var catalog = try ProxyRuntimeRequest(json: .object([
-            "jsonrpc": .string("2.0"), "id": .string("broker-catalog-" + UUID().uuidString),
-            "method": .string("tools/list"),
-        ]), headerSessionExists: true, prefersEventStream: false)
-        catalog.deadline = deadline
-        _ = try Self.result(in: await channel.execute(catalog, cancellation: NativeHostBrokerCancellation()))
-        try Task.checkCancellation()
-        let applied = session.state.withLockedValue { storage in
-            guard !storage.closed, storage.selectionRevision == revision else { return false }
-            storage.selectedHost = host.identifier
-            return true
-        }
-        if applied {
-            let data = try JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(
-                method: "notifications/tools/list_changed"))
-            eventSource.emit(.notification(sessionID: session.identifier, data: data))
-        }
-        return .object(["host": descriptor(host, for: session), "selectionApplied": .bool(applied),
-            "selectedHostIdentifier": .string(session.state.withLockedValue { $0.selectedHost })])
-    }
-
     private func channel(for host: NativeBrokerHost, session: NativeBrokerSession)
         async throws -> NativeBrokerChannel {
         if let process = host.guiProcess, !inventory.isGUIProcessRunning(process) {
-            throw NativeHostBrokerError("The selected Xcode process is no longer running")
+            throw NativeHostBrokerError("The workspace's Xcode process is no longer running")
         }
         let channel = try await session.channel(for: host, register: { [self] backendID in
             try state.withLockedValue { storage in
@@ -341,7 +311,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         })
         if let process = host.guiProcess, !inventory.isGUIProcessRunning(process) {
             channel.close()
-            throw NativeHostBrokerError("The selected Xcode process exited while connecting")
+            throw NativeHostBrokerError("The workspace's Xcode process exited while connecting")
         }
         return channel
     }
@@ -350,7 +320,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                          hostIdentifier: String, cancellation: NativeHostBrokerCancellation)
         async throws -> ProxyRuntimeReply {
         guard let host = state.withLockedValue({ $0.hosts[hostIdentifier] }) else {
-            throw NativeHostBrokerError("Selected host is unavailable")
+            throw NativeHostBrokerError("The workspace's Xcode host is unavailable")
         }
         let channel = try await channel(for: host, session: session)
         try Task.checkCancellation()
@@ -395,14 +365,13 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
 
     private func receive(_ event: ProxyRuntimeEvent, from hostIdentifier: String) {
         if case .catalogChanged = event {
-            let sessions = state.withLockedValue { Array($0.sessions.values) }
-            guard let data = try? JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(
-                method: "notifications/tools/list_changed"
-            )) else { return }
-            for session in sessions where session.state.withLockedValue({
-                !$0.closed && $0.protocolVersion != nil && $0.selectedHost == hostIdentifier
-            }) {
-                eventSource.emit(.notification(sessionID: session.identifier, data: data))
+            let (host, sessions) = state.withLockedValue {
+                ($0.hosts[hostIdentifier], Array($0.sessions.values))
+            }
+            guard let snapshot = host?.snapshot else { return }
+            for session in sessions where session.invalidateReferences(
+                hostIdentifier: hostIdentifier, supersededBy: snapshot.upstreamSource) {
+                closeUnusedChannels(in: session)
             }
             return
         }
@@ -428,12 +397,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         state.withLockedValue { Array($0.hosts.values) }.sorted { $0.index < $1.index }
     }
 
-    private func descriptor(_ host: NativeBrokerHost, for session: NativeBrokerSession) -> JSONValue {
+    private func descriptor(_ host: NativeBrokerHost) -> JSONValue {
         var result = host.installation.fields
         result["kind"] = .string(host.guiProcess == nil ? "headless" : "gui")
         result["hostIdentifier"] = .string(host.identifier)
         result["isDefault"] = .bool(host.identifier == Self.defaultHostIdentifier)
-        result["isSelected"] = .bool(session.state.withLockedValue { $0.selectedHost } == host.identifier)
         let snapshot = host.snapshot
         let isRunning = host.guiProcess.map(inventory.isGUIProcessRunning)
         result["isReady"] = .bool(snapshot?.catalogAvailable == true && isRunning != false)
@@ -442,9 +410,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             result["isRunning"] = .bool(isRunning == true)
         }
         if let origin = snapshot?.originMetadata {
-            result["origin"] = origin
             if case .object(let fields) = origin {
-                if host.guiProcess == nil { result["processIdentifier"] = fields["processID"] }
                 if let version = fields["xcodeVersion"] { result["xcodeVersion"] = version }
             }
         }
@@ -540,7 +506,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             guard host.independent || host.guiProcess != nil else { return false }
             return !storage.sessions.values.contains { session in
                 session.state.withLockedValue { session in
-                    (!session.closed && session.selectedHost == host.identifier)
+                    (!session.closed && session.retainsHost(host.identifier))
                         || session.hostRequests[host.identifier] != nil
                         || session.channels[host.identifier] != nil
                 }
@@ -641,4 +607,351 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         await waitForClosingResources()
         for host in hosts() { if let runtime = host.runtimeIfStarted { await runtime.reset() } }
     }
+}
+
+private extension NativeHostBroker {
+    private func callTool(_ request: ProxyRuntimeRequest, session: NativeBrokerSession,
+                  admission: Admission, cancellation: NativeHostBrokerCancellation) async throws -> ProxyRuntimeReply {
+        guard case .object(let object)? = request.decodedJSON,
+              case .object(let parameters)? = object["params"],
+              case .string(let name)? = parameters["name"] else {
+            throw NativeHostBrokerError("tools/call requires a tool name")
+        }
+        let arguments: [String: JSONValue]
+        if case .object(let values)? = parameters["arguments"] { arguments = values }
+        else { arguments = [:] }
+        let result: JSONValue
+        switch name {
+        case Self.listTool:
+            for installation in try await inventory.discover() { _ = try register(installation: installation) }
+            try discoverGUIHosts()
+            result = try Self.toolResult(.object(["hosts": .array(hosts().filter { host in
+                host.guiProcess.map(inventory.isGUIProcessRunning) ?? true
+            }.map(descriptor))]))
+        case Self.listWorkspacesTool:
+            result = try await listWorkspaces(request, session: session, cancellation: cancellation)
+        case Self.openWorkspaceTool:
+            result = try await openWorkspace(arguments, request: request, session: session,
+                                             cancellation: cancellation)
+        case Self.closeWorkspaceTool:
+            guard let workspace = admission.workspace else {
+                throw NativeHostBrokerError("XcodeCloseWorkspace requires a workspaceIdentifier returned by XcodeOpenWorkspace or XcodeListWorkspaces")
+            }
+            guard let host = state.withLockedValue({ $0.hosts[workspace.hostIdentifier] }) else {
+                throw NativeHostBrokerError("The workspace's Xcode host is unavailable")
+            }
+            let channel = try await channel(for: host, session: session)
+            let source = try channel.source()
+            guard source == workspace.source else { throw Self.expiredReference() }
+            if workspace.gui {
+                _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
+                result = try Self.toolResult(.object([
+                    "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
+                    "message": .string("Released the workspace reference. The Xcode window remains open."),
+                ]))
+            } else {
+                let native = try Self.toolRequest(request, name: name,
+                    arguments: ["workspaceIdentifier": .string(workspace.nativeIdentifier)])
+                let reply = try Self.externalReply(
+                    await channel.execute(native, source: source, cancellation: cancellation),
+                    session: session.identifier, hostIdentifier: workspace.hostIdentifier)
+                let value = try Self.result(in: reply)
+                if !Self.isToolError(value) {
+                    _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
+                }
+                return try Self.rewriteReply(reply, workspace: workspace, deviceSession: nil)
+            }
+        default:
+            return try await callNativeTool(name, arguments: arguments, request: request,
+                session: session, admission: admission, cancellation: cancellation)
+        }
+        return try Self.response(id: Self.requestID(request), result: result, session: session.identifier,
+                                 eventStream: request.prefersEventStream)
+    }
+
+    private func discoverGUIHosts() throws {
+        for process in inventory.runningGUIProcesses() {
+            _ = try register(installation: process.installation, guiProcess: process)
+        }
+    }
+
+    private func withPinnedHost<T: Sendable>(_ host: NativeBrokerHost, session: NativeBrokerSession,
+        operation: (NativeBrokerChannel) async throws -> T) async throws -> T {
+        try session.state.withLockedValue { state in
+            guard !state.closed else { throw CancellationError() }
+            state.hostRequests[host.identifier, default: 0] += 1
+        }
+        defer { session.releaseHost(host.identifier); closeUnusedChannels(in: session) }
+        let channel = try await channel(for: host, session: session)
+        return try await operation(channel)
+    }
+
+    private func listWorkspaces(_ request: ProxyRuntimeRequest, session: NativeBrokerSession,
+                        cancellation: NativeHostBrokerCancellation) async throws -> JSONValue {
+        try discoverGUIHosts()
+        let targets = hosts().filter {
+            if let gui = $0.guiProcess { return inventory.isGUIProcessRunning(gui) }
+            return $0.identifier == Self.defaultHostIdentifier || $0.runtimeIfStarted != nil
+        }
+        var entries: [JSONValue] = []
+        var errors: [JSONValue] = []
+        for host in targets {
+            do {
+                let listed = try await withPinnedHost(host, session: session) { channel in
+                    let source = try channel.source()
+                    let entries = try await workspaceEntries(host: host, channel: channel, source: source,
+                                                             request: request, cancellation: cancellation)
+                    return try entries.map {
+                        try session.bindWorkspace(host: host, source: source, nativeIdentifier: $0.nativeIdentifier,
+                                                  path: $0.path, name: nil)
+                    }
+                }
+                entries.append(contentsOf: listed.map(\.descriptor))
+            } catch is CancellationError { throw CancellationError() }
+            catch let error as NativeHostBrokerReplyError {
+                var detail: [String: JSONValue] = ["hostIdentifier": .string(host.identifier)]
+                switch error.reply {
+                case .failure(let kind, let message, _):
+                    detail["failureKind"] = .string(String(describing: kind))
+                    detail["message"] = .string(message)
+                case .mcpError(_, let code, let message, _, _):
+                    detail["error"] = .object(["code": .number(.int(Int64(code))), "message": .string(message)])
+                case .response(let data, _, _):
+                    let object = try JSONRPC.Wire.object(fromData: data)
+                    detail["error"] = object["error"].flatMap(JSONValue.init(any:))
+                case .accepted:
+                    detail["message"] = .string(error.description)
+                }
+                errors.append(.object(detail))
+            }
+            catch let error as NativeBrokerToolFailure {
+                errors.append(.object(["hostIdentifier": .string(host.identifier), "error": error.result]))
+            } catch {
+                errors.append(.object(["hostIdentifier": .string(host.identifier),
+                                       "message": .string(String(describing: error))]))
+            }
+        }
+        var payload: [String: JSONValue] = ["workspaces": .array(entries)]
+        if !errors.isEmpty { payload["errors"] = .array(errors) }
+        return try Self.toolResult(.object(payload), isError: !errors.isEmpty)
+    }
+
+    private func workspaceEntries(host: NativeBrokerHost, channel: NativeBrokerChannel,
+                          source: ProxyRuntimeUpstreamSource, request: ProxyRuntimeRequest,
+                          cancellation: NativeHostBrokerCancellation) async throws -> [NativeBrokerWorkspaceEntry] {
+        let gui = host.guiProcess != nil
+        let native = try Self.toolRequest(request, name: gui ? "XcodeListWindows" : Self.listWorkspacesTool,
+                                         arguments: [:])
+        let value = try Self.result(in: await channel.execute(native, source: source, cancellation: cancellation))
+        if Self.isToolError(value) { throw NativeBrokerToolFailure(result: value) }
+        let payload = try Self.toolPayload(value)
+        guard let message = Self.string(payload["message"]) else {
+            throw NativeHostBrokerError("Native workspace enumeration returned no message")
+        }
+        let selector = gui ? "tabIdentifier: " : "workspaceIdentifier: "
+        return try message.split(separator: "\n").compactMap { line in
+            guard let marker = line.range(of: selector) else { return nil }
+            let entry = line[marker.upperBound...]
+            guard let separator = entry.range(of: ", workspacePath: ") else {
+                throw NativeHostBrokerError("Native workspace enumeration has no workspacePath: \(line)")
+            }
+            let identifier = String(entry[..<separator.lowerBound])
+            let path = String(entry[separator.upperBound...])
+            return NativeBrokerWorkspaceEntry(nativeIdentifier: identifier, path: path)
+        }
+    }
+
+    private func openWorkspace(_ arguments: [String: JSONValue], request: ProxyRuntimeRequest,
+                       session: NativeBrokerSession, cancellation: NativeHostBrokerCancellation) async throws -> JSONValue {
+        guard let path = Self.string(arguments["path"]) else {
+            throw NativeHostBrokerError("XcodeOpenWorkspace requires path")
+        }
+        let hostIdentifier = Self.string(arguments["hostIdentifier"]) ?? Self.defaultHostIdentifier
+        guard var host = state.withLockedValue({ $0.hosts[hostIdentifier] }) else {
+            throw NativeHostBrokerError("Unknown hostIdentifier; call XcodeMCPKitListHosts")
+        }
+        let createsNew: Bool
+        if let value = arguments["createsNewHost"] {
+            guard case .bool(let flag) = value else { throw NativeHostBrokerError("createsNewHost must be a boolean") }
+            createsNew = flag
+        } else { createsNew = false }
+        if createsNew {
+            guard host.guiProcess == nil else {
+                throw NativeHostBrokerError("A running Xcode process is shared; createsNewHost applies to headless workspaces")
+            }
+            host = try register(installation: host.installation, independent: true, claiming: session)
+        }
+        let registeredHost = host
+        defer {
+            if createsNew {
+                session.releaseHost(registeredHost.identifier)
+                closeUnusedChannels(in: session)
+            }
+        }
+        return try await withPinnedHost(host, session: session) { channel in
+            let source = try channel.source()
+            if host.guiProcess != nil {
+                let entries = try await workspaceEntries(host: host, channel: channel, source: source,
+                                                        request: request, cancellation: cancellation)
+                let normalized = Self.normalizedWorkspacePath(path)
+                let matches = entries.filter {
+                    Self.normalizedWorkspacePath($0.path) == normalized
+                }
+                guard matches.count == 1, let entry = matches.first else {
+                    if matches.isEmpty {
+                        throw NativeHostBrokerError("The GUI host has no open window for this path. Open it in Xcode, or omit hostIdentifier to open a headless workspace.")
+                    }
+                    throw NativeHostBrokerError("Several Xcode windows have this path. Call XcodeListWorkspaces and choose the intended window's workspaceIdentifier.")
+                }
+                let workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: entry.nativeIdentifier,
+                                                          path: entry.path, name: nil)
+                return try Self.toolResult(workspace.descriptor)
+            }
+            let native = try Self.toolRequest(request, name: Self.openWorkspaceTool,
+                                             arguments: ["path": .string(path)])
+            let value = try Self.result(in: await channel.execute(native, source: source, cancellation: cancellation))
+            if Self.isToolError(value) { return value }
+            let payload = try Self.toolPayload(value)
+            guard let identifier = Self.string(payload["workspaceIdentifier"]) else {
+                throw NativeHostBrokerError("Native XcodeOpenWorkspace returned no workspaceIdentifier")
+            }
+            let workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: identifier,
+                path: Self.string(payload["workspacePath"]) ?? path, name: Self.string(payload["name"]))
+            return try Self.toolResult(Self.rewritePayload(.object(payload), workspace: workspace, deviceSession: nil))
+        }
+    }
+
+    private static func normalizedWorkspacePath(_ path: String) -> String {
+        var url = URL(filePath: path).standardizedFileURL
+        if url.lastPathComponent == "Package.swift",
+           (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+            url.deleteLastPathComponent()
+        }
+        return url.resolvingSymlinksInPath().path
+    }
+
+    private static func expiredReference() -> NativeHostBrokerError {
+        NativeHostBrokerError("This reference belongs to an earlier Xcode connection. Open or list workspaces again, or start a new session.")
+    }
+
+    private static func workspaceConflict(_ workspace: NativeBrokerWorkspace,
+        device: NativeBrokerDeviceSession?, launch: NativeBrokerLaunchSession?) -> String? {
+        if let device, workspace.hostIdentifier != device.hostIdentifier || workspace.source != device.source
+            || device.workspace.map({ !workspace.hasSameNativeScope(as: $0) }) == true {
+            return "The workspace and device session belong to different execution contexts"
+        }
+        if let launch, workspace.hostIdentifier != launch.hostIdentifier || workspace.source != launch.source
+            || launch.workspace.map({ !workspace.hasSameNativeScope(as: $0) }) == true {
+            return "The workspace and launch session belong to different execution contexts"
+        }
+        return nil
+    }
+
+    private func callNativeTool(_ name: String, arguments: [String: JSONValue], request: ProxyRuntimeRequest,
+                       session: NativeBrokerSession, admission: Admission,
+                       cancellation: NativeHostBrokerCancellation) async throws -> ProxyRuntimeReply {
+        guard let host = state.withLockedValue({ $0.hosts[admission.hostIdentifier] }) else {
+            throw NativeHostBrokerError("The workspace's Xcode host is unavailable")
+        }
+        var workspace = admission.workspace
+        if let selector = Self.string(arguments["workspaceIdentifier"]), selector.hasPrefix("/") {
+            if admission.deviceSession != nil || admission.launchSession != nil {
+                guard let parent = admission.deviceSession?.workspace ?? admission.launchSession?.workspace,
+                      let path = parent.path else {
+                    throw NativeHostBrokerError("This session has no workspace path. Use an existing workspaceIdentifier, or omit it to keep the session's workspace.")
+                }
+                guard parent.hostIdentifier == Self.defaultHostIdentifier,
+                      Self.normalizedWorkspacePath(selector) == Self.normalizedWorkspacePath(path) else {
+                    throw NativeHostBrokerError("The workspace path and session belong to different execution contexts. Use a matching workspaceIdentifier, or omit it to keep the session's workspace.")
+                }
+                if let conflict = Self.workspaceConflict(parent,
+                    device: admission.deviceSession, launch: admission.launchSession) {
+                    throw NativeHostBrokerError(conflict)
+                }
+                workspace = parent
+            } else {
+                let opened = try await openWorkspace(["path": .string(selector)], request: request,
+                                                     session: session, cancellation: cancellation)
+                if Self.isToolError(opened) {
+                    return try Self.response(id: Self.requestID(request), result: opened,
+                        session: session.identifier, eventStream: request.prefersEventStream)
+                }
+                let payload = try Self.toolPayload(opened)
+                workspace = Self.string(payload["workspaceIdentifier"]).flatMap { identifier in
+                    session.state.withLockedValue { $0.workspaces[identifier] }
+                }
+            }
+        }
+        if let workspace, workspace.hostIdentifier != host.identifier {
+            throw NativeHostBrokerError("The workspace path resolves on the default host, while the session belongs to another host. Use a workspaceIdentifier from the same host.")
+        }
+        let channel = try await channel(for: host, session: session)
+        let source = try channel.source()
+        guard [workspace?.source, admission.deviceSession?.source, admission.launchSession?.source]
+            .compactMap({ $0 }).allSatisfy({ $0 == source }) else {
+            throw Self.expiredReference()
+        }
+        var nativeArguments = arguments
+        nativeArguments.removeValue(forKey: "hostIdentifier")
+        if let workspace {
+            nativeArguments.removeValue(forKey: "workspaceIdentifier")
+            nativeArguments[workspace.gui ? "tabIdentifier" : "workspaceIdentifier"] = .string(workspace.nativeIdentifier)
+        }
+        if let device = admission.deviceSession {
+            nativeArguments["interactionSessionKey"] = .string(device.nativeIdentifier)
+        }
+        if let launch = admission.launchSession {
+            nativeArguments["launchSessionReference"] = .string(launch.nativeIdentifier)
+        }
+        var catalogRequest = try ProxyRuntimeRequest(json: .object([
+            "jsonrpc": .string("2.0"), "id": .string("broker-catalog-" + UUID().uuidString),
+            "method": .string("tools/list"),
+        ]), headerSessionExists: true, prefersEventStream: false)
+        catalogRequest.deadline = request.deadline
+        catalogRequest.prefersCachedToolsCatalog = true
+        let nativeCatalog = try Self.result(in: await channel.execute(catalogRequest, cancellation: cancellation))
+        let native = try XcodeToolCatalog.nativeCall(name: name, arguments: nativeArguments,
+            nativeCatalog: nativeCatalog)
+        let forwarded = try Self.toolRequest(request, name: native.name, arguments: native.arguments)
+        let reply = try await channel.execute(forwarded, source: source, cancellation: cancellation)
+        let value = try Self.result(in: reply)
+        if Self.isToolError(value) {
+            return try Self.externalReply(reply, session: session.identifier, hostIdentifier: host.identifier)
+        }
+        var device = admission.deviceSession
+        var launch = admission.launchSession
+        if name == "RunProject" {
+            let payload = try Self.toolPayload(value)
+            if let nativeID = Self.string(payload["launchSessionReference"]) {
+                launch = try session.bindLaunchSession(host: host, source: source, nativeIdentifier: nativeID,
+                                                       workspace: workspace)
+            }
+        }
+        if name == "DeviceInteractionStartSession" {
+            let payload = try Self.toolPayload(value)
+            guard let nativeID = Self.string(payload["interactionSessionKey"]) ?? Self.string(payload["interactSessionKey"]) else {
+                throw NativeHostBrokerError("Native device interaction returned no session key")
+            }
+            device = try session.bindDeviceSession(host: host, source: source, nativeIdentifier: nativeID,
+                                                   workspace: workspace)
+        }
+        if name == "DeviceInteractionEndSession", let device {
+            _ = session.state.withLockedValue { $0.deviceSessions.removeValue(forKey: device.identifier) }
+        }
+        if workspace == nil, name == "XcodeNewProject" {
+            let payload = try Self.toolPayload(value)
+            if let nativeID = Self.string(payload["workspaceIdentifier"]) {
+                workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: nativeID,
+                    path: Self.string(payload["workspacePath"]), name: nil)
+            }
+        }
+        return try Self.externalReply(Self.rewriteReply(reply, workspace: name == "XcodeNewProject" ? workspace : nil,
+                deviceSession: name == "DeviceInteractionStartSession" ? device : nil,
+                launchSession: ["RunProject", "GetConsoleOutput"].contains(name) ? launch : nil, toolName: name),
+                                      session: session.identifier, hostIdentifier: host.identifier)
+    }
+}
+
+private struct NativeBrokerToolFailure: Error {
+    let result: JSONValue
 }

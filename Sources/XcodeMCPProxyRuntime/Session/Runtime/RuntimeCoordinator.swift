@@ -164,7 +164,8 @@ protocol RuntimeInitializeToolsPort: Sendable {
     ) -> EventLoopFuture<ByteBuffer>
     func sharedToolsList(
         sessionID: String,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        prefersCachedToolsCatalog: Bool
     ) async throws -> JSONValue
 }
 
@@ -278,7 +279,9 @@ protocol RuntimeCoordinating:
     RuntimeSessionLifecyclePort,
     RuntimeClientMCPRequestPort,
     RuntimeDebugSnapshotPort
-{}
+{
+    func upstreamSource() -> ProxyRuntimeUpstreamSource?
+}
 
 extension RuntimeSessionLifecyclePort {
     func start() {}
@@ -863,6 +866,12 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         initializeManager.isInitialized()
     }
 
+    func upstreamSource() -> ProxyRuntimeUpstreamSource? {
+        let entries = upstreamTopology.snapshot().entries
+        guard entries.count == 1, let entry = entries.first else { return nil }
+        return ProxyRuntimeUpstreamSource(slotID: entry.id.rawValue, generation: entry.generation)
+    }
+
     func cachedToolsListResult() -> JSONValue? {
         toolsCatalog.canonicalToolsCatalogRaw()
     }
@@ -1128,7 +1137,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     func sharedToolsList(
         sessionID: String,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        prefersCachedToolsCatalog: Bool = false
     ) async throws -> JSONValue {
         _ = session(id: sessionID)
         let timeout =
@@ -1147,7 +1157,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
         let baseResult = try await awaitControlPlaneOperation {
             try await self.controlPlaneCoordinator.toolsCatalog(
-                deadlineUptimeNs: deadline
+                deadlineUptimeNs: deadline,
+                prefersCachedToolsCatalog: prefersCachedToolsCatalog
             )
         }
         logNativeToolCatalogSummaryIfNeeded(baseResult)

@@ -64,9 +64,12 @@ may be incomplete, even though the server lifecycle has stopped.
 - `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
 - `prewarmToolsList`: whether discovery begins during startup.
 
-The server starts one owned headless native host. Concurrent requests multiplex
-on that connection. An absolute `workspaceIdentifier` loads its saved model
-lazily; tool definitions come from the selected Xcode's headless catalog.
+The server owns the public tool contract and routes workspace handles to their
+headless model or GUI Xcode process. `XcodeListWorkspaces` discovers existing
+workspaces; `XcodeOpenWorkspace` loads a saved model in the default headless host
+unless another host is requested. Workspace and device-session handles retain
+their native context without a client-side host switch. See
+[workspace usage](../../Docs/usage.md) for the tool contract.
 
 Install `XcodeMCPNativeHost.app` beside the proxy executable, or supply its bundle
 URL. Missing helpers or required native contracts return diagnostics. The helper
@@ -167,6 +170,5 @@ xcode-mcp-proxy-install
 xcode-mcp-proxy-install --dry-run
 ```
 
-See [native routing migration](../../Docs/migrations/native-backend.md) for
-the current transport and configuration changes. The earlier
-[breaking migration guide](../../Docs/migrations/v0.14.0.md) records the v0.14.0 API changes.
+See the [migration guide](../../Docs/migrations/native-backend.md) for removed
+Swift APIs, configuration, and older tool-routing sequences.

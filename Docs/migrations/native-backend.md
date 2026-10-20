@@ -1,99 +1,120 @@
-# Native routing migration
+# Migration
 
-The native backend is available on `main`. Published v0.17.0 uses the earlier
-backend; its [README](https://github.com/lynnswap/XcodeMCPKit/blob/v0.17.0/README.md)
-records that version's setup.
+Restart the proxy and connected MCP clients after upgrading so clients load the
+current public tool definitions. Installation instructions are in the
+[quick start](../../README.md#quick-start).
 
-The proxy runs one owned headless host. Pass an absolute `workspaceIdentifier`
-to load a saved project model. Open GUI windows do not supply editor state,
-schemes, or destinations. See [Select a workspace](../usage.md#select-a-workspace).
+## Workspace and host routing
 
-## Server and CLI
+Use `XcodeListWorkspaces`, then pass a returned `workspaceIdentifier` to an
+operation. The identifier retains its native workspace/tab and host. Public tool
+names and inputs stay the same across GUI and headless workspaces.
 
-`--auto-approve` and `XcodeMCPProxyServerConfiguration.approvalPolicy` remain
-available as explicit opt-ins for GUI Xcode MCP connection dialogs, including
-external agents. They require macOS Accessibility access. The default is manual
-approval. See [automatic connection approval](../configuration.md#automatic-connection-approval).
-The native helper executes headless tools independently of this monitor.
-Server startup does not register agent identities or rewrite Xcode's permission
-store; automatic approval operates the visible `Allow` button.
+| Previous call or value | Replacement |
+| --- | --- |
+| `XcodeMCPKitSelectHost({hostIdentifier})` followed by `tools/list` | Use the workspace identifier directly. For another installation, pass `hostIdentifier` to `XcodeOpenWorkspace`. |
+| `XcodeMCPKitSelectHost({hostIdentifier,createsNewHost:true})` | `XcodeOpenWorkspace({path,hostIdentifier,createsNewHost:true})`. |
+| `XcodeListWindows` and its native tab ID | `XcodeListWorkspaces` and its proxy `workspaceIdentifier`. |
+| `GetBuildLog({tabIdentifier: ...})` or other GUI workspace inputs | `GetBuildLog({workspaceIdentifier: ...})` using the identifier from List/Open. |
+| A native workspace ID retained across host selection | A new proxy identifier from List/Open. Do not reuse an old native ID. |
+| `DeviceInteractionStartWorkspaceSession` | `DeviceInteractionStartSession` with `workspaceIdentifier`; omit that field for standalone device interaction. |
+| `interactSessionKey` in `DeviceInteractionSynthesize` | `interactionSessionKey`, using the session returned by the public device-start operation. |
+| Native `launchSessionReference` with a separately selected host | Keep the proxy reference returned by `RunProject`; pass it to `GetConsoleOutput` to retain the creating context. |
 
-Remove `--upstream-processes` and `upstreamProcessCount`. One native host serves
-concurrent requests; there is no replacement process-count setting.
+For example, replace the host-selection sequence with:
 
-The previously removed `--xcode-mode`, `--session-id`, `--upstream-command`,
-`--upstream-args`, and `--upstream-arg` remain unsupported. Remove Xcode Service
-status/enable steps and explicit `mcpbridge` launches from proxy startup scripts.
-Endpoint and deadline settings remain. Tool visibility is controlled by the MCP client.
-
-`XcodeMCPProxyServerConfiguration` adds optional `nativeHostBundleURL` and
-`developerDirectoryURL`. Leave them `nil` for helper and Xcode discovery, or
-provide a signed app bundle and selected installation explicitly:
-
-```swift
-import Foundation
-import XcodeMCPProxyKit
-
-let server = XcodeMCPProxyServer(configuration: .init(
-    nativeHostBundleURL: URL(fileURLWithPath: "/opt/xcode-mcp/XcodeMCPNativeHost.app"),
-    developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer")
-))
-let endpoint = try await server.start()
-try await server.shutdown()
+```json
+{
+  "path": "/Users/me/Projects/App/App.xcworkspace",
+  "hostIdentifier": "host-from-XcodeMCPKitListHosts"
+}
 ```
 
-The server CLI discovers the installed helper.
-The standard `DEVELOPER_DIR` environment can select the headless installation.
-Explicit bundle and developer-directory URLs remain available for SDK embedding.
-The source and release installers now install `XcodeMCPNativeHost.app` beside
-the proxy binaries. Keep that bundle with the executables when relocating them.
+Call `XcodeOpenWorkspace` with those arguments and use its returned
+`workspaceIdentifier` for subsequent calls. Omit `hostIdentifier` for the default
+headless host. GUI tabs for the same path remain separate; use List when choosing
+among them. `XcodeCloseWorkspace` releases a GUI handle without closing its window.
 
-## Swift client transport
+Headless work uses saved files. GUI editor state, scheme, destination, and debugger
+state belong to their GUI workspace; they are not imported into a saved model.
+After a new MCP session or host restart, obtain fresh workspace and device-session
+identifiers. See [workspace usage](../usage.md) for normal operations.
 
-`XcodeMCPConfiguration` now defaults to `.streamableHTTPProxyDiscovery()`.
-Start `xcode-mcp-proxy-server` before constructing a default client. This path
-provides shared headless execution over HTTP.
+## Native helper and server configuration
 
-The `.defaultMCPBridge` bridge case has been removed. For a standalone headless
-session, select the native host explicitly:
+Install `XcodeMCPNativeHost.app` beside the proxy commands. Reinstall the complete
+package if it is missing. The default helper executes headlessly through the
+selected Xcode's frameworks, without Xcode Service setup or an open GUI window.
 
-```swift
-import XcodeMCPKit
+Remove these older settings from startup scripts and embedding configuration:
 
-let client = try await XcodeMCP(configuration: .init(
-    transport: .localBridge(.nativeHost())
-))
-let tools = try await client.listTools()
-await client.close()
-```
+| Removed | Current setup |
+| --- | --- |
+| `--upstream-processes`, `upstreamProcessCount` | One owned host multiplexes concurrent requests. Open an independent host only when separate workspace settings are needed. |
+| `--xcode-mode`, `--session-id`, `--upstream-command`, `--upstream-args`, `--upstream-arg` | Use the normal proxy server. Remove explicit Service enable/status and `mcpbridge` launch steps. |
+| `--config`, `MCP_XCODE_CONFIG`, TOML files, `configurationFileURL`, `ToolPolicy`, disabled-tool lists | Configure endpoint/deadlines directly; the MCP client controls allowed tools. |
+| `--refresh-code-issues-mode` and its policy/environment settings | `XcodeRefreshCodeIssuesInFile` uses its owning native context. |
+| Server CLI `--native-host-bundle`, `--developer-dir` | Keep the helper beside the commands; use `DEVELOPER_DIR` to prefer an installation. Embedders can set `nativeHostBundleURL` / `developerDirectoryURL`. |
+| STDIO CLI `--stdio URL` | `xcode-mcp-proxy --url URL`. |
 
-`.localBridge(.custom(command:arguments:environment:))` remains available for
-generic MCP processes and tests. The HTTP `MCP-Session-Id` and adapter recovery
-contract are unchanged. Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` do not
-select the proxy's backend.
+`--auto-approve` and the embedding `.automatic` approval policy remain opt-in
+Accessibility automation for GUI Xcode connection dialogs, including other
+agents. They do not change routing or Xcode's permission store. Headless startup
+does not require that monitor. See [configuration](../configuration.md).
 
-## Workspace behavior
+## Swift client
 
-Explicit Open is optional for ordinary absolute-path operations. Save project
-and source files before calling tools. Select the host's scheme, destination,
-and test plan explicitly; GUI selections and unsaved buffers are not imported.
+`XcodeMCPConfiguration` defaults to `.streamableHTTPProxyDiscovery()`. Start the
+proxy before constructing the client. `.defaultMCPBridge` is removed. For a
+standalone headless process, use `.localBridge(.nativeHost())`; generic processes
+use `.localBridge(.custom(command:arguments:environment:))`. Standalone transports
+expose their own native catalog, outside proxy handle routing.
 
-The public catalog now follows `enabledHeadlessMCPTools` only. GUI window,
-current-editor, and navigator tools and `tabIdentifier` routing are removed.
-Provider-union metadata and schema variants are removed; descriptors come from
-the single native host. Installation and cancellation facts remain in origin
-metadata. Documentation search uses the headless native action.
+For consumers upgrading across v0.14.0:
 
-## Removed configuration
+| Previous API | Current API |
+| --- | --- |
+| Fixed timeout per client only | `XcodeMCPRequestOptions.Timeout`: `.configurationDefault`, `.disabled`, `.after(Duration)`. |
+| No replay choice | `XcodeMCPRequestOptions.ReplayPolicy`; only a proven rejection before processing can be replayed once. |
+| No connection observation/reconnect | `connectionState()`, `connectionStates()`, `reconnect(options:)`. Obtain snapshots from the client rather than constructing them. |
+| First-page `listTools()` | `listTools(options:)` loads all pages within one deadline or fails without returning a partial catalog. |
+| `callTool` without progress | `callTool(_:arguments:options:onProgress:)`. |
+| `notify(_:params:)` | Typed operations or `request(_:params:options:)` for non-tool requests. |
+| `MCPJSONValue.init(encoding:)`, `intValue` | `MCPJSONValue.init(_:)`, `integerValue`. |
+| Manual text extraction | `MCPToolResult.text`; create text with `MCPContent.text(_:)`. |
 
-Remove `--config`, `MCP_XCODE_CONFIG` and TOML files. `configurationFileURL` and
-`ToolPolicy` are removed from the public server API, along with per-tool disabled
-name lists. The server exposes Xcode's available tools; the MCP client decides
-which tools may be called.
+Call `close()` explicitly for graceful completion. Deinitialization only requests
+cancellation. Test clients use `XcodeMCPTestRuntime.makeClient(configuration:)`
+with its default local transport and `recordedToolCalls()` for decoded assertions.
+See the [client guide](../../Sources/XcodeMCPKit/README.md) for current examples.
 
-Remove `--refresh-code-issues-mode`, its environment setting and the corresponding
-feature-policy property. `XcodeRefreshCodeIssuesInFile` now uses its native
-provider through the normal request route, with native progress and errors.
+## Embedded server and adapter
 
-The server CLI also removes `--native-host-bundle` and `--developer-dir`. Keep
-`XcodeMCPNativeHost.app` beside the installed executables for automatic lookup.
+The current server and adapter APIs are documented in
+[XcodeMCPProxyKit](../../Sources/XcodeMCPProxyKit/README.md). For v0.14.0 consumers:
+
+| Previous API | Current API |
+| --- | --- |
+| Synchronous server `start()`, `startAndWriteDiscovery()` | Configure discovery and call `try await start()`. |
+| Server `wait()` | `waitUntilShutdown()`. Use `snapshot()` for sanitized lifecycle/readiness. |
+| Server `Configuration.Limits` | Top-level `maxBodyBytes` and `requestTimeout: Duration?`. |
+| `configurationFilePath` | Remove file-based tool policy; current configuration is typed. |
+| Struct discovery configuration | `.disabled`, `.defaultLocation`, `.file(URL)`. |
+| Public launch-plan/parser/product-metadata types | `XcodeMCPProxyServer.run(...)` / `XcodeMCPProxyStdioAdapter.run(...)` for CLI hosting. |
+| Public installer library APIs | `xcode-mcp-proxy-install` executable; `--dry-run` remains supported. |
+| Adapter endpoint resolver/options | `.url(URL)`, `.discoveryFile(URL)`, `.proxyDefault(environment:)`. |
+| Adapter nonthrowing `start()`, `wait()` | `try await start()`, `waitUntilStopped()`. |
+| `TimeInterval` request timeout | Positive `Duration?`; `nil` disables it. CLI `--request-timeout 0` also disables it. |
+
+Server instances are one-shot. Await `shutdown()` or adapter `stop()` for
+completion. Cleanup errors preserve the startup failure and remaining resource
+information. Delivery-unknown operations are not replayed during HTTP recovery.
+
+## Direct Streamable HTTP clients
+
+Clients upgrading across v0.11.0 must send the server-issued `MCP-Session-Id`
+after initialize, use `Accept: application/json, text/event-stream`, and send
+individual JSON-RPC messages instead of batch arrays. An explicit
+`MCP-Protocol-Version` must match negotiation. The SDK and STDIO adapter handle
+these details. See the [HTTP contract](../architecture.md#streamable-http-contract)
+for expiry, recovery, and header errors.

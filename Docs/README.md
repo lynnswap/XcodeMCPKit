@@ -1,37 +1,22 @@
 # Documentation
 
-## Using XcodeMCPKit
+## Use the server
 
-- [README quick start](../README.md#quick-start): installation and MCP client registration.
-- [Configuration](configuration.md): Xcode selection, CLI options, and environment variables.
-- [Workspace and tool usage](usage.md): saved workspace models, tool catalogs,
-  editor state, and cancellation.
-- [Troubleshooting](troubleshooting.md): connection, helper, timeout, and diagnostic errors.
-- [Migration guides](migrations/README.md): changes required when upgrading.
+- [Quick start](../README.md#quick-start): install, start, and connect an MCP client.
+- [Workspace and tool usage](usage.md): find a workspace, run tools, and manage sessions.
+- [Configuration](configuration.md): Xcode selection, CLI options, and environment settings.
+- [Troubleshooting](troubleshooting.md): connection, workspace, helper, and timeout errors.
+- [Migration](migrations/native-backend.md): update older tool calls, Swift APIs, and startup scripts.
 
-## Swift APIs
+## Use the Swift libraries
 
-- [XcodeMCPKit](../Sources/XcodeMCPKit/README.md): discover and call tools from Swift.
+- [XcodeMCPKit](../Sources/XcodeMCPKit/README.md): discover and call MCP tools.
 - [XcodeMCPProxyKit](../Sources/XcodeMCPProxyKit/README.md): embed the server or STDIO adapter.
-- [XcodeMCPKitTesting](../Sources/XcodeMCPKitTesting/README.md): test clients through an in-memory MCP runtime.
+- [XcodeMCPKitTesting](../Sources/XcodeMCPKitTesting/README.md): use the client API with an in-memory runtime.
 
-## Development
+## Maintain the project
 
-- [Architecture](architecture.md): request routing, catalogs, discovery, and HTTP contracts.
-- [Maintainer architecture](maintainer-architecture.md): module ownership, local checks,
-  live verification, release flow, and cleanup.
-- [Native host design](native-headless-backend.md): Xcode framework integration through ABIBridge.
-- [Homebrew distribution](../Homebrew/README.md): Formula ownership, release approval, tap dispatch,
-  bottle verification, and recovery.
-- [Live tool verifier](../Sources/XcodeMCPProxyToolVerifier/README.md): fixture-based verification.
-- [MCP benchmarks](mcp-benchmark.md): measuring a running server.
-
-## Historical design notes
-
-- [July 2026 design audit](design-audit-2026-07/README.md)
-- [Proxy target rearchitecture](proxy-target-rearchitecture-2026-07.md)
-- [Xcode 27 headless MCP investigation](xcode-27-headless-mcp-design.md)
-- [Xcode 27 mcpbridge tool additions](xcode-27-mcpbridge-tools.md)
-
-- [Former permission automation](permission-automation-target-design.md) and
-  [dialog investigation](mcp-permission-dialog-investigation.md).
+- [Architecture](architecture.md): public contracts, routing, sessions, and HTTP delivery.
+- [Maintainer guide](maintainer-architecture.md): module ownership, native integration constraints, and verification.
+- [Live tool verifier](../Sources/XcodeMCPProxyToolVerifier/README.md): disposable fixtures and preview comparisons.
+- [Homebrew distribution](../Homebrew/README.md): release approval, publication, and recovery.

@@ -1,115 +1,61 @@
 # Troubleshooting
 
-## Native helper cannot be found or started
+## A workspace operation uses the wrong state
 
-Keep `XcodeMCPNativeHost.app` beside `xcode-mcp-proxy-server`. Both source and
-release installers copy this bundle. Reinstall a complete package if it is
-missing; copying only the proxy executable is insufficient.
+Call `XcodeListWorkspaces` and use the returned `workspaceIdentifier`. GUI entries
+use that Xcode tab's state; headless entries use saved files and their native
+model's scheme, destination, and test plan. Two tabs for the same path can differ.
+Do not pass a native `tabIdentifier` or call the removed `XcodeMCPKitSelectHost`.
+See [migration](migrations/native-backend.md#workspace-and-host-routing) for older
+clients and scripts.
 
-For a custom layout, use `XCODE_MCP_NATIVE_HOST_BUNDLE`. Embedding code can set
-`nativeHostBundleURL`. The server reports a missing executable before binding
-its endpoint.
+If a host or MCP session restarted, list or open the workspace again. Workspace
+and device-session identifiers from the old context are invalid. A GUI process
+that has exited is not replaced with a headless model automatically. Reopen the
+intended GUI workspace or explicitly open a saved model.
 
-Check the `Selected Xcode` startup log for the installation actually used.
-The server tries the embedding `developerDirectoryURL`, `DEVELOPER_DIR`, and
-`xcode-select -p` before discovering installed apps. A Command Line Tools
-selection, a removed app, or another unavailable selection produces a diagnostic
-and falls through to discovery. With no available Xcode, startup reports an
-installation error instead of repeatedly launching Command Line Tools.
+## An operation is unavailable
 
-Set `DEVELOPER_DIR` or `developerDirectoryURL` to prefer another Xcode app or
-developer directory. The host reports missing native API contracts after
-selection. Xcode 27 / Swift
-6.4 is the verified packaging environment; other versions are not rejected by
-a manufactured-version allowlist.
+The public catalog describes stable proxy operations. Availability still depends
+on the workspace's Xcode installation and native context. Read the tool error
+for the unsupported operation or missing native contract. A public schema does
+not guarantee that every installed Xcode supports that operation.
 
-## Native catalog or tool request timed out
+For a stale client catalog after upgrading the server, restart the MCP client.
+New calls use `workspaceIdentifier` for GUI and headless work alike. Routing does
+not require the client to refresh definitions after opening another workspace.
 
-Confirm that the proxy is running and inspect its error before increasing a
-client deadline. Set `MCP_LOG_LEVEL=debug` to inspect native initialization,
-catalog loads, cancellation, and recovery. Check the selected Xcode installation
-for missing framework or API contracts.
+## The native helper cannot be found or started
 
-For workspace operations, check the absolute `workspaceIdentifier` and save
-project/source changes to disk. Inspect and select the host's scheme, destination,
-and test plan. GUI selection and unsaved editor state do not configure the host.
-Native tool failures keep their MCP `isError` result; transport and protocol
-failures remain request errors. Headless startup does not require agent-access
-approval or changes to Xcode's permission store.
+Keep `XcodeMCPNativeHost.app` beside `xcode-mcp-proxy-server`. Reinstall the complete
+package if the helper is missing; copying only the command is insufficient.
+Custom layouts can use `XCODE_MCP_NATIVE_HOST_BUNDLE` or the embedding
+`nativeHostBundleURL` property.
 
-If a native error was suppressed, inspect `Native error presentation suppressed`
-in the host's stderr or the failed tool result for its domain, code, and context.
-The host closes removed saved workspaces before subsequent tool execution. A
-remaining cleanup failure is reported as `Native workspace cleanup failed`;
-inspect that failure before retrying an operation against the removed workspace.
+Check the `Selected Xcode` startup log. The server tries its explicit developer
+directory, `DEVELOPER_DIR`, and `xcode-select -p` before discovering installations.
+Unavailable selections fall through to discovery. Set `DEVELOPER_DIR` or the
+embedding `developerDirectoryURL` to prefer an app. Missing native contracts
+produce initialization diagnostics; the server does not switch installations
+after such a failure. See [Xcode compatibility](configuration.md#xcode-compatibility).
 
-## CoreSimulator service connection becomes invalid
+## A tool request times out
 
-When CoreSimulator declares that Simulator services are no longer available to
-the native host, the proxy replaces its owned host and initializes the replacement.
-Requests interrupted by replacement fail with `upstream unavailable`; operations
-whose completion is unknown are not replayed automatically.
+Inspect the proxy/helper error before increasing deadlines. `MCP_LOG_LEVEL=debug`
+shows HTTP, initialization, catalog, cancellation, and recovery telemetry.
+Confirm the workspace path exists, save headless source/project changes, and
+inspect the owning workspace's scheme, destination, and test plan. GUI selections
+do not configure a separate headless model.
 
-Replacement invalidates native workspace identifiers and sessions. Use the
-absolute project path to load a workspace again, then inspect its scheme,
-destination, and test plan before continuing device or build operations.
+A `Native error presentation suppressed` message retains the native domain,
+code, and context in stderr or the tool failure. `Native workspace cleanup failed`
+reports cleanup of a removed model; resolve that failure before retrying against
+the same removed workspace.
 
-Recovery recognizes the known terminal CoreSimulator diagnostics emitted by
-`xcode-mcp-native-host`. Ordinary connection interruptions and tool errors keep
-their existing behavior. If a newer CoreSimulator changes its diagnostic wording,
-automatic detection may not apply; restart the server to reload its native host.
-
-## DocumentationSearch is unavailable
-
-The startup summary reports whether the native catalog contains the tool; it
-is not a search execution test. At startup the host selects the latest readable
-installed documentation index and sets its location only for that process.
-A saved `IDEChatDocumentationSearchConfigURL` override is not required.
-
-If the helper reports `no installed documentation index found`, check that
-Xcode's developer documentation has been installed. Asset discovery failures
-are logged on stderr and do not prevent other native tools from starting. When
-no installed index can be selected, the existing Xcode configuration remains
-in effect. Restart the server after installing documentation, then call the tool
-to verify the search itself.
-
-## Streamable HTTP client cannot connect
-- Set `MCP_LOG_LEVEL=debug` when per-connection and per-request access logs are
-  needed; routine HTTP traffic is not printed at the default log level.
-- Ensure `xcode-mcp-proxy-server` is running.
-- Confirm the URL is correct (default: `http://localhost:8765/mcp`).
-- If you changed the listen address/port, check the discovery file: `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
-- Treat the discovery record as a URL hint; connect and initialize to check reachability.
-- Ensure `POST /mcp` sends `Content-Type: application/json` and `Accept: application/json, text/event-stream`.
-- After initialize, ensure the client sends the server-issued `MCP-Session-Id` and `MCP-Protocol-Version: 2025-06-18`.
-
-## `Address already in use` / `errno: 48`
-Another process is already listening on the same port (default: `8765`).
-
-- Stop the existing proxy server and retry:
-  - `pkill -x xcode-mcp-proxy-server`
-- Or rerun with `--force-restart` to terminate an existing `xcode-mcp-proxy-server` automatically:
-  - `xcode-mcp-proxy-server --force-restart`
-
-## STDIO adapter cannot connect
-Ensure the proxy server is running and you are launching the adapter with `xcode-mcp-proxy`.
-If you changed the server URL, pass it explicitly:
-
-- `xcode-mcp-proxy --url http://localhost:9000/mcp`
-
-or set `XCODE_MCP_PROXY_ENDPOINT` to the server URL. The discovery file should exist at `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
-
-## Codex `tools/call` times out after 60 seconds
-Increase `tool_timeout_sec` in `~/.codex/config.toml` (this is client-side and separate from the proxy `--request-timeout`).
-
-```toml
-[mcp_servers.xcode]
-command = "xcode-mcp-proxy"
-args = []
-tool_timeout_sec = 600
-```
-
-If you configured Codex via `--url`, set `tool_timeout_sec` on the URL server entry instead:
+The proxy, SDK, and adapter default to 600 seconds. `RenderPreview` defaults to
+300 seconds for build/render work, with initial preparation and cleanup outside
+that budget. Give the external client enough time for the entire request.
+For Codex, set `tool_timeout_sec` in the registered server entry, for example:
 
 ```toml
 [mcp_servers.xcode]
@@ -117,29 +63,57 @@ url = "http://localhost:8765/mcp"
 tool_timeout_sec = 600
 ```
 
-## Codex shows `Transport closed` (then hangs)
-If you see an error like:
+For STDIO registrations, keep the existing `command`/`args` and add the same
+`tool_timeout_sec` setting. A closed transport can also mean a process exited;
+check server stderr and reachability instead of treating every disconnect as a
+timeout.
 
-- `tools/call failed: Transport closed`
+## CoreSimulator disconnects from the native host
 
-it usually means the MCP server process (`xcode-mcp-proxy`) was terminated while Codex was waiting (often due to the default `tool_timeout_sec` being too short for slow Xcode operations).
+Known terminal CoreSimulator diagnostics trigger replacement of the affected
+owned host. Interrupted requests fail; delivery-unknown operations are not
+replayed. Obtain fresh workspace/device-session identifiers, then inspect scheme,
+destination, and test plan before continuing. If a newer runtime changes the
+diagnostic and automatic recovery does not occur, restart the server.
 
-- Set `tool_timeout_sec` (see above) to a value that covers the slowest Xcode tool calls you expect.
-- Ensure the proxy server (`xcode-mcp-proxy-server`) is running and the discovery file is fresh: `~/Library/Caches/XcodeMCPProxy/endpoint.json`.
-- If it keeps happening, restart the local processes:
-  - `pkill -f xcode-mcp-proxy`
-  - Restart the proxy through its normal launcher so it can stop its owned native helpers.
+## DocumentationSearch is unavailable
 
-## Native code diagnostics
+The native host selects the latest readable installed documentation index at
+startup. If it reports `no installed documentation index found`, install Xcode's
+developer documentation and restart the server. Selection failure does not block
+other tools and leaves Xcode's existing configuration in effect. A catalog entry
+proves discovery only; call the tool to verify search execution.
 
-`XcodeRefreshCodeIssuesInFile` executes in its owning native Xcode context.
-The proxy forwards native diagnostics, progress and errors. It does not replace
-the response with navigator issues or retry a failed diagnostic operation.
+## HTTP or STDIO cannot connect
 
-## `session not found`
-Ensure the client is using the server-issued `MCP-Session-Id`. Initialize requests must not rely on a caller-provided session id. `DELETE /mcp` permanently terminates the session, and the proxy also expires a session after it has had no in-flight request, open SSE stream, or other client activity for five minutes. A client that receives `404` for a session-bound request must initialize a new session; the bundled SDK and STDIO adapter perform that recovery automatically.
+Ensure the proxy is running and check its URL, normally
+`http://localhost:8765/mcp`. The discovery record at
+`~/Library/Caches/XcodeMCPProxy/endpoint.json` is a URL hint, not proof that the
+server is reachable. For a different STDIO endpoint, use:
 
-## `protocol version required` / `protocol version mismatch`
-An explicit `MCP-Protocol-Version` must match the negotiated supported version.
-When it is omitted, the proxy uses the session's negotiated version. Reinitialize
-a client that cached an incompatible protocol version.
+```sh
+xcode-mcp-proxy --url http://localhost:9000/mcp
+```
+
+`XCODE_MCP_PROXY_ENDPOINT` also configures the adapter; `--url` takes precedence.
+For `Address already in use` / `errno: 48`, stop the known listener or use
+`xcode-mcp-proxy-server --force-restart` to replace a proxy on the selected port.
+
+Direct HTTP clients must send `Content-Type: application/json` and
+`Accept: application/json, text/event-stream` for POST. After initialize, use the
+server-issued `MCP-Session-Id`. An explicit `MCP-Protocol-Version` must match the
+negotiated supported version; omitted versions use the session's negotiation.
+See the [HTTP contract](architecture.md#streamable-http-contract).
+
+`session not found` means the ID is unknown, deleted, or expired. Initialize a
+new session after `404`; the SDK and STDIO adapter handle this recovery. Sessions
+expire after five minutes without client activity, an in-flight request, or an
+open SSE stream. Recovered MCP sessions require fresh workspace/session handles.
+For `protocol version required` or `protocol version mismatch`, reinitialize a
+client that retained an incompatible negotiated version.
+
+## Native code diagnostics differ from the navigator
+
+`XcodeRefreshCodeIssuesInFile` runs in its owning native workspace. It returns
+native diagnostics, progress, and errors. The proxy does not substitute navigator
+issues or retry a failed diagnostic operation through another backend.

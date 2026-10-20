@@ -196,12 +196,6 @@ struct ProxyToolVerifier {
                     print("<- [\(record.status.rawValue)] \(toolName) (\(formatSeconds(record.elapsedSeconds)))")
                     records.append(record)
                     try state.observe(toolName: toolName, record: record)
-                    if toolName == "DeviceInteractionStartSession",
-                       let key = state.openedInteractionSessionKeyForCleanup {
-                        let end = await endDeviceInteractionSession(interactionSessionKey: key, client: client)
-                        records.append(end)
-                        state.observeDeviceInteractionEnd(record: end)
-                    }
                 case .skip(let reason):
                     print("-- [not-planned] \(toolName) - \(reason)")
                     records.append(
@@ -782,14 +776,6 @@ private struct VerificationState {
                 "interactionSessionKey": .string(interactionSessionKey),
             ])
         case "DeviceInteractionStartSession":
-            guard let deviceIdentifier else {
-                throw ToolPlanUnavailable(reason: "standalone device interaction requires an explicitly owned device identifier")
-            }
-            return [
-                "sessionIdentifier": .string(interactionSessionIdentifier + " Standalone"),
-                "deviceIdentifier": .string(deviceIdentifier),
-            ]
-        case "DeviceInteractionStartWorkspaceSession":
             var arguments: [String: MCPJSONValue] = ["sessionIdentifier": .string(interactionSessionIdentifier + " Workspace")]
             if let deviceIdentifier { arguments["deviceIdentifier"] = .string(deviceIdentifier) }
             return try withWorkspaceScope(toolName, arguments)
@@ -798,9 +784,7 @@ private struct VerificationState {
                 throw ToolPlanUnavailable(reason: "the workspace device session did not start")
             }
             return [
-                // Xcode returns interactionSessionKey from StartSession, but
-                // Synthesize's input schema names the argument interactSessionKey.
-                "interactSessionKey": .string(interactionSessionKey),
+                "interactionSessionKey": .string(interactionSessionKey),
             ]
         case "DocumentationSearch":
             return ["query": .string("NavigationStack")]
@@ -992,7 +976,7 @@ private struct VerificationState {
         }
         var result = arguments
         guard schema.properties.contains("workspaceIdentifier") else {
-            throw ToolPlanUnavailable(reason: "Native schema has no workspaceIdentifier argument")
+            throw ToolPlanUnavailable(reason: "Tool schema has no workspaceIdentifier argument")
         }
         guard let workspaceIdentifier else {
             throw VerifierFailure("The verifier's workspace has not been opened for \(toolName)")
@@ -1058,10 +1042,8 @@ private struct VerificationState {
                 ?? parseFirstString(named: "name", from: rawResult)
         case "XcodeMakeDir":
             createdScratchPath = parseFirstString(named: "createdPath", from: rawResult)
-        case "DeviceInteractionStartSession", "DeviceInteractionStartWorkspaceSession":
-            if let key = parseFirstString(named: "interactionSessionKey", from: rawResult)
-                ?? parseFirstString(named: "interactSessionKey", from: rawResult)
-                ?? parseFirstString(named: "sessionKey", from: rawResult) {
+        case "DeviceInteractionStartSession":
+            if let key = parseFirstString(named: "interactionSessionKey", from: rawResult) {
                 interactionSessionKey = key
                 interactionSessionOpenedByVerifier = true
                 interactionSessionEndAttempted = false
@@ -1272,7 +1254,6 @@ private func isExternalPrerequisiteResult(toolName: String, detail: String) -> B
 
     let deviceTools: Set<String> = [
         "DeviceInteractionStartSession",
-        "DeviceInteractionStartWorkspaceSession",
         "DeviceInteractionInstallAndRun",
         "DeviceInteractionSynthesize",
         "DeviceInteractionEndSession",
@@ -1416,7 +1397,6 @@ private func fieldReportToolNames() -> [String] {
 private func deviceInteractionToolNames() -> [String] {
     [
         "DeviceInteractionStartSession",
-        "DeviceInteractionStartWorkspaceSession",
         "DeviceInteractionInstallAndRun",
         "DeviceInteractionSynthesize",
         "DeviceInteractionEndSession",
