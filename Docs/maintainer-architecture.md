@@ -9,7 +9,7 @@
 | `XcodeMCPKit` | Public Swift client and MCP values. `MCPClientSessionAuthority` owns transport identity/recovery; `InitializedMCPClientSession` owns request correlation and progress lanes. |
 | `XcodeMCPNativeRuntime` / `XcodeMCPNativeHost` | Xcode framework integration, native actions, headless workspace models, execution queues, and owned preview resources. |
 | `XcodeMCPProxyRuntimeContract` | Package request/reply/session values and serving protocols. No execution or I/O state. |
-| `XcodeMCPProxyRuntime` | Public tool contract, handle routing, backend catalogs, request lifetimes, scheduling, and recovery. |
+| `XcodeMCPProxyRuntime` | Public tool contract and handle routing (`Broker/`), and one connection per host process with its catalog, request correlation, and recovery (`Host/`). |
 | `XcodeMCPProxyHTTP` | Listener, protocol validation, responses, and SSE delivery. Depends on the runtime contract rather than concrete Runtime. |
 | `XcodeMCPPermissionAutomation` | Accessibility dialog recognition and opt-in approval monitor. Independent of native execution and routing. |
 | `XcodeMCPProxyKit` | Public server/adapter facades, runtime/HTTP composition, discovery, CLI hosting, and installation. |
@@ -27,12 +27,12 @@ uses the same path. Native workspace state remains authoritative for contents,
 scheme, destination, and test plan. A handle must not become a cached second copy
 of those values or silently move to a replacement host.
 
-Native catalogs remain tied to their source connection. `ToolsCatalogAuthority`
-owns refresh leases and returns cancellation/notification effects for execution
-outside its lock. `UpstreamTopologyAuthority` owns slot membership and topology;
-`CanonicalHandshakeState` owns initialization independently of catalog epochs.
-Coordinators arrange I/O through those owners. A late response from a retired
-connection cannot update current definitions.
+`NativeHostConnection` is the only owner of a host process. Each start increments
+its generation; handles record the generation that created them, and a request
+for an ended generation fails instead of reaching the replacement process. The
+connection fails in-flight requests and reports the end before it stops the old
+process, so the broker invalidates handles before a new process can answer. Its
+catalog cache belongs to one generation and is discarded on a catalog change.
 
 A headless request holds its workspace execution permit through preparation,
 native stream drain, observed Operation completion, and cleanup. The action
@@ -187,7 +187,7 @@ xcodebuild test -workspace XcodeMCPKit.xcworkspace -scheme XcodeMCPProxyRuntimeT
 | `PublicProductContractTests` | Supported library consumers compiled from an external package. |
 
 Core fixtures live in `XcodeMCPCoreTestSupport`, shared proxy fixtures in
-`XcodeMCPProxyTestSupport`, and coordinator/upstream fixtures in
+`XcodeMCPProxyTestSupport`, and scripted host processes (`FakeHostSession`) in
 `XcodeMCPProxyRuntimeTestSupport`. A fixture used by one suite stays with that
 suite. Keep deterministic observations at owner boundaries instead of adding
 production test hooks or reproducing internal branch order in assertions.

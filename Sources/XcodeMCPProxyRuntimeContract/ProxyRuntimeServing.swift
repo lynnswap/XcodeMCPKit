@@ -14,28 +14,13 @@ package struct ProxySessionID: Hashable, Sendable {
 package enum ProxyRuntimeEvent: Sendable {
     case sessionOpened(sessionID: ProxySessionID)
     case notification(sessionID: ProxySessionID, data: Data)
-    /// Native tool availability or the cached catalog changed.
-    case catalogChanged
     case sessionClosed(sessionID: ProxySessionID)
-}
-
-/// Identifies one physical upstream lifetime within a runtime.
-package struct ProxyRuntimeUpstreamSource: Sendable, Hashable {
-    package let slotID: Int
-    package let generation: UInt64
-
-    package init(slotID: Int, generation: UInt64) {
-        self.slotID = slotID
-        self.generation = generation
-    }
 }
 
 package struct ProxyRuntimeRequest: Sendable {
     package let data: Data
     package let decodedJSON: JSONValue?
     package var deadline: Date?
-    package var prefersCachedToolsCatalog = false
-    package var expectedUpstreamSource: ProxyRuntimeUpstreamSource?
     package var headerSessionExists: Bool
     package let prefersEventStream: Bool
 
@@ -120,20 +105,14 @@ package struct ProxyRuntimeSnapshot: Sendable {
     package let catalogAvailable: Bool
     package let queuedRequestCount: Int
     package let upstreams: [Upstream]
-    package let originMetadata: JSONValue?
-    /// Set only when the runtime owns exactly one authoritative upstream.
-    package let upstreamSource: ProxyRuntimeUpstreamSource?
 
     package init(generatedAt: Date, proxyInitialized: Bool, catalogAvailable: Bool,
-                 queuedRequestCount: Int, upstreams: [Upstream], originMetadata: JSONValue? = nil,
-                 upstreamSource: ProxyRuntimeUpstreamSource? = nil) {
+                 queuedRequestCount: Int, upstreams: [Upstream]) {
         self.generatedAt = generatedAt
         self.proxyInitialized = proxyInitialized
         self.catalogAvailable = catalogAvailable
         self.queuedRequestCount = queuedRequestCount
         self.upstreams = upstreams
-        self.originMetadata = originMetadata
-        self.upstreamSource = upstreamSource
     }
 }
 

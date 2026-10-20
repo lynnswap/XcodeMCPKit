@@ -43,19 +43,26 @@ spellings. Public tools remain callable without relying on a client to process
 `notifications/tools/list_changed` after a routing change. An unavailable backend
 operation returns a tool error.
 
-Each backend retains its native catalog separately. `ToolsCatalogAuthority`
-ties definitions to the exact connection and refresh that supplied them.
-`ControlPlaneCoordinator` shares concurrent native loads while preserving each
-caller's deadline and cancellation. A request captures its native definition;
-a later catalog refresh cannot alter that request's response contract. A retired
-connection cannot commit a late catalog as current.
+Each host process supplies its own native catalog. Its connection loads the
+catalog once per process start, shares the load among concurrent callers, and
+discards it on `notifications/tools/list_changed`. A request translates its
+arguments with the catalog of the process it runs on; a later refresh cannot
+alter that request's response contract.
 
-## Lifecycle and failure
+## Processes and failure
 
-The runtime owns request correlation, progress, cancellation, and connection
-recovery. Delivery-unknown mutations are not replayed. Replacement initialization
-waits for the previous owned host to stop. Closing an MCP session releases its
-handles and channels; it does not quit a GUI Xcode process.
+Each Xcode installation has at most one headless host process, and each running
+GUI Xcode process has at most one `mcpbridge`. Every MCP session shares them.
+A host connection owns its process: it starts it on first use, sends one
+`initialize`, assigns upstream request IDs, returns progress to the requesting
+session, and sends `notifications/cancelled` when a request is cancelled or
+times out. A timeout fails only that request.
+
+When a process exits or violates the protocol, its in-flight requests fail with
+`upstream unavailable`, handles created by that process expire, and the next
+request starts a new process. Delivery-unknown mutations are not replayed.
+Closing an MCP session releases its handles; it does not quit a GUI Xcode process.
+GUI bridges stop once no session references or uses them.
 
 Shutdown stops admission, cancels and drains owned request/event tasks, stops
 backend connections, and closes owned native models and preview resources.
@@ -91,7 +98,7 @@ startup; write failure unwinds acquired resources.
 - A client transport session with no in-flight HTTP request and no open SSE stream is retained for five minutes after its last client activity so that an interrupted SSE connection can reconnect. A one-minute sweep then terminates stale sessions and their buffered notifications; outbound server notifications do not extend this lifetime. Runtime-internal control-plane and health-probe sessions do not participate in transport expiry.
 - HTTP connection, SSE connection, request, and response access events are debug telemetry, including expected protocol-level `4xx` responses. The response remains the client-visible error contract.
 - Empty, singleton, and mixed JSON-RPC arrays return `400`; the internal executor and response router operate on typed single messages. An array response from an upstream is a protocol violation.
-- Upstream `notifications/progress` is delivered only to the session that owns the active operation lease. It is dropped when no owner exists; globally scoped server notifications continue to fan out to initialized sessions.
+- Host `notifications/progress` is delivered only to the session whose request carries that progress token. It is dropped when the request has finished; other host notifications fan out to the sessions using that host.
 - HTTP owns each session's bounded SSE notification buffer. On overflow it drops the oldest notification and emits at most one warning per 30 seconds per session. `dropped_notifications` is cumulative for that session, while the warning also reports the dropped delta and sanitized methods of the notifications actually evicted; notification payloads are never logged. Unhandled server notifications remain debug-level events.
 
 
