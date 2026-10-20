@@ -216,7 +216,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
             try await runInternal(tool, arguments: arguments, context: context)
         }
         let selection: NativeWorkspaceSelection?
-        if name == "XcodeOpenWorkspace" {
+        // Opening or creating a workspace runs under its permit or exclusively in the process, so
+        // the new workspace's selection can be read for the session that opened it.
+        if name == "XcodeOpenWorkspace" || name == "XcodeNewProject" {
             guard case .object(let fields)? = output,
                   let identifier = NativeWorkspaceSelection.string(fields["workspaceIdentifier"]) else { return [:] }
             do { selection = try await selections.selection(in: identifier, run: run) }

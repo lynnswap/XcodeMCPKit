@@ -867,6 +867,25 @@ struct NativeHostBrokerTests {
         #expect(read.metadata[NativeHostBroker.selectionKey] == .object(["scheme": .string("Tool")]))
     }
 
+    @Test func aCreatedProjectStartsWithTheSelectionItWasCreatedWith() async throws {
+        let fixture = try BrokerFixture()
+        fixture.factory.reportsSelection.withLockedValue {
+            $0 = { tool, _, requested in
+                tool == "XcodeNewProject" ? .object(["scheme": .string("NewProject")]) : requested
+            }
+        }
+        let session = try await fixture.initialize("new-project-selection")
+        let created = try await fixture.call(session, name: "XcodeNewProject", arguments: [
+            "templateIdentifier": .string("fixture-template"), "productName": .string("NewProject"),
+            "destinationPath": .string("/Fixture/NewProject"),
+        ])
+        let workspace = try #require(created["workspaceIdentifier"])
+        _ = try await fixture.toolResult(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": workspace])
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let read = try #require(native.calls.withLockedValue { $0.first { $0.name == "GetBuildLog" } })
+        #expect(read.metadata[NativeHostBroker.selectionKey] == .object(["scheme": .string("NewProject")]))
+    }
+
     @Test func anAdmittedCallKeepsItsSelectionAfterTheHandleCloses() async throws {
         let fixture = try BrokerFixture()
         // The build's reply reports nothing, so only the session's record can carry the selection.
@@ -1136,6 +1155,11 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                         result = try NativeHostBroker.toolResult(.object([
                             "workspaceIdentifier": .string("native-w-\(index)"),
                             "workspacePath": .string(workspacePath),
+                        ]))
+                    case "XcodeNewProject":
+                        result = try NativeHostBroker.toolResult(.object([
+                            "workspaceIdentifier": .string("native-new-\(index)"),
+                            "workspacePath": arguments["destinationPath"] ?? .string("/Fixture/NewProject"),
                         ]))
                     case "XcodeListWorkspaces":
                         let message = openedPath.withLockedValue { $0 }.map {

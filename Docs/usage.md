@@ -66,8 +66,9 @@ Inspect settings with `XcodeListSchemes`, `XcodeListRunDestinations`, and
 with testable targets and a usable test plan.
 
 In a headless workspace, each MCP session keeps its own scheme, run destination,
-and test plan. A session starts with the workspace's settings when it opens the
-workspace, and its switches apply only to its own later operations. Before each
+and test plan. A session starts with the workspace's settings when it opens or
+creates the workspace, or when it first uses a workspace found through
+`XcodeListWorkspaces`. Its switches apply only to its own later operations. Before each
 of its operations, the host restores the session's settings, and no other
 session's operation on that workspace runs in between. If Xcode cannot restore
 them, for example because the destination is no longer available, the operation

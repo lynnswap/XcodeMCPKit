@@ -1137,8 +1137,12 @@ private extension NativeHostBroker {
         if workspace == nil, name == "XcodeNewProject" {
             let payload = try Self.toolPayload(value)
             if let nativeID = Self.string(payload["workspaceIdentifier"]) {
-                workspace = try bindWorkspace(in: session, host: host, generation: generation, nativeIdentifier: nativeID,
+                let created = try bindWorkspace(in: session, host: host, generation: generation, nativeIdentifier: nativeID,
                     path: Self.string(payload["workspacePath"]), name: nil)
+                if !created.gui, let selection = sent.selection {
+                    session.recordSelection(selection, for: created, replacing: false)
+                }
+                workspace = created
             }
         }
         return try Self.externalReply(Self.rewriteReply(reply, workspace: name == "XcodeNewProject" ? workspace : nil,
