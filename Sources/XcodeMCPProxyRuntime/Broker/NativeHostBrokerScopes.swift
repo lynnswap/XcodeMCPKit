@@ -69,11 +69,12 @@ extension NativeBrokerSession {
         }
     }
 
-    /// Forgets the selection of a model the session no longer references, so a later open starts
-    /// from the model's selection at that time.
+    /// Forgets the selection of a model the session no longer references or uses in a running
+    /// request, so a later open starts from the model's selection at that time.
     func forgetSelectionIfUnreferenced(_ workspace: NativeBrokerWorkspace) {
         state.withLockedValue { state in
-            let referenced = state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }
+            let referenced = state.admittedWorkspaces[workspace.scope] != nil
+                || state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }
                 || state.deviceSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true }
                 || state.launchSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true }
             if !referenced { state.selections[workspace.scope] = nil }

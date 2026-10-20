@@ -867,6 +867,37 @@ struct NativeHostBrokerTests {
         #expect(read.metadata[NativeHostBroker.selectionKey] == .object(["scheme": .string("Tool")]))
     }
 
+    @Test func anAdmittedCallKeepsItsSelectionAfterTheHandleCloses() async throws {
+        let fixture = try BrokerFixture()
+        // The build's reply reports nothing, so only the session's record can carry the selection.
+        fixture.factory.reportsSelection.withLockedValue {
+            $0 = { tool, _, requested in tool == "BuildProject" ? nil : requested ?? .object(["scheme": .string("App")]) }
+        }
+        let session = try await fixture.initialize("admitted-selection")
+        let workspace = try await fixture.open(session)
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let building = Task { try await fixture.toolResult(session, name: "BuildProject", arguments: ["workspaceIdentifier": workspace]) }
+        try await native.waiting.wait(description: "build sent")
+        // Admitted now, the read waits behind the build for the session's turn on the model.
+        let read = try ProxyRuntimeRequest(json: .object([
+            "jsonrpc": .string("2.0"), "id": .number(.int(77)), "method": .string("tools/call"),
+            "params": .object(["name": .string("GetBuildLog"), "arguments": .object(["workspaceIdentifier": workspace])]),
+        ]), headerSessionExists: true, prefersEventStream: false)
+        let reading = try #require(fixture.broker.beginRequest(read, in: session))
+        let released = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                              arguments: ["workspaceIdentifier": workspace])
+        #expect(released["released"] == .bool(true))
+
+        await native.releaseWait()
+        _ = try await building.value
+        _ = try await withCheckedThrowingContinuation { continuation in
+            reading.whenComplete { continuation.resume(with: $0) }
+        }
+        fixture.broker.clientRequestFinished(session)
+        let sent = try #require(native.calls.withLockedValue { $0.first { $0.name == "GetBuildLog" } })
+        #expect(sent.metadata[NativeHostBroker.selectionKey] == .object(["scheme": .string("App")]))
+    }
+
     @Test func forwardedCallsKeepTheClientsProgressToken() async throws {
         let fixture = try BrokerFixture()
         let session = try await fixture.initialize("progress-meta")

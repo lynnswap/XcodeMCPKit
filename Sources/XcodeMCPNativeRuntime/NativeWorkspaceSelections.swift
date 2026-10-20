@@ -11,6 +11,8 @@ package struct NativeWorkspaceSelection: Equatable, Sendable {
     package var destination: String?
     /// The test plan's name, or its path when several plans of the scheme share the name.
     package var testPlan: String?
+    /// The session's last switch succeeded, but its result could not be read.
+    package var isUnknown = false
 
     package init(scheme: String? = nil, destination: String? = nil, testPlan: String? = nil) {
         self.scheme = scheme
@@ -18,11 +20,19 @@ package struct NativeWorkspaceSelection: Equatable, Sendable {
         self.testPlan = testPlan
     }
 
+    /// A selection that the session must switch again before its operations run.
+    package static var unknown: Self {
+        var selection = Self()
+        selection.isUnknown = true
+        return selection
+    }
+
     /// Reads the selection that the proxy sends in a request's `_meta`.
     package init?(json: JSONValue?) {
         guard case .object(let fields)? = json else { return nil }
         self.init(scheme: Self.string(fields["scheme"]), destination: Self.string(fields["destination"]),
                   testPlan: Self.string(fields["testPlan"]))
+        isUnknown = fields["unknown"] == .bool(true)
     }
 
     package var json: JSONValue {
@@ -30,6 +40,7 @@ package struct NativeWorkspaceSelection: Equatable, Sendable {
         if let scheme { fields["scheme"] = .string(scheme) }
         if let destination { fields["destination"] = .string(destination) }
         if let testPlan { fields["testPlan"] = .string(testPlan) }
+        if isUnknown { fields["unknown"] = .bool(true) }
         return .object(fields)
     }
 
@@ -109,10 +120,10 @@ final class NativeWorkspaceSelections {
             active[workspace] = nil
         }
         if Self.switchTools.contains(tool) {
-            guard let output else { return nil }
-            if let selection = try? await selection(in: workspace, run: run) { return selection }
-            // The switch's own output keeps the session from restoring what it had before the switch.
-            return Self.selection(after: tool, output: output, from: applied ?? NativeWorkspaceSelection())
+            guard output != nil else { return nil }
+            // A session whose switch cannot be confirmed must switch again, so that it neither
+            // restores what it had before nor runs with another session's selection.
+            return (try? await selection(in: workspace, run: run)) ?? .unknown
         }
         return tool == "XcodeCloseWorkspace" ? nil : applied
     }
@@ -132,6 +143,10 @@ final class NativeWorkspaceSelections {
     /// Makes the parts of `requested` that it names active in `workspace`, and fails when Xcode
     /// selects something else.
     func apply(_ requested: NativeWorkspaceSelection, in workspace: String, run: Run) async throws {
+        if requested.isUnknown {
+            throw NativeToolExecutionError(message: "This session's last switch could not be confirmed. Switch the "
+                + "scheme, run destination, or test plan again before retrying.")
+        }
         let steps: [(part: WritableKeyPath<NativeWorkspaceSelection, String?>, tool: String, argument: String, kind: String)] = [
             (\.scheme, "XcodeSwitchScheme", "schemeName", "scheme"),
             (\.destination, "XcodeSwitchRunDestination", "displayTitle", "run destination"),
@@ -156,24 +171,6 @@ final class NativeWorkspaceSelections {
             active[workspace] = nil
             throw error
         }
-    }
-
-    /// The selection after a switch, from the switch's output and the selection it started from.
-    private static func selection(after tool: String, output: [String: JSONValue],
-                                  from base: NativeWorkspaceSelection) -> NativeWorkspaceSelection {
-        var selection = base
-        switch tool {
-        case "XcodeSwitchScheme":
-            selection.scheme = NativeWorkspaceSelection.string(output["activeSchemeName"])
-            selection.destination = NativeWorkspaceSelection.string(output["activeDestinationDisplayTitle"])
-            selection.testPlan = NativeWorkspaceSelection.string(output["activeTestPlanName"])
-        case "XcodeSwitchRunDestination":
-            selection.destination = NativeWorkspaceSelection.string(output["activeDestinationDisplayTitle"])
-        default:
-            selection.testPlan = NativeWorkspaceSelection.string(output["activeTestPlanPath"])
-                ?? NativeWorkspaceSelection.string(output["activeTestPlanName"])
-        }
-        return selection
     }
 
     /// The active entry of a list action's output, by the field that tells it apart from entries

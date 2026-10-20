@@ -118,16 +118,17 @@ struct NativeWorkspaceSelectionsTests {
                                                reportsSelection: true, in: "w1", run: workspace.run)
         #expect(reported?.destination == "iPhone 17")
 
-        // A switch that cannot be read back reports what its output names, so the session keeps the switch.
-        _ = try await selections.prepare(for: "XcodeSwitchScheme", requested: NativeWorkspaceSelection(), in: "w1",
-                                         run: workspace.run)
+        // A switch that cannot be read back leaves the session to switch again before other operations.
         workspace.listsFail = true
-        let output: [String: JSONValue] = ["activeSchemeName": .string("Tool"),
-                                           "activeDestinationDisplayTitle": .string("iPhone 17")]
-        #expect(await selections.finish("XcodeSwitchScheme", changesWorkspace: true, output: output,
-                                        reportsSelection: true, in: "w1", run: workspace.run)
-            == NativeWorkspaceSelection(scheme: "Tool", destination: "iPhone 17"))
+        let unknown = await selections.finish("XcodeSwitchScheme", changesWorkspace: true, output: [:],
+                                              reportsSelection: true, in: "w1", run: workspace.run)
+        #expect(unknown == .unknown)
         workspace.listsFail = false
+        await #expect(throws: NativeToolExecutionError.self) {
+            _ = try await selections.prepare(for: "BuildProject", requested: .unknown, in: "w1", run: workspace.run)
+        }
+        #expect(try await selections.prepare(for: "XcodeSwitchScheme", requested: .unknown, in: "w1",
+                                             run: workspace.run) == false)
 
         // A failed or cancelled switch may have changed the selection, so it is read again next time.
         workspace.scheme = "Tool"

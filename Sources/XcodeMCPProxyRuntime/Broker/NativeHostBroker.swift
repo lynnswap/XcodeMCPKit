@@ -632,6 +632,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     /// session released the handle, so the model closes once nothing else references it.
     private func releaseRequestRetention(of workspace: NativeBrokerWorkspace, in session: NativeBrokerSession) {
         session.releaseAdmission(of: workspace)
+        session.forgetSelectionIfUnreferenced(workspace)
         if !state.withLockedValue({ $0.sessions.values.contains { $0.retainsNativeWorkspace(workspace) } }) {
             scheduleUnreferencedClose([workspace])
         }
