@@ -55,9 +55,8 @@ struct NativeBrokerLaunchSession: Sendable, Equatable {
 }
 
 extension NativeBrokerSession {
-    /// Returns the session's handle for a native workspace and whether this call created it.
     func bindWorkspace(host: NativeBrokerHost, source: ProxyRuntimeUpstreamSource, nativeIdentifier: String,
-                       path: String?, name: String?) throws -> (workspace: NativeBrokerWorkspace, created: Bool) {
+                       path: String?, name: String?) throws -> NativeBrokerWorkspace {
         try state.withLockedValue { state in
             guard !state.closed else { throw CancellationError() }
             // Validate while holding the registry lock so a replacement notification
@@ -67,14 +66,14 @@ extension NativeBrokerSession {
             }
             if let existing = state.workspaces.values.first(where: {
                 $0.hostIdentifier == host.identifier && $0.source == source && $0.nativeIdentifier == nativeIdentifier
-            }) { return (existing, false) }
+            }) { return existing }
             let workspace = NativeBrokerWorkspace(identifier: Self.reference(prefix: "w"),
                 hostIdentifier: host.identifier, source: source, nativeIdentifier: nativeIdentifier,
                 gui: host.guiProcess != nil, path: path,
                 name: name ?? path.map { URL(filePath: $0).deletingPathExtension().lastPathComponent }
                     ?? nativeIdentifier)
             state.workspaces[workspace.identifier] = workspace
-            return (workspace, true)
+            return workspace
         }
     }
 

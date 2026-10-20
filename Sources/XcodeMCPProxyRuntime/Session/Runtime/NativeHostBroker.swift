@@ -18,13 +18,14 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         var sessions: [ProxySessionID: NativeBrokerSession] = [:]
         var backendBindings: [ProxySessionID: Binding] = [:]
         var closing: [UUID: Task<Void, Never>] = [:]
-        /// Headless models whose native close is in flight; new handles to them are refused.
-        var closingWorkspaces: Set<NativeBrokerWorkspace.Scope> = []
         var stopped = false
         var resetsInProgress = 0
         var publicCatalog: JSONValue?
     }
     private let state = NIOLockedValueBox(State())
+    /// Headless models whose native close is in flight. Binding, close election, and failed-close
+    /// restoration all run under this lock, which is taken before the broker and session locks.
+    private let closingWorkspaces = NIOLockedValueBox<Set<NativeBrokerWorkspace.Scope>>([])
     private let eventSource = ProxyRuntimeEventSource()
     private let configuration: ProxyRuntimeConfiguration
     private let inventory: XcodeHostInventory
@@ -675,40 +676,37 @@ private extension NativeHostBroker {
 
     /// Removes the session's handle and reports whether this call must close the native model:
     /// the handle was still bound, no other session uses the model, and no close is in flight.
-    /// The decision and the in-flight mark share the broker lock, which `bindWorkspace` also observes.
     private func electNativeClose(of workspace: NativeBrokerWorkspace, in session: NativeBrokerSession) -> Bool {
-        state.withLockedValue { storage in
+        closingWorkspaces.withLockedValue { closing in
             let removed = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) } != nil
-            guard removed, !storage.closingWorkspaces.contains(workspace.scope),
-                  !storage.sessions.values.contains(where: { $0 !== session && $0.retainsNativeWorkspace(workspace) })
+            let sessions = state.withLockedValue { Array($0.sessions.values) }
+            guard removed, !closing.contains(workspace.scope),
+                  !sessions.contains(where: { $0 !== session && $0.retainsNativeWorkspace(workspace) })
             else { return false }
-            storage.closingWorkspaces.insert(workspace.scope)
+            closing.insert(workspace.scope)
             return true
         }
     }
 
     private func finishNativeClose(of workspace: NativeBrokerWorkspace, in session: NativeBrokerSession,
                                    host: NativeBrokerHost, closed: Bool) {
-        // Restore while the mark still refuses other handles, so no other session can elect a close first.
-        if !closed { session.restoreWorkspace(workspace, host: host) }
-        _ = state.withLockedValue { $0.closingWorkspaces.remove(workspace.scope) }
+        closingWorkspaces.withLockedValue { closing in
+            if !closed { session.restoreWorkspace(workspace, host: host) }
+            closing.remove(workspace.scope)
+        }
     }
 
     /// Binds a handle unless its native model is being closed; a model mid-close is about to disappear.
     private func bindWorkspace(in session: NativeBrokerSession, host: NativeBrokerHost,
                                source: ProxyRuntimeUpstreamSource, nativeIdentifier: String,
                                path: String?, name: String?) throws -> NativeBrokerWorkspace {
-        let (workspace, created) = try session.bindWorkspace(host: host, source: source,
-                                                             nativeIdentifier: nativeIdentifier, path: path, name: name)
-        // Checked after binding: an election that ran first left its mark, and one that runs later sees this handle.
-        // A handle that already existed is the closing session's restored handle after a failed close.
-        let closing = created && state.withLockedValue { storage in
-            guard storage.closingWorkspaces.contains(workspace.scope) else { return false }
-            _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
-            return true
+        try closingWorkspaces.withLockedValue { closing in
+            let scope = NativeBrokerWorkspace.Scope(hostIdentifier: host.identifier, source: source,
+                                                    nativeIdentifier: nativeIdentifier)
+            guard !closing.contains(scope) else { throw NativeBrokerWorkspaceClosing() }
+            return try session.bindWorkspace(host: host, source: source, nativeIdentifier: nativeIdentifier,
+                                             path: path, name: name)
         }
-        if closing { throw NativeBrokerWorkspaceClosing() }
-        return workspace
     }
 
     private func discoverGUIHosts() throws {
