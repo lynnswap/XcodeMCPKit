@@ -255,6 +255,39 @@ struct NativeHostConnectionTests {
                                                      .object(["name": .string("Second")])])]))
     }
 
+    @Test func aCatalogPageWithAnInvalidCursorIsRejected() async throws {
+        let factory = FakeHostSessionFactory { _ in
+            FakeHostSession(handlesCatalog: true) { method, _ in
+                method == "tools/list"
+                    ? .result(.object(["tools": .array([]), "nextCursor": .number(.int(2))]))
+                    : .result(.object([:]))
+            }
+        }
+        let fixture = Fixture(factory: factory)
+        await #expect(throws: NativeHostConnectionError.self) { _ = try await fixture.connection.nativeCatalog() }
+    }
+
+    @Test func aCatalogChangeDuringALoadReturnsTheNewCatalog() async throws {
+        let loads = NIOLockedValueBox(0)
+        let changed = JSONValue.object(["tools": .array([.object(["name": .string("Changed")])])])
+        let factory = FakeHostSessionFactory { _ in
+            FakeHostSession(handlesCatalog: true) { method, _ in
+                guard method == "tools/list" else { return .result(.object([:])) }
+                return loads.withLockedValue { count in
+                    count += 1
+                    return count == 1 ? .hold : .result(changed)
+                }
+            }
+        }
+        let fixture = Fixture(factory: factory)
+        let loading = Task { try await fixture.connection.nativeCatalog() }
+        let host = try await factory.started.nextValue(at: 0)
+        try await host.heldRequest.wait(description: "first catalog load held")
+        host.emit(.object(["jsonrpc": .string("2.0"), "method": .string("notifications/tools/list_changed")]))
+        host.release("tools/list", with: .result(.object(["tools": .array([.object(["name": .string("Stale")])])])))
+        #expect(try await loading.value.result == changed)
+    }
+
     @Test func deinitializationCancelsAProcessThatIsStillStarting() async throws {
         let gate = TestSignal()
         let session = FakeHostSession()

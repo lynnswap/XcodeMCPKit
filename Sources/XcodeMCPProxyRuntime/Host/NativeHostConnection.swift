@@ -131,10 +131,13 @@ actor NativeHostConnection {
 
     /// Returns the host's `tools/list` result, loading it once per process and catalog change.
     func nativeCatalog() async throws -> (generation: UInt64, result: JSONValue) {
-        let process = try await runningProcess()
-        let load = catalogLoad(on: process)
-        let result = try await Self.value(of: load.task)
-        return (load.generation, result)
+        while true {
+            let process = try await runningProcess()
+            let load = catalogLoad(on: process)
+            let result = try await Self.value(of: load.task)
+            // A catalog change during the load makes its result stale; load the new catalog.
+            if load.epoch == catalogEpoch { return (load.generation, result) }
+        }
     }
 
     /// Stops the running process. The next request starts a new one.
@@ -429,9 +432,14 @@ actor NativeHostConnection {
             if catalog == nil { catalog = page }
             tools += pageTools
             cursor = nil
-            if case .string(let next)? = page["nextCursor"] {
+            switch page["nextCursor"] {
+            case .string(let next)?:
                 guard visited.insert(next).inserted else { throw NativeHostConnectionError.invalidResponse }
                 cursor = .string(next)
+            case nil, .null?:
+                break
+            default:
+                throw NativeHostConnectionError.invalidResponse
             }
         } while cursor != nil
         var result = catalog ?? [:]
