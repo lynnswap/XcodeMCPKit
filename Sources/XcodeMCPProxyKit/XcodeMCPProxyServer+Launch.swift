@@ -67,7 +67,8 @@ private extension ProxyServerCommand {
             requestTimeout: requestTimeout.map { $0.duration }
                 ?? XcodeMCPProxyServerConfiguration().requestTimeout,
             discovery: .file(ProxyFilesystemLocations.discoveryFileURL(environment: environment)),
-            approvalPolicy: autoApprove ? .automatic : .manual
+            approvalPolicy: autoApprove ? .automatic : .manual,
+            enablesDebugEndpoints: debugEndpoints
         )
     }
 
@@ -121,6 +122,9 @@ private extension ProxyServerCommand {
         }
         if configuration.approvalPolicy == .automatic {
             arguments.append("--auto-approve")
+        }
+        if configuration.enablesDebugEndpoints {
+            arguments.append("--debug-endpoints")
         }
         if forceRestart {
             arguments.append("--force-restart")

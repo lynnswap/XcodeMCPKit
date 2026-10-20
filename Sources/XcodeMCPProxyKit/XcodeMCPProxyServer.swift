@@ -132,6 +132,10 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Whether to fetch native tool catalogs during startup.
     public var prewarmToolsList: Bool
 
+    /// Whether to serve `/debug/upstreams` and `/debug/reset`. They are served only on a loopback
+    /// listener. Defaults to `false`.
+    public var enablesDebugEndpoints: Bool
+
     /// Creates a public proxy server configuration.
     ///
     /// - Parameters:
@@ -146,6 +150,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///   - approvalPolicy: Xcode MCP connection dialog automation policy. Defaults to `.manual`.
     ///   - prewarmToolsList: Whether to fetch native tool catalogs during startup.
     ///   - initializeHandshake: Explicit upstream initialize handshake override.
+    ///   - enablesDebugEndpoints: Whether to serve the debug endpoints on a loopback listener. Defaults to `false`.
     public init(
         bindAddress: BindAddress = .localhost(),
         nativeHostBundleURL: URL? = nil,
@@ -156,7 +161,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         initializeHandshake: InitializeHandshake? = nil,
         discovery: Discovery = .defaultLocation,
         approvalPolicy: ApprovalPolicy = .manual,
-        prewarmToolsList: Bool = true
+        prewarmToolsList: Bool = true,
+        enablesDebugEndpoints: Bool = false
     ) {
         self.bindAddress = bindAddress
         self.nativeHostBundleURL = nativeHostBundleURL
@@ -168,6 +174,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         self.initializeHandshake = initializeHandshake
         self.discovery = discovery
         self.prewarmToolsList = prewarmToolsList
+        self.enablesDebugEndpoints = enablesDebugEndpoints
     }
 
     var listenHost: String { bindAddress.host }

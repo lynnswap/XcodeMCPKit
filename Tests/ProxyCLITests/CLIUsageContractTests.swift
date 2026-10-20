@@ -15,6 +15,7 @@ struct CLIUsageContractTests {
             "--request-timeout <request-timeout>",
             "--share-compilation-cache",
             "--auto-approve",
+            "--debug-endpoints",
             "--force-restart",
             "--dry-run",
             "--version",

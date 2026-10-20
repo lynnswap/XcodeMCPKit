@@ -254,7 +254,8 @@ extension XcodeMCPProxyServer {
                 ProxyHTTPConfiguration(
                     listenHost: configuration.listenHost,
                     listenPort: configuration.listenPort,
-                    maxBodyBytes: configuration.maxBodyBytes
+                    maxBodyBytes: configuration.maxBodyBytes,
+                    enablesDebugEndpoints: configuration.enablesDebugEndpoints
                 ),
                 runtime,
                 logger
