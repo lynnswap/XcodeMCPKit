@@ -151,8 +151,9 @@ private enum NativeHostMain {
 
     private static func consumeInput(into session: NativeMCPSession, maxMessageBytes: Int) async -> HostOutcome {
         let framer = StdioFramer(mode: .delimitedMessages)
+        let input = StandardInput()
         do {
-            for try await chunk in standardInput() {
+            for try await chunk in input.chunks {
                 let result = framer.append(chunk)
                 guard framer.bufferedMessageByteCount <= maxMessageBytes else {
                     throw NativeRuntimeError.invalidRequest("Native MCP input exceeds the configured message limit")
@@ -166,35 +167,11 @@ private enum NativeHostMain {
                     }
                 }
                 try await session.receive(result.messages)
+                input.consumed()
             }
             return .inputEnded
         } catch {
             return .inputFailed(error)
-        }
-    }
-
-    /// Reads stdin on its own thread. Cancelling the consumer ends iteration; the reader stops at its next read.
-    private static func standardInput() -> AsyncThrowingStream<Data, any Error> {
-        AsyncThrowingStream { continuation in
-            DispatchQueue(label: "xcode.native.stdin").async {
-                while true {
-                    var data = Data(count: 64 * 1024)
-                    let count = unsafe data.withUnsafeMutableBytes { bytes in
-                        unsafe Darwin.read(STDIN_FILENO, bytes.baseAddress, bytes.count)
-                    }
-                    if count > 0 {
-                        data.count = count
-                        if case .terminated = continuation.yield(data) { return }
-                    } else if count == 0 {
-                        continuation.finish()
-                        return
-                    } else if errno != EINTR {
-                        continuation.finish(throwing: NativeRuntimeError.unavailable(
-                            "Native MCP stdin read failed: \(unsafe String(cString: strerror(errno)))"))
-                        return
-                    }
-                }
-            }
         }
     }
 
@@ -210,4 +187,40 @@ private enum NativeHostMain {
         }
         application.terminate(nil)
     }
+}
+
+/// Reads stdin on its own thread, one chunk ahead of the consumer, so the pipe keeps exerting
+/// backpressure. Cancelling the consumer ends iteration; the reader then stops at its next chunk.
+private final class StandardInput: Sendable {
+    let chunks: AsyncThrowingStream<Data, any Error>
+    private let demand = DispatchSemaphore(value: 0)
+
+    init() {
+        let (chunks, continuation) = AsyncThrowingStream<Data, any Error>.makeStream()
+        self.chunks = chunks
+        let demand = demand
+        DispatchQueue(label: "xcode.native.stdin").async {
+            while true {
+                var data = Data(count: 64 * 1024)
+                let count = unsafe data.withUnsafeMutableBytes { bytes in
+                    unsafe Darwin.read(STDIN_FILENO, bytes.baseAddress, bytes.count)
+                }
+                if count > 0 {
+                    data.count = count
+                    guard case .enqueued = continuation.yield(data) else { return }
+                    demand.wait()
+                } else if count == 0 {
+                    continuation.finish()
+                    return
+                } else if errno != EINTR {
+                    continuation.finish(throwing: NativeRuntimeError.unavailable(
+                        "Native MCP stdin read failed: \(unsafe String(cString: strerror(errno)))"))
+                    return
+                }
+            }
+        }
+    }
+
+    /// Lets the reader fetch the next chunk.
+    func consumed() { demand.signal() }
 }

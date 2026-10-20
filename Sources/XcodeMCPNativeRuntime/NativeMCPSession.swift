@@ -73,7 +73,6 @@ package actor NativeMCPSession {
             let params = object["params"].flatMap(JSONValue.init(any:))
             let requestBytes = data.count
             requests[id.key] = Task {
-                defer { requests[id.key] = nil }
                 do {
                     try Task.checkCancellation()
                     let result = try await perform(method, params: params, requestBytes: requestBytes)
@@ -95,6 +94,8 @@ package actor NativeMCPSession {
                         reportError(id: id, code: -32603, message: String(describing: error))
                     }
                 }
+                // The client may reuse the ID as soon as it reads the reply.
+                requests[id.key] = nil
                 // The reply above reports the failure to its caller; later callers need a new process.
                 if let failure = await backend.processFailure {
                     fail(NativeRuntimeError.unavailable("The native host cannot continue: \(failure)"))
