@@ -2,6 +2,10 @@ import Foundation
 import XcodeMCPCore
 
 enum InitializeHandshakeJSON {
+    /// Capabilities that let a host send requests to the client. Every client session shares a host,
+    /// so no client can answer those requests and the handshake does not advertise them.
+    private static let hostRequestCapabilities: Set<String> = ["roots", "sampling", "elicitation"]
+
     static func resolved(
         initializeParamsOverride: ProxyRuntimeConfiguration.InitializeHandshakeOverride?
     ) -> [String: JSONValue] {
@@ -49,7 +53,9 @@ enum InitializeHandshakeJSON {
         }
 
         if let capabilities = override.capabilities {
-            params["capabilities"] = .object(capabilities.mapValues(jsonValue(from:)))
+            params["capabilities"] = .object(capabilities
+                .filter { !hostRequestCapabilities.contains($0.key) }
+                .mapValues(jsonValue(from:)))
         }
 
         return params.isEmpty ? nil : params
