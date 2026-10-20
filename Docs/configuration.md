@@ -56,6 +56,7 @@ Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
 | `--max-body-bytes bytes` | Maximum accepted HTTP request body size. |
 | `--share-compilation-cache` | Enable shared compilation caching and Swift/Clang prefix mapping in native hosts. Off by default; see [compilation caching](#compilation-caching). |
 | `--auto-approve` | Automatically allow GUI Xcode MCP connection dialogs for all agents, including external clients. Off by default; requires macOS Accessibility access. |
+| `--debug-endpoints` | Serve `/debug/upstreams` and `/debug/reset` when the listener is loopback. Off by default. |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port before starting. |
 | `--dry-run` | Print the resolved server command without starting it. |
 

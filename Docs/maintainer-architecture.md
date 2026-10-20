@@ -53,7 +53,7 @@ spawn an unowned task or promise graceful shutdown. Report cleanup failure
 alongside the original failure. Do not replay mutations with unknown delivery.
 
 Keep stdout exclusively for protocol messages and stderr for diagnostics. Parse
-an HTTP body once and pass its parsed message onward. Origin validation happens
+an HTTP body once and pass its parsed message onward. Host and Origin validation happen
 before routing or side effects; JSON-RPC arrays are rejected at the HTTP boundary.
 See the [HTTP contract](architecture.md#streamable-http-contract) for session,
 header, and notification-buffer behavior.

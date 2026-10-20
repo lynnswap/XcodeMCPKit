@@ -31,7 +31,8 @@ struct HTTPHandlerTests {
     }
 
     @Test func httpDebugUpstreamsReturnsSnapshot() async throws {
-        let config = makeHTTPConfig()
+        var config = makeHTTPConfig()
+        config.enablesDebugEndpoints = true
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let runtime = try HTTPTestRuntime(config: config)
@@ -59,6 +60,7 @@ struct HTTPHandlerTests {
     @Test func httpDebugUpstreamsReturnsNotFoundWhenListenerIsNotLoopback() async throws {
         var config = makeHTTPConfig()
         config.listenHost = "0.0.0.0"
+        config.enablesDebugEndpoints = true
 
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -77,6 +79,7 @@ struct HTTPHandlerTests {
     @Test func httpDebugResetResetsRuntimeOnLoopback() async throws {
         var config = makeHTTPConfig()
         config.prewarmToolsList = false
+        config.enablesDebugEndpoints = true
         let runtime = try HTTPTestRuntime(config: config)
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
 
@@ -121,6 +124,7 @@ struct HTTPHandlerTests {
     @Test func httpDebugResetReturnsNotFoundWhenListenerIsNotLoopback() async throws {
         var config = makeHTTPConfig()
         config.listenHost = "0.0.0.0"
+        config.enablesDebugEndpoints = true
 
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -134,6 +138,21 @@ struct HTTPHandlerTests {
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notFound)
         #expect(response.body == "not found")
+    }
+
+    @Test(arguments: [(HTTPMethod.GET, "/debug/upstreams?includeSensitive=1"), (.POST, "/debug/reset")])
+    func httpDebugEndpointsRequireTheOptIn(method: HTTPMethod, uri: String) async throws {
+        let config = makeHTTPConfig()
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let runtime = try HTTPTestRuntime(config: config)
+        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+
+        try channel.writeInbound(HTTPServerRequestPart.head(HTTPRequestHead(version: .http1_1, method: method, uri: uri)))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .notFound)
     }
 
     @Test func httpSSERequiresAcceptHeader() async throws {
@@ -440,6 +459,7 @@ struct HTTPHandlerTests {
             for originCase in OriginPolicyHeaderCase.allCases {
                 var config = makeHTTPConfig()
                 config.listenPort = 8765
+                config.enablesDebugEndpoints = true
                 if route == .debugReset, originCase.isRejected == false {
                     // The live loopback reset path is covered separately. A non-loopback
                     // listener keeps this Cartesian header test synchronous.
@@ -534,6 +554,79 @@ struct HTTPHandlerTests {
             #expect(response.head.status == .ok, "origin=\(origin)")
             _ = try? channel.finish()
         }
+    }
+
+    /// A page that rebinds its own domain to the listener sends its domain in `Host` and no `Origin`.
+    @Test func httpRejectsRebindingHostsBeforeEveryRoute() async throws {
+        for route in OriginPolicyRoute.allCases {
+            var config = makeHTTPConfig()
+            config.listenPort = 8765
+            config.enablesDebugEndpoints = true
+            let channel = EmbeddedChannel()
+            let runtime = try HTTPTestRuntime(config: config)
+            try addHTTPHandler(to: channel, config: config, runtime: runtime)
+            let sentinelSessionID = try await initializeHTTPChannel(channel)
+
+            try writeOriginPolicyRequest(route, originCase: .missing, host: "attacker.example:8765", to: channel)
+            let response = try await collectResponse(from: channel)
+
+            #expect(response.head.status == .forbidden, "route=\(route)")
+            #expect(response.body == "host not allowed", "route=\(route)")
+            #expect(runtime.hasSession(sentinelSessionID))
+            #expect(runtime.startedHostCount == 0)
+            _ = try? channel.finish()
+        }
+    }
+
+    @Test func httpHostMustNameTheListener() async throws {
+        let cases: [(listenHost: String, hosts: [String], allowed: Bool)] = [
+            ("127.0.0.1", ["localhost:8765", "LOCALHOST:8765", "127.0.0.1:8765", "[::1]:8765"], true),
+            ("127.0.0.1", ["attacker.example:8765", "localhost.attacker.example:8765", "localhost:8766",
+                           "localhost", "user@localhost:8765", "localhost:8765/path", ""], false),
+            ("0.0.0.0", ["192.168.1.10:8765", "localhost:8765"], true),
+            ("0.0.0.0", ["attacker.example:8765"], false),
+            ("mac.example", ["mac.example:8765", "192.168.1.10:8765"], true),
+            ("mac.example", ["other.example:8765"], false),
+        ]
+        for testCase in cases {
+            for host in testCase.hosts {
+                var config = makeHTTPConfig()
+                config.listenHost = testCase.listenHost
+                config.listenPort = 8765
+                let channel = EmbeddedChannel()
+                let runtime = try HTTPTestRuntime(config: config)
+                try addHTTPHandler(to: channel, config: config, runtime: runtime)
+
+                var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
+                head.headers.add(name: "Host", value: host)
+                try channel.writeInbound(HTTPServerRequestPart.head(head))
+                try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+                let response = try await collectResponse(from: channel)
+                #expect(response.head.status == (testCase.allowed ? .ok : .forbidden),
+                        "listen=\(testCase.listenHost) host=\(host)")
+                _ = try? channel.finish()
+            }
+        }
+    }
+
+    @Test func httpRejectsMultipleHostHeaders() async throws {
+        var config = makeHTTPConfig()
+        config.listenPort = 8765
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let runtime = try HTTPTestRuntime(config: config)
+        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
+        head.headers.add(name: "Host", value: "localhost:8765")
+        head.headers.add(name: "Host", value: "attacker.example:8765")
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        let response = try await collectResponse(from: channel)
+        #expect(response.head.status == .forbidden)
+        #expect(response.body == "host not allowed")
     }
 
     @Test func httpAllowsOriginMatchingEphemeralListenerPort() async throws {
@@ -672,8 +765,9 @@ struct HTTPHandlerTests {
         )
 
         let response = try await collectResponse(from: channel)
+        // The Host check rejects the rebound name before the Origin check runs.
         #expect(response.head.status == .forbidden)
-        #expect(response.body == "origin not allowed")
+        #expect(response.body == "host not allowed")
         #expect(response.head.headers.first(name: "Mcp-Session-Id") == nil)
     }
 
@@ -1734,9 +1828,11 @@ struct HTTPHandlerTests {
     private func writeOriginPolicyRequest(
         _ route: OriginPolicyRoute,
         originCase: OriginPolicyHeaderCase,
+        host: String? = nil,
         to channel: EmbeddedChannel
     ) throws {
         var head = HTTPRequestHead(version: .http1_1, method: route.method, uri: route.uri)
+        if let host { head.headers.add(name: "Host", value: host) }
         if route == .sse {
             head.headers.add(name: "Accept", value: "text/event-stream")
         } else if route == .post {

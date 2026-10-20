@@ -47,6 +47,9 @@ package struct ProxyServerCommand: ParsableCommand {
     @Flag(help: "Automatically allow Xcode MCP connections for all agents, including external clients. Requires Accessibility permission.")
     var autoApprove = false
 
+    @Flag(help: "Serve /debug/upstreams and /debug/reset on a loopback listener.")
+    var debugEndpoints = false
+
     @Flag(help: "Terminate an existing proxy server on the listen port before starting.")
     var forceRestart = false
 

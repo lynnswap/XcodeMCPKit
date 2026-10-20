@@ -11,6 +11,7 @@ struct ServerCommandTests {
         #expect(config.developerDirectoryURL == nil)
         #expect(!config.sharesCompilationCache)
         #expect(config.approvalPolicy == .manual)
+        #expect(!config.enablesDebugEndpoints)
         #expect(!(try config.runtimeConfiguration()).sharesCompilationCache)
         #expect(config.maxBodyBytes == 1_048_576)
         #expect(config.requestTimeout == .seconds(600))
@@ -24,12 +25,14 @@ struct ServerCommandTests {
             "--request-timeout", "12.5",
             "--share-compilation-cache",
             "--auto-approve",
+            "--debug-endpoints",
         ])
         #expect(config.bindAddress == .init(host: "0.0.0.0", port: 9999))
         #expect(config.maxBodyBytes == 2048)
         #expect(config.requestTimeout == .seconds(12.5))
         #expect(config.sharesCompilationCache)
         #expect(config.approvalPolicy == .automatic)
+        #expect(config.enablesDebugEndpoints)
         #expect((try config.runtimeConfiguration()).sharesCompilationCache)
     }
 
