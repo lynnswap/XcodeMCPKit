@@ -88,6 +88,8 @@ actor NativeHostConnection {
     nonisolated let status = NIOLockedValueBox(Status())
     /// The process session that deinitialization cancels, and whether it already did.
     private nonisolated let live = NIOLockedValueBox<(session: (any UpstreamSession)?, cancelled: Bool)>((nil, false))
+    /// A requested stop that has not finished; requests wait for it and then start a new process.
+    private nonisolated let retirement = NIOLockedValueBox<Task<Void, Never>?>(nil)
 
     private var generation: UInt64 = 0
     /// The process from launch until it ends; it receives replies even while initializing.
@@ -148,6 +150,21 @@ actor NativeHostConnection {
         await waitForEndings()
     }
 
+    /// Requests a stop of the current process. Once this returns, new requests wait for the stop
+    /// and start a new process instead of using the one being stopped.
+    @discardableResult
+    nonisolated func retire() -> Task<Void, Never> {
+        retirement.withLockedValue { pending in
+            if let pending { return pending }
+            let task = Task {
+                await self.stopProcess()
+                self.retirement.withLockedValue { $0 = nil }
+            }
+            pending = task
+            return task
+        }
+    }
+
     /// Stops the process permanently.
     func shutdown() async {
         stopped = true
@@ -168,6 +185,10 @@ actor NativeHostConnection {
 
     private func runningProcess() async throws -> Process {
         while true {
+            if let retiring = retirement.withLockedValue({ $0 }) {
+                await retiring.value
+                continue
+            }
             if let readyProcess { return readyProcess }
             guard !stopped, !live.withLockedValue({ $0.cancelled }) else {
                 throw NativeHostConnectionError.unavailable("the host has shut down")
@@ -220,8 +241,12 @@ actor NativeHostConnection {
             let reply = try await withTimeout(handshakeTimeout) { [self] in
                 try await exchange(initialize, owner: nil, on: process)
             }
-            if JSONRPC.Wire.errorPayload(fromResponseData: reply) != nil {
+            guard case .object(let result)? = try? JSONRPC.Wire.resultValue(fromResponseData: reply),
+                  case .string(let version)? = result["protocolVersion"] else {
                 throw NativeHostConnectionError.unavailable("initialize failed: \(String(decoding: reply, as: UTF8.self))")
+            }
+            guard MCPProtocolVersion.isSupported(version) else {
+                throw NativeHostConnectionError.unavailable("the host negotiated unsupported MCP protocol version \(version)")
             }
             try await write(JSONRPC.Wire.data(from: JSONRPC.Wire.notificationObject(
                 method: "notifications/initialized")), to: process)

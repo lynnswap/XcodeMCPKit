@@ -271,6 +271,29 @@ struct NativeHostConnectionTests {
         #expect(session.requests("initialize").isEmpty)
     }
 
+    @Test func requestsAfterARetirementUseANewProcess() async throws {
+        let fixture = Fixture()
+        try await fixture.connection.start()
+        let retiring = fixture.connection.retire()
+        _ = try await fixture.call("AfterRetirement")
+        await retiring.value
+        let sessions = fixture.factory.sessions.withLockedValue { $0 }
+        #expect(sessions.count == 2)
+        #expect(sessions.first?.requests("tools/call").isEmpty == true)
+        #expect(fixture.connection.status.withLockedValue { $0.runningGeneration } == 2)
+    }
+
+    @Test func aHostNegotiatingAnUnsupportedProtocolIsNotUsed() async throws {
+        let factory = FakeHostSessionFactory { _ in
+            FakeHostSession(initializeReply: .result(.object(["protocolVersion": .string("1999-01-01")])))
+        }
+        let fixture = Fixture(factory: factory)
+        await #expect(throws: NativeHostConnectionError.self) { try await fixture.connection.start() }
+        let host = try fixture.session
+        #expect(host.requests("notifications/initialized").isEmpty)
+        try await host.stopped.wait(description: "the incompatible host stopped")
+    }
+
     @Test func hostPingIsAnsweredWithoutReachingClients() async throws {
         let fixture = Fixture()
         try await fixture.connection.start()

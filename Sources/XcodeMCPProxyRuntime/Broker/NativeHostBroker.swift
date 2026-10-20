@@ -473,9 +473,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             return !storage.sessions.values.contains { $0.state.withLockedValue { $0.usesHost(host.identifier) } }
         }
         for host in unused {
+            // Retiring synchronously keeps a session that pins the host next from using this process.
+            let stop = host.connection.retire()
             let key = UUID()
             storage.closing[key] = Task { [self] in
-                await host.connection.stopProcess()
+                await stop.value
                 _ = state.withLockedValue { $0.closing.removeValue(forKey: key) }
             }
         }
