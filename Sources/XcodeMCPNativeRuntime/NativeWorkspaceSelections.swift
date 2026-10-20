@@ -11,7 +11,7 @@ package struct NativeWorkspaceSelection: Equatable, Sendable {
     package var destination: String?
     /// The test plan's name, or its path when several plans of the scheme share the name.
     package var testPlan: String?
-    /// The session's last switch succeeded, but its result could not be read.
+    /// The session's selection could not be read after it opened the workspace or switched.
     package var isUnknown = false
 
     package init(scheme: String? = nil, destination: String? = nil, testPlan: String? = nil) {
@@ -144,8 +144,9 @@ final class NativeWorkspaceSelections {
     /// selects something else.
     func apply(_ requested: NativeWorkspaceSelection, in workspace: String, run: Run) async throws {
         if requested.isUnknown {
-            throw NativeToolExecutionError(message: "This session's last switch could not be confirmed. Switch the "
-                + "scheme, run destination, or test plan again before retrying.")
+            throw NativeToolExecutionError(message: "This session's scheme, run destination, and test plan could not "
+                + "be read. Switch them with XcodeSwitchScheme, XcodeSwitchRunDestination, or XcodeSwitchTestPlan "
+                + "before retrying.")
         }
         let steps: [(part: WritableKeyPath<NativeWorkspaceSelection, String?>, tool: String, argument: String, kind: String)] = [
             (\.scheme, "XcodeSwitchScheme", "schemeName", "scheme"),

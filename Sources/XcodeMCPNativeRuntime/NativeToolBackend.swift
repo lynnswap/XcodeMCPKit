@@ -223,9 +223,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
                   let identifier = NativeWorkspaceSelection.string(fields["workspaceIdentifier"]) else { return [:] }
             do { selection = try await selections.selection(in: identifier, run: run) }
             catch {
-                // The open succeeded; the session's next operation reports its selection instead.
+                // The session must choose its selection before its operations run.
                 NativeErrorPresentation.reportBackground("Reading the workspace's selection failed: \(error)")
-                return [:]
+                selection = .unknown
             }
         } else if let request = requestWorkspaces[context.artifactsDirectory] {
             requestWorkspaces[context.artifactsDirectory]?.finished = true
