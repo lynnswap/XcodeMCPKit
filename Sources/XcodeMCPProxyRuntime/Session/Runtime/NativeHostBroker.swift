@@ -162,6 +162,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             if let workspace, let conflict = Self.workspaceConflict(workspace, device: device, launch: launch) {
                 error = conflict
             }
+            if let selector = ["hostIdentifier", "workspaceIdentifier", "interactionSessionKey", "launchSessionReference"].first(where: {
+                arguments[$0] != nil && !(arguments[$0] is String)
+            }) {
+                error = "\(selector) must be a string"
+            }
             storage.hostRequests[host, default: 0] += 1
             return Admission(hostIdentifier: host, workspace: workspace, deviceSession: device, launchSession: launch, error: error)
         }

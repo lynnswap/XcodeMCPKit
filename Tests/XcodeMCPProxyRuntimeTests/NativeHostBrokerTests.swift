@@ -84,6 +84,42 @@ struct NativeHostBrokerTests {
         #expect(fixture.factory.transports.withLockedValue { $0.count } == 2)
     }
 
+    @Test(arguments: ["XcodeOpenWorkspace", "XcodeNewProject"])
+    func nonStringHostDoesNotDispatchAnOperationOnTheDefaultHost(operation: String) async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("invalid-host")
+        var arguments: [String: JSONValue] = ["hostIdentifier": .bool(true)]
+        if operation == NativeHostBroker.openWorkspaceTool {
+            arguments["path"] = .string("/Fixture/App.xcodeproj")
+        } else {
+            arguments["templateIdentifier"] = .string("fixture-template")
+            arguments["productName"] = .string("FixtureProject")
+            arguments["destinationPath"] = .string("/Fixture/NewProject")
+        }
+        let result = try await fixture.toolResult(session, name: operation, arguments: arguments)
+        #expect(NativeHostBroker.isToolError(result))
+        let calls = fixture.factory.transports.withLockedValue { $0 }.flatMap { transport in
+            transport.calls.withLockedValue { $0 }
+        }
+        #expect(!calls.contains { $0.name == operation })
+    }
+
+    @Test func nonStringWorkspaceIsNotReplacedByTheDeviceSessionsParent() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("invalid-workspace")
+        let workspace = try await fixture.open(session)
+        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
+            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
+        ])
+        let key = try #require(started["interactionSessionKey"])
+        let result = try await fixture.toolResult(session, name: "DeviceInteractionInstallAndRun", arguments: [
+            "workspaceIdentifier": .bool(true), "interactionSessionKey": key,
+        ])
+        #expect(NativeHostBroker.isToolError(result))
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        #expect(native.calls.withLockedValue { !$0.contains { $0.name == "DeviceInteractionInstallAndRun" } })
+    }
+
     @Test func absolutePathsUseTheDefaultHeadlessHostAndReuseItsWorkspaceHandle() async throws {
         let fixture = try BrokerFixture()
         let session = try await fixture.initialize("paths")
@@ -571,6 +607,11 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
                 var tools = scoped.map { descriptor($0, properties: [gui ? "tabIdentifier" : "workspaceIdentifier": .object(["type": .string("string")])]) }
                 tools.append(contentsOf: [
                     descriptor("DocumentationSearch", properties: ["query": .object(["type": .string("string")])]),
+                    descriptor("XcodeNewProject", properties: [
+                        "templateIdentifier": .object(["type": .string("string")]),
+                        "productName": .object(["type": .string("string")]),
+                        "destinationPath": .object(["type": .string("string")]),
+                    ]),
                     descriptor("XcodeOpenWorkspace", properties: ["path": .object(["type": .string("string")])]),
                     descriptor(gui ? "XcodeListWindows" : "XcodeListWorkspaces"),
                     descriptor("DeviceInteractionStartSession", properties: ["deviceIdentifier": .object(["type": .string("string")]),

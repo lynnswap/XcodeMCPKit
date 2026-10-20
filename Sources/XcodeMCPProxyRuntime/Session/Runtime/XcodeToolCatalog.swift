@@ -15,7 +15,12 @@ enum XcodeToolCatalog {
             guard let name = toolName(native), name != "XcodeListWindows",
                   name != "XcodeMCPKitSelectHost", name != "DeviceInteractionStartWorkspaceSession",
                   !managedNames.contains(name) else { continue }
-            let source = name == "DeviceInteractionStartSession" ? workspaceSession ?? native : native
+            let source: JSONValue
+            if name == "DeviceInteractionStartSession", let workspaceSession {
+                source = mergedDeviceSession(standalone: native, workspace: workspaceSession)
+            } else {
+                source = native
+            }
             tools[name] = normalized(source, name: name)
         }
         if tools["DeviceInteractionStartSession"] == nil, let workspaceSession {
@@ -101,6 +106,26 @@ enum XcodeToolCatalog {
         guard case .object(let fields) = tool, case .object(let input)? = fields["inputSchema"],
               case .object(let properties)? = input["properties"] else { return [:] }
         return properties
+    }
+
+    private static func mergedDeviceSession(standalone: JSONValue, workspace: JSONValue) -> JSONValue {
+        guard case .object(var fields) = workspace,
+              case .object(var workspaceInput)? = fields["inputSchema"],
+              case .object(let standaloneFields) = standalone,
+              case .object(let standaloneInput)? = standaloneFields["inputSchema"] else { return workspace }
+        workspaceInput["properties"] = .object(inputProperties(standalone).merging(inputProperties(workspace)) {
+            _, workspaceProperty in workspaceProperty
+        })
+        let standaloneRequired: [JSONValue]
+        let workspaceRequired: [JSONValue]
+        if case .array(let values)? = standaloneInput["required"] { standaloneRequired = values }
+        else { standaloneRequired = [] }
+        if case .array(let values)? = workspaceInput["required"] { workspaceRequired = values }
+        else { workspaceRequired = [] }
+        // The selected native operation enforces requirements specific to its variant.
+        workspaceInput["required"] = .array(workspaceRequired.filter { standaloneRequired.contains($0) })
+        fields["inputSchema"] = .object(workspaceInput)
+        return .object(fields)
     }
 
     private static func toolName(_ value: JSONValue) -> String? {

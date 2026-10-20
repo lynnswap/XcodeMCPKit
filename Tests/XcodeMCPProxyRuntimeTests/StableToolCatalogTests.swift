@@ -21,11 +21,19 @@ struct StableToolCatalogTests {
     }
 
     @Test func deviceSessionUsesOnePublicOperationAndOneKeySpelling() throws {
+        let workspaceSessionLabel: JSONValue = .object([
+            "type": .string("string"), "description": .string("Workspace session label."),
+        ])
+        let workspaceAnnotations: JSONValue = .object(["readOnlyHint": .bool(false)])
+        let sessionOutput: JSONValue = .object(["type": .string("object"), "properties": .object([
+            "interactionSessionKey": string,
+        ])])
         let tools = [
             tool("DeviceInteractionStartSession", properties: ["deviceIdentifier": string, "sessionIdentifier": string],
                  required: ["deviceIdentifier", "sessionIdentifier"]),
-            tool("DeviceInteractionStartWorkspaceSession", properties: ["deviceIdentifier": string,
-                "sessionIdentifier": string, "workspaceIdentifier": string], required: ["sessionIdentifier"]),
+            tool("DeviceInteractionStartWorkspaceSession", properties: [
+                "sessionIdentifier": workspaceSessionLabel, "workspaceIdentifier": string], required: ["sessionIdentifier"],
+                 extra: ["annotations": workspaceAnnotations, "outputSchema": sessionOutput]),
             tool("DeviceInteractionSynthesize", properties: ["interactSessionKey": string,
                 "interactionCommand": string], required: ["interactSessionKey"]),
         ]
@@ -33,7 +41,11 @@ struct StableToolCatalogTests {
         #expect(find("DeviceInteractionStartWorkspaceSession", in: result) == nil)
         let start = try #require(find("DeviceInteractionStartSession", in: result))
         #expect(field(start, "inputSchema", "properties", "workspaceIdentifier") != nil)
+        #expect(field(start, "inputSchema", "properties", "deviceIdentifier") == string)
+        #expect(field(start, "inputSchema", "properties", "sessionIdentifier") == workspaceSessionLabel)
         #expect(field(start, "inputSchema", "required") == .array([.string("sessionIdentifier")]))
+        #expect(field(start, "annotations") == workspaceAnnotations)
+        #expect(field(start, "outputSchema") == sessionOutput)
         let synthesize = try #require(find("DeviceInteractionSynthesize", in: result))
         #expect(field(synthesize, "inputSchema", "properties", "interactSessionKey") == nil)
         #expect(field(synthesize, "inputSchema", "required") == .array([.string("interactionSessionKey")]))
