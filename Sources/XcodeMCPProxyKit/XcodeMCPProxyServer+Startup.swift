@@ -47,7 +47,7 @@ extension XcodeMCPProxyServer {
         private var shutdownTask: Task<Void, any Error>?
         private var resources: Resources?
         private var lastEndpoint: Endpoint?
-        private var terminalUpstreams: [Status.Upstream] = []
+        private var terminalHosts: [Status.Host] = []
         private var shutdownRequested = false
 
         init(
@@ -130,37 +130,15 @@ extension XcodeMCPProxyServer {
             }
 
             guard let resources else {
-                return Status(
-                    generatedAt: Date(),
-                    phase: publicPhase,
-                    endpoint: lastEndpoint,
-                    proxyInitialized: false,
-                    catalogAvailable: false,
-                    queuedRequestCount: 0,
-                    upstreams: terminalUpstreams
-                )
+                return Status(generatedAt: Date(), phase: publicPhase, endpoint: lastEndpoint, hosts: terminalHosts)
             }
 
             let runtimeSnapshot = resources.runtime.snapshot()
-            let upstreams = runtimeSnapshot.upstreams.map { upstream in
-                Status.Upstream(
-                    id: upstream.id,
-                    health: Self.publicHealth(
-                        debugHealth: upstream.healthState,
-                        isInitialized: upstream.isInitialized
-                    ),
-                    isInitialized: upstream.isInitialized,
-                    activeRequestCount: upstream.activeRequestCount
-                )
-            }
             return Status(
                 generatedAt: runtimeSnapshot.generatedAt,
                 phase: publicPhase,
                 endpoint: resources.endpoint,
-                proxyInitialized: runtimeSnapshot.proxyInitialized,
-                catalogAvailable: runtimeSnapshot.catalogAvailable,
-                queuedRequestCount: runtimeSnapshot.queuedRequestCount,
-                upstreams: upstreams
+                hosts: runtimeSnapshot.hosts.map(Self.publicHost)
             )
         }
 
@@ -236,7 +214,11 @@ extension XcodeMCPProxyServer {
                     return
                 }
                 lastEndpoint = acquired.endpoint
-                terminalUpstreams = Self.stoppedUpstreams(from: acquired.runtime.snapshot())
+                // Shutdown stops every host process.
+                terminalHosts = acquired.runtime.snapshot().hosts.map { host in
+                    Status.Host(identifier: host.identifier, developerDirectory: host.developerDirectory,
+                                kind: Self.publicKind(of: host), state: .stopped, activeRequestCount: 0)
+                }
                 try await Self.release(acquired)
             }
             shutdownTask = task
@@ -376,30 +358,18 @@ extension XcodeMCPProxyServer {
             }
         }
 
-        private static func publicHealth(
-            debugHealth: String,
-            isInitialized: Bool
-        ) -> Status.Upstream.Health {
-            if debugHealth.hasPrefix("quarantined") {
-                return .quarantined
+        private static func publicHost(_ host: ProxyRuntimeSnapshot.Host) -> Status.Host {
+            let state: Status.Host.State = switch host.state {
+            case .stopped: .stopped
+            case .starting: .starting
+            case .running: .running
             }
-            if debugHealth == "degraded" {
-                return .degraded
-            }
-            return isInitialized ? .healthy : .starting
+            return Status.Host(identifier: host.identifier, developerDirectory: host.developerDirectory,
+                               kind: publicKind(of: host), state: state, activeRequestCount: host.activeRequestCount)
         }
 
-        private static func stoppedUpstreams(
-            from snapshot: ProxyRuntimeSnapshot
-        ) -> [Status.Upstream] {
-            snapshot.upstreams.map { upstream in
-                Status.Upstream(
-                    id: upstream.id,
-                    health: .stopped,
-                    isInitialized: upstream.isInitialized,
-                    activeRequestCount: 0
-                )
-            }
+        private static func publicKind(of host: ProxyRuntimeSnapshot.Host) -> Status.Host.Kind {
+            host.guiProcessIdentifier.map { .gui(processIdentifier: $0) } ?? .headless
         }
     }
 }

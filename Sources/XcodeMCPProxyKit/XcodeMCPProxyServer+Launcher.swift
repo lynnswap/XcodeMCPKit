@@ -1,3 +1,7 @@
+import Darwin
+import Dispatch
+import Synchronization
+
 extension XcodeMCPProxyServer {
     package protocol LaunchServer: Sendable {
         func start() async throws -> XcodeMCPProxyServer.Endpoint
@@ -11,6 +15,9 @@ extension XcodeMCPProxyServer {
             package var isAddressAlreadyInUse: (Swift.Error) -> Bool
             package var forceRestartExistingServer: (_ host: String, _ port: Int, _ stderr: (String) -> Void) -> Bool
             package var detectExistingServerProcessIDs: (_ host: String, _ port: Int) -> [Int]
+            /// Calls `handler` when the process receives a termination signal, until the returned
+            /// closure stops observing.
+            package var observeTerminationSignals: (_ handler: @escaping @Sendable () -> Void) -> () -> Void
 
             package init(
                 makeServer: @escaping (XcodeMCPProxyServerConfiguration) -> any LaunchServer,
@@ -21,12 +28,14 @@ extension XcodeMCPProxyServer {
                         _ port: Int,
                         _ stderr: (String) -> Void
                     ) -> Bool = { _, _, _ in false },
-                detectExistingServerProcessIDs: @escaping (_ host: String, _ port: Int) -> [Int] = { _, _ in [] }
+                detectExistingServerProcessIDs: @escaping (_ host: String, _ port: Int) -> [Int] = { _, _ in [] },
+                observeTerminationSignals: @escaping (_ handler: @escaping @Sendable () -> Void) -> () -> Void = { _ in {} }
             ) {
                 self.makeServer = makeServer
                 self.isAddressAlreadyInUse = isAddressAlreadyInUse
                 self.forceRestartExistingServer = forceRestartExistingServer
                 self.detectExistingServerProcessIDs = detectExistingServerProcessIDs
+                self.observeTerminationSignals = observeTerminationSignals
             }
 
             package static var live: Self {
@@ -41,7 +50,8 @@ extension XcodeMCPProxyServer {
                     },
                     detectExistingServerProcessIDs: { host, port in
                         existingServerController.detectExistingServerProcessIDs(host, port)
-                    }
+                    },
+                    observeTerminationSignals: TerminationSignals.observe
                 )
             }
         }
@@ -121,6 +131,11 @@ extension XcodeMCPProxyServer {
                 throw error
             }
 
+            // A termination signal shuts the server down, which stops its host processes and ends the wait.
+            let stopObservingSignals = dependencies.observeTerminationSignals {
+                Task { try? await server.shutdown() }
+            }
+            defer { stopObservingSignals() }
             do {
                 try await server.waitUntilShutdown()
             } catch {
@@ -143,3 +158,37 @@ extension XcodeMCPProxyServer {
 }
 
 extension XcodeMCPProxyServer: XcodeMCPProxyServer.LaunchServer {}
+
+/// Delivers `SIGINT` and `SIGTERM` to a handler instead of terminating the process.
+private enum TerminationSignals {
+    private static let numbers = [SIGINT, SIGTERM]
+
+    /// The first signal calls `handler`. A later one terminates the process, so a shutdown that
+    /// does not finish can still be interrupted.
+    static func observe(_ handler: @escaping @Sendable () -> Void) -> () -> Void {
+        let received = Mutex(false)
+        var previous: [Int32: sig_t?] = [:]
+        let sources = numbers.map { number -> any DispatchSourceSignal in
+            previous[number] = signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+            source.setEventHandler {
+                let isFirst = received.withLock { received in
+                    defer { received = true }
+                    return !received
+                }
+                if isFirst {
+                    handler()
+                } else {
+                    signal(number, SIG_DFL)
+                    raise(number)
+                }
+            }
+            source.resume()
+            return source
+        }
+        return {
+            for source in sources { source.cancel() }
+            for (number, handler) in previous { signal(number, handler ?? SIG_DFL) }
+        }
+    }
+}

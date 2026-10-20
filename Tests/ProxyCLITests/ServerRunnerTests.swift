@@ -356,6 +356,33 @@ struct ServerRunnerTests {
         #expect(diagnostic.contains("listener wait failed") == waitFails)
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func aTerminationSignalShutsTheServerDown() async throws {
+        let server = SignalStoppedProxyServer()
+        let handlers = LockedBox<[@Sendable () -> Void]>([])
+        let observing = LockedBox(false)
+        let launcher = XcodeMCPProxyServer.Launcher(dependencies: .init(
+            makeServer: { _ in server },
+            isAddressAlreadyInUse: { _ in false },
+            observeTerminationSignals: { handler in
+                handlers.withValue { $0.append(handler) }
+                observing.withValue { $0 = true }
+                return { observing.withValue { $0 = false } }
+            }
+        ))
+
+        let running = Task {
+            await launcher.run(arguments: ["xcode-mcp-proxy-server", "--listen", "127.0.0.1:9003"],
+                               environment: [:], stdout: { _ in }, stderr: { _ in })
+        }
+        while handlers.snapshot().isEmpty { await Task.yield() }
+        handlers.snapshot().first?()
+
+        #expect(await running.value == 0)
+        #expect(server.shutdownCount >= 1)
+        #expect(!observing.snapshot())
+    }
+
     @Test func startupCleanupFailureIsNotReplacedByPortInUseDiagnostic() async throws {
         let error = XcodeMCPProxyServer.CleanupError(
             operationError: AddressAlreadyInUseError(),
@@ -513,6 +540,27 @@ private final class ShutdownFailingProxyServer: XcodeMCPProxyServer.LaunchServer
     func shutdown() async throws {
         shutdowns.withValue { $0 += 1 }
         throw LaunchCleanupFailure.expected
+    }
+}
+
+/// Waits until it is shut down.
+private final class SignalStoppedProxyServer: XcodeMCPProxyServer.LaunchServer {
+    private let stops = AsyncStream<Void>.makeStream()
+    private let shutdowns = LockedBox(0)
+
+    var shutdownCount: Int { shutdowns.snapshot() }
+
+    func start() async throws -> XcodeMCPProxyServer.Endpoint {
+        .init(host: "127.0.0.1", port: 9003)
+    }
+
+    func waitUntilShutdown() async throws {
+        for await _ in stops.stream {}
+    }
+
+    func shutdown() async throws {
+        shutdowns.withValue { $0 += 1 }
+        stops.continuation.finish()
     }
 }
 

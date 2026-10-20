@@ -182,7 +182,7 @@ struct XcodeMCPProxyServerTests {
         let snapshot = await server.snapshot()
         #expect(snapshot.phase == .stopped)
         #expect(snapshot.endpoint == nil)
-        #expect(snapshot.upstreams.isEmpty)
+        #expect(snapshot.hosts.isEmpty)
         try await server.shutdown()
     }
 
@@ -537,21 +537,14 @@ struct XcodeMCPProxyServerTests {
         let status = try await waitUntilDefaultHostIsHealthy(server)
         #expect(status.phase == .running)
         #expect(status.endpoint == endpoint)
-        #expect(status.queuedRequestCount == 0)
-        #expect(status.upstreams.map(\.id) == [0])
-        #expect(status.upstreams.allSatisfy { $0.activeRequestCount == 0 })
+        let host = try #require(status.hosts.first)
+        #expect(status.hosts.count == 1)
+        #expect(host.identifier == "host-default")
+        #expect(host.kind == .headless)
+        #expect(host.activeRequestCount == 0)
 
         let labels = Set(Mirror(reflecting: status).children.compactMap(\.label))
-        #expect(
-            labels == [
-                "phase",
-                "endpoint",
-                "proxyInitialized",
-                "catalogAvailable",
-                "queuedRequestCount",
-                "upstreams",
-                "generatedAt",
-            ])
+        #expect(labels == ["phase", "endpoint", "hosts", "generatedAt"])
 
         try await server.shutdown()
     }
@@ -590,8 +583,8 @@ struct XcodeMCPProxyServerTests {
         #expect(host.stopCount == 1)
         let status = await server.snapshot()
         #expect(status.phase == .stopped)
-        #expect(status.upstreams.map(\.health) == [.stopped])
-        #expect(status.upstreams.map(\.activeRequestCount) == [0])
+        #expect(status.hosts.map(\.state) == [.stopped])
+        #expect(status.hosts.map(\.activeRequestCount) == [0])
 
         let probeGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let rebound = try await ServerBootstrap(group: probeGroup)
@@ -715,13 +708,7 @@ private final class StartupTestRuntime: @unchecked Sendable, ProxyRuntimeServing
     func removeSession(_ id: ProxySessionID) {}
 
     func snapshot() -> ProxyRuntimeSnapshot {
-        ProxyRuntimeSnapshot(
-            generatedAt: Date(),
-            proxyInitialized: false,
-            catalogAvailable: false,
-            queuedRequestCount: 0,
-            upstreams: []
-        )
+        ProxyRuntimeSnapshot(generatedAt: Date(), hosts: [])
     }
 
     func debugSnapshotData(includeSensitivePayloads: Bool) -> Data? {
@@ -748,10 +735,10 @@ private func makeServerTestRuntime(
 private func waitUntilDefaultHostIsHealthy(
     _ server: XcodeMCPProxyServer
 ) async throws -> XcodeMCPProxyServer.Status {
-    try await waitWithTimeout("waiting for the default host to become healthy", timeout: .seconds(5)) {
+    try await waitWithTimeout("waiting for the default host to run", timeout: .seconds(5)) {
         while true {
             let status = await server.snapshot()
-            if status.upstreams.map(\.health) == [.healthy] { return status }
+            if status.hosts.map(\.state) == [.running] { return status }
             await Task.yield()
         }
     }
