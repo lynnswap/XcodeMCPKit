@@ -129,6 +129,15 @@ actor NativeHostConnection {
         return try await exchange(request, owner: owner, on: process)
     }
 
+    /// Sends a request only to the running process with `generation`; never starts a process.
+    /// Used for cleanup that is moot once that process has ended or is being stopped.
+    func sendToRunningProcess(_ request: JSONValue, generation: UInt64) async throws -> Data {
+        guard retirement.withLockedValue({ $0 }) == nil, let readyProcess, readyProcess.generation == generation else {
+            throw NativeHostConnectionError.expired
+        }
+        return try await exchange(request, owner: nil, on: readyProcess)
+    }
+
     /// Returns the host's `tools/list` result, loading it once per process and catalog change.
     func nativeCatalog() async throws -> (generation: UInt64, result: JSONValue) {
         while true {

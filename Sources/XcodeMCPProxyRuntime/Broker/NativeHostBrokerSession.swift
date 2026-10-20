@@ -36,6 +36,8 @@ final class NativeBrokerSession: Sendable {
         var workspaces: [String: NativeBrokerWorkspace] = [:]
         var deviceSessions: [String: NativeBrokerDeviceSession] = [:]
         var launchSessions: [String: NativeBrokerLaunchSession] = [:]
+        /// Models used by this session's running requests, counted per request.
+        var admittedWorkspaces: [NativeBrokerWorkspace.Scope: Int] = [:]
 
         func retainsHost(_ identifier: String) -> Bool {
             workspaces.values.contains { $0.hostIdentifier == identifier }
@@ -60,6 +62,13 @@ final class NativeBrokerSession: Sendable {
             let remaining = (state.hostRequests[identifier] ?? 0) - 1
             if remaining == 0 { state.hostRequests.removeValue(forKey: identifier) }
             else { state.hostRequests[identifier] = remaining }
+        }
+    }
+
+    func releaseAdmission(of workspace: NativeBrokerWorkspace) {
+        state.withLockedValue { state in
+            guard let count = state.admittedWorkspaces[workspace.scope] else { return }
+            state.admittedWorkspaces[workspace.scope] = count > 1 ? count - 1 : nil
         }
     }
 

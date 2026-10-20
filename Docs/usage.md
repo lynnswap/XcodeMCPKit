@@ -33,7 +33,9 @@ It accepts a `.xcworkspace`, `.xcodeproj`, Swift package directory, or
 `Package.swift` and returns a `workspaceIdentifier` for subsequent operations.
 Without an explicit host, Open uses the server's default headless installation.
 Workspace operations also accept an absolute path for that default host when
-an explicit Open is unnecessary.
+an explicit Open is unnecessary. A path opens the workspace for the session as
+Open does, so later calls with the same path reuse the loaded model. The
+session's handle for it appears in `XcodeListWorkspaces`.
 
 An identifier refers to one workspace in its owning host. The proxy translates
 it to the native workspace or GUI tab identifier. Keep using that identifier;
@@ -41,9 +43,14 @@ no host-selection call or catalog refresh is needed. Identifiers belong to the
 MCP session that returned them. After starting a new MCP session or restarting a
 host, list or open the workspace again to obtain a current identifier.
 
-`XcodeCloseWorkspace` releases the calling session's handle. A headless model
-closes, releasing its preview resources, once no other session references it.
-For a GUI workspace, it releases the proxy handle and leaves the Xcode window open.
+A headless model stays open while any MCP session references it through a
+`workspaceIdentifier`, a device interaction session, or a launch reference.
+`XcodeCloseWorkspace` releases the calling session's handle; ending a device
+session, or the end or expiry of an MCP session, releases its references too.
+When the last reference is released and requests already running against the
+model finish, the model closes and releases its preview resources. For a GUI
+workspace, `XcodeCloseWorkspace` releases the proxy handle
+and leaves the Xcode window open.
 Disconnecting from the server does not close GUI windows or quit Xcode.
 
 ## Files, schemes, and destinations
