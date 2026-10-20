@@ -91,10 +91,14 @@ import XcodeMCPProxyKit
 let configuration = XcodeMCPProxyServerConfiguration(
     initializeHandshake: .init(
         clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
-        capabilities: ["roots": ["listChanged": true]]
+        capabilities: ["experimental": ["embedding": true]]
     )
 )
 ```
+
+The handshake omits `roots`, `sampling`, and `elicitation`: every client
+session shares an Xcode host, so no client can answer the host requests those
+capabilities allow.
 
 `snapshot()` returns a sanitized aggregate read model: lifecycle phase,
 endpoint, proxy/catalog readiness, queued request count, and per-upstream

@@ -519,7 +519,7 @@ actor NativeHostConnection {
         case .notification:
             onEvent(.notification(owner: nil, data: data))
         case .request(let method, let id):
-            // The handshake advertises no client capabilities; only ping is expected.
+            // The handshake advertises no capability that allows host requests; only ping is expected.
             let reply = method == "ping"
                 ? JSONRPC.Wire.resultResponseObject(idValue: id.value, result: .object([:]))
                 : JSONRPC.Wire.errorResponseObject(id: id, code: -32601, message: "Method not found")

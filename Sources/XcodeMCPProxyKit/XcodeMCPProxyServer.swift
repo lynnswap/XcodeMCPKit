@@ -85,6 +85,9 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         public var clientInfo: ClientInfo?
 
         /// Capability object to send in initialize params.
+        ///
+        /// `roots`, `sampling`, and `elicitation` are not sent: every client session shares an Xcode
+        /// host, so no client can answer the host requests those capabilities allow.
         public var capabilities: [String: MCPJSONValue]?
 
         /// Creates initialize handshake overrides.

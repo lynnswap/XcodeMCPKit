@@ -41,14 +41,16 @@ struct ConfigurationRuntimeTests {
     @Test func hostReceivesTheTypedInitializeHandshake() async throws {
         let params = try await hostInitializeParameters(XcodeMCPProxyServerConfiguration(
             requestTimeout: .seconds(5),
-            initializeHandshake: .init(clientInfo: .init(name: "custom-proxy"), capabilities: ["roots": true]),
+            initializeHandshake: .init(clientInfo: .init(name: "custom-proxy"),
+                                       capabilities: ["roots": true, "sampling": [:], "elicitation": [:], "experimental": [:]]),
             prewarmToolsList: false))
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
         let capabilities = try #require(params["capabilities"] as? [String: Any])
         #expect(params["protocolVersion"] as? String == "2025-06-18")
         #expect(clientInfo["name"] as? String == "custom-proxy")
         #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
-        #expect(capabilities["roots"] as? Bool == true)
+        // A shared host has no single client to answer its requests.
+        #expect(capabilities.keys.sorted() == ["experimental"])
     }
 
     @Test func hostReceivesTypedHandshakeValuesUnchanged() async throws {
