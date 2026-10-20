@@ -151,6 +151,23 @@ struct NativeHostBrokerTests {
         #expect(try await fixture.call(b, name: "GetBuildLog", arguments: ["workspaceIdentifier": right])["host"] == .number(.int(1)))
     }
 
+    @Test func closingASharedWorkspaceKeepsItOpenForOtherSessions() async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("close-a")
+        let b = try await fixture.initialize("close-b")
+        let left = try await fixture.open(a)
+        let right = try await fixture.open(b)
+        let released = try await fixture.call(a, name: NativeHostBroker.closeWorkspaceTool, arguments: ["workspaceIdentifier": left])
+        #expect(released["released"] == .bool(true))
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        #expect(native.calls.withLockedValue { !$0.contains { $0.name == NativeHostBroker.closeWorkspaceTool } })
+        #expect(NativeHostBroker.isToolError(try await fixture.toolResult(a, name: "GetBuildLog", arguments: ["workspaceIdentifier": left])))
+        #expect(!NativeHostBroker.isToolError(try await fixture.toolResult(b, name: "GetBuildLog", arguments: ["workspaceIdentifier": right])))
+        _ = try await fixture.call(b, name: NativeHostBroker.closeWorkspaceTool, arguments: ["workspaceIdentifier": right])
+        #expect(native.calls.withLockedValue { $0.last { $0.name == NativeHostBroker.closeWorkspaceTool }?.arguments["workspaceIdentifier"] }
+            == .string("native-w-1"))
+    }
+
     @Test func admittedWorkRetainsItsScopeWhenTheWorkspaceReferenceIsClosed() async throws {
         let fixture = try BrokerFixture.singleGUIWindow()
         let session = try await fixture.initialize("inflight")

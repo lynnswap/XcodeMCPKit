@@ -41,7 +41,8 @@ no host-selection call or catalog refresh is needed. Identifiers belong to the
 MCP session that returned them. After starting a new MCP session or restarting a
 host, list or open the workspace again to obtain a current identifier.
 
-`XcodeCloseWorkspace` closes a headless model and releases its preview resources.
+`XcodeCloseWorkspace` releases the calling session's handle. A headless model
+closes, releasing its preview resources, once no other session references it.
 For a GUI workspace, it releases the proxy handle and leaves the Xcode window open.
 Disconnecting from the server does not close GUI windows or quit Xcode.
 

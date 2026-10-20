@@ -107,6 +107,20 @@ extension NativeBrokerSession {
         }
     }
 
+    func retainsNativeWorkspace(_ workspace: NativeBrokerWorkspace) -> Bool {
+        state.withLockedValue { state in
+            !state.closed && (state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }
+                || state.deviceSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true }
+                || state.launchSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true })
+        }
+    }
+
+    func releaseNativeWorkspace(_ workspace: NativeBrokerWorkspace) {
+        state.withLockedValue { state in
+            state.workspaces = state.workspaces.filter { !$0.value.hasSameNativeScope(as: workspace) }
+        }
+    }
+
     @discardableResult
     func invalidateReferences(hostIdentifier: String, supersededBy source: ProxyRuntimeUpstreamSource?) -> Bool {
         state.withLockedValue { state in

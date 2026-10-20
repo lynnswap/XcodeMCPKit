@@ -635,11 +635,20 @@ private extension NativeHostBroker {
             let channel = try await channel(for: host, session: session)
             let source = try channel.source()
             guard source == workspace.source else { throw Self.expiredReference() }
+            let otherSessions = state.withLockedValue { storage in
+                storage.sessions.values.filter { $0 !== session }
+            }
             if workspace.gui {
                 _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
                 result = try Self.toolResult(.object([
                     "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
                     "message": .string("Released the workspace reference. The Xcode window remains open."),
+                ]))
+            } else if otherSessions.contains(where: { $0.retainsNativeWorkspace(workspace) }) {
+                _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
+                result = try Self.toolResult(.object([
+                    "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
+                    "message": .string("Released this session's reference. Another session still uses the workspace, so it remains open."),
                 ]))
             } else {
                 let native = try Self.toolRequest(request, name: name,
@@ -650,6 +659,10 @@ private extension NativeHostBroker {
                 let value = try Self.result(in: reply)
                 if !Self.isToolError(value) {
                     _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
+                    // A session that bound the model while the close was pending would keep a dead reference.
+                    for other in state.withLockedValue({ Array($0.sessions.values) }) where other !== session {
+                        other.releaseNativeWorkspace(workspace)
+                    }
                 }
                 return try Self.rewriteReply(reply, workspace: workspace, deviceSession: nil)
             }
