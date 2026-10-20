@@ -243,14 +243,17 @@ struct NativeHostBrokerTests {
         #expect(try await nativeCloses(after: fixture) == 1)
     }
 
-    @Test func aRunningRequestKeepsItsModelOpenAfterTheOtherSessionsEnd() async throws {
+    /// The request names its workspace by handle or by path.
+    @Test(arguments: [false, true])
+    func aRunningRequestKeepsItsModelOpenAfterTheOtherSessionsEnd(byPath: Bool) async throws {
         let fixture = try BrokerFixture()
         let a = try await fixture.initialize("running-a")
         let b = try await fixture.initialize("running-b")
         _ = try await fixture.open(a)
         let workspace = try await fixture.open(b)
         let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        let building = Task { try await fixture.call(b, name: "BuildProject", arguments: ["workspaceIdentifier": workspace]) }
+        let selector = byPath ? JSONValue.string("/Fixture/App.xcodeproj") : workspace
+        let building = Task { try await fixture.call(b, name: "BuildProject", arguments: ["workspaceIdentifier": selector]) }
         try await native.waiting.wait(description: "build admitted")
         let released = try await fixture.call(b, name: NativeHostBroker.closeWorkspaceTool,
                                               arguments: ["workspaceIdentifier": workspace])

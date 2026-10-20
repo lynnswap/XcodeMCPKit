@@ -152,7 +152,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             let device = (arguments["interactionSessionKey"] as? String).flatMap { storage.deviceSessions[$0] }
             let launch = (arguments["launchSessionReference"] as? String).flatMap { storage.launchSessions[$0] }
             let workspace: NativeBrokerWorkspace?
-            if let identifier = arguments["workspaceIdentifier"] as? String {
+            if let identifier = arguments["workspaceIdentifier"] as? String, !identifier.hasPrefix("/") {
                 workspace = storage.workspaces[identifier]
             } else {
                 workspace = device?.workspace ?? launch?.workspace
@@ -201,11 +201,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             let reply = await process(admittedMessage, in: session, admission: admission)
             session.releaseHost(admission.hostIdentifier)
             if let workspace = admission.workspace, admission.retainsWorkspace {
-                session.releaseAdmission(of: workspace)
-                // The request may have held the last reference after its session released the handle.
-                if !state.withLockedValue({ $0.sessions.values.contains { $0.retainsNativeWorkspace(workspace) } }) {
-                    scheduleUnreferencedClose([workspace])
-                }
+                releaseRequestRetention(of: workspace, in: session)
             }
             reapUnusedHosts()
             return reply
@@ -578,6 +574,15 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     /// Schedules `closeUnreferencedWorkspaces` as owned work that shutdown waits for.
+    /// Ends a request's hold on `workspace`. The request may have held the last reference after its
+    /// session released the handle, so the model closes once nothing else references it.
+    private func releaseRequestRetention(of workspace: NativeBrokerWorkspace, in session: NativeBrokerSession) {
+        session.releaseAdmission(of: workspace)
+        if !state.withLockedValue({ $0.sessions.values.contains { $0.retainsNativeWorkspace(workspace) } }) {
+            scheduleUnreferencedClose([workspace])
+        }
+    }
+
     private func scheduleUnreferencedClose(_ workspaces: [NativeBrokerWorkspace]) {
         guard workspaces.contains(where: { !$0.gui }) else { return }
         state.withLockedValue { storage in
@@ -690,7 +695,7 @@ private extension NativeHostBroker {
         case Self.listWorkspacesTool:
             result = try await listWorkspaces(request, session: session)
         case Self.openWorkspaceTool:
-            result = try await openWorkspace(arguments, request: request, session: session)
+            result = try await openWorkspace(arguments, request: request, session: session).result
         case Self.closeWorkspaceTool:
             guard let workspace = admission.workspace else {
                 throw NativeHostBrokerError("XcodeCloseWorkspace requires a workspaceIdentifier returned by XcodeOpenWorkspace or XcodeListWorkspaces")
@@ -766,13 +771,14 @@ private extension NativeHostBroker {
 
     /// Binds a handle unless its native model is being closed; a model mid-close is about to disappear.
     private func bindWorkspace(in session: NativeBrokerSession, host: NativeBrokerHost, generation: UInt64,
-                               nativeIdentifier: String, path: String?, name: String?) throws -> NativeBrokerWorkspace {
+                               nativeIdentifier: String, path: String?, name: String?,
+                               retainsForRequest: Bool = false) throws -> NativeBrokerWorkspace {
         try closingWorkspaces.withLockedValue { closing in
             let scope = NativeBrokerWorkspace.Scope(hostIdentifier: host.identifier, generation: generation,
                                                     nativeIdentifier: nativeIdentifier)
             guard !closing.contains(scope) else { throw NativeBrokerWorkspaceClosing() }
             return try session.bindWorkspace(host: host, generation: generation, nativeIdentifier: nativeIdentifier,
-                                             path: path, name: name)
+                                             path: path, name: name, retainsForRequest: retainsForRequest)
         }
     }
 
@@ -871,8 +877,10 @@ private extension NativeHostBroker {
         }
     }
 
+    /// Opens and binds a workspace. `workspace` is nil when the host returned a tool error.
     private func openWorkspace(_ arguments: [String: JSONValue], request: ProxyRuntimeRequest,
-                               session: NativeBrokerSession) async throws -> JSONValue {
+                               session: NativeBrokerSession, retainsForRequest: Bool = false) async throws
+        -> (result: JSONValue, workspace: NativeBrokerWorkspace?) {
         guard let path = Self.string(arguments["path"]) else {
             throw NativeHostBrokerError("XcodeOpenWorkspace requires path")
         }
@@ -896,21 +904,24 @@ private extension NativeHostBroker {
                     throw NativeHostBrokerError("Several Xcode windows have this path. Call XcodeListWorkspaces and choose the intended window's workspaceIdentifier.")
                 }
                 let workspace = try bindWorkspace(in: session, host: host, generation: generation,
-                                                  nativeIdentifier: entry.nativeIdentifier, path: entry.path, name: nil)
-                return try Self.toolResult(workspace.descriptor)
+                                                  nativeIdentifier: entry.nativeIdentifier, path: entry.path, name: nil,
+                                                  retainsForRequest: retainsForRequest)
+                return (try Self.toolResult(workspace.descriptor), workspace)
             }
             let native = try Self.toolRequest(request, name: Self.openWorkspaceTool,
                                              arguments: ["path": .string(path)])
             let value = try Self.result(in: await send(native, to: host, session: session, generation: generation,
                                                        eventStream: request.prefersEventStream))
-            if Self.isToolError(value) { return value }
+            if Self.isToolError(value) { return (value, nil) }
             let payload = try Self.toolPayload(value)
             guard let identifier = Self.string(payload["workspaceIdentifier"]) else {
                 throw NativeHostBrokerError("Native XcodeOpenWorkspace returned no workspaceIdentifier")
             }
             let workspace = try bindWorkspace(in: session, host: host, generation: generation, nativeIdentifier: identifier,
-                path: Self.string(payload["workspacePath"]) ?? path, name: Self.string(payload["name"]))
-            return try Self.toolResult(Self.rewritePayload(.object(payload), workspace: workspace, deviceSession: nil))
+                path: Self.string(payload["workspacePath"]) ?? path, name: Self.string(payload["name"]),
+                retainsForRequest: retainsForRequest)
+            return (try Self.toolResult(Self.rewritePayload(.object(payload), workspace: workspace, deviceSession: nil)),
+                    workspace)
         }
     }
 
@@ -946,6 +957,9 @@ private extension NativeHostBroker {
             throw NativeHostBrokerError("The workspace's Xcode host is unavailable")
         }
         var workspace = admission.workspace
+        // A workspace opened from a path stays open until this request finishes, as an admitted one does.
+        var retained: NativeBrokerWorkspace?
+        defer { if let retained { releaseRequestRetention(of: retained, in: session) } }
         if let selector = Self.string(arguments["workspaceIdentifier"]), selector.hasPrefix("/") {
             if admission.deviceSession != nil || admission.launchSession != nil {
                 guard let parent = admission.deviceSession?.workspace ?? admission.launchSession?.workspace,
@@ -962,15 +976,14 @@ private extension NativeHostBroker {
                 }
                 workspace = parent
             } else {
-                let opened = try await openWorkspace(["path": .string(selector)], request: request, session: session)
-                if Self.isToolError(opened) {
-                    return try Self.response(id: Self.requestID(request), result: opened,
+                let opened = try await openWorkspace(["path": .string(selector)], request: request, session: session,
+                                                     retainsForRequest: true)
+                guard let openedWorkspace = opened.workspace else {
+                    return try Self.response(id: Self.requestID(request), result: opened.result,
                         session: session.identifier, eventStream: request.prefersEventStream)
                 }
-                let payload = try Self.toolPayload(opened)
-                workspace = Self.string(payload["workspaceIdentifier"]).flatMap { identifier in
-                    session.state.withLockedValue { $0.workspaces[identifier] }
-                }
+                retained = openedWorkspace
+                workspace = openedWorkspace
             }
         }
         if let workspace, workspace.hostIdentifier != host.identifier {
