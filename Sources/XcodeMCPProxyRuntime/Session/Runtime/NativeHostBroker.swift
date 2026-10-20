@@ -661,9 +661,9 @@ private extension NativeHostBroker {
                     throw error
                 }
                 if closed {
-                    // A session that bound the model while the close was pending would keep a dead reference.
-                    for other in state.withLockedValue({ Array($0.sessions.values) }) where other !== session {
-                        other.releaseNativeWorkspace(workspace)
+                    // Handles bound while the close was pending, including the caller's, refer to the closed model.
+                    for bound in state.withLockedValue({ Array($0.sessions.values) }) {
+                        bound.releaseNativeWorkspace(workspace)
                     }
                 } else {
                     session.restoreWorkspace(workspace)
