@@ -160,23 +160,30 @@ extension XcodeMCPProxyServer {
 extension XcodeMCPProxyServer: XcodeMCPProxyServer.LaunchServer {}
 
 /// Delivers `SIGINT` and `SIGTERM` to a handler instead of terminating the process.
-private enum TerminationSignals {
-    private static let numbers = [SIGINT, SIGTERM]
+enum TerminationSignals {
+    static let numbers = [SIGINT, SIGTERM]
 
     /// The first signal calls `handler`. A later one terminates the process, so a shutdown that
-    /// does not finish can still be interrupted.
+    /// does not finish can still be interrupted. The returned closure restores the previous
+    /// dispositions, including their flags and masks.
     static func observe(_ handler: @escaping @Sendable () -> Void) -> () -> Void {
-        let received = Mutex(false)
-        var previous: [Int32: sig_t?] = [:]
+        let received = Mutex<UInt>(0)
+        var previous: [(number: Int32, action: sigaction)] = []
         let sources = numbers.map { number -> any DispatchSourceSignal in
-            previous[number] = signal(number, SIG_IGN)
+            var ignore = sigaction()
+            ignore.__sigaction_u.__sa_handler = SIG_IGN
+            var action = sigaction()
+            sigaction(number, &ignore, &action)
+            previous.append((number, action))
             let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
-            source.setEventHandler {
-                let isFirst = received.withLock { received in
-                    defer { received = true }
-                    return !received
+            source.setEventHandler { [weak source] in
+                guard let source else { return }
+                // A source reports signals that arrive together in one event.
+                let count = received.withLock { count in
+                    count += source.data
+                    return count
                 }
-                if isFirst {
+                if count == 1 {
                     handler()
                 } else {
                     signal(number, SIG_DFL)
@@ -188,7 +195,7 @@ private enum TerminationSignals {
         }
         return {
             for source in sources { source.cancel() }
-            for (number, handler) in previous { signal(number, handler ?? SIG_DFL) }
+            for var entry in previous { sigaction(entry.number, &entry.action, nil) }
         }
     }
 }
