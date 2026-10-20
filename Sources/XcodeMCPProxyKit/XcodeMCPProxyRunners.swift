@@ -10,6 +10,10 @@ extension XcodeMCPProxyServer {
     /// want swift-log output should configure logging before calling this
     /// method.
     ///
+    /// While the server runs, the first `SIGINT` or `SIGTERM` shuts it down and
+    /// stops its host processes; a second one terminates the process. The
+    /// previous signal handlers are restored when the server stops.
+    ///
     /// - Parameters:
     ///   - arguments: Command-line arguments, including the executable name.
     ///   - environment: Environment variables used for launch resolution.

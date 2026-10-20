@@ -100,9 +100,14 @@ The handshake omits `roots`, `sampling`, and `elicitation`: every client
 session shares an Xcode host, so no client can answer the host requests those
 capabilities allow.
 
-`snapshot()` returns a sanitized aggregate read model: lifecycle phase,
-endpoint, proxy/catalog readiness, queued request count, and per-upstream
-health. It does not expose traffic payloads, tool arguments, or stderr.
+`snapshot()` returns a sanitized read model: lifecycle phase, endpoint, and one
+entry per Xcode host with its identifier, kind (headless or GUI Xcode process),
+state, and active request count. It does not expose traffic payloads, tool
+arguments, or stderr.
+
+`XcodeMCPProxyServer.run(...)` handles `SIGINT` and `SIGTERM` while the server
+runs: the first signal shuts the server down, stopping every host process, and
+a second one terminates the process immediately.
 
 ## STDIO adapter
 

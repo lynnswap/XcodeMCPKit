@@ -105,6 +105,7 @@ The current server and adapter APIs are documented in
 | Adapter endpoint resolver/options | `.url(URL)`, `.discoveryFile(URL)`, `.proxyDefault(environment:)`. |
 | Adapter nonthrowing `start()`, `wait()` | `try await start()`, `waitUntilStopped()`. |
 | `TimeInterval` request timeout | Positive `Duration?`; `nil` disables it. CLI `--request-timeout 0` also disables it. |
+| `Status.upstreams`, `Status.Upstream.Health`, `queuedRequestCount`, `proxyInitialized`, `catalogAvailable` | `Status.hosts`: one `Status.Host` per Xcode installation or running Xcode app, with its `identifier` (the `hostIdentifier` from `XcodeMCPKitListHosts`), `kind`, `state` (`stopped`, `starting`, `running`), and `activeRequestCount`. Requests queue inside each host, and the catalog is available whenever the server runs. |
 
 Server instances are one-shot. Await `shutdown()` or adapter `stop()` for
 completion. Cleanup errors preserve the startup failure and remaining resource

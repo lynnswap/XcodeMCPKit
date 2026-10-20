@@ -1172,15 +1172,17 @@ func compileOnlyProxyLifecycleSurface(server: XcodeMCPProxyServer) async throws 
     try await server.shutdown()
 
     _ = (address.host, address.port, address.url)
-    _ = (
-        status.phase,
-        status.endpoint,
-        status.proxyInitialized,
-        status.catalogAvailable,
-        status.queuedRequestCount,
-        status.upstreams,
-        status.generatedAt
-    )
+    _ = (status.phase, status.endpoint, status.generatedAt)
+    for host in status.hosts {
+        _ = (host.identifier, host.developerDirectory, host.activeRequestCount)
+        switch host.kind {
+        case .headless: break
+        case .gui(let processIdentifier): _ = processIdentifier
+        }
+        switch host.state {
+        case .stopped, .starting, .running: break
+        }
+    }
 }
 """
 

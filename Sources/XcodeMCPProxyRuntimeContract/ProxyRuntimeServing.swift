@@ -86,33 +86,37 @@ package enum ProxyRuntimeSessionState: Sendable, Equatable {
 }
 
 package struct ProxyRuntimeSnapshot: Sendable {
-    package struct Upstream: Sendable {
-        package let id: Int
-        package let healthState: String
-        package let isInitialized: Bool
+    /// One Xcode host: a headless host for an installation, or a bridge to a running Xcode app.
+    package struct Host: Equatable, Sendable {
+        package enum State: Equatable, Sendable {
+            case stopped
+            case starting
+            case running
+        }
+
+        package let identifier: String
+        package let developerDirectory: URL
+        /// The running Xcode app a GUI bridge connects to; `nil` for a headless host.
+        package let guiProcessIdentifier: Int32?
+        package let state: State
         package let activeRequestCount: Int
 
-        package init(id: Int, healthState: String, isInitialized: Bool, activeRequestCount: Int) {
-            self.id = id
-            self.healthState = healthState
-            self.isInitialized = isInitialized
+        package init(identifier: String, developerDirectory: URL, guiProcessIdentifier: Int32?,
+                     state: State, activeRequestCount: Int) {
+            self.identifier = identifier
+            self.developerDirectory = developerDirectory
+            self.guiProcessIdentifier = guiProcessIdentifier
+            self.state = state
             self.activeRequestCount = activeRequestCount
         }
     }
 
     package let generatedAt: Date
-    package let proxyInitialized: Bool
-    package let catalogAvailable: Bool
-    package let queuedRequestCount: Int
-    package let upstreams: [Upstream]
+    package let hosts: [Host]
 
-    package init(generatedAt: Date, proxyInitialized: Bool, catalogAvailable: Bool,
-                 queuedRequestCount: Int, upstreams: [Upstream]) {
+    package init(generatedAt: Date, hosts: [Host]) {
         self.generatedAt = generatedAt
-        self.proxyInitialized = proxyInitialized
-        self.catalogAvailable = catalogAvailable
-        self.queuedRequestCount = queuedRequestCount
-        self.upstreams = upstreams
+        self.hosts = hosts
     }
 }
 
