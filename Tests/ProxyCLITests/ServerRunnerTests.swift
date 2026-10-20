@@ -383,34 +383,6 @@ struct ServerRunnerTests {
         #expect(!observing.snapshot())
     }
 
-    @Test(.timeLimit(.minutes(1)))
-    func aDeliveredTerminationSignalReachesTheHandler() async throws {
-        let calls = LockedBox(0)
-        let stop = TerminationSignals.observe { calls.withValue { $0 += 1 } }
-        defer { stop() }
-        kill(getpid(), SIGTERM)
-        while calls.snapshot() == 0 { await Task.yield() }
-        #expect(calls.snapshot() == 1)
-    }
-
-    @Test func observingTerminationSignalsRestoresThePreviousDispositions() {
-        var custom = sigaction()
-        custom.__sigaction_u.__sa_handler = SIG_IGN
-        custom.sa_flags = SA_RESTART | SA_NODEFER
-        sigemptyset(&custom.sa_mask)
-        sigaddset(&custom.sa_mask, SIGUSR1)
-        var original = sigaction()
-        sigaction(SIGTERM, &custom, &original)
-        defer { sigaction(SIGTERM, &original, nil) }
-
-        TerminationSignals.observe {}()
-
-        var restored = sigaction()
-        sigaction(SIGTERM, nil, &restored)
-        #expect(restored.sa_flags == custom.sa_flags)
-        #expect(restored.sa_mask == custom.sa_mask)
-    }
-
     @Test func startupCleanupFailureIsNotReplacedByPortInUseDiagnostic() async throws {
         let error = XcodeMCPProxyServer.CleanupError(
             operationError: AddressAlreadyInUseError(),
@@ -503,6 +475,38 @@ private func runServer(
         stderr: { errors.append($0) }
     )
     return (exitCode, output.snapshot(), errors.snapshot())
+}
+
+/// These tests change the process-wide `SIGTERM` disposition, so they run one at a time.
+@Suite(.serialized)
+struct TerminationSignalTests {
+    @Test(.timeLimit(.minutes(1)))
+    func aDeliveredTerminationSignalReachesTheHandler() async throws {
+        let calls = LockedBox(0)
+        let stop = TerminationSignals.observe { calls.withValue { $0 += 1 } }
+        defer { stop() }
+        kill(getpid(), SIGTERM)
+        while calls.snapshot() == 0 { await Task.yield() }
+        #expect(calls.snapshot() == 1)
+    }
+
+    @Test func observingTerminationSignalsRestoresThePreviousDispositions() {
+        var custom = sigaction()
+        custom.__sigaction_u.__sa_handler = SIG_IGN
+        custom.sa_flags = SA_RESTART | SA_NODEFER
+        sigemptyset(&custom.sa_mask)
+        sigaddset(&custom.sa_mask, SIGUSR1)
+        var original = sigaction()
+        sigaction(SIGTERM, &custom, &original)
+        defer { sigaction(SIGTERM, &original, nil) }
+
+        TerminationSignals.observe {}()
+
+        var restored = sigaction()
+        sigaction(SIGTERM, nil, &restored)
+        #expect(restored.sa_flags == custom.sa_flags)
+        #expect(restored.sa_mask == custom.sa_mask)
+    }
 }
 
 private func makeServerLauncher(
