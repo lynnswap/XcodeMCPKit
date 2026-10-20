@@ -45,8 +45,9 @@ A headless model stays open while any MCP session references it through a
 `workspaceIdentifier`, a device interaction session, or a launch reference.
 `XcodeCloseWorkspace` releases the calling session's handle; ending a device
 session, or the end or expiry of an MCP session, releases its references too.
-When the last reference is released, the model closes and releases its preview
-resources. For a GUI workspace, `XcodeCloseWorkspace` releases the proxy handle
+When the last reference is released and requests already running against the
+model finish, the model closes and releases its preview resources. For a GUI
+workspace, `XcodeCloseWorkspace` releases the proxy handle
 and leaves the Xcode window open.
 Disconnecting from the server does not close GUI windows or quit Xcode.
 
