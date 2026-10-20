@@ -26,6 +26,8 @@ package protocol NativeToolBackend: AnyObject, Sendable {
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data>
     func executionResource(for name: String, arguments: [String: JSONValue]) async throws -> NativeExecutionResource
     func finishExecution(context: NativeToolContext) async throws
+    /// A failure that leaves this process unable to serve further requests.
+    var processFailure: (any Error)? { get }
     /// Prepares pending requests to drain before shutdown performs final cleanup.
     func beginShutdown()
     func shutdown() async throws
@@ -33,6 +35,7 @@ package protocol NativeToolBackend: AnyObject, Sendable {
 
 extension NativeToolBackend {
     package var origin: [String: JSONValue]? { nil }
+    package var processFailure: (any Error)? { nil }
     package func beginShutdown() {}
     package func executionResource(for name: String, arguments: [String: JSONValue]) async throws -> NativeExecutionResource {
         NativeExecutionResource()
@@ -72,6 +75,8 @@ package final class NativeXcodeBackend: NativeToolBackend {
     package var origin: [String: JSONValue]? {
         installation.origin(kind: "nativeHost", processID: getpid(), toolCancellation: "task")
     }
+
+    package var processFailure: (any Error)? { testableStateCorrection.failure }
 
     package func listTools() async throws -> [NativeTool] {
         if let catalogTask { return try await catalogTask.value }

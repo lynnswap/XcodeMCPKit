@@ -1,20 +1,22 @@
 import CryptoKit
 import Darwin
 import Foundation
+import Synchronization
 
-@MainActor
-struct NativePreviewProductSignature: Equatable {
+/// Product inputs and contents of a staged preview. Content digests are computed off the main
+/// actor, which also runs Xcode's workspace models.
+struct NativePreviewProductSignature: Equatable, Sendable {
     private let configuration: [String]
     private let products: Set<URL>
     private let files: [FileStamp]
 
-    private struct FileStamp: Equatable {
+    private struct FileStamp: Equatable, Sendable {
         let path: String
         let mode: UInt16
         let content: Data?
     }
 
-    final class DigestCache {
+    final class DigestCache: Sendable {
         private struct Metadata: Equatable {
             let device: dev_t
             let inode: ino_t
@@ -43,24 +45,31 @@ struct NativePreviewProductSignature: Equatable {
             let digest: Data
         }
 
-        private var files: [String: Entry] = [:]
+        private let files = Mutex<[String: Entry]>([:])
 
         func digest(for path: String, metadata value: stat) throws -> Data {
             let metadata = Metadata(value)
-            if let entry = files[path], entry.metadata == metadata { return entry.digest }
+            if let entry = files.withLock({ $0[path] }), entry.metadata == metadata { return entry.digest }
             let url = URL(filePath: path, directoryHint: .notDirectory)
             let digest = Data(SHA256.hash(data: try Data(contentsOf: url, options: .mappedIfSafe)))
-            files[path] = Entry(metadata: metadata, digest: digest)
+            files.withLock { $0[path] = Entry(metadata: metadata, digest: digest) }
             return digest
         }
 
         func retain(_ paths: Set<String>) {
-            files = files.filter { paths.contains($0.key) }
+            files.withLock { $0 = $0.filter { paths.contains($0.key) } }
         }
     }
 
-    init(build: NativePreviewBuild.Result, source: URL, helper: URL, digestCache: DigestCache,
-         additionalProducts: [URL] = []) throws {
+    private init(configuration: [String], products: Set<URL>, files: [FileStamp]) {
+        self.configuration = configuration
+        self.products = products
+        self.files = files
+    }
+
+    @MainActor
+    static func make(build: NativePreviewBuild.Result, source: URL, helper: URL, digestCache: DigestCache,
+                     additionalProducts: [URL] = []) async throws -> Self {
         var configuration = [source.path, build.destinationIdentifier, build.previewDestinationIdentifier,
             build.platformIdentifier ?? "", build.systemVersion ?? ""]
         func targetConfiguration(_ target: NativePreviewBuild.Target) -> [String] {
@@ -88,20 +97,20 @@ struct NativePreviewProductSignature: Equatable {
             products.formUnion(target.resourceURLs)
             pending += target.dependencies
         }
-        self.configuration = configuration
-        self.products = products
-        files = try Self.stamps(for: products, digestCache: digestCache)
+        return Self(configuration: configuration, products: products,
+                    files: try await stamps(for: products, digestCache: digestCache))
     }
 
-    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+    static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.configuration == rhs.configuration && lhs.files == rhs.files
     }
 
-    func matchesCurrentFiles(digestCache: DigestCache) throws -> Bool {
-        files == (try Self.stamps(for: products, digestCache: digestCache))
+    func matchesCurrentFiles(digestCache: DigestCache) async throws -> Bool {
+        files == (try await Self.stamps(for: products, digestCache: digestCache))
     }
 
-    private static func stamps(for roots: Set<URL>, digestCache: DigestCache) throws -> [FileStamp] {
+    @concurrent
+    private static func stamps(for roots: Set<URL>, digestCache: DigestCache) async throws -> [FileStamp] {
         let fileMetadata = NativePreviewFileMetadata()
         var pending = roots.map { (path: $0.standardizedFileURL.path, metadata: Optional<stat>.none) }
         var visited: Set<String> = []

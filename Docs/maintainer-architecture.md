@@ -43,7 +43,12 @@ with no cancellable Operation can take until natural completion; opaque native
 Swift Task handles are not joined by this mechanism.
 
 Shutdown stops admission and awaits owned tasks before closing workspace and
-transport resources. `deinit` is a synchronous cancellation backstop and must not
+transport resources. In the native host, the main task owns shutdown and runs it
+once, for whichever comes first: input end, input or output failure, or a failure
+that leaves Xcode's state in the process unreliable (such as a failed testable-state
+hook). The failing request still gets its reply; the proxy then fails in-flight
+requests and starts a new process on the next use. Input framing and preview
+product digests run off the main actor, which Xcode's models use. `deinit` is a synchronous cancellation backstop and must not
 spawn an unowned task or promise graceful shutdown. Report cleanup failure
 alongside the original failure. Do not replay mutations with unknown delivery.
 

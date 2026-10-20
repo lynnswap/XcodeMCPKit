@@ -6,7 +6,7 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewProductSignatureTests {
-    @Test func reusesProductsWhenNativeTargetOrderChanges() throws {
+    @Test func reusesProductsWhenNativeTargetOrderChanges() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let output = fixture.product.appendingPathComponent("Support.dylib")
@@ -15,32 +15,32 @@ struct NativePreviewProductSignatureTests {
             sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", output.path], linkerWorkingDirectory: nil,
             objectFiles: [], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)
 
-        let before = try fixture.signature(targets: [fixture.target, support])
+        let before = try await fixture.signature(targets: [fixture.target, support])
 
-        #expect(try fixture.signature(targets: [support, fixture.target]) == before)
+        #expect(try await fixture.signature(targets: [support, fixture.target]) == before)
     }
 
-    @Test func reusesProductsAfterFileMetadataChangesWithoutContentChanges() throws {
+    @Test func reusesProductsAfterFileMetadataChangesWithoutContentChanges() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let info = fixture.product.appendingPathComponent("Info.plist")
         try Data("unchanged".utf8).write(to: info)
-        let before = try fixture.signature()
+        let before = try await fixture.signature()
 
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: info.path)
 
-        #expect(try fixture.signature() == before)
+        #expect(try await fixture.signature() == before)
     }
 
-    @Test func detectsResourceChangesWhenSizeAndModificationTimeArePreserved() throws {
+    @Test func detectsResourceChangesWhenSizeAndModificationTimeArePreserved() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let resource = fixture.product.appendingPathComponent("Label.txt")
         try Data("old".utf8).write(to: resource)
         var original = stat()
         try #require(unsafe lstat(resource.path, &original) == 0)
-        let before = try fixture.signature()
-        #expect(try before.matchesCurrentFiles(digestCache: fixture.digestCache))
+        let before = try await fixture.signature()
+        #expect(try await before.matchesCurrentFiles(digestCache: fixture.digestCache))
 
         let file = try FileHandle(forWritingTo: resource)
         try file.write(contentsOf: Data("new".utf8))
@@ -57,51 +57,51 @@ struct NativePreviewProductSignatureTests {
         #expect(changed.st_size == original.st_size)
         #expect(changed.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec)
         #expect(changed.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec)
-        #expect(try !before.matchesCurrentFiles(digestCache: fixture.digestCache))
-        #expect(try fixture.signature() != before)
+        #expect(try await !before.matchesCurrentFiles(digestCache: fixture.digestCache))
+        #expect(try await fixture.signature() != before)
     }
 
-    @Test func detectsResourceInventoryAndLaunchSettingChanges() throws {
+    @Test func detectsResourceInventoryAndLaunchSettingChanges() async throws {
         var fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let before = try fixture.signature()
+        let before = try await fixture.signature()
         let resource = fixture.product.appendingPathComponent("Added.txt")
         try Data("resource".utf8).write(to: resource)
-        let added = try fixture.signature()
+        let added = try await fixture.signature()
         #expect(added != before)
 
         try FileManager.default.removeItem(at: resource)
-        let removed = try fixture.signature()
+        let removed = try await fixture.signature()
         #expect(removed != added)
 
         fixture.target.rendererEnvironment["PREVIEW_MODE"] = "updated"
-        #expect(try fixture.signature() != removed)
+        #expect(try await fixture.signature() != removed)
     }
 
-    @Test func detectsChangesToProductsCopiedIntoTheHost() throws {
+    @Test func detectsChangesToProductsCopiedIntoTheHost() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let input = fixture.root.appendingPathComponent("Extension.appex")
         try FileManager.default.createDirectory(at: input, withIntermediateDirectories: false)
         let resource = input.appendingPathComponent("Label.txt")
         try Data("before".utf8).write(to: resource)
-        let before = try fixture.signature(inputProducts: [input])
-        #expect(try before.matchesCurrentFiles(digestCache: fixture.digestCache))
+        let before = try await fixture.signature(inputProducts: [input])
+        #expect(try await before.matchesCurrentFiles(digestCache: fixture.digestCache))
 
         try Data("after".utf8).write(to: resource)
 
-        #expect(try !before.matchesCurrentFiles(digestCache: fixture.digestCache))
-        #expect(try fixture.signature(inputProducts: [input]) != before)
+        #expect(try await !before.matchesCurrentFiles(digestCache: fixture.digestCache))
+        #expect(try await fixture.signature(inputProducts: [input]) != before)
     }
 
-    @Test func detectsAtomicallyReplacedResources() throws {
+    @Test func detectsAtomicallyReplacedResources() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let resource = fixture.product.appendingPathComponent("Label.txt")
         try Data("old".utf8).write(to: resource)
         var original = stat()
         try #require(unsafe lstat(resource.path, &original) == 0)
-        let before = try fixture.signature()
+        let before = try await fixture.signature()
 
         let replacement = fixture.root.appendingPathComponent("Replacement.txt")
         try Data("new".utf8).write(to: replacement)
@@ -117,10 +117,10 @@ struct NativePreviewProductSignatureTests {
         #expect(changed.st_size == original.st_size)
         #expect(changed.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec)
         #expect(changed.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec)
-        #expect(try fixture.signature() != before)
+        #expect(try await fixture.signature() != before)
     }
 
-    @Test func detectsSymbolicLinkRetargetingAndTargetChanges() throws {
+    @Test func detectsSymbolicLinkRetargetingAndTargetChanges() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let first = fixture.root.appendingPathComponent("First.txt")
@@ -129,15 +129,15 @@ struct NativePreviewProductSignatureTests {
         try Data("old".utf8).write(to: first)
         try Data("old".utf8).write(to: second)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
-        let before = try fixture.signature()
+        let before = try await fixture.signature()
 
         try FileManager.default.removeItem(at: link)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: second)
-        let retargeted = try fixture.signature()
+        let retargeted = try await fixture.signature()
         #expect(retargeted != before)
 
         try Data("new".utf8).write(to: second)
-        #expect(try fixture.signature() != retargeted)
+        #expect(try await fixture.signature() != retargeted)
     }
 
     @MainActor
@@ -163,12 +163,12 @@ struct NativePreviewProductSignatureTests {
                 objectFiles: [], sourceFiles: [source], debugDylibEnabled: true, isRunnable: true)
         }
 
-        func signature(targets: [NativePreviewBuild.Target]? = nil, inputProducts: Set<URL> = []) throws -> NativePreviewProductSignature {
+        func signature(targets: [NativePreviewBuild.Target]? = nil, inputProducts: Set<URL> = []) async throws -> NativePreviewProductSignature {
             var build = NativePreviewBuild.Result(targets: targets ?? [target], previewRoots: [], destinationIdentifier: "destination",
                 previewDestinationIdentifier: "preview-destination", platformIdentifier: "com.apple.platform.iphonesimulator",
                 previewPlatform: .iOS, platformName: "iOS", deviceModelName: "iPhone", systemVersion: "27.1")
             build.inputProducts = inputProducts
-            return try NativePreviewProductSignature(build: build, source: source, helper: helper,
+            return try await NativePreviewProductSignature.make(build: build, source: source, helper: helper,
                 digestCache: digestCache)
         }
     }

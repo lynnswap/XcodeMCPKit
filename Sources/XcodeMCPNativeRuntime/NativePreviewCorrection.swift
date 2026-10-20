@@ -346,7 +346,7 @@ final class NativePreviewCorrection {
                        certificate.build.previewPlatform != nil, let signature = session.signature {
                         let resolution = try await builder.resolveDestination(workspace: workspace, input: input.nativeValue)
                         if try await builder.destinationResolution(resolution, matches: plan.destination.resolution),
-                           try signature.matchesCurrentFiles(digestCache: session.productDigests), inputRevision == session.inputRevision,
+                           try await signature.matchesCurrentFiles(digestCache: session.productDigests), inputRevision == session.inputRevision,
                            plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
                             let destination = NativePreviewBuild.DestinationSelection(selected: plan.destination.selected, resolution: resolution)
                             return Prepared(workspace: workspace, source: plan.source, location: plan.location,
@@ -381,7 +381,7 @@ final class NativePreviewCorrection {
                 let build = try await builder.build(workspace: workspace, destination: destination, source: source)
                 if let platform = build.previewPlatform {
                     let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
-                    let signature = try NativePreviewProductSignature(build: build, source: source, helper: helper,
+                    let signature = try await NativePreviewProductSignature.make(build: build, source: source, helper: helper,
                         digestCache: session.productDigests,
                         additionalProducts: session.additionalProducts)
                     if signature == session.signature,
@@ -693,7 +693,7 @@ final class NativePreviewCorrection {
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
         let containingApp = try Self.containingApp(for: output, targets: build.targets)
         let originalProducts = additionalProducts + [product] + (sourceProduct.map { [$0] } ?? []) + (containingApp.map { [$0] } ?? [])
-        let originalSignature = try NativePreviewProductSignature(build: build, source: source, helper: helper,
+        let originalSignature = try await NativePreviewProductSignature.make(build: build, source: source, helper: helper,
             digestCache: digestCache,
             additionalProducts: originalProducts)
         let nativeExtensionIdentifier = ((metadataOnly == true && location.providerPath != nil) || nativeWidget)
@@ -719,7 +719,7 @@ final class NativePreviewCorrection {
                 in: products, agentApp: sourceProduct == nil ? nil : app,
                 sourceProduct: copiedSourceProduct, linkedImages: linkedImages, environment: target.rendererEnvironment)
         let copiedProducts = Array(Set(originalProducts + Array(dependencies.products.keys)))
-        let productSignature = try NativePreviewProductSignature(build: build, source: source, helper: helper,
+        let productSignature = try await NativePreviewProductSignature.make(build: build, source: source, helper: helper,
             digestCache: digestCache,
             additionalProducts: copiedProducts)
         try Self.copyFrameworkDependencies(dependencies, into: products)
@@ -801,8 +801,8 @@ final class NativePreviewCorrection {
             signing += ["--entitlements", plist.path]
         }
         try await writeRendererRequest(request, app: app, platform: platform, signing: signing, process: process)
-        guard try originalSignature.matchesCurrentFiles(digestCache: digestCache),
-              try productSignature.matchesCurrentFiles(digestCache: digestCache) else {
+        guard try await originalSignature.matchesCurrentFiles(digestCache: digestCache),
+              try await productSignature.matchesCurrentFiles(digestCache: digestCache) else {
             throw NativeRuntimeError.invocation("Build products changed while preparing the preview; render again")
         }
         return RendererPreparation(request: request, app: app, product: product, containingApp: containingApp,
@@ -831,13 +831,16 @@ final class NativePreviewCorrection {
                         platform: NativePreviewPlatform, signature retainedSignature: NativePreviewProductSignature? = nil,
                         process: NativePreviewProcess) async throws {
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
-        let signature = try retainedSignature ?? NativePreviewProductSignature(build: build, source: source, helper: helper,
-            digestCache: session.productDigests,
-            additionalProducts: session.additionalProducts)
+        let signature: NativePreviewProductSignature
+        if let retainedSignature { signature = retainedSignature }
+        else {
+            signature = try await NativePreviewProductSignature.make(build: build, source: source, helper: helper,
+                digestCache: session.productDigests, additionalProducts: session.additionalProducts)
+        }
         if session.signature != signature {
             try await resetStages(session, process: process)
             session.additionalProducts = []
-            session.signature = try NativePreviewProductSignature(build: build, source: source, helper: helper,
+            session.signature = try await NativePreviewProductSignature.make(build: build, source: source, helper: helper,
                 digestCache: session.productDigests)
         } else { session.signature = signature }
         if let simulator = session.simulator, session.simulatorDestination != SimulatorDestination(build) {

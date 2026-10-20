@@ -4,13 +4,14 @@ import XcodeMCPWire
 package actor NativeMCPSession {
     private let backend: any NativeToolBackend
     private let output: @Sendable (Data) throws -> Void
-    private var onOutputFailure: (@Sendable (any Error) -> Void)?
+    private var onFailure: (@Sendable (any Error) -> Void)?
+    private var failed = false
+    private var shutdownTask: Task<Void, any Error>?
     private let artifactsRoot: URL
     private let executionQueue: NativeExecutionQueue
     private let conversationID = UUID().uuidString
     private var initialized = false
     private var stopping = false
-    private var outputFailed = false
     private var requests: [String: Task<Void, Never>] = [:]
 
     package init(backend: any NativeToolBackend, artifactsRoot: URL,
@@ -24,8 +25,10 @@ package actor NativeMCPSession {
             maximumHeavyOperations: maximumHeavyOperations, maximumQueuedBytes: maximumQueuedBytes)
     }
 
-    package func setOutputFailureHandler(_ handler: (@Sendable (any Error) -> Void)?) {
-        onOutputFailure = handler
+    /// Receives the first failure after which this process cannot serve requests: MCP output
+    /// failed, or Xcode's state in this process is no longer reliable. The owner shuts down.
+    package func setFailureHandler(_ handler: (@Sendable (any Error) -> Void)?) {
+        onFailure = handler
     }
 
     package func receive(_ messages: [Data]) throws {
@@ -91,6 +94,10 @@ package actor NativeMCPSession {
                     } else {
                         reportError(id: id, code: -32603, message: String(describing: error))
                     }
+                }
+                // The reply above reports the failure to its caller; later callers need a new process.
+                if let failure = await backend.processFailure {
+                    fail(NativeRuntimeError.unavailable("The native host cannot continue: \(failure)"))
                 }
             }
         case .malformed(let id):
@@ -171,6 +178,12 @@ package actor NativeMCPSession {
                              resource: NativeExecutionResource) async throws -> JSONValue {
         let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Results can name files in the directory, so only a directory nothing was written to is removed.
+        defer {
+            if (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?.isEmpty == true {
+                try? FileManager.default.removeItem(at: directory)
+            }
+        }
         let context = NativeToolContext(artifactsDirectory: directory, artifactsRoot: artifactsRoot,
                                        conversationID: conversationID, executionResource: resource)
         return try await NativeExecutionOperations.$scope.withValue(context.executionScope) {
@@ -294,22 +307,32 @@ package actor NativeMCPSession {
     private func write(_ data: Data) throws {
         do { try output(data) }
         catch {
-            if !outputFailed {
-                outputFailed = true
-                stopping = true
-                onOutputFailure?(error)
-            }
+            fail(error)
             throw error
         }
     }
 
-    package func shutdown() async throws {
+    private func fail(_ error: any Error) {
         stopping = true
-        let pending = Array(requests.values)
-        for request in pending { request.cancel() }
-        await executionQueue.shutdown()
-        await backend.beginShutdown()
-        for request in pending { await request.value }
-        try await backend.shutdown()
+        guard !failed else { return }
+        failed = true
+        onFailure?(error)
+    }
+
+    /// Cancels requests, waits for them, and releases native resources. Concurrent and repeated
+    /// calls share the first shutdown and its result.
+    package func shutdown() async throws {
+        if let shutdownTask { return try await shutdownTask.value }
+        stopping = true
+        let task = Task {
+            let pending = Array(requests.values)
+            for request in pending { request.cancel() }
+            await executionQueue.shutdown()
+            await backend.beginShutdown()
+            for request in pending { await request.value }
+            try await backend.shutdown()
+        }
+        shutdownTask = task
+        try await task.value
     }
 }
