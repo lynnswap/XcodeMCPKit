@@ -3,10 +3,12 @@ import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProxyRuntimeContract
 
-final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
+/// One admitted request. Its reply is the work's result, unless cancellation or the deadline
+/// interrupts the work first with its own reply.
+final class NativeHostBrokerOperation: Sendable {
     private struct State: Sendable {
-        var result: Result<ProxyRuntimeReply, any Error>?
-        var callbacks: [@Sendable (Result<ProxyRuntimeReply, any Error>) -> Void] = []
+        var reply: ProxyRuntimeReply?
+        var waiters: [CheckedContinuation<ProxyRuntimeReply, Never>] = []
         var task: Task<Void, Never>?
         var timer: Task<Void, Never>?
         var workFinished = false
@@ -30,7 +32,7 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
         self.requestIDKey = requestIDKey
         let task = Task { [self] in
             let reply = await work()
-            finish(.success(reply))
+            finish(with: reply)
             finishWork()
         }
         let timer = deadline.flatMap { deadline -> Task<Void, Never>? in
@@ -42,7 +44,7 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
             }
         }
         let retained = state.withLockedValue { state in
-            guard state.result == nil else { return false }
+            guard state.reply == nil else { return false }
             state.task = task
             state.timer = timer
             return true
@@ -50,13 +52,18 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
         if !retained { task.cancel(); timer?.cancel() }
     }
 
-    func whenComplete(_ completion: @escaping @Sendable (Result<ProxyRuntimeReply, any Error>) -> Void) {
-        let result = state.withLockedValue { state -> Result<ProxyRuntimeReply, any Error>? in
-            if let result = state.result { return result }
-            state.callbacks.append(completion)
-            return nil
+    /// The request's reply, available as soon as the work finishes or is interrupted.
+    var reply: ProxyRuntimeReply {
+        get async {
+            await withCheckedContinuation { continuation in
+                let reply = state.withLockedValue { state -> ProxyRuntimeReply? in
+                    if let reply = state.reply { return reply }
+                    state.waiters.append(continuation)
+                    return nil
+                }
+                if let reply { continuation.resume(returning: reply) }
+            }
         }
-        if let result { completion(result) }
     }
 
     func whenWorkComplete(_ completion: @escaping @Sendable () -> Void) {
@@ -81,34 +88,32 @@ final class NativeHostBrokerOperation: ProxyRuntimeRequestOperating, Sendable {
 
     func waitForWorkCompletion() async { await workCompletion.wait() }
 
-    func cancel(reason: ProxyRuntimeCancellationReason) {
+    func cancel() {
         interrupt(with: cancelledReply)
     }
 
     private func interrupt(with reply: ProxyRuntimeReply) {
         let task = state.withLockedValue { $0.task }
-        guard finish(.success(reply)) else { return }
+        guard finish(with: reply) else { return }
         // Cancelling the work task reaches the host connection, which cancels the host request.
         task?.cancel()
     }
 
     @discardableResult
-    private func finish(_ result: Result<ProxyRuntimeReply, any Error>) -> Bool {
-        let resources = state.withLockedValue { state -> (
-            [@Sendable (Result<ProxyRuntimeReply, any Error>) -> Void], Task<Void, Never>?
-        )? in
-            guard state.result == nil else { return nil }
-            state.result = result
+    private func finish(with reply: ProxyRuntimeReply) -> Bool {
+        let resources = state.withLockedValue { state -> ([CheckedContinuation<ProxyRuntimeReply, Never>], Task<Void, Never>?)? in
+            guard state.reply == nil else { return nil }
+            state.reply = reply
             state.task = nil
-            let callbacks = state.callbacks
+            let waiters = state.waiters
             let timer = state.timer
-            state.callbacks.removeAll()
+            state.waiters.removeAll()
             state.timer = nil
-            return (callbacks, timer)
+            return (waiters, timer)
         }
         guard let resources else { return false }
         resources.1?.cancel()
-        for callback in resources.0 { callback(result) }
+        for waiter in resources.0 { waiter.resume(returning: reply) }
         return true
     }
 }

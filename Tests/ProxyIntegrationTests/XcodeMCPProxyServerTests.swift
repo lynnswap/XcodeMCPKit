@@ -680,32 +680,10 @@ private final class StartupTestRuntime: @unchecked Sendable, ProxyRuntimeServing
 
     func shutdown() async { state.withLockedValue { $0.shutdownCount += 1 } }
 
-    func subscribeToEvents(
-        _ receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void
-    ) -> @Sendable () -> Void {
-        {}
+    func openSession(_: ProxySessionID,
+                     notify _: @escaping @Sendable (Data) -> Void) throws -> any ProxyRuntimeSession {
+        throw ProxyRuntimeUnavailable()
     }
-
-    func beginRequest(
-        _ message: ProxyRuntimeRequest,
-        in sessionID: ProxySessionID?
-    ) -> (any ProxyRuntimeRequestOperating)? {
-        fatalError("startup lifecycle test does not admit requests")
-    }
-
-    func clientRequestFinished(_: ProxySessionID) {}
-
-    func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState {
-        .missing
-    }
-
-    func clientEventStreamOpened(_: ProxySessionID) -> Bool { false }
-
-    func clientEventStreamClosed(_: ProxySessionID) {}
-
-    func expireInactiveSessions(inactiveFor _: TimeAmount) {}
-
-    func removeSession(_ id: ProxySessionID) {}
 
     func snapshot() -> ProxyRuntimeSnapshot {
         ProxyRuntimeSnapshot(generatedAt: Date(), hosts: [])

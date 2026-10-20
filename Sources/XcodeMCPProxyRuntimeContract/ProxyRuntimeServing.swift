@@ -1,5 +1,4 @@
 import Foundation
-import NIOCore
 import XcodeMCPCore
 
 package struct ProxySessionID: Hashable, Sendable {
@@ -11,28 +10,19 @@ package struct ProxySessionID: Hashable, Sendable {
     }
 }
 
-package enum ProxyRuntimeEvent: Sendable {
-    case sessionOpened(sessionID: ProxySessionID)
-    case notification(sessionID: ProxySessionID, data: Data)
-    case sessionClosed(sessionID: ProxySessionID)
-}
-
+/// One JSON-RPC message from a client.
 package struct ProxyRuntimeRequest: Sendable {
     package let data: Data
     package let decodedJSON: JSONValue?
-    package var deadline: Date?
-    package var headerSessionExists: Bool
 
-    package init(data: Data, headerSessionExists: Bool) {
+    package init(data: Data) {
         self.data = data
         self.decodedJSON = (try? JSONSerialization.jsonObject(with: data)).flatMap(JSONValue.init(any:))
-        self.headerSessionExists = headerSessionExists
     }
 
-    package init(json: JSONValue, headerSessionExists: Bool) throws {
+    package init(json: JSONValue) throws {
         self.data = try JSONSerialization.data(withJSONObject: json.foundationObject)
         self.decodedJSON = json
-        self.headerSessionExists = headerSessionExists
     }
 }
 
@@ -42,19 +32,6 @@ package enum ProxyRuntimeReply: Sendable {
     case response(Data)
     /// A client notification or response, which has no reply.
     case accepted
-}
-
-package enum ProxyRuntimeCancellationReason: String, Sendable {
-    case channelInactive
-    case responseWriteFailure
-    case clientNotification
-    case requestDeadline
-}
-
-package enum ProxyRuntimeSessionState: Sendable, Equatable {
-    case missing
-    case uninitialized
-    case initialized(protocolVersion: String?)
 }
 
 package struct ProxyRuntimeSnapshot: Sendable {
@@ -92,30 +69,28 @@ package struct ProxyRuntimeSnapshot: Sendable {
     }
 }
 
-package protocol ProxyRuntimeRequestOperating: Sendable {
-    func whenComplete(
-        _ completion: @escaping @Sendable (Result<ProxyRuntimeReply, any Error>) -> Void
-    )
-    func cancel(reason: ProxyRuntimeCancellationReason)
+/// The runtime side of one MCP session, which the HTTP gateway creates, uses, and ends.
+package protocol ProxyRuntimeSession: Sendable {
+    /// Handles one client message and returns its reply. Cancelling the calling task cancels the
+    /// request, which then replies without waiting for its host.
+    func handle(_ message: ProxyRuntimeRequest) async -> ProxyRuntimeReply
+
+    /// Ends the session: cancels its requests and releases what it references. Later calls do nothing.
+    func close()
+}
+
+/// The runtime cannot open sessions while it stops or resets.
+package struct ProxyRuntimeUnavailable: Error {
+    package init() {}
 }
 
 package protocol ProxyRuntimeServing: Sendable {
     func start()
     func cancelForDeinit()
     func shutdown() async
-    func subscribeToEvents(
-        _ receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void
-    ) -> @Sendable () -> Void
-    func beginRequest(
-        _ message: ProxyRuntimeRequest,
-        in sessionID: ProxySessionID?
-    ) -> (any ProxyRuntimeRequestOperating)?
-    func clientRequestFinished(_ id: ProxySessionID)
-    func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState
-    func clientEventStreamOpened(_ id: ProxySessionID) -> Bool
-    func clientEventStreamClosed(_ id: ProxySessionID)
-    func expireInactiveSessions(inactiveFor: TimeAmount)
-    func removeSession(_ id: ProxySessionID)
+    /// Opens a session. `notify` receives the host notifications meant for it, such as progress
+    /// for its requests.
+    func openSession(_ id: ProxySessionID, notify: @escaping @Sendable (Data) -> Void) throws -> any ProxyRuntimeSession
     func snapshot() -> ProxyRuntimeSnapshot
     func debugSnapshotData(includeSensitivePayloads: Bool) -> Data?
     func reset() async

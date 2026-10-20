@@ -104,12 +104,13 @@ startup; write failure unwinds acquired resources.
 - `/debug/upstreams` and `/debug/reset` return `404` unless the server enables debug endpoints (`--debug-endpoints`) and listens on loopback.
 - `POST /mcp` requires `Content-Type: application/json` and `Accept` containing both `application/json` and `text/event-stream`.
 - A POST that carries a request is answered with one JSON-RPC response; a client notification or response gets `202`. When a host's response is not valid JSON-RPC for its request, the client receives error `-32603` (`invalid upstream response`) for that request.
-- The server generates `MCP-Session-Id` on `initialize`; caller-provided session ids are ignored for initialize.
+- HTTP owns MCP sessions. It generates `MCP-Session-Id` on `initialize`, ignoring caller-provided ids, and ends the runtime's side of a session when the session is deleted, expires, or the server stops. An `initialize` that arrives while the server is stopping returns `503`.
 - After initialize, `POST`, `GET`, and `DELETE` require `MCP-Session-Id`. An explicit `MCP-Protocol-Version` must be valid, supported, and match the negotiated version.
 - When `MCP-Protocol-Version` is omitted, the server uses the session's negotiated version. If no negotiated version exists, it evaluates the protocol-defined fallback `2025-03-26` and returns `400` when that version is unsupported.
-- Missing session ids return `400`; unknown or terminated session ids return `404`.
-- `DELETE /mcp` terminates the session; later requests with that session id return `404`.
-- A client transport session with no in-flight HTTP request and no open SSE stream is retained for five minutes after its last client activity so that an interrupted SSE connection can reconnect. A one-minute sweep then terminates stale sessions and their buffered notifications; outbound server notifications do not extend this lifetime. Runtime-internal control-plane and health-probe sessions do not participate in transport expiry.
+- Missing session ids return `400`; unknown or terminated session ids return `404`. The `404` is decided before a request is processed; a request that has started always gets its JSON-RPC response.
+- `DELETE /mcp` terminates the session and cancels its running requests, which are answered with `-32800` (`request cancelled`); later requests with that session id return `404`.
+- A client that disconnects before its response cancels its request, and the host receives `notifications/cancelled`.
+- A session with no in-flight HTTP request and no open SSE stream is retained for five minutes after its last client activity so that an interrupted SSE connection can reconnect. A one-minute sweep then terminates stale sessions and their buffered notifications; outbound server notifications do not extend this lifetime.
 - HTTP connection, SSE connection, request, and response access events are debug telemetry, including expected protocol-level `4xx` responses. The response remains the client-visible error contract.
 - Empty, singleton, and mixed JSON-RPC arrays return `400`; the internal executor and response router operate on typed single messages. An array response from an upstream is a protocol violation.
 - Host `notifications/progress` is delivered only to the session whose request carries that progress token. It is dropped when the request has finished; other host notifications fan out to the sessions using that host.

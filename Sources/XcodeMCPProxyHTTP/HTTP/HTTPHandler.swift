@@ -19,8 +19,9 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     struct ActivePostRequest: Sendable {
-        let operation: any ProxyRuntimeRequestOperating
-        let sessionID: ProxySessionID?
+        let task: Task<ProxyRuntimeReply, Never>
+        /// The session the request holds until its reply is written.
+        let sessionID: ProxySessionID
     }
 
     struct State: Sendable {
@@ -119,16 +120,12 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return (state.sseSessionID, requests)
         }
         if let sessionID {
-            controlService.closeSSE(
-                sessionID: ProxySessionID(rawValue: sessionID),
-                channel: context.channel
-            )
+            controlService.sessions.closeStream(ProxySessionID(rawValue: sessionID), channel: context.channel)
         }
+        // The runtime replies to a cancelled request at once; nothing is left to write it to.
         for request in activePostRequests {
-            request.operation.cancel(reason: .channelInactive)
-            if let sessionID = request.sessionID {
-                controlService.clientRequestFinished(sessionID)
-            }
+            request.task.cancel()
+            controlService.sessions.release(request.sessionID)
         }
         if let remote = remoteAddressString(for: context.channel) {
             if let sessionID {
@@ -329,10 +326,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        guard controlService.openSSE(
-            sessionID: ProxySessionID(rawValue: sessionID),
-            channel: context.channel
-        ) else {
+        guard controlService.sessions.openStream(ProxySessionID(rawValue: sessionID), channel: context.channel) else {
             _ = sendPlain(
                 on: context.channel,
                 status: .notFound,
@@ -380,7 +374,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         else {
             return
         }
-        controlService.deleteSession(ProxySessionID(rawValue: sessionID))
+        controlService.sessions.delete(ProxySessionID(rawValue: sessionID))
         _ = sendEmpty(on: context.channel, status: .ok, keepAlive: head.isKeepAlive, sessionID: sessionID, requestLog: requestLog)
     }
 
@@ -434,7 +428,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        var request = ProxyRuntimeRequest(data: bodyData, headerSessionExists: false)
+        let request = ProxyRuntimeRequest(data: bodyData)
         let parsedRequestJSON = request.decodedJSON?.foundationObject
         if parsedRequestJSON is [Any] {
             _ = sendPlain(
@@ -460,14 +454,29 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             }
             return true
         }()
-        let effectiveSessionID: String?
-        let headerSessionExists: Bool
+        let keepAlive = head.isKeepAlive
+        let channel = context.channel
+        let eventLoop = context.eventLoop
+        let sessionID: ProxySessionID
+        let session: any ProxyRuntimeSession
         if isInitializeRequest {
-            effectiveSessionID = hasValidInitializeID ? UUID().uuidString : nil
-            headerSessionExists = false
+            guard hasValidInitializeID else {
+                // Without a request id, `initialize` cannot start a session.
+                let data = (try? JSONRPC.Wire.errorResponseData(id: nil, code: -32600, message: "invalid request")) ?? Data()
+                _ = sendJSONData(on: channel, data: data, keepAlive: keepAlive, sessionID: nil, requestLog: requestLog)
+                return
+            }
+            sessionID = ProxySessionID(rawValue: UUID().uuidString)
+            do {
+                session = try controlService.sessions.create(sessionID)
+            } catch {
+                _ = sendPlain(on: channel, status: .serviceUnavailable, body: "server unavailable",
+                              keepAlive: keepAlive, sessionID: nil, requestLog: requestLog)
+                return
+            }
         } else {
             guard
-                let sessionID = validateSession(
+                let validated = validateSession(
                     on: context.channel,
                     head: head,
                     requestLog: requestLog,
@@ -476,77 +485,59 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             else {
                 return
             }
-            effectiveSessionID = sessionID
-            headerSessionExists = true
+            sessionID = ProxySessionID(rawValue: validated)
+            // The only "session not found" for a POST is answered here, before processing starts.
+            guard let acquired = controlService.sessions.acquire(sessionID) else {
+                _ = sendPlain(on: channel, status: .notFound, body: "session not found", keepAlive: keepAlive,
+                              sessionID: validated, requestLog: requestLog)
+                return
+            }
+            session = acquired
         }
-        let keepAlive = head.isKeepAlive
-        let channel = context.channel
-        let eventLoop = context.eventLoop
-        request.headerSessionExists = headerSessionExists
-        guard let operation = controlService.beginRequest(
-            request,
-            sessionID: effectiveSessionID.map(ProxySessionID.init(rawValue:))
-        ) else {
-            _ = sendPlain(
-                on: channel,
-                status: .notFound,
-                body: "session not found",
-                keepAlive: keepAlive,
-                sessionID: effectiveSessionID,
-                requestLog: requestLog
-            )
-            return
-        }
+        let task = Task { await session.handle(request) }
         state.withLockedValue { state in
-            state.activePostRequests[requestLog.id] = ActivePostRequest(
-                operation: operation,
-                sessionID: effectiveSessionID.map(ProxySessionID.init(rawValue:))
-            )
+            state.activePostRequests[requestLog.id] = ActivePostRequest(task: task, sessionID: sessionID)
         }
-        operation.whenComplete { result in
+        Task {
+            let reply = await task.value
+            let responseSessionID: String?
+            if isInitializeRequest, let version = Self.negotiatedProtocolVersion(in: reply) {
+                controlService.sessions.markInitialized(sessionID, protocolVersion: version)
+                responseSessionID = sessionID.rawValue
+            } else if isInitializeRequest {
+                // A failed `initialize` leaves nothing to resume.
+                controlService.sessions.delete(sessionID)
+                responseSessionID = nil
+            } else {
+                responseSessionID = sessionID.rawValue
+            }
             self.scheduleResponseCompletion(eventLoop) {
-                switch result {
-                case .success(let resolution):
-                    let writeFuture = self.enqueueOrderedWrite(on: channel) {
-                        self.sendPostResolution(
-                            resolution,
-                            on: channel,
-                            keepAlive: keepAlive,
-                            sessionID: effectiveSessionID,
-                            requestLog: requestLog
-                        )
-                    }
-                    writeFuture.whenFailure { error in
-                        self.logger.warning(
-                            "HTTP response write failed",
-                            metadata: [
-                                "request_id": .string(requestLog.id),
-                                "disconnect_source": .string("responseWriteFailure"),
-                                "error": .string("\(error)"),
-                            ]
-                        )
-                        operation.cancel(reason: .responseWriteFailure)
-                    }
-                    writeFuture.whenComplete { _ in
-                        self.finishActivePostRequest(requestID: requestLog.id)
-                    }
-                case .failure:
-                    let writeFuture = self.enqueueOrderedWrite(on: channel) {
-                        self.sendPlain(
-                            on: channel,
-                            status: .internalServerError,
-                            body: "internal server error",
-                            keepAlive: keepAlive,
-                            sessionID: effectiveSessionID,
-                            requestLog: requestLog
-                        )
-                    }
-                    writeFuture.whenComplete { _ in
-                        self.finishActivePostRequest(requestID: requestLog.id)
-                    }
+                let writeFuture = self.enqueueOrderedWrite(on: channel) {
+                    self.sendPostResolution(reply, on: channel, keepAlive: keepAlive, sessionID: responseSessionID,
+                                            requestLog: requestLog)
+                }
+                writeFuture.whenFailure { error in
+                    self.logger.warning(
+                        "HTTP response write failed",
+                        metadata: [
+                            "request_id": .string(requestLog.id),
+                            "disconnect_source": .string("responseWriteFailure"),
+                            "error": .string("\(error)"),
+                        ]
+                    )
+                }
+                writeFuture.whenComplete { _ in
+                    self.finishActivePostRequest(requestID: requestLog.id)
                 }
             }
         }
+    }
+
+    /// The protocol version a successful `initialize` reply negotiated, or `nil` for a failed one.
+    private static func negotiatedProtocolVersion(in reply: ProxyRuntimeReply) -> String?? {
+        guard case .response(let data) = reply, let object = try? JSONRPC.Wire.object(fromData: data),
+              let result = object["result"] as? [String: Any] else { return nil }
+        return .some(result["protocolVersion"] as? String)
     }
 
     private func finishActivePostRequest(requestID: String) {
@@ -554,7 +545,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             state.activePostRequests.removeValue(forKey: requestID)?.sessionID
         }
         if let sessionID {
-            controlService.clientRequestFinished(sessionID)
+            controlService.sessions.release(sessionID)
         }
     }
 
@@ -583,8 +574,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return nil
         }
         let sessionIDValue = ProxySessionID(rawValue: sessionID)
-        let sessionState = controlService.sessionState(sessionIDValue)
-        guard sessionState != .missing else {
+        guard let phase = controlService.sessions.phase(of: sessionIDValue) else {
             _ = sendPlain(
                 on: channel,
                 status: .notFound,
@@ -595,11 +585,10 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             )
             return nil
         }
-        if case .allowUninitializedDelete = initialization,
-            sessionState == .uninitialized {
+        if case .allowUninitializedDelete = initialization, phase == .initializing {
             return sessionID
         }
-        guard case .initialized(let negotiatedVersion) = sessionState else {
+        guard case .initialized(let negotiatedVersion) = phase else {
             _ = sendPlain(
                 on: channel,
                 status: .badRequest,

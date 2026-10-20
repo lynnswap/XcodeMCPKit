@@ -174,15 +174,17 @@ struct NativeHostBrokerTests {
         let request = try ProxyRuntimeRequest(json: .object([
             "jsonrpc": .string("2.0"), "id": .number(.int(41)), "method": .string("tools/call"),
             "params": .object(["name": .string("XcodeListTemplates"), "arguments": .object([:])]),
-        ]), headerSessionExists: true)
-        let operation = try #require(fixture.broker.beginRequest(request, in: session) as? NativeHostBrokerOperation)
-        defer { fixture.broker.clientRequestFinished(session) }
+        ]))
+        let runtimeSession = try fixture.runtimeSession(session)
+        let calling = Task { await runtimeSession.handle(request) }
         try await fixture.factory.created.wait(description: "host started")
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
         try await transport.initializationStarted.wait(description: "host initialization held")
-        operation.cancel(reason: .clientNotification)
+        calling.cancel()
+        #expect(await calling.value.jsonRPCError?.code == -32800)
         try transport.releaseInitialization()
-        await operation.waitForWorkCompletion()
+        // Shutdown waits for the cancelled request's work to finish.
+        await fixture.broker.shutdown()
         #expect(transport.calls.withLockedValue { !$0.contains { $0.name == "XcodeListTemplates" } })
     }
 
@@ -200,18 +202,16 @@ struct NativeHostBrokerTests {
         return count()
     }
 
-    @Test(arguments: [false, true])
-    func theLastSessionToEndClosesASharedModel(expires: Bool) async throws {
+    @Test func theLastSessionToEndClosesASharedModel() async throws {
         let fixture = try BrokerFixture()
         let a = try await fixture.initialize("ending-a")
         let b = try await fixture.initialize("ending-b")
         _ = try await fixture.open(a)
         let right = try await fixture.open(b)
-        fixture.broker.removeSession(a)
+        fixture.close(a)
         #expect(!NativeHostBroker.isToolError(try await fixture.toolResult(b, name: "GetBuildLog",
             arguments: ["workspaceIdentifier": right])))
-        if expires { fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1)) }
-        else { fixture.broker.removeSession(b) }
+        fixture.close(b)
         #expect(try await nativeCloses(after: fixture) == 1)
     }
 
@@ -224,7 +224,7 @@ struct NativeHostBrokerTests {
         let released = try await fixture.call(a, name: NativeHostBroker.closeWorkspaceTool,
                                               arguments: ["workspaceIdentifier": left])
         #expect(released["released"] == .bool(true))
-        fixture.broker.removeSession(b)
+        fixture.close(b)
         #expect(try await nativeCloses(after: fixture) == 1)
     }
 
@@ -275,7 +275,7 @@ struct NativeHostBrokerTests {
         let released = try await fixture.call(b, name: NativeHostBroker.closeWorkspaceTool,
                                               arguments: ["workspaceIdentifier": workspace])
         #expect(released["released"] == .bool(true))
-        fixture.broker.removeSession(a)
+        fixture.close(a)
         let closes: @Sendable () -> Int = {
             native.calls.withLockedValue { $0.filter { $0.name == NativeHostBroker.closeWorkspaceTool }.count }
         }
@@ -309,7 +309,7 @@ struct NativeHostBrokerTests {
         _ = try await fixture.open(session)
         let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
         _ = native.heldTools.withLockedValue { $0.insert(NativeHostBroker.closeWorkspaceTool) }
-        fixture.broker.removeSession(session)
+        fixture.close(session)
         try await native.waiting.wait(description: "cleanup close sent")
         try await waitWithTimeout("shutdown finished", timeout: .seconds(5)) { await fixture.broker.shutdown() }
     }
@@ -324,7 +324,7 @@ struct NativeHostBrokerTests {
         _ = try await fixture.open(first)
         let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
         _ = native.heldTools.withLockedValue { $0.insert(NativeHostBroker.closeWorkspaceTool) }
-        fixture.broker.removeSession(first)
+        fixture.close(first)
         try await native.waiting.wait(description: "cleanup close sent")
         try await waitForSuspendedSleepers(on: clocks.timeoutClock)
         clocks.uptimeClock.advance(by: bound)
@@ -712,14 +712,12 @@ struct NativeHostBrokerTests {
         }
     }
 
-    @Test(arguments: [false, true])
-    func guiBridgeStopsAfterItsSessionClosesOrExpires(expires: Bool) async throws {
+    @Test func guiBridgeStopsAfterItsSessionCloses() async throws {
         let fixture = try BrokerFixture.singleGUIWindow()
         let session = try await fixture.initialize("expiry")
         _ = try await fixture.openGUI(session)
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        if expires { fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1)) }
-        else { fixture.broker.removeSession(session) }
+        fixture.close(session)
         try await transport.stopped.wait(description: "session released the GUI bridge")
     }
 
@@ -895,22 +893,19 @@ struct NativeHostBrokerTests {
         let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
         let building = Task { try await fixture.toolResult(session, name: "BuildProject", arguments: ["workspaceIdentifier": workspace]) }
         try await native.waiting.wait(description: "build sent")
-        // Admitted now, the read waits behind the build for the session's turn on the model.
-        let read = try ProxyRuntimeRequest(json: .object([
-            "jsonrpc": .string("2.0"), "id": .number(.int(77)), "method": .string("tools/call"),
-            "params": .object(["name": .string("GetBuildLog"), "arguments": .object(["workspaceIdentifier": workspace])]),
-        ]), headerSessionExists: true)
-        let reading = try #require(fixture.broker.beginRequest(read, in: session))
+        let reading = Task { try await fixture.toolResult(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": workspace]) }
+        // Admitted, the read waits behind the build for the session's turn on the model.
+        let host = try #require(fixture.broker.host(withIdentifier: NativeHostBroker.defaultHostIdentifier))
+        try await waitWithTimeout("read waiting for its turn", timeout: .seconds(5)) {
+            while host.waitingRequests.reservedBytes == 0 { await Task.yield() }
+        }
         let released = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
                                               arguments: ["workspaceIdentifier": workspace])
         #expect(released["released"] == .bool(true))
 
         await native.releaseWait()
         _ = try await building.value
-        _ = try await withCheckedThrowingContinuation { continuation in
-            reading.whenComplete { continuation.resume(with: $0) }
-        }
-        fixture.broker.clientRequestFinished(session)
+        _ = try await reading.value
         let sent = try #require(native.calls.withLockedValue { $0.first { $0.name == "GetBuildLog" } })
         #expect(sent.metadata[NativeHostBroker.selectionKey] == .object(["scheme": .string("App")]))
     }
@@ -928,17 +923,6 @@ struct NativeHostBrokerTests {
         #expect(call.metadata[NativeHostBroker.conversationKey] != nil)
     }
 
-    @Test func eventStreamsKeepIdleSessionsAliveUntilTheyClose() async throws {
-        let fixture = try BrokerFixture()
-        let session = try await fixture.initialize("events")
-        #expect(fixture.broker.clientEventStreamOpened(session))
-        fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1))
-        #expect(fixture.broker.sessionState(session) == .initialized(protocolVersion: MCPProtocolVersion.current))
-        fixture.broker.clientEventStreamClosed(session)
-        fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1))
-        #expect(fixture.broker.sessionState(session) == .missing)
-    }
-
     @Test func resetWaitsForTheGUIBridgeToStop() async throws {
         let fixture = try BrokerFixture.singleGUIWindow()
         let session = try await fixture.initialize("reset")
@@ -952,7 +936,8 @@ struct NativeHostBrokerTests {
         #expect(!completed.isSignaled())
         transport.releaseStop.signal()
         await resetting.value
-        #expect(fixture.broker.sessionState(session) == .missing)
+        // Reset closed the session, so its requests are cancelled.
+        #expect(try await fixture.reply(session, method: "ping").jsonRPCError?.code == -32800)
         let next = try await fixture.initialize("after-reset")
         _ = try await fixture.open(next)
     }
@@ -1300,7 +1285,9 @@ private final class BrokerHostProcesses: UpstreamSessionFactory, Sendable {
 private final class BrokerFixture: Sendable {
     let broker: NativeHostBroker
     let factory = BrokerRuntimeFactory()
-    let events = NIOLockedValueBox<[ProxyRuntimeEvent]>([])
+    let sessions = NIOLockedValueBox<[ProxySessionID: any ProxyRuntimeSession]>([:])
+    /// Host notifications that reached each session.
+    let notifications = NIOLockedValueBox<[(session: ProxySessionID, data: Data)]>([])
     let guiProcesses = NIOLockedValueBox<[XcodeGUIProcess]>([])
     let defaultInstallation = XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Default.app"))
 
@@ -1308,7 +1295,6 @@ private final class BrokerFixture: Sendable {
          guiProcesses: [XcodeGUIProcess] = []) throws {
         let factory = factory
         factory.holdsInitialization.withLockedValue { $0 = holdsInitialization }
-        let events = events
         let defaultInstallation = defaultInstallation
         let processes = self.guiProcesses
         processes.withLockedValue { $0 = guiProcesses }
@@ -1319,14 +1305,8 @@ private final class BrokerFixture: Sendable {
         }
         broker = try NativeHostBroker(configuration: makeConfig(requestTimeout: requestTimeout),
                                       inventory: inventory, clock: clock, sessionFactory: factory.make)
-        let cancel = broker.subscribeToEvents { event in
-            events.withLockedValue { $0.append(event) }
-        }
         let broker = broker
-        #expect(registerAsyncTestCleanup(description: "broker shutdown") {
-            await broker.shutdown()
-            cancel()
-        })
+        #expect(registerAsyncTestCleanup(description: "broker shutdown") { await broker.shutdown() })
     }
 
     /// A running GUI Xcode whose two windows have distinct paths.
@@ -1373,6 +1353,9 @@ private final class BrokerFixture: Sendable {
 
     func initialize(_ name: String) async throws -> ProxySessionID {
         let id = ProxySessionID(rawValue: name)
+        let notifications = notifications
+        let session = try broker.openSession(id) { data in notifications.withLockedValue { $0.append((id, data)) } }
+        sessions.withLockedValue { $0[id] = session }
         _ = try await request(id, method: "initialize", parameters: .object([
             "protocolVersion": .string(MCPProtocolVersion.current),
             "capabilities": .object([:]),
@@ -1386,15 +1369,20 @@ private final class BrokerFixture: Sendable {
         var json: [String: JSONValue] = ["jsonrpc": .string("2.0"), "method": .string(method)]
         if let id { json["id"] = .number(.int(id)) }
         if let parameters { json["params"] = parameters }
-        let request = try ProxyRuntimeRequest(json: .object(json),
-            headerSessionExists: method != "initialize")
-        let operation = try #require(broker.beginRequest(request, in: session))
-        defer { broker.clientRequestFinished(session) }
+        let request = try ProxyRuntimeRequest(json: .object(json))
+        let runtimeSession = try runtimeSession(session)
         return try await waitWithTimeout("broker request", timeout: .seconds(10)) {
-            try await withCheckedThrowingContinuation { continuation in
-                operation.whenComplete { continuation.resume(with: $0) }
-            }
+            await runtimeSession.handle(request)
         }
+    }
+
+    func runtimeSession(_ id: ProxySessionID) throws -> any ProxyRuntimeSession {
+        try #require(sessions.withLockedValue { $0[id] })
+    }
+
+    /// Ends a session, as the gateway does when it is deleted or expires.
+    func close(_ id: ProxySessionID) {
+        sessions.withLockedValue { $0[id] }?.close()
     }
 
     func request(_ session: ProxySessionID, method: String, parameters: JSONValue? = nil,

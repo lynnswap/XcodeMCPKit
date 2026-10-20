@@ -122,7 +122,7 @@ let package = Package(
         ),
         .target(
             name: "XcodeMCPProxyRuntimeContract",
-            dependencies: ["XcodeMCPCore", .product(name: "NIOCore", package: "swift-nio")],
+            dependencies: ["XcodeMCPCore"],
             swiftSettings: strictSwiftSettings
         ),
         .target(

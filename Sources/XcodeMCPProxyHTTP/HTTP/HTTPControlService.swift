@@ -60,20 +60,23 @@ final class HTTPEventDeliveryStore: Sendable {
         self.overflowWarningSink = overflowWarningSink
     }
 
-    func receive(_ event: ProxyRuntimeEvent) {
-        switch event {
-        case .sessionOpened(let sessionID):
-            sessions.withLockedValue { sessions in
-                if sessions[sessionID] == nil {
-                    sessions[sessionID] = SessionDelivery()
-                }
+    /// Starts buffering notifications for a session until a client stream opens.
+    func register(_ sessionID: ProxySessionID) {
+        sessions.withLockedValue { sessions in
+            if sessions[sessionID] == nil {
+                sessions[sessionID] = SessionDelivery()
             }
-        case .notification(let sessionID, let data):
-            receiveNotification(data, sessionID: sessionID)
-        case .sessionClosed(let sessionID):
-            let delivery = sessions.withLockedValue { $0.removeValue(forKey: sessionID) }
-            delivery?.hub.closeAll()
         }
+    }
+
+    func deliver(_ data: Data, to sessionID: ProxySessionID) {
+        receiveNotification(data, sessionID: sessionID)
+    }
+
+    /// Drops a session's buffered notifications and closes its streams.
+    func remove(_ sessionID: ProxySessionID) {
+        let delivery = sessions.withLockedValue { $0.removeValue(forKey: sessionID) }
+        delivery?.hub.closeAll()
     }
 
     @discardableResult
@@ -352,9 +355,8 @@ final class HTTPControlService: Sendable {
     static let defaultSessionExpirySweepInterval: TimeAmount = .seconds(60)
 
     private let runtime: any ProxyRuntimeServing
-    private let deliveryStore: HTTPEventDeliveryStore
+    let sessions: HTTPSessionStore
     private let sessionExpirySweep: HTTPSessionExpirySweep
-    private let cancelEventSubscription: @Sendable () -> Void
 
     init(
         runtime: any ProxyRuntimeServing,
@@ -365,16 +367,12 @@ final class HTTPControlService: Sendable {
     ) {
         precondition(sessionInactivityGrace.nanoseconds > 0)
         self.runtime = runtime
-        self.deliveryStore = deliveryStore
+        let sessions = HTTPSessionStore(runtime: runtime, delivery: deliveryStore)
+        self.sessions = sessions
         self.sessionExpirySweep = HTTPSessionExpirySweep(
             interval: sessionExpirySweepInterval,
-            expire: { [runtime] in
-                runtime.expireInactiveSessions(inactiveFor: sessionInactivityGrace)
-            }
+            expire: { sessions.expire(inactiveFor: sessionInactivityGrace) }
         )
-        self.cancelEventSubscription = runtime.subscribeToEvents { [deliveryStore] event in
-            deliveryStore.receive(event)
-        }
     }
 
     deinit {
@@ -383,23 +381,11 @@ final class HTTPControlService: Sendable {
 
     func cancel() {
         sessionExpirySweep.cancel()
-        cancelEventSubscription()
-        deliveryStore.closeAll()
+        sessions.closeAll()
     }
 
     func shutdown() async {
         cancel()
-    }
-
-    func beginRequest(
-        _ request: ProxyRuntimeRequest,
-        sessionID: ProxySessionID?
-    ) -> (any ProxyRuntimeRequestOperating)? {
-        runtime.beginRequest(request, in: sessionID)
-    }
-
-    func clientRequestFinished(_ sessionID: ProxySessionID) {
-        runtime.clientRequestFinished(sessionID)
     }
 
     func startSessionExpirySweep(on eventLoop: EventLoop) {
@@ -412,34 +398,13 @@ final class HTTPControlService: Sendable {
         )
     }
 
-    @discardableResult
-    func openSSE(sessionID: ProxySessionID, channel: Channel) -> Bool {
-        guard runtime.clientEventStreamOpened(sessionID) else { return false }
-        guard deliveryStore.open(sessionID: sessionID, channel: channel) else {
-            runtime.clientEventStreamClosed(sessionID)
-            return false
-        }
-        return true
-    }
-
-    func closeSSE(sessionID: ProxySessionID, channel: Channel) {
-        deliveryStore.close(sessionID: sessionID, channel: channel)
-        runtime.clientEventStreamClosed(sessionID)
-    }
-
     func waitForSSEClient(sessionID: ProxySessionID) async throws {
-        try await deliveryStore.waitForClient(sessionID: sessionID)
-    }
-
-    func deleteSession(_ sessionID: ProxySessionID) {
-        runtime.removeSession(sessionID)
-    }
-
-    func sessionState(_ sessionID: ProxySessionID) -> ProxyRuntimeSessionState {
-        runtime.sessionState(sessionID)
+        try await sessions.delivery.waitForClient(sessionID: sessionID)
     }
 
     func debugReset(on eventLoop: EventLoop) -> EventLoopFuture<Void> {
+        // Sessions end before the runtime resets, so no request runs on a session it closes.
+        sessions.closeAll()
         let promise = eventLoop.makePromise(of: Void.self)
         promise.completeWithTask { [runtime] in
             await runtime.reset()

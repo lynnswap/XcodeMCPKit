@@ -284,7 +284,7 @@ struct HTTPHandlerTests {
         #expect(responseCompletions.withLockedValue { $0.count } == 1)
 
         // Expiry closes only sessions without active requests; the unwritten response keeps it.
-        runtime.broker.expireInactiveSessions(inactiveFor: .nanoseconds(0))
+        runtime.controlService.sessions.expire(inactiveFor: .nanoseconds(0))
 
         let completions = responseCompletions.withLockedValue { completions in
             let pending = completions
@@ -302,11 +302,12 @@ struct HTTPHandlerTests {
         let sessionID = try #require(response.head.headers.first(name: "Mcp-Session-Id"))
         #expect(runtime.hasSession(sessionID))
 
-        runtime.broker.expireInactiveSessions(inactiveFor: .nanoseconds(0))
+        runtime.controlService.sessions.expire(inactiveFor: .nanoseconds(0))
         #expect(runtime.hasSession(sessionID) == false)
     }
 
-    @Test func httpPostReturnsNotFoundWhenTheRuntimeRefusesAdmission() async throws {
+    /// A 404 asks a client to initialize again, which cannot help while the runtime stops.
+    @Test func httpInitializeIsRefusedWhileTheRuntimeIsUnavailable() async throws {
         let config = makeHTTPConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -317,8 +318,8 @@ struct HTTPHandlerTests {
         try writeInitializePost(to: channel)
 
         let response = try await collectResponse(from: channel)
-        #expect(response.head.status == .notFound)
-        #expect(response.body == "session not found")
+        #expect(response.head.status == .serviceUnavailable)
+        #expect(response.body == "server unavailable")
         #expect(runtime.startedHostCount == 0)
     }
 
@@ -452,6 +453,70 @@ struct HTTPHandlerTests {
         let afterDeleteResponse = try await collectResponse(from: channel)
         #expect(afterDeleteResponse.head.status == .notFound)
         #expect(afterDeleteResponse.body == "session not found")
+    }
+
+    /// A client that disconnects gives up its request: the host learns of it, and the session can expire.
+    @Test func aClientDisconnectCancelsItsRequestAndReleasesTheSession() async throws {
+        let config = makeHTTPConfig(requestTimeout: 60)
+        let channel = EmbeddedChannel()
+        let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
+        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        let sessionID = try await initializeHTTPChannel(channel)
+        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                     sessionID: sessionID, to: channel)
+        let held = try await runtime.waitForHostMessages("tools/call")
+        let hostRequestID = try #require(held.first?["id"])
+        runtime.controlService.sessions.expire(inactiveFor: .nanoseconds(0))
+        #expect(runtime.hasSession(sessionID))
+
+        _ = try? channel.finish()
+        let cancellations = try await runtime.waitForHostMessages("notifications/cancelled")
+        guard case .object(let params)? = cancellations.first?["params"] else {
+            Issue.record("the host cancellation has no parameters")
+            return
+        }
+        #expect(params["requestId"] == hostRequestID)
+        runtime.controlService.sessions.expire(inactiveFor: .nanoseconds(0))
+        #expect(!runtime.hasSession(sessionID))
+    }
+
+    /// A request that started is answered when its session is deleted; only later requests get a 404.
+    @Test func deletingASessionAnswersItsRunningRequestAndRefusesLaterOnes() async throws {
+        let config = makeHTTPConfig(requestTimeout: 60)
+        let requestChannel = EmbeddedChannel()
+        let deleteChannel = EmbeddedChannel()
+        defer {
+            _ = try? requestChannel.finish()
+            _ = try? deleteChannel.finish()
+        }
+        let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
+        try addHTTPHandler(to: requestChannel, config: config, runtime: runtime)
+        try addHTTPHandler(to: deleteChannel, config: config, runtime: runtime)
+        let sessionID = try await initializeHTTPChannel(requestChannel)
+        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                     sessionID: sessionID, to: requestChannel)
+        try await runtime.waitForToolCalls(1)
+
+        var deleteHead = HTTPRequestHead(version: .http1_1, method: .DELETE, uri: "/mcp")
+        deleteHead.headers.add(name: "MCP-Session-Id", value: sessionID)
+        deleteHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
+        try deleteChannel.writeInbound(HTTPServerRequestPart.head(deleteHead))
+        try deleteChannel.writeInbound(HTTPServerRequestPart.end(nil))
+        #expect(try await collectResponse(from: deleteChannel).head.status == .ok)
+
+        let running = try await collectResponse(from: requestChannel)
+        #expect(running.head.status == .ok)
+        let body = try #require(
+            JSONSerialization.jsonObject(with: Data(running.body.utf8)) as? [String: Any])
+        let error = try #require(body["error"] as? [String: Any])
+        #expect((error["code"] as? NSNumber)?.intValue == -32800)
+
+        try postJSON(toolsCallPayload(id: 3, name: "DocumentationSearch", arguments: ["query": "late"]),
+                     sessionID: sessionID, to: requestChannel)
+        let late = try await collectResponse(from: requestChannel)
+        #expect(late.head.status == .notFound)
+        #expect(late.body == "session not found")
+        #expect(runtime.toolCalls().count == 1)
     }
 
     @Test func httpAppliesOriginPolicyBeforeEveryRoute() async throws {
@@ -916,7 +981,7 @@ struct HTTPHandlerTests {
         let result = responseObject?["result"] as? [String: Any]
         #expect(result?["protocolVersion"] as? String == MCP.ProtocolVersion.current)
         #expect(
-            runtime.broker.sessionState(ProxySessionID(rawValue: sessionID))
+            runtime.controlService.sessions.phase(of: ProxySessionID(rawValue: sessionID))
                 == .initialized(protocolVersion: MCP.ProtocolVersion.current)
         )
         // The broker answers initialize itself; no host process starts for it.
@@ -955,7 +1020,7 @@ struct HTTPHandlerTests {
         #expect((error["code"] as? NSNumber)?.intValue == -32001)
         #expect(error["message"] as? String == "upstream unavailable")
         #expect(
-            runtime.broker.sessionState(ProxySessionID(rawValue: sessionID))
+            runtime.controlService.sessions.phase(of: ProxySessionID(rawValue: sessionID))
                 == .initialized(protocolVersion: MCP.ProtocolVersion.current)
         )
 
