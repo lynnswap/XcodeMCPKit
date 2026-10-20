@@ -38,6 +38,9 @@ final class NativeBrokerSession: Sendable {
         var launchSessions: [String: NativeBrokerLaunchSession] = [:]
         /// Models used by this session's running requests, counted per request.
         var admittedWorkspaces: [NativeBrokerWorkspace.Scope: Int] = [:]
+        /// The scheme, run destination, and test plan this session uses in each headless model,
+        /// as the host last reported them.
+        var selections: [NativeBrokerWorkspace.Scope: JSONValue] = [:]
 
         func retainsHost(_ identifier: String) -> Bool {
             workspaces.values.contains { $0.hostIdentifier == identifier }
@@ -50,6 +53,8 @@ final class NativeBrokerSession: Sendable {
         }
     }
     let identifier: ProxySessionID
+    /// Identifies this session to headless hosts, which keep Xcode's per-conversation state.
+    let conversationID = UUID().uuidString
     let state: NIOLockedValueBox<State>
 
     init(identifier: ProxySessionID) {

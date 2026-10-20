@@ -381,8 +381,16 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     /// Sends a request to the host process with `generation` and returns its JSON-RPC response.
+    /// Sends a session's request. A headless host learns which session calls a tool, and with
+    /// `selection`, the scheme, run destination, and test plan to use in the request's workspace.
     private func send(_ request: JSONValue, to host: NativeBrokerHost, session: NativeBrokerSession,
-                      generation: UInt64, eventStream: Bool) async throws -> ProxyRuntimeReply {
+                      generation: UInt64, eventStream: Bool, selection: JSONValue? = nil) async throws -> ProxyRuntimeReply {
+        var request = request
+        if host.guiProcess == nil, case .object(let object) = request, object["method"] == .string("tools/call") {
+            var metadata: [String: JSONValue] = [Self.conversationKey: .string(session.conversationID)]
+            if let selection { metadata[Self.selectionKey] = selection }
+            request = Self.addingMetadata(metadata, to: request)
+        }
         let data = try await communicate(with: host) {
             try await host.connection.send(request, owner: session.identifier, generation: generation)
         }
@@ -761,6 +769,7 @@ private extension NativeHostBroker {
                     "message": .string("Released the workspace reference. The Xcode window remains open."),
                 ]))
             } else if !electNativeClose(of: workspace, in: session) {
+                session.forgetSelectionIfUnreferenced(workspace)
                 result = try Self.toolResult(.object([
                     "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
                     "message": .string("Released this session's reference. Another session still uses the workspace, so it remains open."),
@@ -781,6 +790,7 @@ private extension NativeHostBroker {
                     throw error
                 }
                 finishNativeClose(of: workspace, in: session, host: host, closed: closed)
+                session.forgetSelectionIfUnreferenced(workspace)
                 return try Self.rewriteReply(reply, workspace: workspace, deviceSession: nil)
             }
         default:
@@ -961,8 +971,9 @@ private extension NativeHostBroker {
             }
             let native = try Self.toolRequest(request, name: Self.openWorkspaceTool,
                                              arguments: ["path": .string(path)])
-            let value = try Self.result(in: await send(native, to: host, session: session, generation: generation,
-                                                       eventStream: request.prefersEventStream))
+            let opened = try Self.takingSelection(from: await send(native, to: host, session: session,
+                generation: generation, eventStream: request.prefersEventStream))
+            let value = try Self.result(in: opened.reply)
             if Self.isToolError(value) { return (value, nil) }
             let payload = try Self.toolPayload(value)
             guard let identifier = Self.string(payload["workspaceIdentifier"]) else {
@@ -971,6 +982,9 @@ private extension NativeHostBroker {
             let workspace = try bindWorkspace(in: session, host: host, generation: generation, nativeIdentifier: identifier,
                 path: Self.string(payload["workspacePath"]) ?? path, name: Self.string(payload["name"]),
                 retainsForRequest: retainsForRequest)
+            if let selection = opened.selection {
+                session.recordSelection(selection, for: workspace, replacing: false)
+            }
             return (try Self.toolResult(Self.rewritePayload(.object(payload), workspace: workspace, deviceSession: nil)),
                     workspace)
         }
@@ -1062,8 +1076,13 @@ private extension NativeHostBroker {
         let native = try XcodeToolCatalog.nativeCall(name: name, arguments: nativeArguments,
             nativeCatalog: catalog.result)
         let forwarded = try Self.toolRequest(request, name: native.name, arguments: native.arguments)
-        var reply = try await send(forwarded, to: host, session: session, generation: generation,
-                                   eventStream: request.prefersEventStream)
+        let selection = workspace.flatMap { $0.gui ? nil : session.selection(for: $0) }
+        let sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session,
+            generation: generation, eventStream: request.prefersEventStream, selection: selection))
+        var reply = sent.reply
+        if let workspace, !workspace.gui, let reported = sent.selection {
+            session.recordSelection(reported, for: workspace, replacing: true)
+        }
         if case .response(let data, let replySession, let stream) = reply {
             reply = .response(data: ToolCallNormalizer().normalizeResponseDataIfNeeded(
                 method: "tools/call", toolName: native.name, toolsCatalogOverride: catalog.result, upstreamData: data),
@@ -1092,6 +1111,7 @@ private extension NativeHostBroker {
         }
         if name == "DeviceInteractionEndSession", let device {
             _ = session.state.withLockedValue { $0.deviceSessions.removeValue(forKey: device.identifier) }
+            if let parent = device.workspace { session.forgetSelectionIfUnreferenced(parent) }
             scheduleUnreferencedClose(device.workspace.map { [$0] } ?? [])
         }
         if workspace == nil, name == "XcodeNewProject" {
