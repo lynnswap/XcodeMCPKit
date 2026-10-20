@@ -284,27 +284,40 @@ public final class XcodeMCPProxyServer: Sendable {
             case stopped
         }
 
-        /// Sanitized upstream health.
-        public struct Upstream: Equatable, Sendable {
-            /// Stable upstream slot identifier.
-            public let id: Int
-
-            /// Upstream process health.
-            public enum Health: Equatable, Sendable {
-                case starting
-                case healthy
-                case degraded
-                case quarantined
-                case stopped
+        /// An Xcode host the server uses: one headless host per Xcode installation, or a bridge
+        /// to a running Xcode app.
+        public struct Host: Equatable, Sendable {
+            /// What the host connects to.
+            public enum Kind: Equatable, Sendable {
+                /// A headless native host the server starts for an Xcode installation.
+                case headless
+                /// A bridge to the running Xcode app with this process identifier.
+                case gui(processIdentifier: Int32)
             }
 
-            /// Current upstream health.
-            public let health: Health
+            /// Whether the host's process is running.
+            public enum State: Equatable, Sendable {
+                /// No process is running. The next request for this host starts one.
+                case stopped
+                /// The process is starting and does not serve requests yet.
+                case starting
+                /// The process serves requests.
+                case running
+            }
 
-            /// Whether the MCP initialize handshake completed.
-            public let isInitialized: Bool
+            /// The `hostIdentifier` that `XcodeMCPKitListHosts` returns for this host.
+            public let identifier: String
 
-            /// Number of active requests assigned to this upstream.
+            /// Developer directory of the host's Xcode installation.
+            public let developerDirectory: URL
+
+            /// What the host connects to.
+            public let kind: Kind
+
+            /// Whether the host's process is running.
+            public let state: State
+
+            /// Number of requests the host is processing.
             public let activeRequestCount: Int
         }
 
@@ -317,34 +330,14 @@ public final class XcodeMCPProxyServer: Sendable {
         /// Bound endpoint when the server is running or stopping.
         public let endpoint: Endpoint?
 
-        /// Whether the proxy-level initialize handshake completed.
-        public let proxyInitialized: Bool
+        /// Hosts the server has registered, ordered by registration.
+        public let hosts: [Host]
 
-        /// Whether a tool catalog is available.
-        public let catalogAvailable: Bool
-
-        /// Number of requests waiting for an upstream slot.
-        public let queuedRequestCount: Int
-
-        /// Sanitized upstream summaries.
-        public let upstreams: [Upstream]
-
-        init(
-            generatedAt: Date,
-            phase: Phase,
-            endpoint: Endpoint?,
-            proxyInitialized: Bool,
-            catalogAvailable: Bool,
-            queuedRequestCount: Int,
-            upstreams: [Upstream]
-        ) {
+        init(generatedAt: Date, phase: Phase, endpoint: Endpoint?, hosts: [Host]) {
             self.generatedAt = generatedAt
             self.phase = phase
             self.endpoint = endpoint
-            self.proxyInitialized = proxyInitialized
-            self.catalogAvailable = catalogAvailable
-            self.queuedRequestCount = queuedRequestCount
-            self.upstreams = upstreams
+            self.hosts = hosts
         }
     }
 

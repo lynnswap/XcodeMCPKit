@@ -689,14 +689,19 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         eventSource.finish()
     }
     package func snapshot() -> ProxyRuntimeSnapshot {
-        let upstreams = hosts().compactMap { host -> ProxyRuntimeSnapshot.Upstream? in
+        // A GUI host whose Xcode has exited cannot serve requests again.
+        let hosts = hosts().filter { $0.guiProcess.map(inventory.isGUIProcessRunning) ?? true }.map { host -> ProxyRuntimeSnapshot.Host in
             let status = host.status
-            guard status.phase != .idle else { return nil }
-            return .init(id: host.index, healthState: status.phase == .ready ? "healthy" : status.phase.rawValue,
-                         isInitialized: status.phase == .ready, activeRequestCount: status.inFlightRequests)
+            let state: ProxyRuntimeSnapshot.Host.State = switch status.phase {
+            case .idle, .stopped: .stopped
+            case .starting: .starting
+            case .ready: .running
+            }
+            return .init(identifier: host.identifier, developerDirectory: host.installation.developerDirectory,
+                         guiProcessIdentifier: host.guiProcess?.processID, state: state,
+                         activeRequestCount: status.inFlightRequests)
         }
-        return .init(generatedAt: Date(), proxyInitialized: true, catalogAvailable: true,
-                     queuedRequestCount: 0, upstreams: upstreams)
+        return .init(generatedAt: Date(), hosts: hosts)
     }
     package func debugSnapshotData(includeSensitivePayloads: Bool) -> Data? {
         let values = hosts().map { host -> [String: Any] in
