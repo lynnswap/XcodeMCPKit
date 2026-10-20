@@ -130,10 +130,12 @@ struct NativeWorkspaceSelectionsTests {
         #expect(try await selections.prepare(for: "XcodeSwitchScheme", requested: .unknown, in: "w1",
                                              run: workspace.run) == false)
 
-        // A failed or cancelled switch may have changed the selection, so it is read again next time.
+        // A failed switch leaves the session with the selection it started from, and because the
+        // switch may have changed the workspace anyway, the selection is read again next time.
+        let before = try await selections.selection(in: "w1", run: workspace.run)
         workspace.scheme = "Tool"
         #expect(await selections.finish("XcodeSwitchScheme", changesWorkspace: true, output: nil,
-                                        reportsSelection: true, in: "w1", run: workspace.run) == nil)
+                                        reportsSelection: true, in: "w1", run: workspace.run) == before)
         #expect(selections.cachedSelection(in: "w1") == nil)
         _ = try await selections.selection(in: "w1", run: workspace.run)
         selections.abandon("XcodeSwitchTestPlan", changesWorkspace: true, in: "w1")

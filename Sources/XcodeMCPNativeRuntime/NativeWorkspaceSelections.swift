@@ -120,7 +120,8 @@ final class NativeWorkspaceSelections {
             active[workspace] = nil
         }
         if Self.switchTools.contains(tool) {
-            guard output != nil else { return nil }
+            // A failed switch leaves the session with the selection it started from.
+            guard output != nil else { return applied }
             // A session whose switch cannot be confirmed must switch again, so that it neither
             // restores what it had before nor runs with another session's selection.
             return (try? await selection(in: workspace, run: run)) ?? .unknown
