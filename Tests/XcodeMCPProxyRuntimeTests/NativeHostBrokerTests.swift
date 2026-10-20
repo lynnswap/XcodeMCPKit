@@ -294,9 +294,12 @@ struct NativeHostBrokerTests {
         try await waitWithTimeout("shutdown finished", timeout: .seconds(5)) { await fixture.broker.shutdown() }
     }
 
-    @Test func anUnansweredCleanupCloseExpiresSoTheModelCanBeReopened() async throws {
+    /// A disabled request timeout (0) still bounds the cleanup close.
+    @Test(arguments: [5, 0] as [TimeInterval])
+    func anUnansweredCleanupCloseExpiresSoTheModelCanBeReopened(requestTimeout: TimeInterval) async throws {
         let clocks = makeDeterministicClocks()
-        let fixture = try BrokerFixture(clock: clocks.clock)
+        let fixture = try BrokerFixture(clock: clocks.clock, requestTimeout: requestTimeout)
+        let bound = Duration.seconds(requestTimeout > 0 ? requestTimeout : NativeHostBroker.cleanupFallbackTimeout)
         let first = try await fixture.initialize("expiring-cleanup")
         _ = try await fixture.open(first)
         let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
@@ -304,8 +307,8 @@ struct NativeHostBrokerTests {
         fixture.broker.removeSession(first)
         try await native.waiting.wait(description: "cleanup close sent")
         try await waitForSuspendedSleepers(on: clocks.timeoutClock)
-        clocks.uptimeClock.advance(by: .seconds(5))
-        clocks.timeoutClock.advance(by: .seconds(5))
+        clocks.uptimeClock.advance(by: bound)
+        clocks.timeoutClock.advance(by: bound)
         let second = try await fixture.initialize("after-expired-cleanup")
         try await waitWithTimeout("the model can be bound again", timeout: .seconds(5)) {
             while true {
@@ -1046,7 +1049,7 @@ private final class BrokerFixture: Sendable {
     let guiProcesses = NIOLockedValueBox<[XcodeGUIProcess]>([])
     let defaultInstallation = XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Default.app"))
 
-    init(clock: ClockClient = .liveValue, holdsInitialization: Bool = false,
+    init(clock: ClockClient = .liveValue, requestTimeout: TimeInterval = 5, holdsInitialization: Bool = false,
          guiProcesses: [XcodeGUIProcess] = []) throws {
         let factory = factory
         factory.holdsInitialization.withLockedValue { $0 = holdsInitialization }
@@ -1059,7 +1062,7 @@ private final class BrokerFixture: Sendable {
             isGUIProcessRunning: { process in processes.withLockedValue { $0.contains(process) } }) {
             [defaultInstallation, XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Other.app"))]
         }
-        broker = try NativeHostBroker(configuration: makeConfig(requestTimeout: 5),
+        broker = try NativeHostBroker(configuration: makeConfig(requestTimeout: requestTimeout),
                                       inventory: inventory, clock: clock, sessionFactory: factory.make)
         let cancel = broker.subscribeToEvents { event in
             events.withLockedValue { $0.append(event) }

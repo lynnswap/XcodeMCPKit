@@ -32,6 +32,9 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     static let listWorkspacesTool = "XcodeListWorkspaces"
     static let openWorkspaceTool = "XcodeOpenWorkspace"
     static let closeWorkspaceTool = "XcodeCloseWorkspace"
+    /// Bounds a cleanup close while client requests have no timeout, so a host that never answers
+    /// does not keep the model from being bound again.
+    static let cleanupFallbackTimeout: TimeInterval = 60
 
     private struct Admission: Sendable {
         let hostIdentifier: String
@@ -536,7 +539,8 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                         "workspaceIdentifier": .string(workspace.nativeIdentifier),
                     ])]),
                 ])
-                let timeout = MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: configuration.requestTimeout)
+                let timeout = MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds:
+                    configuration.requestTimeout > 0 ? configuration.requestTimeout : Self.cleanupFallbackTimeout)
                 do {
                     let reply = try await withDeadline(timeout) {
                         try await host.connection.sendToRunningProcess(request, generation: workspace.generation)
