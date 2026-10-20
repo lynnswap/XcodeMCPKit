@@ -113,6 +113,14 @@ extension NativeBrokerSession {
         }
     }
 
+    /// Workspaces this session references through handles, device sessions, or launch sessions.
+    func referencedWorkspaces() -> [NativeBrokerWorkspace] {
+        state.withLockedValue { state in
+            Array(state.workspaces.values) + state.deviceSessions.values.compactMap(\.workspace)
+                + state.launchSessions.values.compactMap(\.workspace)
+        }
+    }
+
     func retainsNativeWorkspace(_ workspace: NativeBrokerWorkspace) -> Bool {
         state.withLockedValue { state in
             !state.closed && (state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }

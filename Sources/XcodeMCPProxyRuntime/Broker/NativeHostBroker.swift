@@ -26,6 +26,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private let inventory: XcodeHostInventory
     private let sessionFactory: SessionFactory
     private let clock: ClockClient
+    private let logger = ProxyLogging.make("broker")
     static let defaultHostIdentifier = "host-default"
     static let listTool = "XcodeMCPKitListHosts"
     static let listWorkspacesTool = "XcodeListWorkspaces"
@@ -484,6 +485,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     private func close(_ session: NativeBrokerSession, in storage: inout State) {
+        let released = session.referencedWorkspaces()
         let key = UUID()
         storage.closing[key] = Task { [self] in
             await session.close().value
@@ -491,8 +493,53 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 if storage.sessions[session.identifier] === session {
                     storage.sessions.removeValue(forKey: session.identifier)
                 }
+            }
+            await closeUnreferencedWorkspaces(released)
+            state.withLockedValue { storage in
                 reapUnusedHosts(in: &storage)
                 storage.closing.removeValue(forKey: key)
+            }
+        }
+    }
+
+    /// Closes the headless models among `workspaces` that no session references any longer.
+    private func closeUnreferencedWorkspaces(_ workspaces: [NativeBrokerWorkspace]) async {
+        // Shutdown and reset stop the hosts, which close their models anyway.
+        guard !state.withLockedValue({ $0.stopped || $0.resetsInProgress > 0 }) else { return }
+        var seen: Set<NativeBrokerWorkspace.Scope> = []
+        for workspace in workspaces where !workspace.gui && seen.insert(workspace.scope).inserted {
+            guard closingWorkspaces.withLockedValue({ markClosingIfUnreferenced(workspace, closing: &$0) }) else { continue }
+            if let host = state.withLockedValue({ $0.hosts[workspace.hostIdentifier] }) {
+                let request = JSONValue.object([
+                    "jsonrpc": .string("2.0"), "id": .string("broker-close-" + UUID().uuidString),
+                    "method": .string("tools/call"),
+                    "params": .object(["name": .string(Self.closeWorkspaceTool), "arguments": .object([
+                        "workspaceIdentifier": .string(workspace.nativeIdentifier),
+                    ])]),
+                ])
+                do {
+                    let reply = try await host.connection.send(request, owner: nil, generation: workspace.generation)
+                    if let value = try? JSONRPC.Wire.resultValue(fromResponseData: reply), Self.isToolError(value) {
+                        logger.notice("Could not close an unreferenced workspace", metadata: ["result": "\(value)"])
+                    }
+                } catch NativeHostConnectionError.expired {
+                    // The process that owned the model has ended, and the model with it.
+                } catch {
+                    logger.notice("Could not close an unreferenced workspace", metadata: ["error": "\(error)"])
+                }
+            }
+            _ = closingWorkspaces.withLockedValue { $0.remove(workspace.scope) }
+        }
+    }
+
+    /// Schedules `closeUnreferencedWorkspaces` as owned work that shutdown waits for.
+    private func scheduleUnreferencedClose(_ workspaces: [NativeBrokerWorkspace]) {
+        guard workspaces.contains(where: { !$0.gui }) else { return }
+        state.withLockedValue { storage in
+            let key = UUID()
+            storage.closing[key] = Task { [self] in
+                await closeUnreferencedWorkspaces(workspaces)
+                _ = state.withLockedValue { $0.closing.removeValue(forKey: key) }
             }
         }
     }
@@ -637,17 +684,23 @@ private extension NativeHostBroker {
     }
 
     /// Removes the session's handle and reports whether this call must close the native model:
-    /// the handle was still bound, no other session uses the model, and no close is in flight.
+    /// the handle was still bound, nothing else references the model, and no close is in flight.
     private func electNativeClose(of workspace: NativeBrokerWorkspace, in session: NativeBrokerSession) -> Bool {
         closingWorkspaces.withLockedValue { closing in
             let removed = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) } != nil
-            let sessions = state.withLockedValue { Array($0.sessions.values) }
-            guard removed, !closing.contains(workspace.scope),
-                  !sessions.contains(where: { $0 !== session && $0.retainsNativeWorkspace(workspace) })
-            else { return false }
-            closing.insert(workspace.scope)
-            return true
+            return removed && markClosingIfUnreferenced(workspace, closing: &closing)
         }
+    }
+
+    /// Marks the model as closing when no handle, device session, or launch session in any session
+    /// references it. Called under the `closingWorkspaces` lock, which binding also takes.
+    private func markClosingIfUnreferenced(_ workspace: NativeBrokerWorkspace,
+                                           closing: inout Set<NativeBrokerWorkspace.Scope>) -> Bool {
+        let sessions = state.withLockedValue { Array($0.sessions.values) }
+        guard !closing.contains(workspace.scope),
+              !sessions.contains(where: { $0.retainsNativeWorkspace(workspace) }) else { return false }
+        closing.insert(workspace.scope)
+        return true
     }
 
     private func finishNativeClose(of workspace: NativeBrokerWorkspace, in session: NativeBrokerSession,
@@ -920,6 +973,7 @@ private extension NativeHostBroker {
         }
         if name == "DeviceInteractionEndSession", let device {
             _ = session.state.withLockedValue { $0.deviceSessions.removeValue(forKey: device.identifier) }
+            scheduleUnreferencedClose(device.workspace.map { [$0] } ?? [])
         }
         if workspace == nil, name == "XcodeNewProject" {
             let payload = try Self.toolPayload(value)

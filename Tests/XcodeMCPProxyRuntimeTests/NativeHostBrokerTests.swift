@@ -186,6 +186,63 @@ struct NativeHostBrokerTests {
         #expect(transport.calls.withLockedValue { !$0.contains { $0.name == "XcodeListTemplates" } })
     }
 
+    /// Waits for the broker's first native close of `/Fixture/App.xcodeproj`, lets every pending close
+    /// finish by shutting the broker down, and returns how many closes the host received.
+    private func nativeCloses(after fixture: BrokerFixture) async throws -> Int {
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let count: @Sendable () -> Int = {
+            native.calls.withLockedValue { $0.filter { $0.name == NativeHostBroker.closeWorkspaceTool }.count }
+        }
+        try await waitWithTimeout("the model was closed", timeout: .seconds(5)) {
+            while count() == 0 { await Task.yield() }
+        }
+        await fixture.broker.shutdown()
+        return count()
+    }
+
+    @Test(arguments: [false, true])
+    func theLastSessionToEndClosesASharedModel(expires: Bool) async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("ending-a")
+        let b = try await fixture.initialize("ending-b")
+        _ = try await fixture.open(a)
+        let right = try await fixture.open(b)
+        fixture.broker.removeSession(a)
+        #expect(!NativeHostBroker.isToolError(try await fixture.toolResult(b, name: "GetBuildLog",
+            arguments: ["workspaceIdentifier": right])))
+        if expires { fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1)) }
+        else { fixture.broker.removeSession(b) }
+        #expect(try await nativeCloses(after: fixture) == 1)
+    }
+
+    @Test func aDeferredCloseCompletesWhenTheRemainingSessionEnds() async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("deferred-a")
+        let b = try await fixture.initialize("deferred-b")
+        let left = try await fixture.open(a)
+        _ = try await fixture.open(b)
+        let released = try await fixture.call(a, name: NativeHostBroker.closeWorkspaceTool,
+                                              arguments: ["workspaceIdentifier": left])
+        #expect(released["released"] == .bool(true))
+        fixture.broker.removeSession(b)
+        #expect(try await nativeCloses(after: fixture) == 1)
+    }
+
+    @Test func aDeviceSessionKeepsItsWorkspaceOpenUntilItEnds() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("device-retains")
+        let workspace = try await fixture.open(session)
+        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
+            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
+        ])
+        let key = try #require(started["interactionSessionKey"])
+        let released = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                               arguments: ["workspaceIdentifier": workspace])
+        #expect(released["released"] == .bool(true))
+        _ = try await fixture.call(session, name: "DeviceInteractionEndSession", arguments: ["interactionSessionKey": key])
+        #expect(try await nativeCloses(after: fixture) == 1)
+    }
+
     @Test func workspaceBeingClosedCannotBeBoundUntilTheCloseFinishes() async throws {
         let fixture = try BrokerFixture()
         let a = try await fixture.initialize("closing-a")
