@@ -99,9 +99,9 @@ final class NativeWorkspaceSelections {
         }
     }
 
-    /// Updates what is known after `tool`, which `changesWorkspace` unless it only reads, completes.
-    /// Returns the selection its result reports.
-    func finish(_ tool: String, changesWorkspace: Bool, completed: Bool, reportsSelection: Bool,
+    /// Updates what is known after `tool`, which `changesWorkspace` unless it only reads, completes
+    /// with `output`, or `nil` when it failed. Returns the selection its result reports.
+    func finish(_ tool: String, changesWorkspace: Bool, output: [String: JSONValue]?, reportsSelection: Bool,
                 in workspace: String, run: Run) async -> NativeWorkspaceSelection? {
         let applied = reportsSelection ? active[workspace] : nil
         // An action that changes the workspace can change the selection even when it fails.
@@ -109,10 +109,10 @@ final class NativeWorkspaceSelections {
             active[workspace] = nil
         }
         if Self.switchTools.contains(tool) {
-            guard completed else { return nil }
-            // When the switch cannot be read back, an empty selection keeps the session from
-            // restoring what it had before the switch; its next operation reports the active one.
-            return (try? await selection(in: workspace, run: run)) ?? NativeWorkspaceSelection()
+            guard let output else { return nil }
+            if let selection = try? await selection(in: workspace, run: run) { return selection }
+            // The switch's own output keeps the session from restoring what it had before the switch.
+            return Self.selection(after: tool, output: output, from: applied ?? NativeWorkspaceSelection())
         }
         return tool == "XcodeCloseWorkspace" ? nil : applied
     }
@@ -156,6 +156,24 @@ final class NativeWorkspaceSelections {
             active[workspace] = nil
             throw error
         }
+    }
+
+    /// The selection after a switch, from the switch's output and the selection it started from.
+    private static func selection(after tool: String, output: [String: JSONValue],
+                                  from base: NativeWorkspaceSelection) -> NativeWorkspaceSelection {
+        var selection = base
+        switch tool {
+        case "XcodeSwitchScheme":
+            selection.scheme = NativeWorkspaceSelection.string(output["activeSchemeName"])
+            selection.destination = NativeWorkspaceSelection.string(output["activeDestinationDisplayTitle"])
+            selection.testPlan = NativeWorkspaceSelection.string(output["activeTestPlanName"])
+        case "XcodeSwitchRunDestination":
+            selection.destination = NativeWorkspaceSelection.string(output["activeDestinationDisplayTitle"])
+        default:
+            selection.testPlan = NativeWorkspaceSelection.string(output["activeTestPlanPath"])
+                ?? NativeWorkspaceSelection.string(output["activeTestPlanName"])
+        }
+        return selection
     }
 
     /// The active entry of a list action's output, by the field that tells it apart from entries

@@ -227,8 +227,10 @@ package final class NativeXcodeBackend: NativeToolBackend {
             }
         } else if let request = requestWorkspaces[context.artifactsDirectory] {
             requestWorkspaces[context.artifactsDirectory]?.finished = true
+            var fields: [String: JSONValue]?
+            if case .object(let object)? = output { fields = object }
             selection = await selections.finish(
-                name, changesWorkspace: tools[name]?.requiresPreviewBuildInvalidation ?? true, completed: output != nil,
+                name, changesWorkspace: tools[name]?.requiresPreviewBuildInvalidation ?? true, output: fields,
                 reportsSelection: request.reportsSelection, in: request.identifier, run: run)
         } else {
             return [:]

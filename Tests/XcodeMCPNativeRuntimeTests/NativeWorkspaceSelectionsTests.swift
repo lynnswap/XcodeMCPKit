@@ -114,19 +114,24 @@ struct NativeWorkspaceSelectionsTests {
         _ = try await selections.selection(in: "w1", run: workspace.run)
 
         workspace.destination = "iPhone 17"
-        let reported = await selections.finish("XcodeSwitchRunDestination", changesWorkspace: true, completed: true,
+        let reported = await selections.finish("XcodeSwitchRunDestination", changesWorkspace: true, output: [:],
                                                reportsSelection: true, in: "w1", run: workspace.run)
         #expect(reported?.destination == "iPhone 17")
 
-        // A switch that cannot be read back reports no parts, so the session keeps the switch.
+        // A switch that cannot be read back reports what its output names, so the session keeps the switch.
+        _ = try await selections.prepare(for: "XcodeSwitchScheme", requested: NativeWorkspaceSelection(), in: "w1",
+                                         run: workspace.run)
         workspace.listsFail = true
-        #expect(await selections.finish("XcodeSwitchScheme", changesWorkspace: true, completed: true,
-                                        reportsSelection: true, in: "w1", run: workspace.run) == NativeWorkspaceSelection())
+        let output: [String: JSONValue] = ["activeSchemeName": .string("Tool"),
+                                           "activeDestinationDisplayTitle": .string("iPhone 17")]
+        #expect(await selections.finish("XcodeSwitchScheme", changesWorkspace: true, output: output,
+                                        reportsSelection: true, in: "w1", run: workspace.run)
+            == NativeWorkspaceSelection(scheme: "Tool", destination: "iPhone 17"))
         workspace.listsFail = false
 
         // A failed or cancelled switch may have changed the selection, so it is read again next time.
         workspace.scheme = "Tool"
-        #expect(await selections.finish("XcodeSwitchScheme", changesWorkspace: true, completed: false,
+        #expect(await selections.finish("XcodeSwitchScheme", changesWorkspace: true, output: nil,
                                         reportsSelection: true, in: "w1", run: workspace.run) == nil)
         #expect(selections.cachedSelection(in: "w1") == nil)
         _ = try await selections.selection(in: "w1", run: workspace.run)
@@ -141,7 +146,7 @@ struct NativeWorkspaceSelectionsTests {
         #expect(try await selections.prepare(for: "XcodeNewTarget", requested: session, in: "w1", run: workspace.run))
         // The new target's scheme becomes active, as with automatically created schemes.
         workspace.scheme = "Tool"
-        let reported = await selections.finish("XcodeNewTarget", changesWorkspace: true, completed: true,
+        let reported = await selections.finish("XcodeNewTarget", changesWorkspace: true, output: [:],
                                                reportsSelection: true, in: "w1", run: workspace.run)
         #expect(reported == session)
 
@@ -151,7 +156,7 @@ struct NativeWorkspaceSelectionsTests {
         #expect(workspace.scheme == "App")
 
         // A query keeps what is known.
-        _ = await selections.finish("XcodeRead", changesWorkspace: false, completed: true, reportsSelection: true,
+        _ = await selections.finish("XcodeRead", changesWorkspace: false, output: [:], reportsSelection: true,
                                     in: "w1", run: workspace.run)
         #expect(selections.cachedSelection(in: "w1") != nil)
     }
