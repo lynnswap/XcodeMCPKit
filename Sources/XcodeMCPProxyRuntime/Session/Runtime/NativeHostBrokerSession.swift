@@ -154,10 +154,18 @@ struct NativeBrokerChannel: Sendable {
     let sessionID: ProxySessionID
     let runtime: any ProxyRuntimeServing
 
-    func execute(_ request: ProxyRuntimeRequest,
+    func source() throws -> ProxyRuntimeUpstreamSource {
+        guard let source = runtime.snapshot().upstreamSource else {
+            throw NativeHostBrokerError("The Xcode connection is unavailable; open or list workspaces again")
+        }
+        return source
+    }
+
+    func execute(_ request: ProxyRuntimeRequest, source: ProxyRuntimeUpstreamSource? = nil,
                  cancellation: NativeHostBrokerCancellation) async throws -> ProxyRuntimeReply {
         var request = request
         request.headerSessionExists = true
+        request.expectedUpstreamSource = source
         return try await nativeHostBrokerReply(from: runtime, request: request,
                                                sessionID: sessionID, cancellation: cancellation)
     }

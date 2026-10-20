@@ -309,6 +309,88 @@ struct NativeHostBrokerTests {
         #expect(try await fixture.request(session, method: "tools/list") == before)
     }
 
+    @Test func recoveredNativeProcessesDoNotReuseWorkspaceOrDependentReferences() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("native-recovery")
+        let workspace = try await fixture.open(session)
+        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
+            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
+        ])
+        let device = try #require(started["interactionSessionKey"])
+        let launched = try await fixture.call(session, name: "RunProject", arguments: ["workspaceIdentifier": workspace])
+        let launch = try #require(launched["launchSessionReference"])
+        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        original.emitExit()
+        let replacement = try await waitWithTimeout("native process replaced after exit", timeout: .seconds(5)) {
+            try await fixture.factory.replacements.nextValue(at: 0)
+        }
+        try await replacement.initializationStarted.wait(description: "replacement initialized")
+        _ = try await fixture.call(session, name: "DocumentationSearch", arguments: ["query": .string("SwiftUI")])
+        for (name, arguments) in [
+            ("GetBuildLog", ["workspaceIdentifier": workspace]),
+            ("DeviceInteractionInstallAndRun", ["interactionSessionKey": device]),
+            ("GetConsoleOutput", ["launchSessionReference": launch]),
+        ] {
+            #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: name, arguments: arguments)))
+        }
+        #expect(replacement.calls.withLockedValue { calls in
+            !calls.contains { ["GetBuildLog", "DeviceInteractionInstallAndRun", "GetConsoleOutput"].contains($0.name) }
+        })
+        let newPath = JSONValue.string("/Fixture/Recovered.xcodeproj")
+        let reopened = try await fixture.call(session, name: NativeHostBroker.openWorkspaceTool, arguments: ["path": newPath])
+        let newWorkspace = try #require(reopened["workspaceIdentifier"])
+        #expect(newWorkspace != workspace)
+        let entries = try await fixture.workspaces(session)
+        let entry = try #require(entries.first { $0["workspaceIdentifier"] == newWorkspace })
+        #expect(entry["path"] == newPath)
+        #expect(entry["name"] == .string("Recovered"))
+        _ = try await fixture.call(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": newWorkspace])
+        #expect(replacement.calls.withLockedValue { $0.last { $0.name == "GetBuildLog" }?.arguments["workspaceIdentifier"] }
+            == .string("native-w-\(original.index)"))
+    }
+
+    @Test func expiredGenerationReferencesDoNotRetainAnIndependentHost() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("recovery-lifetime")
+        let initialHosts = try await fixture.list(session).compactMap { NativeHostBroker.string($0["hostIdentifier"]) }
+        let workspace = try await fixture.open(session, independent: true)
+        let host = try #require(try await fixture.list(session).first {
+            NativeHostBroker.string($0["hostIdentifier"]).map { !initialHosts.contains($0) } == true
+        }?["hostIdentifier"])
+        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
+            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
+        ])
+        _ = try #require(started["interactionSessionKey"])
+        let launched = try await fixture.call(session, name: "RunProject", arguments: ["workspaceIdentifier": workspace])
+        _ = try #require(launched["launchSessionReference"])
+        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        original.emitExit()
+        let stoppedHost = try await waitWithTimeout("expired references released the independent runtime", timeout: .seconds(5)) {
+            try await fixture.factory.shutdowns.nextValue(at: 0)
+        }
+        #expect(stoppedHost == original.index)
+        #expect(fixture.factory.transports.withLockedValue { $0.allSatisfy { $0.stopped.isSignaled() } })
+        #expect(try await fixture.list(session).allSatisfy { $0["hostIdentifier"] != host })
+    }
+
+    @Test func explicitNonObjectArgumentsAreRejectedBeforeNativeDispatchWhileOmittedArgumentsWork() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("argument-shape")
+        let invalid = try await fixture.reply(session, method: "tools/call", parameters: .object([
+            "name": .string("XcodeListTemplates"), "arguments": .array([]),
+        ]))
+        guard case .mcpError(_, -32602, _, _, _) = invalid else {
+            Issue.record("Non-object tool arguments were not rejected as invalid parameters"); return
+        }
+        #expect(fixture.factory.transports.withLockedValue { $0.isEmpty })
+        let omitted = try await fixture.request(session, method: "tools/call", parameters: .object([
+            "name": .string("XcodeListTemplates"),
+        ]))
+        #expect(!NativeHostBroker.isToolError(omitted))
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        #expect(native.calls.withLockedValue { $0.last { $0.name == "XcodeListTemplates" }?.arguments } == [:])
+    }
+
     @Test func handlelessQueriesReuseTheDefaultChannelAndNativeCatalog() async throws {
         let fixture = try BrokerFixture()
         let session = try await fixture.initialize("global-queries")
@@ -541,6 +623,7 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
     let serverResponseReceived = TestSignal()
     let serverResponseIDs = NIOLockedValueBox<[JSONValue]>([])
     let index: Int64
+    let processID: Int64
     let gui: Bool
     let guiWorkspacePaths: [String]
     let manifestOpensDirectory: Bool
@@ -554,12 +637,13 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
     let calls = NIOLockedValueBox<[Call]>([])
     let toolFailures = NIOLockedValueBox<Set<String>>([])
     let returnsProtocolError = NIOLockedValueBox(false)
-    private let opened = NIOLockedValueBox(false)
+    private let openedPath = NIOLockedValueBox<String?>(nil)
 
     init(index: Int64, holdsInitialization: Bool, gui: Bool = false,
          guiWorkspacePaths: [String] = ["/Fixture/App.xcodeproj", "/Fixture/App.xcodeproj"],
-         manifestOpensDirectory: Bool = false) {
+         manifestOpensDirectory: Bool = false, processID: Int64? = nil) {
         self.index = index
+        self.processID = processID ?? 1000 + index
         self.gui = gui
         self.guiWorkspacePaths = guiWorkspacePaths
         self.manifestOpensDirectory = manifestOpensDirectory
@@ -607,6 +691,7 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
                 var tools = scoped.map { descriptor($0, properties: [gui ? "tabIdentifier" : "workspaceIdentifier": .object(["type": .string("string")])]) }
                 tools.append(contentsOf: [
                     descriptor("DocumentationSearch", properties: ["query": .object(["type": .string("string")])]),
+                    descriptor("XcodeListTemplates"),
                     descriptor("XcodeNewProject", properties: [
                         "templateIdentifier": .object(["type": .string("string")]),
                         "productName": .object(["type": .string("string")]),
@@ -625,7 +710,7 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
                 ]))
                 result = .object(["tools": .array(tools), "_meta": .object([
                     "com.lynnswap.xcode-mcpkit/origin": .object([
-                        "kind": .string("nativeHost"), "processID": .number(.int(1000 + index)),
+                        "kind": .string("nativeHost"), "processID": .number(.int(processID)),
                     ]),
                 ])])
             case "tools/call":
@@ -650,17 +735,18 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
                 } else {
                     switch name {
                     case "XcodeOpenWorkspace":
-                        opened.withLockedValue { $0 = true }
                         let path = NativeHostBroker.string(arguments["path"]) ?? "/Fixture/App.xcodeproj"
                         let workspacePath = manifestOpensDirectory && URL(filePath: path).lastPathComponent == "Package.swift"
                             ? URL(filePath: path).deletingLastPathComponent().path : path
+                        openedPath.withLockedValue { $0 = workspacePath }
                         result = try NativeHostBroker.toolResult(.object([
                             "workspaceIdentifier": .string("native-w-\(index)"),
                             "workspacePath": .string(workspacePath),
                         ]))
                     case "XcodeListWorkspaces":
-                        let message = opened.withLockedValue { $0 }
-                            ? "* workspaceIdentifier: native-w-\(index), workspacePath: /Fixture/App.xcodeproj\n" : "No open workspaces."
+                        let message = openedPath.withLockedValue { $0 }.map {
+                            "* workspaceIdentifier: native-w-\(index), workspacePath: \($0)\n"
+                        } ?? "No open workspaces."
                         result = try NativeHostBroker.toolResult(.object(["message": .string(message)]))
                     case "XcodeListWindows":
                         let message = guiWorkspacePaths.enumerated().map { offset, path in
@@ -668,7 +754,7 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
                         }.joined(separator: "\n")
                         result = try NativeHostBroker.toolResult(.object(["message": .string(message)]))
                     case "XcodeCloseWorkspace":
-                        opened.withLockedValue { $0 = false }
+                        openedPath.withLockedValue { $0 = nil }
                         result = try NativeHostBroker.toolResult(.object(["closed": .bool(true),
                             "workspaceIdentifier": arguments["workspaceIdentifier"] ?? .null]))
                     case "DeviceInteractionStartSession", "DeviceInteractionStartWorkspaceSession":
@@ -720,6 +806,8 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
             JSONRPC.Wire.notificationObject(method: "notifications/tools/list_changed"))))
     }
 
+    func emitExit() { continuation.yield(.exit(1)) }
+
     private var echoResult: JSONValue {
         .object(["content": .array([.object(["type": .string("text"), "text": .string("host \(index)")])]),
             "structuredContent": .object(["host": .number(.int(index)),
@@ -739,6 +827,8 @@ private final class BrokerRuntimeFactory: Sendable {
     let guiWorkspacePaths = NIOLockedValueBox(["/Fixture/App.xcodeproj", "/Fixture/App.xcodeproj"])
     let manifestOpensDirectory = NIOLockedValueBox(false)
     let catalogChanges = LockedRecordedValues<Void>()
+    let replacements = LockedRecordedValues<BrokerTransport>()
+    let shutdowns = LockedRecordedValues<Int64>()
     let failNewHosts = NIOLockedValueBox(false)
     let holdsInitialization = NIOLockedValueBox(false)
     let replyOverrides = NIOLockedValueBox<[String: ProxyRuntimeReply]>([:])
@@ -762,24 +852,28 @@ private final class BrokerRuntimeFactory: Sendable {
                     let replacement = BrokerTransport(index: upstream.index,
                         holdsInitialization: holdsInitialization.withLockedValue { $0 }, gui: upstream.gui,
                         guiWorkspacePaths: guiWorkspacePaths.withLockedValue { $0 },
-                        manifestOpensDirectory: manifestOpensDirectory.withLockedValue { $0 })
+                        manifestOpensDirectory: manifestOpensDirectory.withLockedValue { $0 },
+                        processID: transports.withLockedValue { Int64(1001 + $0.count) })
                     transports.withLockedValue { $0.append(replacement) }
+                    replacements.append(replacement)
                     return replacement
                 }, notificationSink: notification, sessionClosedSink: closed,
                 catalogChangedSink: { [self] in catalogChanged(); catalogChanges.append(()) }, startImmediately: false)
             return coordinator
         }
-        return BrokerReplyRuntime(base: runtime, overrides: replyOverrides)
+        return BrokerReplyRuntime(base: runtime, overrides: replyOverrides,
+                                  shutdownCompleted: { [self] in shutdowns.append(upstream.index) })
     }
 }
 
 private struct BrokerReplyRuntime: ProxyRuntimeServing {
     let base: any ProxyRuntimeServing
     let overrides: NIOLockedValueBox<[String: ProxyRuntimeReply]>
+    let shutdownCompleted: @Sendable () -> Void
 
     func start() { base.start() }
     func cancelForDeinit() { base.cancelForDeinit() }
-    func shutdown() async { await base.shutdown() }
+    func shutdown() async { await base.shutdown(); shutdownCompleted() }
     func subscribeToEvents(_ receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void) -> @Sendable () -> Void {
         base.subscribeToEvents(receive)
     }

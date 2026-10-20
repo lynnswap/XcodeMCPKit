@@ -47,6 +47,8 @@ actor ManagedUpstreamSlot: UpstreamSlotControlling {
     private let factory: any UpstreamSessionFactory
     private var pendingStart: StartAttempt?
     private var current: RunningSessionBox?
+    // A replacement topology slot owns the next successful native session.
+    private var hasStartedSession = false
     private var sessions: [ObjectIdentifier: RunningSessionBox] = [:]
     private var isShutdown = false
     private var stopTask: Task<Void, Never>?
@@ -143,7 +145,7 @@ actor ManagedUpstreamSlot: UpstreamSlotControlling {
     }
 
     private func beginStartIfNeeded() {
-        guard !isShutdown, current == nil, pendingStart == nil else {
+        guard !isShutdown, !hasStartedSession, current == nil, pendingStart == nil else {
             return
         }
 
@@ -192,6 +194,7 @@ actor ManagedUpstreamSlot: UpstreamSlotControlling {
         }
 
         let running = RunningSessionBox(session: session)
+        hasStartedSession = true
         current = running
         sessions[ObjectIdentifier(running)] = running
         running.eventTask = Task { [weak self, running] in

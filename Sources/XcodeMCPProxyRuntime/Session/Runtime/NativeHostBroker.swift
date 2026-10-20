@@ -256,6 +256,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 return try Self.response(id: id, result: published, session: session.identifier,
                                          eventStream: request.prefersEventStream)
             case .request("tools/call", _):
+                if let arguments = (object["params"] as? [String: Any])?["arguments"],
+                   !(arguments is [String: Any]) {
+                    return .mcpError(id: id, code: -32602, message: "tools/call arguments must be an object",
+                        sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+                }
                 do {
                     if let error = admission.error { throw NativeHostBrokerError(error) }
                     return try await callTool(request, session: session, admission: admission,
@@ -359,7 +364,17 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     private func receive(_ event: ProxyRuntimeEvent, from hostIdentifier: String) {
-        if case .catalogChanged = event { return }
+        if case .catalogChanged = event {
+            let (host, sessions) = state.withLockedValue {
+                ($0.hosts[hostIdentifier], Array($0.sessions.values))
+            }
+            guard let snapshot = host?.snapshot else { return }
+            for session in sessions where session.invalidateReferences(
+                hostIdentifier: hostIdentifier, supersededBy: snapshot.upstreamSource) {
+                closeUnusedChannels(in: session)
+            }
+            return
+        }
         guard case .notification(let backendID, let data) = event,
               let binding = state.withLockedValue({ $0.backendBindings[backendID] }),
               !binding.session.state.withLockedValue({ $0.closed }) else { return }
@@ -622,6 +637,12 @@ private extension NativeHostBroker {
             guard let workspace = admission.workspace else {
                 throw NativeHostBrokerError("XcodeCloseWorkspace requires a workspaceIdentifier returned by XcodeOpenWorkspace or XcodeListWorkspaces")
             }
+            guard let host = state.withLockedValue({ $0.hosts[workspace.hostIdentifier] }) else {
+                throw NativeHostBrokerError("The workspace's Xcode host is unavailable")
+            }
+            let channel = try await channel(for: host, session: session)
+            let source = try channel.source()
+            guard source == workspace.source else { throw Self.expiredReference() }
             if workspace.gui {
                 _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
                 result = try Self.toolResult(.object([
@@ -631,8 +652,9 @@ private extension NativeHostBroker {
             } else {
                 let native = try Self.toolRequest(request, name: name,
                     arguments: ["workspaceIdentifier": .string(workspace.nativeIdentifier)])
-                let reply = try await forward(native, session: session,
-                    hostIdentifier: workspace.hostIdentifier, cancellation: cancellation)
+                let reply = try Self.externalReply(
+                    await channel.execute(native, source: source, cancellation: cancellation),
+                    session: session.identifier, hostIdentifier: workspace.hostIdentifier)
                 let value = try Self.result(in: reply)
                 if !Self.isToolError(value) {
                     _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
@@ -676,10 +698,11 @@ private extension NativeHostBroker {
         for host in targets {
             do {
                 let listed = try await withPinnedHost(host, session: session) { channel in
-                    let entries = try await workspaceEntries(host: host, channel: channel, request: request,
-                                                             cancellation: cancellation)
+                    let source = try channel.source()
+                    let entries = try await workspaceEntries(host: host, channel: channel, source: source,
+                                                             request: request, cancellation: cancellation)
                     return try entries.map {
-                        try session.bindWorkspace(host: host, nativeIdentifier: $0.nativeIdentifier,
+                        try session.bindWorkspace(host: host, source: source, nativeIdentifier: $0.nativeIdentifier,
                                                   path: $0.path, name: nil)
                     }
                 }
@@ -714,12 +737,12 @@ private extension NativeHostBroker {
     }
 
     private func workspaceEntries(host: NativeBrokerHost, channel: NativeBrokerChannel,
-                          request: ProxyRuntimeRequest,
+                          source: ProxyRuntimeUpstreamSource, request: ProxyRuntimeRequest,
                           cancellation: NativeHostBrokerCancellation) async throws -> [NativeBrokerWorkspaceEntry] {
         let gui = host.guiProcess != nil
         let native = try Self.toolRequest(request, name: gui ? "XcodeListWindows" : Self.listWorkspacesTool,
                                          arguments: [:])
-        let value = try Self.result(in: await channel.execute(native, cancellation: cancellation))
+        let value = try Self.result(in: await channel.execute(native, source: source, cancellation: cancellation))
         if Self.isToolError(value) { throw NativeBrokerToolFailure(result: value) }
         let payload = try Self.toolPayload(value)
         guard let message = Self.string(payload["message"]) else {
@@ -766,9 +789,10 @@ private extension NativeHostBroker {
             }
         }
         return try await withPinnedHost(host, session: session) { channel in
+            let source = try channel.source()
             if host.guiProcess != nil {
-                let entries = try await workspaceEntries(host: host, channel: channel, request: request,
-                                                        cancellation: cancellation)
+                let entries = try await workspaceEntries(host: host, channel: channel, source: source,
+                                                        request: request, cancellation: cancellation)
                 let normalized = Self.normalizedWorkspacePath(path)
                 let matches = entries.filter {
                     Self.normalizedWorkspacePath($0.path) == normalized
@@ -779,19 +803,19 @@ private extension NativeHostBroker {
                     }
                     throw NativeHostBrokerError("Several Xcode windows have this path. Call XcodeListWorkspaces and choose the intended window's workspaceIdentifier.")
                 }
-                let workspace = try session.bindWorkspace(host: host, nativeIdentifier: entry.nativeIdentifier,
+                let workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: entry.nativeIdentifier,
                                                           path: entry.path, name: nil)
                 return try Self.toolResult(workspace.descriptor)
             }
             let native = try Self.toolRequest(request, name: Self.openWorkspaceTool,
                                              arguments: ["path": .string(path)])
-            let value = try Self.result(in: await channel.execute(native, cancellation: cancellation))
+            let value = try Self.result(in: await channel.execute(native, source: source, cancellation: cancellation))
             if Self.isToolError(value) { return value }
             let payload = try Self.toolPayload(value)
             guard let identifier = Self.string(payload["workspaceIdentifier"]) else {
                 throw NativeHostBrokerError("Native XcodeOpenWorkspace returned no workspaceIdentifier")
             }
-            let workspace = try session.bindWorkspace(host: host, nativeIdentifier: identifier,
+            let workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: identifier,
                 path: Self.string(payload["workspacePath"]) ?? path, name: Self.string(payload["name"]))
             return try Self.toolResult(Self.rewritePayload(.object(payload), workspace: workspace, deviceSession: nil))
         }
@@ -806,13 +830,17 @@ private extension NativeHostBroker {
         return url.resolvingSymlinksInPath().path
     }
 
+    private static func expiredReference() -> NativeHostBrokerError {
+        NativeHostBrokerError("This reference belongs to an earlier Xcode connection. Open or list workspaces again, or start a new session.")
+    }
+
     private static func workspaceConflict(_ workspace: NativeBrokerWorkspace,
         device: NativeBrokerDeviceSession?, launch: NativeBrokerLaunchSession?) -> String? {
-        if let device, workspace.hostIdentifier != device.hostIdentifier
+        if let device, workspace.hostIdentifier != device.hostIdentifier || workspace.source != device.source
             || device.workspace.map({ !workspace.hasSameNativeScope(as: $0) }) == true {
             return "The workspace and device session belong to different execution contexts"
         }
-        if let launch, workspace.hostIdentifier != launch.hostIdentifier
+        if let launch, workspace.hostIdentifier != launch.hostIdentifier || workspace.source != launch.source
             || launch.workspace.map({ !workspace.hasSameNativeScope(as: $0) }) == true {
             return "The workspace and launch session belong to different execution contexts"
         }
@@ -858,6 +886,11 @@ private extension NativeHostBroker {
             throw NativeHostBrokerError("The workspace path resolves on the default host, while the session belongs to another host. Use a workspaceIdentifier from the same host.")
         }
         let channel = try await channel(for: host, session: session)
+        let source = try channel.source()
+        guard [workspace?.source, admission.deviceSession?.source, admission.launchSession?.source]
+            .compactMap({ $0 }).allSatisfy({ $0 == source }) else {
+            throw Self.expiredReference()
+        }
         var nativeArguments = arguments
         nativeArguments.removeValue(forKey: "hostIdentifier")
         if let workspace {
@@ -880,7 +913,7 @@ private extension NativeHostBroker {
         let native = try XcodeToolCatalog.nativeCall(name: name, arguments: nativeArguments,
             nativeCatalog: nativeCatalog)
         let forwarded = try Self.toolRequest(request, name: native.name, arguments: native.arguments)
-        let reply = try await channel.execute(forwarded, cancellation: cancellation)
+        let reply = try await channel.execute(forwarded, source: source, cancellation: cancellation)
         let value = try Self.result(in: reply)
         if Self.isToolError(value) {
             return try Self.externalReply(reply, session: session.identifier, hostIdentifier: host.identifier)
@@ -890,7 +923,7 @@ private extension NativeHostBroker {
         if name == "RunProject" {
             let payload = try Self.toolPayload(value)
             if let nativeID = Self.string(payload["launchSessionReference"]) {
-                launch = try session.bindLaunchSession(host: host, nativeIdentifier: nativeID,
+                launch = try session.bindLaunchSession(host: host, source: source, nativeIdentifier: nativeID,
                                                        workspace: workspace)
             }
         }
@@ -899,7 +932,7 @@ private extension NativeHostBroker {
             guard let nativeID = Self.string(payload["interactionSessionKey"]) ?? Self.string(payload["interactSessionKey"]) else {
                 throw NativeHostBrokerError("Native device interaction returned no session key")
             }
-            device = try session.bindDeviceSession(host: host, nativeIdentifier: nativeID,
+            device = try session.bindDeviceSession(host: host, source: source, nativeIdentifier: nativeID,
                                                    workspace: workspace)
         }
         if name == "DeviceInteractionEndSession", let device {
@@ -908,7 +941,7 @@ private extension NativeHostBroker {
         if workspace == nil, name == "XcodeNewProject" {
             let payload = try Self.toolPayload(value)
             if let nativeID = Self.string(payload["workspaceIdentifier"]) {
-                workspace = try session.bindWorkspace(host: host, nativeIdentifier: nativeID,
+                workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: nativeID,
                     path: Self.string(payload["workspacePath"]), name: nil)
             }
         }

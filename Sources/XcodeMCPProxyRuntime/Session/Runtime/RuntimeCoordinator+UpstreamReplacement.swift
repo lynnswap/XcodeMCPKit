@@ -22,6 +22,7 @@ extension RuntimeCoordinator {
         guard initializeManager.performIfRunning({
             replacement = replaceOrRetireInitializeChannelWhileRunning(proof, restart: restart)
         }) else { return nil }
+        catalogChangedSink?()
         return replacement
     }
 

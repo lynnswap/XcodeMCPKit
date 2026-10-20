@@ -1,3 +1,4 @@
+import XcodeMCPProxyRuntimeContract
 @testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPCore
 import Darwin
@@ -732,6 +733,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
         }
         return plan.data
     }
+
+    func upstreamSource() -> ProxyRuntimeUpstreamSource? { nil }
 
     func debugSnapshot() -> ProxyDebug.Snapshot {
         debugSnapshot(includeSensitiveDebugPayloads: false)

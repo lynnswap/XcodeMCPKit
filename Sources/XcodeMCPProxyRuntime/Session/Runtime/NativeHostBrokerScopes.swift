@@ -1,16 +1,19 @@
 import Foundation
 import XcodeMCPCore
+import XcodeMCPProxyRuntimeContract
 
 struct NativeBrokerWorkspace: Sendable, Equatable {
     let identifier: String
     let hostIdentifier: String
+    let source: ProxyRuntimeUpstreamSource
     let nativeIdentifier: String
     let gui: Bool
     let path: String?
     let name: String
 
     func hasSameNativeScope(as other: Self) -> Bool {
-        hostIdentifier == other.hostIdentifier && nativeIdentifier == other.nativeIdentifier
+        hostIdentifier == other.hostIdentifier && source == other.source
+            && nativeIdentifier == other.nativeIdentifier
     }
 
     var descriptor: JSONValue {
@@ -32,6 +35,7 @@ struct NativeBrokerWorkspaceEntry: Sendable {
 struct NativeBrokerDeviceSession: Sendable, Equatable {
     let identifier: String
     let hostIdentifier: String
+    let source: ProxyRuntimeUpstreamSource
     let nativeIdentifier: String
     let workspace: NativeBrokerWorkspace?
 }
@@ -39,20 +43,26 @@ struct NativeBrokerDeviceSession: Sendable, Equatable {
 struct NativeBrokerLaunchSession: Sendable, Equatable {
     let identifier: String
     let hostIdentifier: String
+    let source: ProxyRuntimeUpstreamSource
     let nativeIdentifier: String
     let workspace: NativeBrokerWorkspace?
 }
 
 extension NativeBrokerSession {
-    func bindWorkspace(host: NativeBrokerHost, nativeIdentifier: String,
+    func bindWorkspace(host: NativeBrokerHost, source: ProxyRuntimeUpstreamSource, nativeIdentifier: String,
                        path: String?, name: String?) throws -> NativeBrokerWorkspace {
         try state.withLockedValue { state in
             guard !state.closed else { throw CancellationError() }
+            // Validate while holding the registry lock so a replacement notification
+            // cannot prune old references before a late response inserts another one.
+            guard host.snapshot?.upstreamSource == source else {
+                throw NativeHostBrokerError("The Xcode connection changed before its reference could be registered; try again")
+            }
             if let existing = state.workspaces.values.first(where: {
-                $0.hostIdentifier == host.identifier && $0.nativeIdentifier == nativeIdentifier
+                $0.hostIdentifier == host.identifier && $0.source == source && $0.nativeIdentifier == nativeIdentifier
             }) { return existing }
             let workspace = NativeBrokerWorkspace(identifier: Self.reference(prefix: "w"),
-                hostIdentifier: host.identifier, nativeIdentifier: nativeIdentifier,
+                hostIdentifier: host.identifier, source: source, nativeIdentifier: nativeIdentifier,
                 gui: host.guiProcess != nil, path: path,
                 name: name ?? path.map { URL(filePath: $0).deletingPathExtension().lastPathComponent }
                     ?? nativeIdentifier)
@@ -61,33 +71,55 @@ extension NativeBrokerSession {
         }
     }
 
-    func bindDeviceSession(host: NativeBrokerHost, nativeIdentifier: String,
+    func bindDeviceSession(host: NativeBrokerHost, source: ProxyRuntimeUpstreamSource, nativeIdentifier: String,
                            workspace: NativeBrokerWorkspace?) throws -> NativeBrokerDeviceSession {
         try state.withLockedValue { state in
             guard !state.closed else { throw CancellationError() }
+            guard host.snapshot?.upstreamSource == source else {
+                throw NativeHostBrokerError("The Xcode connection changed before its reference could be registered; try again")
+            }
             if let existing = state.deviceSessions.values.first(where: {
-                $0.hostIdentifier == host.identifier && $0.nativeIdentifier == nativeIdentifier
+                $0.hostIdentifier == host.identifier && $0.source == source && $0.nativeIdentifier == nativeIdentifier
             }) { return existing }
             let session = NativeBrokerDeviceSession(identifier: Self.reference(prefix: "d"),
-                hostIdentifier: host.identifier, nativeIdentifier: nativeIdentifier,
+                hostIdentifier: host.identifier, source: source, nativeIdentifier: nativeIdentifier,
                 workspace: workspace)
             state.deviceSessions[session.identifier] = session
             return session
         }
     }
 
-    func bindLaunchSession(host: NativeBrokerHost, nativeIdentifier: String,
+    func bindLaunchSession(host: NativeBrokerHost, source: ProxyRuntimeUpstreamSource, nativeIdentifier: String,
                            workspace: NativeBrokerWorkspace?) throws -> NativeBrokerLaunchSession {
         try state.withLockedValue { state in
             guard !state.closed else { throw CancellationError() }
+            guard host.snapshot?.upstreamSource == source else {
+                throw NativeHostBrokerError("The Xcode connection changed before its reference could be registered; try again")
+            }
             if let existing = state.launchSessions.values.first(where: {
-                $0.hostIdentifier == host.identifier && $0.nativeIdentifier == nativeIdentifier
+                $0.hostIdentifier == host.identifier && $0.source == source && $0.nativeIdentifier == nativeIdentifier
             }) { return existing }
             let launch = NativeBrokerLaunchSession(identifier: Self.reference(prefix: "r"),
-                hostIdentifier: host.identifier, nativeIdentifier: nativeIdentifier,
+                hostIdentifier: host.identifier, source: source, nativeIdentifier: nativeIdentifier,
                 workspace: workspace)
             state.launchSessions[launch.identifier] = launch
             return launch
+        }
+    }
+
+    @discardableResult
+    func invalidateReferences(hostIdentifier: String, supersededBy source: ProxyRuntimeUpstreamSource?) -> Bool {
+        state.withLockedValue { state in
+            func obsolete(host: String, previous: ProxyRuntimeUpstreamSource) -> Bool {
+                guard host == hostIdentifier else { return false }
+                guard let source else { return true }
+                return previous.slotID == source.slotID && previous.generation < source.generation
+            }
+            let previousCount = state.workspaces.count + state.deviceSessions.count + state.launchSessions.count
+            state.workspaces = state.workspaces.filter { !obsolete(host: $0.value.hostIdentifier, previous: $0.value.source) }
+            state.deviceSessions = state.deviceSessions.filter { !obsolete(host: $0.value.hostIdentifier, previous: $0.value.source) }
+            state.launchSessions = state.launchSessions.filter { !obsolete(host: $0.value.hostIdentifier, previous: $0.value.source) }
+            return previousCount != state.workspaces.count + state.deviceSessions.count + state.launchSessions.count
         }
     }
 

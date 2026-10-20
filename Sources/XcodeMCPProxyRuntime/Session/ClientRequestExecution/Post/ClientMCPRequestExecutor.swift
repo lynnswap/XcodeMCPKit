@@ -125,6 +125,7 @@ final class ClientMCPRequestExecutor: Sendable {
             headerSessionExists: headerSessionExists,
             prefersEventStream: prefersEventStream,
             prefersCachedToolsCatalog: request.prefersCachedToolsCatalog,
+            expectedUpstreamSource: request.expectedUpstreamSource,
             eventLoop: eventLoop,
             requestTimeoutOverride: requestTimeoutOverride,
             parentCancellationHandle: parentCancellationHandle,
@@ -189,6 +190,7 @@ final class ClientMCPRequestExecutor: Sendable {
         headerSessionExists: Bool,
         prefersEventStream: Bool,
         prefersCachedToolsCatalog: Bool,
+        expectedUpstreamSource: ProxyRuntimeUpstreamSource?,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
         parentCancellationHandle: CancellationHandle?,
@@ -299,7 +301,8 @@ final class ClientMCPRequestExecutor: Sendable {
             requestTimeoutOverride: requestTimeoutOverride,
             parentCancellationHandle: parentCancellationHandle,
             admittedHandle: admittedHandle,
-            requestDeadline: requestDeadline
+            requestDeadline: requestDeadline,
+            expectedUpstreamSource: expectedUpstreamSource
         )
     }
 
@@ -311,7 +314,8 @@ final class ClientMCPRequestExecutor: Sendable {
         requestTimeoutOverride: TimeAmount?,
         parentCancellationHandle: ClientMCPRequestExecutor.CancellationHandle?,
         admittedHandle: CancellationHandle? = nil,
-        requestDeadline: Date?
+        requestDeadline: Date?,
+        expectedUpstreamSource: ProxyRuntimeUpstreamSource? = nil
     ) -> ClientMCPRequestExecutor.Operation {
         guard let forwardedRequestJSON = forwardedRequest.decodedJSON.foundationObject as? [String: Any] else {
             return immediate(
@@ -381,6 +385,11 @@ final class ClientMCPRequestExecutor: Sendable {
                 on: eventLoop,
                 preferredUpstreamIndices: nil
             ) { operationLease in
+                if let expectedUpstreamSource,
+                   expectedUpstreamSource.slotID != operationLease.proof.slotID.rawValue
+                    || expectedUpstreamSource.generation != operationLease.proof.slotGeneration {
+                    return eventLoop.makeFailedFuture(UpstreamSlotScheduler.AcquisitionError.unavailable)
+                }
                 let remainingTimeout = forwardingTimeout()
                 if forwardingDeadline != nil, remainingTimeout == nil {
                     return timeoutResolution()

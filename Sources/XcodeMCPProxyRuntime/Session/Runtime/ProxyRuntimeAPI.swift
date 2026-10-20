@@ -366,7 +366,8 @@ package final class ProxyRuntime: ProxyRuntimeServing, Sendable {
                 guard case .object(let result)? = coordinator.cachedToolsListResult(),
                       case .object(let metadata)? = result["_meta"] else { return nil }
                 return metadata["com.lynnswap.xcode-mcpkit/origin"]
-            }()
+            }(),
+            upstreamSource: coordinator.upstreamSource()
         )
     }
 

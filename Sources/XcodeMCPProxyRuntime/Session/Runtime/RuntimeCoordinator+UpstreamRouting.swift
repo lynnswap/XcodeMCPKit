@@ -194,7 +194,8 @@ extension RuntimeCoordinator {
             reason: "upstream_exit_\(status)",
             leaseReleaseReason: .upstreamExit,
             upstreamIndex: upstreamIndex,
-            proof: proof
+            proof: proof,
+            replaceNativeHost: nativeUpstreamFactory != nil
         )
     }
 
@@ -203,7 +204,8 @@ extension RuntimeCoordinator {
             reason: "upstream_stdout_closed",
             leaseReleaseReason: .upstreamUnavailable,
             upstreamIndex: upstreamIndex,
-            proof: proof
+            proof: proof,
+            replaceNativeHost: nativeUpstreamFactory != nil
         )
     }
 
@@ -622,7 +624,14 @@ extension RuntimeCoordinator {
     ) {
         switch reason {
         case .terminated, .notStarted, .startFailed:
-            _ = clearUpstreamState(proof: operationLease.proof)
+            if nativeUpstreamFactory != nil {
+                handleUpstreamUnavailable(reason: "native_send_unavailable",
+                    leaseReleaseReason: .upstreamUnavailable,
+                    upstreamIndex: operationLease.upstreamIndex, proof: operationLease.proof,
+                    replaceNativeHost: true)
+            } else {
+                _ = clearUpstreamState(proof: operationLease.proof)
+            }
         case .shuttingDown:
             break
         }
@@ -1259,6 +1268,11 @@ extension RuntimeCoordinator {
                 reason: .stdoutProtocolViolation
             )
         )
+        if nativeUpstreamFactory != nil,
+           replaceOrRetireInitializeChannel(proof, restart: false) == nil {
+            failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
+            return
+        }
         failQueuedRequestsIfNoHealthyOrRecoveringUpstream()
         let quarantineUntil = transition.quarantineUntil
         logger.warning(

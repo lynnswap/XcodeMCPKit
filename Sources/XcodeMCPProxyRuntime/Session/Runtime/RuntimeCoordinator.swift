@@ -279,7 +279,9 @@ protocol RuntimeCoordinating:
     RuntimeSessionLifecyclePort,
     RuntimeClientMCPRequestPort,
     RuntimeDebugSnapshotPort
-{}
+{
+    func upstreamSource() -> ProxyRuntimeUpstreamSource?
+}
 
 extension RuntimeSessionLifecyclePort {
     func start() {}
@@ -862,6 +864,12 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     func isInitialized() -> Bool {
         initializeManager.isInitialized()
+    }
+
+    func upstreamSource() -> ProxyRuntimeUpstreamSource? {
+        let entries = upstreamTopology.snapshot().entries
+        guard entries.count == 1, let entry = entries.first else { return nil }
+        return ProxyRuntimeUpstreamSource(slotID: entry.id.rawValue, generation: entry.generation)
     }
 
     func cachedToolsListResult() -> JSONValue? {
