@@ -55,8 +55,10 @@ struct NativeBrokerLaunchSession: Sendable, Equatable {
 }
 
 extension NativeBrokerSession {
+    /// Binds a handle for the native model. With `retainsForRequest`, the running request also holds
+    /// the model until it calls `releaseAdmission(of:)`.
     func bindWorkspace(host: NativeBrokerHost, generation: UInt64, nativeIdentifier: String,
-                       path: String?, name: String?) throws -> NativeBrokerWorkspace {
+                       path: String?, name: String?, retainsForRequest: Bool = false) throws -> NativeBrokerWorkspace {
         try state.withLockedValue { state in
             guard !state.closed else { throw CancellationError() }
             // Validate while holding the registry lock so a replacement notification
@@ -64,15 +66,20 @@ extension NativeBrokerSession {
             guard host.status.runningGeneration == generation else {
                 throw NativeHostBrokerError("The Xcode connection changed before its reference could be registered; try again")
             }
+            let workspace: NativeBrokerWorkspace
             if let existing = state.workspaces.values.first(where: {
                 $0.hostIdentifier == host.identifier && $0.generation == generation && $0.nativeIdentifier == nativeIdentifier
-            }) { return existing }
-            let workspace = NativeBrokerWorkspace(identifier: Self.reference(prefix: "w"),
-                hostIdentifier: host.identifier, generation: generation, nativeIdentifier: nativeIdentifier,
-                gui: host.guiProcess != nil, path: path,
-                name: name ?? path.map { URL(filePath: $0).deletingPathExtension().lastPathComponent }
-                    ?? nativeIdentifier)
-            state.workspaces[workspace.identifier] = workspace
+            }) {
+                workspace = existing
+            } else {
+                workspace = NativeBrokerWorkspace(identifier: Self.reference(prefix: "w"),
+                    hostIdentifier: host.identifier, generation: generation, nativeIdentifier: nativeIdentifier,
+                    gui: host.guiProcess != nil, path: path,
+                    name: name ?? path.map { URL(filePath: $0).deletingPathExtension().lastPathComponent }
+                        ?? nativeIdentifier)
+                state.workspaces[workspace.identifier] = workspace
+            }
+            if retainsForRequest { state.admittedWorkspaces[workspace.scope, default: 0] += 1 }
             return workspace
         }
     }
@@ -113,9 +120,18 @@ extension NativeBrokerSession {
         }
     }
 
+    /// Workspaces this session references through handles, device sessions, or launch sessions.
+    func referencedWorkspaces() -> [NativeBrokerWorkspace] {
+        state.withLockedValue { state in
+            Array(state.workspaces.values) + state.deviceSessions.values.compactMap(\.workspace)
+                + state.launchSessions.values.compactMap(\.workspace)
+        }
+    }
+
     func retainsNativeWorkspace(_ workspace: NativeBrokerWorkspace) -> Bool {
         state.withLockedValue { state in
-            !state.closed && (state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }
+            !state.closed && (state.admittedWorkspaces[workspace.scope] != nil
+                || state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }
                 || state.deviceSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true }
                 || state.launchSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true })
         }
