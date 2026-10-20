@@ -353,7 +353,8 @@ private final class ToolSurfaceRuntimeCoordinator: @unchecked Sendable, RuntimeC
 
     func sharedToolsList(
         sessionID: String,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        prefersCachedToolsCatalog: Bool
     ) async throws -> JSONValue {
         fatalError("unused in ToolSurfaceTests")
     }

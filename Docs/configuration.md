@@ -39,12 +39,10 @@ The standard `DEVELOPER_DIR` environment variable can prefer an installation:
 DEVELOPER_DIR=/Applications/Xcode_27.0.app/Contents/Developer xcode-mcp-proxy-server
 ```
 
-Use `XcodeMCPKitListHosts` and `XcodeMCPKitSelectHost` to change a client
-session's host without restarting the shared server. The list includes owned
-headless hosts, installed candidates, and running GUI Xcode processes. GUI
-selection binds to that process's identity; restarting the application requires
-selecting its new entry. Different selected processes can operate concurrently.
-See [host selection](usage.md#select-an-xcode-host).
+To use another installation for a workspace, pass a `hostIdentifier` from
+`XcodeMCPKitListHosts` to `XcodeOpenWorkspace`. The returned workspace handle
+retains that host for subsequent operations. See
+[choosing another Xcode installation](usage.md#choose-another-xcode-installation).
 
 ## Server options
 
@@ -75,8 +73,8 @@ Calls for the same workspace remain exclusive through preparation, native stream
 consumption, and cleanup. Mutations without a workspace selector are exclusive
 with every workspace in that process. The limits have no public configuration
 option and do not serialize other headless hosts or GUI Xcode processes. See
-[concurrent operations](usage.md#concurrent-operations) for admission and
-[cancellation](usage.md#cancellation) for completion boundaries.
+[operation ordering and cancellation](usage.md#tools-failures-and-cancellation)
+for admission and completion boundaries.
 
 ## Environment variables
 
@@ -104,8 +102,8 @@ sentences naming an agent that requests Xcode's tools. The default button must
 be `Allow` or `許可`, or use `action-button-1` when its title is unavailable.
 Agent names, PIDs, and executable paths alone do not identify a connection
 request. Other dialogs keep their normal behavior.
-Select a running GUI target with `XcodeMCPKitSelectHost` to use its bridge tools.
-The default target remains the owned headless host.
+Use a GUI workspace returned by `XcodeListWorkspaces` to work with its window.
+The default installation for saved models remains the owned headless host.
 
 ### Compilation caching
 

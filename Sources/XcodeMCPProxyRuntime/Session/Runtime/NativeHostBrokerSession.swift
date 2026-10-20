@@ -169,28 +169,36 @@ final class NativeBrokerSession: Sendable {
     struct ChannelLoad: Sendable {
         let identifier: UUID
         let task: Task<NativeBrokerChannel, any Error>
+        let isScopeOwned: Bool
         var closing: Task<Void, Never>?
     }
     struct State: Sendable {
-        var selectedHost: String
         var protocolVersion: String?
         var activeRequests = 0
         var hostRequests: [String: Int] = [:]
         var eventStreams = 0
         var activity = DispatchTime.now().uptimeNanoseconds
-        var selectionRevision: UInt64 = 0
         var closed = false
         var operations: [UUID: NativeHostBrokerOperation] = [:]
         var channels: [String: ChannelLoad] = [:]
+        var workspaces: [String: NativeBrokerWorkspace] = [:]
+        var deviceSessions: [String: NativeBrokerDeviceSession] = [:]
+        var launchSessions: [String: NativeBrokerLaunchSession] = [:]
+
+        func retainsHost(_ identifier: String) -> Bool {
+            workspaces.values.contains { $0.hostIdentifier == identifier }
+                || deviceSessions.values.contains { $0.hostIdentifier == identifier }
+                || launchSessions.values.contains { $0.hostIdentifier == identifier }
+        }
     }
     let identifier: ProxySessionID
     let state: NIOLockedValueBox<State>
     let initializeParameters: JSONValue
 
-    init(identifier: ProxySessionID, defaultHost: String, initializeParameters: JSONValue) {
+    init(identifier: ProxySessionID, initializeParameters: JSONValue) {
         self.identifier = identifier
         self.initializeParameters = initializeParameters
-        state = NIOLockedValueBox(State(selectedHost: defaultHost))
+        state = NIOLockedValueBox(State())
     }
 
     func channel(
@@ -232,7 +240,8 @@ final class NativeBrokerSession: Sendable {
                     throw error
                 }
             }
-            let load = ChannelLoad(identifier: identifier, task: task)
+            let load = ChannelLoad(identifier: identifier, task: task,
+                                   isScopeOwned: host.independent || host.guiProcess != nil)
             state.channels[host.identifier] = load
             return load
         }
@@ -263,7 +272,8 @@ final class NativeBrokerSession: Sendable {
         state.withLockedValue { state in
             guard !state.closed else { return }
             for (host, load) in state.channels
-                where host != state.selectedHost && state.hostRequests[host] == nil && load.closing == nil {
+                where load.isScopeOwned && !state.retainsHost(host)
+                    && state.hostRequests[host] == nil && load.closing == nil {
                 let task = Task { [self] in
                     load.task.cancel()
                     let channel = try? await load.task.value
@@ -286,6 +296,9 @@ final class NativeBrokerSession: Sendable {
             let operations = Array(state.operations.values)
             let channels = Array(state.channels.values)
             state.operations.removeAll()
+            state.workspaces.removeAll()
+            state.deviceSessions.removeAll()
+            state.launchSessions.removeAll()
             return (operations, channels)
         }
         for operation in pending.0 { operation.cancel(reason: .channelInactive) }

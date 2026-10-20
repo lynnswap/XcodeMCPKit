@@ -124,6 +124,7 @@ final class ClientMCPRequestExecutor: Sendable {
             headerSessionID: headerSessionID,
             headerSessionExists: headerSessionExists,
             prefersEventStream: prefersEventStream,
+            prefersCachedToolsCatalog: request.prefersCachedToolsCatalog,
             eventLoop: eventLoop,
             requestTimeoutOverride: requestTimeoutOverride,
             parentCancellationHandle: parentCancellationHandle,
@@ -187,6 +188,7 @@ final class ClientMCPRequestExecutor: Sendable {
         headerSessionID: String?,
         headerSessionExists: Bool,
         prefersEventStream: Bool,
+        prefersCachedToolsCatalog: Bool,
         eventLoop: EventLoop,
         requestTimeoutOverride: TimeAmount?,
         parentCancellationHandle: CancellationHandle?,
@@ -198,7 +200,8 @@ final class ClientMCPRequestExecutor: Sendable {
             headerSessionID: headerSessionID,
             headerSessionExists: headerSessionExists,
             eventLoop: eventLoop,
-            requestTimeoutOverride: requestTimeoutOverride
+            requestTimeoutOverride: requestTimeoutOverride,
+            prefersCachedToolsCatalog: prefersCachedToolsCatalog
         ) {
             let future = resolveLocalHandling(
                 localHandling,

@@ -23,6 +23,7 @@ package struct ProxyRuntimeRequest: Sendable {
     package let data: Data
     package let decodedJSON: JSONValue?
     package var deadline: Date?
+    package var prefersCachedToolsCatalog = false
     package var headerSessionExists: Bool
     package let prefersEventStream: Bool
 

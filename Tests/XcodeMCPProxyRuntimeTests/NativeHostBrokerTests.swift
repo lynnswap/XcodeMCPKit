@@ -9,485 +9,486 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .timeLimit(.minutes(1)), .asyncTestCleanup)
 struct NativeHostBrokerTests {
-    @Test func guiProcessesHaveSeparateTargetsAndShareEachProcessConnection() async throws {
+    @Test func guiHandlesKeepIdenticalPathsAndTabsOnTheirNativeHosts() async throws {
         let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let processes = [
-            XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
-            XcodeGUIProcess(processID: 102, launchDate: Date(timeIntervalSince1970: 2), installation: installation),
-        ]
-        let fixture = try BrokerFixture(guiProcesses: processes)
+        let fixture = try BrokerFixture(guiProcesses: [
+            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
+            .init(processID: 102, launchDate: Date(timeIntervalSince1970: 2), installation: installation),
+        ])
         let a = try await fixture.initialize("gui-a")
         let b = try await fixture.initialize("gui-b")
-        let c = try await fixture.initialize("gui-c")
-        let targets = try await fixture.list(a).filter { $0["kind"] == .string("gui") }
-        #expect(targets.count == 2)
-        #expect(fixture.factory.transports.withLockedValue { $0.isEmpty })
-        let first = try #require(targets.first?["hostIdentifier"])
-        let second = try #require(targets.last?["hostIdentifier"])
-        for session in [a, b] {
-            _ = try await fixture.call(session, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": first])
-        }
-        _ = try await fixture.call(c, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": second])
-        let firstResult = try await fixture.echo(a)
-        let sharedResult = try await fixture.echo(b)
-        let secondResult = try await fixture.echo(c)
-        #expect(firstResult == sharedResult)
-        #expect(firstResult != secondResult)
-        let catalog = try await fixture.request(a, method: "tools/list")
-        guard case .object(let fields) = catalog, case .array(let tools)? = fields["tools"],
-              case .object(let tool)? = tools.first, case .object(let schema)? = tool["inputSchema"],
-              case .object(let properties)? = schema["properties"] else {
-            Issue.record("Missing GUI tool schema"); return
-        }
-        #expect(properties["tabIdentifier"] != nil)
-        #expect(properties["workspaceIdentifier"] == nil)
-        let selectedTargets = try await fixture.list(a).filter { $0["kind"] == .string("gui") }
-        #expect(selectedTargets.first?["processIdentifier"] == .number(.int(101)))
-        #expect(fixture.factory.transports.withLockedValue { $0.count } == 2)
+        let before = try await fixture.request(a, method: "tools/list")
+        let workspaces = try await fixture.workspaces(a).filter { $0["kind"] == .string("gui") }
+        #expect(workspaces.count == 4)
+        let first = try #require(workspaces.first?["workspaceIdentifier"])
+        let last = try #require(workspaces.last?["workspaceIdentifier"])
+        let left = try await fixture.call(a, name: "GetBuildLog", arguments: ["workspaceIdentifier": first])
+        let right = try await fixture.call(a, name: "GetBuildLog", arguments: ["workspaceIdentifier": last])
+        #expect(left != right)
+        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
+        let logged = try #require(gui.calls.withLockedValue { $0.last { $0.name == "GetBuildLog" } })
+        #expect(logged.arguments["tabIdentifier"] == .string("tab-1"))
+        #expect(logged.arguments["workspaceIdentifier"] == nil)
+        #expect(try await fixture.request(a, method: "tools/list") == before)
+        #expect(try await fixture.request(b, method: "tools/list") == before)
+        let rejected = try await fixture.toolResult(b, name: "GetBuildLog", arguments: ["workspaceIdentifier": first])
+        #expect(NativeHostBroker.isToolError(rejected))
     }
 
-    @Test func unusedGUIBridgeClosesAndReconnectsToTheSameProcessTarget() async throws {
+    @Test func ambiguousGUIOpenDoesNotRetainWorkspaceReferences() async throws {
         let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let process = XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation)
-        let fixture = try BrokerFixture(guiProcesses: [process])
-        let session = try await fixture.initialize("gui-first")
-        let targets = try await fixture.list(session)
-        let id = try #require(targets.first { $0["kind"] == .string("gui") }?["hostIdentifier"])
-        _ = try await fixture.call(session, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": id])
-        let first = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        fixture.broker.removeSession(session)
-        try await first.stopped.wait(description: "unused GUI bridge closed")
-        let next = try await fixture.initialize("gui-next")
-        let available = try await fixture.list(next)
-        #expect(available.contains { $0["hostIdentifier"] == id && $0["isRunning"] == .bool(true) })
-        _ = try await fixture.call(next, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": id])
-        #expect(try await fixture.echo(next) == .number(.int(2)))
-        #expect(fixture.factory.transports.withLockedValue { $0.count } == 2)
+        let fixture = try BrokerFixture(guiProcesses: [
+            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
+        ])
+        let session = try await fixture.initialize("gui-open")
+        let host = try #require(try await fixture.list(session).first { $0["kind"] == .string("gui") }?["hostIdentifier"])
+        let ambiguous = try await fixture.toolResult(session, name: NativeHostBroker.openWorkspaceTool,
+            arguments: ["path": .string("/Fixture/App.xcodeproj"), "hostIdentifier": host])
+        #expect(NativeHostBroker.isToolError(ambiguous))
+        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
+        try await gui.stopped.wait(description: "ambiguous GUI open released its bridge")
     }
 
-    @Test func guiExitDuringConnectionKeepsThePreviousSelection() async throws {
+    @Test func openingOneGUIWorkspaceDoesNotRetainOtherProjectTabs() async throws {
         let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let process = XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation)
-        let fixture = try BrokerFixture(holdsInitialization: true, guiProcesses: [process])
-        let session = try await fixture.initialize("gui-connecting")
-        let targets = try await fixture.list(session)
-        let id = try #require(targets.first { $0["kind"] == .string("gui") }?["hostIdentifier"])
-        let selection = Task { try await fixture.request(session, method: "tools/call", parameters: .object([
-            "name": .string(NativeHostBroker.selectTool), "arguments": .object(["hostIdentifier": id]),
-        ])) }
-        try await fixture.factory.created.wait(description: "GUI connection created")
-        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        try await transport.initializationStarted.wait(description: "GUI initialization started")
-        fixture.guiProcesses.withLockedValue { $0.removeAll() }
-        try transport.releaseInitialization()
-        guard case .object(let result) = try await selection.value else {
-            Issue.record("missing failed GUI selection"); return
-        }
-        #expect(result["isError"] == .bool(true))
-        let hosts = try await fixture.list(session)
-        #expect(hosts.first { $0["isSelected"] == .bool(true) }?["hostIdentifier"] == .string(NativeHostBroker.defaultHostIdentifier))
+        let fixture = try BrokerFixture(guiProcesses: [
+            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
+        ])
+        fixture.factory.guiWorkspacePaths.withLockedValue { $0 = ["/Fixture/App.xcodeproj", "/Fixture/Other.xcodeproj"] }
+        let session = try await fixture.initialize("gui-open-one")
+        let host = try #require(try await fixture.list(session).first { $0["kind"] == .string("gui") }?["hostIdentifier"])
+        let identifier = try await fixture.open(session, host: host)
+        _ = try await fixture.call(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": identifier])
+        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
+        #expect(gui.calls.withLockedValue { $0.last { $0.name == "GetBuildLog" }?.arguments["tabIdentifier"] } == .string("tab-1"))
+        let closed = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                             arguments: ["workspaceIdentifier": identifier])
+        #expect(closed["released"] == .bool(true))
+        try await gui.stopped.wait(description: "the opened GUI workspace released its only reference")
+        #expect(gui.calls.withLockedValue { !$0.contains { $0.name == NativeHostBroker.closeWorkspaceTool } })
+        #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: "GetBuildLog",
+            arguments: ["workspaceIdentifier": identifier])))
     }
 
-    @Test func exitedGUIProcessDoesNotFallBackWhenItsPIDIsReused() async throws {
+    @Test func exitedGUIProcessDoesNotReuseAWorkspaceHandleWhenPIDIsReused() async throws {
         let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
         let original = XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation)
         let fixture = try BrokerFixture(guiProcesses: [original])
         let session = try await fixture.initialize("gui-exit")
-        let targets = try await fixture.list(session)
-        let originalID = try #require(targets.first { $0["kind"] == .string("gui") }?["hostIdentifier"])
-        _ = try await fixture.call(session, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": originalID])
+        let identifier = try #require(try await fixture.workspaces(session).first { $0["kind"] == .string("gui") }?["workspaceIdentifier"])
         fixture.guiProcesses.withLockedValue {
-            $0 = [XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 2), installation: installation)]
+            $0 = [.init(processID: 101, launchDate: Date(timeIntervalSince1970: 2), installation: installation)]
         }
-        guard case .mcpError(_, -32000, _, _, _) = try await fixture.reply(session, method: "tools/call", parameters: .object([
-            "name": .string("Echo-1"), "arguments": .object([:]),
-        ])) else {
-            Issue.record("An exited GUI target was used"); return
-        }
-        let refreshed = try await fixture.list(session).filter { $0["kind"] == .string("gui") }
-        #expect(refreshed.contains { $0["hostIdentifier"] != originalID && $0["isRunning"] == .bool(true) })
-        #expect(fixture.factory.transports.withLockedValue { $0.count } == 1)
-    }
-
-    @Test func selectionAndCatalogsAreScopedToTheClientSession() async throws {
-        let fixture = try BrokerFixture()
-        let a = try await fixture.initialize("client-a")
-        let b = try await fixture.initialize("client-b")
-        _ = try await fixture.echo(b)
-        let eventStart = fixture.events.withLockedValue { $0.count }
-        let available = try await fixture.list(a)
-        let other = try #require(available.first { $0["isDefault"] == .bool(false) })
-        let otherID = try #require(other["hostIdentifier"])
-        _ = try await fixture.call(a, name: NativeHostBroker.selectTool,
-                                 arguments: ["hostIdentifier": otherID])
-        let aCatalog = try await fixture.request(a, method: "tools/list")
-        let bCatalog = try await fixture.request(b, method: "tools/list")
-        #expect(aCatalog != bCatalog)
-        let aHosts = try await fixture.list(a)
-        let bHosts = try await fixture.list(b)
-        #expect(aHosts.first { $0["isSelected"] == .bool(true) }?["hostIdentifier"] == otherID)
-        #expect(bHosts.first { $0["isSelected"] == .bool(true) }?["hostIdentifier"] == .string(NativeHostBroker.defaultHostIdentifier))
-        let changeSessions = fixture.events.withLockedValue { values in
-            values.dropFirst(eventStart).compactMap { event -> ProxySessionID? in
-                guard case .notification(let id, let data) = event,
-                      (try? JSONRPC.Wire.object(fromData: data)["method"] as? String)
-                        == "notifications/tools/list_changed" else { return nil }
-                return id
-            }
-        }
-        #expect(changeSessions.contains(a))
-        #expect(!changeSessions.contains(b))
-    }
-
-    @Test func sameInstallationCanHaveIndependentHosts() async throws {
-        let fixture = try BrokerFixture()
-        let a = try await fixture.initialize("client-a")
-        let b = try await fixture.initialize("client-b")
-        let selection = try await fixture.call(a, name: NativeHostBroker.selectTool, arguments: [
-            "hostIdentifier": .string(NativeHostBroker.defaultHostIdentifier),
-            "createsNewHost": .bool(true),
-        ])
-        guard case .object(let value) = selection,
-              case .object(let host)? = value["host"] else { Issue.record("missing selected host"); return }
-        #expect(host["hostIdentifier"] != .string(NativeHostBroker.defaultHostIdentifier))
-        #expect(host["developerDirectory"] == .string(fixture.defaultInstallation.developerDirectory.path))
-        let left = try await fixture.echo(a)
-        let right = try await fixture.echo(b)
-        #expect(left != right)
+        let result = try await fixture.toolResult(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": identifier])
+        #expect(NativeHostBroker.isToolError(result))
         #expect(fixture.factory.transports.withLockedValue { $0.count } == 2)
     }
 
-    @Test func admittedRequestsFinishOnTheirOriginalHostAfterSelectionChanges() async throws {
+    @Test func absolutePathsUseTheDefaultHeadlessHostAndReuseItsWorkspaceHandle() async throws {
         let fixture = try BrokerFixture()
-        let a = try await fixture.initialize("client-a")
-        _ = try await fixture.echo(a)
-        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        let pending = Task { try await fixture.request(a, method: "tools/call", parameters: .object([
-            "name": .string("Wait"), "arguments": .object([:]),
-        ]), id: 71) }
-        try await original.waiting.wait(description: "wait request admitted to original host")
-        let available = try await fixture.list(a)
-        let other = try #require(available.first { $0["isDefault"] == .bool(false) }?["hostIdentifier"])
-        _ = try await fixture.call(a, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": other])
-        await original.releaseWait()
-        let result = try await pending.value
-        guard case .object(let value) = result,
-              case .object(let content)? = value["structuredContent"] else {
-            Issue.record("missing wait result"); return
-        }
-        #expect(content["host"] == .number(.int(1)))
-        #expect(try await fixture.echo(a) != .number(.int(1)))
+        let session = try await fixture.initialize("paths")
+        let path = JSONValue.string("/Fixture/App.xcodeproj")
+        let result = try await fixture.call(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": path])
+        #expect(result["host"] == .number(.int(1)))
+        let entries = try await fixture.workspaces(session)
+        let identifier = try #require(entries.first?["workspaceIdentifier"])
+        #expect(identifier != .string("native-w-1"))
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        #expect(transport.calls.withLockedValue { $0.last { $0.name == "GetBuildLog" }?.arguments["workspaceIdentifier"] } == .string("native-w-1"))
+        #expect(try await fixture.open(session) == identifier)
     }
 
-    @Test func numericCancellationStillReachesTheOldHostAfterSwitching() async throws {
-        let fixture = try BrokerFixture()
-        let a = try await fixture.initialize("client-a")
-        _ = try await fixture.echo(a)
-        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        let pending = Task { try await fixture.reply(a, method: "tools/call", parameters: .object([
-            "name": .string("Wait"), "arguments": .object([:]),
-        ]), id: 73) }
-        try await original.waiting.wait(description: "cancellable request admitted")
-        _ = try await fixture.call(a, name: NativeHostBroker.selectTool, arguments: [
-            "hostIdentifier": .string(NativeHostBroker.defaultHostIdentifier), "createsNewHost": .bool(true),
-        ])
-        _ = try await fixture.reply(a, method: "notifications/cancelled",
-                                   parameters: .object(["requestId": .number(.int(73))]), id: nil)
-        guard case .mcpError(_, -32800, _, _, _) = try await pending.value else {
-            Issue.record("request was not cancelled"); return
-        }
-        try await original.cancelled.wait(description: "cancellation delivered to original host")
-        let replacement = try #require(fixture.factory.transports.withLockedValue { $0.last })
-        #expect(!replacement.cancelled.isSignaled())
-    }
-
-    @Test func serverRequestsKeepTheirOriginalChannelAfterSwitchingHosts() async throws {
-        let fixture = try BrokerFixture()
-        let a = try await fixture.initialize("client-a")
-        let b = try await fixture.initialize("client-b")
-        _ = try await fixture.echo(a)
-        _ = try await fixture.echo(b)
-        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        let pending = Task { try await fixture.request(a, method: "tools/call", parameters: .object([
-            "name": .string("Wait"), "arguments": .object([:]),
-        ]), id: 77) }
-        try await original.waiting.wait(description: "request owns original channel")
-        _ = try await fixture.call(a, name: NativeHostBroker.selectTool, arguments: [
-            "hostIdentifier": .string(NativeHostBroker.defaultHostIdentifier), "createsNewHost": .bool(true),
-        ])
-        try original.emitServerRequest()
-        try await fixture.serverRequestDelivered.wait(description: "server request delivered after host switch")
-        let requests = fixture.events.withLockedValue { values in
-            values.compactMap { event -> (ProxySessionID, JSONRPC.ID)? in
-                guard case .notification(let session, let data) = event,
-                      let object = try? JSONRPC.Wire.object(fromData: data),
-                      case .request("sampling/createMessage", let id) = JSONRPC.Message.Inspector.kind(of: object)
-                else { return nil }
-                return (session, id)
-            }
-        }
-        #expect(requests.count == 1)
-        let routed = try #require(requests.first)
-        #expect(routed.0 == a)
-        let response = try ProxyRuntimeRequest(json: .object([
-            "jsonrpc": .string("2.0"), "id": routed.1.value, "result": .object([:]),
-        ]), headerSessionExists: true, prefersEventStream: false)
-        let operation = try #require(fixture.broker.beginRequest(response, in: a))
-        _ = try await withCheckedThrowingContinuation { continuation in
-            operation.whenComplete { continuation.resume(with: $0) }
-        }
-        fixture.broker.clientRequestFinished(a)
-        try await original.serverResponseReceived.wait(description: "response returned to original host")
-        #expect(original.serverResponseIDs.withLockedValue { $0 } == [.string("native-server-request")])
-        let replacement = try #require(fixture.factory.transports.withLockedValue { $0.last })
-        #expect(replacement.serverResponseIDs.withLockedValue { $0.isEmpty })
-        await original.releaseWait()
-        _ = try await pending.value
-    }
-
-    @Test(arguments: [false, true])
-    func independentHostStopsAfterItsLastClientClosesOrExpires(expires: Bool) async throws {
+    @Test func independentWorkspacesRetainTheirHostsAndCloseAfterFinalRelease() async throws {
         let fixture = try BrokerFixture()
         let a = try await fixture.initialize("independent-a")
         let b = try await fixture.initialize("independent-b")
-        let id = try await fixture.selectIndependentHost(a)
-        _ = try await fixture.call(b, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": id])
+        let knownHosts = try await fixture.list(a).compactMap { $0["hostIdentifier"] }
+        let left = try await fixture.open(a, independent: true)
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let host = try #require(try await fixture.list(a).first {
+            !knownHosts.contains($0["hostIdentifier"] ?? .null)
+        }?["hostIdentifier"])
+        let right = try await fixture.open(b, host: host)
         fixture.broker.removeSession(a)
         #expect(!transport.stopped.isSignaled())
-        _ = try await fixture.echo(b)
-        if expires { fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1)) }
-        else { fixture.broker.removeSession(b) }
-        try await transport.stopped.wait(description: "last independent host client released")
-        let observer = try await fixture.initialize("observer")
-        let hosts = try await fixture.list(observer)
-        #expect(!hosts.contains { $0["hostIdentifier"] == id })
+        #expect(try await fixture.call(b, name: "GetBuildLog", arguments: ["workspaceIdentifier": right])["host"] == .number(.int(1)))
+        _ = try await fixture.call(b, name: NativeHostBroker.closeWorkspaceTool, arguments: ["workspaceIdentifier": right])
+        try await transport.stopped.wait(description: "last workspace reference released")
+        #expect(try await fixture.list(b).allSatisfy { $0["hostIdentifier"] != host })
+        #expect(left != right)
     }
 
-    @Test func switchingKeepsAnIndependentHostUntilItsAdmittedRequestFinishes() async throws {
+    @Test func admittedWorkRetainsItsScopeWhenTheWorkspaceReferenceIsClosed() async throws {
         let fixture = try BrokerFixture()
-        let session = try await fixture.initialize("switching-independent")
-        let id = try await fixture.selectIndependentHost(session)
+        let session = try await fixture.initialize("inflight")
+        let workspace = try await fixture.open(session, independent: true)
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        let pending = Task { try await fixture.request(session, method: "tools/call", parameters: .object([
-            "name": .string("Wait"), "arguments": .object([:]),
-        ]), id: 307) }
-        try await transport.waiting.wait(description: "independent host request admitted")
-        _ = try await fixture.call(session, name: NativeHostBroker.selectTool,
-            arguments: ["hostIdentifier": .string(NativeHostBroker.defaultHostIdentifier)])
+        let pending = Task { try await fixture.toolResult(session, name: "BuildProject",
+            arguments: ["workspaceIdentifier": workspace], id: 71) }
+        try await transport.waiting.wait(description: "build admitted")
+        _ = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                  arguments: ["workspaceIdentifier": workspace])
         #expect(!transport.stopped.isSignaled())
         await transport.releaseWait()
-        _ = try await pending.value
-        try await transport.stopped.wait(description: "unselected independent host drained")
-        let hosts = try await fixture.list(session)
-        #expect(!hosts.contains { $0["hostIdentifier"] == id })
-        #expect(try await fixture.echo(session) != .number(.int(1)))
+        #expect(!NativeHostBroker.isToolError(try await pending.value))
+        try await transport.stopped.wait(description: "admitted work released its host")
     }
 
-    @Test func closingOneClientKeepsAnotherClientAndTheSharedHostAlive() async throws {
+    @Test func numericCancellationAndServerCallbacksStayOnTheOriginalHost() async throws {
         let fixture = try BrokerFixture()
-        let a = try await fixture.initialize("client-a")
-        let b = try await fixture.initialize("client-b")
-        _ = try await fixture.echo(a)
-        _ = try await fixture.echo(b)
+        let session = try await fixture.initialize("callbacks")
+        let workspace = try await fixture.open(session, independent: true)
         let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        let pending = Task { try await fixture.reply(a, method: "tools/call", parameters: .object([
-            "name": .string("Wait"), "arguments": .object([:]),
-        ]), id: 79) }
-        try await original.waiting.wait(description: "client request ready before close")
-        fixture.broker.removeSession(a)
-        guard case .mcpError(_, -32800, _, _, _) = try await pending.value else {
-            Issue.record("closed client's request was not cancelled"); return
-        }
-        #expect(fixture.broker.sessionState(a) == .missing)
-        #expect(try await fixture.echo(b) == .number(.int(1)))
-    }
-
-    @Test func malformedServerResponseDoesNotTrapOrCloseTheSession() async throws {
-        let fixture = try BrokerFixture()
-        let session = try await fixture.initialize("client-a")
-        let request = try ProxyRuntimeRequest(json: .object([
-            "jsonrpc": .string("2.0"), "id": .string(":MA=="), "result": .object([:]),
+        let pending = Task { try await fixture.reply(session, method: "tools/call", parameters: .object([
+            "name": .string("BuildProject"), "arguments": .object(["workspaceIdentifier": workspace]),
+        ]), id: 73) }
+        try await original.waiting.wait(description: "cancellable build admitted")
+        _ = try await fixture.open(session)
+        try original.emitServerRequest()
+        try await fixture.serverRequestDelivered.wait(description: "server request delivered")
+        let routed = try #require(fixture.events.withLockedValue { events in
+            events.compactMap { event -> JSONRPC.ID? in
+                guard case .notification(_, let data) = event,
+                      let object = try? JSONRPC.Wire.object(fromData: data),
+                      case .request("sampling/createMessage", let id) = JSONRPC.Message.Inspector.kind(of: object) else { return nil }
+                return id
+            }.first
+        })
+        let response = try ProxyRuntimeRequest(json: .object([
+            "jsonrpc": .string("2.0"), "id": routed.value, "result": .object([:]),
         ]), headerSessionExists: true, prefersEventStream: false)
-        let operation = try #require(fixture.broker.beginRequest(request, in: session))
-        let reply = try await withCheckedThrowingContinuation { continuation in
+        let operation = try #require(fixture.broker.beginRequest(response, in: session))
+        _ = try await withCheckedThrowingContinuation { continuation in
             operation.whenComplete { continuation.resume(with: $0) }
         }
         fixture.broker.clientRequestFinished(session)
-        guard case .mcpError = reply else { Issue.record("invalid channel identifier was accepted"); return }
-        #expect(try await fixture.echo(session) == .number(.int(1)))
+        try await original.serverResponseReceived.wait(description: "server response returned to original host")
+        #expect(original.serverResponseIDs.withLockedValue { $0 } == [.string("native-server-request")])
+        _ = try await fixture.reply(session, method: "notifications/cancelled",
+                                   parameters: .object(["requestId": .number(.int(73))]), id: nil)
+        guard case .mcpError(_, -32800, _, _, _) = try await pending.value else {
+            Issue.record("build was not cancelled"); return
+        }
+        try await original.cancelled.wait(description: "cancellation reached original host")
+        let other = try #require(fixture.factory.transports.withLockedValue { $0.last })
+        #expect(!other.cancelled.isSignaled())
+        #expect(other.serverResponseIDs.withLockedValue { $0.isEmpty })
+        await original.releaseWait()
     }
 
-    @Test func activeRequestsPreventSessionExpiry() async throws {
+    @Test func deviceAndLaunchReferencesCarryTheirHostAndParentWorkspace() async throws {
         let fixture = try BrokerFixture()
-        let session = try await fixture.initialize("client-a")
-        _ = try await fixture.echo(session)
-        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        let pending = Task { try await fixture.request(session, method: "tools/call", parameters: .object([
-            "name": .string("Wait"), "arguments": .object([:]),
-        ]), id: 83) }
-        try await original.waiting.wait(description: "request active during expiry")
-        fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1))
-        #expect(fixture.broker.sessionState(session) == .initialized(protocolVersion: MCPProtocolVersion.current))
-        await original.releaseWait()
-        _ = try await pending.value
+        let session = try await fixture.initialize("sessions")
+        let workspace = try await fixture.open(session, independent: true)
+        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
+            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
+        ])
+        let key = try #require(started["interactionSessionKey"])
+        _ = try await fixture.call(session, name: "DeviceInteractionSynthesize", arguments: ["interactionSessionKey": key])
+        _ = try await fixture.call(session, name: "DeviceInteractionInstallAndRun", arguments: ["interactionSessionKey": key])
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        #expect(transport.calls.withLockedValue { $0.contains { $0.name == "DeviceInteractionStartWorkspaceSession" } })
+        let synthesized = try #require(transport.calls.withLockedValue { $0.last { $0.name == "DeviceInteractionSynthesize" } })
+        #expect(synthesized.arguments["interactSessionKey"] == .string("native-device-1"))
+        #expect(synthesized.arguments["interactionSessionKey"] == nil)
+        let install = try #require(transport.calls.withLockedValue { $0.last { $0.name == "DeviceInteractionInstallAndRun" } })
+        #expect(install.arguments["workspaceIdentifier"] == .string("native-w-1"))
+        #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: "DeviceInteractionInstallAndRun",
+            arguments: ["interactionSessionKey": key, "workspaceIdentifier": .string("/Fixture/Other.xcodeproj")])))
+        #expect(fixture.factory.transports.withLockedValue { transports in
+            transports.allSatisfy { transport in
+                transport.calls.withLockedValue { calls in
+                    !calls.contains { $0.name == "XcodeOpenWorkspace" && $0.arguments["path"] == .string("/Fixture/Other.xcodeproj") }
+                }
+            }
+        })
+        let run = try await fixture.call(session, name: "RunProject", arguments: ["workspaceIdentifier": workspace])
+        let launch = try #require(run["launchSessionReference"])
+        #expect(launch != .string("native-launch-1"))
+        _ = try await fixture.call(session, name: "GetConsoleOutput", arguments: ["launchSessionReference": launch])
+        let console = try #require(transport.calls.withLockedValue { $0.last { $0.name == "GetConsoleOutput" } })
+        #expect(console.arguments["launchSessionReference"] == .string("native-launch-1"))
+        #expect(console.arguments["workspaceIdentifier"] == .string("native-w-1"))
+        _ = try await fixture.call(session, name: "DeviceInteractionEndSession", arguments: ["interactionSessionKey": key])
+        #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: "DeviceInteractionSynthesize",
+            arguments: ["interactionSessionKey": key])))
+    }
+
+    @Test func guiSessionReferencesRetainTheirOriginalTabAfterTheWorkspaceReferenceCloses() async throws {
+        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+        let fixture = try BrokerFixture(guiProcesses: [
+            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
+        ])
+        let session = try await fixture.initialize("gui-dependent-sessions")
+        let entries = try await fixture.workspaces(session).filter { $0["kind"] == .string("gui") }
+        let workspace = try #require(entries.first?["workspaceIdentifier"])
+        let otherTab = try #require(entries.last?["workspaceIdentifier"])
+        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
+            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
+        ])
+        let key = try #require(started["interactionSessionKey"])
+        let run = try await fixture.call(session, name: "RunProject", arguments: ["workspaceIdentifier": workspace])
+        let launch = try #require(run["launchSessionReference"])
+        _ = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                  arguments: ["workspaceIdentifier": workspace])
+        #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: "GetBuildLog",
+            arguments: ["workspaceIdentifier": workspace])))
+        #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: "DeviceInteractionInstallAndRun",
+            arguments: ["interactionSessionKey": key, "workspaceIdentifier": otherTab])))
+        let console = try await fixture.toolResult(session, name: "GetConsoleOutput",
+                                                   arguments: ["launchSessionReference": launch])
+        let installed = try await fixture.toolResult(session, name: "DeviceInteractionInstallAndRun",
+                                                     arguments: ["interactionSessionKey": key])
+        #expect(!NativeHostBroker.isToolError(console))
+        #expect(!NativeHostBroker.isToolError(installed))
+        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
+        let consoleCall = try #require(gui.calls.withLockedValue { $0.last { $0.name == "GetConsoleOutput" } })
+        let installCall = try #require(gui.calls.withLockedValue { $0.last { $0.name == "DeviceInteractionInstallAndRun" } })
+        #expect(consoleCall.arguments["tabIdentifier"] == .string("tab-1"))
+        #expect(installCall.arguments["tabIdentifier"] == .string("tab-1"))
+    }
+
+    @Test func nativeCatalogChangesUpdateTheAdapterWithoutChangingThePublicCatalog() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("catalog-change")
+        let workspace = try await fixture.open(session)
+        let before = try await fixture.request(session, method: "tools/list")
+        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
+            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
+        ])
+        let key = try #require(started["interactionSessionKey"])
+        _ = try await fixture.call(session, name: "DeviceInteractionSynthesize", arguments: ["interactionSessionKey": key])
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        #expect(native.calls.withLockedValue { $0.last { $0.name == "DeviceInteractionSynthesize" }?.arguments["interactSessionKey"] } != nil)
+        let changeIndex = fixture.factory.catalogChanges.count()
+        native.interactionKeyProperty.withLockedValue { $0 = "interactionSessionKey" }
+        try native.emitCatalogChanged()
+        try await waitWithTimeout("native catalog invalidation reached the runtime", timeout: .seconds(2)) {
+            try await fixture.factory.catalogChanges.nextValue(at: changeIndex)
+        }
+        _ = try await fixture.call(session, name: "DeviceInteractionSynthesize", arguments: ["interactionSessionKey": key])
+        let call = try #require(native.calls.withLockedValue { $0.last { $0.name == "DeviceInteractionSynthesize" } })
+        #expect(call.arguments["interactionSessionKey"] != nil)
+        #expect(call.arguments["interactSessionKey"] == nil)
+        #expect(try await fixture.request(session, method: "tools/list") == before)
+    }
+
+    @Test func handlelessQueriesReuseTheDefaultChannelAndNativeCatalog() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("global-queries")
+        _ = try await fixture.call(session, name: "DocumentationSearch", arguments: ["query": .string("SwiftUI")])
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let startupRequests = native.methods.withLockedValue { $0.filter { $0 == "initialize" || $0 == "tools/list" } }
+        _ = try await fixture.call(session, name: "DocumentationSearch", arguments: ["query": .string("Foundation")])
+        #expect(fixture.factory.transports.withLockedValue { $0.count } == 1)
+        #expect(native.methods.withLockedValue { $0.filter { $0 == "initialize" || $0 == "tools/list" } } == startupRequests)
+    }
+
+    @Test func packageManifestPathsReuseTheDeviceSessionsParentWorkspace() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("BrokerPackage-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            do { try FileManager.default.removeItem(at: directory) }
+            catch { Issue.record(error) }
+        }
+        let manifest = directory.appendingPathComponent("Package.swift")
+        try "// swift-tools-version: 6.3\nimport PackageDescription\nlet package = Package(name: \"Fixture\")\n"
+            .write(to: manifest, atomically: true, encoding: .utf8)
+        let fixture = try BrokerFixture()
+        fixture.factory.manifestOpensDirectory.withLockedValue { $0 = true }
+        let session = try await fixture.initialize("manifest-parent")
+        let opened = try await fixture.call(session, name: NativeHostBroker.openWorkspaceTool,
+                                            arguments: ["path": .string(manifest.path)])
+        let workspace = try #require(opened["workspaceIdentifier"])
+        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
+            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
+        ])
+        let key = try #require(started["interactionSessionKey"])
+        let installed = try await fixture.toolResult(session, name: "DeviceInteractionInstallAndRun", arguments: [
+            "interactionSessionKey": key, "workspaceIdentifier": .string(manifest.path),
+        ])
+        #expect(!NativeHostBroker.isToolError(installed))
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        #expect(native.calls.withLockedValue { $0.filter { $0.name == "XcodeOpenWorkspace" }.count } == 1)
+    }
+
+    @Test func failedOpenReleasesItsIndependentHostWithoutPublishingAWorkspace() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("failed-open")
+        fixture.factory.failNewHosts.withLockedValue { $0 = true }
+        let result = try await fixture.toolResult(session, name: NativeHostBroker.openWorkspaceTool,
+            arguments: ["path": .string("/Fixture/App.xcodeproj"), "createsNewHost": .bool(true)])
+        #expect(NativeHostBroker.isToolError(result))
+        #expect(try NativeHostBroker.toolPayload(result)["workspaceIdentifier"] == nil)
+        #expect(try await fixture.list(session).count == 2)
+    }
+
+    @Test(arguments: ["GetBuildLog", "tools/list"])
+    func runtimeTransportFailuresKeepTheirClassificationAndExternalSession(operation: String) async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("runtime-failure")
+        let workspace = try await fixture.open(session)
+        fixture.factory.replyOverrides.withLockedValue {
+            $0[operation] = .failure(kind: .invalidUpstreamResponse, message: "invalid upstream response",
+                                    sessionID: ProxySessionID(rawValue: "internal-runtime-session"))
+        }
+        let reply: ProxyRuntimeReply
+        if operation == "tools/list" {
+            reply = try await fixture.reply(session, method: "tools/list")
+        } else {
+            reply = try await fixture.reply(session, method: "tools/call", parameters: .object([
+                "name": .string(operation), "arguments": .object(["workspaceIdentifier": workspace]),
+            ]))
+        }
+        guard case .failure(.invalidUpstreamResponse, let message, let replySession) = reply else {
+            Issue.record("runtime transport failure became a tool result"); return
+        }
+        #expect(message == "invalid upstream response")
+        #expect(replySession == session)
+    }
+
+    @Test func nativeProtocolErrorsKeepTheirPayloadAndClientCorrelation() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("native-protocol-error")
+        let workspace = try await fixture.open(session)
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        transport.returnsProtocolError.withLockedValue { $0 = true }
+        let reply = try await fixture.reply(session, method: "tools/call", parameters: .object([
+            "name": .string("GetBuildLog"), "arguments": .object(["workspaceIdentifier": workspace]),
+        ]), id: 91)
+        guard case .response(let data, let replySession, _) = reply else {
+            Issue.record("native JSON-RPC error lost its original response"); return
+        }
+        let object = try JSONRPC.Wire.object(fromData: data)
+        #expect(JSONRPC.Message.Inspector.responseID(from: object)?.value == .number(.int(91)))
+        #expect(replySession == session)
+        #expect(object["error"].flatMap(JSONValue.init(any:)) == .object([
+            "code": .number(.int(-32010)), "message": .string("native protocol failure"),
+            "data": .object(["reason": .string("fixture")]),
+        ]))
+    }
+
+    @Test func nativeFailuresAndUserPayloadArePreserved() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("native-failure")
+        let workspace = try await fixture.open(session)
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        _ = transport.toolFailures.withLockedValue { $0.insert("GetBuildLog") }
+        let failure = try await fixture.toolResult(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": workspace])
+        #expect(NativeHostBroker.isToolError(failure))
+        #expect(try NativeHostBroker.toolPayload(failure)["message"] == .string("native failure"))
+        _ = transport.toolFailures.withLockedValue { $0.remove("GetBuildLog") }
+        let result = try await fixture.call(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": workspace])
+        #expect(result["data"] == .object(["workspaceIdentifier": .string("native-w-1"),
+                                           "tabIdentifier": .string("user-data")]))
+    }
+
+    @Test(arguments: [false, true])
+    func listWorkspacesReportsPartialNativeFailures(transportFailure: Bool) async throws {
+        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
+        let fixture = try BrokerFixture(guiProcesses: [
+            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
+        ])
+        let session = try await fixture.initialize("partial-list")
+        _ = try await fixture.workspaces(session)
+        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
+        if transportFailure {
+            fixture.factory.replyOverrides.withLockedValue {
+                $0["XcodeListWindows"] = .failure(kind: .invalidUpstreamResponse,
+                    message: "invalid upstream response", sessionID: nil)
+            }
+        } else {
+            _ = gui.toolFailures.withLockedValue { $0.insert("XcodeListWindows") }
+        }
+        _ = try await fixture.open(session)
+        let result = try await fixture.toolResult(session, name: NativeHostBroker.listWorkspacesTool)
+        #expect(NativeHostBroker.isToolError(result))
+        let payload = try NativeHostBroker.toolPayload(result)
+        guard case .array(let workspaces)? = payload["workspaces"], case .array(let errors)? = payload["errors"] else {
+            Issue.record("missing partial workspace list"); return
+        }
+        #expect(workspaces.count == 1)
+        #expect(errors.count == 1)
+        if transportFailure, case .object(let error)? = errors.first {
+            #expect(error["failureKind"] == .string("invalidUpstreamResponse"))
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func independentHostStopsAfterItsSessionClosesOrExpires(expires: Bool) async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("expiry")
+        _ = try await fixture.open(session, independent: true)
+        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        if expires { fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1)) }
+        else { fixture.broker.removeSession(session) }
+        try await transport.stopped.wait(description: "session released independent host")
     }
 
     @Test func eventStreamsKeepIdleSessionsAliveUntilTheyClose() async throws {
         let fixture = try BrokerFixture()
-        let session = try await fixture.initialize("client-a")
+        let session = try await fixture.initialize("events")
         #expect(fixture.broker.clientEventStreamOpened(session))
         fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1))
         #expect(fixture.broker.sessionState(session) == .initialized(protocolVersion: MCPProtocolVersion.current))
         fixture.broker.clientEventStreamClosed(session)
         fixture.broker.expireInactiveSessions(inactiveFor: .nanoseconds(1))
         #expect(fixture.broker.sessionState(session) == .missing)
-        #expect(!fixture.broker.clientEventStreamOpened(session))
     }
 
     @Test func resetWaitsForTheIndependentHostToStop() async throws {
         let fixture = try BrokerFixture()
-        let session = try await fixture.initialize("reset-independent")
-        let id = try await fixture.selectIndependentHost(session)
+        let session = try await fixture.initialize("reset")
+        _ = try await fixture.open(session, independent: true)
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
         transport.holdsStop.withLockedValue { $0 = true }
         defer { transport.releaseStop.signal() }
         let completed = TestSignal()
-        let resetting = Task {
-            await fixture.broker.reset()
-            completed.signal()
-        }
+        let resetting = Task { await fixture.broker.reset(); completed.signal() }
         try await transport.stopped.wait(description: "independent host stop began")
         #expect(!completed.isSignaled())
         transport.releaseStop.signal()
         await resetting.value
-        let next = try await fixture.initialize("after-independent-reset")
-        let available = try await fixture.list(next)
-        #expect(!available.contains { $0["hostIdentifier"] == id })
-    }
-
-    @Test func resetInvalidatesExternalSessionsAndAllowsAReconnectedClient() async throws {
-        let fixture = try BrokerFixture()
-        let a = try await fixture.initialize("client-a")
-        _ = try await fixture.echo(a)
-        await fixture.broker.reset()
-        #expect(fixture.broker.sessionState(a) == .missing)
-        let reconnected = try await fixture.initialize("client-reconnected")
-        #expect(try await fixture.echo(reconnected) == .number(.int(1)))
-        #expect(fixture.factory.transports.withLockedValue { $0.count } == 1)
+        #expect(fixture.broker.sessionState(session) == .missing)
+        let next = try await fixture.initialize("after-reset")
+        _ = try await fixture.open(next)
     }
 
     @Test func unissuedCursorRemainsAnInputError() async throws {
         let fixture = try BrokerFixture()
-        let a = try await fixture.initialize("client-a")
-        _ = try await fixture.echo(a)
+        let session = try await fixture.initialize("cursor")
         do {
-            _ = try await fixture.request(a, method: "tools/list",
-                                          parameters: .object(["cursor": .string("unissued-cursor")]))
+            _ = try await fixture.request(session, method: "tools/list", parameters: .object(["cursor": .string("unissued")]))
             Issue.record("unissued cursor was accepted")
-        } catch let error as NativeHostBrokerRPCError {
-            #expect(error.code == -32602)
-        }
-    }
-
-    @Test func initialConnectionFailureStillReceivesCatalogRecovery() async throws {
-        let fixture = try BrokerFixture(holdsInitialization: true)
-        let a = try await fixture.initialize("client-a")
-        let catalog = Task { try await fixture.request(a, method: "tools/list") }
-        try await fixture.factory.created.wait(description: "native runtime created")
-        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        try await transport.initializationStarted.wait(description: "native initialization started")
-        let initializeManager = try #require(fixture.factory.initializeManagers.withLockedValue { $0.first })
-        try await waitWithTimeout("backend initialize waiter registered") {
-            while initializeManager.pendingInitializes().isEmpty {
-                try Task.checkCancellation()
-                await Task.yield()
+        } catch let error as NativeHostBrokerReplyError {
+            guard case .mcpError(_, let code, _, _, _) = error.reply else {
+                Issue.record("cursor error lost its protocol reply"); return
             }
+            #expect(code == -32602)
         }
-        try transport.failInitialization()
-        let partial = try await catalog.value
-        guard case .object(let result) = partial, case .array(let tools)? = result["tools"],
-            case .object(let metadata)? = result["_meta"],
-            case .string(let nativeError)? = metadata["com.lynnswap.xcode-mcpkit/nativeCatalogError"]
-        else {
-            Issue.record("missing partial catalog"); return
-        }
-        #expect(tools.count == 2)
-        #expect(nativeError.contains("fixture initialization failed"))
-        fixture.factory.holdsInitialization.withLockedValue { $0 = false }
-        for transport in fixture.factory.transports.withLockedValue({ $0 }) {
-            try transport.releaseInitialization()
-        }
-        try await fixture.catalogChangedDelivered.wait(timeout: .seconds(10),
-                                                       description: "recovered catalog notified without a backend session")
-        #expect(try await fixture.echo(a) == .number(.int(1)))
     }
 
-    @Test func toolsListTimeoutKeepsManagementToolsAvailable() async throws {
+    @Test func toolsListTimeoutDoesNotPublishAnIncompleteCatalog() async throws {
         let clocks = makeRuntimeCoordinatorDeterministicClocks()
         let fixture = try BrokerFixture(clock: clocks.clock, holdsInitialization: true)
-        let a = try await fixture.initialize("client-a")
-        let pending = Task { try await fixture.request(a, method: "tools/list") }
+        let session = try await fixture.initialize("timeout")
+        let pending = Task { try await fixture.request(session, method: "tools/list") }
         try await fixture.factory.created.wait(description: "native runtime created")
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
         try await transport.initializationStarted.wait(description: "catalog waits for initialization")
         try await waitForSuspendedSleepers(on: clocks.timeoutClock)
         clocks.uptimeClock.advance(by: .seconds(5))
         clocks.timeoutClock.advance(by: .seconds(5))
-        guard case .object(let catalog) = try await pending.value,
-              case .array(let tools)? = catalog["tools"] else {
-            Issue.record("missing management catalog"); return
+        do {
+            _ = try await pending.value
+            Issue.record("timeout published an incomplete catalog")
+        } catch let error as NativeHostBrokerReplyError {
+            guard case .mcpError(_, let code, _, _, _) = error.reply else {
+                Issue.record("timeout lost its protocol reply"); return
+            }
+            #expect(code == -32000)
         }
-        #expect(tools.count == 2)
-        #expect(catalog["_meta"] != nil)
-    }
-
-    @Test func requestDeadlineIncludesWaitingForTheInitialConnection() async throws {
-        let timerClock = TestClock()
-        let uptimeClock = TestUptimeClock()
-        let base = Date()
-        let clock = ClockClient(now: {
-            base.addingTimeInterval(Double(uptimeClock.now()) / 1_000_000_000)
-        }, uptimeNanoseconds: uptimeClock.now, sleep: { duration in
-            try? await timerClock.sleep(for: duration)
-        }, sleepForTimeInterval: { _ in })
-        let fixture = try BrokerFixture(clock: clock, holdsInitialization: true)
-        let a = try await fixture.initialize("client-a")
-        let pending = Task { try await fixture.reply(a, method: "tools/call", parameters: .object([
-            "name": .string("Wait"), "arguments": .object([:]),
-        ]), id: 89) }
-        try await fixture.factory.created.wait(description: "native runtime created")
-        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        try await transport.initializationStarted.wait(description: "request waits for initialization")
-        try await waitForSuspendedSleepers(on: timerClock)
-        uptimeClock.advance(by: .seconds(4))
-        timerClock.advance(by: .seconds(4))
         try transport.releaseInitialization()
-        try await transport.waiting.wait(description: "tool execution started after initialization")
-        uptimeClock.advance(by: .seconds(1))
-        timerClock.advance(by: .seconds(1))
-        guard case .mcpError(_, -32000, "upstream timeout", _, _) = try await pending.value else {
-            Issue.record("initialization time was excluded from the deadline"); return
-        }
-        try await transport.cancelled.wait(description: "expired request cancelled on its native host")
-    }
-
-    @Test func failureKeepsThePreviousSelectionAndManagementToolsRemainAvailable() async throws {
-        let fixture = try BrokerFixture()
-        let a = try await fixture.initialize("client-a")
-        fixture.factory.failNewHosts.withLockedValue { $0 = true }
-        let available = try await fixture.list(a)
-        let other = try #require(available.first { $0["isDefault"] == .bool(false) }?["hostIdentifier"])
-        let result = try await fixture.request(a, method: "tools/call", parameters: .object([
-            "name": .string(NativeHostBroker.selectTool), "arguments": .object(["hostIdentifier": other]),
-        ]))
-        guard case .object(let value) = result else { Issue.record("missing failed selection"); return }
-        #expect(value["isError"] == .bool(true))
-        let current = try await fixture.list(a)
-        #expect(current.first { $0["isSelected"] == .bool(true) }?["hostIdentifier"] == .string(NativeHostBroker.defaultHostIdentifier))
-        fixture.factory.failNewHosts.withLockedValue { $0 = false }
-        _ = try await fixture.call(a, name: NativeHostBroker.selectTool, arguments: ["hostIdentifier": other])
-        #expect(try await fixture.echo(a) == .number(.int(1)))
     }
 }
 
@@ -505,11 +506,27 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
     let serverResponseIDs = NIOLockedValueBox<[JSONValue]>([])
     let index: Int64
     let gui: Bool
+    let guiWorkspacePaths: [String]
+    let manifestOpensDirectory: Bool
+    let interactionKeyProperty = NIOLockedValueBox("interactSessionKey")
+    let methods = NIOLockedValueBox<[String]>([])
     private let pending = NIOLockedValueBox<[JSONRPC.ID]>([])
+    struct Call: Sendable {
+        let name: String
+        let arguments: [String: JSONValue]
+    }
+    let calls = NIOLockedValueBox<[Call]>([])
+    let toolFailures = NIOLockedValueBox<Set<String>>([])
+    let returnsProtocolError = NIOLockedValueBox(false)
+    private let opened = NIOLockedValueBox(false)
 
-    init(index: Int64, holdsInitialization: Bool, gui: Bool = false) {
+    init(index: Int64, holdsInitialization: Bool, gui: Bool = false,
+         guiWorkspacePaths: [String] = ["/Fixture/App.xcodeproj", "/Fixture/App.xcodeproj"],
+         manifestOpensDirectory: Bool = false) {
         self.index = index
         self.gui = gui
+        self.guiWorkspacePaths = guiWorkspacePaths
+        self.manifestOpensDirectory = manifestOpensDirectory
         initialization.withLockedValue { $0.held = holdsInitialization }
         let pair = AsyncStream<Upstream.Event>.makeStream()
         events = pair.stream
@@ -534,6 +551,7 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
                 return .accepted
             }
             let method = object["method"] as? String
+            if let method { methods.withLockedValue { $0.append(method) } }
             if method == "notifications/cancelled" { cancelled.signal(); return .accepted }
             guard let id = JSONRPC.Message.Inspector.requestID(from: object) else { return .accepted }
             let result: JSONValue
@@ -548,21 +566,77 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
                 if held { return .accepted }
                 result = initializeResult
             case "tools/list":
-                result = .object(["tools": .array(["Echo-\(index)", "Wait"].map { name in
-                    .object(["name": .string(name), "description": .string(name),
-                        "inputSchema": .object(["type": .string("object"), "properties": .object(
-                            gui ? ["tabIdentifier": .object(["type": .string("string")])] : [:])])])
-                }), "_meta": .object(["com.lynnswap.xcode-mcpkit/origin": .object([
-                    "kind": .string("nativeHost"), "processID": .number(.int(1000 + index)),
-                ])])])
+                let scoped = ["GetBuildLog", "BuildProject", "XcodeCloseWorkspace", "RunProject", "GetConsoleOutput",
+                              "DeviceInteractionInstallAndRun"]
+                var tools = scoped.map { descriptor($0, properties: [gui ? "tabIdentifier" : "workspaceIdentifier": .object(["type": .string("string")])]) }
+                tools.append(contentsOf: [
+                    descriptor("DocumentationSearch", properties: ["query": .object(["type": .string("string")])]),
+                    descriptor("XcodeOpenWorkspace", properties: ["path": .object(["type": .string("string")])]),
+                    descriptor(gui ? "XcodeListWindows" : "XcodeListWorkspaces"),
+                    descriptor("DeviceInteractionStartSession", properties: ["deviceIdentifier": .object(["type": .string("string")]),
+                        "sessionIdentifier": .object(["type": .string("string")])]),
+                    descriptor("DeviceInteractionSynthesize", properties: [interactionKeyProperty.withLockedValue { $0 }: .object(["type": .string("string")])]),
+                    descriptor("DeviceInteractionEndSession", properties: ["interactionSessionKey": .object(["type": .string("string")])]),
+                ])
+                tools.append(descriptor("DeviceInteractionStartWorkspaceSession", properties: [
+                    gui ? "tabIdentifier" : "workspaceIdentifier": .object(["type": .string("string")]),
+                    "sessionIdentifier": .object(["type": .string("string")]),
+                ]))
+                result = .object(["tools": .array(tools), "_meta": .object([
+                    "com.lynnswap.xcode-mcpkit/origin": .object([
+                        "kind": .string("nativeHost"), "processID": .number(.int(1000 + index)),
+                    ]),
+                ])])
             case "tools/call":
-                let parameters = object["params"] as? [String: Any]
-                if parameters?["name"] as? String == "Wait" {
+                let parameters = object["params"] as? [String: Any] ?? [:]
+                let name = parameters["name"] as? String ?? ""
+                let arguments: [String: JSONValue]
+                if case .object(let fields)? = (parameters["arguments"] as? [String: Any]).flatMap(JSONValue.init(any:)) {
+                    arguments = fields
+                } else { arguments = [:] }
+                calls.withLockedValue { $0.append(Call(name: name, arguments: arguments)) }
+                if name == "GetBuildLog", returnsProtocolError.withLockedValue({ $0 }) {
+                    continuation.yield(.message(try JSONRPC.Wire.errorResponseData(id: id, code: -32010,
+                        message: "native protocol failure", data: .object(["reason": .string("fixture")]))))
+                    return .accepted
+                }
+                if toolFailures.withLockedValue({ $0.contains(name) }) {
+                    result = try NativeHostBroker.toolResult(.object(["message": .string("native failure")]), isError: true)
+                } else if name == "BuildProject" {
                     pending.withLockedValue { $0.append(id) }
                     waiting.signal()
                     return .accepted
+                } else {
+                    switch name {
+                    case "XcodeOpenWorkspace":
+                        opened.withLockedValue { $0 = true }
+                        let path = NativeHostBroker.string(arguments["path"]) ?? "/Fixture/App.xcodeproj"
+                        let workspacePath = manifestOpensDirectory && URL(filePath: path).lastPathComponent == "Package.swift"
+                            ? URL(filePath: path).deletingLastPathComponent().path : path
+                        result = try NativeHostBroker.toolResult(.object([
+                            "workspaceIdentifier": .string("native-w-\(index)"),
+                            "workspacePath": .string(workspacePath),
+                        ]))
+                    case "XcodeListWorkspaces":
+                        let message = opened.withLockedValue { $0 }
+                            ? "* workspaceIdentifier: native-w-\(index), workspacePath: /Fixture/App.xcodeproj\n" : "No open workspaces."
+                        result = try NativeHostBroker.toolResult(.object(["message": .string(message)]))
+                    case "XcodeListWindows":
+                        let message = guiWorkspacePaths.enumerated().map { offset, path in
+                            "* tabIdentifier: tab-\(offset + 1), workspacePath: \(path)"
+                        }.joined(separator: "\n")
+                        result = try NativeHostBroker.toolResult(.object(["message": .string(message)]))
+                    case "XcodeCloseWorkspace":
+                        opened.withLockedValue { $0 = false }
+                        result = try NativeHostBroker.toolResult(.object(["closed": .bool(true),
+                            "workspaceIdentifier": arguments["workspaceIdentifier"] ?? .null]))
+                    case "DeviceInteractionStartSession", "DeviceInteractionStartWorkspaceSession":
+                        result = try NativeHostBroker.toolResult(.object(["interactionSessionKey": .string("native-device-\(index)")]))
+                    case "RunProject":
+                        result = try NativeHostBroker.toolResult(.object(["launchSessionReference": .string("native-launch-\(index)")]))
+                    default: result = echoResult
+                    }
                 }
-                result = echoResult
             default: result = .object([:])
             }
             continuation.yield(.message(try JSONRPC.Wire.resultResponseData(id: id, result: result)))
@@ -570,23 +644,15 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
         return .accepted
     }
 
+    private func descriptor(_ name: String, properties: [String: JSONValue] = [:]) -> JSONValue {
+        .object(["name": .string(name), "description": .string(name),
+            "inputSchema": .object(["type": .string("object"), "properties": .object(properties)])])
+    }
+
     private var initializeResult: JSONValue {
         .object(["protocolVersion": .string(MCPProtocolVersion.current),
             "capabilities": .object(["tools": .object([:])]),
             "serverInfo": .object(["name": .string("Native-\(index)"), "version": .string("1")])])
-    }
-
-    func failInitialization() throws {
-        let ids = initialization.withLockedValue { state in
-            let ids = state.pending
-            state.pending.removeAll()
-            return ids
-        }
-        for id in ids {
-            continuation.yield(.message(try JSONRPC.Wire.errorResponseData(
-                id: id, code: -32000, message: "fixture initialization failed"
-            )))
-        }
     }
 
     func releaseInitialization() throws {
@@ -608,9 +674,16 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
         ])))
     }
 
+    func emitCatalogChanged() throws {
+        continuation.yield(.message(try JSONRPC.Wire.data(from:
+            JSONRPC.Wire.notificationObject(method: "notifications/tools/list_changed"))))
+    }
+
     private var echoResult: JSONValue {
         .object(["content": .array([.object(["type": .string("text"), "text": .string("host \(index)")])]),
-            "structuredContent": .object(["host": .number(.int(index))]), "isError": .bool(false)])
+            "structuredContent": .object(["host": .number(.int(index)),
+                "data": .object(["workspaceIdentifier": .string("native-w-\(index)"), "tabIdentifier": .string("user-data")])]),
+                "isError": .bool(false)])
     }
     func releaseWait() async {
         for id in pending.withLockedValue({ values in let ids = values; values.removeAll(); return ids }) {
@@ -622,34 +695,81 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
 
 private final class BrokerRuntimeFactory: Sendable {
     let transports = NIOLockedValueBox<[BrokerTransport]>([])
-    let initializeManagers = NIOLockedValueBox<[InitializeManager]>([])
+    let guiWorkspacePaths = NIOLockedValueBox(["/Fixture/App.xcodeproj", "/Fixture/App.xcodeproj"])
+    let manifestOpensDirectory = NIOLockedValueBox(false)
+    let catalogChanges = LockedRecordedValues<Void>()
     let failNewHosts = NIOLockedValueBox(false)
     let holdsInitialization = NIOLockedValueBox(false)
+    let replyOverrides = NIOLockedValueBox<[String: ProxyRuntimeReply]>([:])
     let created = TestSignal()
     func make(_ configuration: ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing {
         if failNewHosts.withLockedValue({ $0 }) { throw NativeHostBrokerError("fixture startup failed") }
         let upstream = transports.withLockedValue { values in
             let transport = BrokerTransport(index: Int64(values.count + 1),
                                             holdsInitialization: holdsInitialization.withLockedValue { $0 },
-                                            gui: configuration.guiProcess != nil)
+                                            gui: configuration.guiProcess != nil,
+                                            guiWorkspacePaths: guiWorkspacePaths.withLockedValue { $0 },
+                                            manifestOpensDirectory: manifestOpensDirectory.withLockedValue { $0 })
             values.append(transport)
             return transport
         }
         created.signal()
-        return ProxyRuntime.testing(configuration: configuration) { eventLoop, notification, closed, catalogChanged in
+        let runtime = ProxyRuntime.testing(configuration: configuration) { eventLoop, notification, closed, catalogChanged in
             let coordinator = RuntimeCoordinator(
                 config: configuration, eventLoop: eventLoop, upstreams: [upstream],
                 nativeUpstreamFactory: { [self] in
                     let replacement = BrokerTransport(index: upstream.index,
-                        holdsInitialization: holdsInitialization.withLockedValue { $0 }, gui: upstream.gui)
+                        holdsInitialization: holdsInitialization.withLockedValue { $0 }, gui: upstream.gui,
+                        guiWorkspacePaths: guiWorkspacePaths.withLockedValue { $0 },
+                        manifestOpensDirectory: manifestOpensDirectory.withLockedValue { $0 })
                     transports.withLockedValue { $0.append(replacement) }
                     return replacement
                 }, notificationSink: notification, sessionClosedSink: closed,
-                catalogChangedSink: catalogChanged, startImmediately: false)
-            initializeManagers.withLockedValue { $0.append(coordinator.initializeManager) }
+                catalogChangedSink: { [self] in catalogChanged(); catalogChanges.append(()) }, startImmediately: false)
             return coordinator
         }
+        return BrokerReplyRuntime(base: runtime, overrides: replyOverrides)
     }
+}
+
+private struct BrokerReplyRuntime: ProxyRuntimeServing {
+    let base: any ProxyRuntimeServing
+    let overrides: NIOLockedValueBox<[String: ProxyRuntimeReply]>
+
+    func start() { base.start() }
+    func cancelForDeinit() { base.cancelForDeinit() }
+    func shutdown() async { await base.shutdown() }
+    func subscribeToEvents(_ receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void) -> @Sendable () -> Void {
+        base.subscribeToEvents(receive)
+    }
+    func beginRequest(_ message: ProxyRuntimeRequest, in session: ProxySessionID?) -> (any ProxyRuntimeRequestOperating)? {
+        guard let operation = base.beginRequest(message, in: session) else { return nil }
+        let method = (message.decodedJSON?.foundationObject as? [String: Any])?["method"] as? String
+        let key = NativeHostBroker.toolName(in: message) ?? method ?? ""
+        guard let reply = overrides.withLockedValue({ $0[key] }) else { return operation }
+        return BrokerReplyOperation(base: operation, reply: reply)
+    }
+    func clientRequestFinished(_ id: ProxySessionID) { base.clientRequestFinished(id) }
+    func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState { base.sessionState(id) }
+    func clientEventStreamOpened(_ id: ProxySessionID) -> Bool { base.clientEventStreamOpened(id) }
+    func clientEventStreamClosed(_ id: ProxySessionID) { base.clientEventStreamClosed(id) }
+    func expireInactiveSessions(inactiveFor: TimeAmount) { base.expireInactiveSessions(inactiveFor: inactiveFor) }
+    func removeSession(_ id: ProxySessionID) { base.removeSession(id) }
+    func snapshot() -> ProxyRuntimeSnapshot { base.snapshot() }
+    func debugSnapshotData(includeSensitivePayloads: Bool) -> Data? {
+        base.debugSnapshotData(includeSensitivePayloads: includeSensitivePayloads)
+    }
+    func reset() async { await base.reset() }
+}
+
+private struct BrokerReplyOperation: ProxyRuntimeRequestOperating {
+    let base: any ProxyRuntimeRequestOperating
+    let reply: ProxyRuntimeReply
+
+    func whenComplete(_ completion: @escaping @Sendable (Result<ProxyRuntimeReply, any Error>) -> Void) {
+        base.whenComplete { result in completion(result.map { _ in reply }) }
+    }
+    func cancel(reason: ProxyRuntimeCancellationReason) { base.cancel(reason: reason) }
 }
 
 private final class BrokerFixture: Sendable {
@@ -657,7 +777,6 @@ private final class BrokerFixture: Sendable {
     let factory = BrokerRuntimeFactory()
     let events = NIOLockedValueBox<[ProxyRuntimeEvent]>([])
     let serverRequestDelivered = TestSignal()
-    let catalogChangedDelivered = TestSignal()
     let guiProcesses = NIOLockedValueBox<[XcodeGUIProcess]>([])
     let defaultInstallation = XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Default.app"))
 
@@ -677,7 +796,6 @@ private final class BrokerFixture: Sendable {
         broker = try NativeHostBroker(configuration: makeConfig(requestTimeout: 5),
                                   inventory: inventory, clock: clock, factory: factory.make)
         let delivered = serverRequestDelivered
-        let catalogChanged = catalogChangedDelivered
         let cancel = broker.subscribeToEvents { event in
             events.withLockedValue { $0.append(event) }
             if case .notification(_, let data) = event,
@@ -685,11 +803,7 @@ private final class BrokerFixture: Sendable {
                case .request("sampling/createMessage", _) = JSONRPC.Message.Inspector.kind(of: object) {
                 delivered.signal()
             }
-            if case .notification(_, let data) = event,
-               let object = try? JSONRPC.Wire.object(fromData: data),
-               object["method"] as? String == "notifications/tools/list_changed" {
-                catalogChanged.signal()
-            }
+
         }
         let broker = broker
         #expect(registerAsyncTestCleanup(description: "broker shutdown") {
@@ -698,15 +812,31 @@ private final class BrokerFixture: Sendable {
         })
     }
 
-    func selectIndependentHost(_ session: ProxySessionID) async throws -> JSONValue {
-        let value = try await call(session, name: NativeHostBroker.selectTool, arguments: [
-            "hostIdentifier": .string(NativeHostBroker.defaultHostIdentifier), "createsNewHost": .bool(true),
-        ])
-        guard case .object(let result) = value, case .object(let host)? = result["host"],
-              let identifier = host["hostIdentifier"] else {
-            throw NativeHostBrokerError("missing independent host")
+    func open(_ session: ProxySessionID, host: JSONValue? = nil,
+              independent: Bool = false) async throws -> JSONValue {
+        var arguments: [String: JSONValue] = ["path": .string("/Fixture/App.xcodeproj")]
+        if let host { arguments["hostIdentifier"] = host }
+        if independent { arguments["createsNewHost"] = .bool(true) }
+        let result = try await call(session, name: NativeHostBroker.openWorkspaceTool, arguments: arguments)
+        guard let identifier = result["workspaceIdentifier"] else {
+            throw NativeHostBrokerError("missing workspace reference")
         }
         return identifier
+    }
+
+    func workspaces(_ session: ProxySessionID) async throws -> [[String: JSONValue]] {
+        let result = try await call(session, name: NativeHostBroker.listWorkspacesTool)
+        guard case .array(let values)? = result["workspaces"] else {
+            throw NativeHostBrokerError("missing workspace list")
+        }
+        return values.compactMap { if case .object(let fields) = $0 { fields } else { nil } }
+    }
+
+    func toolResult(_ session: ProxySessionID, name: String,
+                    arguments: [String: JSONValue] = [:], id: Int64 = 19) async throws -> JSONValue {
+        try await request(session, method: "tools/call", parameters: .object([
+            "name": .string(name), "arguments": .object(arguments),
+        ]), id: id)
     }
 
     func initialize(_ name: String) async throws -> ProxySessionID {
@@ -740,34 +870,21 @@ private final class BrokerFixture: Sendable {
         try NativeHostBroker.result(in: await reply(session, method: method, parameters: parameters, id: id))
     }
     func call(_ session: ProxySessionID, name: String,
-              arguments: [String: JSONValue] = [:]) async throws -> JSONValue {
+              arguments: [String: JSONValue] = [:]) async throws -> [String: JSONValue] {
         let result = try await request(session, method: "tools/call", parameters: .object([
             "name": .string(name), "arguments": .object(arguments),
         ]))
         guard case .object(let object) = result, case .object(let content)? = object["structuredContent"] else {
             throw NativeHostBrokerError("missing tool result")
         }
-        return .object(content)
+        return content
     }
     func list(_ session: ProxySessionID) async throws -> [[String: JSONValue]] {
         let value = try await call(session, name: NativeHostBroker.listTool)
-        guard case .object(let object) = value, case .array(let hosts)? = object["hosts"] else {
+        guard case .array(let hosts)? = value["hosts"] else {
             throw NativeHostBrokerError("missing host list")
         }
         return hosts.compactMap { if case .object(let fields) = $0 { fields } else { nil } }
     }
-    func echo(_ session: ProxySessionID) async throws -> JSONValue {
-        let catalog = try await request(session, method: "tools/list")
-        guard case .object(let object) = catalog, case .array(let tools)? = object["tools"],
-              let name = tools.compactMap({ value -> String? in
-                  guard case .object(let fields) = value, case .string(let name)? = fields["name"],
-                        name.hasPrefix("Echo-") else { return nil }
-                  return name
-              }).first else { throw NativeHostBrokerError("missing echo tool") }
-        let value = try await call(session, name: name)
-        guard case .object(let fields) = value, let host = fields["host"] else {
-            throw NativeHostBrokerError("missing host identity")
-        }
-        return host
-    }
+
 }

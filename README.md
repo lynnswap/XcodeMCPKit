@@ -1,6 +1,7 @@
 # XcodeMCPKit
 
-XcodeMCPKit is a server for using Xcode's MCP tools headlessly.
+XcodeMCPKit runs Xcode's MCP tools through one server, using saved workspace
+models headlessly or an open Xcode window.
 
 ## Requirements
 

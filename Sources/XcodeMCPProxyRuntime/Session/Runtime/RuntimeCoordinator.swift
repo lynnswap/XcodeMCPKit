@@ -164,7 +164,8 @@ protocol RuntimeInitializeToolsPort: Sendable {
     ) -> EventLoopFuture<ByteBuffer>
     func sharedToolsList(
         sessionID: String,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        prefersCachedToolsCatalog: Bool
     ) async throws -> JSONValue
 }
 
@@ -1128,7 +1129,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
 
     func sharedToolsList(
         sessionID: String,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        prefersCachedToolsCatalog: Bool = false
     ) async throws -> JSONValue {
         _ = session(id: sessionID)
         let timeout =
@@ -1147,7 +1149,8 @@ final class RuntimeCoordinator: Sendable, RuntimeCoordinating {
         )
         let baseResult = try await awaitControlPlaneOperation {
             try await self.controlPlaneCoordinator.toolsCatalog(
-                deadlineUptimeNs: deadline
+                deadlineUptimeNs: deadline,
+                prefersCachedToolsCatalog: prefersCachedToolsCatalog
             )
         }
         logNativeToolCatalogSummaryIfNeeded(baseResult)

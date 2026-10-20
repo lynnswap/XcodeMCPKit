@@ -45,7 +45,8 @@ struct LocalMCPResponder {
         }
         let result = try await sessionManager.sharedToolsList(
             sessionID: sessionID,
-            requestTimeoutOverride: requestTimeoutOverride
+            requestTimeoutOverride: requestTimeoutOverride,
+            prefersCachedToolsCatalog: false
         )
         return try Self.encodeResultData(id: originalID, result: result)
     }
@@ -55,7 +56,8 @@ struct LocalMCPResponder {
         headerSessionID: String?,
         headerSessionExists: Bool,
         eventLoop: EventLoop,
-        requestTimeoutOverride: TimeAmount? = nil
+        requestTimeoutOverride: TimeAmount? = nil,
+        prefersCachedToolsCatalog: Bool = false
     ) -> LocalPostHandling? {
         guard let method = JSONRPC.Message.Inspector.method(from: object) else {
             return nil
@@ -140,7 +142,8 @@ struct LocalMCPResponder {
             ) {
                 try await sessionManager.sharedToolsList(
                     sessionID: headerSessionID,
-                    requestTimeoutOverride: requestTimeoutOverride
+                    requestTimeoutOverride: requestTimeoutOverride,
+                    prefersCachedToolsCatalog: prefersCachedToolsCatalog
                 )
             }
         }

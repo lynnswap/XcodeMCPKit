@@ -121,26 +121,28 @@ struct ProxyToolVerifierTests {
         #expect(calls.last?.name == "XcodeCloseWorkspace")
     }
 
-    @Test func bothDeviceSessionKindsCloseTheirOwnedSession() async throws {
+    @Test func deviceOperationsUseAndCloseTheirOwnedSession() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.outputRoot) }
-        let recentIdentifiers = RecentDeviceSessionIdentifiers()
         let runtime = XcodeMCPTestRuntime(tools: [
             tool("XcodeOpenWorkspace", properties: ["path"]),
             tool("XcodeCloseWorkspace", properties: ["workspaceIdentifier"]),
-            tool("DeviceInteractionStartSession", properties: ["sessionIdentifier", "deviceIdentifier"]),
-            tool("DeviceInteractionStartWorkspaceSession", properties: ["workspaceIdentifier", "sessionIdentifier", "deviceIdentifier"]),
+            tool("DeviceInteractionStartSession", properties: ["workspaceIdentifier", "sessionIdentifier", "deviceIdentifier"]),
+            tool("DeviceInteractionSynthesize", properties: ["interactionSessionKey"]),
             tool("DeviceInteractionEndSession", properties: ["interactionSessionKey"]),
         ])
         await runtime.setToolHandler { call in
             switch call.name {
             case "XcodeOpenWorkspace": return result(["workspaceIdentifier": "owned-native-id"])
-            case "DeviceInteractionStartSession", "DeviceInteractionStartWorkspaceSession":
-                let identifier = try #require(call.arguments["sessionIdentifier"]?.stringValue)
-                #expect(await recentIdentifiers.insert(identifier))
+            case "DeviceInteractionStartSession":
+                #expect(call.arguments["sessionIdentifier"]?.stringValue?.isEmpty == false)
                 #expect(call.arguments["deviceIdentifier"] == "owned-device-id")
-                #expect(call.arguments["workspaceIdentifier"] == (call.name == "DeviceInteractionStartSession" ? nil : "owned-native-id"))
-                return result(["interactionSessionKey": .string(call.name)])
+                #expect(call.arguments["workspaceIdentifier"] == "owned-native-id")
+                return result(["interactionSessionKey": "owned-device-session"])
+            case "DeviceInteractionSynthesize":
+                #expect(call.arguments["interactionSessionKey"] == "owned-device-session")
+                #expect(call.arguments["interactSessionKey"] == nil)
+                return result(["message": "ok"])
             default: return result(["message": "ok"])
             }
         }
@@ -149,7 +151,7 @@ struct ProxyToolVerifierTests {
         let calls = await runtime.recordedToolCalls()
         #expect(calls.filter { $0.name == "DeviceInteractionEndSession" }
             .compactMap { $0.arguments["interactionSessionKey"]?.stringValue }
-            == ["DeviceInteractionStartSession", "DeviceInteractionStartWorkspaceSession"])
+            == ["owned-device-session"])
     }
 
     @Test func nativeConfigurationPlansUseDisposableProjectAndRunCreationAfterBuild() async throws {
@@ -281,7 +283,7 @@ struct ProxyToolVerifierTests {
                 #expect(call.arguments["workspaceIdentifier"] == "owned-native-id")
                 await ownership.close()
                 return result(["message": "closed"])
-            case "XcodeListSchemes", "DeviceInteractionStartWorkspaceSession":
+            case "XcodeListSchemes", "DeviceInteractionStartSession":
                 #expect(call.arguments["workspaceIdentifier"] == "owned-native-id")
                 return MCPToolResult(content: [], structuredContent: ["message": "ProxyToolVerifierFixture"], isError: toolFails)
             default:
@@ -330,11 +332,6 @@ private actor HeadlessFixtureState {
     func close() { closeCount += 1 }
 }
 
-private actor RecentDeviceSessionIdentifiers {
-    private var identifiers: Set<String> = []
-    func insert(_ identifier: String) -> Bool { identifiers.insert(identifier).inserted }
-}
-
 private func referencedProject(in workspace: URL) throws -> URL {
     let document = try XMLDocument(contentsOf: workspace.appendingPathComponent("contents.xcworkspacedata"))
     let reference = try #require(try document.nodes(forXPath: "/Workspace/FileRef/@location").first?.stringValue)
@@ -356,7 +353,7 @@ private let nativeTools = [
     tool("XcodeOpenWorkspace", properties: ["path"]),
     tool("XcodeListWorkspaces", properties: []),
     tool("XcodeCloseWorkspace", properties: ["workspaceIdentifier"]),
-    tool("DeviceInteractionStartWorkspaceSession", properties: ["workspaceIdentifier", "sessionIdentifier"]),
+    tool("DeviceInteractionStartSession", properties: ["workspaceIdentifier", "sessionIdentifier"]),
 ]
 
 private let workspaceTools = nativeTools + [

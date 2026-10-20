@@ -6,7 +6,7 @@ Swift client API for calling Xcode MCP from an app or tool.
 
 Use `XcodeMCPKit` when Swift code needs to discover and call Xcode MCP tools.
 The default transport discovers a running `xcode-mcp-proxy-server` endpoint.
-The proxy loads saved workspace models through its owned headless native host.
+The proxy routes public workspace handles to headless models or GUI Xcode.
 Start the proxy before constructing a default client.
 
 The public API is intentionally small:
@@ -19,10 +19,10 @@ The public API is intentionally small:
 - `MCPTool`, `MCPToolResult`, `MCPContent`, and `MCPProgress`
 - `XcodeMCPError`
 
-Xcode decides the available tools at runtime, so the SDK does not provide
-tool-specific Swift wrappers. Use `listTools()` to discover tools, `callTool`
-to call them, and `request(_:params:)` for dynamic MCP methods outside
-`tools/call`.
+Use `listTools()` to discover the connected server's operations, `callTool`
+to invoke them, and `request(_:params:)` for MCP methods outside `tools/call`.
+The SDK preserves JSON schemas and values rather than providing tool-specific
+Swift wrappers. The proxy keeps its public inputs stable across native backends.
 
 Use `XcodeMCPKitTesting` when tests need deterministic tool catalogs, progress
 notifications, and tool results through the same `XcodeMCP` API without
@@ -55,11 +55,7 @@ if tools.contains(where: { $0.name == "DocumentationSearch" }) {
         }
     }
 
-    for item in result.content {
-        if case .text(let text, _) = item {
-            print(text)
-        }
-    }
+    print(result.text)
 }
 
 await xcode.close()
@@ -100,19 +96,27 @@ let config = XcodeMCPConfiguration(
 
 ### Workspace routing
 
-Pass an absolute project or workspace path to a workspace-scoped tool:
+Use `XcodeListWorkspaces` for existing GUI/headless workspaces, or open a saved
+workspace and use its returned identifier:
 
 ```swift
-let result = try await xcode.callTool("XcodeRead", arguments: [
-    "workspaceIdentifier": "/Users/me/Projects/App/App.xcworkspace",
-    "filePath": "App/Sources/App.swift"
+let opened = try await xcode.callTool("XcodeOpenWorkspace", arguments: [
+    "path": "/Users/me/Projects/App/App.xcworkspace"
 ])
+if let workspace = opened.structuredContent?["workspaceIdentifier"]?.stringValue {
+    let result = try await xcode.callTool("XcodeRead", arguments: [
+        "workspaceIdentifier": .string(workspace),
+        "filePath": "App/Sources/App.swift"
+    ])
+    print(result.text)
+}
 ```
 
-The native host loads the model for the operation. Explicit Open is optional;
-native workspace IDs returned by `XcodeOpenWorkspace` are also accepted. Save
-editor changes to disk and select the host's scheme, destination, and test plan
-before building or testing. Open GUI windows do not supply state to this host.
+The proxy retains each workspace's host and translates native workspace/tab
+selectors internally. Obtain fresh identifiers after a new MCP session or host
+restart. Absolute workspace paths also load saved models in the default headless
+host when explicit Open is unnecessary. See [workspace usage](../../Docs/usage.md)
+for saved-file behavior, schemes, device sessions, and optional host selection.
 
 ### Standalone native session
 
@@ -132,13 +136,13 @@ await standalone.close()
 ```
 
 This transport exposes the host's native tools and owns its process lifecycle.
-The proxy and standalone transports both execute headless tools.
-The verified Xcode 27 headless catalog contains 57 tools; the catalog remains
-dynamic, so callers should discover capabilities with `listTools()`.
+Its native catalog and identifiers are outside the proxy's stable tool/handle
+contract. Discover its capabilities with `listTools()` and keep native identifiers
+within that standalone session.
 
-## Dynamic tools and raw values
+## Tool discovery and JSON values
 
-The Xcode MCP server decides which tools are available at runtime. Call
+Call
 `listTools(options:)` to load every page of the catalog, then pass the selected
 tool name to `callTool(_:arguments:options:onProgress:)`. A pagination failure
 never returns a partial catalog, and a cursor cycle is treated as an invalid
@@ -234,35 +238,7 @@ discovery is reported as `transportUnavailable`, not as an invalid request.
 
 ## Testing
 
-`XcodeMCPKitTesting` provides `XcodeMCPTestRuntime`, an in-memory MCP runtime
-that creates initialized `XcodeMCP` clients:
-
-```swift
-import XcodeMCPKit
-import XcodeMCPKitTesting
-
-let runtime = XcodeMCPTestRuntime()
-await runtime.setToolResult(
-    MCPToolResult(
-        content: [
-            .text("Result text")
-        ]
-    ),
-    forToolNamed: "DocumentationSearch"
-)
-
-let xcode = try await runtime.makeClient()
-let result = try await xcode.callTool(
-    "DocumentationSearch",
-    arguments: ["query": "NavigationStack"]
-)
-await xcode.close()
-```
-
-The runtime provides the fake transport and JSON-RPC response loop. Tests can
-read `recordedMessages()` and `recordedToolCalls()` to assert request shape while
-keeping production code on the public SDK surface. A non-default transport in
-`makeClient(configuration:)` is rejected instead of being silently ignored.
-
-See [`XcodeMCPKitTesting`](../XcodeMCPKitTesting/README.md) for the focused
-testing API guide.
+Use [XcodeMCPKitTesting](../XcodeMCPKitTesting/README.md) to create initialized
+clients with deterministic catalogs, progress, and results. Its fake transport
+uses the same public `XcodeMCP` API and records decoded tool calls; production
+code does not need a separate mock client interface.

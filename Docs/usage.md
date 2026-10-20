@@ -1,200 +1,126 @@
 # Workspace and tool usage
 
 Start the server and [connect your MCP client](../README.md#connect-your-mcp-client).
-The server runs tools in owned headless hosts or running Xcode application processes.
+Use `XcodeListWorkspaces` to find a workspace, then pass its `workspaceIdentifier`
+to the operation you need. The same tool names and inputs work with headless
+models and GUI Xcode windows.
 
-## Select an Xcode host
+## Find or open a workspace
 
-Each MCP session starts on the server's selected default Xcode. Call
-`XcodeMCPKitListHosts` to list owned headless hosts, installed Xcode candidates,
-and running Xcode application processes. Each entry reports its `kind`
-(`headless` or `gui`), installation, and default/selected status. Running entries
-include a `processIdentifier`. Listing does not start every candidate.
+`XcodeListWorkspaces` returns entries with `workspaceIdentifier`, `name`, `kind`,
+and a path when available. It includes open GUI workspaces and loaded headless
+models. Two GUI tabs for the same path remain separate entries because they can
+have different editor state and operation settings.
 
-Pass a returned identifier to `XcodeMCPKitSelectHost`:
+For example, call `GetBuildLog` with a returned identifier:
 
 ```json
 {
+  "workspaceIdentifier": "workspace-from-the-list",
+  "severity": "error"
+}
+```
+
+To load a saved project, call `XcodeOpenWorkspace`:
+
+```json
+{
+  "path": "/Users/me/Projects/App/App.xcworkspace"
+}
+```
+
+It accepts a `.xcworkspace`, `.xcodeproj`, Swift package directory, or
+`Package.swift` and returns a `workspaceIdentifier` for subsequent operations.
+Without an explicit host, Open uses the server's default headless installation.
+Workspace operations also accept an absolute path for that default host when
+an explicit Open is unnecessary.
+
+An identifier refers to one workspace in its owning host. The proxy translates
+it to the native workspace or GUI tab identifier. Keep using that identifier;
+no host-selection call or catalog refresh is needed. Identifiers belong to the
+MCP session that returned them. After starting a new MCP session or restarting a
+host, list or open the workspace again to obtain a current identifier.
+
+`XcodeCloseWorkspace` closes a headless model and releases its preview resources.
+For a GUI workspace, it releases the proxy handle and leaves the Xcode window open.
+Disconnecting from the server does not close GUI windows or quit Xcode.
+
+## Files, schemes, and destinations
+
+Headless models use saved project and source files. Save changes before using
+a headless workspace; opening the same path in Xcode does not transfer unsaved
+buffers, scheme selection, destination, or debugger state. Use the GUI entry from
+`XcodeListWorkspaces` when the operation should use that window's state.
+
+Inspect settings with `XcodeListSchemes`, `XcodeListRunDestinations`, and
+`XcodeListTestPlans`. Change them with `XcodeSwitchScheme`,
+`XcodeSwitchRunDestination`, and `XcodeSwitchTestPlan`. A test run needs a scheme
+with testable targets and a usable test plan. Sessions referencing the same native
+workspace share these settings.
+
+`RenderPreview` defaults to a 300-second timeout; the SDK, proxy, and STDIO adapter
+default to 600 seconds per request. Set an external client's deadline above the
+preview timeout to leave time for preparation and cleanup. In a headless workspace,
+RenderPreview builds saved changes and captures a fresh snapshot. Successful
+headless renders retain reusable planning, products, processes, and an owned
+Simulator; code, resource, or destination changes invalidate the corresponding
+state. Failure, timeout, cancellation, workspace close, and host shutdown clean up
+those headless resources. GUI requests use their Xcode window's native preview
+execution and resource lifecycle.
+
+## Device and launch sessions
+
+`RunProject` returns a `launchSessionReference`. Pass it to `GetConsoleOutput`
+to read that launch's logs without resupplying a workspace or selecting a host.
+The proxy retains the creating host and native launch reference.
+
+`DeviceInteractionStartSession` accepts an optional `workspaceIdentifier`. With
+one, it prepares project-bound interaction, including build/install operations;
+without one, it prepares standalone device interaction. Follow-up tools use the
+returned `interactionSessionKey` consistently, and the proxy supplies its owning
+host and workspace. End the session with `DeviceInteractionEndSession` when done.
+After starting a new MCP session or restarting a host, start a new device session.
+
+Native device, debugger, signing, and account permissions still apply.
+
+## Choose another Xcode installation
+
+Host selection is optional for normal workspace operations. To open a headless
+model with another installation or attach to a specific GUI process, call
+`XcodeMCPKitListHosts`, then include its `hostIdentifier` in `XcodeOpenWorkspace`:
+
+```json
+{
+  "path": "/Users/me/Projects/App/App.xcworkspace",
   "hostIdentifier": "host-from-the-list"
 }
 ```
 
-The server starts an available candidate when needed and changes only the
-calling MCP session. Its next `tools/list` returns the selected Xcode's tools.
-Requests already admitted before the change finish on their original host.
-GUI targets share one `mcpbridge` connection per Xcode application process.
-Different Xcode processes can execute requests concurrently, including processes
-from the same installation.
+Add `"createsNewHost": true` to create an independent headless instance using
+that installation. GUI processes are shared; choose an existing GUI entry instead.
+When the same GUI path has several tabs, use their individual identifiers from
+`XcodeListWorkspaces`.
 
-To use the same Xcode installation in another independent headless host, add
-`"createsNewHost": true`. Select an existing host identifier to return to a
-previous host while it remains registered. `createsNewHost` applies to headless
-targets; select the existing entry for a running GUI process. Independent
-headless hosts keep separate workspace models, schemes, destinations, and
-test-plan selections. Start the server with
-`--share-compilation-cache` to enable shared compilation caching and Swift/Clang
-prefix mapping across its hosts. This option is off by default. See
-[compilation caching](configuration.md#compilation-caching) for usage and limits.
+Independent headless instances have separate models and selected settings.
+DerivedData and build databases retain Xcode's existing locations and locking.
+The optional [shared compilation cache](configuration.md#compilation-caching)
+can reuse compatible compilation work across hosts.
 
-DerivedData and build databases retain Xcode's existing locations. Builds targeting
-the same build database can encounter Xcode's native lock, including when a GUI
-Xcode build is using it.
+## Tools, failures, and cancellation
 
-Workspace and device-session identifiers belong to the host that returned them.
-Select that host before reusing its identifiers. Absolute workspace paths resolve
-inside the selected host. Tool results identify their host under
-`_meta["com.lynnswap.xcode-mcpkit/hostIdentifier"]`.
+`tools/list` describes the proxy's public operations. Backend tool availability
+can differ by installation; a call reports when its owning host cannot perform
+an operation. GUI tab identifiers and native schema changes are internal to the
+proxy. Tools without a workspace, such as `DocumentationSearch`, use the default
+host. Restart after installing newer developer documentation to select its index.
 
-Selection lasts for the MCP session. Clients that pool one MCP session across
-several conversations share that selection. A new or recovered client session
-starts on the default host; select the previous host again if needed.
+Tool failures retain MCP `isError` and available diagnostics or partial output.
+Transport failures remain request errors. Cancellation stops queued work before
+dispatch; after dispatch it requests a stop and waits for owned work to drain.
+It does not roll back completed edits. A connection failure does not establish
+whether a mutation completed, and delivery-unknown mutations are not replayed.
 
-An independent headless host is reclaimed after its last selecting session and
-outstanding requests release it. Switching away, deleting a session, or session
-expiry can trigger this cleanup. Its host, workspace, and device-session
-identifiers then become invalid. Select an installed Xcode candidate or create
-another independent host, and reopen the workspace by absolute path to obtain
-fresh identifiers. The default host and ordinary installation candidates remain
-registered for reuse.
-
-After a GUI target's final selecting session, request, and channel are released,
-the proxy stops its `mcpbridge` and retains the process entry. Selecting that
-entry again reconnects after the old bridge has finished stopping. The GUI
-Xcode application keeps running.
-
-## Select a workspace
-
-Use the selected target's `tools/list` response to choose its workspace selector.
-GUI tools commonly accept a `tabIdentifier` returned by `XcodeListWindows`;
-headless tools accept `workspaceIdentifier`. Xcode supplies these schemas, so
-inspect the catalog when switching targets.
-
-For a headless target, pass an absolute project, workspace, or Swift package path as
-`workspaceIdentifier`. For example, call `BuildProject` with:
-
-```json
-{
-  "workspaceIdentifier": "/Users/me/Projects/App/App.xcworkspace"
-}
-```
-
-The native registry loads the project model when needed. Opening Xcode or calling
-`XcodeOpenWorkspace` first is optional for ordinary file, scheme, destination,
-build, and test operations that accept `workspaceIdentifier`.
-
-Swift packages accept either their directory or `Package.swift`. Both paths refer
-to the same native workspace and can also be passed to `XcodeOpenWorkspace`.
-The host waits for package dependencies to resolve before waiting for the
-workspace's initial run destination.
-
-`XcodeOpenWorkspace` explicitly preloads a model and returns its native identifier.
-`XcodeListWorkspaces` lists the host's models. `XcodeCloseWorkspace` closes an
-owned model and releases its preview processes, staged products, and owned
-Simulator. Host shutdown releases those resources for all remaining models. These
-operations do not manage windows in a separate Xcode application. Host restart
-invalidates native identifiers, so use the absolute project path to load it again.
-
-Before executing a tool, the host closes models whose saved workspace or project
-directories have been removed. It skips models still used by another request;
-a later cleanup can close them after that request finishes. Other loaded
-workspaces remain available. Cleanup failures are reported on the host's stderr
-and do not fail a request for another workspace.
-
-Native errors are reported without presenting a modal error panel. Errors raised
-in a tool request set its MCP `isError` result and retain any partial output and
-the native error details. Errors raised outside a request are recorded on stderr.
-The host continues accepting requests without waiting for a GUI response or an
-unlocked desktop. This does not replay a failed operation or confirm that its
-effects were rolled back.
-
-## Saved files and operation settings
-
-An owned headless host reads saved project and source files. Save editor changes
-before an MCP operation. Opening the same project in Xcode does not transfer its
-unsaved buffers, active scheme, selected destination, or debugger session to the host.
-
-`RenderPreview` builds saved changes and captures a new image for each request.
-Its `timeout` defaults to 300 seconds, including building and preparing the render
-destination. Pass an explicit `timeout` to use a different duration.
-The SDK, proxy server, and STDIO adapter default to a 600-second request timeout
-to allow time for setup and cleanup. Set an external MCP client's timeout above
-the preview timeout as well.
-Repeated requests reuse preview planning when build products and preview settings
-are unchanged.
-Successful calls retain the workspace's preview processes and owned Simulator for
-later requests. Changes to build products, resources, or destination invalidate the
-retained preview metadata and staged products. Failure, timeout, or cancellation
-cleans up the affected preview session; cleanup failures remain in the error.
-
-Use `XcodeListSchemes`, `XcodeListRunDestinations`, and `XcodeListTestPlans` to
-inspect the project's settings. Select the required values with
-`XcodeSwitchScheme`, `XcodeSwitchRunDestination`, and `XcodeSwitchTestPlan` before
-building or testing. A test run requires a scheme with testable targets and a
-usable test plan; configure and save those project files first. All sessions using
-the same host and workspace share these selections.
-
-Tools without workspace scope, such as `DocumentationSearch`, run in the same
-host without loading a project. DocumentationSearch uses the latest installed
-developer documentation at host startup, ordered by Xcode version and then
-documentation release. Restart the server after installing a newer documentation
-asset. The host does not download documentation or persist search settings.
-
-Device and debugger operations use the host's native sessions. Their permissions
-and runtime requirements still apply.
-
-## Concurrent operations
-
-Each owned headless process has its own session actor and execution queue. A
-request holds its workspace permit from model preparation through stream
-consumption and cleanup. Calls for the same workspace run in order; different
-workspaces can progress independently. A mutation without a workspace selector
-holds the whole process while it runs.
-
-A headless process runs up to four tool calls concurrently, including at most one
-heavy call (`BuildProject`, `RunProject`, `RunAllTests`, `RunSomeTests`, or
-`RenderPreview`). The queue budgets waiting requests by their incoming JSON-RPC
-sizes, up to 32 MiB in total. The host rejects additional queued requests when
-that budget is exhausted and creates request artifacts only after admission.
-These limits apply separately to each owned process. Other headless hosts and
-GUI Xcode processes retain independent execution.
-
-## Discover tools
-
-Call `tools/list` to discover the selected target's tools. Xcode supplies tool
-names and schemas dynamically. Headless targets expose the enabled headless
-catalog; GUI targets expose their native bridge catalog, including supported
-window and editor tools. The MCP client controls which advertised tools an
-agent may call.
-
-Each explicit `tools/list` refreshes the catalog. Concurrent callers share an
-in-flight load while retaining independent deadlines and cancellation. The proxy
-preserves the native descriptors and captures the definition used by each call,
-so a later refresh cannot change that call's response contract. Native tool
-failures retain MCP `isError`; transport and protocol failures are request errors.
-
-For owned headless targets, initialize and catalog results report installation
-facts under `_meta["com.lynnswap.xcode-mcpkit/origin"]`, including the Xcode installation,
-process, and `toolCancellation: "task"` contract. See
-[architecture](architecture.md#catalog-ownership) for lifecycle ownership.
-
-## Cancellation
-
-MCP cancellation targets the matching request. Cancelling queued headless work
-prevents backend dispatch and artifact creation. After dispatch, cancellation
-requests a stop; it does not undo file edits or other completed effects.
-
-The headless helper continues consuming the original native stream after the
-request is cancelled. Cancellation signals observed native Operations while an
-owned relay waits for the stream's natural terminal. Cleanup waits for that
-relay, observed Operation completions, and owned preview/crash producer Tasks
-before closing workspace resources and releasing the execution permit. A later
-request for the same workspace waits for this cleanup.
-
-If an action exposes no cancellable Operation, draining its stream can wait for
-natural completion. This boundary does not join opaque native Swift Task handles.
-GUI cancellation follows the selected Xcode process's bridge contract.
-
-Headless shutdown stops admission, cancels pending requests, waits for owned
-tasks, and closes native workspace resources. A failed connection is not evidence
-that an operation completed or rolled back; mutations with unknown delivery are not
-replayed automatically.
+Calls for one headless workspace run in order through cleanup. Different
+workspaces can progress independently within the
+[headless execution limits](configuration.md#owned-headless-execution-limits).
+Other hosts retain their own queues. GUI work follows Xcode's execution contract.

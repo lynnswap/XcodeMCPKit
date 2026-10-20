@@ -97,12 +97,17 @@ actor ControlPlaneCoordinator {
         self.clock = clock
     }
 
-    func toolsCatalog(deadlineUptimeNs: UInt64?) async throws -> JSONValue {
+    func toolsCatalog(deadlineUptimeNs: UInt64?, prefersCachedToolsCatalog: Bool = false) async throws -> JSONValue {
+        try Task.checkCancellation()
         guard acceptsNewLoads else {
             throw CancellationError()
         }
         guard deadlineExceeded(deadlineUptimeNs) == false else {
             throw TimeoutError()
+        }
+
+        if prefersCachedToolsCatalog, let result = cachedToolsCatalog() {
+            return result
         }
 
         let requestedTimeout = sharedRequestTimeout(for: deadlineUptimeNs)

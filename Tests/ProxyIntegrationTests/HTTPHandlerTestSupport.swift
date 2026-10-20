@@ -395,7 +395,8 @@ final class TestRuntimeCoordinator: RuntimeCoordinating {
 
     func sharedToolsList(
         sessionID: String,
-        requestTimeoutOverride: TimeAmount?
+        requestTimeoutOverride: TimeAmount?,
+        prefersCachedToolsCatalog: Bool
     ) async throws -> JSONValue {
         _ = requestTimeoutOverride
         if let cached = state.withLockedValue({ $0.cachedToolsList }) {
