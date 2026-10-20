@@ -33,7 +33,9 @@ It accepts a `.xcworkspace`, `.xcodeproj`, Swift package directory, or
 `Package.swift` and returns a `workspaceIdentifier` for subsequent operations.
 Without an explicit host, Open uses the server's default headless installation.
 Workspace operations also accept an absolute path for that default host when
-an explicit Open is unnecessary.
+an explicit Open is unnecessary. A path opens the workspace for the session as
+Open does, so later calls with the same path reuse the loaded model. The
+session's handle for it appears in `XcodeListWorkspaces`.
 
 An identifier refers to one workspace in its owning host. The proxy translates
 it to the native workspace or GUI tab identifier. Keep using that identifier;
