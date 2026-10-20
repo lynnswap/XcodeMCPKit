@@ -62,7 +62,9 @@ When a process exits or violates the protocol, its in-flight requests fail with
 `upstream unavailable`, handles created by that process expire, and the next
 request starts a new process. Delivery-unknown mutations are not replayed.
 Closing an MCP session releases its handles; it does not quit a GUI Xcode process.
-GUI bridges stop once no session references or uses them.
+GUI bridges stop once no session references or uses them. A headless host for
+a non-default installation stops after `NativeHostBroker.idleHostGracePeriod`
+(five minutes) without references or requests; the default host keeps its process.
 
 Shutdown stops admission, cancels and drains owned request/event tasks, stops
 backend connections, and closes owned native models and preview resources.
