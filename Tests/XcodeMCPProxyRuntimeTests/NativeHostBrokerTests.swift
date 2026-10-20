@@ -168,6 +168,27 @@ struct NativeHostBrokerTests {
             == .string("native-w-1"))
     }
 
+    @Test func workspaceBeingClosedCannotBeBoundUntilTheCloseFinishes() async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("closing-a")
+        let b = try await fixture.initialize("closing-b")
+        let workspace = try await fixture.open(a)
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        _ = native.heldTools.withLockedValue { $0.insert(NativeHostBroker.closeWorkspaceTool) }
+        let closing = Task { try await fixture.call(a, name: NativeHostBroker.closeWorkspaceTool,
+                                                     arguments: ["workspaceIdentifier": workspace]) }
+        try await native.waiting.wait(description: "native close admitted")
+        let refused = try await fixture.toolResult(b, name: NativeHostBroker.openWorkspaceTool,
+                                                   arguments: ["path": .string("/Fixture/App.xcodeproj")])
+        #expect(NativeHostBroker.isToolError(refused))
+        #expect(try await fixture.workspaces(b).isEmpty)
+        await native.releaseWait()
+        _ = try await closing.value
+        let reopened = try await fixture.open(b)
+        #expect(!NativeHostBroker.isToolError(try await fixture.toolResult(b, name: "GetBuildLog",
+            arguments: ["workspaceIdentifier": reopened])))
+    }
+
     @Test func admittedWorkRetainsItsScopeWhenTheWorkspaceReferenceIsClosed() async throws {
         let fixture = try BrokerFixture.singleGUIWindow()
         let session = try await fixture.initialize("inflight")
@@ -650,6 +671,8 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
     }
     let calls = NIOLockedValueBox<[Call]>([])
     let toolFailures = NIOLockedValueBox<Set<String>>([])
+    /// Tools whose replies wait for `releaseWait()`.
+    let heldTools = NIOLockedValueBox<Set<String>>(["BuildProject"])
     let returnsProtocolError = NIOLockedValueBox(false)
     private let openedPath = NIOLockedValueBox<String?>(nil)
 
@@ -742,7 +765,7 @@ private final class BrokerTransport: UpstreamSlotControlling, Sendable {
                 }
                 if toolFailures.withLockedValue({ $0.contains(name) }) {
                     result = try NativeHostBroker.toolResult(.object(["message": .string("native failure")]), isError: true)
-                } else if name == "BuildProject" {
+                } else if heldTools.withLockedValue({ $0.contains(name) }) {
                     pending.withLockedValue { $0.append(id) }
                     waiting.signal()
                     return .accepted

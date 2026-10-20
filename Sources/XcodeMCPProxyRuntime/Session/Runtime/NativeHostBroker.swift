@@ -18,6 +18,8 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         var sessions: [ProxySessionID: NativeBrokerSession] = [:]
         var backendBindings: [ProxySessionID: Binding] = [:]
         var closing: [UUID: Task<Void, Never>] = [:]
+        /// Headless models whose native close is in flight; new handles to them are refused.
+        var closingWorkspaces: Set<NativeBrokerWorkspace.Scope> = []
         var stopped = false
         var resetsInProgress = 0
         var publicCatalog: JSONValue?
@@ -641,7 +643,7 @@ private extension NativeHostBroker {
                     "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
                     "message": .string("Released the workspace reference. The Xcode window remains open."),
                 ]))
-            } else if !releaseLastReference(to: workspace, in: session) {
+            } else if !electNativeClose(of: workspace, in: session) {
                 result = try Self.toolResult(.object([
                     "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
                     "message": .string("Released this session's reference. Another session still uses the workspace, so it remains open."),
@@ -657,17 +659,10 @@ private extension NativeHostBroker {
                         session: session.identifier, hostIdentifier: workspace.hostIdentifier)
                     closed = !Self.isToolError(try Self.result(in: reply))
                 } catch {
-                    session.restoreWorkspace(workspace)
+                    finishNativeClose(of: workspace, in: session, host: host, closed: false)
                     throw error
                 }
-                if closed {
-                    // Handles bound while the close was pending, including the caller's, refer to the closed model.
-                    for bound in state.withLockedValue({ Array($0.sessions.values) }) {
-                        bound.releaseNativeWorkspace(workspace)
-                    }
-                } else {
-                    session.restoreWorkspace(workspace)
-                }
+                finishNativeClose(of: workspace, in: session, host: host, closed: closed)
                 return try Self.rewriteReply(reply, workspace: workspace, deviceSession: nil)
             }
         default:
@@ -678,13 +673,40 @@ private extension NativeHostBroker {
                                  eventStream: request.prefersEventStream)
     }
 
-    /// Removes the session's handle and reports whether no other session still uses the native model.
-    /// Both happen under the broker lock so concurrent closes elect exactly one native close.
-    private func releaseLastReference(to workspace: NativeBrokerWorkspace, in session: NativeBrokerSession) -> Bool {
+    /// Removes the session's handle and reports whether this call must close the native model:
+    /// the handle was still bound, no other session uses the model, and no close is in flight.
+    /// The decision and the in-flight mark share the broker lock, which `bindWorkspace` also observes.
+    private func electNativeClose(of workspace: NativeBrokerWorkspace, in session: NativeBrokerSession) -> Bool {
         state.withLockedValue { storage in
-            _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
-            return !storage.sessions.values.contains { $0 !== session && $0.retainsNativeWorkspace(workspace) }
+            let removed = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) } != nil
+            guard removed, !storage.closingWorkspaces.contains(workspace.scope),
+                  !storage.sessions.values.contains(where: { $0 !== session && $0.retainsNativeWorkspace(workspace) })
+            else { return false }
+            storage.closingWorkspaces.insert(workspace.scope)
+            return true
         }
+    }
+
+    private func finishNativeClose(of workspace: NativeBrokerWorkspace, in session: NativeBrokerSession,
+                                   host: NativeBrokerHost, closed: Bool) {
+        _ = state.withLockedValue { $0.closingWorkspaces.remove(workspace.scope) }
+        if !closed { session.restoreWorkspace(workspace, host: host) }
+    }
+
+    /// Binds a handle unless its native model is being closed; a model mid-close is about to disappear.
+    private func bindWorkspace(in session: NativeBrokerSession, host: NativeBrokerHost,
+                               source: ProxyRuntimeUpstreamSource, nativeIdentifier: String,
+                               path: String?, name: String?) throws -> NativeBrokerWorkspace {
+        let workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: nativeIdentifier,
+                                                  path: path, name: name)
+        // Checked after binding: an election that ran first left its mark, and one that runs later sees this handle.
+        let closing = state.withLockedValue { storage in
+            guard storage.closingWorkspaces.contains(workspace.scope) else { return false }
+            _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
+            return true
+        }
+        if closing { throw NativeBrokerWorkspaceClosing() }
+        return workspace
     }
 
     private func discoverGUIHosts() throws {
@@ -719,9 +741,11 @@ private extension NativeHostBroker {
                     let source = try channel.source()
                     let entries = try await workspaceEntries(host: host, channel: channel, source: source,
                                                              request: request, cancellation: cancellation)
-                    return try entries.map {
-                        try session.bindWorkspace(host: host, source: source, nativeIdentifier: $0.nativeIdentifier,
-                                                  path: $0.path, name: nil)
+                    return try entries.compactMap { entry -> NativeBrokerWorkspace? in
+                        do {
+                            return try bindWorkspace(in: session, host: host, source: source,
+                                                     nativeIdentifier: entry.nativeIdentifier, path: entry.path, name: nil)
+                        } catch is NativeBrokerWorkspaceClosing { return nil }
                     }
                 }
                 entries.append(contentsOf: listed.map(\.descriptor))
@@ -803,7 +827,7 @@ private extension NativeHostBroker {
                     }
                     throw NativeHostBrokerError("Several Xcode windows have this path. Call XcodeListWorkspaces and choose the intended window's workspaceIdentifier.")
                 }
-                let workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: entry.nativeIdentifier,
+                let workspace = try bindWorkspace(in: session, host: host, source: source, nativeIdentifier: entry.nativeIdentifier,
                                                           path: entry.path, name: nil)
                 return try Self.toolResult(workspace.descriptor)
             }
@@ -815,7 +839,7 @@ private extension NativeHostBroker {
             guard let identifier = Self.string(payload["workspaceIdentifier"]) else {
                 throw NativeHostBrokerError("Native XcodeOpenWorkspace returned no workspaceIdentifier")
             }
-            let workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: identifier,
+            let workspace = try bindWorkspace(in: session, host: host, source: source, nativeIdentifier: identifier,
                 path: Self.string(payload["workspacePath"]) ?? path, name: Self.string(payload["name"]))
             return try Self.toolResult(Self.rewritePayload(.object(payload), workspace: workspace, deviceSession: nil))
         }
@@ -941,7 +965,7 @@ private extension NativeHostBroker {
         if workspace == nil, name == "XcodeNewProject" {
             let payload = try Self.toolPayload(value)
             if let nativeID = Self.string(payload["workspaceIdentifier"]) {
-                workspace = try session.bindWorkspace(host: host, source: source, nativeIdentifier: nativeID,
+                workspace = try bindWorkspace(in: session, host: host, source: source, nativeIdentifier: nativeID,
                     path: Self.string(payload["workspacePath"]), name: nil)
             }
         }
@@ -954,4 +978,8 @@ private extension NativeHostBroker {
 
 private struct NativeBrokerToolFailure: Error {
     let result: JSONValue
+}
+
+private struct NativeBrokerWorkspaceClosing: Error, CustomStringConvertible {
+    var description: String { "The workspace is being closed. Open it again with XcodeOpenWorkspace." }
 }
