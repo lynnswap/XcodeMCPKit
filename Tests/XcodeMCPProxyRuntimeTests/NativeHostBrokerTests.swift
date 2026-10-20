@@ -174,7 +174,7 @@ struct NativeHostBrokerTests {
         let request = try ProxyRuntimeRequest(json: .object([
             "jsonrpc": .string("2.0"), "id": .number(.int(41)), "method": .string("tools/call"),
             "params": .object(["name": .string("XcodeListTemplates"), "arguments": .object([:])]),
-        ]), headerSessionExists: true, prefersEventStream: false)
+        ]), headerSessionExists: true)
         let operation = try #require(fixture.broker.beginRequest(request, in: session) as? NativeHostBrokerOperation)
         defer { fixture.broker.clientRequestFinished(session) }
         try await fixture.factory.created.wait(description: "host started")
@@ -390,7 +390,7 @@ struct NativeHostBrokerTests {
         _ = try await fixture.open(session)
         _ = try await fixture.reply(session, method: "notifications/cancelled",
                                    parameters: .object(["requestId": .number(.int(73))]), id: nil)
-        guard case .mcpError(_, -32800, _, _, _) = try await pending.value else {
+        guard try await pending.value.jsonRPCError?.code == -32800 else {
             Issue.record("build was not cancelled"); return
         }
         try await original.cancelled.wait(description: "cancellation reached original host")
@@ -560,7 +560,7 @@ struct NativeHostBrokerTests {
         let invalid = try await fixture.reply(session, method: "tools/call", parameters: .object([
             "name": .string("XcodeListTemplates"), "arguments": .array([]),
         ]))
-        guard case .mcpError(_, -32602, _, _, _) = invalid else {
+        guard invalid.jsonRPCError?.code == -32602 else {
             Issue.record("Non-object tool arguments were not rejected as invalid parameters"); return
         }
         #expect(fixture.factory.transports.withLockedValue { $0.isEmpty })
@@ -620,7 +620,7 @@ struct NativeHostBrokerTests {
             "name": .string(NativeHostBroker.openWorkspaceTool),
             "arguments": .object(["path": .string("/Fixture/App.xcodeproj"), "hostIdentifier": other]),
         ]))
-        guard case .mcpError(_, -32001, "upstream unavailable", _, _) = failed else {
+        guard let error = failed.jsonRPCError, error.code == -32001, error.message == "upstream unavailable" else {
             Issue.record("A host that cannot start did not report itself unavailable: \(failed)"); return
         }
         #expect(try await fixture.workspaces(session).isEmpty)
@@ -643,11 +643,10 @@ struct NativeHostBrokerTests {
                 "name": .string(operation), "arguments": .object(["workspaceIdentifier": workspace]),
             ]))
         }
-        guard case .failure(.invalidUpstreamResponse, let message, let replySession) = reply else {
+        guard let error = reply.jsonRPCError, error.code == -32603 else {
             Issue.record("runtime transport failure became a tool result"); return
         }
-        #expect(message == "invalid upstream response")
-        #expect(replySession == session)
+        #expect(error.message == "invalid upstream response")
     }
 
     @Test func nativeProtocolErrorsKeepTheirPayloadAndClientCorrelation() async throws {
@@ -659,12 +658,11 @@ struct NativeHostBrokerTests {
         let reply = try await fixture.reply(session, method: "tools/call", parameters: .object([
             "name": .string("GetBuildLog"), "arguments": .object(["workspaceIdentifier": workspace]),
         ]), id: 91)
-        guard case .response(let data, let replySession, _) = reply else {
+        guard case .response(let data) = reply else {
             Issue.record("native JSON-RPC error lost its original response"); return
         }
         let object = try JSONRPC.Wire.object(fromData: data)
         #expect(JSONRPC.Message.Inspector.responseID(from: object)?.value == .number(.int(91)))
-        #expect(replySession == session)
         #expect(object["error"].flatMap(JSONValue.init(any:)) == .object([
             "code": .number(.int(-32010)), "message": .string("native protocol failure"),
             "data": .object(["reason": .string("fixture")]),
@@ -710,7 +708,7 @@ struct NativeHostBrokerTests {
         #expect(workspaces.count == 1)
         #expect(errors.count == 1)
         if transportFailure, case .object(let error)? = errors.first {
-            #expect(error["failureKind"] == .string("invalidUpstreamResponse"))
+            #expect(error["error"] == .object(["code": .number(.int(-32603)), "message": .string("invalid upstream response")]))
         }
     }
 
@@ -901,7 +899,7 @@ struct NativeHostBrokerTests {
         let read = try ProxyRuntimeRequest(json: .object([
             "jsonrpc": .string("2.0"), "id": .number(.int(77)), "method": .string("tools/call"),
             "params": .object(["name": .string("GetBuildLog"), "arguments": .object(["workspaceIdentifier": workspace])]),
-        ]), headerSessionExists: true, prefersEventStream: false)
+        ]), headerSessionExists: true)
         let reading = try #require(fixture.broker.beginRequest(read, in: session))
         let released = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
                                               arguments: ["workspaceIdentifier": workspace])
@@ -966,7 +964,7 @@ struct NativeHostBrokerTests {
             _ = try await fixture.request(session, method: "tools/list", parameters: .object(["cursor": .string("unissued")]))
             Issue.record("unissued cursor was accepted")
         } catch let error as NativeHostBrokerReplyError {
-            guard case .mcpError(_, let code, _, _, _) = error.reply else {
+            guard let code = error.reply.jsonRPCError?.code else {
                 Issue.record("cursor error lost its protocol reply"); return
             }
             #expect(code == -32602)
@@ -988,7 +986,7 @@ struct NativeHostBrokerTests {
             _ = try await pending.value
             Issue.record("timeout published an incomplete catalog")
         } catch let error as NativeHostBrokerReplyError {
-            guard case .mcpError(_, let code, _, _, _) = error.reply else {
+            guard let code = error.reply.jsonRPCError?.code else {
                 Issue.record("timeout lost its protocol reply"); return
             }
             #expect(code == -32000)
@@ -1389,7 +1387,7 @@ private final class BrokerFixture: Sendable {
         if let id { json["id"] = .number(.int(id)) }
         if let parameters { json["params"] = parameters }
         let request = try ProxyRuntimeRequest(json: .object(json),
-            headerSessionExists: method != "initialize", prefersEventStream: false)
+            headerSessionExists: method != "initialize")
         let operation = try #require(broker.beginRequest(request, in: session))
         defer { broker.clientRequestFinished(session) }
         return try await waitWithTimeout("broker request", timeout: .seconds(10)) {
@@ -1401,7 +1399,7 @@ private final class BrokerFixture: Sendable {
 
     func request(_ session: ProxySessionID, method: String, parameters: JSONValue? = nil,
                  id: Int64? = 19) async throws -> JSONValue {
-        try NativeHostBroker.result(in: await reply(session, method: method, parameters: parameters, id: id))
+        try NativeHostBroker.result(in: await reply(session, method: method, parameters: parameters, id: id).brokerReply)
     }
     func call(_ session: ProxySessionID, name: String,
               arguments: [String: JSONValue] = [:]) async throws -> [String: JSONValue] {
@@ -1421,4 +1419,34 @@ private final class BrokerFixture: Sendable {
         return hosts.compactMap { if case .object(let fields) = $0 { fields } else { nil } }
     }
 
+}
+
+/// The code and message of a JSON-RPC error response.
+private func jsonRPCError(in data: Data) -> (code: Int, message: String)? {
+    guard let object = try? JSONRPC.Wire.object(fromData: data), let error = object["error"] as? [String: Any],
+          let code = (error["code"] as? NSNumber)?.intValue, let message = error["message"] as? String else { return nil }
+    return (code, message)
+}
+
+private extension ProxyRuntimeReply {
+    var brokerReply: NativeBrokerReply {
+        switch self {
+        case .response(let data): .response(data)
+        case .accepted: .accepted
+        }
+    }
+
+    var jsonRPCError: (code: Int, message: String)? {
+        if case .response(let data) = self { XcodeMCPProxyRuntimeTests.jsonRPCError(in: data) } else { nil }
+    }
+}
+
+private extension NativeBrokerReply {
+    var jsonRPCError: (code: Int, message: String)? {
+        switch self {
+        case .response(let data): XcodeMCPProxyRuntimeTests.jsonRPCError(in: data)
+        case .error(_, let code, let message): (code, message)
+        case .accepted: nil
+        }
+    }
 }

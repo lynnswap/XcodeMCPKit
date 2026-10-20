@@ -1,10 +1,39 @@
 import Foundation
 import XcodeMCPCore
+import XcodeMCPWire
 import XcodeMCPProxyRuntimeContract
+
+/// A reply that the broker builds before it hands the client the request's JSON-RPC response.
+enum NativeBrokerReply: Sendable {
+    /// A JSON-RPC response object from a host or the broker.
+    case response(Data)
+    /// A JSON-RPC error that the broker reports for the request.
+    case error(id: JSONRPC.ID?, code: Int, message: String)
+    /// A client notification or response, which has no reply.
+    case accepted
+
+    /// The error for a host response that is not valid JSON-RPC for its request.
+    static func invalidUpstreamResponse(id: JSONRPC.ID? = nil) -> Self {
+        .error(id: id, code: -32603, message: "invalid upstream response")
+    }
+
+    /// The message HTTP sends to the client.
+    var clientReply: ProxyRuntimeReply {
+        switch self {
+        case .response(let data):
+            return .response(data)
+        case .error(let id, let code, let message):
+            // An error object of a string and numbers always serializes.
+            return .response((try? JSONRPC.Wire.errorResponseData(id: id, code: code, message: message)) ?? Data())
+        case .accepted:
+            return .accepted
+        }
+    }
+}
 
 struct NativeHostBrokerReplyError: Error, CustomStringConvertible {
     let description: String
-    let reply: ProxyRuntimeReply
+    let reply: NativeBrokerReply
 }
 
 extension NativeHostBroker {
@@ -94,14 +123,14 @@ extension NativeHostBroker {
     }
 
     /// Removes the host's report of the session's selection from a reply and returns it.
-    static func takingSelection(from reply: ProxyRuntimeReply) throws -> (reply: ProxyRuntimeReply, selection: JSONValue?) {
-        guard case .response(let data, let session, let stream) = reply else { return (reply, nil) }
+    static func takingSelection(from reply: NativeBrokerReply) throws -> (reply: NativeBrokerReply, selection: JSONValue?) {
+        guard case .response(let data) = reply else { return (reply, nil) }
         var object = try JSONRPC.Wire.object(fromData: data)
         guard var result = object["result"] as? [String: Any], var metadata = result["_meta"] as? [String: Any],
               let selection = metadata.removeValue(forKey: selectionKey) else { return (reply, nil) }
         result["_meta"] = metadata.isEmpty ? nil : metadata
         object["result"] = result
-        return (.response(data: try JSONRPC.Wire.data(from: object), sessionID: session, prefersEventStream: stream),
+        return (.response(try JSONRPC.Wire.data(from: object)),
                 JSONValue(any: selection))
     }
 
@@ -129,12 +158,12 @@ extension NativeHostBroker {
         return .object(fields)
     }
 
-    static func rewriteReply(_ reply: ProxyRuntimeReply, workspace: NativeBrokerWorkspace?,
+    static func rewriteReply(_ reply: NativeBrokerReply, workspace: NativeBrokerWorkspace?,
                              deviceSession: NativeBrokerDeviceSession?,
                              launchSession: NativeBrokerLaunchSession? = nil,
-                             toolName: String? = nil) throws -> ProxyRuntimeReply {
+                             toolName: String? = nil) throws -> NativeBrokerReply {
         guard workspace != nil || deviceSession != nil || launchSession != nil || toolName == "RenderPreview",
-              case .response(let data, let session, let stream) = reply else { return reply }
+              case .response(let data) = reply else { return reply }
         var object = try JSONRPC.Wire.object(fromData: data)
         guard var result = object["result"] as? [String: Any] else { return reply }
         if let raw = result["structuredContent"], let payload = JSONValue(any: raw) {
@@ -154,7 +183,7 @@ extension NativeHostBroker {
             }
         }
         object["result"] = result
-        return .response(data: try JSONRPC.Wire.data(from: object), sessionID: session, prefersEventStream: stream)
+        return .response(try JSONRPC.Wire.data(from: object))
     }
 
     static func cancellationID(from raw: Any?) -> JSONRPC.ID? {
@@ -182,15 +211,14 @@ extension NativeHostBroker {
         ])
     }
 
-    static func response(id: JSONRPC.ID?, result: JSONValue,
-                         session: ProxySessionID, eventStream: Bool) throws -> ProxyRuntimeReply {
-        .response(data: try JSONRPC.Wire.data(from: JSONRPC.Wire.resultResponseObject(
-            idValue: id?.value, result: result)), sessionID: session, prefersEventStream: eventStream)
+    static func response(id: JSONRPC.ID?, result: JSONValue) throws -> NativeBrokerReply {
+        .response(try JSONRPC.Wire.data(from: JSONRPC.Wire.resultResponseObject(
+            idValue: id?.value, result: result)))
     }
 
-    static func result(in reply: ProxyRuntimeReply) throws -> JSONValue {
+    static func result(in reply: NativeBrokerReply) throws -> JSONValue {
         switch reply {
-        case .response(let data, _, _):
+        case .response(let data):
             let object = try JSONRPC.Wire.object(fromData: data)
             if let error = object["error"] as? [String: Any] {
                 throw NativeHostBrokerReplyError(description: "Native request failed: \(error)", reply: reply)
@@ -199,19 +227,17 @@ extension NativeHostBroker {
                 throw NativeHostBrokerError("Native reply has no result")
             }
             return result
-        case .mcpError(_, let code, let message, _, _):
+        case .error(_, let code, let message):
             throw NativeHostBrokerReplyError(description: "Native request failed (\(code)): \(message)", reply: reply)
-        case .failure(_, let message, _):
-            throw NativeHostBrokerReplyError(description: message, reply: reply)
         case .accepted:
             throw NativeHostBrokerError("Native request did not return a response")
         }
     }
 
-    static func externalReply(_ reply: ProxyRuntimeReply, session: ProxySessionID,
-                              hostIdentifier: String? = nil, requestID: JSONRPC.ID? = nil) throws -> ProxyRuntimeReply {
+    static func externalReply(_ reply: NativeBrokerReply, hostIdentifier: String? = nil,
+                              requestID: JSONRPC.ID? = nil) throws -> NativeBrokerReply {
         switch reply {
-        case .response(let data, _, let stream):
+        case .response(let data):
             var object = try JSONRPC.Wire.object(fromData: data)
             if let requestID { object["id"] = requestID.value.foundationObject }
             if let hostIdentifier, var result = object["result"] as? [String: Any] {
@@ -220,13 +246,10 @@ extension NativeHostBroker {
                 result["_meta"] = metadata
                 object["result"] = result
             }
-            return .response(data: try JSONRPC.Wire.data(from: object),
-                             sessionID: session, prefersEventStream: stream)
-        case .mcpError(let id, let code, let message, _, let stream):
-            return .mcpError(id: requestID ?? id, code: code, message: message, sessionID: session, prefersEventStream: stream)
-        case .failure(let kind, let message, _):
-            return .failure(kind: kind, message: message, sessionID: session)
-        case .accepted: return .accepted(sessionID: session)
+            return .response(try JSONRPC.Wire.data(from: object))
+        case .error(let id, let code, let message):
+            return .error(id: requestID ?? id, code: code, message: message)
+        case .accepted: return .accepted
         }
     }
 }

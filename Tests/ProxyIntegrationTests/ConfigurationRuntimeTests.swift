@@ -93,7 +93,7 @@ struct ConfigurationRuntimeTests {
                     "protocolVersion": .string("2099-01-01"), "capabilities": .object([:]),
                     "clientInfo": .object(["name": .string("downstream-client"), "version": .string("9.9")]),
                 ]),
-            ]), headerSessionExists: false, prefersEventStream: false)
+            ]), headerSessionExists: false)
             let session = ProxySessionID(rawValue: "downstream")
             let operation = try #require(broker.beginRequest(request, in: session))
             _ = try await withCheckedThrowingContinuation { continuation in

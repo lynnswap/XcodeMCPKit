@@ -12,32 +12,6 @@ struct HTTPResponseWriter: Sendable {
         self.logger = logger
     }
 
-    func sendSingleSSE(
-        on channel: Channel,
-        data: Data,
-        keepAlive: Bool,
-        sessionID: String?,
-        requestLog: HTTPHandler.RequestLogContext
-    ) -> EventLoopFuture<Void> {
-        guard SSECodec.encodeDataEvent(data) != nil else {
-            return sendPlain(
-                on: channel,
-                status: .badGateway,
-                body: "invalid upstream response",
-                keepAlive: keepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-        }
-        logResponse(requestLog, status: .ok, sessionID: sessionID)
-        return MCPResponseEmitter.sendSingleSSE(
-            on: channel,
-            data: data,
-            keepAlive: keepAlive,
-            sessionID: sessionID
-        )
-    }
-
     func sendJSON(
         on channel: Channel,
         buffer: ByteBuffer,
@@ -94,7 +68,7 @@ struct HTTPResponseWriter: Sendable {
         on channel: Channel,
         status: HTTPResponseStatus,
         keepAlive: Bool,
-        sessionID: String,
+        sessionID: String?,
         requestLog: HTTPHandler.RequestLogContext
     ) -> EventLoopFuture<Void> {
         logResponse(requestLog, status: status, sessionID: sessionID)
@@ -103,41 +77,6 @@ struct HTTPResponseWriter: Sendable {
             status: status,
             keepAlive: keepAlive,
             sessionID: sessionID
-        )
-    }
-
-    func sendMCPError(
-        on channel: Channel,
-        id: JSONRPC.ID?,
-        code: Int,
-        message: String,
-        prefersEventStream: Bool,
-        keepAlive: Bool,
-        sessionID: String?,
-        requestLog: HTTPHandler.RequestLogContext
-    ) -> EventLoopFuture<Void> {
-        guard let data = try? JSONRPC.Wire.errorResponseData(
-            id: id,
-            code: code,
-            message: message,
-            data: nil
-        ) else {
-            return sendPlain(
-                on: channel,
-                status: .badGateway,
-                body: "invalid error response",
-                keepAlive: keepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-        }
-        return sendErrorPayload(
-            on: channel,
-            data: data,
-            prefersEventStream: prefersEventStream,
-            keepAlive: keepAlive,
-            sessionID: sessionID,
-            requestLog: requestLog
         )
     }
 
@@ -171,34 +110,5 @@ struct HTTPResponseWriter: Sendable {
             metadata["session"] = .string(sessionID)
         }
         logger.debug("HTTP response", metadata: metadata)
-    }
-
-    private func sendErrorPayload(
-        on channel: Channel,
-        data: Data,
-        prefersEventStream: Bool,
-        keepAlive: Bool,
-        sessionID: String?,
-        requestLog: HTTPHandler.RequestLogContext
-    ) -> EventLoopFuture<Void> {
-        if prefersEventStream {
-            return sendSingleSSE(
-                on: channel,
-                data: data,
-                keepAlive: keepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-        } else {
-            var buffer = channel.allocator.buffer(capacity: data.count)
-            buffer.writeBytes(data)
-            return sendJSON(
-                on: channel,
-                buffer: buffer,
-                keepAlive: keepAlive,
-                sessionID: sessionID,
-                requestLog: requestLog
-            )
-        }
     }
 }

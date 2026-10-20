@@ -1548,18 +1548,13 @@ struct HTTPHandlerTests {
         }
 
         let response = try await collectResponse(from: channel)
-        guard let code = failure.code else {
-            #expect(response.head.status == .badGateway)
-            #expect(response.body == "invalid upstream response")
-            return
-        }
         #expect(response.head.status == .ok)
         let object = try #require(
             JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any]
         )
         #expect((object["id"] as? NSNumber)?.intValue == 501)
         let error = try #require(object["error"] as? [String: Any])
-        #expect((error["code"] as? NSNumber)?.intValue == code)
+        #expect((error["code"] as? NSNumber)?.intValue == failure.code)
         #expect(error["message"] as? String == failure.message)
     }
 
@@ -1871,14 +1866,14 @@ enum HostFailureCase: CaseIterable, Sendable {
         }
     }
 
-    /// The JSON-RPC error code, or `nil` when the client receives an HTTP failure instead.
-    var code: Int? {
+    /// The JSON-RPC error code the client receives.
+    var code: Int {
         switch self {
         case .timeout: -32000
         case .processExit: -32001
         case .backpressure: -32002
         case .rpcError: -32602
-        case .invalidResponse: nil
+        case .invalidResponse: -32603
         }
     }
 

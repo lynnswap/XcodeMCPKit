@@ -66,7 +66,7 @@ struct ProxyRuntimeEventSourceTests {
             let request = try ProxyRuntimeRequest(json: .object([
                 "jsonrpc": .string("2.0"), "id": .number(.int(1)), "method": .string("initialize"),
                 "params": .object(["protocolVersion": .string(MCPProtocolVersion.current)]),
-            ]), headerSessionExists: false, prefersEventStream: false)
+            ]), headerSessionExists: false)
             let operation = try #require(broker.beginRequest(request, in: ProxySessionID(rawValue: name)))
             _ = try await withCheckedThrowingContinuation { continuation in
                 operation.whenComplete { continuation.resume(with: $0) }
