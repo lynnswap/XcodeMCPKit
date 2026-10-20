@@ -13,7 +13,7 @@ names and inputs stay the same across GUI and headless workspaces.
 | Previous call or value | Replacement |
 | --- | --- |
 | `XcodeMCPKitSelectHost({hostIdentifier})` followed by `tools/list` | Use the workspace identifier directly. For another installation, pass `hostIdentifier` to `XcodeOpenWorkspace`. |
-| `XcodeMCPKitSelectHost({hostIdentifier,createsNewHost:true})` | `XcodeOpenWorkspace({path,hostIdentifier,createsNewHost:true})`. |
+| `XcodeMCPKitSelectHost({hostIdentifier,createsNewHost:true})` or `XcodeOpenWorkspace({path,createsNewHost:true})` | `XcodeOpenWorkspace({path,hostIdentifier})`. Each installation has one shared headless host; use a separate checkout when settings must differ. |
 | `XcodeListWindows` and its native tab ID | `XcodeListWorkspaces` and its proxy `workspaceIdentifier`. |
 | `GetBuildLog({tabIdentifier: ...})` or other GUI workspace inputs | `GetBuildLog({workspaceIdentifier: ...})` using the identifier from List/Open. |
 | A native workspace ID retained across host selection | A new proxy identifier from List/Open. Do not reuse an old native ID. |
@@ -50,7 +50,7 @@ Remove these older settings from startup scripts and embedding configuration:
 
 | Removed | Current setup |
 | --- | --- |
-| `--upstream-processes`, `upstreamProcessCount` | One owned host multiplexes concurrent requests. Open an independent host only when separate workspace settings are needed. |
+| `--upstream-processes`, `upstreamProcessCount` | One owned host per installation multiplexes concurrent requests. |
 | `--xcode-mode`, `--session-id`, `--upstream-command`, `--upstream-args`, `--upstream-arg` | Use the normal proxy server. Remove explicit Service enable/status and `mcpbridge` launch steps. |
 | `--config`, `MCP_XCODE_CONFIG`, TOML files, `configurationFileURL`, `ToolPolicy`, disabled-tool lists | Configure endpoint/deadlines directly; the MCP client controls allowed tools. |
 | `--refresh-code-issues-mode` and its policy/environment settings | `XcodeRefreshCodeIssuesInFile` uses its owning native context. |

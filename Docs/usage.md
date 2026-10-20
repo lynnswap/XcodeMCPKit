@@ -56,7 +56,8 @@ Inspect settings with `XcodeListSchemes`, `XcodeListRunDestinations`, and
 `XcodeListTestPlans`. Change them with `XcodeSwitchScheme`,
 `XcodeSwitchRunDestination`, and `XcodeSwitchTestPlan`. A test run needs a scheme
 with testable targets and a usable test plan. Sessions referencing the same native
-workspace share these settings.
+workspace share these settings. Use a separate checkout, such as a Git worktree,
+when concurrent clients need different settings for the same project.
 
 `RenderPreview` defaults to a 300-second timeout; the SDK, proxy, and STDIO adapter
 default to 600 seconds per request. Set an external client's deadline above the
@@ -96,15 +97,15 @@ model with another installation or attach to a specific GUI process, call
 }
 ```
 
-Add `"createsNewHost": true` to create an independent headless instance using
-that installation. GUI processes are shared; choose an existing GUI entry instead.
+Each installation has one headless host process, shared by every MCP session;
+each running GUI Xcode process has one bridge. Opening more workspaces or
+connecting more clients does not start additional processes for the same Xcode.
 When the same GUI path has several tabs, use their individual identifiers from
 `XcodeListWorkspaces`.
 
-Independent headless instances have separate models and selected settings.
 DerivedData and build databases retain Xcode's existing locations and locking.
 The optional [shared compilation cache](configuration.md#compilation-caching)
-can reuse compatible compilation work across hosts.
+can reuse compatible compilation work across installations.
 
 ## Tools, failures, and cancellation
 

@@ -58,14 +58,14 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         _ = try register(installation: inventory.defaultInstallation, identifier: Self.defaultHostIdentifier)
     }
 
+    /// Returns the one host for an installation's headless models or for a running GUI process.
     private func register(installation: XcodeHostInstallation, identifier: String? = nil,
-                          independent: Bool = false, guiProcess: XcodeGUIProcess? = nil,
-                          claiming session: NativeBrokerSession? = nil) throws -> NativeBrokerHost {
+                          guiProcess: XcodeGUIProcess? = nil) throws -> NativeBrokerHost {
         try state.withLockedValue { storage in
             guard !storage.stopped else { throw CancellationError() }
             if let guiProcess, let id = storage.guiProcesses[guiProcess.identity],
                let host = storage.hosts[id] { return host }
-            if guiProcess == nil, !independent, let id = storage.installations[installation.developerDirectory],
+            if guiProcess == nil, let id = storage.installations[installation.developerDirectory],
                let host = storage.hosts[id] { return host }
             let id = identifier ?? "host-" + UUID().uuidString
             var config = configuration
@@ -73,12 +73,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             config.guiProcess = guiProcess
             let frozenConfig = config
             let host = NativeBrokerHost(identifier: id, index: (storage.hosts.values.map(\.index).max() ?? -1) + 1,
-                installation: installation, guiProcess: guiProcess, independent: independent, create: { [factory] in try factory(frozenConfig) },
+                installation: installation, guiProcess: guiProcess, create: { [factory] in try factory(frozenConfig) },
                 receive: { [weak self] event in self?.receive(event, from: id) })
             storage.hosts[id] = host
-            session?.state.withLockedValue { $0.hostRequests[id, default: 0] += 1 }
             if let guiProcess { storage.guiProcesses[guiProcess.identity] = id }
-            else if !independent { storage.installations[installation.developerDirectory] = id }
+            else { storage.installations[installation.developerDirectory] = id }
             return host
         }
     }
@@ -503,7 +502,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private func reapUnusedHosts(in storage: inout State) {
         guard !storage.stopped else { return }
         let unused = storage.hosts.values.filter { host in
-            guard host.independent || host.guiProcess != nil else { return false }
+            guard host.guiProcess != nil else { return false }
             return !storage.sessions.values.contains { session in
                 session.state.withLockedValue { session in
                     (!session.closed && session.retainsHost(host.identifier))
@@ -513,14 +512,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             }
         }
         for host in unused {
-            let shutdown: Task<Void, Never>
-            if host.independent {
-                storage.hosts.removeValue(forKey: host.identifier)
-                shutdown = Task { await host.shutdown() }
-            } else {
-                guard let pending = host.deactivate() else { continue }
-                shutdown = pending
-            }
+            guard let shutdown = host.deactivate() else { continue }
             let key = UUID()
             storage.closing[key] = Task { [self] in
                 await shutdown.value
@@ -767,26 +759,8 @@ private extension NativeHostBroker {
             throw NativeHostBrokerError("XcodeOpenWorkspace requires path")
         }
         let hostIdentifier = Self.string(arguments["hostIdentifier"]) ?? Self.defaultHostIdentifier
-        guard var host = state.withLockedValue({ $0.hosts[hostIdentifier] }) else {
+        guard let host = state.withLockedValue({ $0.hosts[hostIdentifier] }) else {
             throw NativeHostBrokerError("Unknown hostIdentifier; call XcodeMCPKitListHosts")
-        }
-        let createsNew: Bool
-        if let value = arguments["createsNewHost"] {
-            guard case .bool(let flag) = value else { throw NativeHostBrokerError("createsNewHost must be a boolean") }
-            createsNew = flag
-        } else { createsNew = false }
-        if createsNew {
-            guard host.guiProcess == nil else {
-                throw NativeHostBrokerError("A running Xcode process is shared; createsNewHost applies to headless workspaces")
-            }
-            host = try register(installation: host.installation, independent: true, claiming: session)
-        }
-        let registeredHost = host
-        defer {
-            if createsNew {
-                session.releaseHost(registeredHost.identifier)
-                closeUnusedChannels(in: session)
-            }
         }
         return try await withPinnedHost(host, session: session) { channel in
             let source = try channel.source()
