@@ -16,13 +16,13 @@ struct NativeHostConnectionTests {
         let connection: NativeHostConnection
 
         init(factory: FakeHostSessionFactory = FakeHostSessionFactory(), handshakeTimeout: Duration? = nil,
-             clock: ClockClient = .liveValue) {
+             catalogTimeout: Duration? = nil, clock: ClockClient = .liveValue) {
             self.factory = factory
             let events = events
             connection = NativeHostConnection(
                 factory: factory, handshake: .object(["protocolVersion": .string(MCPProtocolVersion.current),
                     "capabilities": .object([:]), "clientInfo": .object(["name": .string("test"), "version": .string("1")])]),
-                handshakeTimeout: handshakeTimeout, catalogTimeout: nil, prewarmsCatalog: false, clock: clock,
+                handshakeTimeout: handshakeTimeout, catalogTimeout: catalogTimeout, prewarmsCatalog: false, clock: clock,
                 logger: Logger(label: "NativeHostConnectionTests")) { events.append($0) }
             let connection = connection
             #expect(registerAsyncTestCleanup(description: "connection shutdown") { await connection.shutdown() })
@@ -286,6 +286,60 @@ struct NativeHostConnectionTests {
         host.emit(.object(["jsonrpc": .string("2.0"), "method": .string("notifications/tools/list_changed")]))
         host.release("tools/list", with: .result(.object(["tools": .array([.object(["name": .string("Stale")])])])))
         #expect(try await loading.value.result == changed)
+    }
+
+    @Test func aCatalogChangeReleasesWaitersOfALoadThatNeverAnswers() async throws {
+        let loads = NIOLockedValueBox(0)
+        let changed = JSONValue.object(["tools": .array([.object(["name": .string("Changed")])])])
+        let factory = FakeHostSessionFactory { _ in
+            FakeHostSession(handlesCatalog: true) { method, _ in
+                guard method == "tools/list" else { return .result(.object([:])) }
+                return loads.withLockedValue { count in
+                    count += 1
+                    return count == 1 ? .hold : .result(changed)
+                }
+            }
+        }
+        let fixture = Fixture(factory: factory)
+        let loading = Task { try await fixture.connection.nativeCatalog() }
+        let host = try await factory.started.nextValue(at: 0)
+        try await host.heldRequest.wait(description: "first catalog load held")
+        host.emit(.object(["jsonrpc": .string("2.0"), "method": .string("notifications/tools/list_changed")]))
+        let catalog = try await waitWithTimeout("the new catalog", timeout: .seconds(5)) { try await loading.value.result }
+        #expect(catalog == changed)
+    }
+
+    @Test func theCatalogTimeoutBoundsTheWholeLoad() async throws {
+        let clocks = makeDeterministicClocks()
+        let factory = FakeHostSessionFactory { _ in
+            FakeHostSession(handlesCatalog: true) { method, _ in method == "tools/list" ? .hold : .result(.object([:])) }
+        }
+        let fixture = Fixture(factory: factory, catalogTimeout: .seconds(10), clock: clocks.clock)
+        let loading = Task { try await fixture.connection.nativeCatalog() }
+        let host = try await factory.started.nextValue(at: 0)
+        try await host.heldRequest.wait(description: "first catalog page held")
+        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
+        clocks.timeoutClock.advance(by: .seconds(6))
+        host.release("tools/list", with: .result(.object(["tools": .array([]), "nextCursor": .string("page-2")])))
+        try await waitWithTimeout("second catalog page requested", timeout: .seconds(5)) {
+            while host.requests("tools/list").count < 2 { await Task.yield() }
+        }
+        clocks.timeoutClock.advance(by: .seconds(6))
+        try await waitWithTimeout("the catalog load timed out", timeout: .seconds(5)) {
+            await #expect(throws: NativeHostConnectionError.self) { _ = try await loading.value }
+        }
+    }
+
+    @Test func aMalformedReplyFailsItsRequest() async throws {
+        let fixture = Fixture(factory: FakeHostSessionFactory { _ in FakeHostSession { _, _ in .hold } })
+        let calling = Task { try await fixture.call("Malformed") }
+        let host = try await fixture.factory.started.nextValue(at: 0)
+        try await host.heldRequest.wait(description: "request held")
+        let id = try #require(host.requests("tools/call").first?["id"])
+        host.emit(.object(["jsonrpc": .string("2.0"), "id": id, "method": .number(.int(5))]))
+        try await waitWithTimeout("the request failed", timeout: .seconds(5)) {
+            await #expect(throws: NativeHostConnectionError.self) { _ = try await calling.value }
+        }
     }
 
     @Test func deinitializationCancelsAProcessThatIsStillStarting() async throws {

@@ -134,9 +134,12 @@ actor NativeHostConnection {
         while true {
             let process = try await runningProcess()
             let load = catalogLoad(on: process)
-            let result = try await Self.value(of: load.task)
-            // A catalog change during the load makes its result stale; load the new catalog.
-            if load.epoch == catalogEpoch { return (load.generation, result) }
+            do {
+                let result = try await Self.value(of: load.task)
+                if load.epoch == catalogEpoch { return (load.generation, result) }
+            } catch _ where load.epoch != catalogEpoch && !Task.isCancelled {
+                // The load was cancelled or failed after a catalog change superseded it.
+            }
         }
     }
 
@@ -392,7 +395,7 @@ actor NativeHostConnection {
         let generation = process.generation
         let task = Task { [self] in
             do {
-                let result = try await loadCatalog(on: process)
+                let result = try await withTimeout(catalogTimeout) { [self] in try await loadCatalog(on: process) }
                 if case .object(let fields) = result, case .object(let meta)? = fields["_meta"],
                    let origin = meta["com.lynnswap.xcode-mcpkit/origin"] {
                     updateStatus { $0.origin = origin }
@@ -420,9 +423,7 @@ actor NativeHostConnection {
                 "jsonrpc": .string("2.0"), "id": .string("tools/list"), "method": .string("tools/list"),
             ]
             if let cursor { request["params"] = .object(["cursor": cursor]) }
-            let reply = try await withTimeout(catalogTimeout) { [self, request] in
-                try await exchange(.object(request), owner: nil, on: process)
-            }
+            let reply = try await exchange(.object(request), owner: nil, on: process)
             let object = try JSONRPC.Wire.object(fromData: reply)
             if object["error"] != nil { throw NativeHostConnectionError.rejected(response: reply) }
             guard case .object(let page)? = JSONRPC.Wire.resultValue(inResponseObject: object),
@@ -477,8 +478,8 @@ actor NativeHostConnection {
             return
         }
         switch JSONRPC.Message.Inspector.kind(of: object) {
-        case .malformed(let id?) where object["method"] == nil:
-            // A reply to a pending request without a result or an error.
+        case .malformed(let id?):
+            // A reply to a pending request that is neither a result nor an error.
             if case .number(.int(let key)) = id.value, pending[key]?.generation == process.generation {
                 complete(key, with: .failure(NativeHostConnectionError.invalidResponse))
             }
@@ -503,6 +504,8 @@ actor NativeHostConnection {
             }
         case .notification("notifications/tools/list_changed"):
             catalogEpoch &+= 1
+            // Waiters of the superseded load see the epoch change and load the new catalog.
+            catalog?.task.cancel()
             catalog = nil
         case .notification:
             onEvent(.notification(owner: nil, data: data))
