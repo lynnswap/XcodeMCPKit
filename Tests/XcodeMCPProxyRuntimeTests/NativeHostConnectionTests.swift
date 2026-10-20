@@ -184,6 +184,93 @@ struct NativeHostConnectionTests {
         #expect(host.requests("tools/list").count == 2)
     }
 
+    @Test func callersWaitingForAStartingHostSendOnlyAfterItsHandshake() async throws {
+        let factory = FakeHostSessionFactory { _ in FakeHostSession(initializeReply: .hold) }
+        let fixture = Fixture(factory: factory)
+        let first = Task { try await fixture.call("First", id: .number(.int(1))) }
+        let host = try await factory.started.nextValue(at: 0)
+        try await host.heldRequest.wait(description: "initialize held")
+        let second = Task { try await fixture.call("Second", id: .number(.int(2))) }
+        for _ in 0..<100 { await Task.yield() }
+        host.release("initialize", with: .result(.object(["protocolVersion": .string(MCPProtocolVersion.current)])))
+        _ = try await (first.value, second.value)
+        let methods = host.received.withLockedValue { $0 }.compactMap { message -> String? in
+            guard case .object(let object) = message, case .string(let method)? = object["method"] else { return nil }
+            return method
+        }
+        let initialized = try #require(methods.firstIndex(of: "notifications/initialized"))
+        #expect(methods.firstIndex(of: "tools/call").map { $0 > initialized } == true)
+    }
+
+    @Test func aReplacementStartsOnlyAfterThePreviousProcessStops() async throws {
+        let previousStopped = LockedRecordedValues<Bool>()
+        let first = NIOLockedValueBox<FakeHostSession?>(nil)
+        let factory = FakeHostSessionFactory { start in
+            let session = FakeHostSession()
+            if start == 0 {
+                session.holdsStop.withLockedValue { $0 = true }
+                first.withLockedValue { $0 = session }
+            } else if let previous = first.withLockedValue({ $0 }) {
+                previousStopped.append(previous.stopFinished.withLockedValue { $0 })
+            }
+            return session
+        }
+        let fixture = Fixture(factory: factory)
+        try await fixture.connection.start()
+        let original = try fixture.session
+        original.emitStderr("2026-10-05 23:53:55.624 xcode-mcp-native-host[43311:36380528] CoreSimulatorService connection became invalid.  Simulator services will no longer be available.")
+        try await original.stopped.wait(description: "the ended process is stopping")
+        let replacement = Task { try await fixture.call("AfterReplacement") }
+        for _ in 0..<100 { await Task.yield() }
+        original.releaseStop.signal()
+        _ = try await replacement.value
+        #expect(try await previousStopped.nextValue(at: 0))
+    }
+
+    @Test func cancellingACatalogWaiterDoesNotWaitForTheHost() async throws {
+        let factory = FakeHostSessionFactory { _ in
+            FakeHostSession(handlesCatalog: true) { method, _ in method == "tools/list" ? .hold : .result(.object([:])) }
+        }
+        let fixture = Fixture(factory: factory)
+        let waiting = Task { try await fixture.connection.nativeCatalog() }
+        try await factory.started.nextValue(at: 0).heldRequest.wait(description: "catalog held")
+        waiting.cancel()
+        await #expect(throws: CancellationError.self) { _ = try await waiting.value }
+    }
+
+    @Test func catalogPagesAreCombinedWithoutACursor() async throws {
+        let factory = FakeHostSessionFactory { _ in
+            FakeHostSession(handlesCatalog: true) { method, params in
+                guard method == "tools/list" else { return .result(.object([:])) }
+                if params["cursor"] == nil {
+                    return .result(.object(["tools": .array([.object(["name": .string("First")])]),
+                                            "nextCursor": .string("page-2")]))
+                }
+                return .result(.object(["tools": .array([.object(["name": .string("Second")])])]))
+            }
+        }
+        let fixture = Fixture(factory: factory)
+        let catalog = try await fixture.connection.nativeCatalog().result
+        #expect(catalog == .object(["tools": .array([.object(["name": .string("First")]),
+                                                     .object(["name": .string("Second")])])]))
+    }
+
+    @Test func deinitializationCancelsAProcessThatIsStillStarting() async throws {
+        let gate = TestSignal()
+        let session = FakeHostSession()
+        let factory = GatedSessionFactory(session: session, gate: gate)
+        let connection = NativeHostConnection(
+            factory: factory, handshake: .object([:]), handshakeTimeout: nil, catalogTimeout: nil,
+            prewarmsCatalog: false, clock: .liveValue, logger: Logger(label: "NativeHostConnectionTests")) { _ in }
+        let starting = Task { try await connection.start() }
+        try await factory.entered.wait(description: "process start in progress")
+        connection.cancelForDeinit()
+        gate.signal()
+        await #expect(throws: NativeHostConnectionError.self) { _ = try await starting.value }
+        #expect(session.cancelled.isSignaled())
+        #expect(session.requests("initialize").isEmpty)
+    }
+
     @Test func hostPingIsAnsweredWithoutReachingClients() async throws {
         let fixture = Fixture()
         try await fixture.connection.start()
@@ -196,5 +283,23 @@ struct NativeHostConnectionTests {
             } }) { await Task.yield() }
         }
         #expect(fixture.events.count() == 0)
+    }
+}
+
+/// Returns its session only after `gate` is signaled.
+private final class GatedSessionFactory: UpstreamSessionFactory, Sendable {
+    let session: FakeHostSession
+    let gate: TestSignal
+    let entered = TestSignal()
+
+    init(session: FakeHostSession, gate: TestSignal) {
+        self.session = session
+        self.gate = gate
+    }
+
+    func startSession() async throws -> any UpstreamSession {
+        entered.signal()
+        try await gate.wait(description: "process start released")
+        return session
     }
 }

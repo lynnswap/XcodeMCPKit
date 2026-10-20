@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import NIOConcurrencyHelpers
+import Synchronization
 import XcodeMCPCore
 import XcodeMCPProxyRuntimeContract
 
@@ -85,10 +86,14 @@ actor NativeHostConnection {
     private let stderrLimiter = UpstreamStderrLogLimiter()
     private let onEvent: @Sendable (Event) -> Void
     nonisolated let status = NIOLockedValueBox(Status())
-    private nonisolated let liveSession = NIOLockedValueBox<(any UpstreamSession)?>(nil)
+    /// The process session that deinitialization cancels, and whether it already did.
+    private nonisolated let live = NIOLockedValueBox<(session: (any UpstreamSession)?, cancelled: Bool)>((nil, false))
 
     private var generation: UInt64 = 0
+    /// The process from launch until it ends; it receives replies even while initializing.
     private var process: Process?
+    /// The process once it has completed its handshake; only this one serves requests.
+    private var readyProcess: Process?
     private var starting: (generation: UInt64, task: Task<Process, any Error>)?
     private var stopped = false
     private var nextRequestID: Int64 = 0
@@ -126,7 +131,7 @@ actor NativeHostConnection {
     func nativeCatalog() async throws -> (generation: UInt64, result: JSONValue) {
         let process = try await runningProcess()
         let load = catalogLoad(on: process)
-        let result = try await load.task.value
+        let result = try await Self.value(of: load.task)
         return (load.generation, result)
     }
 
@@ -150,21 +155,36 @@ actor NativeHostConnection {
         await stopProcess()
     }
 
-    /// Requests process termination without waiting; used only by deinitialization.
-    nonisolated func cancelForDeinit() { liveSession.withLockedValue { $0 }?.cancel() }
+    /// Requests process termination without waiting; used only by deinitialization. A process
+    /// that is still starting is cancelled as soon as it exists.
+    nonisolated func cancelForDeinit() {
+        live.withLockedValue { live in
+            live.cancelled = true
+            return live.session
+        }?.cancel()
+    }
 
     // MARK: - Process lifetime
 
     private func runningProcess() async throws -> Process {
-        if let process { return process }
-        guard !stopped else { throw NativeHostConnectionError.unavailable("the host has shut down") }
-        if let starting { return try await starting.task.value }
-        generation += 1
-        let next = generation
-        let task = Task { try await launch(generation: next) }
-        starting = (next, task)
-        updateStatus { $0.phase = .starting }
-        return try await task.value
+        while true {
+            if let readyProcess { return readyProcess }
+            guard !stopped, !live.withLockedValue({ $0.cancelled }) else {
+                throw NativeHostConnectionError.unavailable("the host has shut down")
+            }
+            if let starting { return try await Self.value(of: starting.task) }
+            // A replacement never runs beside the process it replaces.
+            if let ending = endings.values.first {
+                await ending.value
+                continue
+            }
+            generation += 1
+            let next = generation
+            let task = Task { try await launch(generation: next) }
+            starting = (next, task)
+            updateStatus { $0.phase = .starting }
+            return try await Self.value(of: task)
+        }
     }
 
     private func launch(generation: UInt64) async throws -> Process {
@@ -176,9 +196,17 @@ actor NativeHostConnection {
             logger.error("Native host process did not start", metadata: ["error": "\(error)"])
             throw NativeHostConnectionError.unavailable(String(describing: error))
         }
+        let cancelled = live.withLockedValue { live in
+            if !live.cancelled { live.session = session }
+            return live.cancelled
+        }
+        if cancelled {
+            session.cancel()
+            updateStatus { if $0.phase == .starting { $0.phase = .idle } }
+            throw NativeHostConnectionError.unavailable("the host was cancelled while starting")
+        }
         let process = Process(generation: generation, session: session)
         self.process = process
-        liveSession.withLockedValue { $0 = session }
         process.reader.withLockedValue { $0 = Task { [weak self] in
             for await event in session.events { await self?.receive(event, from: process) }
             await self?.end(process, reason: "the host process exited")
@@ -204,6 +232,7 @@ actor NativeHostConnection {
             throw NativeHostConnectionError.unavailable(String(describing: error))
         }
         guard self.process === process else { throw NativeHostConnectionError.unavailable("the host process exited") }
+        readyProcess = process
         updateStatus {
             $0.phase = .ready
             $0.runningGeneration = generation
@@ -218,7 +247,8 @@ actor NativeHostConnection {
         if let ending = endings[process.generation] { await ending.value; return }
         guard self.process === process else { return }
         self.process = nil
-        liveSession.withLockedValue { if $0 === process.session { $0 = nil } }
+        if readyProcess === process { readyProcess = nil }
+        live.withLockedValue { if $0.session === process.session { $0.session = nil } }
         catalog = nil
         let failed = pending.filter { $0.value.generation == process.generation }
         for id in failed.keys { complete(id, with: .failure(NativeHostConnectionError.unavailable(reason))) }
@@ -228,10 +258,14 @@ actor NativeHostConnection {
         }
         logger.notice("Native host process ended", metadata: ["generation": "\(process.generation)", "reason": "\(reason)"])
         onEvent(.processEnded(generation: process.generation))
-        let ending = Task { await process.session.stop() }
-        endings[process.generation] = ending
+        let generation = process.generation
+        // The task removes its own entry, so whoever awaits it next sees the process gone.
+        let ending = Task {
+            await process.session.stop()
+            endings[generation] = nil
+        }
+        endings[generation] = ending
         await ending.value
-        endings[process.generation] = nil
     }
 
     private func waitForEndings() async {
@@ -327,20 +361,10 @@ actor NativeHostConnection {
     private func catalogLoad(on process: Process) -> Catalog {
         if let catalog, catalog.generation == process.generation, catalog.epoch == catalogEpoch { return catalog }
         let epoch = catalogEpoch
-        let request = JSONValue.object([
-            "jsonrpc": .string("2.0"), "id": .string("tools/list"), "method": .string("tools/list"),
-        ])
         let generation = process.generation
         let task = Task { [self] in
             do {
-                let reply = try await withTimeout(catalogTimeout) { [self] in
-                    try await exchange(request, owner: nil, on: process)
-                }
-                let object = try JSONRPC.Wire.object(fromData: reply)
-                if object["error"] != nil { throw NativeHostConnectionError.rejected(response: reply) }
-                guard let result = JSONRPC.Wire.resultValue(inResponseObject: object) else {
-                    throw NativeHostConnectionError.invalidResponse
-                }
+                let result = try await loadCatalog(on: process)
                 if case .object(let fields) = result, case .object(let meta)? = fields["_meta"],
                    let origin = meta["com.lynnswap.xcode-mcpkit/origin"] {
                     updateStatus { $0.origin = origin }
@@ -355,6 +379,40 @@ actor NativeHostConnection {
         let load = Catalog(generation: generation, epoch: epoch, task: task)
         catalog = load
         return load
+    }
+
+    /// Reads every page of the host's `tools/list` into one result without a cursor.
+    private func loadCatalog(on process: Process) async throws -> JSONValue {
+        var catalog: [String: JSONValue]?
+        var tools: [JSONValue] = []
+        var cursor: JSONValue?
+        var visited: Set<String> = []
+        repeat {
+            var request: [String: JSONValue] = [
+                "jsonrpc": .string("2.0"), "id": .string("tools/list"), "method": .string("tools/list"),
+            ]
+            if let cursor { request["params"] = .object(["cursor": cursor]) }
+            let reply = try await withTimeout(catalogTimeout) { [self, request] in
+                try await exchange(.object(request), owner: nil, on: process)
+            }
+            let object = try JSONRPC.Wire.object(fromData: reply)
+            if object["error"] != nil { throw NativeHostConnectionError.rejected(response: reply) }
+            guard case .object(let page)? = JSONRPC.Wire.resultValue(inResponseObject: object),
+                  case .array(let pageTools)? = page["tools"] else {
+                throw NativeHostConnectionError.invalidResponse
+            }
+            if catalog == nil { catalog = page }
+            tools += pageTools
+            cursor = nil
+            if case .string(let next)? = page["nextCursor"] {
+                guard visited.insert(next).inserted else { throw NativeHostConnectionError.invalidResponse }
+                cursor = .string(next)
+            }
+        } while cursor != nil
+        var result = catalog ?? [:]
+        result["tools"] = .array(tools)
+        result.removeValue(forKey: "nextCursor")
+        return .object(result)
     }
 
     // MARK: - Host messages
@@ -440,6 +498,43 @@ actor NativeHostConnection {
 
     private func updateStatus(_ update: (inout Status) -> Void) {
         status.withLockedValue(update)
+    }
+
+    /// Waits for a task the connection owns, returning early when the caller is cancelled.
+    /// The task keeps running for its other waiters.
+    private static func value<T: Sendable>(of task: Task<T, any Error>) async throws -> T {
+        let waiter = Waiter<T>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiter.install(continuation)
+                Task { waiter.resume(with: await task.result) }
+            }
+        } onCancel: {
+            waiter.resume(with: .failure(CancellationError()))
+        }
+    }
+
+    private final class Waiter<T: Sendable>: Sendable {
+        private let state = Mutex<(continuation: CheckedContinuation<T, any Error>?, result: Result<T, any Error>?)>((nil, nil))
+
+        func install(_ continuation: CheckedContinuation<T, any Error>) {
+            let result = state.withLock { state -> Result<T, any Error>? in
+                if let result = state.result { return result }
+                state.continuation = continuation
+                return nil
+            }
+            if let result { continuation.resume(with: result) }
+        }
+
+        func resume(with result: Result<T, any Error>) {
+            let continuation = state.withLock { state -> CheckedContinuation<T, any Error>? in
+                guard state.result == nil else { return nil }
+                state.result = result
+                defer { state.continuation = nil }
+                return state.continuation
+            }
+            continuation?.resume(with: result)
+        }
     }
 
     private func withTimeout<T: Sendable>(_ timeout: Duration?, _ operation: @escaping @Sendable () async throws -> T)

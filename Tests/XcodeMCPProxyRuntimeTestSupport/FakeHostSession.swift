@@ -5,8 +5,8 @@ import XcodeMCPCore
 @testable import XcodeMCPProxyRuntime
 import XcodeMCPProxyTestSupport
 
-/// A scripted host process. It answers `initialize` and `tools/list` itself and asks
-/// `handle` for every other request.
+/// A scripted host process. It answers `initialize` and, unless `handlesCatalog` is set,
+/// `tools/list` itself, and asks `handle` for every other request.
 final class FakeHostSession: UpstreamSession, Sendable {
     enum Reply: Sendable {
         case result(JSONValue)
@@ -22,6 +22,7 @@ final class FakeHostSession: UpstreamSession, Sendable {
     private let handle: @Sendable (_ method: String, _ params: [String: JSONValue]) -> Reply
     private let tools: NIOLockedValueBox<JSONValue>
     private let initializeReply: Reply?
+    private let handlesCatalog: Bool
     /// Every message the proxy wrote, in order.
     let received = NIOLockedValueBox<[JSONValue]>([])
     private let held = NIOLockedValueBox<[(id: JSONValue, method: String)]>([])
@@ -31,14 +32,21 @@ final class FakeHostSession: UpstreamSession, Sendable {
     let cancelled = TestSignal()
     private let stops = NIOLockedValueBox(0)
     var stopCount: Int { stops.withLockedValue { $0 } }
+    /// While set, `stop()` waits for `releaseStop`.
+    let holdsStop = NIOLockedValueBox(false)
+    let releaseStop = TestSignal()
+    /// Set once `stop()` has returned.
+    let stopFinished = NIOLockedValueBox(false)
 
     init(tools: JSONValue = .object(["tools": .array([])]), initializeReply: Reply? = nil,
+         handlesCatalog: Bool = false,
          handle: @escaping @Sendable (_ method: String, _ params: [String: JSONValue]) -> Reply = { _, _ in
              .result(.object([:]))
          }) {
         (events, continuation) = AsyncStream<Upstream.Event>.makeStream()
         self.tools = NIOLockedValueBox(tools)
         self.initializeReply = initializeReply
+        self.handlesCatalog = handlesCatalog
         self.handle = handle
     }
 
@@ -62,7 +70,7 @@ final class FakeHostSession: UpstreamSession, Sendable {
                 "capabilities": .object(["tools": .object([:])]),
                 "serverInfo": .object(["name": .string("FakeHost"), "version": .string("1")]),
             ]))
-        case "tools/list":
+        case "tools/list" where !handlesCatalog:
             reply = .result(tools.withLockedValue { $0 })
         default:
             reply = handle(method, params)
@@ -126,7 +134,12 @@ final class FakeHostSession: UpstreamSession, Sendable {
     func stop() async {
         stops.withLockedValue { $0 += 1 }
         stopped.signal()
+        if holdsStop.withLockedValue({ $0 }) {
+            do { try await releaseStop.wait(description: "release the held host stop") }
+            catch { Issue.record(error) }
+        }
         continuation.finish()
+        stopFinished.withLockedValue { $0 = true }
     }
 }
 
