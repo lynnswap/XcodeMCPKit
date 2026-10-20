@@ -17,7 +17,7 @@ extension NativeHostBroker {
                 description: "List headless workspaces and open Xcode windows. Each workspaceIdentifier names one execution context; use it with workspace tools. Errors identify hosts whose workspaces could not be listed.",
                 properties: [:]),
             tool(openWorkspaceTool,
-                description: "Open a saved project, workspace, or Swift package and return its workspaceIdentifier. Defaults to the default installation's headless host. Optionally choose a host from XcodeMCPKitListHosts; a GUI host attaches an already open window. Each installation has one headless host; sessions opening the same path share its model, scheme, run destination, and test plan.",
+                description: "Open a saved project, workspace, or Swift package and return its workspaceIdentifier. Defaults to the default installation's headless host. Optionally choose a host from XcodeMCPKitListHosts; a GUI host attaches an already open window. Each installation has one headless host; sessions opening the same path share its model, and each session keeps its own scheme, run destination, and test plan in it.",
                 properties: [
                     "path": .object(["type": .string("string"), "description": .string("Absolute project, workspace, or Swift package path.")]),
                     "hostIdentifier": .object(["type": .string("string")]),

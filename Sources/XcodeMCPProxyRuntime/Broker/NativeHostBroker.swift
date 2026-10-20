@@ -1087,7 +1087,8 @@ private extension NativeHostBroker {
             // The session's operations on one model run one at a time, as the host runs them anyway,
             // so each carries the selection that the previous one reported.
             do {
-                sent = try await session.selectionTurns.run(workspace.scope, bytes: request.data.count) {
+                sent = try await session.selectionTurns.run(workspace.scope, bytes: request.data.count,
+                                                             budget: host.waitingRequests) {
                     let sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session,
                         generation: generation, eventStream: request.prefersEventStream,
                         selection: session.selection(for: workspace)))

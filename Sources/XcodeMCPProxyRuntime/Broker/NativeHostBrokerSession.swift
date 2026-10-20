@@ -11,6 +11,9 @@ final class NativeBrokerHost: Sendable {
     let installation: XcodeHostInstallation
     let guiProcess: XcodeGUIProcess?
     let connection: NativeHostConnection
+    /// Requests that wait in the broker for a session's turn on one of this host's models. Their
+    /// limit is the host queue's, which they would otherwise be in.
+    let waitingRequests = NativeBrokerByteBudget(limit: 32 * 1024 * 1024)
 
     init(identifier: String, index: Int, installation: XcodeHostInstallation, guiProcess: XcodeGUIProcess?,
          connection: NativeHostConnection) {
@@ -55,9 +58,8 @@ final class NativeBrokerSession: Sendable {
     let identifier: ProxySessionID
     /// Identifies this session to headless hosts, which keep Xcode's per-conversation state.
     let conversationID = UUID().uuidString
-    /// Orders this session's operations on each headless model. Waiting requests have the same
-    /// limit as a host's queue.
-    let selectionTurns = NativeBrokerTurns<NativeBrokerWorkspace.Scope>(maximumWaitingBytes: 32 * 1024 * 1024)
+    /// Orders this session's operations on each headless model.
+    let selectionTurns = NativeBrokerTurns<NativeBrokerWorkspace.Scope>()
     let state: NIOLockedValueBox<State>
 
     init(identifier: ProxySessionID) {

@@ -72,13 +72,14 @@ struct NativeWorkspaceSelectionsTests {
         let workspace = Workspace()
         let selections = NativeWorkspaceSelections()
 
-        try await selections.apply(NativeWorkspaceSelection(), in: "w1", run: workspace.run)
+        try await selections.apply(nil, in: "w1", run: workspace.run)
         let first = NativeWorkspaceSelection(scheme: "App", destination: "My Mac", testPlan: "Unit")
         #expect(selections.cachedSelection(in: "w1") == first)
         #expect(workspace.calls == ["XcodeListSchemes", "XcodeListRunDestinations", "XcodeListTestPlans"])
 
         // Another session switches the scheme.
-        try await selections.apply(NativeWorkspaceSelection(scheme: "Tool"), in: "w1", run: workspace.run)
+        try await selections.apply(NativeWorkspaceSelection(scheme: "Tool", destination: "My Mac", testPlan: "ToolTests"),
+                                   in: "w1", run: workspace.run)
         #expect(selections.cachedSelection(in: "w1")
             == NativeWorkspaceSelection(scheme: "Tool", destination: "My Mac", testPlan: "ToolTests"))
 
@@ -97,7 +98,7 @@ struct NativeWorkspaceSelectionsTests {
         let workspace = Workspace()
         workspace.unavailableDestination = "iPhone 17"
         let selections = NativeWorkspaceSelections()
-        let requested = NativeWorkspaceSelection(destination: "iPhone 17")
+        let requested = NativeWorkspaceSelection(scheme: "App", destination: "iPhone 17", testPlan: "Unit")
         await #expect(throws: NativeToolExecutionError.self) {
             _ = try await selections.prepare(for: "BuildProject", requested: requested, in: "w1", run: workspace.run)
         }
@@ -168,9 +169,21 @@ struct NativeWorkspaceSelectionsTests {
         let workspace = Workspace()
         workspace.scheme = nil
         let selections = NativeWorkspaceSelections()
-        #expect(try await selections.prepare(for: "XcodeListSchemes", requested: NativeWorkspaceSelection(),
-                                             in: "w1", run: workspace.run))
+        #expect(try await selections.prepare(for: "XcodeListSchemes", requested: nil, in: "w1", run: workspace.run))
         #expect(selections.cachedSelection(in: "w1") == NativeWorkspaceSelection(destination: "My Mac"))
+    }
+
+    @Test func aSessionWithoutASchemeDoesNotRunWithAnotherSessionsScheme() async throws {
+        let workspace = Workspace()
+        workspace.scheme = nil
+        let selections = NativeWorkspaceSelections()
+        let recorded = try await selections.selection(in: "w1", run: workspace.run)
+        // Another session selects a scheme.
+        try await selections.apply(NativeWorkspaceSelection(scheme: "Tool", destination: "My Mac", testPlan: "ToolTests"),
+                                   in: "w1", run: workspace.run)
+        await #expect(throws: NativeToolExecutionError.self) {
+            _ = try await selections.prepare(for: "BuildProject", requested: recorded, in: "w1", run: workspace.run)
+        }
     }
 
     @Test func schemesAndPlansThatShareANameAreToldApart() async throws {
@@ -184,14 +197,16 @@ struct NativeWorkspaceSelectionsTests {
         #expect(selection.testPlan == "/A/Unit.xctestplan")
 
         // Another session's scheme of the same name in the other project is restored too.
-        try await selections.apply(NativeWorkspaceSelection(scheme: "App (Mac)"), in: "w1", run: workspace.run)
+        try await selections.apply(
+            NativeWorkspaceSelection(scheme: "App (Mac)", destination: "My Mac", testPlan: "/A/Unit.xctestplan"),
+            in: "w1", run: workspace.run)
         #expect(workspace.scheme == "App (Mac)")
     }
 
     @Test func aClosedWorkspaceIsReadAgainWhenReopened() async throws {
         let workspace = Workspace()
         let selections = NativeWorkspaceSelections()
-        try await selections.apply(NativeWorkspaceSelection(), in: "w1", run: workspace.run)
+        try await selections.apply(nil, in: "w1", run: workspace.run)
         selections.retain([])
         #expect(selections.cachedSelection(in: "w1") == nil)
     }

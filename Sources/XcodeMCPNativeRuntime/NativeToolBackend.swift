@@ -185,7 +185,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
             // The request holds the workspace's execution permit, so no other session's operation
             // runs between applying this session's selection and the action.
             let reportsSelection = try await selections.prepare(
-                for: name, requested: context.selection ?? NativeWorkspaceSelection(), in: identifier
+                for: name, requested: context.selection, in: identifier
             ) { [self] tool, arguments in try await runInternal(tool, arguments: arguments, context: context) }
             requestWorkspaces[context.artifactsDirectory]?.reportsSelection = reportsSelection
         }

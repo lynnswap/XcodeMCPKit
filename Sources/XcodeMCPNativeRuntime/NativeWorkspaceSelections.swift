@@ -93,13 +93,14 @@ final class NativeWorkspaceSelections {
         return selection
     }
 
-    /// Prepares `workspace` for `tool` with the session's `requested` selection. Returns whether the
-    /// tool's result reports the session's selection.
+    /// Prepares `workspace` for `tool` with the session's `requested` selection, or with the active
+    /// one when the session has none recorded yet. Returns whether the tool's result reports the
+    /// session's selection.
     ///
     /// An operation fails when the session's selection cannot be restored, so it never runs with
     /// another session's selection. Tools that inspect or switch the selection still run, so the
     /// session can correct settings that Xcode no longer offers.
-    func prepare(for tool: String, requested: NativeWorkspaceSelection, in workspace: String,
+    func prepare(for tool: String, requested: NativeWorkspaceSelection?, in workspace: String,
                  run: Run) async throws -> Bool {
         guard tool != "XcodeCloseWorkspace" else { return false }
         do {
@@ -141,9 +142,14 @@ final class NativeWorkspaceSelections {
         active = active.filter { workspaces.contains($0.key) }
     }
 
-    /// Makes the parts of `requested` that it names active in `workspace`, and fails when Xcode
-    /// selects something else.
-    func apply(_ requested: NativeWorkspaceSelection, in workspace: String, run: Run) async throws {
+    /// Makes `requested` active in `workspace`, and fails when Xcode selects something else. A part
+    /// that `requested` lacks must be absent, since a switch cannot clear it. Without `requested`,
+    /// the active selection is only read.
+    func apply(_ requested: NativeWorkspaceSelection?, in workspace: String, run: Run) async throws {
+        guard let requested else {
+            _ = try await selection(in: workspace, run: run)
+            return
+        }
         if requested.isUnknown {
             throw NativeToolExecutionError(message: "This session's scheme, run destination, and test plan could not "
                 + "be read. Switch them with XcodeSwitchScheme, XcodeSwitchRunDestination, or XcodeSwitchTestPlan "
@@ -157,7 +163,14 @@ final class NativeWorkspaceSelections {
         do {
             var current = try await selection(in: workspace, run: run)
             for step in steps {
-                guard let value = requested[keyPath: step.part], value != current[keyPath: step.part] else { continue }
+                guard let value = requested[keyPath: step.part] else {
+                    if let selected = current[keyPath: step.part] {
+                        throw NativeToolExecutionError(message: "This session has no \(step.kind) selected, but the "
+                            + "workspace now has '\(selected)'. Switch the \(step.kind) before retrying.")
+                    }
+                    continue
+                }
+                guard value != current[keyPath: step.part] else { continue }
                 _ = try await run(step.tool, ["workspaceIdentifier": .string(workspace), step.argument: .string(value)])
                 // Xcode can adjust the other parts, so the whole selection is read again.
                 active[workspace] = nil
