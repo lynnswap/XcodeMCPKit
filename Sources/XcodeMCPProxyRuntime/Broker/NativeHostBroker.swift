@@ -81,7 +81,8 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 handshake: .object(InitializeHandshakeJSON.resolved(
                     initializeParamsOverride: configuration.initializeParamsOverride)),
                 handshakeTimeout: MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: timeout).map(Self.duration),
-                catalogTimeout: MCP.MethodDispatcher.timeoutForMethod("tools/list", defaultSeconds: timeout).map(Self.duration),
+                // An internal catalog load stays bounded even when client request timeouts are disabled.
+                catalogTimeout: MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: timeout).map(Self.duration),
                 prewarmsCatalog: configuration.prewarmToolsList, clock: clock,
                 logger: ProxyLogging.make("native-host"),
                 onEvent: { [weak self] event in self?.receive(event, from: id) })
@@ -138,7 +139,9 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             eventSource.emit(.sessionOpened(sessionID: sessionID))
         }
         guard let session = state.withLockedValue({ $0.resetsInProgress == 0 ? $0.sessions[sessionID] : nil }) else { return nil }
-        let admission = session.state.withLockedValue { storage -> Admission? in
+        // Admission pins the host under the broker lock, which the unused-host scan also holds,
+        // so a GUI bridge is either kept for this request or retired before the request uses it.
+        let admission = state.withLockedValue { _ in session.state.withLockedValue { storage -> Admission? in
             guard !storage.closed else { return nil }
             storage.activeRequests += 1
             storage.activity = DispatchTime.now().uptimeNanoseconds
@@ -184,7 +187,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             }
             return Admission(hostIdentifier: host, workspace: workspace, deviceSession: device, launchSession: launch,
                              error: error, retainsWorkspace: retainsWorkspace)
-        }
+        } }
         guard let admission else { return nil }
         let key = UUID()
         let admittedMessage = message
@@ -778,9 +781,11 @@ private extension NativeHostBroker {
     /// Keeps a reclaimable host in use while `operation` runs.
     private func withPinnedHost<T: Sendable>(_ host: NativeBrokerHost, session: NativeBrokerSession,
                                              operation: () async throws -> T) async throws -> T {
-        try session.state.withLockedValue { state in
-            guard !state.closed else { throw CancellationError() }
-            state.hostRequests[host.identifier, default: 0] += 1
+        try state.withLockedValue { _ in
+            try session.state.withLockedValue { state in
+                guard !state.closed else { throw CancellationError() }
+                state.hostRequests[host.identifier, default: 0] += 1
+            }
         }
         defer { session.releaseHost(host.identifier); reapUnusedHosts() }
         return try await operation()
