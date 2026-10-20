@@ -725,6 +725,17 @@ struct NativeHostBrokerTests {
         try await transport.stopped.wait(description: "session released the GUI bridge")
     }
 
+    @Test func snapshotOmitsGUIHostsWhoseXcodeExited() async throws {
+        let fixture = try BrokerFixture.singleGUIWindow()
+        let session = try await fixture.initialize("gui-exit")
+        _ = try await fixture.list(session)
+        #expect(fixture.broker.snapshot().hosts.compactMap(\.guiProcessIdentifier) == [101])
+        fixture.guiProcesses.withLockedValue { $0 = [] }
+        let hosts = fixture.broker.snapshot().hosts
+        #expect(hosts.compactMap(\.guiProcessIdentifier).isEmpty)
+        #expect(hosts.contains { $0.identifier == NativeHostBroker.defaultHostIdentifier })
+    }
+
     @Test func eventStreamsKeepIdleSessionsAliveUntilTheyClose() async throws {
         let fixture = try BrokerFixture()
         let session = try await fixture.initialize("events")

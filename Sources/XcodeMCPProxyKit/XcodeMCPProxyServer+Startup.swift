@@ -214,10 +214,13 @@ extension XcodeMCPProxyServer {
                     return
                 }
                 lastEndpoint = acquired.endpoint
+                // Read after release, so hosts that requests registered during shutdown are included.
                 // Shutdown stops every host process.
-                terminalHosts = acquired.runtime.snapshot().hosts.map { host in
-                    Status.Host(identifier: host.identifier, developerDirectory: host.developerDirectory,
-                                kind: Self.publicKind(of: host), state: .stopped, activeRequestCount: 0)
+                defer {
+                    terminalHosts = acquired.runtime.snapshot().hosts.map { host in
+                        Status.Host(identifier: host.identifier, developerDirectory: host.developerDirectory,
+                                    kind: Self.publicKind(of: host), state: .stopped, activeRequestCount: 0)
+                    }
                 }
                 try await Self.release(acquired)
             }

@@ -1,5 +1,6 @@
 import Darwin
 import Dispatch
+import Foundation
 import Synchronization
 
 extension XcodeMCPProxyServer {
@@ -111,10 +112,22 @@ extension XcodeMCPProxyServer {
             }
 
             let server = dependencies.makeServer(configuration)
+            // A termination signal shuts the server down, also while it starts, which stops its host
+            // processes and ends the wait.
+            let signalled = Mutex(false)
+            let stopObservingSignals = dependencies.observeTerminationSignals {
+                signalled.withLock { $0 = true }
+                Task { try? await server.shutdown() }
+            }
+            defer { stopObservingSignals() }
             let endpoint: Endpoint
             do {
                 endpoint = try await server.start()
             } catch {
+                // A startup that a signal stopped ends like a shutdown, unless its cleanup failed.
+                if !(error is CleanupError), signalled.withLock({ $0 }) {
+                    return 0
+                }
                 if !(error is CleanupError), configuration.bindAddress.port > 0,
                    dependencies.isAddressAlreadyInUse(error) {
                     let diagnostic = XcodeMCPProxyServer.PortInUseError(
@@ -131,11 +144,6 @@ extension XcodeMCPProxyServer {
                 throw error
             }
 
-            // A termination signal shuts the server down, which stops its host processes and ends the wait.
-            let stopObservingSignals = dependencies.observeTerminationSignals {
-                Task { try? await server.shutdown() }
-            }
-            defer { stopObservingSignals() }
             do {
                 try await server.waitUntilShutdown()
             } catch {
@@ -159,43 +167,63 @@ extension XcodeMCPProxyServer {
 
 extension XcodeMCPProxyServer: XcodeMCPProxyServer.LaunchServer {}
 
-/// Delivers `SIGINT` and `SIGTERM` to a handler instead of terminating the process.
+/// Delivers `SIGINT` and `SIGTERM` to handlers instead of terminating the process. Observers in one
+/// process share the dispositions, which are replaced while any observer is registered.
 enum TerminationSignals {
     static let numbers = [SIGINT, SIGTERM]
 
-    /// The first signal calls `handler`. A later one terminates the process, so a shutdown that
-    /// does not finish can still be interrupted. The returned closure restores the previous
-    /// dispositions, including their flags and masks.
-    static func observe(_ handler: @escaping @Sendable () -> Void) -> () -> Void {
-        let received = Mutex<UInt>(0)
+    private struct Registry {
+        var handlers: [UUID: @Sendable () -> Void] = [:]
+        var received: UInt = 0
+        var sources: [any DispatchSourceSignal] = []
         var previous: [(number: Int32, action: sigaction)] = []
-        let sources = numbers.map { number -> any DispatchSourceSignal in
+    }
+
+    private static let registry = Mutex(Registry())
+
+    /// The first signal calls every registered handler. A later one terminates the process, so a
+    /// shutdown that does not finish can still be interrupted. When the last observer stops, the
+    /// previous dispositions are restored with their flags and masks.
+    static func observe(_ handler: @escaping @Sendable () -> Void) -> () -> Void {
+        let id = UUID()
+        registry.withLock { registry in
+            if registry.handlers.isEmpty { install(in: &registry) }
+            registry.handlers[id] = handler
+        }
+        return {
+            registry.withLock { registry in
+                guard registry.handlers.removeValue(forKey: id) != nil, registry.handlers.isEmpty else { return }
+                for source in registry.sources { source.cancel() }
+                for var entry in registry.previous { sigaction(entry.number, &entry.action, nil) }
+                registry = Registry()
+            }
+        }
+    }
+
+    private static func install(in registry: inout Registry) {
+        for number in numbers {
             var ignore = sigaction()
             ignore.__sigaction_u.__sa_handler = SIG_IGN
             var action = sigaction()
             sigaction(number, &ignore, &action)
-            previous.append((number, action))
+            registry.previous.append((number, action))
             let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
             source.setEventHandler { [weak source] in
                 guard let source else { return }
                 // A source reports signals that arrive together in one event.
-                let count = received.withLock { count in
-                    count += source.data
-                    return count
+                let (count, handlers) = Self.registry.withLock { registry in
+                    registry.received += source.data
+                    return (registry.received, Array(registry.handlers.values))
                 }
                 if count == 1 {
-                    handler()
+                    for handler in handlers { handler() }
                 } else {
                     signal(number, SIG_DFL)
                     raise(number)
                 }
             }
             source.resume()
-            return source
-        }
-        return {
-            for source in sources { source.cancel() }
-            for var entry in previous { sigaction(entry.number, &entry.action, nil) }
+            registry.sources.append(source)
         }
     }
 }

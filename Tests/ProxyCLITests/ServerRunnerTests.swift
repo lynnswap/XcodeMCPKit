@@ -383,6 +383,30 @@ struct ServerRunnerTests {
         #expect(!observing.snapshot())
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func aTerminationSignalDuringStartupShutsTheServerDown() async throws {
+        let server = StartBlockingProxyServer()
+        let handlers = LockedBox<[@Sendable () -> Void]>([])
+        let launcher = XcodeMCPProxyServer.Launcher(dependencies: .init(
+            makeServer: { _ in server },
+            isAddressAlreadyInUse: { _ in false },
+            observeTerminationSignals: { handler in
+                handlers.withValue { $0.append(handler) }
+                return {}
+            }
+        ))
+
+        let running = Task {
+            await launcher.run(arguments: ["xcode-mcp-proxy-server", "--listen", "127.0.0.1:9004"],
+                               environment: [:], stdout: { _ in }, stderr: { _ in })
+        }
+        while handlers.snapshot().isEmpty || !server.isStarting { await Task.yield() }
+        handlers.snapshot().first?()
+
+        #expect(await running.value == 0)
+        #expect(server.shutdownCount == 1)
+    }
+
     @Test func startupCleanupFailureIsNotReplacedByPortInUseDiagnostic() async throws {
         let error = XcodeMCPProxyServer.CleanupError(
             operationError: AddressAlreadyInUseError(),
@@ -490,6 +514,26 @@ struct TerminationSignalTests {
         #expect(calls.snapshot() == 1)
     }
 
+    @Test func overlappingObserversKeepTheirDispositionsUntilTheLastStops() {
+        var custom = sigaction()
+        custom.__sigaction_u.__sa_handler = SIG_IGN
+        custom.sa_flags = SA_RESTART | SA_NODEFER
+        var original = sigaction()
+        sigaction(SIGTERM, &custom, &original)
+        defer { sigaction(SIGTERM, &original, nil) }
+
+        let stopFirst = TerminationSignals.observe {}
+        let stopSecond = TerminationSignals.observe {}
+        stopFirst()
+        var current = sigaction()
+        sigaction(SIGTERM, nil, &current)
+        #expect(current.sa_flags != custom.sa_flags)
+
+        stopSecond()
+        sigaction(SIGTERM, nil, &current)
+        #expect(current.sa_flags == custom.sa_flags)
+    }
+
     @Test func observingTerminationSignalsRestoresThePreviousDispositions() {
         var custom = sigaction()
         custom.__sigaction_u.__sa_handler = SIG_IGN
@@ -572,6 +616,30 @@ private final class ShutdownFailingProxyServer: XcodeMCPProxyServer.LaunchServer
     func shutdown() async throws {
         shutdowns.withValue { $0 += 1 }
         throw LaunchCleanupFailure.expected
+    }
+}
+
+/// Starts only after it is shut down, which ends the start with an error.
+private final class StartBlockingProxyServer: XcodeMCPProxyServer.LaunchServer {
+    private let stops = AsyncStream<Void>.makeStream()
+    private let state = LockedBox((starting: false, shutdowns: 0))
+
+    var isStarting: Bool { state.snapshot().starting }
+    var shutdownCount: Int { state.snapshot().shutdowns }
+
+    func start() async throws -> XcodeMCPProxyServer.Endpoint {
+        state.withValue { $0.starting = true }
+        for await _ in stops.stream {}
+        throw XcodeMCPProxyServer.LifecycleError.shutdownInProgress
+    }
+
+    func waitUntilShutdown() async throws {
+        Issue.record("wait should not be called when start fails")
+    }
+
+    func shutdown() async throws {
+        state.withValue { $0.shutdowns += 1 }
+        stops.continuation.finish()
     }
 }
 
