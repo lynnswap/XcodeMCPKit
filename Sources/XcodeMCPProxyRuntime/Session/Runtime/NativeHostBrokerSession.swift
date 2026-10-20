@@ -19,19 +19,17 @@ final class NativeBrokerHost: Sendable {
     let index: Int
     let installation: XcodeHostInstallation
     let guiProcess: XcodeGUIProcess?
-    let independent: Bool
     private let state = NIOLockedValueBox(State())
     private let create: @Sendable () throws -> any ProxyRuntimeServing
     private let receive: @Sendable (ProxyRuntimeEvent) -> Void
 
-    init(identifier: String, index: Int, installation: XcodeHostInstallation, guiProcess: XcodeGUIProcess? = nil, independent: Bool = false,
+    init(identifier: String, index: Int, installation: XcodeHostInstallation, guiProcess: XcodeGUIProcess? = nil,
          create: @escaping @Sendable () throws -> any ProxyRuntimeServing,
          receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void) {
         self.identifier = identifier
         self.index = index
         self.installation = installation
         self.guiProcess = guiProcess
-        self.independent = independent
         self.create = create
         self.receive = receive
     }
@@ -249,7 +247,7 @@ final class NativeBrokerSession: Sendable {
                 }
             }
             let load = ChannelLoad(identifier: identifier, task: task,
-                                   isScopeOwned: host.independent || host.guiProcess != nil)
+                                   isScopeOwned: host.guiProcess != nil)
             state.channels[host.identifier] = load
             return load
         }

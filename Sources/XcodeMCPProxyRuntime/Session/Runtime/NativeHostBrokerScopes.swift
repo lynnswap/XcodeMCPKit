@@ -11,10 +11,16 @@ struct NativeBrokerWorkspace: Sendable, Equatable {
     let path: String?
     let name: String
 
-    func hasSameNativeScope(as other: Self) -> Bool {
-        hostIdentifier == other.hostIdentifier && source == other.source
-            && nativeIdentifier == other.nativeIdentifier
+    /// Identifies the native model a handle refers to, independent of the session that holds it.
+    struct Scope: Hashable, Sendable {
+        let hostIdentifier: String
+        let source: ProxyRuntimeUpstreamSource
+        let nativeIdentifier: String
     }
+
+    var scope: Scope { Scope(hostIdentifier: hostIdentifier, source: source, nativeIdentifier: nativeIdentifier) }
+
+    func hasSameNativeScope(as other: Self) -> Bool { scope == other.scope }
 
     var descriptor: JSONValue {
         var fields: [String: JSONValue] = [
@@ -104,6 +110,23 @@ extension NativeBrokerSession {
                 workspace: workspace)
             state.launchSessions[launch.identifier] = launch
             return launch
+        }
+    }
+
+    func retainsNativeWorkspace(_ workspace: NativeBrokerWorkspace) -> Bool {
+        state.withLockedValue { state in
+            !state.closed && (state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }
+                || state.deviceSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true }
+                || state.launchSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true })
+        }
+    }
+
+    /// Restores a handle whose native close failed while the session and its host connection remain.
+    func restoreWorkspace(_ workspace: NativeBrokerWorkspace, host: NativeBrokerHost) {
+        state.withLockedValue { state in
+            // Checked under the session lock, as in `bindWorkspace`, so a concurrent invalidation cannot be undone.
+            guard !state.closed, host.snapshot?.upstreamSource == workspace.source else { return }
+            state.workspaces[workspace.identifier] = workspace
         }
     }
 
