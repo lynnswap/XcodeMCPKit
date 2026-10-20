@@ -39,6 +39,8 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         let deviceSession: NativeBrokerDeviceSession?
         let launchSession: NativeBrokerLaunchSession?
         let error: String?
+        /// Whether this request counts as a reference to `workspace` while it runs.
+        let retainsWorkspace: Bool
     }
 
     package convenience init(configuration: ProxyRuntimeConfiguration) throws {
@@ -174,7 +176,14 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 error = "\(selector) must be a string"
             }
             storage.hostRequests[host, default: 0] += 1
-            return Admission(hostIdentifier: host, workspace: workspace, deviceSession: device, launchSession: launch, error: error)
+            // A running request keeps its model open; a close request must not keep open what it closes.
+            let name = (object?["params"] as? [String: Any])?["name"] as? String
+            let retainsWorkspace = workspace != nil && name != Self.closeWorkspaceTool
+            if let workspace, retainsWorkspace {
+                storage.admittedWorkspaces[workspace.scope, default: 0] += 1
+            }
+            return Admission(hostIdentifier: host, workspace: workspace, deviceSession: device, launchSession: launch,
+                             error: error, retainsWorkspace: retainsWorkspace)
         }
         guard let admission else { return nil }
         let key = UUID()
@@ -185,6 +194,13 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             deadline: message.deadline, clock: clock, timeoutReply: timeoutReply) { [self] in
             let reply = await process(admittedMessage, in: session, admission: admission)
             session.releaseHost(admission.hostIdentifier)
+            if let workspace = admission.workspace, admission.retainsWorkspace {
+                session.releaseAdmission(of: workspace)
+                // The request may have held the last reference after its session released the handle.
+                if !state.withLockedValue({ $0.sessions.values.contains { $0.retainsNativeWorkspace(workspace) } }) {
+                    scheduleUnreferencedClose([workspace])
+                }
+            }
             reapUnusedHosts()
             return reply
         }

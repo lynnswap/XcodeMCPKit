@@ -243,6 +243,46 @@ struct NativeHostBrokerTests {
         #expect(try await nativeCloses(after: fixture) == 1)
     }
 
+    @Test func aRunningRequestKeepsItsModelOpenAfterTheOtherSessionsEnd() async throws {
+        let fixture = try BrokerFixture()
+        let a = try await fixture.initialize("running-a")
+        let b = try await fixture.initialize("running-b")
+        _ = try await fixture.open(a)
+        let workspace = try await fixture.open(b)
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let building = Task { try await fixture.call(b, name: "BuildProject", arguments: ["workspaceIdentifier": workspace]) }
+        try await native.waiting.wait(description: "build admitted")
+        let released = try await fixture.call(b, name: NativeHostBroker.closeWorkspaceTool,
+                                              arguments: ["workspaceIdentifier": workspace])
+        #expect(released["released"] == .bool(true))
+        fixture.broker.removeSession(a)
+        let closes: @Sendable () -> Int = {
+            native.calls.withLockedValue { $0.filter { $0.name == NativeHostBroker.closeWorkspaceTool }.count }
+        }
+        // Give a mistaken cleanup the time it needs to reach the host.
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(300))
+        while closes() == 0, ContinuousClock.now < deadline { await Task.yield() }
+        #expect(closes() == 0)
+        await native.releaseWait()
+        _ = try await building.value
+        #expect(try await nativeCloses(after: fixture) == 1)
+    }
+
+    @Test func aRequestHoldingTheLastReferenceClosesTheModelWhenItFinishes() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("last-request")
+        let workspace = try await fixture.open(session)
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let building = Task { try await fixture.call(session, name: "BuildProject", arguments: ["workspaceIdentifier": workspace]) }
+        try await native.waiting.wait(description: "build admitted")
+        let released = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                              arguments: ["workspaceIdentifier": workspace])
+        #expect(released["released"] == .bool(true))
+        await native.releaseWait()
+        _ = try await building.value
+        #expect(try await nativeCloses(after: fixture) == 1)
+    }
+
     @Test func shutdownDoesNotWaitForAnUnansweredCleanupClose() async throws {
         let fixture = try BrokerFixture()
         let session = try await fixture.initialize("hung-cleanup")

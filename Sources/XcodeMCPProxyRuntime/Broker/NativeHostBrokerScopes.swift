@@ -123,7 +123,8 @@ extension NativeBrokerSession {
 
     func retainsNativeWorkspace(_ workspace: NativeBrokerWorkspace) -> Bool {
         state.withLockedValue { state in
-            !state.closed && (state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }
+            !state.closed && (state.admittedWorkspaces[workspace.scope] != nil
+                || state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }
                 || state.deviceSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true }
                 || state.launchSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true })
         }
