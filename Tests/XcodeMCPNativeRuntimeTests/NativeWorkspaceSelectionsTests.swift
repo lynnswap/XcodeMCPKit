@@ -16,6 +16,7 @@ struct NativeWorkspaceSelectionsTests {
         var duplicatePlanPaths: [String] = []
         /// A destination that Xcode does not select, as when it is unavailable.
         var unavailableDestination: String?
+        var listsFail = false
         var calls: [String] = []
 
         var run: NativeWorkspaceSelections.Run {
@@ -24,6 +25,7 @@ struct NativeWorkspaceSelectionsTests {
 
         private func perform(_ tool: String, _ arguments: [String: JSONValue]) throws -> [String: JSONValue] {
             calls.append(tool)
+            if listsFail, tool.hasPrefix("XcodeList") { throw NativeToolExecutionError(message: "\(tool) failed") }
             func argument(_ key: String) -> String {
                 if case .string(let value)? = arguments[key] { value } else { "" }
             }
@@ -115,6 +117,12 @@ struct NativeWorkspaceSelectionsTests {
         let reported = await selections.finish("XcodeSwitchRunDestination", changesWorkspace: true, completed: true,
                                                reportsSelection: true, in: "w1", run: workspace.run)
         #expect(reported?.destination == "iPhone 17")
+
+        // A switch that cannot be read back reports no parts, so the session keeps the switch.
+        workspace.listsFail = true
+        #expect(await selections.finish("XcodeSwitchScheme", changesWorkspace: true, completed: true,
+                                        reportsSelection: true, in: "w1", run: workspace.run) == NativeWorkspaceSelection())
+        workspace.listsFail = false
 
         // A failed or cancelled switch may have changed the selection, so it is read again next time.
         workspace.scheme = "Tool"

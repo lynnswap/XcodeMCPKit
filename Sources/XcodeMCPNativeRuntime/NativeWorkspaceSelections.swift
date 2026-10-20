@@ -110,7 +110,9 @@ final class NativeWorkspaceSelections {
         }
         if Self.switchTools.contains(tool) {
             guard completed else { return nil }
-            return try? await selection(in: workspace, run: run)
+            // When the switch cannot be read back, an empty selection keeps the session from
+            // restoring what it had before the switch; its next operation reports the active one.
+            return (try? await selection(in: workspace, run: run)) ?? NativeWorkspaceSelection()
         }
         return tool == "XcodeCloseWorkspace" ? nil : applied
     }
