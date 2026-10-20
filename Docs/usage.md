@@ -111,6 +111,11 @@ connecting more clients does not start additional processes for the same Xcode.
 When the same GUI path has several tabs, use their individual identifiers from
 `XcodeListWorkspaces`.
 
+The default installation's host runs while the server runs. A host for another
+installation stops after no MCP session has used it or held a reference to it
+for five minutes, and starts again on its next use. A GUI bridge stops as soon
+as no session uses it; the Xcode app keeps running.
+
 DerivedData and build databases retain Xcode's existing locations and locking.
 The optional [shared compilation cache](configuration.md#compilation-caching)
 can reuse compatible compilation work across installations.

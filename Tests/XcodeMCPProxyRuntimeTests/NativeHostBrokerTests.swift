@@ -736,6 +736,57 @@ struct NativeHostBrokerTests {
         #expect(hosts.contains { $0.identifier == NativeHostBroker.defaultHostIdentifier })
     }
 
+    @Test func anUnusedHostForAnotherInstallationStopsAfterTheGracePeriod() async throws {
+        let clocks = makeDeterministicClocks()
+        let fixture = try BrokerFixture(clock: clocks.clock)
+        let session = try await fixture.initialize("idle-other")
+        let other = try #require(try await fixture.list(session).first { $0["isDefault"] == .bool(false) }?["hostIdentifier"])
+        let workspace = try await fixture.open(session, host: other)
+        let otherProcess = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let defaultWorkspace = try await fixture.open(session)
+        let defaultProcess = try #require(fixture.factory.transports.withLockedValue { $0.last })
+        for handle in [workspace, defaultWorkspace] {
+            _ = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                       arguments: ["workspaceIdentifier": handle])
+        }
+
+        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
+        clocks.timeoutClock.advance(by: NativeHostBroker.idleHostGracePeriod)
+        try await otherProcess.stopped.wait(description: "the unused host stopped")
+        // Give a mistaken stop of the default host the time it needs to reach its process.
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(300))
+        while !defaultProcess.stopped.isSignaled(), ContinuousClock.now < deadline { await Task.yield() }
+        #expect(!defaultProcess.stopped.isSignaled())
+
+        _ = try await fixture.open(session, host: other)
+        #expect(fixture.factory.transports.withLockedValue { $0.count } == 3)
+    }
+
+    @Test func usingAHostDuringItsGracePeriodRestartsThePeriod() async throws {
+        let clocks = makeDeterministicClocks()
+        let fixture = try BrokerFixture(clock: clocks.clock)
+        let session = try await fixture.initialize("idle-reuse")
+        let other = try #require(try await fixture.list(session).first { $0["isDefault"] == .bool(false) }?["hostIdentifier"])
+        let workspace = try await fixture.open(session, host: other)
+        let process = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        _ = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                   arguments: ["workspaceIdentifier": workspace])
+        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
+        clocks.timeoutClock.advance(by: NativeHostBroker.idleHostGracePeriod / 2)
+
+        _ = try await fixture.call(session, name: "DocumentationSearch",
+                                   arguments: ["query": .string("View"), "hostIdentifier": other])
+        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
+        clocks.timeoutClock.advance(by: NativeHostBroker.idleHostGracePeriod / 2 + .seconds(1))
+        // Give a stop from the first period the time it needs to reach the process.
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(300))
+        while !process.stopped.isSignaled(), ContinuousClock.now < deadline { await Task.yield() }
+        #expect(!process.stopped.isSignaled())
+
+        clocks.timeoutClock.advance(by: NativeHostBroker.idleHostGracePeriod / 2)
+        try await process.stopped.wait(description: "the host stopped a full period after its last use")
+    }
+
     @Test func eventStreamsKeepIdleSessionsAliveUntilTheyClose() async throws {
         let fixture = try BrokerFixture()
         let session = try await fixture.initialize("events")

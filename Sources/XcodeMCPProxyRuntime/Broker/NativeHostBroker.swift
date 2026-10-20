@@ -13,6 +13,8 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         var guiProcesses: [XcodeGUIProcess.Identity: String] = [:]
         var sessions: [ProxySessionID: NativeBrokerSession] = [:]
         var closing: [UUID: Task<Void, Never>] = [:]
+        /// Pending stops of unused headless hosts for other installations, by host identifier.
+        var idleStops: [String: (id: UUID, task: Task<Void, Never>)] = [:]
         var stopped = false
         var resetsInProgress = 0
         var publicCatalog: JSONValue?
@@ -28,6 +30,9 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private let clock: ClockClient
     private let logger = ProxyLogging.make("broker")
     static let defaultHostIdentifier = "host-default"
+    /// How long an unused headless host for another installation keeps its process, so handle-less
+    /// calls in between reuse the loaded Xcode frameworks.
+    static let idleHostGracePeriod: Duration = .seconds(300)
     static let listTool = "XcodeMCPKitListHosts"
     static let listWorkspacesTool = "XcodeListWorkspaces"
     static let openWorkspaceTool = "XcodeOpenWorkspace"
@@ -144,58 +149,63 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         guard let session = state.withLockedValue({ $0.resetsInProgress == 0 ? $0.sessions[sessionID] : nil }) else { return nil }
         // Admission pins the host under the broker lock, which the unused-host scan also holds,
         // so a GUI bridge is either kept for this request or retired before the request uses it.
-        let admission = state.withLockedValue { _ in session.state.withLockedValue { storage -> Admission? in
-            guard !storage.closed else { return nil }
-            storage.activeRequests += 1
-            storage.activity = DispatchTime.now().uptimeNanoseconds
-            let arguments = (object?["params"] as? [String: Any])?["arguments"] as? [String: Any] ?? [:]
-            let device = (arguments["interactionSessionKey"] as? String).flatMap { storage.deviceSessions[$0] }
-            let launch = (arguments["launchSessionReference"] as? String).flatMap { storage.launchSessions[$0] }
-            let name = (object?["params"] as? [String: Any])?["name"] as? String
-            let selector = arguments["workspaceIdentifier"] as? String
-            let workspace: NativeBrokerWorkspace?
-            if let selector, !selector.hasPrefix("/") {
-                workspace = storage.workspaces[selector]
-            } else if selector == nil || name != Self.closeWorkspaceTool {
-                // A path names the device or launch session's workspace, which callNativeTool verifies.
-                // XcodeCloseWorkspace accepts only handles.
-                workspace = device?.workspace ?? launch?.workspace
-            } else {
-                workspace = nil
+        // It also cancels the host's pending idle stop.
+        let admission = state.withLockedValue { broker in
+            let admission = session.state.withLockedValue { storage -> Admission? in
+                guard !storage.closed else { return nil }
+                storage.activeRequests += 1
+                storage.activity = DispatchTime.now().uptimeNanoseconds
+                let arguments = (object?["params"] as? [String: Any])?["arguments"] as? [String: Any] ?? [:]
+                let device = (arguments["interactionSessionKey"] as? String).flatMap { storage.deviceSessions[$0] }
+                let launch = (arguments["launchSessionReference"] as? String).flatMap { storage.launchSessions[$0] }
+                let name = (object?["params"] as? [String: Any])?["name"] as? String
+                let selector = arguments["workspaceIdentifier"] as? String
+                let workspace: NativeBrokerWorkspace?
+                if let selector, !selector.hasPrefix("/") {
+                    workspace = storage.workspaces[selector]
+                } else if selector == nil || name != Self.closeWorkspaceTool {
+                    // A path names the device or launch session's workspace, which callNativeTool verifies.
+                    // XcodeCloseWorkspace accepts only handles.
+                    workspace = device?.workspace ?? launch?.workspace
+                } else {
+                    workspace = nil
+                }
+                let host = workspace?.hostIdentifier ?? device?.hostIdentifier ?? launch?.hostIdentifier
+                    ?? (arguments["hostIdentifier"] as? String) ?? Self.defaultHostIdentifier
+                var error: String?
+                if arguments["tabIdentifier"] != nil {
+                    error = "Use workspaceIdentifier returned by XcodeListWorkspaces instead of a native tabIdentifier"
+                }
+                if let value = arguments["workspaceIdentifier"] as? String, workspace == nil,
+                   !value.hasPrefix("/") {
+                    error = "Unknown workspaceIdentifier '\(value)'; call XcodeListWorkspaces or XcodeOpenWorkspace"
+                }
+                if let value = arguments["interactionSessionKey"] as? String, device == nil {
+                    error = "Unknown interactionSessionKey '\(value)'; start a device interaction session"
+                }
+                if let value = arguments["launchSessionReference"] as? String, launch == nil {
+                    error = "Unknown launchSessionReference '\(value)'; use a reference returned by RunProject"
+                }
+                if let workspace, let conflict = Self.workspaceConflict(workspace, device: device, launch: launch) {
+                    error = conflict
+                }
+                if let selector = ["hostIdentifier", "workspaceIdentifier", "interactionSessionKey", "launchSessionReference"].first(where: {
+                    arguments[$0] != nil && !(arguments[$0] is String)
+                }) {
+                    error = "\(selector) must be a string"
+                }
+                storage.hostRequests[host, default: 0] += 1
+                // A running request keeps its model open; a close request must not keep open what it closes.
+                let retainsWorkspace = workspace != nil && name != Self.closeWorkspaceTool
+                if let workspace, retainsWorkspace {
+                    storage.admittedWorkspaces[workspace.scope, default: 0] += 1
+                }
+                return Admission(hostIdentifier: host, workspace: workspace, deviceSession: device, launchSession: launch,
+                                 error: error, retainsWorkspace: retainsWorkspace)
             }
-            let host = workspace?.hostIdentifier ?? device?.hostIdentifier ?? launch?.hostIdentifier
-                ?? (arguments["hostIdentifier"] as? String) ?? Self.defaultHostIdentifier
-            var error: String?
-            if arguments["tabIdentifier"] != nil {
-                error = "Use workspaceIdentifier returned by XcodeListWorkspaces instead of a native tabIdentifier"
-            }
-            if let value = arguments["workspaceIdentifier"] as? String, workspace == nil,
-               !value.hasPrefix("/") {
-                error = "Unknown workspaceIdentifier '\(value)'; call XcodeListWorkspaces or XcodeOpenWorkspace"
-            }
-            if let value = arguments["interactionSessionKey"] as? String, device == nil {
-                error = "Unknown interactionSessionKey '\(value)'; start a device interaction session"
-            }
-            if let value = arguments["launchSessionReference"] as? String, launch == nil {
-                error = "Unknown launchSessionReference '\(value)'; use a reference returned by RunProject"
-            }
-            if let workspace, let conflict = Self.workspaceConflict(workspace, device: device, launch: launch) {
-                error = conflict
-            }
-            if let selector = ["hostIdentifier", "workspaceIdentifier", "interactionSessionKey", "launchSessionReference"].first(where: {
-                arguments[$0] != nil && !(arguments[$0] is String)
-            }) {
-                error = "\(selector) must be a string"
-            }
-            storage.hostRequests[host, default: 0] += 1
-            // A running request keeps its model open; a close request must not keep open what it closes.
-            let retainsWorkspace = workspace != nil && name != Self.closeWorkspaceTool
-            if let workspace, retainsWorkspace {
-                storage.admittedWorkspaces[workspace.scope, default: 0] += 1
-            }
-            return Admission(hostIdentifier: host, workspace: workspace, deviceSession: device, launchSession: launch,
-                             error: error, retainsWorkspace: retainsWorkspace)
-        } }
+            if let admission { cancelIdleStop(of: admission.hostIdentifier, in: &broker) }
+            return admission
+        }
         guard let admission else { return nil }
         let key = UUID()
         let admittedMessage = message
@@ -489,22 +499,53 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         state.withLockedValue { reapUnusedHosts(in: &$0) }
     }
 
-    /// Stops GUI bridges that no session references or uses. The GUI Xcode itself keeps running.
+    /// Stops hosts that no session references or uses: a GUI bridge at once, while the GUI Xcode
+    /// itself keeps running, and a headless host for another installation after
+    /// `idleHostGracePeriod`. The default host keeps its process.
     private func reapUnusedHosts(in storage: inout State) {
         guard !storage.stopped else { return }
-        let unused = storage.hosts.values.filter { host in
-            guard host.guiProcess != nil, host.status.phase != .idle else { return false }
-            return !storage.sessions.values.contains { $0.state.withLockedValue { $0.usesHost(host.identifier) } }
-        }
-        for host in unused {
-            // Retiring synchronously keeps a session that pins the host next from using this process.
-            let stop = host.connection.retire()
-            let key = UUID()
-            storage.closing[key] = Task { [self] in
-                await stop.value
-                _ = state.withLockedValue { $0.closing.removeValue(forKey: key) }
+        for host in storage.hosts.values where host.identifier != Self.defaultHostIdentifier
+            && host.status.phase != .idle && !isUsed(host, in: storage) {
+            if host.guiProcess != nil {
+                retire(host, in: &storage)
+            } else if storage.idleStops[host.identifier] == nil {
+                scheduleIdleStop(of: host, in: &storage)
             }
         }
+    }
+
+    private func isUsed(_ host: NativeBrokerHost, in storage: State) -> Bool {
+        storage.sessions.values.contains { $0.state.withLockedValue { $0.usesHost(host.identifier) } }
+    }
+
+    private func retire(_ host: NativeBrokerHost, in storage: inout State) {
+        // Retiring under the broker lock keeps a session that pins the host next from using this process.
+        let stop = host.connection.retire()
+        let key = UUID()
+        storage.closing[key] = Task { [self] in
+            await stop.value
+            _ = state.withLockedValue { $0.closing.removeValue(forKey: key) }
+        }
+    }
+
+    private func scheduleIdleStop(of host: NativeBrokerHost, in storage: inout State) {
+        let id = UUID()
+        let clock = clock
+        let task = Task { [weak self] in
+            await clock.sleep(Self.idleHostGracePeriod)
+            guard !Task.isCancelled, let self else { return }
+            state.withLockedValue { storage in
+                guard storage.idleStops[host.identifier]?.id == id else { return }
+                storage.idleStops.removeValue(forKey: host.identifier)
+                guard !storage.stopped, !isUsed(host, in: storage) else { return }
+                retire(host, in: &storage)
+            }
+        }
+        storage.idleStops[host.identifier] = (id, task)
+    }
+
+    private func cancelIdleStop(of identifier: String, in storage: inout State) {
+        storage.idleStops.removeValue(forKey: identifier)?.task.cancel()
     }
 
     private func close(_ session: NativeBrokerSession, in storage: inout State) {
@@ -602,7 +643,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     /// Stops waiting for model closes that stopping the hosts makes unnecessary. Session teardown
     /// in the same tasks still completes, because it awaits work the cancellation does not reach.
     private func cancelPendingCleanup() {
-        for task in state.withLockedValue({ Array($0.closing.values) }) { task.cancel() }
+        let tasks = state.withLockedValue { storage in
+            defer { storage.idleStops.removeAll() }
+            return Array(storage.closing.values) + storage.idleStops.values.map(\.task)
+        }
+        for task in tasks { task.cancel() }
     }
 
     private func waitForClosingResources() async {
@@ -801,11 +846,12 @@ private extension NativeHostBroker {
     /// Keeps a reclaimable host in use while `operation` runs.
     private func withPinnedHost<T: Sendable>(_ host: NativeBrokerHost, session: NativeBrokerSession,
                                              operation: () async throws -> T) async throws -> T {
-        try state.withLockedValue { _ in
+        try state.withLockedValue { broker in
             try session.state.withLockedValue { state in
                 guard !state.closed else { throw CancellationError() }
                 state.hostRequests[host.identifier, default: 0] += 1
             }
+            cancelIdleStop(of: host.identifier, in: &broker)
         }
         defer { session.releaseHost(host.identifier); reapUnusedHosts() }
         return try await operation()
