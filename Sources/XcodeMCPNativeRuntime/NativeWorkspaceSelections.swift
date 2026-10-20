@@ -40,8 +40,9 @@ package struct NativeWorkspaceSelection: Equatable, Sendable {
 
 /// Applies each session's selection to a headless workspace before the session's operations.
 ///
-/// Only this process's actions change the selection of its headless models, so the active
-/// selection of a workspace is read from Xcode once, and again after each switch.
+/// Only this process's actions change the selection of its headless models. The active selection
+/// of a workspace is read from Xcode when needed and kept until an action that can change the
+/// workspace, such as a switch or a new target with an automatically created scheme.
 @MainActor
 final class NativeWorkspaceSelections {
     /// Runs a native action and returns its structured output.
@@ -98,21 +99,27 @@ final class NativeWorkspaceSelections {
         }
     }
 
-    /// Updates what is known after `tool` completes and returns the selection its result reports.
-    func finish(_ tool: String, completed: Bool, reportsSelection: Bool, in workspace: String,
-                run: Run) async -> NativeWorkspaceSelection? {
-        if tool == "XcodeCloseWorkspace" || Self.switchTools.contains(tool) {
-            // A switch can change the selection even when it fails.
+    /// Updates what is known after `tool`, which `changesWorkspace` unless it only reads, completes.
+    /// Returns the selection its result reports.
+    func finish(_ tool: String, changesWorkspace: Bool, completed: Bool, reportsSelection: Bool,
+                in workspace: String, run: Run) async -> NativeWorkspaceSelection? {
+        let applied = reportsSelection ? active[workspace] : nil
+        // An action that changes the workspace can change the selection even when it fails.
+        if tool == "XcodeCloseWorkspace" || changesWorkspace || Self.switchTools.contains(tool) {
             active[workspace] = nil
-            guard Self.switchTools.contains(tool), completed else { return nil }
+        }
+        if Self.switchTools.contains(tool) {
+            guard completed else { return nil }
             return try? await selection(in: workspace, run: run)
         }
-        return reportsSelection ? active[workspace] : nil
+        return tool == "XcodeCloseWorkspace" ? nil : applied
     }
 
     /// Updates what is known after `tool` ended without a result, such as when it was cancelled.
-    func abandon(_ tool: String, in workspace: String) {
-        if tool == "XcodeCloseWorkspace" || Self.switchTools.contains(tool) { active[workspace] = nil }
+    func abandon(_ tool: String, changesWorkspace: Bool, in workspace: String) {
+        if tool == "XcodeCloseWorkspace" || changesWorkspace || Self.switchTools.contains(tool) {
+            active[workspace] = nil
+        }
     }
 
     /// Forgets the selections of workspaces other than `workspaces`, whose models are closed.

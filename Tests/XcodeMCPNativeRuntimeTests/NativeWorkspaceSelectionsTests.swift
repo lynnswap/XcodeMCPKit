@@ -112,18 +112,40 @@ struct NativeWorkspaceSelectionsTests {
         _ = try await selections.selection(in: "w1", run: workspace.run)
 
         workspace.destination = "iPhone 17"
-        let reported = await selections.finish("XcodeSwitchRunDestination", completed: true, reportsSelection: true,
-                                               in: "w1", run: workspace.run)
+        let reported = await selections.finish("XcodeSwitchRunDestination", changesWorkspace: true, completed: true,
+                                               reportsSelection: true, in: "w1", run: workspace.run)
         #expect(reported?.destination == "iPhone 17")
 
         // A failed or cancelled switch may have changed the selection, so it is read again next time.
         workspace.scheme = "Tool"
-        #expect(await selections.finish("XcodeSwitchScheme", completed: false, reportsSelection: true,
-                                        in: "w1", run: workspace.run) == nil)
+        #expect(await selections.finish("XcodeSwitchScheme", changesWorkspace: true, completed: false,
+                                        reportsSelection: true, in: "w1", run: workspace.run) == nil)
         #expect(selections.cachedSelection(in: "w1") == nil)
         _ = try await selections.selection(in: "w1", run: workspace.run)
-        selections.abandon("XcodeSwitchTestPlan", in: "w1")
+        selections.abandon("XcodeSwitchTestPlan", changesWorkspace: true, in: "w1")
         #expect(selections.cachedSelection(in: "w1") == nil)
+    }
+
+    @Test func anActionThatChangesTheWorkspaceReadsTheSelectionAgainBeforeTheNextOperation() async throws {
+        let workspace = Workspace()
+        let selections = NativeWorkspaceSelections()
+        let session = NativeWorkspaceSelection(scheme: "App", destination: "My Mac", testPlan: "Unit")
+        #expect(try await selections.prepare(for: "XcodeNewTarget", requested: session, in: "w1", run: workspace.run))
+        // The new target's scheme becomes active, as with automatically created schemes.
+        workspace.scheme = "Tool"
+        let reported = await selections.finish("XcodeNewTarget", changesWorkspace: true, completed: true,
+                                               reportsSelection: true, in: "w1", run: workspace.run)
+        #expect(reported == session)
+
+        workspace.calls = []
+        _ = try await selections.prepare(for: "BuildProject", requested: session, in: "w1", run: workspace.run)
+        #expect(workspace.calls.contains("XcodeSwitchScheme"))
+        #expect(workspace.scheme == "App")
+
+        // A query keeps what is known.
+        _ = await selections.finish("XcodeRead", changesWorkspace: false, completed: true, reportsSelection: true,
+                                    in: "w1", run: workspace.run)
+        #expect(selections.cachedSelection(in: "w1") != nil)
     }
 
     @Test func aWorkspaceWithoutAnActiveSchemeCanBeUsed() async throws {

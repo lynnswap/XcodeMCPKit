@@ -227,8 +227,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
             }
         } else if let request = requestWorkspaces[context.artifactsDirectory] {
             requestWorkspaces[context.artifactsDirectory]?.finished = true
-            selection = await selections.finish(name, completed: output != nil, reportsSelection: request.reportsSelection,
-                                                in: request.identifier, run: run)
+            selection = await selections.finish(
+                name, changesWorkspace: tools[name]?.requiresPreviewBuildInvalidation ?? true, completed: output != nil,
+                reportsSelection: request.reportsSelection, in: request.identifier, run: run)
         } else {
             return [:]
         }
@@ -280,7 +281,8 @@ package final class NativeXcodeBackend: NativeToolBackend {
         defer {
             workspaces.endExecution(request: context.artifactsDirectory)
             if let request = requestWorkspaces.removeValue(forKey: context.artifactsDirectory), !request.finished {
-                selections.abandon(request.tool, in: request.identifier)
+                selections.abandon(request.tool, changesWorkspace: tools[request.tool]?.requiresPreviewBuildInvalidation ?? true,
+                                   in: request.identifier)
             }
         }
         if Task.isCancelled { context.executionScope.cancel() }
