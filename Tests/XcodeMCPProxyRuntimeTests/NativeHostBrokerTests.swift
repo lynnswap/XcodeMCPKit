@@ -243,6 +243,40 @@ struct NativeHostBrokerTests {
         #expect(try await nativeCloses(after: fixture) == 1)
     }
 
+    @Test func shutdownDoesNotWaitForAnUnansweredCleanupClose() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("hung-cleanup")
+        _ = try await fixture.open(session)
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        _ = native.heldTools.withLockedValue { $0.insert(NativeHostBroker.closeWorkspaceTool) }
+        fixture.broker.removeSession(session)
+        try await native.waiting.wait(description: "cleanup close sent")
+        try await waitWithTimeout("shutdown finished", timeout: .seconds(5)) { await fixture.broker.shutdown() }
+    }
+
+    @Test func anUnansweredCleanupCloseExpiresSoTheModelCanBeReopened() async throws {
+        let clocks = makeDeterministicClocks()
+        let fixture = try BrokerFixture(clock: clocks.clock)
+        let first = try await fixture.initialize("expiring-cleanup")
+        _ = try await fixture.open(first)
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        _ = native.heldTools.withLockedValue { $0.insert(NativeHostBroker.closeWorkspaceTool) }
+        fixture.broker.removeSession(first)
+        try await native.waiting.wait(description: "cleanup close sent")
+        try await waitForSuspendedSleepers(on: clocks.timeoutClock)
+        clocks.uptimeClock.advance(by: .seconds(5))
+        clocks.timeoutClock.advance(by: .seconds(5))
+        let second = try await fixture.initialize("after-expired-cleanup")
+        try await waitWithTimeout("the model can be bound again", timeout: .seconds(5)) {
+            while true {
+                let result = try await fixture.toolResult(second, name: NativeHostBroker.openWorkspaceTool,
+                    arguments: ["path": .string("/Fixture/App.xcodeproj")])
+                if !NativeHostBroker.isToolError(result) { return }
+                await Task.yield()
+            }
+        }
+    }
+
     @Test func workspaceBeingClosedCannotBeBoundUntilTheCloseFinishes() async throws {
         let fixture = try BrokerFixture()
         let a = try await fixture.initialize("closing-a")

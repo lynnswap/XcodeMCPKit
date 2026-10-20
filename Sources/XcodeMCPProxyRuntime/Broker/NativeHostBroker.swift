@@ -517,18 +517,40 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                         "workspaceIdentifier": .string(workspace.nativeIdentifier),
                     ])]),
                 ])
+                let timeout = MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds: configuration.requestTimeout)
                 do {
-                    let reply = try await host.connection.send(request, owner: nil, generation: workspace.generation)
+                    let reply = try await withDeadline(timeout) {
+                        try await host.connection.sendToRunningProcess(request, generation: workspace.generation)
+                    }
                     if let value = try? JSONRPC.Wire.resultValue(fromResponseData: reply), Self.isToolError(value) {
                         logger.notice("Could not close an unreferenced workspace", metadata: ["result": "\(value)"])
                     }
                 } catch NativeHostConnectionError.expired {
-                    // The process that owned the model has ended, and the model with it.
+                    // The process that owned the model has ended or is stopping, and the model with it.
+                } catch is CancellationError {
+                    // Shutdown or reset stops the host, which closes the model.
                 } catch {
                     logger.notice("Could not close an unreferenced workspace", metadata: ["error": "\(error)"])
                 }
             }
             _ = closingWorkspaces.withLockedValue { $0.remove(workspace.scope) }
+        }
+    }
+
+    /// Runs `operation`, failing it with `CancellationError` once `timeout` elapses.
+    private func withDeadline<T: Sendable>(_ timeout: TimeAmount?,
+                                           _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        guard let timeout else { return try await operation() }
+        let clock = clock
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                await clock.sleep(.nanoseconds(timeout.nanoseconds))
+                throw CancellationError()
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw CancellationError() }
+            return result
         }
     }
 
@@ -542,6 +564,12 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 _ = state.withLockedValue { $0.closing.removeValue(forKey: key) }
             }
         }
+    }
+
+    /// Stops waiting for model closes that stopping the hosts makes unnecessary. Session teardown
+    /// in the same tasks still completes, because it awaits work the cancellation does not reach.
+    private func cancelPendingCleanup() {
+        for task in state.withLockedValue({ Array($0.closing.values) }) { task.cancel() }
     }
 
     private func waitForClosingResources() async {
@@ -567,6 +595,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             return (Array(storage.sessions.keys), Array(storage.hosts.values))
         }
         for id in resources.0 { removeSession(id) }
+        cancelPendingCleanup()
         await waitForClosingResources()
         await withTaskGroup(of: Void.self) { group in
             for host in resources.1 { group.addTask { await host.connection.shutdown() } }
@@ -605,6 +634,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             return Array(storage.sessions.keys)
         }
         for id in sessions { removeSession(id) }
+        cancelPendingCleanup()
         await waitForClosingResources()
         for host in hosts() { await host.connection.stopProcess() }
         state.withLockedValue { storage in

@@ -294,6 +294,21 @@ struct NativeHostConnectionTests {
         try await host.stopped.wait(description: "the incompatible host stopped")
     }
 
+    @Test func cleanupForAnEndedProcessDoesNotStartAnother() async throws {
+        let fixture = Fixture()
+        let generation = try await fixture.connection.start()
+        let host = try fixture.session
+        host.exit()
+        try await host.stopped.wait(description: "ended process stopped")
+        await #expect(throws: NativeHostConnectionError.self) {
+            _ = try await fixture.connection.sendToRunningProcess(.object([
+                "jsonrpc": .string("2.0"), "id": .number(.int(1)), "method": .string("tools/call"),
+                "params": .object(["name": .string("Cleanup"), "arguments": .object([:])]),
+            ]), generation: generation)
+        }
+        #expect(fixture.factory.sessions.withLockedValue { $0.count } == 1)
+    }
+
     @Test func hostPingIsAnsweredWithoutReachingClients() async throws {
         let fixture = Fixture()
         try await fixture.connection.start()
