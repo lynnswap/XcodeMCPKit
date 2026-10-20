@@ -635,17 +635,13 @@ private extension NativeHostBroker {
             let channel = try await channel(for: host, session: session)
             let source = try channel.source()
             guard source == workspace.source else { throw Self.expiredReference() }
-            let otherSessions = state.withLockedValue { storage in
-                storage.sessions.values.filter { $0 !== session }
-            }
             if workspace.gui {
                 _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
                 result = try Self.toolResult(.object([
                     "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
                     "message": .string("Released the workspace reference. The Xcode window remains open."),
                 ]))
-            } else if otherSessions.contains(where: { $0.retainsNativeWorkspace(workspace) }) {
-                _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
+            } else if !releaseLastReference(to: workspace, in: session) {
                 result = try Self.toolResult(.object([
                     "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
                     "message": .string("Released this session's reference. Another session still uses the workspace, so it remains open."),
@@ -653,16 +649,24 @@ private extension NativeHostBroker {
             } else {
                 let native = try Self.toolRequest(request, name: name,
                     arguments: ["workspaceIdentifier": .string(workspace.nativeIdentifier)])
-                let reply = try Self.externalReply(
-                    await channel.execute(native, source: source, cancellation: cancellation),
-                    session: session.identifier, hostIdentifier: workspace.hostIdentifier)
-                let value = try Self.result(in: reply)
-                if !Self.isToolError(value) {
-                    _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
+                let reply: ProxyRuntimeReply
+                let closed: Bool
+                do {
+                    reply = try Self.externalReply(
+                        await channel.execute(native, source: source, cancellation: cancellation),
+                        session: session.identifier, hostIdentifier: workspace.hostIdentifier)
+                    closed = !Self.isToolError(try Self.result(in: reply))
+                } catch {
+                    session.restoreWorkspace(workspace)
+                    throw error
+                }
+                if closed {
                     // A session that bound the model while the close was pending would keep a dead reference.
                     for other in state.withLockedValue({ Array($0.sessions.values) }) where other !== session {
                         other.releaseNativeWorkspace(workspace)
                     }
+                } else {
+                    session.restoreWorkspace(workspace)
                 }
                 return try Self.rewriteReply(reply, workspace: workspace, deviceSession: nil)
             }
@@ -672,6 +676,15 @@ private extension NativeHostBroker {
         }
         return try Self.response(id: Self.requestID(request), result: result, session: session.identifier,
                                  eventStream: request.prefersEventStream)
+    }
+
+    /// Removes the session's handle and reports whether no other session still uses the native model.
+    /// Both happen under the broker lock so concurrent closes elect exactly one native close.
+    private func releaseLastReference(to workspace: NativeBrokerWorkspace, in session: NativeBrokerSession) -> Bool {
+        state.withLockedValue { storage in
+            _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
+            return !storage.sessions.values.contains { $0 !== session && $0.retainsNativeWorkspace(workspace) }
+        }
     }
 
     private func discoverGUIHosts() throws {

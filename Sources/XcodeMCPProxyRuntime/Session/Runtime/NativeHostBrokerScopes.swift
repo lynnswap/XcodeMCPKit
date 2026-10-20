@@ -115,6 +115,13 @@ extension NativeBrokerSession {
         }
     }
 
+    /// Restores a handle whose native close failed, unless the session has closed meanwhile.
+    func restoreWorkspace(_ workspace: NativeBrokerWorkspace) {
+        state.withLockedValue { state in
+            if !state.closed { state.workspaces[workspace.identifier] = workspace }
+        }
+    }
+
     func releaseNativeWorkspace(_ workspace: NativeBrokerWorkspace) {
         state.withLockedValue { state in
             state.workspaces = state.workspaces.filter { !$0.value.hasSameNativeScope(as: workspace) }
