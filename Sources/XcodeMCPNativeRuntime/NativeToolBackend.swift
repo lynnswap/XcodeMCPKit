@@ -254,25 +254,35 @@ package final class NativeXcodeBackend: NativeToolBackend {
         arguments["temporaryArtifactsPath"] = .string(artifacts.path)
         arguments["conversationID"] = .string(context.conversationID)
         let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
+        var outcome: Result<[String: JSONValue], any Error>?
+        // The stream ends after the native producer's cleanup, so the action is consumed to its end
+        // before the next one starts in the workspace.
         for await data in try unsafe await bridge.execute(action: action, input: input, context: context) {
-            guard case .object(let event)? = JSONValue(any: try JSONSerialization.jsonObject(with: data)),
-                  case .string(let type)? = event["type"] else {
-                throw NativeRuntimeError.unsupportedContract("Native action emitted an unsupported event")
-            }
-            switch type {
-            case "completed":
-                guard case .object(let output)? = event["data"] else {
-                    throw NativeRuntimeError.unsupportedContract("\(name) completed without structured output")
-                }
-                return output
-            case "error":
-                throw NativeToolExecutionError(message: NativeWorkspaceSelection.string(event["data"]) ?? "\(name) failed")
-            default:
-                continue
-            }
+            guard outcome == nil else { continue }
+            outcome = Self.internalOutcome(of: data, action: name)
         }
         try Task.checkCancellation()
-        throw NativeRuntimeError.invocation("\(name) ended without a result")
+        guard let outcome else { throw NativeRuntimeError.invocation("\(name) ended without a result") }
+        return try outcome.get()
+    }
+
+    /// The result that an internal action's event carries, or `nil` for a progress update.
+    private static func internalOutcome(of data: Data, action name: String) -> Result<[String: JSONValue], any Error>? {
+        guard case .object(let event)? = (try? JSONSerialization.jsonObject(with: data)).flatMap(JSONValue.init(any:)),
+              case .string(let type)? = event["type"] else {
+            return .failure(NativeRuntimeError.unsupportedContract("Native action emitted an unsupported event"))
+        }
+        switch type {
+        case "completed":
+            guard case .object(let output)? = event["data"] else {
+                return .failure(NativeRuntimeError.unsupportedContract("\(name) completed without structured output"))
+            }
+            return .success(output)
+        case "error":
+            return .failure(NativeToolExecutionError(message: NativeWorkspaceSelection.string(event["data"]) ?? "\(name) failed"))
+        default:
+            return nil
+        }
     }
 
     package func beginShutdown() {
