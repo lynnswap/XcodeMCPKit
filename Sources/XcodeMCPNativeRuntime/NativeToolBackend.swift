@@ -65,7 +65,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
     private let previewCorrection: NativePreviewCorrection
     private let selections = NativeWorkspaceSelections()
     /// The headless workspace of each running request, by its artifacts directory.
-    private var requestWorkspaces: [URL: String] = [:]
+    private var requestWorkspaces: [URL: (identifier: String, tool: String, reportsSelection: Bool, finished: Bool)] = [:]
     private var actions: [String: NativeActionClass] = unsafe [:]
     private var tools: [String: NativeTool] = [:]
     private var previewBuildInvalidations: [URL: String?] = [:]
@@ -181,14 +181,13 @@ package final class NativeXcodeBackend: NativeToolBackend {
             try await workspaces.prepareDebugger(for: identifier)
         }
         if tool.acceptsWorkspaceIdentifier, case .string(let identifier) = arguments["workspaceIdentifier"] {
-            requestWorkspaces[context.artifactsDirectory] = identifier
+            requestWorkspaces[context.artifactsDirectory] = (identifier, name, false, false)
             // The request holds the workspace's execution permit, so no other session's operation
             // runs between applying this session's selection and the action.
-            if name != "XcodeCloseWorkspace" {
-                try await selections.apply(context.selection ?? NativeWorkspaceSelection(), in: identifier) {
-                    [self] tool, arguments in try await runInternal(tool, arguments: arguments, context: context)
-                }
-            }
+            let reportsSelection = try await selections.prepare(
+                for: name, requested: context.selection ?? NativeWorkspaceSelection(), in: identifier
+            ) { [self] tool, arguments in try await runInternal(tool, arguments: arguments, context: context) }
+            requestWorkspaces[context.artifactsDirectory]?.reportsSelection = reportsSelection
         }
         try Task.checkCancellation()
         arguments["temporaryArtifactsPath"] = .string(context.artifactsDirectory.path)
@@ -213,31 +212,27 @@ package final class NativeXcodeBackend: NativeToolBackend {
 
     package func resultMetadata(for name: String, output: JSONValue?,
                                 context: NativeToolContext) async -> [String: JSONValue] {
-        var fields: [String: JSONValue] = [:]
-        if case .object(let object)? = output { fields = object }
-        let workspace: String
-        switch name {
-        case "XcodeCloseWorkspace":
-            if let identifier = requestWorkspaces[context.artifactsDirectory] { selections.forget(identifier) }
-            return [:]
-        case "XcodeOpenWorkspace":
-            guard let identifier = NativeWorkspaceSelection.string(fields["workspaceIdentifier"]) else { return [:] }
-            workspace = identifier
-            do {
-                _ = try await selections.selection(in: identifier) { [self] tool, arguments in
-                    try await runInternal(tool, arguments: arguments, context: context)
-                }
-            } catch {
-                // The open succeeded; the session's selection is recorded by its next operation instead.
-                NativeErrorPresentation.reportBackground("Reading the workspace's selection failed: \(error)")
-            }
-        default:
-            guard let identifier = requestWorkspaces[context.artifactsDirectory] else { return [:] }
-            workspace = identifier
-            selections.record(name, output: fields, in: identifier)
+        let run: NativeWorkspaceSelections.Run = { [self] tool, arguments in
+            try await runInternal(tool, arguments: arguments, context: context)
         }
-        guard let selection = selections.cachedSelection(in: workspace) else { return [:] }
-        return [NativeWorkspaceSelection.metadataKey: selection.json]
+        let selection: NativeWorkspaceSelection?
+        if name == "XcodeOpenWorkspace" {
+            guard case .object(let fields)? = output,
+                  let identifier = NativeWorkspaceSelection.string(fields["workspaceIdentifier"]) else { return [:] }
+            do { selection = try await selections.selection(in: identifier, run: run) }
+            catch {
+                // The open succeeded; the session's next operation reports its selection instead.
+                NativeErrorPresentation.reportBackground("Reading the workspace's selection failed: \(error)")
+                return [:]
+            }
+        } else if let request = requestWorkspaces[context.artifactsDirectory] {
+            requestWorkspaces[context.artifactsDirectory]?.finished = true
+            selection = await selections.finish(name, completed: output != nil, reportsSelection: request.reportsSelection,
+                                                in: request.identifier, run: run)
+        } else {
+            return [:]
+        }
+        return selection.map { [NativeWorkspaceSelection.metadataKey: $0.json] } ?? [:]
     }
 
     /// Runs a native action outside a client request and returns its structured output.
@@ -284,7 +279,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
     package func finishExecution(context: NativeToolContext) async throws {
         defer {
             workspaces.endExecution(request: context.artifactsDirectory)
-            requestWorkspaces[context.artifactsDirectory] = nil
+            if let request = requestWorkspaces.removeValue(forKey: context.artifactsDirectory), !request.finished {
+                selections.abandon(request.tool, in: request.identifier)
+            }
         }
         if Task.isCancelled { context.executionScope.cancel() }
         await previewCorrection.finishExecution(request: context.artifactsDirectory)
