@@ -1085,12 +1085,17 @@ private extension NativeHostBroker {
         if let workspace, !workspace.gui {
             // The session's operations on one model run one at a time, as the host runs them anyway,
             // so each carries the selection that the previous one reported.
-            sent = try await session.selectionTurns.run(workspace.scope) {
-                let sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session,
-                    generation: generation, eventStream: request.prefersEventStream,
-                    selection: session.selection(for: workspace)))
-                if let reported = sent.selection { session.recordSelection(reported, for: workspace, replacing: true) }
-                return sent
+            do {
+                sent = try await session.selectionTurns.run(workspace.scope, bytes: request.data.count) {
+                    let sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session,
+                        generation: generation, eventStream: request.prefersEventStream,
+                        selection: session.selection(for: workspace)))
+                    if let reported = sent.selection { session.recordSelection(reported, for: workspace, replacing: true) }
+                    return sent
+                }
+            } catch is NativeBrokerTurns<NativeBrokerWorkspace.Scope>.Full {
+                // The host's queue would refuse these requests too.
+                throw Self.replyError(.overloaded, code: -32002, message: "upstream overloaded")
             }
         } else {
             sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session, generation: generation,

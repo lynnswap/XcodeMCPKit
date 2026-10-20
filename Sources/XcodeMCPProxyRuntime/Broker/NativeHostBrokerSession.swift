@@ -55,8 +55,9 @@ final class NativeBrokerSession: Sendable {
     let identifier: ProxySessionID
     /// Identifies this session to headless hosts, which keep Xcode's per-conversation state.
     let conversationID = UUID().uuidString
-    /// Orders this session's operations on each headless model.
-    let selectionTurns = NativeBrokerTurns<NativeBrokerWorkspace.Scope>()
+    /// Orders this session's operations on each headless model. Waiting requests have the same
+    /// limit as a host's queue.
+    let selectionTurns = NativeBrokerTurns<NativeBrokerWorkspace.Scope>(maximumWaitingBytes: 32 * 1024 * 1024)
     let state: NIOLockedValueBox<State>
 
     init(identifier: ProxySessionID) {
