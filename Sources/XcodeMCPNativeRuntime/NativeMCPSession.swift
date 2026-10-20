@@ -9,6 +9,9 @@ package actor NativeMCPSession {
     private var shutdownTask: Task<Void, any Error>?
     private let artifactsRoot: URL
     private let executionQueue: NativeExecutionQueue
+    /// The `_meta` key that names the calling MCP session.
+    package static let conversationKey = "com.lynnswap.xcode-mcpkit/conversation"
+    /// Used when a request does not name its session.
     private let conversationID = UUID().uuidString
     private var initialized = false
     private var stopping = false
@@ -179,14 +182,20 @@ package actor NativeMCPSession {
                              resource: NativeExecutionResource) async throws -> JSONValue {
         let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // The proxy identifies the calling MCP session and its selection for a headless workspace.
+        var metadata: [String: JSONValue] = [:]
+        if case .object(let fields)? = fieldsForMetadata(params) { metadata = fields }
         // Results can name files in the directory, so only a directory nothing was written to is removed.
         defer {
             if (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?.isEmpty == true {
                 try? FileManager.default.removeItem(at: directory)
             }
         }
-        let context = NativeToolContext(artifactsDirectory: directory, artifactsRoot: artifactsRoot,
-                                       conversationID: conversationID, executionResource: resource)
+        let context = NativeToolContext(
+            artifactsDirectory: directory, artifactsRoot: artifactsRoot,
+            conversationID: NativeWorkspaceSelection.string(metadata[Self.conversationKey]) ?? conversationID,
+            selection: NativeWorkspaceSelection(json: metadata[NativeWorkspaceSelection.metadataKey]),
+            executionResource: resource)
         return try await NativeExecutionOperations.$scope.withValue(context.executionScope) {
             try await withTaskCancellationHandler {
                 try await executeTool(params: params, name: name, arguments: arguments, context: context)
@@ -223,6 +232,7 @@ package actor NativeMCPSession {
             return try toolResult(.string(error.message), isError: true)
         }
         var completed: JSONValue?
+        var output: JSONValue?
         for await data in updates {
             guard let event = JSONValue(any: try JSONSerialization.jsonObject(with: data)),
                   case .object(let fields) = event, case .string(let type) = fields["type"] else {
@@ -244,6 +254,7 @@ package actor NativeMCPSession {
                 guard let result = fields["data"] else {
                     throw NativeRuntimeError.unsupportedContract("Native completion has no output")
                 }
+                output = result
                 completed = try toolResult(result, isError: false)
             case "error":
                 completed = try toolResult(fields["data"] ?? .string("Native tool failed"), isError: true)
@@ -252,8 +263,12 @@ package actor NativeMCPSession {
             }
         }
         try Task.checkCancellation()
-        guard let completed else { throw NativeRuntimeError.invocation("Native action ended without a completion result") }
-        return completed
+        guard case .object(var result)? = completed else {
+            throw NativeRuntimeError.invocation("Native action ended without a completion result")
+        }
+        let metadata = await backend.resultMetadata(for: name, output: output, context: context)
+        if !metadata.isEmpty { result["_meta"] = .object(metadata) }
+        return .object(result)
     }
 
     private func withOrigin(_ fields: [String: JSONValue]) async -> JSONValue {

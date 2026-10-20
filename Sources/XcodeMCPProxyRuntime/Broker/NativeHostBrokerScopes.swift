@@ -55,6 +55,32 @@ struct NativeBrokerLaunchSession: Sendable, Equatable {
 }
 
 extension NativeBrokerSession {
+    func selection(for workspace: NativeBrokerWorkspace) -> JSONValue? {
+        state.withLockedValue { $0.selections[workspace.scope] }
+    }
+
+    /// Records the selection that the host reported after an operation on `workspace`. An open
+    /// keeps an existing record, so opening a shared model again does not adopt another session's
+    /// selection.
+    func recordSelection(_ selection: JSONValue, for workspace: NativeBrokerWorkspace, replacing: Bool) {
+        state.withLockedValue { state in
+            guard !state.closed, replacing || state.selections[workspace.scope] == nil else { return }
+            state.selections[workspace.scope] = selection
+        }
+    }
+
+    /// Forgets the selection of a model the session no longer references or uses in a running
+    /// request, so a later open starts from the model's selection at that time.
+    func forgetSelectionIfUnreferenced(_ workspace: NativeBrokerWorkspace) {
+        state.withLockedValue { state in
+            let referenced = state.admittedWorkspaces[workspace.scope] != nil
+                || state.workspaces.values.contains { $0.hasSameNativeScope(as: workspace) }
+                || state.deviceSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true }
+                || state.launchSessions.values.contains { $0.workspace?.hasSameNativeScope(as: workspace) == true }
+            if !referenced { state.selections[workspace.scope] = nil }
+        }
+    }
+
     /// Binds a handle for the native model. With `retainsForRequest`, the running request also holds
     /// the model until it calls `releaseAdmission(of:)`.
     func bindWorkspace(host: NativeBrokerHost, generation: UInt64, nativeIdentifier: String,
@@ -157,6 +183,7 @@ extension NativeBrokerSession {
             state.workspaces = state.workspaces.filter { !ended($0.value.hostIdentifier, $0.value.generation) }
             state.deviceSessions = state.deviceSessions.filter { !ended($0.value.hostIdentifier, $0.value.generation) }
             state.launchSessions = state.launchSessions.filter { !ended($0.value.hostIdentifier, $0.value.generation) }
+            state.selections = state.selections.filter { !ended($0.key.hostIdentifier, $0.key.generation) }
             return previousCount != state.workspaces.count + state.deviceSessions.count + state.launchSessions.count
         }
     }

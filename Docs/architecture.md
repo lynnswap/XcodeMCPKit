@@ -58,6 +58,15 @@ A host connection owns its process: it starts it on first use, sends one
 session, and sends `notifications/cancelled` when a request is cancelled or
 times out. A timeout fails only that request.
 
+A tool call to a headless host carries the calling session's identity in
+`_meta` (`com.lynnswap.xcode-mcpkit/conversation`), which the host passes to
+Xcode as the conversation. A call on a headless workspace also carries the
+session's scheme, run destination, and test plan
+(`com.lynnswap.xcode-mcpkit/selection`). The host applies them under the
+workspace's execution permit before the action and reports the active selection
+in the result's `_meta`. The broker records that report for the session and
+removes it from the client's result.
+
 When a process exits or violates the protocol, its in-flight requests fail with
 `upstream unavailable`, handles created by that process expire, and the next
 request starts a new process. Delivery-unknown mutations are not replayed.

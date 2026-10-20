@@ -17,7 +17,7 @@ extension NativeHostBroker {
                 description: "List headless workspaces and open Xcode windows. Each workspaceIdentifier names one execution context; use it with workspace tools. Errors identify hosts whose workspaces could not be listed.",
                 properties: [:]),
             tool(openWorkspaceTool,
-                description: "Open a saved project, workspace, or Swift package and return its workspaceIdentifier. Defaults to the default installation's headless host. Optionally choose a host from XcodeMCPKitListHosts; a GUI host attaches an already open window. Each installation has one headless host; sessions opening the same path share its model, scheme, run destination, and test plan.",
+                description: "Open a saved project, workspace, or Swift package and return its workspaceIdentifier. Defaults to the default installation's headless host. Optionally choose a host from XcodeMCPKitListHosts; a GUI host attaches an already open window. Each installation has one headless host; sessions opening the same path share its model, and each session keeps its own scheme, run destination, and test plan in it.",
                 properties: [
                     "path": .object(["type": .string("string"), "description": .string("Absolute project, workspace, or Swift package path.")]),
                     "hostIdentifier": .object(["type": .string("string")]),
@@ -75,6 +75,34 @@ extension NativeHostBroker {
         parameters["arguments"] = .object(arguments)
         object["params"] = .object(parameters)
         return .object(object)
+    }
+
+    /// The `_meta` key that names the calling MCP session to a headless host.
+    static let conversationKey = "com.lynnswap.xcode-mcpkit/conversation"
+    /// The `_meta` key of a session's selection in a headless workspace.
+    static let selectionKey = "com.lynnswap.xcode-mcpkit/selection"
+
+    /// Adds `fields` to the request's `params._meta`, keeping the client's entries such as its progress token.
+    static func addingMetadata(_ fields: [String: JSONValue], to request: JSONValue) -> JSONValue {
+        guard case .object(var object) = request, case .object(var parameters)? = object["params"] else { return request }
+        var metadata: [String: JSONValue] = [:]
+        if case .object(let existing)? = parameters["_meta"] { metadata = existing }
+        metadata.merge(fields) { _, new in new }
+        parameters["_meta"] = .object(metadata)
+        object["params"] = .object(parameters)
+        return .object(object)
+    }
+
+    /// Removes the host's report of the session's selection from a reply and returns it.
+    static func takingSelection(from reply: ProxyRuntimeReply) throws -> (reply: ProxyRuntimeReply, selection: JSONValue?) {
+        guard case .response(let data, let session, let stream) = reply else { return (reply, nil) }
+        var object = try JSONRPC.Wire.object(fromData: data)
+        guard var result = object["result"] as? [String: Any], var metadata = result["_meta"] as? [String: Any],
+              let selection = metadata.removeValue(forKey: selectionKey) else { return (reply, nil) }
+        result["_meta"] = metadata.isEmpty ? nil : metadata
+        object["result"] = result
+        return (.response(data: try JSONRPC.Wire.data(from: object), sessionID: session, prefersEventStream: stream),
+                JSONValue(any: selection))
     }
 
     static func rewritePayload(_ payload: JSONValue, workspace: NativeBrokerWorkspace?,

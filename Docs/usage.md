@@ -63,9 +63,18 @@ buffers, scheme selection, destination, or debugger state. Use the GUI entry fro
 Inspect settings with `XcodeListSchemes`, `XcodeListRunDestinations`, and
 `XcodeListTestPlans`. Change them with `XcodeSwitchScheme`,
 `XcodeSwitchRunDestination`, and `XcodeSwitchTestPlan`. A test run needs a scheme
-with testable targets and a usable test plan. Sessions referencing the same native
-workspace share these settings. Use a separate checkout, such as a Git worktree,
-when concurrent clients need different settings for the same project.
+with testable targets and a usable test plan.
+
+In a headless workspace, each MCP session keeps its own scheme, run destination,
+and test plan. A session starts with the workspace's settings when it opens or
+creates the workspace, or when it first uses a workspace found through
+`XcodeListWorkspaces`. Its switches apply only to its own later operations. Before each
+of its operations, the host restores the session's settings, and no other
+session's operation on that workspace runs in between. If Xcode cannot restore
+them, for example because the destination is no longer available, the operation
+fails instead of running with another session's settings. Build logs, issues,
+and preview state remain shared by every session that uses the workspace. GUI
+workspaces use the Xcode window's settings.
 
 `RenderPreview` defaults to a 300-second timeout; the SDK, proxy, and STDIO adapter
 default to 600 seconds per request. Set an external client's deadline above the

@@ -787,6 +787,149 @@ struct NativeHostBrokerTests {
         try await process.stopped.wait(description: "the host stopped a full period after its last use")
     }
 
+    @Test func eachSessionKeepsItsOwnSelectionInASharedWorkspace() async throws {
+        let fixture = try BrokerFixture()
+        // A headless host with one active scheme, which each request first sets to its session's.
+        let active = NIOLockedValueBox("App")
+        fixture.factory.reportsSelection.withLockedValue {
+            $0 = { tool, arguments, requested in
+                active.withLockedValue { scheme in
+                    if case .object(let fields)? = requested, case .string(let requested)? = fields["scheme"] {
+                        scheme = requested
+                    }
+                    if tool == "XcodeSwitchScheme", case .string(let switched)? = arguments["schemeName"] {
+                        scheme = switched
+                    }
+                    return .object(["scheme": .string(scheme)])
+                }
+            }
+        }
+        let a = try await fixture.initialize("selection-a")
+        let b = try await fixture.initialize("selection-b")
+        let workspaceA = try await fixture.open(a)
+        let workspaceB = try await fixture.open(b)
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+
+        _ = try await fixture.call(a, name: "XcodeSwitchScheme",
+                                   arguments: ["workspaceIdentifier": workspaceA, "schemeName": .string("Tool")])
+        let resultB = try await fixture.toolResult(b, name: "GetBuildLog", arguments: ["workspaceIdentifier": workspaceB])
+        _ = try await fixture.toolResult(a, name: "GetBuildLog", arguments: ["workspaceIdentifier": workspaceA])
+
+        let logs = native.calls.withLockedValue { $0.filter { $0.name == "GetBuildLog" } }
+        #expect(logs.map { $0.metadata[NativeHostBroker.selectionKey] }
+            == [.object(["scheme": .string("App")]), .object(["scheme": .string("Tool")])])
+        let conversations = logs.map { $0.metadata[NativeHostBroker.conversationKey] }
+        #expect(conversations[0] != nil && conversations[1] != nil && conversations[0] != conversations[1])
+        // The host's report stays between the proxy and the host.
+        guard case .object(let fields) = resultB, case .object(let metadata)? = fields["_meta"] else {
+            Issue.record("missing result metadata"); return
+        }
+        #expect(metadata[NativeHostBroker.selectionKey] == nil)
+    }
+
+    @Test func aSessionsNextOperationOnAModelCarriesTheSelectionItsSwitchReported() async throws {
+        let fixture = try BrokerFixture()
+        let active = NIOLockedValueBox("App")
+        fixture.factory.reportsSelection.withLockedValue {
+            $0 = { tool, arguments, requested in
+                active.withLockedValue { scheme in
+                    if case .object(let fields)? = requested, case .string(let requested)? = fields["scheme"] {
+                        scheme = requested
+                    }
+                    if tool == "XcodeSwitchScheme", case .string(let switched)? = arguments["schemeName"] {
+                        scheme = switched
+                    }
+                    return .object(["scheme": .string(scheme)])
+                }
+            }
+        }
+        let session = try await fixture.initialize("selection-order")
+        let workspace = try await fixture.open(session)
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        _ = native.heldTools.withLockedValue { $0.insert("XcodeSwitchScheme") }
+
+        let switching = Task {
+            try await fixture.call(session, name: "XcodeSwitchScheme",
+                                   arguments: ["workspaceIdentifier": workspace, "schemeName": .string("Tool")])
+        }
+        try await native.waiting.wait(description: "switch sent")
+        let reading = Task { try await fixture.toolResult(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": workspace]) }
+        // Give a read that skips its turn the time it needs to reach the host.
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(300))
+        let hasRead: @Sendable () -> Bool = { native.calls.withLockedValue { $0.contains { $0.name == "GetBuildLog" } } }
+        while !hasRead(), ContinuousClock.now < deadline { await Task.yield() }
+        #expect(!hasRead())
+
+        await native.releaseWait()
+        _ = try await switching.value
+        _ = try await reading.value
+        let read = try #require(native.calls.withLockedValue { $0.first { $0.name == "GetBuildLog" } })
+        #expect(read.metadata[NativeHostBroker.selectionKey] == .object(["scheme": .string("Tool")]))
+    }
+
+    @Test func aCreatedProjectStartsWithTheSelectionItWasCreatedWith() async throws {
+        let fixture = try BrokerFixture()
+        fixture.factory.reportsSelection.withLockedValue {
+            $0 = { tool, _, requested in
+                tool == "XcodeNewProject" ? .object(["scheme": .string("NewProject")]) : requested
+            }
+        }
+        let session = try await fixture.initialize("new-project-selection")
+        let created = try await fixture.call(session, name: "XcodeNewProject", arguments: [
+            "templateIdentifier": .string("fixture-template"), "productName": .string("NewProject"),
+            "destinationPath": .string("/Fixture/NewProject"),
+        ])
+        let workspace = try #require(created["workspaceIdentifier"])
+        _ = try await fixture.toolResult(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": workspace])
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let read = try #require(native.calls.withLockedValue { $0.first { $0.name == "GetBuildLog" } })
+        #expect(read.metadata[NativeHostBroker.selectionKey] == .object(["scheme": .string("NewProject")]))
+    }
+
+    @Test func anAdmittedCallKeepsItsSelectionAfterTheHandleCloses() async throws {
+        let fixture = try BrokerFixture()
+        // The build's reply reports nothing, so only the session's record can carry the selection.
+        fixture.factory.reportsSelection.withLockedValue {
+            $0 = { tool, _, requested in tool == "BuildProject" ? nil : requested ?? .object(["scheme": .string("App")]) }
+        }
+        let session = try await fixture.initialize("admitted-selection")
+        let workspace = try await fixture.open(session)
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let building = Task { try await fixture.toolResult(session, name: "BuildProject", arguments: ["workspaceIdentifier": workspace]) }
+        try await native.waiting.wait(description: "build sent")
+        // Admitted now, the read waits behind the build for the session's turn on the model.
+        let read = try ProxyRuntimeRequest(json: .object([
+            "jsonrpc": .string("2.0"), "id": .number(.int(77)), "method": .string("tools/call"),
+            "params": .object(["name": .string("GetBuildLog"), "arguments": .object(["workspaceIdentifier": workspace])]),
+        ]), headerSessionExists: true, prefersEventStream: false)
+        let reading = try #require(fixture.broker.beginRequest(read, in: session))
+        let released = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                              arguments: ["workspaceIdentifier": workspace])
+        #expect(released["released"] == .bool(true))
+
+        await native.releaseWait()
+        _ = try await building.value
+        _ = try await withCheckedThrowingContinuation { continuation in
+            reading.whenComplete { continuation.resume(with: $0) }
+        }
+        fixture.broker.clientRequestFinished(session)
+        let sent = try #require(native.calls.withLockedValue { $0.first { $0.name == "GetBuildLog" } })
+        #expect(sent.metadata[NativeHostBroker.selectionKey] == .object(["scheme": .string("App")]))
+    }
+
+    @Test func forwardedCallsKeepTheClientsProgressToken() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("progress-meta")
+        _ = try await fixture.request(session, method: "tools/call", parameters: .object([
+            "name": .string("DocumentationSearch"), "arguments": .object(["query": .string("View")]),
+            "_meta": .object(["progressToken": .number(.int(5))]),
+        ]))
+        let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
+        let call = try #require(native.calls.withLockedValue { $0.first { $0.name == "DocumentationSearch" } })
+        #expect(call.metadata["progressToken"] != nil)
+        #expect(call.metadata[NativeHostBroker.conversationKey] != nil)
+    }
+
     @Test func eventStreamsKeepIdleSessionsAliveUntilTheyClose() async throws {
         let fixture = try BrokerFixture()
         let session = try await fixture.initialize("events")
@@ -873,11 +1016,16 @@ private final class BrokerTransport: UpstreamSession, Sendable {
     let manifestOpensDirectory: Bool
     let interactionKeyProperty = NIOLockedValueBox("interactSessionKey")
     let methods = NIOLockedValueBox<[String]>([])
-    private let pending = NIOLockedValueBox<[JSONRPC.ID]>([])
+    private let pending = NIOLockedValueBox<[(id: JSONRPC.ID, call: Call)]>([])
     struct Call: Sendable {
         let name: String
         let arguments: [String: JSONValue]
+        var metadata: [String: JSONValue] = [:]
     }
+    /// Reports the selection a headless host has active after a call, given the call's tool,
+    /// arguments, and requested selection.
+    typealias SelectionReport = @Sendable (_ tool: String, _ arguments: [String: JSONValue],
+                                           _ requested: JSONValue?) -> JSONValue?
     let calls = NIOLockedValueBox<[Call]>([])
     let toolFailures = NIOLockedValueBox<Set<String>>([])
     /// Tools whose replies wait for `releaseWait()`.
@@ -885,15 +1033,18 @@ private final class BrokerTransport: UpstreamSession, Sendable {
     let returnsProtocolError = NIOLockedValueBox(false)
     private let openedPath = NIOLockedValueBox<String?>(nil)
     private let respondsInvalidly: @Sendable (String) -> Bool
+    private let reportsSelection: SelectionReport
     private let onStop: @Sendable (Int64) -> Void
 
     init(index: Int64, holdsInitialization: Bool, gui: Bool = false,
          guiWorkspacePaths: [String] = ["/Fixture/App.xcodeproj", "/Fixture/App.xcodeproj"],
          manifestOpensDirectory: Bool = false, processID: Int64? = nil,
          respondsInvalidly: @escaping @Sendable (String) -> Bool = { _ in false },
+         reportsSelection: @escaping SelectionReport = { _, _, _ in nil },
          onStop: @escaping @Sendable (Int64) -> Void = { _ in }) {
         self.index = index
         self.respondsInvalidly = respondsInvalidly
+        self.reportsSelection = reportsSelection
         self.onStop = onStop
         self.processID = processID ?? 1000 + index
         self.gui = gui
@@ -932,7 +1083,7 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                 continuation.yield(.message(try JSONRPC.Wire.data(from: ["jsonrpc": "2.0", "id": id.value.foundationObject])))
                 return .accepted
             }
-            let result: JSONValue
+            var result: JSONValue
             switch method {
             case "initialize":
                 let held = initialization.withLockedValue { state in
@@ -945,7 +1096,7 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                 result = initializeResult
             case "tools/list":
                 let scoped = ["GetBuildLog", "BuildProject", "XcodeCloseWorkspace", "RunProject", "GetConsoleOutput",
-                              "DeviceInteractionInstallAndRun"]
+                              "DeviceInteractionInstallAndRun", "XcodeSwitchScheme"]
                 var tools = scoped.map { descriptor($0, properties: [gui ? "tabIdentifier" : "workspaceIdentifier": .object(["type": .string("string")])]) }
                 tools.append(contentsOf: [
                     descriptor("DocumentationSearch", properties: ["query": .object(["type": .string("string")])]),
@@ -978,7 +1129,11 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                 if case .object(let fields)? = (parameters["arguments"] as? [String: Any]).flatMap(JSONValue.init(any:)) {
                     arguments = fields
                 } else { arguments = [:] }
-                calls.withLockedValue { $0.append(Call(name: name, arguments: arguments)) }
+                var metadata: [String: JSONValue] = [:]
+                if case .object(let fields)? = (parameters["_meta"] as? [String: Any]).flatMap(JSONValue.init(any:)) {
+                    metadata = fields
+                }
+                calls.withLockedValue { $0.append(Call(name: name, arguments: arguments, metadata: metadata)) }
                 if name == "GetBuildLog", returnsProtocolError.withLockedValue({ $0 }) {
                     continuation.yield(.message(try JSONRPC.Wire.errorResponseData(id: id, code: -32010,
                         message: "native protocol failure", data: .object(["reason": .string("fixture")]))))
@@ -987,7 +1142,7 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                 if toolFailures.withLockedValue({ $0.contains(name) }) {
                     result = try NativeHostBroker.toolResult(.object(["message": .string("native failure")]), isError: true)
                 } else if heldTools.withLockedValue({ $0.contains(name) }) {
-                    pending.withLockedValue { $0.append(id) }
+                    pending.withLockedValue { $0.append((id, Call(name: name, arguments: arguments, metadata: metadata))) }
                     waiting.signal()
                     return .accepted
                 } else {
@@ -1000,6 +1155,11 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                         result = try NativeHostBroker.toolResult(.object([
                             "workspaceIdentifier": .string("native-w-\(index)"),
                             "workspacePath": .string(workspacePath),
+                        ]))
+                    case "XcodeNewProject":
+                        result = try NativeHostBroker.toolResult(.object([
+                            "workspaceIdentifier": .string("native-new-\(index)"),
+                            "workspacePath": arguments["destinationPath"] ?? .string("/Fixture/NewProject"),
                         ]))
                     case "XcodeListWorkspaces":
                         let message = openedPath.withLockedValue { $0 }.map {
@@ -1021,6 +1181,11 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                         result = try NativeHostBroker.toolResult(.object(["launchSessionReference": .string("native-launch-\(index)")]))
                     default: result = echoResult
                     }
+                }
+                if case .object(var fields) = result,
+                   let selection = reportsSelection(name, arguments, metadata[NativeHostBroker.selectionKey]) {
+                    fields["_meta"] = .object([NativeHostBroker.selectionKey: selection])
+                    result = .object(fields)
                 }
             default: result = .object([:])
             }
@@ -1066,8 +1231,14 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                 "isError": .bool(false)])
     }
     func releaseWait() async {
-        for id in pending.withLockedValue({ values in let ids = values; values.removeAll(); return ids }) {
-            do { continuation.yield(.message(try JSONRPC.Wire.resultResponseData(id: id, result: echoResult))) }
+        for (id, call) in pending.withLockedValue({ values in let held = values; values.removeAll(); return held }) {
+            var result = echoResult
+            if case .object(var fields) = result,
+               let selection = reportsSelection(call.name, call.arguments, call.metadata[NativeHostBroker.selectionKey]) {
+                fields["_meta"] = .object([NativeHostBroker.selectionKey: selection])
+                result = .object(fields)
+            }
+            do { continuation.yield(.message(try JSONRPC.Wire.resultResponseData(id: id, result: result))) }
             catch { Issue.record(error) }
         }
     }
@@ -1080,6 +1251,7 @@ private final class BrokerRuntimeFactory: Sendable {
     let replacements = LockedRecordedValues<BrokerTransport>()
     let shutdowns = LockedRecordedValues<Int64>()
     let failNewHosts = NIOLockedValueBox(false)
+    let reportsSelection = NIOLockedValueBox<BrokerTransport.SelectionReport?>(nil)
     let holdsInitialization = NIOLockedValueBox(false)
     /// Tool names or methods answered with a response that has neither a result nor an error.
     let invalidResponses = NIOLockedValueBox<Set<String>>([])
@@ -1101,6 +1273,9 @@ private final class BrokerRuntimeFactory: Sendable {
                 manifestOpensDirectory: manifestOpensDirectory.withLockedValue { $0 },
                 processID: previous == nil ? nil : Int64(1001 + values.count),
                 respondsInvalidly: { [invalidResponses] in invalidResponses.withLockedValue { $0 }.contains($0) },
+                reportsSelection: { [reportsSelection] tool, arguments, requested in
+                    reportsSelection.withLockedValue { $0 }?(tool, arguments, requested)
+                },
                 onStop: { [shutdowns] in shutdowns.append($0) })
             values.append(transport)
             return (transport, previous != nil)

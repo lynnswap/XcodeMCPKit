@@ -371,6 +371,30 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test func theCallingSessionReachesTheBackendAndItsReportReachesTheResult() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            let selection = JSONValue.object(["scheme": .string("App"), "destination": .string("My Mac")])
+            harness.backend.resultMetadata = [NativeWorkspaceSelection.metadataKey: .object(["scheme": .string("Tool")])]
+            try await harness.request("tools/call", id: "call", params: .object([
+                "name": .string("Action"), "arguments": .object([:]),
+                "_meta": .object([
+                    NativeMCPSession.conversationKey: .string("session-a"),
+                    NativeWorkspaceSelection.metadataKey: selection,
+                ]),
+            ]))
+            let execution = try await harness.backend.nextExecution()
+            #expect(execution.context.conversationID == "session-a")
+            #expect(execution.context.selection == NativeWorkspaceSelection(scheme: "App", destination: "My Mac"))
+            try execution.complete(.object(["value": .bool(true)]))
+
+            let reply = try await harness.nextMessage()
+            #expect(try nativeTestField(reply, "result", "_meta")
+                == .object([NativeWorkspaceSelection.metadataKey: .object(["scheme": .string("Tool")])]))
+            #expect(harness.backend.metadataOutputs == [.object(["value": .bool(true)])])
+        }
+    }
+
     @Test func invalidParametersAndUnknownToolsPreserveRequestErrors() async throws {
         try await withNativeSession { harness in
             _ = try await harness.initialize()
@@ -1162,6 +1186,8 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     var onShutdown: (@MainActor () -> Void)?
     var onFinish: (@MainActor (NativeToolContext) async throws -> Void)?
     var transformStream: (@MainActor (AsyncStream<Data>, NativeToolContext) async -> AsyncStream<Data>)?
+    var resultMetadata: [String: JSONValue] = [:]
+    private(set) var metadataOutputs: [JSONValue?] = []
     private(set) var executions: [NativeSessionExecution] = []
     private(set) var finishedContexts: [NativeToolContext] = []
     private(set) var listCalls = 0
@@ -1211,6 +1237,11 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     func finishExecution(context: NativeToolContext) async throws {
         finishedContexts.append(context)
         try await onFinish?(context)
+    }
+
+    func resultMetadata(for name: String, output: JSONValue?, context: NativeToolContext) async -> [String: JSONValue] {
+        metadataOutputs.append(output)
+        return resultMetadata
     }
 
     func shutdown() async throws {

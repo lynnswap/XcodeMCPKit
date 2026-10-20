@@ -5,14 +5,18 @@ package struct NativeToolContext: Sendable {
     package let artifactsDirectory: URL
     package let artifactsRoot: URL
     package let conversationID: String
+    /// The calling session's selection for a headless workspace operation.
+    package let selection: NativeWorkspaceSelection?
     package let executionResource: NativeExecutionResource
     let executionScope: NativeExecutionOperations.Scope
 
     package init(artifactsDirectory: URL, artifactsRoot: URL, conversationID: String,
+                 selection: NativeWorkspaceSelection? = nil,
                  executionResource: NativeExecutionResource = NativeExecutionResource()) {
         self.artifactsDirectory = artifactsDirectory
         self.artifactsRoot = artifactsRoot
         self.conversationID = conversationID
+        self.selection = selection
         self.executionResource = executionResource
         executionScope = NativeExecutionOperations.Scope()
     }
@@ -26,6 +30,8 @@ package protocol NativeToolBackend: AnyObject, Sendable {
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data>
     func executionResource(for name: String, arguments: [String: JSONValue]) async throws -> NativeExecutionResource
     func finishExecution(context: NativeToolContext) async throws
+    /// `_meta` fields for the result of `name`, which completed with `output`.
+    func resultMetadata(for name: String, output: JSONValue?, context: NativeToolContext) async -> [String: JSONValue]
     /// A failure that leaves this process unable to serve further requests.
     var processFailure: (any Error)? { get }
     /// Prepares pending requests to drain before shutdown performs final cleanup.
@@ -41,6 +47,8 @@ extension NativeToolBackend {
         NativeExecutionResource()
     }
     package func finishExecution(context: NativeToolContext) async throws {}
+    package func resultMetadata(for name: String, output: JSONValue?,
+                                context: NativeToolContext) async -> [String: JSONValue] { [:] }
 }
 
 @safe
@@ -55,6 +63,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
     private let workspaces: NativeWorkspaceRegistry
     private let crashCorrection: NativeCrashToolCorrection
     private let previewCorrection: NativePreviewCorrection
+    private let selections = NativeWorkspaceSelections()
+    /// The headless workspace of each running request, by its artifacts directory.
+    private var requestWorkspaces: [URL: (identifier: String, tool: String, reportsSelection: Bool, finished: Bool)] = [:]
     private var actions: [String: NativeActionClass] = unsafe [:]
     private var tools: [String: NativeTool] = [:]
     private var previewBuildInvalidations: [URL: String?] = [:]
@@ -136,7 +147,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
         try await NativeErrorPresentation.$capture.withValue(nil) {
             do {
                 try await workspaces.closeRemovedWorkspaces(request: context.artifactsDirectory)
-                try await previewCorrection.retainWorkspaces(workspaces.registeredIdentifiers())
+                let registered = try workspaces.registeredIdentifiers()
+                try await previewCorrection.retainWorkspaces(registered)
+                selections.retain(registered)
             }
             catch { NativeErrorPresentation.reportBackground("Native workspace cleanup failed: \(error)") }
             try Task.checkCancellation()
@@ -167,6 +180,15 @@ package final class NativeXcodeBackend: NativeToolBackend {
         if tool.workspaceScoped, case .string(let identifier) = arguments["workspaceIdentifier"] {
             try await workspaces.prepareDebugger(for: identifier)
         }
+        if tool.acceptsWorkspaceIdentifier, case .string(let identifier) = arguments["workspaceIdentifier"] {
+            requestWorkspaces[context.artifactsDirectory] = (identifier, name, false, false)
+            // The request holds the workspace's execution permit, so no other session's operation
+            // runs between applying this session's selection and the action.
+            let reportsSelection = try await selections.prepare(
+                for: name, requested: context.selection, in: identifier
+            ) { [self] tool, arguments in try await runInternal(tool, arguments: arguments, context: context) }
+            requestWorkspaces[context.artifactsDirectory]?.reportsSelection = reportsSelection
+        }
         try Task.checkCancellation()
         arguments["temporaryArtifactsPath"] = .string(context.artifactsDirectory.path)
         arguments["conversationID"] = .string(context.conversationID)
@@ -188,6 +210,81 @@ package final class NativeXcodeBackend: NativeToolBackend {
         return try unsafe await bridge.execute(action: action, input: input, context: context)
     }
 
+    package func resultMetadata(for name: String, output: JSONValue?,
+                                context: NativeToolContext) async -> [String: JSONValue] {
+        let run: NativeWorkspaceSelections.Run = { [self] tool, arguments in
+            try await runInternal(tool, arguments: arguments, context: context)
+        }
+        let selection: NativeWorkspaceSelection?
+        // Opening or creating a workspace runs under its permit or exclusively in the process, so
+        // the new workspace's selection can be read for the session that opened it.
+        if name == "XcodeOpenWorkspace" || name == "XcodeNewProject" {
+            guard case .object(let fields)? = output,
+                  let identifier = NativeWorkspaceSelection.string(fields["workspaceIdentifier"]) else { return [:] }
+            do { selection = try await selections.selection(in: identifier, run: run) }
+            catch {
+                // The session must choose its selection before its operations run.
+                NativeErrorPresentation.reportBackground("Reading the workspace's selection failed: \(error)")
+                selection = .unknown
+            }
+        } else if let request = requestWorkspaces[context.artifactsDirectory] {
+            requestWorkspaces[context.artifactsDirectory]?.finished = true
+            var fields: [String: JSONValue]?
+            if case .object(let object)? = output { fields = object }
+            selection = await selections.finish(
+                name, changesWorkspace: tools[name]?.requiresPreviewBuildInvalidation ?? true, output: fields,
+                reportsSelection: request.reportsSelection, in: request.identifier, run: run)
+        } else {
+            return [:]
+        }
+        return selection.map { [NativeWorkspaceSelection.metadataKey: $0.json] } ?? [:]
+    }
+
+    /// Runs a native action outside a client request and returns its structured output.
+    private func runInternal(_ name: String, arguments: [String: JSONValue],
+                             context: NativeToolContext) async throws -> [String: JSONValue] {
+        guard let action = unsafe actions[name] else {
+            throw NativeToolExecutionError(message: "This Xcode has no \(name) action")
+        }
+        // Files that the action writes are not part of the client's result.
+        let artifacts = context.artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: artifacts) }
+        var arguments = arguments
+        arguments["temporaryArtifactsPath"] = .string(artifacts.path)
+        arguments["conversationID"] = .string(context.conversationID)
+        let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
+        var outcome: Result<[String: JSONValue], any Error>?
+        // The stream ends after the native producer's cleanup, so the action is consumed to its end
+        // before the next one starts in the workspace.
+        for await data in try unsafe await bridge.execute(action: action, input: input, context: context) {
+            guard outcome == nil else { continue }
+            outcome = Self.internalOutcome(of: data, action: name)
+        }
+        try Task.checkCancellation()
+        guard let outcome else { throw NativeRuntimeError.invocation("\(name) ended without a result") }
+        return try outcome.get()
+    }
+
+    /// The result that an internal action's event carries, or `nil` for a progress update.
+    private static func internalOutcome(of data: Data, action name: String) -> Result<[String: JSONValue], any Error>? {
+        guard case .object(let event)? = (try? JSONSerialization.jsonObject(with: data)).flatMap(JSONValue.init(any:)),
+              case .string(let type)? = event["type"] else {
+            return .failure(NativeRuntimeError.unsupportedContract("Native action emitted an unsupported event"))
+        }
+        switch type {
+        case "completed":
+            guard case .object(let output)? = event["data"] else {
+                return .failure(NativeRuntimeError.unsupportedContract("\(name) completed without structured output"))
+            }
+            return .success(output)
+        case "error":
+            return .failure(NativeToolExecutionError(message: NativeWorkspaceSelection.string(event["data"]) ?? "\(name) failed"))
+        default:
+            return nil
+        }
+    }
+
     package func beginShutdown() {
         catalogTask?.cancel()
         crashCorrection.cancelPendingOperations()
@@ -195,7 +292,13 @@ package final class NativeXcodeBackend: NativeToolBackend {
     }
 
     package func finishExecution(context: NativeToolContext) async throws {
-        defer { workspaces.endExecution(request: context.artifactsDirectory) }
+        defer {
+            workspaces.endExecution(request: context.artifactsDirectory)
+            if let request = requestWorkspaces.removeValue(forKey: context.artifactsDirectory), !request.finished {
+                selections.abandon(request.tool, changesWorkspace: tools[request.tool]?.requiresPreviewBuildInvalidation ?? true,
+                                   in: request.identifier)
+            }
+        }
         if Task.isCancelled { context.executionScope.cancel() }
         await previewCorrection.finishExecution(request: context.artifactsDirectory)
         await crashCorrection.finishExecution(request: context.artifactsDirectory)
