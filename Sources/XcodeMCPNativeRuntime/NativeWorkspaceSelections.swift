@@ -6,6 +6,7 @@ package struct NativeWorkspaceSelection: Equatable, Sendable {
     /// The `_meta` key of a selection in requests and results between the proxy and the host.
     package static let metadataKey = "com.lynnswap.xcode-mcpkit/selection"
 
+    /// The scheme's name, with its container when several schemes share the name.
     package var scheme: String?
     package var destination: String?
     /// The test plan's name, or its path when several plans of the scheme share the name.
@@ -64,13 +65,14 @@ final class NativeWorkspaceSelections {
     func selection(in workspace: String, run: Run) async throws -> NativeWorkspaceSelection {
         if let selection = active[workspace] { return selection }
         let arguments: [String: JSONValue] = ["workspaceIdentifier": .string(workspace)]
+        let scheme = Self.activeEntry(in: try await run("XcodeListSchemes", arguments), list: "schemes",
+                                      identifier: "disambiguatedName", active: "activeSchemeName")
         let destinations = try await run("XcodeListRunDestinations", arguments)
-        let scheme = NativeWorkspaceSelection.string(destinations["activeSchemeName"])
         var testPlan: String?
         // Test plans belong to the active scheme; a workspace without one has none.
         if scheme != nil {
-            let plans = try await run("XcodeListTestPlans", arguments)
-            testPlan = Self.activeTestPlan(in: plans)
+            testPlan = Self.activeEntry(in: try await run("XcodeListTestPlans", arguments), list: "testPlans",
+                                        identifier: "path", active: "activeTestPlanName")
         }
         let selection = NativeWorkspaceSelection(
             scheme: scheme, destination: NativeWorkspaceSelection.string(destinations["activeDestinationDisplayTitle"]),
@@ -147,12 +149,15 @@ final class NativeWorkspaceSelections {
         }
     }
 
-    private static func activeTestPlan(in output: [String: JSONValue]) -> String? {
-        if case .array(let plans)? = output["testPlans"] {
-            for case .object(let plan) in plans where plan["isActive"] == .bool(true) {
-                return NativeWorkspaceSelection.string(plan["path"]) ?? NativeWorkspaceSelection.string(plan["name"])
+    /// The active entry of a list action's output, by the field that tells it apart from entries
+    /// that share its name.
+    private static func activeEntry(in output: [String: JSONValue], list: String, identifier: String,
+                                    active: String) -> String? {
+        if case .array(let entries)? = output[list] {
+            for case .object(let entry) in entries where entry["isActive"] == .bool(true) {
+                return NativeWorkspaceSelection.string(entry[identifier]) ?? NativeWorkspaceSelection.string(entry["name"])
             }
         }
-        return NativeWorkspaceSelection.string(output["activeTestPlanName"])
+        return NativeWorkspaceSelection.string(output[active])
     }
 }

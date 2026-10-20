@@ -1081,13 +1081,22 @@ private extension NativeHostBroker {
         let native = try XcodeToolCatalog.nativeCall(name: name, arguments: nativeArguments,
             nativeCatalog: catalog.result)
         let forwarded = try Self.toolRequest(request, name: native.name, arguments: native.arguments)
-        let selection = workspace.flatMap { $0.gui ? nil : session.selection(for: $0) }
-        let sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session,
-            generation: generation, eventStream: request.prefersEventStream, selection: selection))
-        var reply = sent.reply
-        if let workspace, !workspace.gui, let reported = sent.selection {
-            session.recordSelection(reported, for: workspace, replacing: true)
+        let sent: (reply: ProxyRuntimeReply, selection: JSONValue?)
+        if let workspace, !workspace.gui {
+            // The session's operations on one model run one at a time, as the host runs them anyway,
+            // so each carries the selection that the previous one reported.
+            sent = try await session.selectionTurns.run(workspace.scope) {
+                let sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session,
+                    generation: generation, eventStream: request.prefersEventStream,
+                    selection: session.selection(for: workspace)))
+                if let reported = sent.selection { session.recordSelection(reported, for: workspace, replacing: true) }
+                return sent
+            }
+        } else {
+            sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session, generation: generation,
+                                                             eventStream: request.prefersEventStream))
         }
+        var reply = sent.reply
         if case .response(let data, let replySession, let stream) = reply {
             reply = .response(data: ToolCallNormalizer().normalizeResponseDataIfNeeded(
                 method: "tools/call", toolName: native.name, toolsCatalogOverride: catalog.result, upstreamData: data),

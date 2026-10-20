@@ -8,6 +8,8 @@ struct NativeWorkspaceSelectionsTests {
     @MainActor
     private final class Workspace {
         var scheme: String? = "App"
+        /// Schemes and the containers that share each scheme's name.
+        var schemes: [String: [String]] = ["App": ["App"], "Tool": ["App"]]
         var destination = "My Mac"
         var testPlan = "Unit"
         /// Paths of plans that share the active plan's name.
@@ -26,6 +28,15 @@ struct NativeWorkspaceSelectionsTests {
                 if case .string(let value)? = arguments[key] { value } else { "" }
             }
             switch tool {
+            case "XcodeListSchemes":
+                let entries: [JSONValue] = schemes.sorted { $0.key < $1.key }.flatMap { name, containers in
+                    containers.map { container in
+                        let disambiguated = containers.count > 1 ? "\(name) (\(container))" : name
+                        return .object(["name": .string(name), "disambiguatedName": .string(disambiguated),
+                                        "isActive": .bool(disambiguated == scheme)])
+                    }
+                }
+                return ["activeSchemeName": scheme.map(JSONValue.string) ?? .null, "schemes": .array(entries)]
             case "XcodeListRunDestinations":
                 return ["activeSchemeName": scheme.map(JSONValue.string) ?? .null,
                         "activeDestinationDisplayTitle": .string(destination)]
@@ -62,7 +73,7 @@ struct NativeWorkspaceSelectionsTests {
         try await selections.apply(NativeWorkspaceSelection(), in: "w1", run: workspace.run)
         let first = NativeWorkspaceSelection(scheme: "App", destination: "My Mac", testPlan: "Unit")
         #expect(selections.cachedSelection(in: "w1") == first)
-        #expect(workspace.calls == ["XcodeListRunDestinations", "XcodeListTestPlans"])
+        #expect(workspace.calls == ["XcodeListSchemes", "XcodeListRunDestinations", "XcodeListTestPlans"])
 
         // Another session switches the scheme.
         try await selections.apply(NativeWorkspaceSelection(scheme: "Tool"), in: "w1", run: workspace.run)
@@ -124,11 +135,19 @@ struct NativeWorkspaceSelectionsTests {
         #expect(selections.cachedSelection(in: "w1") == NativeWorkspaceSelection(destination: "My Mac"))
     }
 
-    @Test func plansThatShareANameAreIdentifiedByPath() async throws {
+    @Test func schemesAndPlansThatShareANameAreToldApart() async throws {
         let workspace = Workspace()
+        workspace.schemes = ["App": ["Mac", "iOS"]]
+        workspace.scheme = "App (iOS)"
         workspace.duplicatePlanPaths = ["/A/Unit.xctestplan", "/B/Unit.xctestplan"]
         let selections = NativeWorkspaceSelections()
-        #expect(try await selections.selection(in: "w1", run: workspace.run).testPlan == "/A/Unit.xctestplan")
+        let selection = try await selections.selection(in: "w1", run: workspace.run)
+        #expect(selection.scheme == "App (iOS)")
+        #expect(selection.testPlan == "/A/Unit.xctestplan")
+
+        // Another session's scheme of the same name in the other project is restored too.
+        try await selections.apply(NativeWorkspaceSelection(scheme: "App (Mac)"), in: "w1", run: workspace.run)
+        #expect(workspace.scheme == "App (Mac)")
     }
 
     @Test func aClosedWorkspaceIsReadAgainWhenReopened() async throws {
