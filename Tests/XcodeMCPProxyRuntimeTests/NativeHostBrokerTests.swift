@@ -243,6 +243,23 @@ struct NativeHostBrokerTests {
         #expect(try await nativeCloses(after: fixture) == 1)
     }
 
+    @Test func aPathDoesNotCloseTheDeviceSessionsWorkspace() async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("path-close")
+        let workspace = try await fixture.open(session)
+        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
+            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
+        ])
+        let key = try #require(started["interactionSessionKey"])
+        let rejected = try await fixture.toolResult(session, name: NativeHostBroker.closeWorkspaceTool, arguments: [
+            "workspaceIdentifier": .string("/Fixture/Other.xcodeproj"), "interactionSessionKey": key,
+        ])
+        #expect(NativeHostBroker.isToolError(rejected))
+        let released = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
+                                              arguments: ["workspaceIdentifier": workspace])
+        #expect(released["released"] == .bool(true))
+    }
+
     /// The request names its workspace by handle or by path.
     @Test(arguments: [false, true])
     func aRunningRequestKeepsItsModelOpenAfterTheOtherSessionsEnd(byPath: Bool) async throws {

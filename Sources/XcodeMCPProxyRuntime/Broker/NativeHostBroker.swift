@@ -151,11 +151,17 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             let arguments = (object?["params"] as? [String: Any])?["arguments"] as? [String: Any] ?? [:]
             let device = (arguments["interactionSessionKey"] as? String).flatMap { storage.deviceSessions[$0] }
             let launch = (arguments["launchSessionReference"] as? String).flatMap { storage.launchSessions[$0] }
+            let name = (object?["params"] as? [String: Any])?["name"] as? String
+            let selector = arguments["workspaceIdentifier"] as? String
             let workspace: NativeBrokerWorkspace?
-            if let identifier = arguments["workspaceIdentifier"] as? String, !identifier.hasPrefix("/") {
-                workspace = storage.workspaces[identifier]
-            } else {
+            if let selector, !selector.hasPrefix("/") {
+                workspace = storage.workspaces[selector]
+            } else if selector == nil || name != Self.closeWorkspaceTool {
+                // A path names the device or launch session's workspace, which callNativeTool verifies.
+                // XcodeCloseWorkspace accepts only handles.
                 workspace = device?.workspace ?? launch?.workspace
+            } else {
+                workspace = nil
             }
             let host = workspace?.hostIdentifier ?? device?.hostIdentifier ?? launch?.hostIdentifier
                 ?? (arguments["hostIdentifier"] as? String) ?? Self.defaultHostIdentifier
@@ -183,7 +189,6 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             }
             storage.hostRequests[host, default: 0] += 1
             // A running request keeps its model open; a close request must not keep open what it closes.
-            let name = (object?["params"] as? [String: Any])?["name"] as? String
             let retainsWorkspace = workspace != nil && name != Self.closeWorkspaceTool
             if let workspace, retainsWorkspace {
                 storage.admittedWorkspaces[workspace.scope, default: 0] += 1
