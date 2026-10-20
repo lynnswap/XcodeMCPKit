@@ -124,8 +124,9 @@ extension XcodeMCPProxyServer {
             do {
                 endpoint = try await server.start()
             } catch {
-                // A startup that a signal stopped ends like a shutdown, unless its cleanup failed.
-                if !(error is CleanupError), signalled.withLock({ $0 }) {
+                // A signal's shutdown stopped the startup, so the shutdown's result is the outcome.
+                if signalled.withLock({ $0 }) {
+                    try await server.shutdown()
                     return 0
                 }
                 if !(error is CleanupError), configuration.bindAddress.port > 0,
@@ -173,6 +174,8 @@ enum TerminationSignals {
     static let numbers = [SIGINT, SIGTERM]
 
     private struct Registry {
+        /// Distinguishes observation periods, so a callback from a canceled source is ignored.
+        var generation: UInt64 = 0
         var handlers: [UUID: @Sendable () -> Void] = [:]
         var received: UInt = 0
         var sources: [any DispatchSourceSignal] = []
@@ -195,12 +198,13 @@ enum TerminationSignals {
                 guard registry.handlers.removeValue(forKey: id) != nil, registry.handlers.isEmpty else { return }
                 for source in registry.sources { source.cancel() }
                 for var entry in registry.previous { sigaction(entry.number, &entry.action, nil) }
-                registry = Registry()
+                registry = Registry(generation: registry.generation &+ 1)
             }
         }
     }
 
     private static func install(in registry: inout Registry) {
+        let generation = registry.generation
         for number in numbers {
             var ignore = sigaction()
             ignore.__sigaction_u.__sa_handler = SIG_IGN
@@ -211,11 +215,14 @@ enum TerminationSignals {
             source.setEventHandler { [weak source] in
                 guard let source else { return }
                 // A source reports signals that arrive together in one event.
-                let (count, handlers) = Self.registry.withLock { registry in
+                let (count, handlers) = Self.registry.withLock { registry -> (UInt, [@Sendable () -> Void]) in
+                    guard registry.generation == generation else { return (0, []) }
                     registry.received += source.data
                     return (registry.received, Array(registry.handlers.values))
                 }
-                if count == 1 {
+                if count == 0 {
+                    return
+                } else if count == 1 {
                     for handler in handlers { handler() }
                 } else {
                     signal(number, SIG_DFL)

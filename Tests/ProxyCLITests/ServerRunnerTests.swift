@@ -383,9 +383,11 @@ struct ServerRunnerTests {
         #expect(!observing.snapshot())
     }
 
-    @Test(.timeLimit(.minutes(1)))
-    func aTerminationSignalDuringStartupShutsTheServerDown() async throws {
-        let server = StartBlockingProxyServer()
+    /// A failed cleanup still fails the run.
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func aTerminationSignalDuringStartupShutsTheServerDown(cleanupFails: Bool) async throws {
+        let server = StartBlockingProxyServer(cleanupFails: cleanupFails)
+        let errors = CapturedLines()
         let handlers = LockedBox<[@Sendable () -> Void]>([])
         let launcher = XcodeMCPProxyServer.Launcher(dependencies: .init(
             makeServer: { _ in server },
@@ -398,13 +400,14 @@ struct ServerRunnerTests {
 
         let running = Task {
             await launcher.run(arguments: ["xcode-mcp-proxy-server", "--listen", "127.0.0.1:9004"],
-                               environment: [:], stdout: { _ in }, stderr: { _ in })
+                               environment: [:], stdout: { _ in }, stderr: { errors.append($0) })
         }
         while handlers.snapshot().isEmpty || !server.isStarting { await Task.yield() }
         handlers.snapshot().first?()
 
-        #expect(await running.value == 0)
-        #expect(server.shutdownCount == 1)
+        #expect(await running.value == (cleanupFails ? 1 : 0))
+        #expect(server.shutdownCount >= 1)
+        #expect(errors.snapshot().contains { $0.contains("gateway cleanup failed") } == cleanupFails)
     }
 
     @Test func startupCleanupFailureIsNotReplacedByPortInUseDiagnostic() async throws {
@@ -623,6 +626,9 @@ private final class ShutdownFailingProxyServer: XcodeMCPProxyServer.LaunchServer
 private final class StartBlockingProxyServer: XcodeMCPProxyServer.LaunchServer {
     private let stops = AsyncStream<Void>.makeStream()
     private let state = LockedBox((starting: false, shutdowns: 0))
+    private let cleanupFails: Bool
+
+    init(cleanupFails: Bool) { self.cleanupFails = cleanupFails }
 
     var isStarting: Bool { state.snapshot().starting }
     var shutdownCount: Int { state.snapshot().shutdowns }
@@ -640,6 +646,7 @@ private final class StartBlockingProxyServer: XcodeMCPProxyServer.LaunchServer {
     func shutdown() async throws {
         state.withValue { $0.shutdowns += 1 }
         stops.continuation.finish()
+        if cleanupFails { throw LaunchCleanupFailure.expected }
     }
 }
 
