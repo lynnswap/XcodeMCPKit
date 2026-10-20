@@ -38,6 +38,9 @@ final class NativeTestableStateCorrection {
     func checkFailure() throws {
         try callback.checkFailure()
     }
+
+    /// A recorded failure means a provider may have missed its owner's cleanup; the process stays unreliable.
+    var failure: (any Error)? { callback.recordedFailure }
 }
 
 // This receiver-independent getter has immutable signature/image data, no code
@@ -59,4 +62,6 @@ private final class NativeTestableStateCallback: @unchecked Sendable {
     func checkFailure() throws {
         if let error = failure.withLock({ $0 }) { throw error }
     }
+
+    var recordedFailure: (any Error)? { failure.withLock { $0 } }
 }

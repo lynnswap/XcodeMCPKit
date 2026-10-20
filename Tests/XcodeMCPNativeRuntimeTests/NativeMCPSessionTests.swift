@@ -176,7 +176,7 @@ struct NativeMCPSessionTests {
             let failure = NativeRuntimeError.invocation("Output pipe closed")
             harness.outputControl.failure = failure
             let failureEvents = AsyncStream<(String, Task<Void, any Error>?)>.makeStream()
-            await harness.session.setOutputFailureHandler { [weak session = harness.session] error in
+            await harness.session.setFailureHandler { [weak session = harness.session] error in
                 let shutdown = session.map { session in Task { try await session.shutdown() } }
                 failureEvents.continuation.yield((String(describing: error), shutdown))
             }
@@ -200,7 +200,7 @@ struct NativeMCPSessionTests {
             #expect(await pending.wasCancelled())
             #expect(harness.backend.shutdownCalls == 1)
             #expect(reportedFailure == failure.description)
-            await harness.session.setOutputFailureHandler(nil)
+            await harness.session.setFailureHandler(nil)
             failureEvents.continuation.finish()
             #expect(await failureIterator.next(isolation: MainActor.shared) == nil)
         }
@@ -783,11 +783,66 @@ struct NativeMCPSessionTests {
         }
     }
 
+    @Test func concurrentAndRepeatedShutdownsShareOneCleanup() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            async let first: Void = harness.session.shutdown()
+            async let second: Void = harness.session.shutdown()
+            _ = try await (first, second)
+            try await harness.session.shutdown()
+            #expect(harness.backend.shutdownCalls == 1)
+            #expect(harness.backend.beginShutdownCalls == 1)
+        }
+    }
+
+    @Test func aProcessFailureAnswersItsRequestAndThenStopsTheHost() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            let failures = AsyncStream<String>.makeStream()
+            await harness.session.setFailureHandler { failures.continuation.yield(String(describing: $0)) }
+            harness.backend.executeError = NativeRuntimeError.invocation("testable-state hook failed")
+            harness.backend.processFailure = NativeRuntimeError.invocation("testable-state hook failed")
+            try await harness.call("Broken", id: "broken")
+            var iterator = failures.stream.makeAsyncIterator()
+            let failure = try #require(await iterator.next(isolation: MainActor.shared))
+            #expect(failure.contains("testable-state hook failed"))
+            let reply = try await harness.nextMessage()
+            #expect(try nativeTestField(reply, "id") == .string("broken"))
+            #expect(try nativeTestField(reply, "error", "code") == .number(.int(-32603)))
+            try await harness.call("After", id: "after")
+            #expect(try nativeTestField(await harness.nextMessage(), "error", "code") == .number(.int(-32000)))
+            harness.backend.executeError = nil
+            harness.backend.processFailure = nil
+            await harness.session.setFailureHandler(nil)
+            failures.continuation.finish()
+        }
+    }
+
+    @Test func requestArtifactDirectoriesAreRemovedOnlyWhenNothingWasWritten() async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            try await harness.call("Empty", id: "empty")
+            let empty = try await harness.backend.nextExecution()
+            try empty.complete(.string("done"))
+            _ = try await harness.nextMessage()
+            #expect(!FileManager.default.fileExists(atPath: empty.context.artifactsDirectory.path))
+            try await harness.call("Writes", id: "writes")
+            let writes = try await harness.backend.nextExecution()
+            let artifact = writes.context.artifactsDirectory.appendingPathComponent("snapshot.png")
+            try Data("image".utf8).write(to: artifact)
+            try writes.complete(.string("done"))
+            _ = try await harness.nextMessage()
+            #expect(FileManager.default.fileExists(atPath: artifact.path))
+        }
+    }
+
     @Test func shutdownPropagatesBackendCleanupFailures() async throws {
         try await withNativeSession { harness in
             harness.backend.shutdownError = .invocation("Could not close owned workspace")
+            harness.expectsShutdownFailure = true
             await #expect(throws: NativeRuntimeError.self) { try await harness.session.shutdown() }
-            harness.backend.shutdownError = nil
+            await #expect(throws: NativeRuntimeError.self) { try await harness.session.shutdown() }
+            #expect(harness.backend.shutdownCalls == 1)
         }
     }
 
@@ -798,7 +853,10 @@ struct NativeMCPSessionTests {
             let callback = NativeSessionSuspendedCallback()
             harness.backend.beforeExecute = { await callback.waitForReply() }
             harness.backend.onBeginShutdown = { callback.release(fromShutdown: true) }
-            if failsCleanup { harness.backend.shutdownError = .invocation("Owned native cleanup failed") }
+            if failsCleanup {
+                harness.backend.shutdownError = .invocation("Owned native cleanup failed")
+                harness.expectsShutdownFailure = true
+            }
             try await harness.call("AwaitNativeReply", id: "pending-native-callback")
             await callback.waitUntilEntered()
             let watchdog = Task { @MainActor in
@@ -1009,7 +1067,9 @@ private func withNativeSession(maximumConcurrentOperations: Int = 4,
     defer { try? FileManager.default.removeItem(at: harness.artifactsRoot) }
     do {
         try await body(harness)
-        try await harness.session.shutdown()
+        do { try await harness.session.shutdown() }
+        // Shutdown runs once, so a test that made it fail observes that failure again here.
+        catch where harness.expectsShutdownFailure {}
     } catch {
         try? await harness.session.shutdown()
         throw error
@@ -1022,6 +1082,7 @@ private final class NativeSessionHarness {
     let artifactsRoot = FileManager.default.temporaryDirectory.appendingPathComponent("NativeMCPSessionTests-\(UUID().uuidString)", isDirectory: true)
     let session: NativeMCPSession
     let outputControl: NativeSessionOutputControl
+    var expectsShutdownFailure = false
     private let framer = StdioFramer(mode: .delimitedMessages)
     private var outputIterator: AsyncStream<Data>.Iterator
 
@@ -1095,6 +1156,7 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     var listError: NativeRuntimeError?
     var executeError: (any Error)?
     var shutdownError: NativeRuntimeError?
+    var processFailure: (any Error)?
     var beforeExecute: (@MainActor () async throws -> Void)?
     var onBeginShutdown: (@MainActor () -> Void)?
     var onShutdown: (@MainActor () -> Void)?

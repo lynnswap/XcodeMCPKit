@@ -62,59 +62,52 @@ private enum NativeHostMain {
             let application = try bootstrap.application(for: installation, sharesCompilationCache: arguments.sharesCompilationCache)
             let artifacts = arguments.artifactsDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? FileManager.default.temporaryDirectory.appendingPathComponent("XcodeMCPNativeHost", isDirectory: true)
+            let maxMessageBytes = arguments.maxMessageBytes
             Task { @MainActor in
+                let session: NativeMCPSession
                 do {
                     try await bootstrap.initialize(installation: installation)
                     let backend = try await NativeXcodeBackend(installation: installation)
-                    let session = NativeMCPSession(backend: backend, artifactsRoot: artifacts) { data in
+                    session = NativeMCPSession(backend: backend, artifactsRoot: artifacts) { data in
                         try output.write(contentsOf: data + Data([0x0A]))
                     }
-                    await session.setOutputFailureHandler { [weak session] error in
-                        guard let session else { return }
-                        Task { @MainActor in
-                            do { try await session.shutdown() }
-                            catch let cleanup {
-                                report("Native host output failed: \(error); cleanup failed: \(cleanup)")
-                                terminate(application, failure: true)
-                                return
-                            }
-                            report("Native host output failed: \(error)")
-                            terminate(application, failure: true)
-                        }
-                    }
-                    let framer = StdioFramer(mode: .delimitedMessages)
-                    do {
-                        for try await chunk in standardInput() {
-                            let result = framer.append(chunk)
-                            guard framer.bufferedMessageByteCount <= arguments.maxMessageBytes else {
-                                throw NativeRuntimeError.invalidRequest("Native MCP input exceeds the configured message limit")
-                            }
-                            if let violation = result.protocolViolation {
-                                throw NativeRuntimeError.invalidRequest("Invalid native MCP framing: \(violation.reason.rawValue)")
-                            }
-                            for message in result.messages {
-                                guard message.count <= arguments.maxMessageBytes else {
-                                    throw NativeRuntimeError.invalidRequest("Native MCP message exceeds the configured message limit")
-                                }
-                            }
-                            try await session.receive(result.messages)
-                        }
-                    } catch {
-                        do { try await session.shutdown() }
-                        catch let cleanup {
-                            report("Native host input failed: \(error); cleanup failed: \(cleanup)")
-                            terminate(application, failure: true)
-                            return
-                        }
-                        throw error
-                    }
-                    try await session.shutdown()
                 } catch {
                     report("Native host failed: \(error)")
                     terminate(application, failure: true)
                     return
                 }
-                terminate(application, failure: false)
+                let failures = AsyncStream<any Error>.makeStream()
+                await session.setFailureHandler { error in
+                    failures.continuation.yield(error)
+                    failures.continuation.finish()
+                }
+                // Whichever ends first stops the host: input, its failure, or a failure that makes the
+                // process unusable. Framing runs off the main actor, which Xcode's models use.
+                let outcome = await withTaskGroup(of: HostOutcome?.self) { group in
+                    group.addTask { await consumeInput(into: session, maxMessageBytes: maxMessageBytes) }
+                    group.addTask {
+                        for await error in failures.stream { return .failed(error) }
+                        return nil
+                    }
+                    var first: HostOutcome = .inputEnded
+                    while let next = await group.next() {
+                        guard let next else { continue }
+                        first = next
+                        break
+                    }
+                    group.cancelAll()
+                    return first
+                }
+                var problem: String?
+                switch outcome {
+                case .inputEnded: break
+                case .inputFailed(let error): problem = "Native host input failed: \(error)"
+                case .failed(let error): problem = "Native host failed: \(error)"
+                }
+                do { try await session.shutdown() }
+                catch { problem = (problem.map { $0 + "; " } ?? "") + "cleanup failed: \(error)" }
+                if let problem { report(problem) }
+                terminate(application, failure: problem != nil)
             }
             withExtendedLifetime(bootstrap) {
                 application.run()
@@ -150,36 +143,36 @@ private enum NativeHostMain {
         throw NativeRuntimeError.unavailable("Cannot restart native host with Xcode's loader paths: \(unsafe String(cString: strerror(errno)))")
     }
 
-    private static func standardInput() -> AsyncThrowingStream<Data, any Error> {
-        let queue = DispatchQueue(label: "xcode.native.stdin")
-        return AsyncThrowingStream(unfolding: {
-            try await withCheckedThrowingContinuation { continuation in
-                queue.async {
-                    do {
-                        while true {
-                            var data = Data(count: 64 * 1024)
-                            let count = unsafe data.withUnsafeMutableBytes { bytes in
-                                unsafe Darwin.read(STDIN_FILENO, bytes.baseAddress, bytes.count)
-                            }
-                            if count > 0 {
-                                data.count = count
-                                continuation.resume(returning: data)
-                                return
-                            }
-                            if count == 0 {
-                                continuation.resume(returning: nil)
-                                return
-                            }
-                            if errno != EINTR {
-                                throw NativeRuntimeError.unavailable("Native MCP stdin read failed: \(unsafe String(cString: strerror(errno)))")
-                            }
-                        }
-                    } catch {
-                        continuation.resume(throwing: error)
+    private enum HostOutcome: Sendable {
+        case inputEnded
+        case inputFailed(any Error)
+        case failed(any Error)
+    }
+
+    private static func consumeInput(into session: NativeMCPSession, maxMessageBytes: Int) async -> HostOutcome {
+        let framer = StdioFramer(mode: .delimitedMessages)
+        let input = StandardInput()
+        do {
+            for try await chunk in input.chunks {
+                let result = framer.append(chunk)
+                guard framer.bufferedMessageByteCount <= maxMessageBytes else {
+                    throw NativeRuntimeError.invalidRequest("Native MCP input exceeds the configured message limit")
+                }
+                if let violation = result.protocolViolation {
+                    throw NativeRuntimeError.invalidRequest("Invalid native MCP framing: \(violation.reason.rawValue)")
+                }
+                for message in result.messages {
+                    guard message.count <= maxMessageBytes else {
+                        throw NativeRuntimeError.invalidRequest("Native MCP message exceeds the configured message limit")
                     }
                 }
+                try await session.receive(result.messages)
+                input.consumed()
             }
-        })
+            return .inputEnded
+        } catch {
+            return .inputFailed(error)
+        }
     }
 
     private static func report(_ message: String) {
@@ -194,4 +187,40 @@ private enum NativeHostMain {
         }
         application.terminate(nil)
     }
+}
+
+/// Reads stdin on its own thread, one chunk ahead of the consumer, so the pipe keeps exerting
+/// backpressure. Cancelling the consumer ends iteration; the reader then stops at its next chunk.
+private final class StandardInput: Sendable {
+    let chunks: AsyncThrowingStream<Data, any Error>
+    private let demand = DispatchSemaphore(value: 0)
+
+    init() {
+        let (chunks, continuation) = AsyncThrowingStream<Data, any Error>.makeStream()
+        self.chunks = chunks
+        let demand = demand
+        DispatchQueue(label: "xcode.native.stdin").async {
+            while true {
+                var data = Data(count: 64 * 1024)
+                let count = unsafe data.withUnsafeMutableBytes { bytes in
+                    unsafe Darwin.read(STDIN_FILENO, bytes.baseAddress, bytes.count)
+                }
+                if count > 0 {
+                    data.count = count
+                    guard case .enqueued = continuation.yield(data) else { return }
+                    demand.wait()
+                } else if count == 0 {
+                    continuation.finish()
+                    return
+                } else if errno != EINTR {
+                    continuation.finish(throwing: NativeRuntimeError.unavailable(
+                        "Native MCP stdin read failed: \(unsafe String(cString: strerror(errno)))"))
+                    return
+                }
+            }
+        }
+    }
+
+    /// Lets the reader fetch the next chunk.
+    func consumed() { demand.signal() }
 }
