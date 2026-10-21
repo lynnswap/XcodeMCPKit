@@ -506,13 +506,15 @@ struct HTTPHandlerTests {
         #expect(((body["error"] as? [String: Any])?["code"] as? NSNumber)?.intValue == -32800)
     }
 
-    /// A client that has not read earlier progress skips later updates but still gets the reply.
+    /// A client that stops reading skips later progress but still gets the reply.
     @Test func progressIsSkippedWhileTheClientFallsBehind() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        let socket = StalledWrites()
+        try channel.pipeline.syncOperations.addHandler(socket, position: .first)
         let sessionID = try await initializeHTTPChannel(channel)
         var payload = toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"])
         payload["params"] = ["name": "DocumentationSearch", "arguments": ["query": "held"],
@@ -531,18 +533,20 @@ struct HTTPHandlerTests {
                                         "message": .string(message)])])
         }
 
-        host.emit(progress("read"))
-        let opened = try await collectResponse(from: channel)
-        #expect(opened.head.headers.first(name: "Content-Type") == "text/event-stream")
+        // The client stops reading: writes stay pending, and once one is, the channel is not writable.
+        socket.isStalled = true
+        host.emit(progress("first"))
+        try runEmbedded(channel, until: "the first progress reached the stalled socket") { socket.hasPendingWrites }
         channel.isWritable = false
         host.emit(progress("skipped"))
         host.emit(.object(["jsonrpc": .string("2.0"), "id": hostRequestID,
                            "result": .object(["content": .array([])])]))
+        try runEmbedded(channel, until: "the reply reached the stalled socket") { socket.hasPendingEnd }
 
-        let rest = try await collectStreamEnd(from: channel)
-        #expect(opened.body.contains("read"))
-        #expect(!rest.contains("skipped"))
-        #expect(rest.contains(#""id":2"#))
+        let body = socket.pendingBody
+        #expect(body.contains("first"))
+        #expect(!body.contains("skipped"))
+        #expect(body.contains(#""id":2"#))
     }
 
     /// A request that started is answered when its session is deleted; only later requests get a 404.
@@ -2015,5 +2019,67 @@ enum HostFailureCase: CaseIterable, Sendable {
         case .rpcError: "Invalid params"
         case .invalidResponse: "invalid upstream response"
         }
+    }
+}
+
+/// Runs the channel's scheduled work on the calling thread until `condition` holds.
+private func runEmbedded(_ channel: EmbeddedChannel, until description: String,
+                         _ condition: () -> Bool) throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(5))
+    while !condition() {
+        drainEmbeddedCompletions(for: channel)
+        channel.embeddedEventLoop.run()
+        guard clock.now < deadline else { throw AsyncTestTimeoutError(description: description) }
+        sched_yield()
+    }
+}
+
+/// Holds outbound response parts, as a socket does when its client stops reading.
+private final class StalledWrites: ChannelOutboundHandler, @unchecked Sendable {
+    typealias OutboundIn = HTTPServerResponsePart
+    typealias OutboundOut = HTTPServerResponsePart
+
+    private let state = NIOLockedValueBox<(stalled: Bool, pending: [HTTPServerResponsePart])>((false, []))
+    private var promises: [EventLoopPromise<Void>] = []
+
+    var isStalled: Bool {
+        get { state.withLockedValue { $0.stalled } }
+        set { state.withLockedValue { $0.stalled = newValue } }
+    }
+
+    var hasPendingWrites: Bool { state.withLockedValue { !$0.pending.isEmpty } }
+
+    var hasPendingEnd: Bool {
+        state.withLockedValue { $0.pending.contains { if case .end = $0 { true } else { false } } }
+    }
+
+    var pendingBody: String {
+        state.withLockedValue { state in
+            state.pending.map { part in
+                guard case .body(.byteBuffer(let buffer)) = part else { return "" }
+                return String(buffer: buffer)
+            }.joined()
+        }
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        let part = unwrapOutboundIn(data)
+        // A stalled write never completes, so its promise is not fulfilled.
+        let stalled = state.withLockedValue { state in
+            if state.stalled { state.pending.append(part) }
+            return state.stalled
+        }
+        if !stalled {
+            context.write(data, promise: promise)
+        } else if let promise {
+            promises.append(promise)
+        }
+    }
+
+    func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
+        for pending in promises { pending.fail(ChannelError.ioOnClosedChannel) }
+        promises.removeAll()
+        context.close(mode: mode, promise: promise)
     }
 }

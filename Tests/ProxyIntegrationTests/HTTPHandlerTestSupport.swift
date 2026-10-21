@@ -269,31 +269,6 @@ func collectResponse(
     }
 }
 
-/// Reads an open response's remaining body until it ends.
-func collectStreamEnd(from channel: EmbeddedChannel, timeout: Duration = .seconds(5)) async throws -> String {
-    var body = ""
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: timeout)
-    while true {
-        drainEmbeddedCompletions(for: channel)
-        channel.embeddedEventLoop.run()
-        while let part = try channel.readOutbound(as: HTTPServerResponsePart.self) {
-            switch part {
-            case .body(.byteBuffer(var buffer)):
-                body += buffer.readString(length: buffer.readableBytes) ?? ""
-            case .end:
-                return body
-            case .head, .body(.fileRegion):
-                break
-            }
-        }
-        guard clock.now < deadline else {
-            throw AsyncTestTimeoutError(description: "timed out waiting for the response to end")
-        }
-        sched_yield()
-    }
-}
-
 private enum SelfContainedHTTPResponse {
     static func isOpenSSE(_ head: HTTPResponseHead, bodyBuffer: ByteBuffer) -> Bool {
         guard head.headers.first(name: "Content-Type") == "text/event-stream" else {

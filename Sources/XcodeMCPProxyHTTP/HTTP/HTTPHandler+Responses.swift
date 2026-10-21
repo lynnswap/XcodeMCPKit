@@ -55,19 +55,19 @@ extension HTTPHandler {
         keepAlive: Bool,
         sessionID: String,
         requestLog: RequestLogContext
-    ) -> EventLoopFuture<Void> {
+    ) {
         switch response.beginEvent() {
         case .dropped:
-            return channel.eventLoop.makeSucceededVoidFuture()
+            return
         case .opensStream:
             logResponse(requestLog, status: .ok, sessionID: sessionID)
             MCPResponseEmitter.openEventStream(on: channel, keepAlive: keepAlive, sessionID: sessionID)
         case .continuesStream:
             // Progress only reports state, so a client that falls behind skips updates rather than
             // the server queueing them without bound.
-            guard channel.isWritable else { return channel.eventLoop.makeSucceededVoidFuture() }
+            guard channel.isWritable else { return }
         }
-        return MCPResponseEmitter.sendEvent(data, on: channel)
+        _ = MCPResponseEmitter.sendEvent(data, on: channel)
     }
 
     func sendPostResolution(

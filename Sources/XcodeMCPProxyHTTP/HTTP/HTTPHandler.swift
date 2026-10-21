@@ -500,11 +500,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         // An `initialize` reply decides whether the session exists, so it is never streamed.
         let progressRoute = isInitializeRequest ? nil : Self.progressToken(in: parsedRequestObject).flatMap { token in
             controlService.sessions.delivery.routeProgress(token, of: sessionID) { [self] data in
+                // Progress does not wait for earlier writes to complete, so a client that stops
+                // reading cannot make it queue up; the event loop still orders it before the reply.
                 scheduleResponseCompletion(eventLoop) {
-                    _ = self.enqueueOrderedWrite(on: channel) {
-                        self.sendProgress(data, in: response, on: channel, keepAlive: keepAlive,
-                                          sessionID: sessionID.rawValue, requestLog: requestLog)
-                    }
+                    self.sendProgress(data, in: response, on: channel, keepAlive: keepAlive,
+                                      sessionID: sessionID.rawValue, requestLog: requestLog)
                 }
             }
         }
