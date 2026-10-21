@@ -506,6 +506,45 @@ struct HTTPHandlerTests {
         #expect(((body["error"] as? [String: Any])?["code"] as? NSNumber)?.intValue == -32800)
     }
 
+    /// A client that has not read earlier progress skips later updates but still gets the reply.
+    @Test func progressIsSkippedWhileTheClientFallsBehind() async throws {
+        let config = makeHTTPConfig(requestTimeout: 60)
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
+        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        let sessionID = try await initializeHTTPChannel(channel)
+        var payload = toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"])
+        payload["params"] = ["name": "DocumentationSearch", "arguments": ["query": "held"],
+                             "_meta": ["progressToken": "build"]]
+        try postJSON(payload, sessionID: sessionID, to: channel)
+        let held = try await runtime.waitForHostMessages("tools/call")
+        let host = try #require(runtime.host)
+        guard case .object(let params)? = held.first?["params"], case .object(let meta)? = params["_meta"],
+              let token = meta["progressToken"], let hostRequestID = held.first?["id"] else {
+            Issue.record("the host request has no progress token")
+            return
+        }
+        let progress: @Sendable (String) -> JSONValue = { message in
+            .object(["jsonrpc": .string("2.0"), "method": .string("notifications/progress"),
+                     "params": .object(["progressToken": token, "progress": .number(.int(1)),
+                                        "message": .string(message)])])
+        }
+
+        host.emit(progress("read"))
+        let opened = try await collectResponse(from: channel)
+        #expect(opened.head.headers.first(name: "Content-Type") == "text/event-stream")
+        channel.isWritable = false
+        host.emit(progress("skipped"))
+        host.emit(.object(["jsonrpc": .string("2.0"), "id": hostRequestID,
+                           "result": .object(["content": .array([])])]))
+
+        let rest = try await collectStreamEnd(from: channel)
+        #expect(opened.body.contains("read"))
+        #expect(!rest.contains("skipped"))
+        #expect(rest.contains(#""id":2"#))
+    }
+
     /// A request that started is answered when its session is deleted; only later requests get a 404.
     @Test func deletingASessionAnswersItsRunningRequestAndRefusesLaterOnes() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)

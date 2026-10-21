@@ -63,7 +63,9 @@ extension HTTPHandler {
             logResponse(requestLog, status: .ok, sessionID: sessionID)
             MCPResponseEmitter.openEventStream(on: channel, keepAlive: keepAlive, sessionID: sessionID)
         case .continuesStream:
-            break
+            // Progress only reports state, so a client that falls behind skips updates rather than
+            // the server queueing them without bound.
+            guard channel.isWritable else { return channel.eventLoop.makeSucceededVoidFuture() }
         }
         return MCPResponseEmitter.sendEvent(data, on: channel)
     }
