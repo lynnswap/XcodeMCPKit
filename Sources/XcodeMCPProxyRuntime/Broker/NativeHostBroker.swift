@@ -19,6 +19,8 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         var stopped = false
         var resetsInProgress = 0
         var publicCatalog: JSONValue?
+        /// Counts resets, so a catalog loaded before one is not stored after it.
+        var catalogEpoch: UInt64 = 0
     }
     private let state = NIOLockedValueBox(State())
     /// Headless models whose native close is in flight. Binding, close election, and failed-close
@@ -115,9 +117,10 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             return
         }
         // Building the public catalog at startup also reports the tools that clients will see.
+        let epoch = state.withLockedValue { $0.catalogEpoch }
         Task { [weak self] in
             guard let native = try? await self?.nativeCatalog(of: host).result else { return }
-            _ = try? self?.storePublicCatalog(from: native)
+            _ = try? self?.storePublicCatalog(from: native, loadedIn: epoch)
         }
     }
 
@@ -327,19 +330,22 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
 
     /// The public catalog is fixed by the proxy; the default host only supplies native descriptions once.
     private func publicCatalog(session: NativeBrokerSession) async throws -> JSONValue {
-        if let catalog = state.withLockedValue({ $0.publicCatalog }) { return catalog }
+        let (cached, epoch) = state.withLockedValue { ($0.publicCatalog, $0.catalogEpoch) }
+        if let cached { return cached }
         guard let host = state.withLockedValue({ $0.hosts[Self.defaultHostIdentifier] }) else {
             throw NativeHostBrokerError("The default Xcode host is unavailable")
         }
         let native = try await withPinnedHost(host, session: session) { try await nativeCatalog(of: host).result }
-        return try storePublicCatalog(from: native)
+        return try storePublicCatalog(from: native, loadedIn: epoch)
     }
 
     /// Builds the public catalog from the default host's native catalog unless one exists, and
-    /// logs the tools of the catalog it stores.
-    private func storePublicCatalog(from native: JSONValue) throws -> JSONValue {
+    /// logs the tools of the catalog it stores. A catalog loaded before a reset is returned but
+    /// not stored.
+    private func storePublicCatalog(from native: JSONValue, loadedIn epoch: UInt64) throws -> JSONValue {
         let catalog = try XcodeToolCatalog.publicResult(from: native, managementTools: Self.managementTools)
         let (stored, isNew) = state.withLockedValue { storage in
+            guard storage.catalogEpoch == epoch else { return (catalog, false) }
             if let existing = storage.publicCatalog { return (existing, false) }
             storage.publicCatalog = catalog
             return (catalog, true)
@@ -679,6 +685,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         // The gateway closes its sessions first; any left are closed here too.
         let sessions = state.withLockedValue { storage in
             storage.resetsInProgress += 1
+            storage.catalogEpoch += 1
             return Array(storage.sessions.values)
         }
         for session in sessions { closeSession(session) }
