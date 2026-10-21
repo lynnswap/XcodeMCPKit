@@ -106,7 +106,7 @@ struct NativePreviewProductSignatureTests {
         let replacement = fixture.root.appendingPathComponent("Replacement.txt")
         try Data("new".utf8).write(to: replacement)
         let times = [original.st_atimespec, original.st_mtimespec]
-        try #require(unsafe times.withUnsafeBufferPointer {
+        try #require(times.withUnsafeBufferPointer {
             unsafe utimensat(AT_FDCWD, replacement.path, $0.baseAddress, 0)
         } == 0)
         try #require(unsafe rename(replacement.path, resource.path) == 0)

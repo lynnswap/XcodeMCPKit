@@ -1,4 +1,5 @@
 import Foundation
+import XcodeMCPWire
 
 package struct RequestTransform {
     package let upstreamData: Data

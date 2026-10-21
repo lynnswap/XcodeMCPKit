@@ -509,8 +509,8 @@ struct NativePreviewCorrectionTests {
         #expect(paths == ["Contents/Frameworks/XcodeMCPPreviewSource.dylib"])
         let symbols = try await previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", linked.url.path])
         #expect(!NativePreviewCorrection.registryNames(in: symbols).isEmpty)
-        try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", staged.path])
-        try await process.run("/usr/bin/codesign", ["--verify", "--strict", "--deep", staged.path])
+        _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", staged.path])
+        _ = try await process.run("/usr/bin/codesign", ["--verify", "--strict", "--deep", staged.path])
         let executable = staged.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer")
         #expect(try await process.run(executable.path, [linked.url.path, forceLoad ? "1" : "0"])
             == "dev.lynnswap.StaticHost\nhost resource\n\(staged.resolvingSymlinksInPath().path)\n"
@@ -615,7 +615,7 @@ struct NativePreviewCorrectionTests {
             "-Wl,-no_adhoc_codesign", "-o", image.path]
         let developer = try await previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
-        try await process.run(compiler, Array(hostCommand.dropFirst()), directory: root)
+        _ = try await process.run(compiler, Array(hostCommand.dropFirst()), directory: root)
         let host = NativePreviewBuild.Target(moduleName: "Widget", buildableName: "Widget.appex", sdkRoot: "macosx",
             sdkVariant: nil, architecture: "arm64", linkCommandLine: hostCommand, linkerWorkingDirectory: root.path,
             objectFiles: [hostObject], sourceFiles: [], debugDylibEnabled: true, isRunnable: false)
@@ -985,7 +985,7 @@ struct NativePreviewCorrectionTests {
             let sdk = try await previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "--show-sdk-path"]).trimmingCharacters(in: .whitespacesAndNewlines)
             let command = [compiler, "-dynamiclib", "-target", NativePreviewPlatform.macOS.triple, "-isysroot", sdk,
                 sourceOutput.path, dependencyOutput.path, archive.path, "-o", hostOutput.path]
-            try await process.run(command[0], Array(command.dropFirst()))
+            _ = try await process.run(command[0], Array(command.dropFirst()))
             let host = NativePreviewBuild.Target(moduleName: "Host", buildableName: "Host.app", sdkRoot: "macosx",
                 sdkVariant: nil, architecture: "arm64", linkCommandLine: command, linkerWorkingDirectory: root.path,
                 objectFiles: [sourceObject], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
@@ -1162,7 +1162,7 @@ struct NativePreviewCorrectionTests {
         let agent = try previewAgent(in: root, helper: helper)
         let app = root.appendingPathComponent("Staged").appendingPathComponent(agent.lastPathComponent)
         try FileManager.default.createDirectory(at: app.deletingLastPathComponent(), withIntermediateDirectories: false)
-        let products = try NativePreviewCorrection.prepareApp(product: agent, sourceProduct: try #require(selection.source.outputURL),
+        let products = try NativePreviewCorrection.prepareApp(product: agent, sourceProduct: selection.source.outputURL,
             helper: helper, app: app, platform: .macOS, staticProduct: true, resourceURLs: selection.source.resourceURLs)
         let developer = try await previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)

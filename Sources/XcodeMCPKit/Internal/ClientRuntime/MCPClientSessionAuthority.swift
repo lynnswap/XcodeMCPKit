@@ -1,4 +1,5 @@
 import XcodeMCPCore
+import XcodeMCPWire
 import Foundation
 import Synchronization
 
