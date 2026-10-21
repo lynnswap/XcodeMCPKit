@@ -136,9 +136,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .build
-          key: spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ inputs.source_sha || github.sha }}
+          key: verify-cold-spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ inputs.source_sha || github.sha }}
           restore-keys: |
-            spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+            verify-cold-spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
 
       - name: Build package tests for this runner's Xcode
         if: steps.built.outputs.cache-hit != 'true'
