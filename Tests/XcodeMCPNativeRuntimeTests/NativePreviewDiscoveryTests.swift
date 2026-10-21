@@ -26,7 +26,7 @@ struct NativePreviewDiscoveryTests {
         #expect(NativePreviewCorrection.programRootNames(in: "_$s\(widgetRoot)VMn") == [])
     }
 
-    @Test func programLibrariesMatchTheBuiltHostImage() throws {
+    @Test func programLibrariesMatchTheBuiltHostImage() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let app = root.appendingPathComponent("Fixture.app", isDirectory: true)
         try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
@@ -34,8 +34,8 @@ struct NativePreviewDiscoveryTests {
 
         let output = root.appendingPathComponent("Built/Original.debug.dylib")
         let otherOutput = root.appendingPathComponent("Built/Other.debug.dylib")
-        try compilePreviewLibrary(at: output)
-        try compilePreviewLibrary(at: otherOutput, value: 1)
+        try await compilePreviewLibrary(at: output)
+        try await compilePreviewLibrary(at: otherOutput, value: 1)
         let stagedHost = app.appendingPathComponent("RenamedHost.debug.dylib")
         let otherLibrary = app.appendingPathComponent("Original.debug.dylib")
         try FileManager.default.copyItem(at: output, to: stagedHost)
@@ -45,7 +45,7 @@ struct NativePreviewDiscoveryTests {
         #expect(try NativePreviewCorrection.programLibraries(previewLibraries: [otherLibrary], output: output) == [])
     }
 
-    @Test func includesEmbeddedFrameworkExecutablesAndDebugLibraries() throws {
+    @Test func includesEmbeddedFrameworkExecutablesAndDebugLibraries() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let app = root.appendingPathComponent("Fixture.app", isDirectory: true)
         let framework = app.appendingPathComponent("Frameworks/FixtureKit.framework", isDirectory: true)
@@ -62,8 +62,8 @@ struct NativePreviewDiscoveryTests {
         let nestedDylib = nestedFrameworks.appendingPathComponent("NestedPreview.dylib")
         let sourceOutput = root.appendingPathComponent("Built/FixtureKit.framework/FixtureImplementation")
         let wrongExecutable = wrongFramework.appendingPathComponent("FixtureImplementation")
-        try compilePreviewLibrary(at: sourceOutput)
-        try compilePreviewLibrary(at: wrongExecutable, value: 1)
+        try await compilePreviewLibrary(at: sourceOutput)
+        try await compilePreviewLibrary(at: wrongExecutable, value: 1)
         for library in [preview, rootDylib, executable, frameworkPreview, dylib, nestedDylib] {
             try FileManager.default.copyItem(at: sourceOutput, to: library)
         }

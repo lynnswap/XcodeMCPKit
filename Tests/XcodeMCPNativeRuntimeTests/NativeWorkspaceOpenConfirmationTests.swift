@@ -75,7 +75,15 @@ struct NativeWorkspaceOpenConfirmationTests {
             }
         }
         RunLoop.main.add(watchdog, forMode: .modalPanel)
-        defer { watchdog.invalidate(); alert.window.orderOut(nil) }
+        defer {
+            watchdog.invalidate()
+            alert.window.orderOut(nil)
+            // Ending a modal session can leave a stop request for the main run loop. The native
+            // host runs NSApplication's event loop, where it only ends one iteration, but here the
+            // main run loop belongs to the test executor, and stopping it ends the test process.
+            // A nested pass runs the queued request so that it stops only that pass.
+            CFRunLoopRunInMode(.defaultMode, 0, false)
+        }
         return alert.runModal()
     }
 }
