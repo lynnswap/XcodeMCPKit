@@ -29,11 +29,7 @@ final class NativeBrokerHost: Sendable {
 
 final class NativeBrokerSession: Sendable {
     struct State: Sendable {
-        var protocolVersion: String?
-        var activeRequests = 0
         var hostRequests: [String: Int] = [:]
-        var eventStreams = 0
-        var activity = DispatchTime.now().uptimeNanoseconds
         var closed = false
         var operations: [UUID: NativeHostBrokerOperation] = [:]
         var workspaces: [String: NativeBrokerWorkspace] = [:]
@@ -62,8 +58,12 @@ final class NativeBrokerSession: Sendable {
     let selectionTurns = NativeBrokerTurns<NativeBrokerWorkspace.Scope>()
     let state: NIOLockedValueBox<State>
 
-    init(identifier: ProxySessionID) {
+    /// Receives the host notifications meant for this session.
+    let notify: @Sendable (Data) -> Void
+
+    init(identifier: ProxySessionID, notify: @escaping @Sendable (Data) -> Void) {
         self.identifier = identifier
+        self.notify = notify
         state = NIOLockedValueBox(State())
     }
 
@@ -93,7 +93,7 @@ final class NativeBrokerSession: Sendable {
             state.launchSessions.removeAll()
             return operations
         }
-        for operation in operations { operation.cancel(reason: .channelInactive) }
+        for operation in operations { operation.cancel() }
         return Task {
             for operation in operations { await operation.waitForWorkCompletion() }
         }

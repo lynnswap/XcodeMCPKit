@@ -21,10 +21,6 @@ struct ConfigurationRuntimeTests {
             inventory: XcodeHostInventory(defaultInstallation: installation) { [installation] },
             sessionFactory: { _ in factory })
         #expect(registerAsyncTestCleanup(description: "broker shutdown") { await broker.shutdown() })
-        // The broker requires its one event subscriber, which HTTP provides in production,
-        // before a session opens.
-        let unsubscribe = broker.subscribeToEvents { _ in }
-        defer { unsubscribe() }
         try await beforeStart(broker)
         broker.start()
         let host = try await waitWithTimeout("host started", timeout: .seconds(5)) {
@@ -93,13 +89,10 @@ struct ConfigurationRuntimeTests {
                     "protocolVersion": .string("2099-01-01"), "capabilities": .object([:]),
                     "clientInfo": .object(["name": .string("downstream-client"), "version": .string("9.9")]),
                 ]),
-            ]), headerSessionExists: false)
-            let session = ProxySessionID(rawValue: "downstream")
-            let operation = try #require(broker.beginRequest(request, in: session))
-            _ = try await withCheckedThrowingContinuation { continuation in
-                operation.whenComplete { continuation.resume(with: $0) }
-            }
-            broker.clientRequestFinished(session)
+            ]))
+            let session = try broker.openSession(ProxySessionID(rawValue: "downstream")) { _ in }
+            _ = await session.receive(request).reply
+            session.close()
         }
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
         #expect(params["protocolVersion"] as? String == "2025-06-18")

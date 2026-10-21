@@ -23,7 +23,6 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     /// Headless models whose native close is in flight. Binding, close election, and failed-close
     /// restoration all run under this lock, which is taken before the broker and session locks.
     private let closingWorkspaces = NIOLockedValueBox<Set<NativeBrokerWorkspace.Scope>>([])
-    private let eventSource = ProxyRuntimeEventSource()
     private let configuration: ProxyRuntimeConfiguration
     private let inventory: XcodeHostInventory
     private let sessionFactory: SessionFactory
@@ -111,47 +110,53 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         Task { try? await host.connection.start() }
     }
 
-    package func subscribeToEvents(_ receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void)
-        -> @Sendable () -> Void { eventSource.subscribe(receive) }
+    package func openSession(_ id: ProxySessionID,
+                             notify: @escaping @Sendable (Data) -> Void) throws -> any ProxyRuntimeSession {
+        let session = NativeBrokerSession(identifier: id, notify: notify)
+        let registered = state.withLockedValue { storage in
+            guard !storage.stopped, storage.resetsInProgress == 0, storage.sessions[id] == nil else { return false }
+            storage.sessions[id] = session
+            return true
+        }
+        guard registered else { throw ProxyRuntimeUnavailable() }
+        return Session(broker: self, session: session)
+    }
 
-    package func beginRequest(_ message: ProxyRuntimeRequest, in sessionID: ProxySessionID?)
-        -> (any ProxyRuntimeRequestOperating)? {
+    /// The runtime side of an MCP session, which the gateway holds.
+    private struct Session: ProxyRuntimeSession {
+        let broker: NativeHostBroker
+        let session: NativeBrokerSession
+
+        func receive(_ message: ProxyRuntimeRequest) -> any ProxyRuntimeCall {
+            broker.receive(message, in: session)
+        }
+
+        func close() { broker.closeSession(session) }
+    }
+
+    /// A call that has its reply when it is received.
+    private struct AnsweredCall: ProxyRuntimeCall {
+        let reply: ProxyRuntimeReply
+        func cancel() {}
+    }
+
+    /// Admits a session's message and registers its operation before returning, so a later
+    /// cancellation in the session finds it.
+    func receive(_ message: ProxyRuntimeRequest, in session: NativeBrokerSession) -> any ProxyRuntimeCall {
         let object = message.decodedJSON?.foundationObject as? [String: Any]
         let requestID = object.flatMap { JSONRPC.Message.Inspector.requestID(from: $0) }
-        var message = message
+        let cancelled = NativeBrokerReply.error(id: requestID, code: -32800, message: "request cancelled").clientReply
+        var deadline: Date?
         if let object, case .request(let method, _) = JSONRPC.Message.Inspector.kind(of: object),
            let timeout = MCP.MethodDispatcher.timeoutForMethod(method, defaultSeconds: configuration.requestTimeout) {
-            let deadline = clock.now().addingTimeInterval(Double(timeout.nanoseconds) / 1_000_000_000)
-            message.deadline = message.deadline.map { min($0, deadline) } ?? deadline
+            deadline = clock.now().addingTimeInterval(Double(timeout.nanoseconds) / 1_000_000_000)
         }
-        let cancelled = NativeBrokerReply.error(id: requestID, code: -32800, message: "request cancelled").clientReply
-        guard let sessionID else {
-            return NativeHostBrokerOperation(cancelledReply: cancelled) {
-                NativeBrokerReply.error(id: requestID, code: -32600, message: "invalid request").clientReply
-            }
-        }
-        if !message.headerSessionExists {
-            guard let object, case .request("initialize", _) = JSONRPC.Message.Inspector.kind(of: object),
-                  !state.withLockedValue({ $0.stopped || $0.resetsInProgress > 0 }) else { return nil }
-            let session = NativeBrokerSession(identifier: sessionID)
-            let registered = state.withLockedValue { storage in
-                guard !storage.stopped, storage.resetsInProgress == 0,
-                      storage.sessions[sessionID] == nil else { return false }
-                storage.sessions[sessionID] = session
-                return true
-            }
-            if !registered { return nil }
-            eventSource.emit(.sessionOpened(sessionID: sessionID))
-        }
-        guard let session = state.withLockedValue({ $0.resetsInProgress == 0 ? $0.sessions[sessionID] : nil }) else { return nil }
         // Admission pins the host under the broker lock, which the unused-host scan also holds,
         // so a GUI bridge is either kept for this request or retired before the request uses it.
         // It also cancels the host's pending idle stop.
         let admission = state.withLockedValue { broker in
             let admission = session.state.withLockedValue { storage -> Admission? in
                 guard !storage.closed else { return nil }
-                storage.activeRequests += 1
-                storage.activity = DispatchTime.now().uptimeNanoseconds
                 let arguments = (object?["params"] as? [String: Any])?["arguments"] as? [String: Any] ?? [:]
                 let device = (arguments["interactionSessionKey"] as? String).flatMap { storage.deviceSessions[$0] }
                 let launch = (arguments["launchSessionReference"] as? String).flatMap { storage.launchSessions[$0] }
@@ -203,12 +208,13 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             if let admission { cancelIdleStop(of: admission.hostIdentifier, in: &broker) }
             return admission
         }
-        guard let admission else { return nil }
+        // A closed session admits nothing; its requests were cancelled when it closed.
+        guard let admission else { return AnsweredCall(reply: cancelled) }
         let key = UUID()
         let admittedMessage = message
         let timeoutReply = NativeBrokerReply.error(id: requestID, code: -32000, message: "upstream timeout").clientReply
         let operation = NativeHostBrokerOperation(cancelledReply: cancelled, requestIDKey: requestID?.key,
-            deadline: message.deadline, clock: clock, timeoutReply: timeoutReply) { [self] in
+            deadline: deadline, clock: clock, timeoutReply: timeoutReply) { [self] in
             let reply = await process(admittedMessage, in: session, admission: admission)
             session.releaseHost(admission.hostIdentifier)
             if let workspace = admission.workspace, admission.retainsWorkspace {
@@ -222,7 +228,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             storage.operations[key] = operation
             return true
         }
-        if !retained { operation.cancel(reason: .channelInactive) }
+        if !retained { operation.cancel() }
         operation.whenWorkComplete {
             _ = session.state.withLockedValue { $0.operations.removeValue(forKey: key) }
         }
@@ -242,7 +248,6 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             try Task.checkCancellation()
             switch JSONRPC.Message.Inspector.kind(of: object) {
             case .request("initialize", _):
-                session.state.withLockedValue { $0.protocolVersion = MCPProtocolVersion.current }
                 return try Self.response(id: id, result: .object([
                     "protocolVersion": .string(MCPProtocolVersion.current),
                     "capabilities": .object(["tools": .object(["listChanged": .bool(false)])]),
@@ -255,7 +260,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                    let cancelledID = Self.cancellationID(from: parameters["requestId"]) {
                     let operations = session.state.withLockedValue { Array($0.operations.values) }
                     for operation in operations where operation.requestIDKey == cancelledID.key {
-                        operation.cancel(reason: .clientNotification)
+                        operation.cancel()
                     }
                 }
                 return .accepted
@@ -385,7 +390,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 return storage.sessions.values.filter { $0.state.withLockedValue { $0.usesHost(hostIdentifier) } }
             }
             for session in recipients where !session.state.withLockedValue({ $0.closed }) {
-                eventSource.emit(.notification(sessionID: session.identifier, data: data))
+                session.notify(data)
             }
         case .processEnded(let generation):
             for session in state.withLockedValue({ Array($0.sessions.values) }) {
@@ -393,6 +398,10 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             }
             reapUnusedHosts()
         }
+    }
+
+    func host(withIdentifier identifier: String) -> NativeBrokerHost? {
+        state.withLockedValue { $0.hosts[identifier] }
     }
 
     private func hosts() -> [NativeBrokerHost] {
@@ -419,68 +428,16 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
 
     // MARK: - Session lifetime
 
-    package func sessionState(_ id: ProxySessionID) -> ProxyRuntimeSessionState {
-        guard let session = state.withLockedValue({ $0.sessions[id] }) else { return .missing }
-        return session.state.withLockedValue { storage in
-            guard !storage.closed else { return .missing }
-            storage.activity = DispatchTime.now().uptimeNanoseconds
-            if let version = storage.protocolVersion { return .initialized(protocolVersion: version) }
-            return .uninitialized
-        }
-    }
-
-    package func clientRequestFinished(_ id: ProxySessionID) {
-        guard let session = state.withLockedValue({ $0.sessions[id] }) else { return }
-        session.state.withLockedValue { storage in
-            storage.activeRequests -= 1
-            storage.activity = DispatchTime.now().uptimeNanoseconds
-        }
-    }
-    package func clientEventStreamOpened(_ id: ProxySessionID) -> Bool {
-        guard let session = state.withLockedValue({ $0.sessions[id] }) else { return false }
-        return session.state.withLockedValue { storage in
-            guard !storage.closed else { return false }
-            storage.eventStreams += 1
-            storage.activity = DispatchTime.now().uptimeNanoseconds
-            return true
-        }
-    }
-    package func clientEventStreamClosed(_ id: ProxySessionID) {
-        guard let session = state.withLockedValue({ $0.sessions[id] }) else { return }
-        session.state.withLockedValue { storage in
-            storage.eventStreams -= 1
-            storage.activity = DispatchTime.now().uptimeNanoseconds
-        }
-    }
-    package func expireInactiveSessions(inactiveFor: TimeAmount) {
-        let now = DispatchTime.now().uptimeNanoseconds
-        let expired = state.withLockedValue { storage in
-            let expired = storage.sessions.values.filter { session in
-                session.state.withLockedValue { value in
-                    guard !value.closed, value.activeRequests == 0, value.eventStreams == 0,
-                          now >= value.activity,
-                          now - value.activity >= UInt64(inactiveFor.nanoseconds) else { return false }
-                    value.closed = true
-                    return true
-                }
-            }
-            for session in expired { close(session, in: &storage) }
-            return expired
-        }
-        for session in expired { eventSource.emit(.sessionClosed(sessionID: session.identifier)) }
-    }
-    package func removeSession(_ id: ProxySessionID) {
-        let session = state.withLockedValue { storage in
-            let session = storage.sessions[id]
-            guard let session, session.state.withLockedValue({ state in
+    /// Ends a session: cancels its requests and releases what it references.
+    func closeSession(_ session: NativeBrokerSession) {
+        state.withLockedValue { storage in
+            guard storage.sessions[session.identifier] === session, session.state.withLockedValue({ state in
                 guard !state.closed else { return false }
                 state.closed = true
                 return true
-            }) else { return nil as NativeBrokerSession? }
+            }) else { return }
             close(session, in: &storage)
-            return session
         }
-        if let session { eventSource.emit(.sessionClosed(sessionID: session.identifier)) }
     }
 
     private func reapUnusedHosts() {
@@ -650,24 +607,22 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     package func cancelForDeinit() {
         let resources = state.withLockedValue { storage in
             storage.stopped = true
-            return (Array(storage.sessions.keys), Array(storage.hosts.values))
+            return (Array(storage.sessions.values), Array(storage.hosts.values))
         }
-        for id in resources.0 { removeSession(id) }
+        for session in resources.0 { closeSession(session) }
         for host in resources.1 { host.connection.cancelForDeinit() }
-        eventSource.finish()
     }
     package func shutdown() async {
         let resources = state.withLockedValue { storage in
             storage.stopped = true
-            return (Array(storage.sessions.keys), Array(storage.hosts.values))
+            return (Array(storage.sessions.values), Array(storage.hosts.values))
         }
-        for id in resources.0 { removeSession(id) }
+        for session in resources.0 { closeSession(session) }
         cancelPendingCleanup()
         await waitForClosingResources()
         await withTaskGroup(of: Void.self) { group in
             for host in resources.1 { group.addTask { await host.connection.shutdown() } }
         }
-        eventSource.finish()
     }
     package func snapshot() -> ProxyRuntimeSnapshot {
         // A GUI host whose Xcode has exited cannot serve requests again.
@@ -701,11 +656,12 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         return try? JSONSerialization.data(withJSONObject: ["hosts": values], options: [.sortedKeys])
     }
     package func reset() async {
+        // The gateway closes its sessions first; any left are closed here too.
         let sessions = state.withLockedValue { storage in
             storage.resetsInProgress += 1
-            return Array(storage.sessions.keys)
+            return Array(storage.sessions.values)
         }
-        for id in sessions { removeSession(id) }
+        for session in sessions { closeSession(session) }
         cancelPendingCleanup()
         await waitForClosingResources()
         for host in hosts() { await host.connection.stopProcess() }

@@ -25,7 +25,7 @@ struct HTTPEventDeliveryStoreTests {
         try activate(secondChannel, port: 2)
         openSession(sessionID, in: store)
 
-        store.receive(.notification(sessionID: sessionID, data: buffered))
+        store.deliver(buffered, to: sessionID)
         store.open(sessionID: sessionID, channel: firstChannel)
         firstChannel.embeddedEventLoop.run()
         let firstBodies = try drainSSEBodies(from: firstChannel)
@@ -33,7 +33,7 @@ struct HTTPEventDeliveryStoreTests {
         #expect(firstBodies[0].contains(String(decoding: buffered, as: UTF8.self)))
 
         store.close(sessionID: sessionID, channel: firstChannel)
-        store.receive(.notification(sessionID: sessionID, data: afterDisconnect))
+        store.deliver(afterDisconnect, to: sessionID)
         store.open(sessionID: sessionID, channel: secondChannel)
         secondChannel.embeddedEventLoop.run()
         let secondBodies = try drainSSEBodies(from: secondChannel)
@@ -55,9 +55,9 @@ struct HTTPEventDeliveryStoreTests {
         try activate(channel, port: 3)
         openSession(sessionID, in: store)
 
-        store.receive(.notification(sessionID: sessionID, data: first))
-        store.receive(.notification(sessionID: sessionID, data: second))
-        store.receive(.notification(sessionID: sessionID, data: third))
+        store.deliver(first, to: sessionID)
+        store.deliver(second, to: sessionID)
+        store.deliver(third, to: sessionID)
 
         store.open(sessionID: sessionID, channel: channel)
         channel.embeddedEventLoop.run()
@@ -79,21 +79,9 @@ struct HTTPEventDeliveryStoreTests {
         let sessionID = ProxySessionID(rawValue: "session-overflow-warning")
         openSession(sessionID, in: store)
 
-        store.receive(
-            .notification(
-                sessionID: sessionID,
-                data: notification(method: "notifications/first")
-            ))
-        store.receive(
-            .notification(
-                sessionID: sessionID,
-                data: notification(method: "notifications/second")
-            ))
-        store.receive(
-            .notification(
-                sessionID: sessionID,
-                data: notification(method: "notifications/third")
-            ))
+        store.deliver(notification(method: "notifications/first"), to: sessionID)
+        store.deliver(notification(method: "notifications/second"), to: sessionID)
+        store.deliver(notification(method: "notifications/third"), to: sessionID)
 
         var warnings = state.warnings
         #expect(warnings.count == 1)
@@ -106,11 +94,7 @@ struct HTTPEventDeliveryStoreTests {
         )
 
         state.uptimeNanoseconds = 30_000_000_000
-        store.receive(
-            .notification(
-                sessionID: sessionID,
-                data: notification(method: "notifications/fourth")
-            ))
+        store.deliver(notification(method: "notifications/fourth"), to: sessionID)
 
         warnings = state.warnings
         #expect(warnings.count == 2)
@@ -140,40 +124,20 @@ struct HTTPEventDeliveryStoreTests {
         openSession(firstSessionID, in: store)
         openSession(secondSessionID, in: store)
 
-        store.receive(
-            .notification(
-                sessionID: firstSessionID,
-                data: notification(method: "notifications/a-1")
-            ))
-        store.receive(
-            .notification(
-                sessionID: firstSessionID,
-                data: notification(method: "notifications/a-2")
-            ))
-        store.receive(
-            .notification(
-                sessionID: secondSessionID,
-                data: notification(method: "notifications/b-1")
-            ))
+        store.deliver(notification(method: "notifications/a-1"), to: firstSessionID)
+        store.deliver(notification(method: "notifications/a-2"), to: firstSessionID)
+        store.deliver(notification(method: "notifications/b-1"), to: secondSessionID)
 
         var warnings = state.warnings
         #expect(warnings.map(\.sessionID) == [firstSessionID, secondSessionID])
         #expect(warnings.map(\.droppedNotificationCount) == [1, 1])
 
-        store.receive(.sessionClosed(sessionID: firstSessionID))
-        store.receive(
-            .notification(
-                sessionID: firstSessionID,
-                data: notification(method: "notifications/a-late")
-            ))
+        store.remove(firstSessionID)
+        store.deliver(notification(method: "notifications/a-late"), to: firstSessionID)
         #expect(state.warnings.count == 2)
 
         openSession(firstSessionID, in: store)
-        store.receive(
-            .notification(
-                sessionID: firstSessionID,
-                data: notification(method: "notifications/a-new")
-            ))
+        store.deliver(notification(method: "notifications/a-new"), to: firstSessionID)
 
         warnings = state.warnings
         #expect(warnings.count == 3)
@@ -198,24 +162,12 @@ struct HTTPEventDeliveryStoreTests {
         let sessionID = ProxySessionID(rawValue: "session-overflow-method-cardinality")
         openSession(sessionID, in: store)
 
-        store.receive(
-            .notification(
-                sessionID: sessionID,
-                data: notification(method: "notifications/initial")
-            ))
+        store.deliver(notification(method: "notifications/initial"), to: sessionID)
         for index in 1...20 {
-            store.receive(
-                .notification(
-                    sessionID: sessionID,
-                    data: notification(method: "notifications/method-\(index)")
-                ))
+            store.deliver(notification(method: "notifications/method-\(index)"), to: sessionID)
         }
         state.uptimeNanoseconds = 30_000_000_000
-        store.receive(
-            .notification(
-                sessionID: sessionID,
-                data: notification(method: "notifications/method-21")
-            ))
+        store.deliver(notification(method: "notifications/method-21"), to: sessionID)
 
         let warning = try #require(state.warnings.last)
         #expect(warning.droppedSinceLastWarning == 21)
@@ -262,7 +214,7 @@ struct HTTPEventDeliveryStoreTests {
         store.open(sessionID: sessionID, channel: disconnectedChannel)
         try disconnectedChannel.close().wait()
 
-        store.receive(.notification(sessionID: sessionID, data: notification))
+        store.deliver(notification, to: sessionID)
         store.open(sessionID: sessionID, channel: reconnectedChannel)
         reconnectedChannel.embeddedEventLoop.run()
         let bodies = try drainSSEBodies(from: reconnectedChannel)
@@ -286,7 +238,7 @@ struct HTTPEventDeliveryStoreTests {
         openSession(sessionID, in: store)
 
         store.open(sessionID: sessionID, channel: disconnectedChannel)
-        store.receive(.notification(sessionID: sessionID, data: notification))
+        store.deliver(notification, to: sessionID)
         try disconnectedChannel.close().wait()
         disconnectedChannel.embeddedEventLoop.run()
 
@@ -311,10 +263,10 @@ struct HTTPEventDeliveryStoreTests {
         try activate(channel, port: 8)
         openSession(sessionID, in: store)
 
-        store.receive(.notification(sessionID: sessionID, data: first))
-        store.receive(.notification(sessionID: sessionID, data: second))
+        store.deliver(first, to: sessionID)
+        store.deliver(second, to: sessionID)
         store.open(sessionID: sessionID, channel: channel)
-        store.receive(.notification(sessionID: sessionID, data: duringReconnect))
+        store.deliver(duringReconnect, to: sessionID)
         channel.embeddedEventLoop.run()
 
         let bodies = try drainSSEBodies(from: channel)
@@ -336,7 +288,7 @@ struct HTTPEventDeliveryStoreTests {
         openSession(sessionID, in: store)
         store.open(sessionID: sessionID, channel: channel)
 
-        store.receive(.sessionClosed(sessionID: sessionID))
+        store.remove(sessionID)
         channel.embeddedEventLoop.run()
 
         #expect(channel.isActive == false)
@@ -353,12 +305,8 @@ struct HTTPEventDeliveryStoreTests {
         try activate(channel, port: 10)
         openSession(sessionID, in: store)
 
-        store.receive(.sessionClosed(sessionID: sessionID))
-        store.receive(
-            .notification(
-                sessionID: sessionID,
-                data: notification(method: "notifications/late")
-            ))
+        store.remove(sessionID)
+        store.deliver(notification(method: "notifications/late"), to: sessionID)
 
         #expect(store.open(sessionID: sessionID, channel: channel) == false)
         openSession(sessionID, in: store)
@@ -389,7 +337,7 @@ private func notification(method: String) -> Data {
 }
 
 private func openSession(_ sessionID: ProxySessionID, in store: HTTPEventDeliveryStore) {
-    store.receive(.sessionOpened(sessionID: sessionID))
+    store.register(sessionID)
 }
 
 private final class HTTPDeliveryTestState: @unchecked Sendable {

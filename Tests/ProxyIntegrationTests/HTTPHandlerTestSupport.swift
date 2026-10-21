@@ -104,6 +104,8 @@ final class HTTPTestRuntime: Sendable {
 
     let broker: NativeHostBroker
     let hosts: FakeHostSessionFactory
+    /// The gateway side that owns MCP sessions, shared by every handler of a test.
+    let controlService: HTTPControlService
 
     init(
         config: HTTPTestConfiguration,
@@ -122,7 +124,12 @@ final class HTTPTestRuntime: Sendable {
             clock: clock,
             sessionFactory: { _ in hosts })
         self.broker = broker
-        #expect(registerAsyncTestCleanup(description: "HTTP test runtime shutdown") { await broker.shutdown() })
+        let controlService = HTTPControlService(runtime: broker)
+        self.controlService = controlService
+        #expect(registerAsyncTestCleanup(description: "HTTP test runtime shutdown") {
+            await controlService.shutdown()
+            await broker.shutdown()
+        })
     }
 
     /// The most recently started host process.
@@ -131,7 +138,7 @@ final class HTTPTestRuntime: Sendable {
     var startedHostCount: Int { hosts.sessions.withLockedValue { $0.count } }
 
     func hasSession(_ id: String) -> Bool {
-        broker.sessionState(ProxySessionID(rawValue: id)) != .missing
+        controlService.sessions.phase(of: ProxySessionID(rawValue: id)) != nil
     }
 
     /// Waits until the hosts have received `count` tool calls.
@@ -207,7 +214,7 @@ func addHTTPHandler(
             maxBodyBytes: config.maxBodyBytes,
             enablesDebugEndpoints: config.enablesDebugEndpoints
         ),
-        controlService: HTTPControlService(runtime: runtime.broker),
+        controlService: runtime.controlService,
         scheduleResponseCompletion: scheduleResponseCompletion ?? { _, operation in
             completionExecutor.enqueue(operation)
         }
@@ -342,7 +349,7 @@ struct TestHTTPHandlerServer {
     static func start(config: HTTPTestConfiguration, runtime: HTTPTestRuntime) throws -> TestHTTPHandlerServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let childChannelTracker = HTTPTestServerChannelTracker()
-        let controlService = HTTPControlService(runtime: runtime.broker)
+        let controlService = runtime.controlService
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)

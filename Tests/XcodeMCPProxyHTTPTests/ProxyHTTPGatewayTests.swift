@@ -194,32 +194,10 @@ private final class GatewayTestRuntime: ProxyRuntimeServing, Sendable {
     func cancelForDeinit() {}
     func shutdown() async {}
 
-    func subscribeToEvents(
-        _ receive: @escaping @Sendable (ProxyRuntimeEvent) -> Void
-    ) -> @Sendable () -> Void {
-        {}
+    func openSession(_: ProxySessionID,
+                     notify _: @escaping @Sendable (Data) -> Void) throws -> any ProxyRuntimeSession {
+        throw ProxyRuntimeUnavailable()
     }
-
-    func beginRequest(
-        _: ProxyRuntimeRequest,
-        in _: ProxySessionID?
-    ) -> (any ProxyRuntimeRequestOperating)? {
-        fatalError("gateway lifecycle test does not admit requests")
-    }
-
-    func clientRequestFinished(_: ProxySessionID) {}
-
-    func sessionState(_: ProxySessionID) -> ProxyRuntimeSessionState {
-        .missing
-    }
-
-    func clientEventStreamOpened(_: ProxySessionID) -> Bool { false }
-
-    func clientEventStreamClosed(_: ProxySessionID) {}
-
-    func expireInactiveSessions(inactiveFor _: TimeAmount) {}
-
-    func removeSession(_: ProxySessionID) {}
 
     func snapshot() -> ProxyRuntimeSnapshot {
         fatalError("gateway lifecycle test does not read runtime state")
