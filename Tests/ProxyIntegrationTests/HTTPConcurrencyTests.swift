@@ -150,6 +150,64 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
+    /// A request's progress opens its own POST response as an event stream that ends with the
+    /// reply; a request that reports no progress still gets JSON.
+    @Test func progressStreamsOnlyOnItsRequestsResponse() async throws {
+        let config = makeHTTPConfig(requestTimeout: 60)
+        let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
+        let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
+        do {
+            let sessionID = try await initializeHTTPSession(url: server.url)
+            async let reporting = postForText(
+                url: server.url, sessionID: sessionID,
+                payload: toolCallPayload(id: 1, name: "DocumentationSearch", arguments: ["query": "reporting"],
+                                         progressToken: "build"))
+            try await runtime.waitForToolCalls(1)
+            async let quiet = postForText(
+                url: server.url, sessionID: sessionID,
+                payload: toolCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "quiet"],
+                                         progressToken: "other"))
+            try await runtime.waitForToolCalls(2)
+            let host = try #require(runtime.host)
+            let calls = host.requests("tools/call")
+            let reportingCall = try #require(calls.first)
+            guard case .object(let params)? = reportingCall["params"], case .object(let meta)? = params["_meta"],
+                  let upstreamToken = meta["progressToken"] else {
+                Issue.record("the host request has no progress token")
+                return
+            }
+
+            host.emit(.object(["jsonrpc": .string("2.0"), "method": .string("notifications/progress"),
+                               "params": .object(["progressToken": upstreamToken, "progress": .number(.int(1)),
+                                                  "message": .string("halfway")])]))
+            let result = JSONValue.object(["content": .array([])])
+            for call in calls {
+                host.emit(.object(["jsonrpc": .string("2.0"), "id": try #require(call["id"]), "result": result]))
+            }
+
+            let (reportingResponse, reportingBody) = try await reporting
+            #expect(reportingResponse.value(forHTTPHeaderField: "Content-Type") == "text/event-stream")
+            #expect(reportingResponse.value(forHTTPHeaderField: "Mcp-Session-Id") == sessionID)
+            let events = try reportingBody.split(separator: "\n").filter { $0.hasPrefix("data: ") }
+                .map { try jsonObject(from: String($0.dropFirst(6))) }
+            #expect(events.count == 2)
+            let progress = events.first?["params"] as? [String: Any]
+            #expect(events.first?["method"] as? String == "notifications/progress")
+            #expect(progress?["progressToken"] as? String == "build")
+            #expect(progress?["message"] as? String == "halfway")
+            #expect((events.last?["id"] as? NSNumber)?.intValue == 1)
+            #expect(events.last?["result"] != nil)
+
+            let (quietResponse, quietBody) = try await quiet
+            #expect(quietResponse.value(forHTTPHeaderField: "Content-Type") == "application/json")
+            #expect((try jsonObject(from: quietBody)["id"] as? NSNumber)?.intValue == 2)
+        } catch {
+            try? await server.shutdown()
+            throw error
+        }
+        try await server.shutdown()
+    }
+
     @Test func multiplexedCancellationPreservesOtherSessionsAndIDScalarTypes() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
@@ -461,6 +519,7 @@ struct HTTPConcurrencyTests {
         try await server.shutdown()
     }
 
+    /// Host notifications reach the session's GET stream; progress reaches only its request's response.
     @Test func httpServerNotificationsReachActiveSSESessions() async throws {
         let config = makeHTTPConfig(requestTimeout: 10)
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
@@ -483,13 +542,9 @@ struct HTTPConcurrencyTests {
                         throw ConcurrencyTestError.invalidResponse
                     }
 
-                    var events: [String] = []
                     var iterator = bytes.lines.makeAsyncIterator()
                     while let line = try await iterator.next() {
-                        if line.hasPrefix("data: ") {
-                            events.append(String(line.dropFirst(6)))
-                            if events.count == 2 { return (httpResponse, events) }
-                        }
+                        if line.hasPrefix("data: ") { return (httpResponse, [String(line.dropFirst(6))]) }
                     }
 
                     throw ConcurrencyTestError.invalidResponse
@@ -506,11 +561,10 @@ struct HTTPConcurrencyTests {
                 )
             }
 
-            async let callResult = postJSON(
+            async let callResult = postForText(
                 url: url, sessionID: sessionID,
                 payload: toolCallPayload(id: 5, name: "DocumentationSearch", arguments: ["query": "progress"],
-                                         progressToken: "client-token"),
-                timeout: 10
+                                         progressToken: "client-token")
             )
             let held = try await runtime.waitForHostMessages("tools/call")
             guard case .object(let params)? = held.first?["params"],
@@ -519,14 +573,14 @@ struct HTTPConcurrencyTests {
                 return
             }
             let host = try #require(runtime.host)
-            // A host notification reaches the sessions using the host; progress reaches its requester.
-            host.emit(.object([
-                "jsonrpc": .string("2.0"), "method": .string("notifications/test"),
-                "params": .object(["value": .number(.int(42))]),
-            ]))
+            // The progress comes first, so the GET stream would see it first if it were sent there.
             host.emit(.object([
                 "jsonrpc": .string("2.0"), "method": .string("notifications/progress"),
                 "params": .object(["progressToken": hostToken, "progress": .number(.int(1))]),
+            ]))
+            host.emit(.object([
+                "jsonrpc": .string("2.0"), "method": .string("notifications/test"),
+                "params": .object(["value": .number(.int(42))]),
             ]))
 
             let (response, events) = try await waitWithTimeout(
@@ -540,14 +594,15 @@ struct HTTPConcurrencyTests {
             let broadcast = try jsonObject(from: try #require(events.first))
             #expect(broadcast["method"] as? String == "notifications/test")
             #expect(((broadcast["params"] as? [String: Any])?["value"] as? NSNumber)?.intValue == 42)
-            let progress = try jsonObject(from: try #require(events.last))
-            #expect(progress["method"] as? String == "notifications/progress")
-            #expect((progress["params"] as? [String: Any])?["progressToken"] as? String == "client-token")
 
             host.release("tools/call", with: .result(.object(["content": .array([])])))
             let (callResponse, callBody) = try await callResult
-            #expect(callResponse.statusCode == 200)
-            #expect((callBody["id"] as? NSNumber)?.intValue == 5)
+            #expect(callResponse.value(forHTTPHeaderField: "Content-Type") == "text/event-stream")
+            let callEvents = try callBody.split(separator: "\n").filter { $0.hasPrefix("data: ") }
+                .map { try jsonObject(from: String($0.dropFirst(6))) }
+            #expect(callEvents.first?["method"] as? String == "notifications/progress")
+            #expect((callEvents.first?["params"] as? [String: Any])?["progressToken"] as? String == "client-token")
+            #expect((callEvents.last?["id"] as? NSNumber)?.intValue == 5)
         } catch {
             try? await server.shutdown()
             throw error
@@ -694,6 +749,28 @@ private func postJSON(
             (try? JSONSerialization.jsonObject(with: responseData, options: [])) as? [String: Any]
             ?? [:]
         return (httpResponse, object)
+    }
+}
+
+private func postForText(
+    url: URL,
+    sessionID: String,
+    payload: [String: Any]
+) async throws -> (HTTPURLResponse, String) {
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+    request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+    request.setValue(MCP.ProtocolVersion.current, forHTTPHeaderField: "MCP-Protocol-Version")
+
+    return try await withTestURLSession { session in
+        let (responseData, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw ConcurrencyTestError.invalidResponse
+        }
+        return (httpResponse, String(decoding: responseData, as: UTF8.self))
     }
 }
 

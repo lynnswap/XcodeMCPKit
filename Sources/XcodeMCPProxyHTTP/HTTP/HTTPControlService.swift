@@ -17,6 +17,13 @@ private enum HTTPEventDeliveryStoreError: Error {
     case sessionNotOpen
 }
 
+/// A request's claim on its session's progress notifications for one progress token.
+struct HTTPProgressRoute: Sendable {
+    fileprivate let sessionID: ProxySessionID
+    fileprivate let tokenKey: String
+    fileprivate let id = UUID()
+}
+
 final class HTTPEventDeliveryStore: Sendable {
     private static let maxDroppedMethodBuckets = 16
     private static let additionalDroppedMethodsBucket = "<additional-methods>"
@@ -33,6 +40,8 @@ final class HTTPEventDeliveryStore: Sendable {
         var droppedSinceLastWarning: UInt64 = 0
         var droppedMethodsSinceLastWarning: [String: UInt64] = [:]
         var lastNotificationOverflowWarningUptimeNanoseconds: UInt64?
+        /// Receivers of running requests' progress, by progress token.
+        var progressReceivers: [String: (route: UUID, receive: @Sendable (Data) -> Void)] = [:]
     }
 
     private let sessions = NIOLockedValueBox<[ProxySessionID: SessionDelivery]>([:])
@@ -69,8 +78,54 @@ final class HTTPEventDeliveryStore: Sendable {
         }
     }
 
+    /// Delivers a notification for a session. Progress goes to the request that routed its token
+    /// and is dropped when no running request did; others go to the session's event stream.
     func deliver(_ data: Data, to sessionID: ProxySessionID) {
-        receiveNotification(data, sessionID: sessionID)
+        let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard object?["method"] as? String == "notifications/progress" else {
+            receiveNotification(data, sessionID: sessionID)
+            return
+        }
+        guard let token = Self.progressTokenKey((object?["params"] as? [String: Any])?["progressToken"]),
+              let receive = sessions.withLockedValue({ $0[sessionID]?.progressReceivers[token]?.receive })
+        else { return }
+        receive(data)
+    }
+
+    /// Sends the session's progress notifications for `token` to `receive` until
+    /// ``removeProgressRoute(_:)``. Returns `nil` for an unknown session or a token that is
+    /// neither a string nor a number.
+    func routeProgress(_ token: Any, of sessionID: ProxySessionID,
+                       to receive: @escaping @Sendable (Data) -> Void) -> HTTPProgressRoute? {
+        guard let key = Self.progressTokenKey(token) else { return nil }
+        let route = HTTPProgressRoute(sessionID: sessionID, tokenKey: key)
+        return sessions.withLockedValue { sessions in
+            guard sessions[sessionID] != nil else { return nil }
+            sessions[sessionID]?.progressReceivers[key] = (route.id, receive)
+            return route
+        }
+    }
+
+    func removeProgressRoute(_ route: HTTPProgressRoute) {
+        sessions.withLockedValue { sessions in
+            guard sessions[route.sessionID]?.progressReceivers[route.tokenKey]?.route == route.id else { return }
+            sessions[route.sessionID]?.progressReceivers[route.tokenKey] = nil
+        }
+    }
+
+    /// The key of a string or number token after the JSON round trip that the runtime applies when
+    /// it restores the client's token in a notification, which can rewrite a number such as `1e16`.
+    private static func progressTokenKey(_ token: Any?) -> String? {
+        guard let value = token.flatMap(JSONValue.init(any:)) else { return nil }
+        switch value {
+        case .string, .number:
+            guard let data = try? JSONSerialization.data(withJSONObject: [value.foundationObject]),
+                  let restored = (try? JSONSerialization.jsonObject(with: data) as? [Any])?.first
+            else { return nil }
+            return JSONRPC.ID(any: restored)?.key
+        case .bool, .null, .array, .object:
+            return nil
+        }
     }
 
     /// Drops a session's buffered notifications and closes its streams.

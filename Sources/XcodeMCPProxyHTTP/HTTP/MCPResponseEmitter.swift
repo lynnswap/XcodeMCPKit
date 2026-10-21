@@ -46,6 +46,39 @@ enum MCPResponseEmitter {
         return sendBuffer(on: channel, status: status, headers: headers, buffer: nil, keepAlive: keepAlive)
     }
 
+    /// Starts a response whose body is a stream of server-sent events.
+    static func openEventStream(on channel: Channel, keepAlive: Bool, sessionID: String?) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "text/event-stream")
+        headers.add(name: "Cache-Control", value: "no-cache")
+        if let sessionID {
+            headers.add(name: "Mcp-Session-Id", value: sessionID)
+        }
+        headers.add(name: "Connection", value: keepAlive ? "keep-alive" : "close")
+        channel.write(HTTPServerResponsePart.head(HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)),
+                      promise: nil)
+    }
+
+    /// Sends one JSON-RPC message as an event of an open event stream.
+    static func sendEvent(_ data: Data, on channel: Channel) -> EventLoopFuture<Void> {
+        // The runtime's messages are serialized JSON, which is UTF-8.
+        let payload = SSECodec.encodeDataEvent(data) ?? ""
+        var buffer = channel.allocator.buffer(capacity: payload.utf8.count)
+        buffer.writeString(payload)
+        return channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buffer)))
+    }
+
+    static func endEventStream(on channel: Channel, keepAlive: Bool) -> EventLoopFuture<Void> {
+        let promise = channel.eventLoop.makePromise(of: Void.self)
+        channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: promise)
+        if !keepAlive {
+            promise.futureResult.whenComplete { _ in
+                channel.close(promise: nil)
+            }
+        }
+        return promise.futureResult
+    }
+
     private static func sendBuffer(
         on channel: Channel,
         status: HTTPResponseStatus,

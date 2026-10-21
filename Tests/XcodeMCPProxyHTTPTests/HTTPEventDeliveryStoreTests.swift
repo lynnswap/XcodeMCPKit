@@ -2,6 +2,7 @@ import Foundation
 import NIO
 import NIOEmbedded
 import NIOHTTP1
+import Synchronization
 import Testing
 
 @testable import XcodeMCPProxyHTTP
@@ -39,6 +40,56 @@ struct HTTPEventDeliveryStoreTests {
         let secondBodies = try drainSSEBodies(from: secondChannel)
         #expect(secondBodies.count == 1)
         #expect(secondBodies[0].contains(String(decoding: afterDisconnect, as: UTF8.self)))
+    }
+
+    /// Progress goes to the running request that routed its token, never to the session's event stream.
+    @Test func progressReachesOnlyTheRequestThatRoutedItsToken() throws {
+        let store = HTTPEventDeliveryStore()
+        let sessionID = ProxySessionID(rawValue: "session-progress")
+        let progress = Data(#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"build","progress":1}}"#.utf8)
+        let unrouted = Data(#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":7,"progress":1}}"#.utf8)
+        let message = Data(#"{"jsonrpc":"2.0","method":"notifications/message"}"#.utf8)
+        let channel = EmbeddedChannel()
+        defer {
+            store.closeAll()
+            _ = try? channel.finish()
+        }
+        try activate(channel, port: 4)
+        openSession(sessionID, in: store)
+        let received = Mutex<[Data]>([])
+        let route = try #require(store.routeProgress("build", of: sessionID) { data in
+            received.withLock { $0.append(data) }
+        })
+
+        store.deliver(progress, to: sessionID)
+        store.deliver(unrouted, to: sessionID)
+        store.removeProgressRoute(route)
+        store.deliver(progress, to: sessionID)
+        store.deliver(message, to: sessionID)
+        #expect(received.withLock { $0 } == [progress])
+
+        store.open(sessionID: sessionID, channel: channel)
+        channel.embeddedEventLoop.run()
+        let bodies = try drainSSEBodies(from: channel)
+        #expect(bodies.count == 1)
+        #expect(bodies.first?.contains(String(decoding: message, as: UTF8.self)) == true)
+    }
+
+    /// The runtime writes a numeric token back in its own JSON spelling.
+    @Test(arguments: [("-0.0", "0"), ("1e16", "10000000000000000")])
+    func progressForANumericTokenReachesItsRoute(sent: String, restored: String) throws {
+        let store = HTTPEventDeliveryStore()
+        let sessionID = ProxySessionID(rawValue: "session-numeric-token")
+        openSession(sessionID, in: store)
+        defer { store.closeAll() }
+        let token = try #require(
+            (JSONSerialization.jsonObject(with: Data(#"{"progressToken":\#(sent)}"#.utf8)) as? [String: Any])?["progressToken"])
+        let progress = Data(#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":\#(restored),"progress":1}}"#.utf8)
+        let received = Mutex(0)
+        _ = try #require(store.routeProgress(token, of: sessionID) { _ in received.withLock { $0 += 1 } })
+
+        store.deliver(progress, to: sessionID)
+        #expect(received.withLock { $0 } == 1)
     }
 
     @Test func notificationBufferDropsOldestPayloadPastItsLimit() throws {

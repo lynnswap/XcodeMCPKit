@@ -22,6 +22,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let call: any ProxyRuntimeCall
         /// The session the request holds until its reply is written.
         let sessionID: ProxySessionID
+        let progressRoute: HTTPProgressRoute?
     }
 
     struct State: Sendable {
@@ -124,6 +125,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
         // The runtime replies to a cancelled request at once; nothing is left to write it to.
         for request in activePostRequests {
+            if let route = request.progressRoute { controlService.sessions.delivery.removeProgressRoute(route) }
             request.call.cancel()
             controlService.sessions.release(request.sessionID)
         }
@@ -494,12 +496,26 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             }
             session = acquired
         }
+        let response = HTTPPostResponse()
+        // An `initialize` reply decides whether the session exists, so it is never streamed.
+        let progressRoute = isInitializeRequest ? nil : Self.progressToken(in: parsedRequestObject).flatMap { token in
+            controlService.sessions.delivery.routeProgress(token, of: sessionID) { [self] data in
+                // Progress does not wait for earlier writes to complete, so a client that stops
+                // reading cannot make it queue up; the event loop still orders it before the reply.
+                scheduleResponseCompletion(eventLoop) {
+                    self.sendProgress(data, in: response, on: channel, keepAlive: keepAlive,
+                                      sessionID: sessionID.rawValue, requestLog: requestLog)
+                }
+            }
+        }
         let call = session.receive(request)
         state.withLockedValue { state in
-            state.activePostRequests[requestLog.id] = ActivePostRequest(call: call, sessionID: sessionID)
+            state.activePostRequests[requestLog.id] = ActivePostRequest(call: call, sessionID: sessionID,
+                                                                        progressRoute: progressRoute)
         }
         Task {
             let reply = await call.reply
+            if let progressRoute { controlService.sessions.delivery.removeProgressRoute(progressRoute) }
             let responseSessionID: String?
             if isInitializeRequest, let version = Self.negotiatedProtocolVersion(in: reply) {
                 controlService.sessions.markInitialized(sessionID, protocolVersion: version)
@@ -513,7 +529,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             }
             self.scheduleResponseCompletion(eventLoop) {
                 let writeFuture = self.enqueueOrderedWrite(on: channel) {
-                    self.sendPostResolution(reply, on: channel, keepAlive: keepAlive, sessionID: responseSessionID,
+                    self.sendPostResolution(reply, in: response, on: channel, keepAlive: keepAlive,
+                                            sessionID: responseSessionID,
                                             requestLog: requestLog)
                 }
                 writeFuture.whenFailure { error in
@@ -531,6 +548,13 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 }
             }
         }
+    }
+
+    /// The progress token of a request, which asks for its progress notifications.
+    private static func progressToken(in object: [String: Any]?) -> Any? {
+        guard let object, JSONRPC.Message.Inspector.requestID(from: object) != nil,
+              let meta = (object["params"] as? [String: Any])?["_meta"] as? [String: Any] else { return nil }
+        return meta["progressToken"]
     }
 
     /// The protocol version a successful `initialize` reply negotiated, or `nil` for a failed one.
