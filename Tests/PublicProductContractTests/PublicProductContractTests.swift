@@ -528,8 +528,8 @@ private final class SpawnedProcessGroup: @unchecked Sendable {
         unsafe argv.append(nil)
 
         var pid: pid_t = 0
-        let spawnResult = unsafe executable.withCString { executablePath in
-            unsafe argv.withUnsafeMutableBufferPointer { argvBuffer in
+        let spawnResult = executable.withCString { executablePath in
+            argv.withUnsafeMutableBufferPointer { argvBuffer in
                 unsafe posix_spawnp(
                     &pid,
                     executablePath,

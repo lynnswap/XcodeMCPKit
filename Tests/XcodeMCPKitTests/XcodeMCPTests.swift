@@ -3380,7 +3380,7 @@ private struct RecordedHTTPRequest: Sendable, Equatable {
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         while stream.hasBytesAvailable {
-            let count = unsafe buffer.withUnsafeMutableBufferPointer { buffer in
+            let count = buffer.withUnsafeMutableBufferPointer { buffer in
                 guard let baseAddress = buffer.baseAddress else {
                     return 0
                 }

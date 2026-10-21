@@ -56,7 +56,7 @@ struct NativeAnalyticsProductManagerTests {
     @Test func nativeManagerOperationsAreForwardedToTheirOriginalOwner() throws {
         let fixture = AnalyticsProductFixture()
         let view = NativeAnalyticsProductManager(manager: fixture.manager, bundleIdentifier: "SharedApp", familyIdentifier: "iphoneos")
-        _ = unsafe class_addProtocol(NativeAnalyticsProductManager.self, AnalyticsManagerOperations.self)
+        _ = class_addProtocol(NativeAnalyticsProductManager.self, AnalyticsManagerOperations.self)
         let receiver = try #require(view as? any AnalyticsManagerOperations)
         receiver.load()
         #expect(fixture.manager.loadCount == 1)

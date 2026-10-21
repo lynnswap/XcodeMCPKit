@@ -58,11 +58,11 @@ final class NativeABI {
         let result = try unsafe storage(for: NativeMetadataResponse.self, components: [pointer, word])
         let interface = try unsafe callInterface(result: result, parameters: [word])
         var request: UInt64 = 0
-        let response: NativeMetadataResponse = try unsafe withUnsafeMutablePointer(to: &request) {
+        let response: NativeMetadataResponse = try withUnsafeMutablePointer(to: &request) {
             try unsafe invoke(symbol: accessor, interface: interface,
                               arguments: [UnsafeMutableRawPointer($0)], returning: NativeMetadataResponse.self)
         }
-        guard let metadata = unsafe response.metadata, response.state == 0 else {
+        guard let metadata = unsafe response.metadata, unsafe response.state == 0 else {
             throw NativeRuntimeError.unsupportedContract("Complete native type metadata is unavailable for " + name)
         }
         return unsafe unsafeBitCast(metadata, to: Any.Type.self)

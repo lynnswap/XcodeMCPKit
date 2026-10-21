@@ -1662,7 +1662,7 @@ final class NativePreviewCorrection {
         func library(at output: URL, target: NativePreviewBuild.Target? = nil) throws -> Library? {
             let output = output.resolvingSymlinksInPath()
             var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: output.path, isDirectory: &isDirectory), !isDirectory.boolValue,
+            guard unsafe FileManager.default.fileExists(atPath: output.path, isDirectory: &isDirectory), !isDirectory.boolValue,
                   let image = try NativePreviewBinary.dynamicLibrary(at: output) else { return nil }
             let packageImage = nativeApp == nil && agentApp != nil && target?.isDynamicPackageProduct == true
                 && rootOutputs.contains(output)
@@ -1692,7 +1692,7 @@ final class NativePreviewCorrection {
         func nativePath(_ url: URL) throws -> String? {
             guard let nativeApp else { return nil }
             var relationship: FileManager.URLRelationship = .other
-            try FileManager.default.getRelationship(&relationship, ofDirectoryAt: nativeApp, toItemAt: url)
+            try unsafe FileManager.default.getRelationship(&relationship, ofDirectoryAt: nativeApp, toItemAt: url)
             guard relationship == .contains else { return nil }
             return url.resolvingSymlinksInPath().pathComponents
                 .dropFirst(nativeApp.resolvingSymlinksInPath().pathComponents.count).joined(separator: "/")
@@ -1938,7 +1938,7 @@ final class NativePreviewCorrection {
             for input in inputs.files where !linked.contains(input.resolvingSymlinksInPath()) {
                 let linkedInput = linkedImages[input.resolvingSymlinksInPath()]?.url ?? input
                 var directory: ObjCBool = false
-                if FileManager.default.fileExists(atPath: linkedInput.path, isDirectory: &directory), !directory.boolValue,
+                if unsafe FileManager.default.fileExists(atPath: linkedInput.path, isDirectory: &directory), !directory.boolValue,
                    try linkedInput.pathExtension == "tbd" || NativePreviewBinary.isStaticArchive(at: linkedInput) || NativePreviewBinary.isDynamicLibrary(at: linkedInput) {
                     arguments += ["-Xlinker", linkedInput.path]
                     linked.insert(input.resolvingSymlinksInPath())
@@ -2026,7 +2026,7 @@ final class NativePreviewCorrection {
         // A relocatable link can leave archive members for the host's final link.
         for input in try source.linkedInputs().files {
             var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectory), !isDirectory.boolValue,
+            if unsafe FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectory), !isDirectory.boolValue,
                try (mergesArchives && NativePreviewBinary.isStaticArchive(at: input))
                 || NativePreviewBinary.file(at: input)?.header.fileType == .object {
                 owned.insert(input.resolvingSymlinksInPath())
@@ -2252,15 +2252,15 @@ final class NativePreviewCorrection {
         for library in libraries {
             let library = library.resolvingSymlinksInPath()
             var relationship: FileManager.URLRelationship = .other
-            try FileManager.default.getRelationship(&relationship, ofDirectoryAt: root, toItemAt: library)
+            try unsafe FileManager.default.getRelationship(&relationship, ofDirectoryAt: root, toItemAt: library)
             let relative: String
             if relationship == .contains {
                 relative = String(library.path.dropFirst(root.path.count + 1))
             } else if let products {
-                try FileManager.default.getRelationship(&relationship, ofDirectoryAt: products, toItemAt: library)
+                try unsafe FileManager.default.getRelationship(&relationship, ofDirectoryAt: products, toItemAt: library)
                 guard relationship == .contains else { throw NativePipelineRequired() }
                 let operation = root.deletingLastPathComponent()
-                try FileManager.default.getRelationship(&relationship, ofDirectoryAt: operation, toItemAt: library)
+                try unsafe FileManager.default.getRelationship(&relationship, ofDirectoryAt: operation, toItemAt: library)
                 guard relationship == .contains else { throw NativePipelineRequired() }
                 relative = "../" + library.path.dropFirst(operation.path.count + 1)
             } else { throw NativePipelineRequired() }

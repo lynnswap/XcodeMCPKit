@@ -1369,7 +1369,7 @@ final class NativePreviewBuild {
                 valueABIs: try result.map { [$0: try NativeType.opaque(named: $0.name)] } ?? [:],
                 receiverABI: .opaque(named: type.name))
         }
-        let preparation = try unsafe await DestinationPreparation(
+        let preparation = try await DestinationPreparation(
             properties: getter(recipeType, "properties.getter : PreviewsPipeline.RunDestinationProperties", NativeSwiftValue.self, result: propertiesType),
             platform: getter(propertiesType, "platform.getter : PreviewsPipeline.Platform", NativeSwiftValue.self, result: platformType),
             identifier: getter(propertiesType, "deviceIdentifier.getter : PreviewsPipeline.DeviceIdentifier", NativeSwiftValue.self, result: identifierType),
