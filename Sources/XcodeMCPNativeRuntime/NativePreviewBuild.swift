@@ -966,7 +966,7 @@ final class NativePreviewBuild {
             named: "dependents(of: __C.IDEBuildable) -> [__C.IDEBuildable]",
             as: ((AnyObject) -> NativeSwiftValue).self)
         try Task.checkCancellation()
-        let resourceClass = NSClassFromString("IDESwiftPackageCore.IDESwiftPackageResourceBundleProductBlueprint")
+        let resourceClass: AnyClass? = NSClassFromString("IDESwiftPackageCore.IDESwiftPackageResourceBundleProductBlueprint")
         // The build graph also contains build tools and aggregate targets.
         // Only native library products contribute code to the renderer image.
         let linkableProducts: Set<String> = ["com.apple.product-type.objfile", "com.apple.product-type.library.static",

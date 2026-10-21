@@ -19,7 +19,7 @@ struct CoreHTTPClientLifecycleTests {
                 catch { cancelled.record(()); throw error }
             }
         )
-        weak var weakClient = client
+        weak let weakClient = client
         await client?.startEventStream(headers: stub.headers)
         _ = try await stub.requests.nextValue(matching: { $0 == "GET" })
         _ = try await sleeps.nextValue(at: 0)
@@ -35,7 +35,7 @@ struct CoreHTTPClientLifecycleTests {
         var client: StreamableHTTPMCPClient? = StreamableHTTPMCPClient(
             endpoint: stub.endpoint, urlSession: session, urlSessionOwnership: .owned
         )
-        weak var weakClient = client
+        weak let weakClient = client
         await client?.startEventStream(headers: stub.headers)
         _ = try await stub.requests.nextValue(matching: { $0 == "GET" })
         var request = URLRequest(url: stub.endpoint)

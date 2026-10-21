@@ -105,7 +105,7 @@ let package = Package(
         ),
         .target(
             name: "XcodeMCPKit",
-            dependencies: ["XcodeMCPCore"],
+            dependencies: ["XcodeMCPCore", "XcodeMCPWire"],
             path: "Sources/XcodeMCPKit",
             exclude: ["README.md"],
             swiftSettings: strictSwiftSettings

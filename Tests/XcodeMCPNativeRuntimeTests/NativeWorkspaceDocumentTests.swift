@@ -45,7 +45,7 @@ struct NativeWorkspaceDocumentTests {
     @Test func closingDetachesTheRepositoryAndReleasesItsOwner() throws {
         let document = WorkspaceDocumentFixture()
         var owner: NativeWorkspaceDocument? = try NativeWorkspaceDocument(document: document)
-        weak var observedOwner = owner
+        weak let observedOwner = owner
 
         try owner?.close()
         owner = nil
