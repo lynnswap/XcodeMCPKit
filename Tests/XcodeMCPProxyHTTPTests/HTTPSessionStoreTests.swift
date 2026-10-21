@@ -78,11 +78,33 @@ struct HTTPSessionStoreTests {
         }
         #expect(store.phase(of: existing) == nil)
         #expect(store.phase(of: duringReset) == nil)
-        #expect(runtime.closeCounts == [existing: 1, duringReset: 1])
+        #expect(runtime.closeCounts == [existing: 1])
 
         let afterReset = ProxySessionID(rawValue: "after-reset")
         _ = try store.create(afterReset)
         #expect(store.phase(of: afterReset) == .initializing)
+    }
+
+    /// A session opened just before a reset may be closed by it, even if the reset ends before the
+    /// session is stored.
+    @Test func aSessionOpenedBeforeAResetIsNotKeptAfterIt() throws {
+        let runtime = SessionRecordingRuntime()
+        let store = HTTPSessionStore(runtime: runtime, delivery: HTTPEventDeliveryStore())
+        let id = ProxySessionID(rawValue: "overlapping")
+        runtime.onOpen.withLock { onOpen in
+            onOpen = {
+                let reset = DispatchSemaphore(value: 0)
+                Task {
+                    await store.closeAll {}
+                    reset.signal()
+                }
+                reset.wait()
+            }
+        }
+
+        #expect(throws: ProxyRuntimeUnavailable.self) { try store.create(id) }
+        #expect(store.phase(of: id) == nil)
+        #expect(runtime.closeCounts == [id: 1])
     }
 }
 
@@ -98,6 +120,9 @@ private final class ManualUptime: Sendable {
 private final class SessionRecordingRuntime: ProxyRuntimeServing {
     private let closes = Mutex<[ProxySessionID: Int]>([:])
 
+    /// Runs inside `openSession`, before it returns.
+    let onOpen = Mutex<(@Sendable () -> Void)?>(nil)
+
     var closeCounts: [ProxySessionID: Int] { closes.withLock { $0 } }
 
     func start() {}
@@ -106,7 +131,8 @@ private final class SessionRecordingRuntime: ProxyRuntimeServing {
 
     func openSession(_ id: ProxySessionID,
                      notify _: @escaping @Sendable (Data) -> Void) throws -> any ProxyRuntimeSession {
-        Session { self.closes.withLock { $0[id, default: 0] += 1 } }
+        onOpen.withLock { $0 }?()
+        return Session { self.closes.withLock { $0[id, default: 0] += 1 } }
     }
 
     func snapshot() -> ProxyRuntimeSnapshot {
