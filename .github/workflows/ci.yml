@@ -98,7 +98,7 @@ jobs:
     name: Package Tests (macOS, ${{ matrix.shard }})
     needs: package-build
     runs-on: xcode-27
-    timeout-minutes: 10
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +112,8 @@ jobs:
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
+          # Building here must describe the same version as the build job.
+          fetch-depth: 0
 
       - name: Select latest Xcode
         id: toolchain
@@ -126,14 +128,27 @@ jobs:
           cache_id="$(xcodebuild -version | tr '\n ' '--' | tr -cd '[:alnum:]._-')"
           echo "cache-id=${cache_id}" >> "$GITHUB_OUTPUT"
 
+      # Runner images can differ in their Xcode build, and products of another Xcode build
+      # cannot be reused. Without the build job's products, build with this runner's Xcode,
+      # starting from an earlier cache for the same Xcode build when there is one.
       - name: Restore built package tests
+        id: built
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .build
           key: spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ inputs.source_sha || github.sha }}
-          fail-on-cache-miss: true
+          restore-keys: |
+            spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+
+      - name: Build package tests for this runner's Xcode
+        if: steps.built.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        run: |
+          ./scripts/restore-source-mtimes.sh
+          swift build --build-tests -Xswiftc -strict-concurrency=minimal
 
       - name: Run package tests
+        timeout-minutes: 10
         run: |
           case "${{ matrix.shard }}" in
             remaining)
@@ -159,7 +174,7 @@ jobs:
     needs: package-build
     if: inputs.run_process_tests
     runs-on: xcode-27
-    timeout-minutes: 10
+    timeout-minutes: 25
     permissions:
       contents: read
     strategy:
@@ -174,6 +189,8 @@ jobs:
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
+          # Building here must describe the same version as the build job.
+          fetch-depth: 0
 
       - name: Select latest Xcode
         id: toolchain
@@ -188,14 +205,27 @@ jobs:
           cache_id="$(xcodebuild -version | tr '\n ' '--' | tr -cd '[:alnum:]._-')"
           echo "cache-id=${cache_id}" >> "$GITHUB_OUTPUT"
 
+      # Runner images can differ in their Xcode build, and products of another Xcode build
+      # cannot be reused. Without the build job's products, build with this runner's Xcode,
+      # starting from an earlier cache for the same Xcode build when there is one.
       - name: Restore built package tests
+        id: built
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .build
           key: spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ inputs.source_sha || github.sha }}
-          fail-on-cache-miss: true
+          restore-keys: |
+            spm-build-v2-debug-strict-minimal-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-id }}-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+
+      - name: Build package tests for this runner's Xcode
+        if: steps.built.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        run: |
+          ./scripts/restore-source-mtimes.sh
+          swift build --build-tests -Xswiftc -strict-concurrency=minimal
 
       - name: Run process tests
+        timeout-minutes: 10
         env:
           XCODE_MCP_RUN_PROCESS_TESTS: "1"
         run: |
