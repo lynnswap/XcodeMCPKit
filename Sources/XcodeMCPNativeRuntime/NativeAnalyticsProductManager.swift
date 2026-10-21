@@ -23,7 +23,7 @@ final class NativeAnalyticsProductManager: NSObject {
         guard let nativeProtocol = unsafe objc_getProtocol("DVTProductManagerProtocol") else {
             throw NativeRuntimeError.unsupportedContract("Xcode's product-manager protocol is unavailable")
         }
-        _ = unsafe class_addProtocol(Self.self, nativeProtocol)
+        _ = class_addProtocol(Self.self, nativeProtocol)
     }
 
     @objc var products: NSArray {

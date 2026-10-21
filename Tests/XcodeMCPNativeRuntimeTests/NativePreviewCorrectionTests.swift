@@ -692,7 +692,7 @@ struct NativePreviewCorrectionTests {
                 #expect(previewBundle["resource"] as? String == "PreviewOnly resource")
                 let path = try #require(previewBundle["path"] as? String)
                 var relationship: FileManager.URLRelationship = .other
-                try FileManager.default.getRelationship(&relationship,
+                try unsafe FileManager.default.getRelationship(&relationship,
                     ofDirectoryAt: app.appendingPathComponent("Contents/Frameworks/PreviewDependencies"), toItemAt: URL(filePath: path))
                 #expect(relationship == .contains)
             } else { #expect(result["NativePreviewOnlyToken"] == nil) }
@@ -705,7 +705,7 @@ struct NativePreviewCorrectionTests {
         for bundle in [stagedProduct, staged] {
             try await previewBinaryOutput("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundle.path])
             let output = try await process.run("/usr/bin/codesign", ["-d", "--entitlements", ":-", bundle.path])
-            let preserved = try #require(PropertyListSerialization.propertyList(from: Data(output.utf8), format: nil) as? [String: Any])
+            let preserved = try #require(unsafe PropertyListSerialization.propertyList(from: Data(output.utf8), format: nil) as? [String: Any])
             #expect(preserved["com.apple.security.get-task-allow"] as? Bool == true)
         }
         for (file, original) in zip(protectedFiles, originalBytes) { #expect(try Data(contentsOf: file) == original, "\(file.path)") }

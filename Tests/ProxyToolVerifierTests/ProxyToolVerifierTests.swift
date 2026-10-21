@@ -34,7 +34,7 @@ struct ProxyToolVerifierTests {
         #expect(Set(destinations).count == 2)
         for destination in destinations {
             var relationship = FileManager.URLRelationship.other
-            try FileManager.default.getRelationship(&relationship, ofDirectoryAt: fixture.outputRoot, toItemAt: destination)
+            try unsafe FileManager.default.getRelationship(&relationship, ofDirectoryAt: fixture.outputRoot, toItemAt: destination)
             #expect(relationship == .contains)
             let contents = destination.appendingPathComponent("ProxyVerifierGeneratedCLI.xcodeproj/project.pbxproj")
             #expect(try String(contentsOf: contents, encoding: .utf8) == "native generated contents")
@@ -193,7 +193,7 @@ struct ProxyToolVerifierTests {
             case "XcodeNewProject":
                 let destination = URL(fileURLWithPath: try #require(call.arguments["destinationPath"]?.stringValue))
                 var relationship = FileManager.URLRelationship.other
-                try FileManager.default.getRelationship(&relationship, ofDirectoryAt: fixture.outputRoot, toItemAt: destination)
+                try unsafe FileManager.default.getRelationship(&relationship, ofDirectoryAt: fixture.outputRoot, toItemAt: destination)
                 #expect(relationship == .contains)
             case "XcodeCloseWorkspace":
                 await ownership.close()
@@ -270,7 +270,7 @@ struct ProxyToolVerifierTests {
                 #expect(project.lastPathComponent == fixture.xcodeProjectURL.lastPathComponent)
                 #expect(project != fixture.xcodeProjectURL)
                 var relationship = FileManager.URLRelationship.other
-                try FileManager.default.getRelationship(&relationship, ofDirectoryAt: fixture.outputRoot, toItemAt: project)
+                try unsafe FileManager.default.getRelationship(&relationship, ofDirectoryAt: fixture.outputRoot, toItemAt: project)
                 #expect(relationship == .contains)
                 await ownership.open(path)
                 return result(["workspaceIdentifier": "owned-native-id", "workspacePath": .string(path)])

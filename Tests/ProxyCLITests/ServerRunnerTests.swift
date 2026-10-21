@@ -519,38 +519,38 @@ struct TerminationSignalTests {
 
     @Test func overlappingObserversKeepTheirDispositionsUntilTheLastStops() {
         var custom = sigaction()
-        custom.__sigaction_u.__sa_handler = SIG_IGN
+        unsafe custom.__sigaction_u.__sa_handler = SIG_IGN
         custom.sa_flags = SA_RESTART | SA_NODEFER
         var original = sigaction()
-        sigaction(SIGTERM, &custom, &original)
-        defer { sigaction(SIGTERM, &original, nil) }
+        unsafe sigaction(SIGTERM, &custom, &original)
+        defer { unsafe sigaction(SIGTERM, &original, nil) }
 
         let stopFirst = TerminationSignals.observe {}
         let stopSecond = TerminationSignals.observe {}
         stopFirst()
         var current = sigaction()
-        sigaction(SIGTERM, nil, &current)
+        unsafe sigaction(SIGTERM, nil, &current)
         #expect(current.sa_flags != custom.sa_flags)
 
         stopSecond()
-        sigaction(SIGTERM, nil, &current)
+        unsafe sigaction(SIGTERM, nil, &current)
         #expect(current.sa_flags == custom.sa_flags)
     }
 
     @Test func observingTerminationSignalsRestoresThePreviousDispositions() {
         var custom = sigaction()
-        custom.__sigaction_u.__sa_handler = SIG_IGN
+        unsafe custom.__sigaction_u.__sa_handler = SIG_IGN
         custom.sa_flags = SA_RESTART | SA_NODEFER
-        sigemptyset(&custom.sa_mask)
-        sigaddset(&custom.sa_mask, SIGUSR1)
+        unsafe sigemptyset(&custom.sa_mask)
+        unsafe sigaddset(&custom.sa_mask, SIGUSR1)
         var original = sigaction()
-        sigaction(SIGTERM, &custom, &original)
-        defer { sigaction(SIGTERM, &original, nil) }
+        unsafe sigaction(SIGTERM, &custom, &original)
+        defer { unsafe sigaction(SIGTERM, &original, nil) }
 
         TerminationSignals.observe {}()
 
         var restored = sigaction()
-        sigaction(SIGTERM, nil, &restored)
+        unsafe sigaction(SIGTERM, nil, &restored)
         #expect(restored.sa_flags == custom.sa_flags)
         #expect(restored.sa_mask == custom.sa_mask)
     }

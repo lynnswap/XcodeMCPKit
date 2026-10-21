@@ -72,7 +72,7 @@ enum NativePreviewBinary {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         guard let data = try handle.read(upToCount: MemoryLayout<UInt32>.size), data.count == MemoryLayout<UInt32>.size,
-              let magic = data.withUnsafeBytes({ unsafe Magic(rawValue: $0.loadUnaligned(as: UInt32.self)) }),
+              let magic = Self.magic(of: data),
               magic.is64BitMach || magic.isFat else { return nil }
         let file: MachOFile
         switch try MachOKit.loadFromFile(url: url) {
@@ -84,10 +84,15 @@ enum NativePreviewBinary {
             // Universal containers can hold archive slices as well as Mach-O images.
             try handle.seek(toOffset: UInt64(architecture.offset))
             guard let data = try handle.read(upToCount: MemoryLayout<UInt32>.size), data.count == MemoryLayout<UInt32>.size,
-                  data.withUnsafeBytes({ unsafe Magic(rawValue: $0.loadUnaligned(as: UInt32.self))?.is64BitMach }) == true else { return nil }
+                  Self.magic(of: data)?.is64BitMach == true else { return nil }
             file = try MachOFile(url: url, headerStartOffset: Int(architecture.offset))
         }
         guard file.header.cpuType == .arm64 else { return nil }
         return file
+    }
+
+    /// The magic in a file's first four bytes, read as a little-endian word like the Mach-O loader does.
+    private static func magic(of data: Data) -> Magic? {
+        Magic(rawValue: data.reversed().reduce(0) { $0 << 8 | UInt32($1) })
     }
 }

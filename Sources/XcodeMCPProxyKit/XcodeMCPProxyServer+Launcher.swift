@@ -197,7 +197,7 @@ enum TerminationSignals {
             registry.withLock { registry in
                 guard registry.handlers.removeValue(forKey: id) != nil, registry.handlers.isEmpty else { return }
                 for source in registry.sources { source.cancel() }
-                for var entry in registry.previous { sigaction(entry.number, &entry.action, nil) }
+                for var entry in registry.previous { unsafe sigaction(entry.number, &entry.action, nil) }
                 registry = Registry(generation: registry.generation &+ 1)
             }
         }
@@ -207,9 +207,9 @@ enum TerminationSignals {
         let generation = registry.generation
         for number in numbers {
             var ignore = sigaction()
-            ignore.__sigaction_u.__sa_handler = SIG_IGN
+            unsafe ignore.__sigaction_u.__sa_handler = SIG_IGN
             var action = sigaction()
-            sigaction(number, &ignore, &action)
+            unsafe sigaction(number, &ignore, &action)
             registry.previous.append((number, action))
             let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
             source.setEventHandler { [weak source] in

@@ -46,7 +46,7 @@ struct NativePreviewProductSignatureTests {
         try file.write(contentsOf: Data("new".utf8))
         try file.close()
         let times = [original.st_atimespec, original.st_mtimespec]
-        let restored = unsafe times.withUnsafeBufferPointer {
+        let restored = times.withUnsafeBufferPointer {
             unsafe utimensat(AT_FDCWD, resource.path, $0.baseAddress, 0)
         }
         try #require(restored == 0)
