@@ -176,12 +176,12 @@ struct NativeHostBrokerTests {
             "params": .object(["name": .string("XcodeListTemplates"), "arguments": .object([:])]),
         ]))
         let runtimeSession = try fixture.runtimeSession(session)
-        let calling = Task { await runtimeSession.handle(request) }
+        let call = runtimeSession.receive(request)
         try await fixture.factory.created.wait(description: "host started")
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
         try await transport.initializationStarted.wait(description: "host initialization held")
-        calling.cancel()
-        #expect(await calling.value.jsonRPCError?.code == -32800)
+        call.cancel()
+        #expect(await call.reply.jsonRPCError?.code == -32800)
         try transport.releaseInitialization()
         // Shutdown waits for the cancelled request's work to finish.
         await fixture.broker.shutdown()
@@ -1372,7 +1372,7 @@ private final class BrokerFixture: Sendable {
         let request = try ProxyRuntimeRequest(json: .object(json))
         let runtimeSession = try runtimeSession(session)
         return try await waitWithTimeout("broker request", timeout: .seconds(10)) {
-            await runtimeSession.handle(request)
+            await runtimeSession.receive(request).reply
         }
     }
 

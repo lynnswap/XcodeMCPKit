@@ -480,6 +480,32 @@ struct HTTPHandlerTests {
         #expect(!runtime.hasSession(sessionID))
     }
 
+    /// A cancellation sent right after a request, on another connection, finds that request.
+    @Test func aCancellationFindsTheRequestSentBeforeIt() async throws {
+        let config = makeHTTPConfig(requestTimeout: 60)
+        let requestChannel = EmbeddedChannel()
+        let cancelChannel = EmbeddedChannel()
+        defer {
+            _ = try? requestChannel.finish()
+            _ = try? cancelChannel.finish()
+        }
+        let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
+        try addHTTPHandler(to: requestChannel, config: config, runtime: runtime)
+        try addHTTPHandler(to: cancelChannel, config: config, runtime: runtime)
+        let sessionID = try await initializeHTTPChannel(requestChannel)
+
+        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                     sessionID: sessionID, to: requestChannel)
+        try postJSON(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": 2]],
+                     sessionID: sessionID, to: cancelChannel)
+        #expect(try await collectResponse(from: cancelChannel).head.status == .accepted)
+
+        let cancelled = try await collectResponse(from: requestChannel)
+        let body = try #require(
+            JSONSerialization.jsonObject(with: Data(cancelled.body.utf8)) as? [String: Any])
+        #expect(((body["error"] as? [String: Any])?["code"] as? NSNumber)?.intValue == -32800)
+    }
+
     /// A request that started is answered when its session is deleted; only later requests get a 404.
     @Test func deletingASessionAnswersItsRunningRequestAndRefusesLaterOnes() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)

@@ -24,7 +24,10 @@ final class HTTPSessionStore: Sendable {
     private struct State: Sendable {
         var entries: [ProxySessionID: Entry] = [:]
         /// Runtime resets in progress, during which no session starts.
-        var resets = 0
+        var resetsInProgress = 0
+        /// Counts the resets that have started. A session opened before a reset started must not
+        /// be kept after it, since the reset may have closed its runtime side.
+        var resetGeneration: UInt64 = 0
     }
 
     private let state = NIOLockedValueBox(State())
@@ -41,6 +44,8 @@ final class HTTPSessionStore: Sendable {
 
     /// Opens a session for an `initialize` request, which holds it until ``release(_:)``.
     func create(_ id: ProxySessionID) throws -> any ProxyRuntimeSession {
+        let generation = state.withLockedValue { $0.resetsInProgress == 0 ? $0.resetGeneration : nil }
+        guard let generation else { throw ProxyRuntimeUnavailable() }
         delivery.register(id)
         let session: any ProxyRuntimeSession
         do {
@@ -50,7 +55,7 @@ final class HTTPSessionStore: Sendable {
             throw error
         }
         let created = state.withLockedValue { state in
-            guard state.resets == 0 else { return false }
+            guard state.resetGeneration == generation else { return false }
             state.entries[id] = Entry(session: session, lastActivity: uptimeNanoseconds())
             return true
         }
@@ -145,10 +150,13 @@ final class HTTPSessionStore: Sendable {
     /// Deletes every session and refuses new ones until `reset` returns, so no session keeps
     /// runtime state that the reset discards.
     func closeAll(during reset: () async -> Void) async {
-        state.withLockedValue { $0.resets += 1 }
+        state.withLockedValue { state in
+            state.resetsInProgress += 1
+            state.resetGeneration += 1
+        }
         closeAll()
         await reset()
-        state.withLockedValue { $0.resets -= 1 }
+        state.withLockedValue { $0.resetsInProgress -= 1 }
     }
 
     private func end(_ id: ProxySessionID, _ entry: Entry) {

@@ -19,7 +19,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     struct ActivePostRequest: Sendable {
-        let task: Task<ProxyRuntimeReply, Never>
+        let call: any ProxyRuntimeCall
         /// The session the request holds until its reply is written.
         let sessionID: ProxySessionID
         let progressRoute: HTTPProgressRoute?
@@ -126,7 +126,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         // The runtime replies to a cancelled request at once; nothing is left to write it to.
         for request in activePostRequests {
             if let route = request.progressRoute { controlService.sessions.delivery.removeProgressRoute(route) }
-            request.task.cancel()
+            request.call.cancel()
             controlService.sessions.release(request.sessionID)
         }
         if let remote = remoteAddressString(for: context.channel) {
@@ -508,13 +508,13 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 }
             }
         }
-        let task = Task { await session.handle(request) }
+        let call = session.receive(request)
         state.withLockedValue { state in
-            state.activePostRequests[requestLog.id] = ActivePostRequest(task: task, sessionID: sessionID,
+            state.activePostRequests[requestLog.id] = ActivePostRequest(call: call, sessionID: sessionID,
                                                                         progressRoute: progressRoute)
         }
         Task {
-            let reply = await task.value
+            let reply = await call.reply
             if let progressRoute { controlService.sessions.delivery.removeProgressRoute(progressRoute) }
             let responseSessionID: String?
             if isInitializeRequest, let version = Self.negotiatedProtocolVersion(in: reply) {
