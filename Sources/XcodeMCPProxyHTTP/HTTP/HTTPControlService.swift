@@ -403,11 +403,9 @@ final class HTTPControlService: Sendable {
     }
 
     func debugReset(on eventLoop: EventLoop) -> EventLoopFuture<Void> {
-        // Sessions end before the runtime resets, so no request runs on a session it closes.
-        sessions.closeAll()
         let promise = eventLoop.makePromise(of: Void.self)
-        promise.completeWithTask { [runtime] in
-            await runtime.reset()
+        promise.completeWithTask { [sessions, runtime] in
+            await sessions.closeAll { await runtime.reset() }
         }
         return promise.futureResult
     }

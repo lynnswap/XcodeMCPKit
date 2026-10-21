@@ -64,6 +64,26 @@ struct HTTPSessionStoreTests {
 
         #expect(runtime.closeCounts == [deleted: 1, expired: 1, remaining: 1])
     }
+
+    /// A session opened while the runtime resets would keep runtime state that the reset discards.
+    @Test func noSessionStartsWhileTheRuntimeResets() async throws {
+        let runtime = SessionRecordingRuntime()
+        let store = HTTPSessionStore(runtime: runtime, delivery: HTTPEventDeliveryStore())
+        let existing = ProxySessionID(rawValue: "existing")
+        let duringReset = ProxySessionID(rawValue: "during-reset")
+        _ = try store.create(existing)
+
+        await store.closeAll {
+            #expect(throws: ProxyRuntimeUnavailable.self) { try store.create(duringReset) }
+        }
+        #expect(store.phase(of: existing) == nil)
+        #expect(store.phase(of: duringReset) == nil)
+        #expect(runtime.closeCounts == [existing: 1, duringReset: 1])
+
+        let afterReset = ProxySessionID(rawValue: "after-reset")
+        _ = try store.create(afterReset)
+        #expect(store.phase(of: afterReset) == .initializing)
+    }
 }
 
 private final class ManualUptime: Sendable {

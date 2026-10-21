@@ -21,7 +21,13 @@ final class HTTPSessionStore: Sendable {
         var lastActivity: UInt64
     }
 
-    private let entries = NIOLockedValueBox<[ProxySessionID: Entry]>([:])
+    private struct State: Sendable {
+        var entries: [ProxySessionID: Entry] = [:]
+        /// Runtime resets in progress, during which no session starts.
+        var resets = 0
+    }
+
+    private let state = NIOLockedValueBox(State())
     private let runtime: any ProxyRuntimeServing
     let delivery: HTTPEventDeliveryStore
     private let uptimeNanoseconds: @Sendable () -> UInt64
@@ -43,43 +49,52 @@ final class HTTPSessionStore: Sendable {
             delivery.remove(id)
             throw error
         }
-        entries.withLockedValue { $0[id] = Entry(session: session, lastActivity: uptimeNanoseconds()) }
+        let created = state.withLockedValue { state in
+            guard state.resets == 0 else { return false }
+            state.entries[id] = Entry(session: session, lastActivity: uptimeNanoseconds())
+            return true
+        }
+        guard created else {
+            delivery.remove(id)
+            session.close()
+            throw ProxyRuntimeUnavailable()
+        }
         return session
     }
 
     func phase(of id: ProxySessionID) -> Phase? {
-        entries.withLockedValue { $0[id]?.phase }
+        state.withLockedValue { $0.entries[id]?.phase }
     }
 
     func markInitialized(_ id: ProxySessionID, protocolVersion: String?) {
-        entries.withLockedValue { $0[id]?.phase = .initialized(protocolVersion: protocolVersion) }
+        state.withLockedValue { $0.entries[id]?.phase = .initialized(protocolVersion: protocolVersion) }
     }
 
     /// Lets one request use the session until ``release(_:)``. Returns `nil` for an unknown session,
     /// before the request is processed.
     func acquire(_ id: ProxySessionID) -> (any ProxyRuntimeSession)? {
-        entries.withLockedValue { entries in
-            guard var entry = entries[id] else { return nil }
+        state.withLockedValue { state in
+            guard var entry = state.entries[id] else { return nil }
             entry.leases += 1
             entry.lastActivity = uptimeNanoseconds()
-            entries[id] = entry
+            state.entries[id] = entry
             return entry.session
         }
     }
 
     func release(_ id: ProxySessionID) {
-        entries.withLockedValue { entries in
-            entries[id]?.leases -= 1
-            entries[id]?.lastActivity = uptimeNanoseconds()
+        state.withLockedValue { state in
+            state.entries[id]?.leases -= 1
+            state.entries[id]?.lastActivity = uptimeNanoseconds()
         }
     }
 
     /// Attaches a client's event stream. Returns `false` for an unknown session.
     func openStream(_ id: ProxySessionID, channel: Channel) -> Bool {
-        let opened = entries.withLockedValue { entries in
-            guard entries[id] != nil else { return false }
-            entries[id]?.streams += 1
-            entries[id]?.lastActivity = uptimeNanoseconds()
+        let opened = state.withLockedValue { state in
+            guard state.entries[id] != nil else { return false }
+            state.entries[id]?.streams += 1
+            state.entries[id]?.lastActivity = uptimeNanoseconds()
             return true
         }
         guard opened, delivery.open(sessionID: id, channel: channel) else {
@@ -91,16 +106,16 @@ final class HTTPSessionStore: Sendable {
 
     func closeStream(_ id: ProxySessionID, channel: Channel) {
         delivery.close(sessionID: id, channel: channel)
-        entries.withLockedValue { entries in
-            entries[id]?.streams -= 1
-            entries[id]?.lastActivity = uptimeNanoseconds()
+        state.withLockedValue { state in
+            state.entries[id]?.streams -= 1
+            state.entries[id]?.lastActivity = uptimeNanoseconds()
         }
     }
 
     /// Deletes a session and ends its runtime side. Returns `false` for an unknown session.
     @discardableResult
     func delete(_ id: ProxySessionID) -> Bool {
-        guard let entry = entries.withLockedValue({ $0.removeValue(forKey: id) }) else { return false }
+        guard let entry = state.withLockedValue({ $0.entries.removeValue(forKey: id) }) else { return false }
         end(id, entry)
         return true
     }
@@ -108,23 +123,32 @@ final class HTTPSessionStore: Sendable {
     /// Deletes sessions that no request or stream has used for `grace`.
     func expire(inactiveFor grace: TimeAmount) {
         let now = uptimeNanoseconds()
-        let expired = entries.withLockedValue { entries -> [(ProxySessionID, Entry)] in
-            let expired = entries.filter { _, entry in
+        let expired = state.withLockedValue { state -> [(ProxySessionID, Entry)] in
+            let expired = state.entries.filter { _, entry in
                 entry.leases == 0 && entry.streams == 0 && now >= entry.lastActivity
                     && now - entry.lastActivity >= UInt64(max(0, grace.nanoseconds))
             }
-            for id in expired.keys { entries.removeValue(forKey: id) }
+            for id in expired.keys { state.entries.removeValue(forKey: id) }
             return Array(expired)
         }
         for (id, entry) in expired { end(id, entry) }
     }
 
     func closeAll() {
-        let all = entries.withLockedValue { entries -> [(ProxySessionID, Entry)] in
-            defer { entries.removeAll() }
-            return Array(entries)
+        let all = state.withLockedValue { state -> [(ProxySessionID, Entry)] in
+            defer { state.entries.removeAll() }
+            return Array(state.entries)
         }
         for (id, entry) in all { end(id, entry) }
+    }
+
+    /// Deletes every session and refuses new ones until `reset` returns, so no session keeps
+    /// runtime state that the reset discards.
+    func closeAll(during reset: () async -> Void) async {
+        state.withLockedValue { $0.resets += 1 }
+        closeAll()
+        await reset()
+        state.withLockedValue { $0.resets -= 1 }
     }
 
     private func end(_ id: ProxySessionID, _ entry: Entry) {
