@@ -124,13 +124,10 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             let deadline = clock.now().addingTimeInterval(Double(timeout.nanoseconds) / 1_000_000_000)
             message.deadline = message.deadline.map { min($0, deadline) } ?? deadline
         }
-        let cancelled = ProxyRuntimeReply.mcpError(id: requestID, code: -32800,
-            message: "request cancelled", sessionID: sessionID, prefersEventStream: message.prefersEventStream)
+        let cancelled = NativeBrokerReply.error(id: requestID, code: -32800, message: "request cancelled").clientReply
         guard let sessionID else {
-            let stream = message.prefersEventStream
             return NativeHostBrokerOperation(cancelledReply: cancelled) {
-                .mcpError(id: requestID, code: -32600, message: "invalid request",
-                          sessionID: nil, prefersEventStream: stream)
+                NativeBrokerReply.error(id: requestID, code: -32600, message: "invalid request").clientReply
             }
         }
         if !message.headerSessionExists {
@@ -209,8 +206,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         guard let admission else { return nil }
         let key = UUID()
         let admittedMessage = message
-        let timeoutReply = ProxyRuntimeReply.mcpError(id: requestID, code: -32000,
-            message: "upstream timeout", sessionID: sessionID, prefersEventStream: message.prefersEventStream)
+        let timeoutReply = NativeBrokerReply.error(id: requestID, code: -32000, message: "upstream timeout").clientReply
         let operation = NativeHostBrokerOperation(cancelledReply: cancelled, requestIDKey: requestID?.key,
             deadline: message.deadline, clock: clock, timeoutReply: timeoutReply) { [self] in
             let reply = await process(admittedMessage, in: session, admission: admission)
@@ -219,7 +215,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 releaseRequestRetention(of: workspace, in: session)
             }
             reapUnusedHosts()
-            return reply
+            return reply.clientReply
         }
         let retained = session.state.withLockedValue { storage in
             guard !storage.closed else { return false }
@@ -234,14 +230,12 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     private func process(_ request: ProxyRuntimeRequest, in session: NativeBrokerSession,
-                         admission: Admission) async -> ProxyRuntimeReply {
+                         admission: Admission) async -> NativeBrokerReply {
         guard let json = request.decodedJSON else {
-            return .mcpError(id: nil, code: -32700, message: "invalid json",
-                            sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+            return .error(id: nil, code: -32700, message: "invalid json")
         }
         guard let object = json.foundationObject as? [String: Any] else {
-            return .mcpError(id: nil, code: -32600, message: "invalid request",
-                            sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+            return .error(id: nil, code: -32600, message: "invalid request")
         }
         let id = JSONRPC.Message.Inspector.requestID(from: object)
         do {
@@ -253,10 +247,9 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                     "protocolVersion": .string(MCPProtocolVersion.current),
                     "capabilities": .object(["tools": .object(["listChanged": .bool(false)])]),
                     "serverInfo": .object(["name": .string("XcodeMCPKit"), "version": .string("1")]),
-                ]), session: session.identifier, eventStream: request.prefersEventStream)
+                ]))
             case .malformed(let invalidID):
-                return .mcpError(id: invalidID, code: -32600, message: "invalid request",
-                    sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+                return .error(id: invalidID, code: -32600, message: "invalid request")
             case .notification("notifications/cancelled"):
                 if let parameters = object["params"] as? [String: Any],
                    let cancelledID = Self.cancellationID(from: parameters["requestId"]) {
@@ -265,64 +258,54 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                         operation.cancel(reason: .clientNotification)
                     }
                 }
-                return .accepted(sessionID: session.identifier)
+                return .accepted
             case .notification, .response:
                 // The server sends no requests to clients, so a client response has nothing to answer.
-                return .accepted(sessionID: session.identifier)
+                return .accepted
             case .request("ping", _):
-                return try Self.response(id: id, result: .object([:]), session: session.identifier,
-                                         eventStream: request.prefersEventStream)
+                return try Self.response(id: id, result: .object([:]))
             case .request("tools/list", _):
                 if (object["params"] as? [String: Any])?["cursor"] != nil {
-                    return .mcpError(id: id, code: -32602, message: "Invalid tools/list cursor",
-                        sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+                    return .error(id: id, code: -32602, message: "Invalid tools/list cursor")
                 }
-                return try Self.response(id: id, result: await publicCatalog(session: session),
-                                         session: session.identifier, eventStream: request.prefersEventStream)
+                return try Self.response(id: id, result: await publicCatalog(session: session))
             case .request("resources/list", _):
-                return try Self.response(id: id, result: .object(["resources": .array([])]),
-                                         session: session.identifier, eventStream: request.prefersEventStream)
+                return try Self.response(id: id, result: .object(["resources": .array([])]))
             case .request("resources/templates/list", _):
-                return try Self.response(id: id, result: .object(["resourceTemplates": .array([])]),
-                                         session: session.identifier, eventStream: request.prefersEventStream)
+                return try Self.response(id: id, result: .object(["resourceTemplates": .array([])]))
             case .request("tools/call", _):
                 if let arguments = (object["params"] as? [String: Any])?["arguments"],
                    !(arguments is [String: Any]) {
-                    return .mcpError(id: id, code: -32602, message: "tools/call arguments must be an object",
-                        sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+                    return .error(id: id, code: -32602, message: "tools/call arguments must be an object")
                 }
                 do {
                     if let error = admission.error { throw NativeHostBrokerError(error) }
                     return try await callTool(request, session: session, admission: admission)
                 } catch let error as NativeHostBrokerReplyError {
-                    return try Self.externalReply(error.reply, session: session.identifier, requestID: id)
+                    return try Self.externalReply(error.reply, requestID: id)
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
                     return try Self.response(id: id, result: Self.toolResult(.object([
                         "message": .string(String(describing: error)),
-                    ]), isError: true), session: session.identifier, eventStream: request.prefersEventStream)
+                    ]), isError: true))
                 }
             case .request:
-                return .mcpError(id: id, code: -32601, message: "Method not found",
-                                 sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+                return .error(id: id, code: -32601, message: "Method not found")
             case .other:
-                return .mcpError(id: id, code: -32600, message: "invalid request",
-                                 sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+                return .error(id: id, code: -32600, message: "invalid request")
             }
         } catch let error as NativeHostBrokerReplyError {
             do {
-                return try Self.externalReply(error.reply, session: session.identifier, requestID: id)
+                return try Self.externalReply(error.reply, requestID: id)
             } catch {
-                return .failure(kind: .invalidUpstreamResponse, message: "Invalid native error response: \(error)",
-                                sessionID: session.identifier)
+                logger.notice("A host's error response is invalid", metadata: ["error": "\(error)"])
+                return .invalidUpstreamResponse(id: id)
             }
         } catch is CancellationError {
-            return .mcpError(id: id, code: -32800, message: "request cancelled",
-                            sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+            return .error(id: id, code: -32800, message: "request cancelled")
         } catch {
-            return .mcpError(id: id, code: -32000, message: String(describing: error),
-                            sessionID: session.identifier, prefersEventStream: request.prefersEventStream)
+            return .error(id: id, code: -32000, message: String(describing: error))
         }
     }
 
@@ -356,19 +339,16 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             case .overloaded: throw Self.replyError(error, code: -32002, message: "upstream overloaded")
             case .timedOut: throw Self.replyError(error, code: -32000, message: "upstream timeout")
             case .invalidResponse:
-                throw NativeHostBrokerReplyError(description: error.description, reply: .failure(
-                    kind: .invalidUpstreamResponse, message: error.description, sessionID: nil))
+                throw NativeHostBrokerReplyError(description: error.description, reply: .invalidUpstreamResponse())
             case .rejected(let response):
-                throw NativeHostBrokerReplyError(description: error.description, reply: .response(
-                    data: response, sessionID: nil, prefersEventStream: false))
+                throw NativeHostBrokerReplyError(description: error.description, reply: .response(response))
             }
         }
     }
 
     private static func replyError(_ error: NativeHostConnectionError, code: Int, message: String)
         -> NativeHostBrokerReplyError {
-        NativeHostBrokerReplyError(description: error.description, reply: .mcpError(
-            id: nil, code: code, message: message, sessionID: nil, prefersEventStream: false))
+        NativeHostBrokerReplyError(description: error.description, reply: .error(id: nil, code: code, message: message))
     }
 
     /// Starts the host's process if needed and returns its generation.
@@ -384,7 +364,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     /// Sends a session's request. A headless host learns which session calls a tool, and with
     /// `selection`, the scheme, run destination, and test plan to use in the request's workspace.
     private func send(_ request: JSONValue, to host: NativeBrokerHost, session: NativeBrokerSession,
-                      generation: UInt64, eventStream: Bool, selection: JSONValue? = nil) async throws -> ProxyRuntimeReply {
+                      generation: UInt64, selection: JSONValue? = nil) async throws -> NativeBrokerReply {
         var request = request
         if host.guiProcess == nil, case .object(let object) = request, object["method"] == .string("tools/call") {
             var metadata: [String: JSONValue] = [Self.conversationKey: .string(session.conversationID)]
@@ -394,7 +374,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         let data = try await communicate(with: host) {
             try await host.connection.send(request, owner: session.identifier, generation: generation)
         }
-        return .response(data: data, sessionID: session.identifier, prefersEventStream: eventStream)
+        return .response(data)
     }
 
     private func receive(_ event: NativeHostConnection.Event, from hostIdentifier: String) {
@@ -739,7 +719,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
 
 private extension NativeHostBroker {
     private func callTool(_ request: ProxyRuntimeRequest, session: NativeBrokerSession,
-                          admission: Admission) async throws -> ProxyRuntimeReply {
+                          admission: Admission) async throws -> NativeBrokerReply {
         guard case .object(let object)? = request.decodedJSON,
               case .object(let parameters)? = object["params"],
               case .string(let name)? = parameters["name"] else {
@@ -783,13 +763,11 @@ private extension NativeHostBroker {
             } else {
                 let native = try Self.toolRequest(request, name: name,
                     arguments: ["workspaceIdentifier": .string(workspace.nativeIdentifier)])
-                let reply: ProxyRuntimeReply
+                let reply: NativeBrokerReply
                 let closed: Bool
                 do {
                     reply = try Self.externalReply(
-                        await send(native, to: host, session: session, generation: workspace.generation,
-                                   eventStream: request.prefersEventStream),
-                        session: session.identifier, hostIdentifier: workspace.hostIdentifier)
+                        await send(native, to: host, session: session, generation: workspace.generation), hostIdentifier: workspace.hostIdentifier)
                     closed = !Self.isToolError(try Self.result(in: reply))
                 } catch {
                     finishNativeClose(of: workspace, in: session, host: host, closed: false)
@@ -803,8 +781,7 @@ private extension NativeHostBroker {
             return try await callNativeTool(name, arguments: arguments, request: request,
                 session: session, admission: admission)
         }
-        return try Self.response(id: Self.requestID(request), result: result, session: session.identifier,
-                                 eventStream: request.prefersEventStream)
+        return try Self.response(id: Self.requestID(request), result: result)
     }
 
     /// Removes the session's handle and reports whether this call must close the native model:
@@ -894,12 +871,9 @@ private extension NativeHostBroker {
             catch let error as NativeHostBrokerReplyError {
                 var detail: [String: JSONValue] = ["hostIdentifier": .string(host.identifier)]
                 switch error.reply {
-                case .failure(let kind, let message, _):
-                    detail["failureKind"] = .string(String(describing: kind))
-                    detail["message"] = .string(message)
-                case .mcpError(_, let code, let message, _, _):
+                case .error(_, let code, let message):
                     detail["error"] = .object(["code": .number(.int(Int64(code))), "message": .string(message)])
-                case .response(let data, _, _):
+                case .response(let data):
                     let object = try JSONRPC.Wire.object(fromData: data)
                     detail["error"] = object["error"].flatMap(JSONValue.init(any:))
                 case .accepted:
@@ -924,8 +898,7 @@ private extension NativeHostBroker {
         let gui = host.guiProcess != nil
         let native = try Self.toolRequest(request, name: gui ? "XcodeListWindows" : Self.listWorkspacesTool,
                                          arguments: [:])
-        let value = try Self.result(in: await send(native, to: host, session: session, generation: generation,
-                                                   eventStream: request.prefersEventStream))
+        let value = try Self.result(in: await send(native, to: host, session: session, generation: generation))
         if Self.isToolError(value) { throw NativeBrokerToolFailure(result: value) }
         let payload = try Self.toolPayload(value)
         guard let message = Self.string(payload["message"]) else {
@@ -978,7 +951,7 @@ private extension NativeHostBroker {
             let native = try Self.toolRequest(request, name: Self.openWorkspaceTool,
                                              arguments: ["path": .string(path)])
             let opened = try Self.takingSelection(from: await send(native, to: host, session: session,
-                generation: generation, eventStream: request.prefersEventStream))
+                generation: generation))
             let value = try Self.result(in: opened.reply)
             if Self.isToolError(value) { return (value, nil) }
             let payload = try Self.toolPayload(value)
@@ -1023,7 +996,7 @@ private extension NativeHostBroker {
     }
 
     private func callNativeTool(_ name: String, arguments: [String: JSONValue], request: ProxyRuntimeRequest,
-                                session: NativeBrokerSession, admission: Admission) async throws -> ProxyRuntimeReply {
+                                session: NativeBrokerSession, admission: Admission) async throws -> NativeBrokerReply {
         guard let host = state.withLockedValue({ $0.hosts[admission.hostIdentifier] }) else {
             throw NativeHostBrokerError("The workspace's Xcode host is unavailable")
         }
@@ -1050,8 +1023,7 @@ private extension NativeHostBroker {
                 let opened = try await openWorkspace(["path": .string(selector)], request: request, session: session,
                                                      retainsForRequest: true)
                 guard let openedWorkspace = opened.workspace else {
-                    return try Self.response(id: Self.requestID(request), result: opened.result,
-                        session: session.identifier, eventStream: request.prefersEventStream)
+                    return try Self.response(id: Self.requestID(request), result: opened.result)
                 }
                 retained = openedWorkspace
                 workspace = openedWorkspace
@@ -1082,7 +1054,7 @@ private extension NativeHostBroker {
         let native = try XcodeToolCatalog.nativeCall(name: name, arguments: nativeArguments,
             nativeCatalog: catalog.result)
         let forwarded = try Self.toolRequest(request, name: native.name, arguments: native.arguments)
-        let sent: (reply: ProxyRuntimeReply, selection: JSONValue?)
+        let sent: (reply: NativeBrokerReply, selection: JSONValue?)
         if let workspace, !workspace.gui {
             // The session's operations on one model run one at a time, as the host runs them anyway,
             // so each carries the selection that the previous one reported.
@@ -1090,7 +1062,7 @@ private extension NativeHostBroker {
                 sent = try await session.selectionTurns.run(workspace.scope, bytes: request.data.count,
                                                              budget: host.waitingRequests) {
                     let sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session,
-                        generation: generation, eventStream: request.prefersEventStream,
+                        generation: generation,
                         selection: session.selection(for: workspace)))
                     if let reported = sent.selection { session.recordSelection(reported, for: workspace, replacing: true) }
                     return sent
@@ -1100,18 +1072,16 @@ private extension NativeHostBroker {
                 throw Self.replyError(.overloaded, code: -32002, message: "upstream overloaded")
             }
         } else {
-            sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session, generation: generation,
-                                                             eventStream: request.prefersEventStream))
+            sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session, generation: generation))
         }
         var reply = sent.reply
-        if case .response(let data, let replySession, let stream) = reply {
-            reply = .response(data: ToolCallNormalizer().normalizeResponseDataIfNeeded(
-                method: "tools/call", toolName: native.name, toolsCatalogOverride: catalog.result, upstreamData: data),
-                sessionID: replySession, prefersEventStream: stream)
+        if case .response(let data) = reply {
+            reply = .response(ToolCallNormalizer().normalizeResponseDataIfNeeded(
+                method: "tools/call", toolName: native.name, toolsCatalogOverride: catalog.result, upstreamData: data))
         }
         let value = try Self.result(in: reply)
         if Self.isToolError(value) {
-            return try Self.externalReply(reply, session: session.identifier, hostIdentifier: host.identifier)
+            return try Self.externalReply(reply, hostIdentifier: host.identifier)
         }
         var device = admission.deviceSession
         var launch = admission.launchSession
@@ -1149,7 +1119,7 @@ private extension NativeHostBroker {
         return try Self.externalReply(Self.rewriteReply(reply, workspace: name == "XcodeNewProject" ? workspace : nil,
                 deviceSession: name == "DeviceInteractionStartSession" ? device : nil,
                 launchSession: ["RunProject", "GetConsoleOutput"].contains(name) ? launch : nil, toolName: name),
-                                      session: session.identifier, hostIdentifier: host.identifier)
+                                      hostIdentifier: host.identifier)
     }
 }
 

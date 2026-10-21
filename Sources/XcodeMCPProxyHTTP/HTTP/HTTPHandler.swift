@@ -385,9 +385,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handlePost(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        let prefersEventStream: Bool
         do {
-            prefersEventStream = try HTTPRequestValidator.postPreference(for: head.headers)
+            try HTTPRequestValidator.validatePost(head.headers)
         } catch HTTPRequestValidationFailure.notAcceptable {
             _ = sendPlain(
                 on: context.channel,
@@ -435,7 +434,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        var request = ProxyRuntimeRequest(data: bodyData, headerSessionExists: false, prefersEventStream: prefersEventStream)
+        var request = ProxyRuntimeRequest(data: bodyData, headerSessionExists: false)
         let parsedRequestJSON = request.decodedJSON?.foundationObject
         if parsedRequestJSON is [Any] {
             _ = sendPlain(
@@ -513,6 +512,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                             resolution,
                             on: channel,
                             keepAlive: keepAlive,
+                            sessionID: effectiveSessionID,
                             requestLog: requestLog
                         )
                     }

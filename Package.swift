@@ -131,6 +131,7 @@ let package = Package(
                 "XcodeMCPInstallation",
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
+                "XcodeMCPWire",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),

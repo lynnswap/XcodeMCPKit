@@ -32,9 +32,9 @@ enum HTTPRequestValidator {
         return contentType.hasPrefix("application/json")
     }
 
-    static func postPreference(
-        for headers: HTTPHeaders
-    ) throws -> Bool {
+    static func validatePost(
+        _ headers: HTTPHeaders
+    ) throws {
         let wantsEventStream = acceptsEventStream(headers)
         let wantsJSON = acceptsJSON(headers)
         guard wantsEventStream && wantsJSON else {
@@ -43,8 +43,6 @@ enum HTTPRequestValidator {
         guard contentTypeIsJSON(headers) else {
             throw HTTPRequestValidationFailure.unsupportedMediaType
         }
-        // The gateway currently chooses JSON responses for single POST replies.
-        return false
     }
 
     private static func combinedHeaderValue(name: String, from headers: HTTPHeaders) -> String {

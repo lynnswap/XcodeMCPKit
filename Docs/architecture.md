@@ -103,6 +103,7 @@ startup; write failure unwinds acquired resources.
 - A missing `Origin` header is allowed for non-browser clients. When `Origin` is present it must be one valid HTTP(S) origin whose host and port match the actual listener policy; empty, multiple, `null`, malformed, and cross-origin values return `403`.
 - `/debug/upstreams` and `/debug/reset` return `404` unless the server enables debug endpoints (`--debug-endpoints`) and listens on loopback.
 - `POST /mcp` requires `Content-Type: application/json` and `Accept` containing both `application/json` and `text/event-stream`.
+- A POST that carries a request is answered with one JSON-RPC response; a client notification or response gets `202`. When a host's response is not valid JSON-RPC for its request, the client receives error `-32603` (`invalid upstream response`) for that request.
 - The server generates `MCP-Session-Id` on `initialize`; caller-provided session ids are ignored for initialize.
 - After initialize, `POST`, `GET`, and `DELETE` require `MCP-Session-Id`. An explicit `MCP-Protocol-Version` must be valid, supported, and match the negotiated version.
 - When `MCP-Protocol-Version` is omitted, the server uses the session's negotiated version. If no negotiated version exists, it evaluates the protocol-defined fallback `2025-03-26` and returns `400` when that version is unsupported.

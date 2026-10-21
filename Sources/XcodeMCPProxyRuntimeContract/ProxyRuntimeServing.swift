@@ -22,54 +22,26 @@ package struct ProxyRuntimeRequest: Sendable {
     package let decodedJSON: JSONValue?
     package var deadline: Date?
     package var headerSessionExists: Bool
-    package let prefersEventStream: Bool
 
-    package init(
-        data: Data,
-        headerSessionExists: Bool,
-        prefersEventStream: Bool
-    ) {
+    package init(data: Data, headerSessionExists: Bool) {
         self.data = data
         self.decodedJSON = (try? JSONSerialization.jsonObject(with: data)).flatMap(JSONValue.init(any:))
         self.headerSessionExists = headerSessionExists
-        self.prefersEventStream = prefersEventStream
     }
 
-    package init(json: JSONValue, headerSessionExists: Bool, prefersEventStream: Bool) throws {
+    package init(json: JSONValue, headerSessionExists: Bool) throws {
         self.data = try JSONSerialization.data(withJSONObject: json.foundationObject)
         self.decodedJSON = json
         self.headerSessionExists = headerSessionExists
-        self.prefersEventStream = prefersEventStream
     }
 }
 
+/// The runtime's answer to a client message. HTTP chooses the status and headers.
 package enum ProxyRuntimeReply: Sendable {
-    case response(
-        data: Data,
-        sessionID: ProxySessionID?,
-        prefersEventStream: Bool
-    )
-    case mcpError(
-        id: JSONRPC.ID?,
-        code: Int,
-        message: String,
-        sessionID: ProxySessionID?,
-        prefersEventStream: Bool
-    )
-    case failure(
-        kind: ProxyRuntimeFailureKind,
-        message: String,
-        sessionID: ProxySessionID?
-    )
-    case accepted(sessionID: ProxySessionID)
-}
-
-package enum ProxyRuntimeFailureKind: Sendable {
-    case invalidRequest
-    case sessionNotFound
-    case unprocessableRequest
-    case invalidUpstreamResponse
-    case runtimeUnavailable
+    /// One JSON-RPC response object, carrying a result or an error.
+    case response(Data)
+    /// A client notification or response, which has no reply.
+    case accepted
 }
 
 package enum ProxyRuntimeCancellationReason: String, Sendable {
