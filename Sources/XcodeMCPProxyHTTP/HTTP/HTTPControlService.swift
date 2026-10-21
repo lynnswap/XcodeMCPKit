@@ -113,11 +113,19 @@ final class HTTPEventDeliveryStore: Sendable {
         }
     }
 
+    /// The key of a string or number token after the JSON round trip that the runtime applies when
+    /// it restores the client's token in a notification, which can rewrite a number such as `1e16`.
     private static func progressTokenKey(_ token: Any?) -> String? {
-        if let token = token as? String { return JSONRPC.ID(any: token)?.key }
-        guard let number = token as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-        // The runtime writes a negative zero token back as `-0`, which reads as the integer 0.
-        return JSONRPC.ID(any: number.doubleValue == 0 ? NSNumber(value: 0) : number)?.key
+        guard let value = token.flatMap(JSONValue.init(any:)) else { return nil }
+        switch value {
+        case .string, .number:
+            guard let data = try? JSONSerialization.data(withJSONObject: [value.foundationObject]),
+                  let restored = (try? JSONSerialization.jsonObject(with: data) as? [Any])?.first
+            else { return nil }
+            return JSONRPC.ID(any: restored)?.key
+        case .bool, .null, .array, .object:
+            return nil
+        }
     }
 
     /// Drops a session's buffered notifications and closes its streams.

@@ -75,15 +75,16 @@ struct HTTPEventDeliveryStoreTests {
         #expect(bodies.first?.contains(String(decoding: message, as: UTF8.self)) == true)
     }
 
-    /// A negative zero token comes back from the runtime as `0`.
-    @Test func progressForANegativeZeroTokenReachesItsRoute() throws {
+    /// The runtime writes a numeric token back in its own JSON spelling.
+    @Test(arguments: [("-0.0", "0"), ("1e16", "10000000000000000")])
+    func progressForANumericTokenReachesItsRoute(sent: String, restored: String) throws {
         let store = HTTPEventDeliveryStore()
-        let sessionID = ProxySessionID(rawValue: "session-zero-token")
+        let sessionID = ProxySessionID(rawValue: "session-numeric-token")
         openSession(sessionID, in: store)
         defer { store.closeAll() }
         let token = try #require(
-            (JSONSerialization.jsonObject(with: Data(#"{"progressToken":-0.0}"#.utf8)) as? [String: Any])?["progressToken"])
-        let progress = Data(#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":0,"progress":1}}"#.utf8)
+            (JSONSerialization.jsonObject(with: Data(#"{"progressToken":\#(sent)}"#.utf8)) as? [String: Any])?["progressToken"])
+        let progress = Data(#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":\#(restored),"progress":1}}"#.utf8)
         let received = Mutex(0)
         _ = try #require(store.routeProgress(token, of: sessionID) { _ in received.withLock { $0 += 1 } })
 
