@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import NIOCore
 import NIOConcurrencyHelpers
 import XcodeMCPCore
@@ -27,7 +28,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private let inventory: XcodeHostInventory
     private let sessionFactory: SessionFactory
     private let clock: ClockClient
-    private let logger = ProxyLogging.make("broker")
+    private let logger: Logger
     static let defaultHostIdentifier = "host-default"
     /// How long an unused headless host for another installation keeps its process, so handle-less
     /// calls in between reuse the loaded Xcode frameworks.
@@ -59,11 +60,13 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     init(configuration: ProxyRuntimeConfiguration, inventory: XcodeHostInventory,
-         clock: ClockClient = .liveValue, sessionFactory: @escaping SessionFactory) throws {
+         clock: ClockClient = .liveValue, logger: Logger = ProxyLogging.make("broker"),
+         sessionFactory: @escaping SessionFactory) throws {
         self.configuration = configuration
         self.inventory = inventory
         self.sessionFactory = sessionFactory
         self.clock = clock
+        self.logger = logger
         _ = try register(installation: inventory.defaultInstallation, identifier: Self.defaultHostIdentifier)
     }
 
@@ -106,8 +109,16 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
 
     package func start() {
         guard let host = state.withLockedValue({ $0.hosts[Self.defaultHostIdentifier] }) else { return }
-        // The connection owns the launch; this task only requests it so the first call finds a warm host.
-        Task { try? await host.connection.start() }
+        guard configuration.prewarmToolsList else {
+            // The connection owns the launch; this task only requests it so the first call finds a warm host.
+            Task { try? await host.connection.start() }
+            return
+        }
+        // Building the public catalog at startup also reports the tools that clients will see.
+        Task { [weak self] in
+            guard let native = try? await self?.nativeCatalog(of: host).result else { return }
+            _ = try? self?.storePublicCatalog(from: native)
+        }
     }
 
     package func openSession(_ id: ProxySessionID,
@@ -321,11 +332,20 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             throw NativeHostBrokerError("The default Xcode host is unavailable")
         }
         let native = try await withPinnedHost(host, session: session) { try await nativeCatalog(of: host).result }
+        return try storePublicCatalog(from: native)
+    }
+
+    /// Builds the public catalog from the default host's native catalog unless one exists, and
+    /// logs the tools of the catalog it stores.
+    private func storePublicCatalog(from native: JSONValue) throws -> JSONValue {
         let catalog = try XcodeToolCatalog.publicResult(from: native, managementTools: Self.managementTools)
-        return state.withLockedValue { storage in
-            if storage.publicCatalog == nil { storage.publicCatalog = catalog }
-            return storage.publicCatalog ?? catalog
+        let (stored, isNew) = state.withLockedValue { storage in
+            if let existing = storage.publicCatalog { return (existing, false) }
+            storage.publicCatalog = catalog
+            return (catalog, true)
         }
+        if isNew { logger.info("\(ToolCatalogStartupLogFormatter.summary(from: stored))") }
+        return stored
     }
 
     // MARK: - Host communication

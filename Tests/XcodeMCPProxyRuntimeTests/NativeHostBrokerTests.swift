@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 import NIO
 import NIOConcurrencyHelpers
 import Testing
@@ -132,6 +133,27 @@ struct NativeHostBrokerTests {
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
         #expect(transport.calls.withLockedValue { $0.last { $0.name == "GetBuildLog" }?.arguments["workspaceIdentifier"] } == .string("native-w-1"))
         #expect(try await fixture.open(session) == identifier)
+    }
+
+    /// The server log lists the tools clients will see once, as soon as startup loads them.
+    @Test func startupLogsThePublicToolsOnce() async throws {
+        let messages = NIOLockedValueBox<[String]>([])
+        let logger = Logger(label: "broker-tests") { _ in MessageRecordingLogHandler(messages: messages) }
+        let fixture = try BrokerFixture(prewarmToolsList: true, logger: logger)
+        let summaries: @Sendable () -> [String] = {
+            messages.withLockedValue { $0.filter { $0.hasPrefix("Tools\n") } }
+        }
+
+        fixture.broker.start()
+        try await waitWithTimeout("the tools were logged", timeout: .seconds(5)) {
+            while summaries().isEmpty { await Task.yield() }
+        }
+        let session = try await fixture.initialize("after-startup")
+        _ = try await fixture.reply(session, method: "tools/list")
+
+        let logged = summaries()
+        #expect(logged.count == 1)
+        #expect(logged.first?.contains("    - \(NativeHostBroker.openWorkspaceTool)\n") == true)
     }
 
     @Test func sessionsShareOneHeadlessHostPerInstallation() async throws {
@@ -1292,7 +1314,8 @@ private final class BrokerFixture: Sendable {
     let defaultInstallation = XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Default.app"))
 
     init(clock: ClockClient = .liveValue, requestTimeout: TimeInterval = 5, holdsInitialization: Bool = false,
-         guiProcesses: [XcodeGUIProcess] = []) throws {
+         guiProcesses: [XcodeGUIProcess] = [], prewarmToolsList: Bool = false,
+         logger: Logger = ProxyLogging.make("broker")) throws {
         let factory = factory
         factory.holdsInitialization.withLockedValue { $0 = holdsInitialization }
         let defaultInstallation = defaultInstallation
@@ -1303,8 +1326,10 @@ private final class BrokerFixture: Sendable {
             isGUIProcessRunning: { process in processes.withLockedValue { $0.contains(process) } }) {
             [defaultInstallation, XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Other.app"))]
         }
-        broker = try NativeHostBroker(configuration: makeConfig(requestTimeout: requestTimeout),
-                                      inventory: inventory, clock: clock, sessionFactory: factory.make)
+        var configuration = makeConfig(requestTimeout: requestTimeout)
+        configuration.prewarmToolsList = prewarmToolsList
+        broker = try NativeHostBroker(configuration: configuration, inventory: inventory, clock: clock,
+                                      logger: logger, sessionFactory: factory.make)
         let broker = broker
         #expect(registerAsyncTestCleanup(description: "broker shutdown") { await broker.shutdown() })
     }
@@ -1436,5 +1461,21 @@ private extension NativeBrokerReply {
         case .error(_, let code, let message): (code, message)
         case .accepted: nil
         }
+    }
+}
+
+private struct MessageRecordingLogHandler: LogHandler {
+    let messages: NIOLockedValueBox<[String]>
+    var metadata: Logger.Metadata = [:]
+    var logLevel: Logger.Level = .trace
+
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    func log(level _: Logger.Level, message: Logger.Message, metadata _: Logger.Metadata?, source _: String,
+             file _: String, function _: String, line _: UInt) {
+        messages.withLockedValue { $0.append(message.description) }
     }
 }
