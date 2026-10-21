@@ -114,9 +114,10 @@ final class HTTPEventDeliveryStore: Sendable {
     }
 
     private static func progressTokenKey(_ token: Any?) -> String? {
-        guard let token, token is String || (token is NSNumber && CFGetTypeID(token as CFTypeRef) != CFBooleanGetTypeID())
-        else { return nil }
-        return JSONRPC.ID(any: token)?.key
+        if let token = token as? String { return JSONRPC.ID(any: token)?.key }
+        guard let number = token as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        // The runtime writes a negative zero token back as `-0`, which reads as the integer 0.
+        return JSONRPC.ID(any: number.doubleValue == 0 ? NSNumber(value: 0) : number)?.key
     }
 
     /// Drops a session's buffered notifications and closes its streams.
