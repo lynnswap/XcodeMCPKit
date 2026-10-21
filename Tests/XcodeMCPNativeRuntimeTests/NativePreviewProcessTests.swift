@@ -77,16 +77,8 @@ struct NativePreviewProcessTests {
             }
         }
         """#.utf8).write(to: source)
-        let compile = Process()
-        compile.executableURL = URL(filePath: "/usr/bin/xcrun")
-        compile.arguments = ["--sdk", "macosx", "clang", "-framework", "Foundation", source.path, "-o", executable.path]
-        let diagnostics = Pipe()
-        compile.standardOutput = diagnostics
-        compile.standardError = diagnostics
-        try compile.run()
-        let output = diagnostics.fileHandleForReading.readDataToEndOfFile()
-        compile.waitUntilExit()
-        #expect(compile.terminationStatus == 0, "\(String(decoding: output, as: UTF8.self))")
+        try await previewBinaryOutput("/usr/bin/xcrun",
+                                      ["--sdk", "macosx", "clang", "-framework", "Foundation", source.path, "-o", executable.path])
         for (locale, greeting) in [("ja_JP", "こんにちは"), ("en_US", "Hello")] {
             let output = try await fixture.process.run(executable.path, NativePreviewCorrection.rendererArguments(localization: locale))
             #expect(output == "\(greeting)\n\(locale)\n")
