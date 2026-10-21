@@ -10,7 +10,7 @@
 | `XcodeMCPNativeRuntime` / `XcodeMCPNativeHost` | Xcode framework integration, native actions, headless workspace models, execution queues, and owned preview resources. |
 | `XcodeMCPProxyRuntimeContract` | Package request/reply/session values and serving protocols. No execution or I/O state. |
 | `XcodeMCPProxyRuntime` | Public tool contract and handle routing (`Broker/`), and one connection per host process with its catalog, request correlation, and recovery (`Host/`). |
-| `XcodeMCPProxyHTTP` | Listener, protocol validation, responses, and SSE delivery. Depends on the runtime contract rather than concrete Runtime. |
+| `XcodeMCPProxyHTTP` | Listener, protocol validation, MCP session lifetime (`HTTPSessionStore`), responses, and SSE delivery, including each request's progress on its POST response. Depends on the runtime contract rather than concrete Runtime. |
 | `XcodeMCPPermissionAutomation` | Accessibility dialog recognition and opt-in approval monitor. Independent of native execution and routing. |
 | `XcodeMCPProxyKit` | Public server/adapter facades, runtime/HTTP composition, discovery, CLI hosting, and installation. |
 
