@@ -91,7 +91,7 @@ struct ConfigurationRuntimeTests {
                 ]),
             ]))
             let session = try broker.openSession(ProxySessionID(rawValue: "downstream")) { _ in }
-            _ = await session.handle(request)
+            _ = await session.receive(request).reply
             session.close()
         }
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])

@@ -143,10 +143,15 @@ private final class SessionRecordingRuntime: ProxyRuntimeServing {
 
     func reset() async {}
 
+    private struct Answered: ProxyRuntimeCall {
+        var reply: ProxyRuntimeReply { .accepted }
+        func cancel() {}
+    }
+
     private struct Session: ProxyRuntimeSession {
         let onClose: @Sendable () -> Void
 
-        func handle(_: ProxyRuntimeRequest) async -> ProxyRuntimeReply { .accepted }
+        func receive(_: ProxyRuntimeRequest) -> any ProxyRuntimeCall { Answered() }
         func close() { onClose() }
     }
 }

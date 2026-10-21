@@ -5,7 +5,7 @@ import XcodeMCPProxyRuntimeContract
 
 /// One admitted request. Its reply is the work's result, unless cancellation or the deadline
 /// interrupts the work first with its own reply.
-final class NativeHostBrokerOperation: Sendable {
+final class NativeHostBrokerOperation: ProxyRuntimeCall {
     private struct State: Sendable {
         var reply: ProxyRuntimeReply?
         var waiters: [CheckedContinuation<ProxyRuntimeReply, Never>] = []

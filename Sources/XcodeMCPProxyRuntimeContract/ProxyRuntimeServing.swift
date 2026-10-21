@@ -69,11 +69,20 @@ package struct ProxyRuntimeSnapshot: Sendable {
     }
 }
 
+/// A client message that the runtime has received.
+package protocol ProxyRuntimeCall: Sendable {
+    /// The message's reply, once the runtime has handled it.
+    var reply: ProxyRuntimeReply { get async }
+
+    /// Cancels the request, which then replies without waiting for its host.
+    func cancel()
+}
+
 /// The runtime side of one MCP session, which the HTTP gateway creates, uses, and ends.
 package protocol ProxyRuntimeSession: Sendable {
-    /// Handles one client message and returns its reply. Cancelling the calling task cancels the
-    /// request, which then replies without waiting for its host.
-    func handle(_ message: ProxyRuntimeRequest) async -> ProxyRuntimeReply
+    /// Receives one client message. A session receives its messages in call order, so a
+    /// cancellation finds every request received before it.
+    func receive(_ message: ProxyRuntimeRequest) -> any ProxyRuntimeCall
 
     /// Ends the session: cancels its requests and releases what it references. Later calls do nothing.
     func close()

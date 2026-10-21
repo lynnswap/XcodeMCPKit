@@ -127,14 +127,22 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         let broker: NativeHostBroker
         let session: NativeBrokerSession
 
-        func handle(_ message: ProxyRuntimeRequest) async -> ProxyRuntimeReply {
-            await broker.handle(message, in: session)
+        func receive(_ message: ProxyRuntimeRequest) -> any ProxyRuntimeCall {
+            broker.receive(message, in: session)
         }
 
         func close() { broker.closeSession(session) }
     }
 
-    func handle(_ message: ProxyRuntimeRequest, in session: NativeBrokerSession) async -> ProxyRuntimeReply {
+    /// A call that has its reply when it is received.
+    private struct AnsweredCall: ProxyRuntimeCall {
+        let reply: ProxyRuntimeReply
+        func cancel() {}
+    }
+
+    /// Admits a session's message and registers its operation before returning, so a later
+    /// cancellation in the session finds it.
+    func receive(_ message: ProxyRuntimeRequest, in session: NativeBrokerSession) -> any ProxyRuntimeCall {
         let object = message.decodedJSON?.foundationObject as? [String: Any]
         let requestID = object.flatMap { JSONRPC.Message.Inspector.requestID(from: $0) }
         let cancelled = NativeBrokerReply.error(id: requestID, code: -32800, message: "request cancelled").clientReply
@@ -201,7 +209,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             return admission
         }
         // A closed session admits nothing; its requests were cancelled when it closed.
-        guard let admission else { return cancelled }
+        guard let admission else { return AnsweredCall(reply: cancelled) }
         let key = UUID()
         let admittedMessage = message
         let timeoutReply = NativeBrokerReply.error(id: requestID, code: -32000, message: "upstream timeout").clientReply
@@ -224,7 +232,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         operation.whenWorkComplete {
             _ = session.state.withLockedValue { $0.operations.removeValue(forKey: key) }
         }
-        return await withTaskCancellationHandler { await operation.reply } onCancel: { operation.cancel() }
+        return operation
     }
 
     private func process(_ request: ProxyRuntimeRequest, in session: NativeBrokerSession,
