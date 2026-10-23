@@ -99,8 +99,9 @@ xcode-mcp-proxy --url http://localhost:9000/mcp
 For `Address already in use` / `errno: 48`, stop the known listener or use
 `xcode-mcp-proxy-server --force-restart` to replace a proxy on the selected port.
 
-Direct HTTP clients must send `Content-Type: application/json` and
-`Accept: application/json, text/event-stream` for POST. After initialize, use the
+Direct HTTP clients must send `Content-Type: application/json` for POST, and list
+`text/event-stream` in `Accept` to receive progress and slow replies as event
+streams. After initialize, use the
 server-issued `MCP-Session-Id`. An explicit `MCP-Protocol-Version` must match the
 negotiated supported version; omitted versions use the session's negotiation.
 See the [HTTP contract](architecture.md#streamable-http-contract).

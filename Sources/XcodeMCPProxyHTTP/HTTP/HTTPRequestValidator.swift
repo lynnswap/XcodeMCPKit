@@ -2,11 +2,6 @@ import Foundation
 import NIOHTTP1
 import XcodeMCPCore
 
-enum HTTPRequestValidationFailure: Error {
-    case notAcceptable
-    case unsupportedMediaType
-}
-
 enum HTTPRequestValidator {
     static let sessionHeader = "MCP-Session-Id"
     static let protocolVersionHeader = "MCP-Protocol-Version"
@@ -21,28 +16,10 @@ enum HTTPRequestValidator {
         return accept.contains("text/event-stream")
     }
 
-    static func acceptsJSON(_ headers: HTTPHeaders) -> Bool {
-        let accept = combinedHeaderValue(name: "Accept", from: headers).lowercased()
-        guard accept.isEmpty == false else { return false }
-        return accept.contains("application/json") || accept.contains("*/*")
-    }
-
+    /// A browser cannot send this content type across origins without asking first.
     static func contentTypeIsJSON(_ headers: HTTPHeaders) -> Bool {
         guard let contentType = headers.first(name: "Content-Type")?.lowercased() else { return false }
         return contentType.hasPrefix("application/json")
-    }
-
-    static func validatePost(
-        _ headers: HTTPHeaders
-    ) throws {
-        let wantsEventStream = acceptsEventStream(headers)
-        let wantsJSON = acceptsJSON(headers)
-        guard wantsEventStream && wantsJSON else {
-            throw HTTPRequestValidationFailure.notAcceptable
-        }
-        guard contentTypeIsJSON(headers) else {
-            throw HTTPRequestValidationFailure.unsupportedMediaType
-        }
     }
 
     private static func combinedHeaderValue(name: String, from headers: HTTPHeaders) -> String {

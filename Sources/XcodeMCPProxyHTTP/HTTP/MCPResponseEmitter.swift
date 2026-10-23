@@ -68,6 +68,13 @@ enum MCPResponseEmitter {
         return channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buffer)))
     }
 
+    /// Sends a comment on an open event stream, which clients ignore.
+    static func sendKeepalive(on channel: Channel) -> EventLoopFuture<Void> {
+        var buffer = channel.allocator.buffer(capacity: 13)
+        buffer.writeString(": keepalive\n\n")
+        return channel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(buffer)))
+    }
+
     static func endEventStream(on channel: Channel, keepAlive: Bool) -> EventLoopFuture<Void> {
         let promise = channel.eventLoop.makePromise(of: Void.self)
         channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: promise)

@@ -7,9 +7,15 @@ import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProxyRuntimeContract
 
-final class HTTPHandler: ChannelInboundHandler, Sendable {
+final class HTTPHandler: ChannelDuplexHandler, Sendable {
     typealias InboundIn = HTTPServerRequestPart
+    typealias OutboundIn = HTTPServerResponsePart
     typealias OutboundOut = HTTPServerResponsePart
+
+    /// How often an event stream with nothing to send carries a comment, and how long a reply can
+    /// take before its response starts as an event stream. Clients give up on responses that do
+    /// not start within a minute, and on streams that stay silent for a few minutes.
+    static let keepaliveInterval: TimeAmount = .seconds(15)
 
     struct RequestLogContext: Sendable {
         let id: String
@@ -23,17 +29,20 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         /// The session the request holds until its reply is written.
         let sessionID: ProxySessionID
         let progressRoute: HTTPProgressRoute?
+        let keepalive: RepeatedTask?
     }
 
     struct State: Sendable {
         var requestHead: HTTPRequestHead?
         var bodyBuffer: ByteBuffer?
-        var isSSE = false
         var sseSessionID: String?
+        var sseKeepalive: RepeatedTask?
         var bodyTooLarge = false
         var securityDecision: HTTPRequestSecurityPolicy.Decision = .allow
         var activePostRequests: [String: ActivePostRequest] = [:]
-        var responseWriteTail: EventLoopFuture<Void>?
+        /// Whether the current request's response has not ended. Responses go out in request
+        /// order, so the connection serves one request at a time.
+        var responseInProgress = false
     }
 
     let state = NIOLockedValueBox(State())
@@ -69,6 +78,15 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         let part = unwrapInboundIn(data)
         switch part {
         case .head(let head):
+            let pipelined = state.withLockedValue { state in
+                defer { state.responseInProgress = true }
+                return state.responseInProgress
+            }
+            guard !pipelined else {
+                logger.debug("Closing a connection that sent a request before the previous response ended")
+                context.close(promise: nil)
+                return
+            }
             let securityDecision = requestSecurityPolicy.evaluate(
                 head,
                 localAddress: context.channel.localAddress
@@ -106,6 +124,13 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
     }
 
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        if case .end = unwrapOutboundIn(data) {
+            state.withLockedValue { $0.responseInProgress = false }
+        }
+        context.write(data, promise: promise)
+    }
+
     func channelActive(context: ChannelHandlerContext) {
         if let remote = remoteAddressString(for: context.channel) {
             logger.debug("Client connected", metadata: ["remote": .string(remote)])
@@ -115,16 +140,19 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        let (sessionID, activePostRequests) = state.withLockedValue { state in
+        let (sessionID, sseKeepalive, activePostRequests) = state.withLockedValue { state in
             let requests = Array(state.activePostRequests.values)
             state.activePostRequests.removeAll()
-            return (state.sseSessionID, requests)
+            defer { state.sseKeepalive = nil }
+            return (state.sseSessionID, state.sseKeepalive, requests)
         }
+        sseKeepalive?.cancel()
         if let sessionID {
             controlService.sessions.closeStream(ProxySessionID(rawValue: sessionID), channel: context.channel)
         }
         // The runtime replies to a cancelled request at once; nothing is left to write it to.
         for request in activePostRequests {
+            request.keepalive?.cancel()
             if let route = request.progressRoute { controlService.sessions.delivery.removeProgressRoute(route) }
             request.call.cancel()
             controlService.sessions.release(request.sessionID)
@@ -143,16 +171,20 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleRequest(context: ChannelHandlerContext) {
-        let request = state.withLockedValue { state -> (HTTPRequestHead, HTTPRequestSecurityPolicy.Decision)? in
+        let request = state.withLockedValue {
+            state -> (HTTPRequestHead, ByteBuffer?, Bool, HTTPRequestSecurityPolicy.Decision)? in
             guard let head = state.requestHead else {
                 return nil
             }
-            state.requestHead = nil
-            let securityDecision = state.securityDecision
-            state.securityDecision = .allow
-            return (head, securityDecision)
+            defer {
+                state.requestHead = nil
+                state.bodyBuffer = nil
+                state.bodyTooLarge = false
+                state.securityDecision = .allow
+            }
+            return (head, state.bodyBuffer, state.bodyTooLarge, state.securityDecision)
         }
-        guard let (head, securityDecision) = request else { return }
+        guard let (head, body, bodyTooLarge, securityDecision) = request else { return }
 
         let path = head.uri.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? head.uri
         let requestLog = RequestLogContext(
@@ -180,7 +212,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
-        let bodyTooLarge = state.withLockedValue { $0.bodyTooLarge }
         if bodyTooLarge {
             _ = sendPlain(
                 on: context.channel,
@@ -207,7 +238,7 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         case .deleteSession:
             handleDelete(context: context, head: head, requestLog: requestLog)
         case .post:
-            handlePost(context: context, head: head, requestLog: requestLog)
+            handlePost(context: context, head: head, body: body, requestLog: requestLog)
         case .notFound:
             _ = sendPlain(on: context.channel, status: .notFound, body: "not found", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
         }
@@ -300,11 +331,6 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
     }
 
     private func handleSSE(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        let alreadySSE = state.withLockedValue { $0.isSSE }
-        if alreadySSE {
-            return
-        }
-
         guard HTTPRequestValidator.acceptsEventStream(head.headers) else {
             _ = sendPlain(
                 on: context.channel,
@@ -340,9 +366,16 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             return
         }
 
+        let channel = context.channel
+        let keepalive = context.eventLoop.scheduleRepeatedTask(
+            initialDelay: Self.keepaliveInterval,
+            delay: Self.keepaliveInterval
+        ) { _ in
+            _ = MCPResponseEmitter.sendKeepalive(on: channel)
+        }
         state.withLockedValue { state in
-            state.isSSE = true
             state.sseSessionID = sessionID
+            state.sseKeepalive = keepalive
         }
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/event-stream")
@@ -380,20 +413,13 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         _ = sendEmpty(on: context.channel, status: .ok, keepAlive: head.isKeepAlive, sessionID: sessionID, requestLog: requestLog)
     }
 
-    private func handlePost(context: ChannelHandlerContext, head: HTTPRequestHead, requestLog: RequestLogContext) {
-        do {
-            try HTTPRequestValidator.validatePost(head.headers)
-        } catch HTTPRequestValidationFailure.notAcceptable {
-            _ = sendPlain(
-                on: context.channel,
-                status: .notAcceptable,
-                body: "client must accept application/json and text/event-stream",
-                keepAlive: head.isKeepAlive,
-                sessionID: nil,
-                requestLog: requestLog
-            )
-            return
-        } catch HTTPRequestValidationFailure.unsupportedMediaType {
+    private func handlePost(
+        context: ChannelHandlerContext,
+        head: HTTPRequestHead,
+        body: ByteBuffer?,
+        requestLog: RequestLogContext
+    ) {
+        guard HTTPRequestValidator.contentTypeIsJSON(head.headers) else {
             _ = sendPlain(
                 on: context.channel,
                 status: .unsupportedMediaType,
@@ -403,23 +429,8 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 requestLog: requestLog
             )
             return
-        } catch {
-            _ = sendPlain(
-                on: context.channel,
-                status: .badRequest,
-                body: "invalid request headers",
-                keepAlive: head.isKeepAlive,
-                sessionID: nil,
-                requestLog: requestLog
-            )
-            return
         }
 
-        let body = state.withLockedValue { state -> ByteBuffer? in
-            let body = state.bodyBuffer
-            state.bodyBuffer = nil
-            return body
-        }
         guard var body = body else {
             _ = sendPlain(on: context.channel, status: .badRequest, body: "missing body", keepAlive: head.isKeepAlive, sessionID: nil, requestLog: requestLog)
             return
@@ -497,21 +508,32 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
             session = acquired
         }
         let response = HTTPPostResponse()
-        // An `initialize` reply decides whether the session exists, so it is never streamed.
-        let progressRoute = isInitializeRequest ? nil : Self.progressToken(in: parsedRequestObject).flatMap { token in
+        // An `initialize` reply decides whether the session exists, so it is never streamed. A
+        // notification is answered with 202, which has no body to stream.
+        let streamsResponse = !isInitializeRequest
+            && parsedRequestObject.flatMap(JSONRPC.Message.Inspector.requestID(from:)) != nil
+            && HTTPRequestValidator.acceptsEventStream(head.headers)
+        let progressRoute = !streamsResponse ? nil : Self.progressToken(in: parsedRequestObject).flatMap { token in
             controlService.sessions.delivery.routeProgress(token, of: sessionID) { [self] data in
                 // Progress does not wait for earlier writes to complete, so a client that stops
                 // reading cannot make it queue up; the event loop still orders it before the reply.
                 scheduleResponseCompletion(eventLoop) {
-                    self.sendProgress(data, in: response, on: channel, keepAlive: keepAlive,
-                                      sessionID: sessionID.rawValue, requestLog: requestLog)
+                    self.sendStreamEvent(.message(data), in: response, on: channel, keepAlive: keepAlive,
+                                         sessionID: sessionID.rawValue, requestLog: requestLog)
                 }
             }
         }
+        let keepalive = !streamsResponse ? nil : eventLoop.scheduleRepeatedTask(
+            initialDelay: Self.keepaliveInterval,
+            delay: Self.keepaliveInterval
+        ) { [self] _ in
+            sendStreamEvent(.keepalive, in: response, on: channel, keepAlive: keepAlive,
+                            sessionID: sessionID.rawValue, requestLog: requestLog)
+        }
         let call = session.receive(request)
         state.withLockedValue { state in
-            state.activePostRequests[requestLog.id] = ActivePostRequest(call: call, sessionID: sessionID,
-                                                                        progressRoute: progressRoute)
+            state.activePostRequests[requestLog.id] = ActivePostRequest(
+                call: call, sessionID: sessionID, progressRoute: progressRoute, keepalive: keepalive)
         }
         Task {
             let reply = await call.reply
@@ -528,11 +550,11 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
                 responseSessionID = sessionID.rawValue
             }
             self.scheduleResponseCompletion(eventLoop) {
-                let writeFuture = self.enqueueOrderedWrite(on: channel) {
-                    self.sendPostResolution(reply, in: response, on: channel, keepAlive: keepAlive,
-                                            sessionID: responseSessionID,
-                                            requestLog: requestLog)
-                }
+                keepalive?.cancel()
+                // A client that left already had its request cancelled and its session released.
+                guard self.state.withLockedValue({ $0.activePostRequests[requestLog.id] != nil }) else { return }
+                let writeFuture = self.sendPostResolution(reply, in: response, on: channel, keepAlive: keepAlive,
+                                                          sessionID: responseSessionID, requestLog: requestLog)
                 writeFuture.whenFailure { error in
                     self.logger.warning(
                         "HTTP response write failed",
@@ -641,26 +663,4 @@ final class HTTPHandler: ChannelInboundHandler, Sendable {
         }
         return sessionID
     }
-
-    private func enqueueOrderedWrite(
-        on channel: Channel,
-        start: @escaping @Sendable () -> EventLoopFuture<Void>
-    ) -> EventLoopFuture<Void> {
-        let gate = channel.eventLoop.makePromise(of: Void.self)
-        let writePromise = channel.eventLoop.makePromise(of: Void.self)
-        let previous = state.withLockedValue { state in
-            let previous = state.responseWriteTail ?? channel.eventLoop.makeSucceededFuture(())
-            state.responseWriteTail = gate.futureResult
-            return previous
-        }
-        previous.whenComplete { _ in
-            let future = start()
-            future.cascade(to: writePromise)
-            future.whenComplete { _ in
-                gate.succeed(())
-            }
-        }
-        return writePromise.futureResult
-    }
-
 }

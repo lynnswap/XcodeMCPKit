@@ -354,19 +354,18 @@ struct TestHTTPHandlerServer {
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                return channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
-                    channel.pipeline.addHandler(
-                        HTTPHandler(
-                            config: ProxyHTTPConfiguration(
-                                listenHost: config.listenHost,
-                                listenPort: config.listenPort,
-                                maxBodyBytes: config.maxBodyBytes,
-                                enablesDebugEndpoints: config.enablesDebugEndpoints
-                            ),
-                            controlService: controlService
-                        )
+                ProxyHTTPChildChannelInitializer.configure(
+                    channel.pipeline,
+                    handler: HTTPHandler(
+                        config: ProxyHTTPConfiguration(
+                            listenHost: config.listenHost,
+                            listenPort: config.listenPort,
+                            maxBodyBytes: config.maxBodyBytes,
+                            enablesDebugEndpoints: config.enablesDebugEndpoints
+                        ),
+                        controlService: controlService
                     )
-                }
+                )
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 

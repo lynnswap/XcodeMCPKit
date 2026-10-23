@@ -171,48 +171,8 @@ struct HTTPHandlerTests {
         #expect(response.body.contains("text/event-stream"))
     }
 
-    @Test func httpPostRejectsUnknownAccept() async throws {
-        let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
-        let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
-
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "text/plain")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        var body = channel.allocator.buffer(capacity: 2)
-        body.writeString("{}")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
-
-        let response = try await collectResponse(from: channel)
-        #expect(response.head.status == .notAcceptable)
-    }
-
-    @Test func httpPostRequiresJSONAndEventStreamAcceptTypes() async throws {
-        let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
-        let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
-
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "application/json")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        var body = channel.allocator.buffer(capacity: 2)
-        body.writeString("{}")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
-
-        let response = try await collectResponse(from: channel)
-        #expect(response.head.status == .notAcceptable)
-        #expect(response.body == "client must accept application/json and text/event-stream")
-    }
-
-    @Test func httpPostAllowsRequiredAcceptTypesAcrossRepeatedHeaders() async throws {
+    /// A client that cannot read event streams is still served; its replies come as JSON.
+    @Test func httpPostWithoutEventStreamAcceptIsAnsweredWithJSON() async throws {
         let config = makeHTTPConfig()
         let channel = EmbeddedChannel()
         defer { _ = try? channel.finish() }
@@ -231,7 +191,6 @@ struct HTTPHandlerTests {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [])
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json")
-        head.headers.add(name: "Accept", value: "text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
@@ -480,6 +439,102 @@ struct HTTPHandlerTests {
         #expect(!runtime.hasSession(sessionID))
     }
 
+    /// The server keeps reading a connection whose response has not started, so it notices a
+    /// client that leaves a running request.
+    @Test func aClientThatLeavesARunningRequestIsNoticedOverTheNetwork() async throws {
+        let config = makeHTTPConfig(requestTimeout: 60)
+        let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
+        let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
+        let clientGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        do {
+            let sessionID = try await initializeHTTPSession(url: server.url)
+            let port = try #require(server.url.port)
+            let body = try JSONSerialization.data(
+                withJSONObject: toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]))
+            let client = try await ClientBootstrap(group: clientGroup).connect(host: config.listenHost, port: port).get()
+            let head = [
+                "POST /mcp HTTP/1.1", "Host: \(config.listenHost):\(port)", "Content-Type: application/json",
+                "Accept: application/json, text/event-stream", "Mcp-Session-Id: \(sessionID)",
+                "Content-Length: \(body.count)",
+            ]
+            var request = client.allocator.buffer(capacity: body.count + 256)
+            request.writeString(head.joined(separator: "\r\n") + "\r\n\r\n")
+            request.writeBytes(body)
+            try await client.writeAndFlush(request).get()
+            _ = try await runtime.waitForHostMessages("tools/call")
+
+            try await client.close().get()
+            _ = try await runtime.waitForHostMessages("notifications/cancelled")
+        } catch {
+            try? await clientGroup.shutdownGracefully()
+            try? await server.shutdown()
+            throw error
+        }
+        try await clientGroup.shutdownGracefully()
+        try await server.shutdown()
+    }
+
+    /// A reply slower than clients wait for a response to start comes on an event stream that
+    /// opens early and carries keepalives until the reply.
+    @Test func aSlowReplyComesOnAnEventStreamThatOpensEarly() async throws {
+        let config = makeHTTPConfig(requestTimeout: 60)
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
+        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        let sessionID = try await initializeHTTPChannel(channel)
+        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                     sessionID: sessionID, to: channel)
+        let held = try await runtime.waitForHostMessages("tools/call")
+        let hostRequestID = try #require(held.first?["id"])
+
+        channel.embeddedEventLoop.advanceTime(by: HTTPHandler.keepaliveInterval + HTTPHandler.keepaliveInterval)
+        let opened = try await collectResponse(from: channel)
+        #expect(opened.head.status == .ok)
+        #expect(opened.head.headers.first(name: "Content-Type") == "text/event-stream")
+        #expect(opened.body == ": keepalive\n\n: keepalive\n\n")
+
+        try #require(runtime.host).emit(.object(["jsonrpc": .string("2.0"), "id": hostRequestID,
+                                                 "result": .object(["content": .array([])])]))
+        var rest = ""
+        var ended = false
+        try runEmbedded(channel, until: "the reply ended the stream") {
+            while let part = try? channel.readOutbound(as: HTTPServerResponsePart.self) {
+                switch part {
+                case .body(.byteBuffer(var buffer)): rest += buffer.readString(length: buffer.readableBytes) ?? ""
+                case .end: ended = true
+                case .head, .body: break
+                }
+            }
+            return ended
+        }
+        #expect(rest.hasPrefix("data: "))
+        #expect(rest.contains(#""id":2"#))
+    }
+
+    /// Responses go out in request order, so a request sent before the previous response ended
+    /// closes the connection instead of being answered out of order.
+    @Test func aRequestBeforeThePreviousResponseEndsClosesTheConnection() async throws {
+        let config = makeHTTPConfig(requestTimeout: 60)
+        let channel = EmbeddedChannel()
+        defer { _ = try? channel.finish() }
+        let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
+        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        let sessionID = try await initializeHTTPChannel(channel)
+        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                     sessionID: sessionID, to: channel)
+        _ = try await runtime.waitForHostMessages("tools/call")
+        let closed = NIOLockedValueBox(false)
+        channel.closeFuture.whenComplete { _ in closed.withLockedValue { $0 = true } }
+
+        try channel.writeInbound(HTTPServerRequestPart.head(HTTPRequestHead(version: .http1_1, method: .GET,
+                                                                            uri: "/health")))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+
+        try runEmbedded(channel, until: "the connection closed") { closed.withLockedValue { $0 } }
+        #expect(try channel.readOutbound(as: HTTPServerResponsePart.self) == nil)
+    }
+
     /// A cancellation sent right after a request, on another connection, finds that request.
     @Test func aCancellationFindsTheRequestSentBeforeIt() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)
@@ -714,9 +769,11 @@ struct HTTPHandlerTests {
 
     @Test func httpHostMustNameTheListener() async throws {
         let cases: [(listenHost: String, hosts: [String], allowed: Bool)] = [
-            ("127.0.0.1", ["localhost:8765", "LOCALHOST:8765", "127.0.0.1:8765", "[::1]:8765"], true),
-            ("127.0.0.1", ["attacker.example:8765", "localhost.attacker.example:8765", "localhost:8766",
-                           "localhost", "user@localhost:8765", "localhost:8765/path", ""], false),
+            // A port forward delivers the client's port, not the listener's.
+            ("127.0.0.1", ["localhost:8765", "LOCALHOST:8765", "127.0.0.1:8765", "[::1]:8765", "localhost:9000",
+                           "localhost"], true),
+            ("127.0.0.1", ["attacker.example:8765", "localhost.attacker.example:8765",
+                           "user@localhost:8765", "localhost:8765/path", ""], false),
             ("0.0.0.0", ["192.168.1.10:8765", "localhost:8765"], true),
             ("0.0.0.0", ["attacker.example:8765"], false),
             ("mac.example", ["mac.example:8765", "192.168.1.10:8765"], true),
@@ -1337,32 +1394,6 @@ struct HTTPHandlerTests {
         #expect(params["requestId"] == heldID)
     }
 
-    @Test func httpPostRequiresBothJSONAndEventStreamAcceptTypes() async throws {
-        let config = makeHTTPConfig(requestTimeout: 0.1)
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
-        let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
-        let sessionID = try await initializeHTTPChannel(channel)
-
-        let data = try JSONSerialization.data(withJSONObject: toolsListPayload(id: 2002), options: [])
-        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
-        head.headers.add(name: "Accept", value: "text/event-stream")
-        head.headers.add(name: "Content-Type", value: "application/json")
-        head.headers.add(name: "Mcp-Session-Id", value: sessionID)
-        head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
-        var body = channel.allocator.buffer(capacity: data.count)
-        body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
-
-        let response = try await collectResponse(from: channel)
-        #expect(response.head.status == .notAcceptable)
-        #expect(response.head.headers.first(name: "Content-Type") == "text/plain; charset=utf-8")
-        #expect(response.body == "client must accept application/json and text/event-stream")
-    }
-
     @Test func httpMalformedJSONReturnsParseErrorBeforeUpstreamUnavailable() async throws {
         let config = makeHTTPConfig()
         let channel = EmbeddedChannel()
@@ -1477,6 +1508,14 @@ struct HTTPHandlerTests {
         #expect(response.head.status == .ok)
         #expect(response.head.headers.first(name: "Content-Type") == "text/event-stream")
         #expect(response.body.contains(": ok"))
+
+        // Clients drop an event stream that stays silent for a few minutes.
+        channel.embeddedEventLoop.advanceTime(by: HTTPHandler.keepaliveInterval)
+        guard case .body(.byteBuffer(var keepalive))? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+            Issue.record("the idle event stream carried no keepalive")
+            return
+        }
+        #expect(keepalive.readString(length: keepalive.readableBytes) == ": keepalive\n\n")
     }
 
     @Test func httpToolsListReturnsThePublicCatalog() async throws {

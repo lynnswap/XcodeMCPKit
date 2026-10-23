@@ -20,15 +20,10 @@ package final class ProxyHTTPChildChannelInitializer: @unchecked Sendable {
 
     package func initialize(_ channel: Channel) -> EventLoopFuture<Void> {
         controlService.startSessionExpirySweep(on: channel.eventLoop)
-        let pipeline = channel.pipeline
-        return pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
-            pipeline.addHandler(
-                HTTPHandler(
-                    config: self.config,
-                    controlService: self.controlService
-                )
-            )
-        }.flatMapError { error in
+        return Self.configure(
+            channel.pipeline,
+            handler: HTTPHandler(config: config, controlService: controlService)
+        ).flatMapError { error in
             self.logger.warning(
                 "Child channel initialization failed.",
                 metadata: [
@@ -36,6 +31,15 @@ package final class ProxyHTTPChildChannelInitializer: @unchecked Sendable {
                 ]
             )
             return channel.eventLoop.makeFailedFuture(error)
+        }
+    }
+
+    /// Adds the HTTP server pipeline that ends in `handler`.
+    static func configure(_ pipeline: ChannelPipeline, handler: HTTPHandler) -> EventLoopFuture<Void> {
+        // NIO's pipelining assistance stops reading while a response is pending, so a client that
+        // leaves an event stream or a running request would never be noticed.
+        pipeline.configureHTTPServerPipeline(withPipeliningAssistance: false, withErrorHandling: true).flatMap {
+            pipeline.addHandler(handler)
         }
     }
 
