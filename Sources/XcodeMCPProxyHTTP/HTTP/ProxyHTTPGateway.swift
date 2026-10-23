@@ -388,11 +388,13 @@ private final class ProxyAcceptedChannelHandler: ChannelInboundHandler, Sendable
         context.fireChannelRead(data)
     }
 
-    /// NIO retries a failed accept without reporting it, and the kernel resets the connection, so
-    /// running out of file descriptors would otherwise look to clients like a server that drops
-    /// every connection.
+    /// NIO retries an accept that failed for lack of file descriptors or memory without reporting
+    /// it, while the kernel resets the client, so clients would see a server that drops every
+    /// connection. Other accept failures concern a client that already left.
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
-        logger.warning("Failed to accept an HTTP connection", metadata: ["error": "\(error)"])
+        if let error = error as? IOError, [EMFILE, ENFILE, ENOBUFS, ENOMEM].contains(error.errnoCode) {
+            logger.warning("Failed to accept an HTTP connection", metadata: ["error": "\(error)"])
+        }
         context.fireErrorCaught(error)
     }
 }
