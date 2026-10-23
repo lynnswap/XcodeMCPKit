@@ -7,7 +7,6 @@ import XcodeMCPCoreTestSupport
 package typealias AsyncTestTimeoutError = XcodeMCPCoreTestSupport.AsyncTestTimeoutError
 package typealias AsyncTestCleanupTrait = XcodeMCPCoreTestSupport.AsyncTestCleanupTrait
 package typealias RecordedValues<Value: Sendable> = XcodeMCPCoreTestSupport.RecordedValues<Value>
-package typealias TestResourceGate = XcodeMCPCoreTestSupport.TestResourceGate
 package typealias TestClock = XcodeMCPCoreTestSupport.TestClock
 
 @discardableResult
@@ -567,21 +566,6 @@ package actor AsyncGate {
             Task {
                 await self.cancelWaiter(id: waiterID)
             }
-        }
-    }
-
-    package func waitIgnoringCancellation() async {
-        if isOpen {
-            return
-        }
-
-        try? await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
-            if isOpen {
-                continuation.resume(returning: ())
-                return
-            }
-            waiters.append(Waiter(id: UUID(), continuation: continuation))
         }
     }
 

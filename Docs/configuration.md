@@ -46,7 +46,7 @@ retains that host for subsequent operations. See
 
 ## Server options
 
-Use `xcode-mcp-proxy-server --help` and `xcode-mcp-proxy --help` for CLI usage.
+Use `xcode-mcp-proxy-server --help` for CLI usage.
 
 | Option | Description |
 | --- | --- |
@@ -86,7 +86,6 @@ for admission and completion boundaries.
 | `XCODE_MCP_NATIVE_HOST_BUNDLE` | Helper bundle override for custom embedded/install layouts. |
 | `DEVELOPER_DIR` | Xcode selection for the native host. |
 | `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, or `critical`. Defaults to `info`; `debug` includes HTTP access and routing telemetry. |
-| `XCODE_MCP_PROXY_ENDPOINT` | STDIO adapter upstream URL. `--url` takes precedence. |
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
 | `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root for the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
 

@@ -8,13 +8,6 @@ import XcodeMCPCoreTestSupport
 @Suite
 struct PublicProductContractTests {
     @Test func publicProductsCompileFromExternalSwiftPMTargets() async throws {
-        // Avoid false 5s STDIO adapter timeouts while this test runs nested swift build processes.
-        try await TestResourceGate.withProcessHeavyStdioAdapterAccess {
-            try await runPublicProductsCompileFromExternalSwiftPMTargets()
-        }
-    }
-
-    private func runPublicProductsCompileFromExternalSwiftPMTargets() async throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -744,10 +737,7 @@ private let removedSurfaceChecks: [(
         }
         """,
         [
-            "has no member 'LaunchAction'",
-            "has no member 'LaunchOptions'",
-            "has no member 'resolveLaunchPlan'",
-            "type 'XcodeMCPProxyStdioAdapter' has no member",
+            "cannot find 'XcodeMCPProxyStdioAdapter' in scope",
         ]
     ),
     (
@@ -1112,20 +1102,13 @@ func compileOnlyProxyConfigurationSurface() {
     let typedCapabilities: [String: MCPJSONValue]? = typedHandshake?.capabilities
     let metadataIsNull = typedCapabilities?["experimental"]?.objectValue?["metadata"]?.isNull
     let server = XcodeMCPProxyServer(configuration: config)
-    let adapterConfig = XcodeMCPProxyStdioAdapterConfiguration(
-        endpoint: .url(URL(string: "http://localhost:8765/mcp")!),
-        requestTimeout: .seconds(30)
-    )
-    let adapter = try? XcodeMCPProxyStdioAdapter(configuration: adapterConfig)
 
     _ = (
         config,
         typedHandshake,
         typedCapabilities,
         metadataIsNull,
-        server,
-        adapterConfig,
-        adapter
+        server
     )
 }
 
@@ -1141,28 +1124,7 @@ func compileOnlyProxyLaunchSurface() async throws {
         stdout: runnerStdout,
         stderr: runnerStderr
     )
-    let adapterExitCode = await XcodeMCPProxyStdioAdapter.run(
-        arguments: [
-            "xcode-mcp-proxy",
-            "--version",
-        ],
-        environment: [:],
-        stdout: runnerStdout,
-        stderr: runnerStderr
-    )
-    _ = (
-        serverExitCode,
-        adapterExitCode
-    )
-}
-
-func compileOnlyAdapterLifecycleSurface(
-    adapter: XcodeMCPProxyStdioAdapter
-) async throws {
-    try await adapter.start()
-    _ = await adapter.connectionState()
-    await adapter.stop()
-    await adapter.waitUntilStopped()
+    _ = serverExitCode
 }
 
 func compileOnlyProxyLifecycleSurface(server: XcodeMCPProxyServer) async throws {

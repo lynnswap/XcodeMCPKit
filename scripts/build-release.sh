@@ -52,7 +52,6 @@ fi
 out_dir="$dist_base/$arch"
 bin_out="$out_dir/bin"
 products=(
-  "xcode-mcp-proxy"
   "xcode-mcp-proxy-server"
 )
 

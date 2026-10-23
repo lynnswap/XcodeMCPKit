@@ -137,10 +137,7 @@ struct InstallerFacadeTests {
         #expect(plan.nativeHostBundle.destinationURL.path == "/tmp/bin/XcodeMCPNativeHost.app")
         #expect(plan.binaries.map(\.name) == XcodeMCPProxyInstaller.binaryNames)
         #expect(
-            plan.binaries.map(\.destinationURL.lastPathComponent) == [
-                "xcode-mcp-proxy",
-                "xcode-mcp-proxy-server",
-            ])
+            plan.binaries.map(\.destinationURL.lastPathComponent) == ["xcode-mcp-proxy-server"])
     }
 }
 

@@ -83,22 +83,6 @@ Restart clients that are already running after changing their configuration.
 
 </details>
 
-<details>
-<summary>Clients that require STDIO</summary>
-
-Keep the HTTP server running and register the bundled STDIO adapter:
-
-```bash
-codex mcp add xcode -- xcode-mcp-proxy
-# Or, for Claude Code:
-claude mcp add --transport stdio xcode -- xcode-mcp-proxy
-```
-
-For a source installation, use the adapter's full path in the chosen installation
-directory in place of `xcode-mcp-proxy`.
-
-</details>
-
 ## Other installation options
 
 <details>

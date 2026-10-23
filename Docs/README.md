@@ -11,7 +11,7 @@
 ## Use the Swift libraries
 
 - [XcodeMCPKit](../Sources/XcodeMCPKit/README.md): discover and call MCP tools.
-- [XcodeMCPProxyKit](../Sources/XcodeMCPProxyKit/README.md): embed the server or STDIO adapter.
+- [XcodeMCPProxyKit](../Sources/XcodeMCPProxyKit/README.md): embed the server.
 - [XcodeMCPKitTesting](../Sources/XcodeMCPKitTesting/README.md): use the client API with an in-memory runtime.
 
 ## Maintain the project

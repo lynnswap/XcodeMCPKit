@@ -10,37 +10,73 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import urllib.request
 
 
-async def request(process, identifier, method, params=None):
-    message = dict(jsonrpc="2.0", method=method)
+def message(identifier, method, params):
+    body = dict(jsonrpc="2.0", method=method)
     if identifier is not None:
-        message["id"] = identifier
+        body["id"] = identifier
     if params is not None:
-        message["params"] = params
-    process.stdin.write(json.dumps(message).encode() + b"\n")
-    await process.stdin.drain()
-    if identifier is None:
-        return None
-    while line := await asyncio.wait_for(process.stdout.readline(), timeout=90):
-        result = json.loads(line)
-        if result.get("id") != identifier:
-            continue
-        if "error" in result:
-            raise RuntimeError(f"{method}: {result['error']}")
-        return result["result"]
-    raise RuntimeError(f"MCP process exited before answering {method}")
+        body["params"] = params
+    return body
 
 
-async def exercise(process, fixture):
-    await request(process, 1, "initialize", dict(protocolVersion="2025-06-18", capabilities={},
-                                              clientInfo=dict(name="XcodeMCPKitHomebrewTest", version="1")))
-    await request(process, None, "notifications/initialized")
-    tools = await request(process, 2, "tools/list")
+def result_of(reply, method):
+    if "error" in reply:
+        raise RuntimeError(f"{method}: {reply['error']}")
+    return reply["result"]
+
+
+def stdio_client(process):
+    async def request(identifier, method, params=None):
+        process.stdin.write(json.dumps(message(identifier, method, params)).encode() + b"\n")
+        await process.stdin.drain()
+        if identifier is None:
+            return None
+        while line := await asyncio.wait_for(process.stdout.readline(), timeout=90):
+            reply = json.loads(line)
+            if reply.get("id") == identifier:
+                return result_of(reply, method)
+        raise RuntimeError(f"MCP process exited before answering {method}")
+    return request
+
+
+def http_client(endpoint):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    session = {}
+
+    def post(identifier, method, params):
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        if "id" in session:
+            headers["Mcp-Session-Id"] = session["id"]
+        body = json.dumps(message(identifier, method, params)).encode()
+        with opener.open(urllib.request.Request(endpoint, data=body, headers=headers), timeout=90) as response:
+            session.setdefault("id", response.headers.get("Mcp-Session-Id"))
+            text = response.read().decode()
+            if identifier is None:
+                return None
+            # A slow reply comes as an event stream that ends with the response.
+            if response.headers.get_content_type() == "text/event-stream":
+                replies = [json.loads(line[len("data:"):]) for line in text.splitlines() if line.startswith("data:")]
+            else:
+                replies = [json.loads(text)]
+        return result_of(next(reply for reply in replies if reply.get("id") == identifier), method)
+
+    async def request(identifier, method, params=None):
+        return await asyncio.to_thread(post, identifier, method, params)
+    return request
+
+
+async def exercise(request, fixture):
+    await request(1, "initialize", dict(protocolVersion="2025-06-18", capabilities={},
+                                     clientInfo=dict(name="XcodeMCPKitHomebrewTest", version="1")))
+    await request(None, "notifications/initialized")
+    tools = await request(2, "tools/list")
     names = {tool["name"] for tool in tools["tools"]}
     if not {"XcodeRead", "XcodeListWorkspaces"} <= names:
         raise RuntimeError("Installed native backend is missing required headless tools")
-    result = await request(process, 3, "tools/call", dict(name="XcodeRead", arguments=dict(
+    result = await request(3, "tools/call", dict(name="XcodeRead", arguments=dict(
         workspaceIdentifier=str(fixture / "ProxyToolVerifierFixture.xcodeproj"),
         filePath="ProxyToolVerifierFixture/VerifierCore.swift", limit=40)))
     if result.get("isError") or "VerifierCore" not in json.dumps(result):
@@ -76,12 +112,10 @@ def verify_closed_pipes(executable, artifacts, environment):
 
 async def verify(prefix, version, fixture_source):
     server = prefix / "bin/xcode-mcp-proxy-server"
-    adapter = prefix / "bin/xcode-mcp-proxy"
     bundle = prefix / "libexec/XcodeMCPNativeHost.app"
-    for executable in (server, adapter):
-        actual = subprocess.check_output([str(executable), "--version"], text=True).strip()
-        if actual != version:
-            raise RuntimeError(f"{executable.name}: expected {version}, got {actual}")
+    actual = subprocess.check_output([str(server), "--version"], text=True).strip()
+    if actual != version:
+        raise RuntimeError(f"{server.name}: expected {version}, got {actual}")
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], check=True)
     with tempfile.TemporaryDirectory(prefix="xcodemcp-homebrew-") as temporary:
         root = Path(temporary)
@@ -108,7 +142,7 @@ async def verify(prefix, version, fixture_source):
             try:
                 native = await launch(bundle / "Contents/MacOS/xcode-mcp-native-host",
                                       "--artifacts-root", root / "native-artifacts")
-                await exercise(native, fixture)
+                await exercise(stdio_client(native), fixture)
                 native.stdin.close()
                 await asyncio.wait_for(native.wait(), timeout=30)
                 if native.returncode:
@@ -120,12 +154,7 @@ async def verify(prefix, version, fixture_source):
                             raise RuntimeError(f"Proxy exited with {proxy.returncode}")
                         await asyncio.sleep(0.05)
                 endpoint = json.loads(discovery.read_text())["url"]
-                client = await launch(adapter, "--url", endpoint)
-                await exercise(client, fixture)
-                client.stdin.close()
-                await asyncio.wait_for(client.wait(), timeout=30)
-                if client.returncode:
-                    raise RuntimeError(f"STDIO adapter exited with {client.returncode}")
+                await exercise(http_client(endpoint), fixture)
             except BaseException:
                 log.flush()
                 print((root / "process.log").read_text(errors="replace"), flush=True)
@@ -139,7 +168,7 @@ async def verify(prefix, version, fixture_source):
                         except TimeoutError:
                             os.killpg(process.pid, signal.SIGKILL)
                             await process.wait()
-    print("Installed CLI versions, native signature, early disconnect, direct MCP, and proxy MCP passed.")
+    print("Installed CLI version, native signature, early disconnect, direct MCP, and proxy MCP passed.")
 
 
 def main():

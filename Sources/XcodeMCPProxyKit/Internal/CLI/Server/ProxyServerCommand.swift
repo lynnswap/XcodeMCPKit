@@ -10,8 +10,7 @@ package struct ProxyServerCommand: ParsableCommand {
             abstract: "Start the Streamable HTTP proxy server for Xcode MCP.",
             discussion: """
                 The server locates its native helper and selected Xcode installation automatically.
-                HTTP-capable clients should connect directly; use xcode-mcp-proxy only for
-                STDIO compatibility.
+                MCP clients connect to its Streamable HTTP endpoint.
                 """,
             version: XcodeMCPProxyServer.productMetadata.version
         )

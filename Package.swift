@@ -28,10 +28,6 @@ let package = Package(
             targets: ["XcodeMCPProxyKit"]
         ),
         .executable(
-            name: "xcode-mcp-proxy",
-            targets: ["XcodeMCPProxyCLI"]
-        ),
-        .executable(
             name: "xcode-mcp-proxy-server",
             targets: ["XcodeMCPProxyServer"]
         ),
@@ -204,13 +200,6 @@ let package = Package(
             swiftSettings: strictSwiftSettings
         ),
         .executableTarget(
-            name: "XcodeMCPProxyCLI",
-            dependencies: [
-                "XcodeMCPProxyKit"
-            ],
-            swiftSettings: strictSwiftSettings
-        ),
-        .executableTarget(
             name: "XcodeMCPProxyServer",
             dependencies: ["XcodeMCPProxyKit"],
             swiftSettings: strictSwiftSettings
@@ -313,17 +302,6 @@ let package = Package(
                 "XcodeMCPCoreTestSupport",
             ],
             path: "Tests/XcodeMCPProcessRuntimeTests",
-            swiftSettings: strictSwiftSettings
-        ),
-        .testTarget(
-            name: "ProxyStdioAdapterTests",
-            dependencies: [
-                "XcodeMCPCore",
-                "XcodeMCPKit",
-                "XcodeMCPProxyKit",
-                "XcodeMCPProxyTestSupport",
-            ],
-            path: "Tests/ProxyStdioAdapterTests",
             swiftSettings: strictSwiftSettings
         ),
         .testTarget(

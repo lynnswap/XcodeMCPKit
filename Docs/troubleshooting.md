@@ -52,8 +52,8 @@ code, and context in stderr or the tool failure. `Native workspace cleanup faile
 reports cleanup of a removed model; resolve that failure before retrying against
 the same removed workspace.
 
-The proxy and the STDIO adapter do not limit how long a request runs, so the
-client's own timeout decides; the SDK defaults to 600 seconds. `RenderPreview` defaults to
+The proxy does not limit how long a request runs, so the client's own timeout
+decides; the SDK defaults to 600 seconds. `RenderPreview` defaults to
 300 seconds for build/render work, with initial preparation and cleanup outside
 that budget. Give the external client enough time for the entire request.
 For Codex, set `tool_timeout_sec` in the registered server entry, for example:
@@ -64,8 +64,7 @@ url = "http://localhost:8765/mcp"
 tool_timeout_sec = 600
 ```
 
-For STDIO registrations, keep the existing `command`/`args` and add the same
-`tool_timeout_sec` setting. A closed transport can also mean a process exited;
+A closed transport can also mean a process exited;
 check server stderr and reachability instead of treating every disconnect as a
 timeout.
 
@@ -85,18 +84,12 @@ developer documentation and restart the server. Selection failure does not block
 other tools and leaves Xcode's existing configuration in effect. A catalog entry
 proves discovery only; call the tool to verify search execution.
 
-## HTTP or STDIO cannot connect
+## A client cannot connect
 
 Ensure the proxy is running and check its URL, normally
 `http://localhost:8765/mcp`. The discovery record at
 `~/Library/Caches/XcodeMCPProxy/endpoint.json` is a URL hint, not proof that the
-server is reachable. For a different STDIO endpoint, use:
-
-```sh
-xcode-mcp-proxy --url http://localhost:9000/mcp
-```
-
-`XCODE_MCP_PROXY_ENDPOINT` also configures the adapter; `--url` takes precedence.
+server is reachable.
 For `Address already in use` / `errno: 48`, stop the known listener or use
 `xcode-mcp-proxy-server --force-restart` to replace a proxy on the selected port.
 
@@ -108,7 +101,7 @@ negotiated supported version; omitted versions use the session's negotiation.
 See the [HTTP contract](architecture.md#streamable-http-contract).
 
 `session not found` means the ID is unknown, deleted, or expired. Initialize a
-new session after `404`; the SDK and STDIO adapter handle this recovery. Sessions
+new session after `404`; the SDK handles this recovery. Sessions
 expire after five minutes without client activity, an in-flight request, or an
 open SSE stream. Recovered MCP sessions require fresh workspace/session handles.
 For `protocol version required` or `protocol version mismatch`, reinitialize a
