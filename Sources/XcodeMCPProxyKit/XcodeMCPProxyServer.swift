@@ -191,9 +191,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
 /// application decides to call ``shutdown()``. Start returns the resolved
 /// endpoint.
 ///
-/// The server exposes the proxy lifecycle. CLI parsing, STDIO adapter behavior,
-/// and internal session routing are intentionally handled outside this public
-/// type.
+/// The server exposes the proxy lifecycle. CLI parsing and internal session
+/// routing are intentionally handled outside this public type.
 public final class XcodeMCPProxyServer: Sendable {
     /// A resolved Streamable HTTP proxy endpoint.
     public struct Endpoint: Equatable, Sendable {

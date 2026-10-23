@@ -20,11 +20,9 @@ struct InstallerFacadeIntegrationTests {
             stdout: { output.append($0) }
         )
 
-        let expectedProxy = bindir.appendingPathComponent("xcode-mcp-proxy").path
         let expectedServer = bindir.appendingPathComponent("xcode-mcp-proxy-server").path
         #expect(output.snapshot() == [
             "Would create: \(bindir.path)",
-            "Would install: \(expectedProxy)",
             "Would install: \(expectedServer)",
             "Would install: \(bindir.appendingPathComponent(XcodeMCPProxyInstaller.nativeHostBundleName).path)",
         ])
@@ -37,10 +35,8 @@ struct InstallerFacadeIntegrationTests {
         defer { installDir.cleanup() }
 
         let installerURL = sourceDir.url.appendingPathComponent("xcode-mcp-proxy-install")
-        let proxyURL = sourceDir.url.appendingPathComponent("xcode-mcp-proxy")
         let serverURL = sourceDir.url.appendingPathComponent("xcode-mcp-proxy-server")
         try Data("installer".utf8).write(to: installerURL)
-        try Data("proxy".utf8).write(to: proxyURL)
         try Data("server".utf8).write(to: serverURL)
         try writeNativeHostFixture(in: sourceDir.url, output: "native")
 
@@ -61,17 +57,11 @@ struct InstallerFacadeIntegrationTests {
         #expect(buildCalls.value == 0)
         #expect(
             try String(
-                contentsOf: installDir.url.appendingPathComponent("xcode-mcp-proxy"),
-                encoding: .utf8
-            ) == "proxy"
-        )
-        #expect(
-            try String(
                 contentsOf: installDir.url.appendingPathComponent("xcode-mcp-proxy-server"),
                 encoding: .utf8
             ) == "server"
         )
-        #expect(output.snapshot().count == 3)
+        #expect(output.snapshot().count == 2)
     }
 
     @Test func replacesExistingExecutablesAfterPreparingTheirPermissions() throws {
@@ -144,7 +134,7 @@ struct InstallerFacadeIntegrationTests {
         }
     }
 
-    @Test func stagingFailurePreservesBothInstalledExecutablesAndRemovesPartialCopies() throws {
+    @Test func stagingFailurePreservesTheInstalledExecutableAndRemovesPartialCopies() throws {
         let source = try TemporaryDirectory()
         defer { source.cleanup() }
         let destination = try TemporaryDirectory()
@@ -173,29 +163,26 @@ struct InstallerFacadeIntegrationTests {
         let destination = try TemporaryDirectory()
         defer { destination.cleanup() }
         try writeExecutables(in: source.url, output: "new")
-        let proxy = destination.url.appendingPathComponent("xcode-mcp-proxy")
         let server = destination.url.appendingPathComponent("xcode-mcp-proxy-server")
-        try Data("old".utf8).write(to: proxy)
-        try FileManager.default.createDirectory(at: server, withIntermediateDirectories: false)
-        let marker = server.appendingPathComponent("untouched")
-        try Data("existing directory".utf8).write(to: marker)
+        let bundle = destination.url.appendingPathComponent(XcodeMCPProxyInstaller.nativeHostBundleName)
         let output = CapturedLines()
 
         let error = try #require(throws: XcodeMCPProxyInstaller.Error.self) {
-            try install(
-                from: source.url,
-                to: destination.url,
+            try XcodeMCPProxyInstaller(configuration: .init(binaryDirectory: destination.url.path)).install(
+                executableURL: source.url.appendingPathComponent("xcode-mcp-proxy-install"),
                 fileManager: FailingInstallFileManager(failCleanup: failCleanup),
+                buildProducts: { _, _, _ in },
+                verifyNativeHostBundle: verifyNativeHostFixture,
+                replaceNativeHostBundle: { _, _ in throw XcodeMCPProxyInstaller.Error.message("injected bundle failure") },
                 stdout: { output.append($0) }
             )
         }
 
-        #expect(error.description.contains("Failed to install xcode-mcp-proxy-server"))
-        #expect(error.description.contains("Installed: \(proxy.path)\nNot installed: \(server.path), \(destination.url.appendingPathComponent(XcodeMCPProxyInstaller.nativeHostBundleName).path)"))
+        #expect(error.description.contains("Failed to install \(XcodeMCPProxyInstaller.nativeHostBundleName)"))
+        #expect(error.description.contains("Installed: \(server.path)\nNot installed: \(bundle.path)"))
         #expect(error.description.contains("injected cleanup failure") == failCleanup)
-        #expect(try runExecutable(proxy) == "new")
-        #expect(try String(contentsOf: marker, encoding: .utf8) == "existing directory")
-        #expect(output.snapshot() == ["Installed xcode-mcp-proxy to \(proxy.path)"])
+        #expect(try runExecutable(server) == "new")
+        #expect(output.snapshot() == ["Installed xcode-mcp-proxy-server to \(server.path)"])
         let stagingDirectories = try FileManager.default.contentsOfDirectory(
             at: destination.url,
             includingPropertiesForKeys: nil
@@ -203,7 +190,7 @@ struct InstallerFacadeIntegrationTests {
         #expect(stagingDirectories.count == (failCleanup ? 1 : 0))
         if let staging = stagingDirectories.first {
             #expect(error.description.contains(destination.url.appendingPathComponent(staging.lastPathComponent).path))
-            #expect(try runExecutable(staging.appendingPathComponent("xcode-mcp-proxy-server")) == "new")
+            #expect(try nativeFixtureContent(in: staging) == "new")
         }
     }
 
@@ -335,7 +322,7 @@ struct InstallerFacadeIntegrationTests {
         #expect(try nativeFixtureContent(in: staging) == "old")
     }
 
-    @Test func cleanupFailureReportsThatBothExecutablesWereInstalled() throws {
+    @Test func cleanupFailureReportsThatTheExecutableWasInstalled() throws {
         let source = try TemporaryDirectory()
         defer { source.cleanup() }
         let destination = try TemporaryDirectory()

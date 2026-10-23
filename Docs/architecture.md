@@ -9,8 +9,6 @@ clients do not switch tool catalogs when moving between GUI and headless work.
 ```mermaid
 flowchart LR
   client["MCP client"] -->|"Streamable HTTP"| proxy["Public tool contract"]
-  stdio["STDIO client"] --> adapter["xcode-mcp-proxy"]
-  adapter -->|"Streamable HTTP"| proxy
   proxy --> handles["Workspace and session handles"]
   handles --> headless["Owned native host"]
   handles --> gui["GUI Xcode bridge"]
@@ -86,8 +84,7 @@ The server binds `localhost:8765` by default. `--listen`, `--host`, `--port`, an
 `LISTEN` / `HOST` / `PORT` select another address. Endpoint discovery uses
 `~/Library/Caches/XcodeMCPProxy/endpoint.json` unless overridden.
 
-The STDIO adapter resolves explicit `--url`, `XCODE_MCP_PROXY_ENDPOINT`, the
-discovery file, then `http://localhost:8765/mcp`. The Swift client's default
+The Swift client's default
 `.streamableHTTPProxyDiscovery()` reads the proxy discovery record and requires
 a running server. Explicit standalone `.localBridge(.nativeHost(...))` starts
 an owned headless host.

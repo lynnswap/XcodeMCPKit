@@ -1,11 +1,10 @@
 import Testing
-@testable import class XcodeMCPCoreTestSupport.AsyncResourceGate
 import XcodeMCPProxyTestSupport
 
 @Suite(.asyncTestCleanup)
 struct AsyncTestSupportCancellationTests {
     enum PendingWait: CaseIterable, Sendable {
-        case signal, lockedValues, indexedValues, matchingValues, gate, keyedGate, keyedGateObservation, resource
+        case signal, lockedValues, indexedValues, matchingValues, gate, keyedGate, keyedGateObservation
     }
 
     @Test(arguments: PendingWait.allCases)
@@ -15,23 +14,6 @@ struct AsyncTestSupportCancellationTests {
         let values = RecordedValues<Int>()
         let gate = AsyncGate()
         let keyedGate = OperationGate<String>()
-        let resource = AsyncResourceGate()
-        let resourceHeld = TestSignal()
-        let releaseResource = AsyncGate()
-        let resourceHolder = wait == .resource ? Task {
-            try await resource.withAccess {
-                resourceHeld.signal()
-                await releaseResource.waitIgnoringCancellation()
-            }
-        } : nil
-        registerAsyncTestCleanup(description: "release cancellation-test resource owner") {
-            await releaseResource.signal()
-            resourceHolder?.cancel()
-            _ = try? await resourceHolder?.value
-        }
-        if resourceHolder != nil {
-            try await resourceHeld.wait(description: "resource owner acquired its permit")
-        }
         let task = Task {
             unsafe withUnsafeCurrentTask { task in unsafe task?.cancel() }
             do {
@@ -43,7 +25,6 @@ struct AsyncTestSupportCancellationTests {
                 case .gate: try await gate.wait()
                 case .keyedGate: try await keyedGate.wait(for: "key")
                 case .keyedGateObservation: try await keyedGate.waitUntilWaiting(for: "key", count: 1)
-                case .resource: try await resource.withAccess {}
                 }
                 return false
             } catch is CancellationError {
@@ -68,8 +49,6 @@ struct AsyncTestSupportCancellationTests {
         try await keyedGate.waitUntilWaiting(for: "key", count: 1)
         await keyedGate.release("key", count: 2)
         _ = await observationRelease.value
-        await releaseResource.signal()
-        _ = try await resourceHolder?.value
         _ = await task.value
         #expect(cancelledWithoutRelease)
     }

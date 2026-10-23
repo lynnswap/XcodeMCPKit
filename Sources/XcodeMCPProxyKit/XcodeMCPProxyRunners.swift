@@ -36,38 +36,6 @@ extension XcodeMCPProxyServer {
     }
 }
 
-extension XcodeMCPProxyStdioAdapter {
-    /// Runs the `xcode-mcp-proxy` STDIO adapter command-line facade.
-    ///
-    /// This helper parses the same arguments and environment accepted by the
-    /// executable, resolves the Streamable HTTP endpoint, starts the adapter
-    /// when requested, and returns a process-style exit code. Display output is
-    /// sent to `stdout`; validation and launch errors are sent to `stderr`.
-    /// Hosts that want swift-log output should configure logging before calling
-    /// this method.
-    ///
-    /// - Parameters:
-    ///   - arguments: Command-line arguments, including the executable name.
-    ///   - environment: Environment variables used for endpoint resolution.
-    ///   - stdout: Callback for standard output lines.
-    ///   - stderr: Callback for standard error lines.
-    /// - Returns: `0` for success, or a nonzero exit code for launch or
-    ///   validation failures.
-    public static func run(
-        arguments: [String],
-        environment: [String: String],
-        stdout: @escaping @Sendable (String) -> Void,
-        stderr: @escaping @Sendable (String) -> Void
-    ) async -> Int32 {
-        return await Launcher().run(
-            arguments: arguments,
-            environment: environment,
-            stdout: stdout,
-            stderr: stderr
-        )
-    }
-}
-
 extension XcodeMCPProxyInstaller {
     package static func run(
         arguments: [String],

@@ -105,7 +105,6 @@ package struct XcodeMCPProxyInstaller: Sendable {
 
     /// Executable product names installed by the source installer.
     package static let binaryNames = [
-        "xcode-mcp-proxy",
         "xcode-mcp-proxy-server",
     ]
 

@@ -31,12 +31,7 @@ struct CLIUsageContractTests {
         #expect(help.contains("--xcode-pid") == false)
     }
 
-    @Test func adapterAndInstallerHelpComeFromTheirCommandDefinitions() {
-        let adapterHelp = ProxyAdapterCommand.helpMessage()
-        #expect(adapterHelp.contains("USAGE: xcode-mcp-proxy"))
-        #expect(adapterHelp.contains("--url <url>"))
-        #expect(adapterHelp.contains("--request-timeout <request-timeout>"))
-
+    @Test func installerHelpComesFromItsCommandDefinition() {
         let installerHelp = XcodeMCPProxyInstaller.installUsage
         #expect(installerHelp.contains("USAGE: xcode-mcp-proxy-install"))
         #expect(installerHelp.contains("--bindir <path>"))

@@ -14,7 +14,7 @@ __EXPLICIT_VERSION__
   def install
     system "scripts/build-release.sh", "--version", "v#{version}", "--dist-root", buildpath/"products"
     libexec.install Dir["products/arm64/bin/*"]
-    bin.install_symlink libexec/"xcode-mcp-proxy", libexec/"xcode-mcp-proxy-server"
+    bin.install_symlink libexec/"xcode-mcp-proxy-server"
     pkgshare.install "scripts/smoke-homebrew.py"
     pkgshare.install "Fixtures/ProxyToolVerifierFixture"
   end
@@ -31,9 +31,7 @@ __EXPLICIT_VERSION__
   end
 
   test do
-    %w[xcode-mcp-proxy xcode-mcp-proxy-server].each do |command|
-      assert_equal "v#{version}", shell_output("#{bin}/#{command} --version").strip
-    end
+    assert_equal "v#{version}", shell_output("#{bin}/xcode-mcp-proxy-server --version").strip
     assert_equal "xcode-mcp-proxy-server --listen 127.0.0.1:0",
                  shell_output("#{bin}/xcode-mcp-proxy-server --host 127.0.0.1 --port 0 --dry-run").strip
     system "codesign", "--verify", "--deep", "--strict", libexec/"XcodeMCPNativeHost.app"

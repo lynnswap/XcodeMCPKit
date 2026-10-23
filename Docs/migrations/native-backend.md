@@ -55,7 +55,7 @@ Remove these older settings from startup scripts and embedding configuration:
 | `--config`, `MCP_XCODE_CONFIG`, TOML files, `configurationFileURL`, `ToolPolicy`, disabled-tool lists | Configure endpoint/deadlines directly; the MCP client controls allowed tools. |
 | `--refresh-code-issues-mode` and its policy/environment settings | `XcodeRefreshCodeIssuesInFile` uses its owning native context. |
 | Server CLI `--native-host-bundle`, `--developer-dir` | Keep the helper beside the commands; use `DEVELOPER_DIR` to prefer an installation. Embedders can set `nativeHostBundleURL` / `developerDirectoryURL`. |
-| STDIO CLI `--stdio URL` | `xcode-mcp-proxy --url URL`. |
+| `xcode-mcp-proxy` STDIO adapter, its `--stdio` / `--url` options, and `XCODE_MCP_PROXY_ENDPOINT` | Register the client with the server's Streamable HTTP endpoint, normally `http://localhost:8765/mcp`. |
 
 `--auto-approve` and the embedding `.automatic` approval policy remain opt-in
 Accessibility automation for GUI Xcode connection dialogs, including other
@@ -88,9 +88,9 @@ cancellation. Test clients use `XcodeMCPTestRuntime.makeClient(configuration:)`
 with its default local transport and `recordedToolCalls()` for decoded assertions.
 See the [client guide](../../Sources/XcodeMCPKit/README.md) for current examples.
 
-## Embedded server and adapter
+## Embedded server
 
-The current server and adapter APIs are documented in
+The current server API is documented in
 [XcodeMCPProxyKit](../../Sources/XcodeMCPProxyKit/README.md). For v0.14.0 consumers:
 
 | Previous API | Current API |
@@ -100,22 +100,20 @@ The current server and adapter APIs are documented in
 | Server `Configuration.Limits` | Top-level `maxBodyBytes` and `requestTimeout: Duration?`. |
 | `configurationFilePath` | Remove file-based tool policy; current configuration is typed. |
 | Struct discovery configuration | `.disabled`, `.defaultLocation`, `.file(URL)`. |
-| Public launch-plan/parser/product-metadata types | `XcodeMCPProxyServer.run(...)` / `XcodeMCPProxyStdioAdapter.run(...)` for CLI hosting. |
+| Public launch-plan/parser/product-metadata types | `XcodeMCPProxyServer.run(...)` for CLI hosting. |
 | Public installer library APIs | `xcode-mcp-proxy-install` executable; `--dry-run` remains supported. |
-| Adapter endpoint resolver/options | `.url(URL)`, `.discoveryFile(URL)`, `.proxyDefault(environment:)`. |
-| Adapter nonthrowing `start()`, `wait()` | `try await start()`, `waitUntilStopped()`. |
+| `XcodeMCPProxyStdioAdapter` and its configuration | Removed. Connect clients over Streamable HTTP; Swift clients use the [SDK](../../Sources/XcodeMCPKit/README.md). |
 | `TimeInterval` request timeout | Positive `Duration?`; `nil` disables it. CLI `--request-timeout 0` also disables it. |
 | `Status.upstreams`, `Status.Upstream.Health`, `queuedRequestCount`, `proxyInitialized`, `catalogAvailable` | `Status.hosts`: one `Status.Host` per Xcode installation or running Xcode app, with its `identifier` (the `hostIdentifier` from `XcodeMCPKitListHosts`), `kind`, `state` (`stopped`, `starting`, `running`), and `activeRequestCount`. Requests queue inside each host, and the catalog is available whenever the server runs. |
 
-Server instances are one-shot. Await `shutdown()` or adapter `stop()` for
+Server instances are one-shot. Await `shutdown()` for
 completion. Cleanup errors preserve the startup failure and remaining resource
 information. Delivery-unknown operations are not replayed during HTTP recovery.
 
 ## Direct Streamable HTTP clients
 
 Clients upgrading across v0.11.0 must send the server-issued `MCP-Session-Id`
-after initialize, use `Accept: application/json, text/event-stream`, and send
-individual JSON-RPC messages instead of batch arrays. An explicit
-`MCP-Protocol-Version` must match negotiation. The SDK and STDIO adapter handle
+after initialize and send individual JSON-RPC messages instead of batch arrays.
+An explicit `MCP-Protocol-Version` must match negotiation. The SDK handles
 these details. See the [HTTP contract](../architecture.md#streamable-http-contract)
 for expiry, recovery, and header errors.

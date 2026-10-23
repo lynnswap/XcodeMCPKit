@@ -12,12 +12,11 @@
 | `XcodeMCPProxyRuntime` | Public tool contract and handle routing (`Broker/`), and one connection per host process with its catalog, request correlation, and recovery (`Host/`). |
 | `XcodeMCPProxyHTTP` | Listener, protocol validation, MCP session lifetime (`HTTPSessionStore`), responses, and SSE delivery, including each request's progress on its POST response. Depends on the runtime contract rather than concrete Runtime. |
 | `XcodeMCPPermissionAutomation` | Accessibility dialog recognition and opt-in approval monitor. Independent of native execution and routing. |
-| `XcodeMCPProxyKit` | Public server/adapter facades, runtime/HTTP composition, discovery, CLI hosting, and installation. |
+| `XcodeMCPProxyKit` | Public server facade, runtime/HTTP composition, discovery, CLI hosting, and installation. |
 
 Runtime and HTTP use Core rather than importing the public SDK. Internal targets
-remain package implementation, not library products. The STDIO adapter and SDK
-share the same client session authority. Keep transport/session recovery there
-instead of adding a second recovery loop in either consumer.
+remain package implementation, not library products. The SDK keeps transport
+and session recovery in its client session authority.
 
 ## State and lifetime boundaries
 
