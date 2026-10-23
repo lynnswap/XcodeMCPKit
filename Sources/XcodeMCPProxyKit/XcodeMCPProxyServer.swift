@@ -120,7 +120,8 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Maximum accepted HTTP request body size in bytes.
     public var maxBodyBytes: Int
 
-    /// Request timeout. Defaults to 600 seconds. `nil` disables request timeouts.
+    /// Request timeout, or `nil` for none, the default. A client that gives up cancels its request
+    /// or disconnects, which also ends the work. Starting a host stays bounded either way.
     public var requestTimeout: Duration?
 
     /// Initialize handshake overrides. `nil` uses the built-in defaults.
@@ -145,7 +146,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///     Unavailable selections fall through to installed-Xcode discovery.
     ///   - sharesCompilationCache: Whether to share compilation caches across worktrees. Defaults to `false`.
     ///   - maxBodyBytes: Maximum accepted HTTP request body size.
-    ///   - requestTimeout: Request timeout, or `nil` to disable it.
+    ///   - requestTimeout: Request timeout, or `nil` for none. Defaults to `nil`.
     ///   - discovery: Endpoint discovery policy.
     ///   - approvalPolicy: Xcode MCP connection dialog automation policy. Defaults to `.manual`.
     ///   - prewarmToolsList: Whether to fetch native tool catalogs during startup.
@@ -157,7 +158,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         developerDirectoryURL: URL? = nil,
         sharesCompilationCache: Bool = false,
         maxBodyBytes: Int = 1_048_576,
-        requestTimeout: Duration? = .seconds(600),
+        requestTimeout: Duration? = nil,
         initializeHandshake: InitializeHandshake? = nil,
         discovery: Discovery = .defaultLocation,
         approvalPolicy: ApprovalPolicy = .manual,

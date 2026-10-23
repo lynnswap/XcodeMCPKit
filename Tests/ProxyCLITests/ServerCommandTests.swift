@@ -14,7 +14,7 @@ struct ServerCommandTests {
         #expect(!config.enablesDebugEndpoints)
         #expect(!(try config.runtimeConfiguration()).sharesCompilationCache)
         #expect(config.maxBodyBytes == 1_048_576)
-        #expect(config.requestTimeout == .seconds(600))
+        #expect(config.requestTimeout == nil)
         #expect(config.requestTimeout == XcodeMCPProxyServerConfiguration().requestTimeout)
     }
 

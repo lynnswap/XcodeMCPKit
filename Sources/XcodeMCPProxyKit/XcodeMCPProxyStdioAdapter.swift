@@ -20,8 +20,8 @@ public struct XcodeMCPProxyStdioAdapterConfiguration: Equatable, Sendable {
     /// Endpoint policy used when the adapter starts forwarding messages.
     public var endpoint: Endpoint
 
-    /// Maximum duration for one logical request, or `nil` to disable the
-    /// client-side timeout. Defaults to 600 seconds.
+    /// Maximum duration for one logical request, or `nil` for none, the default. The STDIO client's
+    /// own timeout applies either way.
     public var requestTimeout: Duration?
 
     /// Creates an adapter configuration.
@@ -29,7 +29,7 @@ public struct XcodeMCPProxyStdioAdapterConfiguration: Equatable, Sendable {
         endpoint: Endpoint = .proxyDefault(
             environment: ProcessInfo.processInfo.environment
         ),
-        requestTimeout: Duration? = .seconds(600)
+        requestTimeout: Duration? = nil
     ) {
         self.endpoint = endpoint
         self.requestTimeout = requestTimeout

@@ -9,8 +9,8 @@ import XcodeMCPProxyKit
 struct PublicRunnerTests {
     @Test func requestTimeoutDefaultsAllowFiveMinutePreviews() {
         #expect(XcodeMCPConfiguration().requestTimeout == .seconds(600))
-        #expect(XcodeMCPProxyServerConfiguration().requestTimeout == .seconds(600))
-        #expect(XcodeMCPProxyStdioAdapterConfiguration().requestTimeout == .seconds(600))
+        #expect(XcodeMCPProxyServerConfiguration().requestTimeout == nil)
+        #expect(XcodeMCPProxyStdioAdapterConfiguration().requestTimeout == nil)
     }
 
     @Test(arguments: [true, false])

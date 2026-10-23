@@ -36,7 +36,7 @@ package struct ProxyServerCommand: ParsableCommand {
 
     @Option(
         parsing: .unconditional,
-        help: "Request timeout in seconds. Defaults to 600. Zero disables non-initialize timeouts.",
+        help: "Request timeout in seconds. Requests have none by default, and zero also means none. Starting a host stays bounded.",
         transform: CLIRequestTimeout.parse
     )
     var requestTimeout: CLIRequestTimeout?

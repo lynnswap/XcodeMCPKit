@@ -161,8 +161,8 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         let requestID = object.flatMap { JSONRPC.Message.Inspector.requestID(from: $0) }
         let cancelled = NativeBrokerReply.error(id: requestID, code: -32800, message: "request cancelled").clientReply
         var deadline: Date?
-        if let object, case .request(let method, _) = JSONRPC.Message.Inspector.kind(of: object),
-           let timeout = MCP.MethodDispatcher.timeoutForMethod(method, defaultSeconds: configuration.requestTimeout) {
+        if let object, case .request = JSONRPC.Message.Inspector.kind(of: object),
+           let timeout = makeRequestTimeout(configuration.requestTimeout) {
             deadline = clock.now().addingTimeInterval(Double(timeout.nanoseconds) / 1_000_000_000)
         }
         // Admission pins the host under the broker lock, which the unused-host scan also holds,
@@ -552,7 +552,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                         "workspaceIdentifier": .string(workspace.nativeIdentifier),
                     ])]),
                 ])
-                let timeout = MCP.MethodDispatcher.timeoutForMethod("tools/call", defaultSeconds:
+                let timeout = makeRequestTimeout(
                     configuration.requestTimeout > 0 ? configuration.requestTimeout : Self.cleanupFallbackTimeout)
                 do {
                     let reply = try await withDeadline(timeout) {

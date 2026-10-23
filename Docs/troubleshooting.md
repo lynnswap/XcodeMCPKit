@@ -52,7 +52,8 @@ code, and context in stderr or the tool failure. `Native workspace cleanup faile
 reports cleanup of a removed model; resolve that failure before retrying against
 the same removed workspace.
 
-The proxy, SDK, and adapter default to 600 seconds. `RenderPreview` defaults to
+The proxy and the STDIO adapter do not limit how long a request runs, so the
+client's own timeout decides; the SDK defaults to 600 seconds. `RenderPreview` defaults to
 300 seconds for build/render work, with initial preparation and cleanup outside
 that budget. Give the external client enough time for the entire request.
 For Codex, set `tool_timeout_sec` in the registered server entry, for example:
