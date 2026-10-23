@@ -1,7 +1,6 @@
 import XcodeMCPProxyRuntimeContract
 @testable import XcodeMCPProxyRuntimeTestSupport
 @testable import XcodeMCPCore
-import Darwin
 import Foundation
 import NIO
 import NIOConcurrencyHelpers
@@ -34,53 +33,6 @@ struct HTTPTestConfiguration: Sendable {
         set { runtime.prewarmToolsList = newValue }
     }
 
-}
-
-private let embeddedCompletionExecutors = NIOLockedValueBox<
-    [ObjectIdentifier: EmbeddedEventLoopCompletionExecutor]
->([:])
-
-private final class EmbeddedEventLoopCompletionExecutor: @unchecked Sendable {
-    private let lock = NSLock()
-    private var operations: [() -> Void] = []
-
-    func enqueue(_ operation: @escaping () -> Void) {
-        lock.withLock {
-            operations.append(operation)
-        }
-    }
-
-    func drain() {
-        let pending = lock.withLock { () -> [() -> Void] in
-            let pending = operations
-            operations.removeAll()
-            return pending
-        }
-        for operation in pending {
-            operation()
-        }
-    }
-}
-
-private func registerEmbeddedCompletionExecutor(
-    _ executor: EmbeddedEventLoopCompletionExecutor,
-    for channel: EmbeddedChannel
-) {
-    embeddedCompletionExecutors.withLockedValue { executors in
-        executors[ObjectIdentifier(channel)] = executor
-    }
-}
-
-private func embeddedCompletionExecutor(
-    for channel: EmbeddedChannel
-) -> EmbeddedEventLoopCompletionExecutor? {
-    embeddedCompletionExecutors.withLockedValue { executors in
-        executors[ObjectIdentifier(channel)]
-    }
-}
-
-func drainEmbeddedCompletions(for channel: EmbeddedChannel) {
-    embeddedCompletionExecutor(for: channel)?.drain()
 }
 
 /// The production runtime, `NativeHostBroker`, over scripted host processes.
@@ -198,32 +150,46 @@ func makeHTTPTestClock(_ clock: TestClock) -> ClockClient {
     )
 }
 
+/// A connection for `HTTPHandler` tests, finished when the test ends.
+///
+/// Unlike `EmbeddedChannel`, the channel can be used from any thread. Async tests need that: they
+/// resume on other threads after a suspension, and the handler writes replies on the channel's
+/// event loop from tasks.
+func makeHTTPTestChannel() -> NIOAsyncTestingChannel {
+    let channel = NIOAsyncTestingChannel()
+    #expect(registerAsyncTestCleanup(description: "HTTP test channel finish") {
+        _ = try? await channel.finish(acceptAlreadyClosed: true)
+    })
+    return channel
+}
+
 func addHTTPHandler(
-    to channel: EmbeddedChannel,
+    to channel: NIOAsyncTestingChannel,
     config: HTTPTestConfiguration,
     runtime: HTTPTestRuntime,
     scheduleResponseCompletion:
         (@Sendable (EventLoop, @escaping @Sendable () -> Void) -> Void)? = nil
-) throws {
-    let completionExecutor = EmbeddedEventLoopCompletionExecutor()
-    registerEmbeddedCompletionExecutor(completionExecutor, for: channel)
-    let handler = HTTPHandler(
-        config: ProxyHTTPConfiguration(
-            listenHost: config.listenHost,
-            listenPort: config.listenPort,
-            maxBodyBytes: config.maxBodyBytes,
-            enablesDebugEndpoints: config.enablesDebugEndpoints
-        ),
-        controlService: runtime.controlService,
-        scheduleResponseCompletion: scheduleResponseCompletion ?? { _, operation in
-            completionExecutor.enqueue(operation)
-        }
+) async throws {
+    let httpConfig = ProxyHTTPConfiguration(
+        listenHost: config.listenHost,
+        listenPort: config.listenPort,
+        maxBodyBytes: config.maxBodyBytes,
+        enablesDebugEndpoints: config.enablesDebugEndpoints
     )
-    try channel.pipeline.addHandler(handler).wait()
+    let handler = if let scheduleResponseCompletion {
+        HTTPHandler(
+            config: httpConfig,
+            controlService: runtime.controlService,
+            scheduleResponseCompletion: scheduleResponseCompletion
+        )
+    } else {
+        HTTPHandler(config: httpConfig, controlService: runtime.controlService)
+    }
+    try await channel.pipeline.addHandler(handler)
 }
 
 func collectResponse(
-    from channel: EmbeddedChannel,
+    from channel: NIOAsyncTestingChannel,
     timeout: Duration = .seconds(2)
 ) async throws -> (
     head: HTTPResponseHead, body: String
@@ -235,12 +201,9 @@ func collectResponse(
     let deadline = clock.now.advanced(by: timeout)
 
     while true {
-        drainEmbeddedCompletions(for: channel)
-        channel.embeddedEventLoop.run()
-        drainEmbeddedCompletions(for: channel)
-        channel.embeddedEventLoop.run()
+        await channel.testingEventLoop.run()
 
-        while let part = try channel.readOutbound(as: HTTPServerResponsePart.self) {
+        while let part = try await channel.readOutbound(as: HTTPServerResponsePart.self) {
             switch part {
             case .head(let head):
                 responseHead = head
@@ -263,9 +226,9 @@ func collectResponse(
             return (responseHead, body)
         }
         guard clock.now < deadline else {
-            throw AsyncTestTimeoutError(description: "timed out waiting for embedded HTTP response")
+            throw AsyncTestTimeoutError(description: "timed out waiting for an HTTP response")
         }
-        sched_yield()
+        await Task.yield()
     }
 }
 
@@ -297,8 +260,8 @@ func toolsCallPayload(
 func postJSON(
     _ payload: [String: Any],
     sessionID: String,
-    to channel: EmbeddedChannel
-) throws {
+    to channel: NIOAsyncTestingChannel
+) async throws {
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
     head.headers.add(name: "Accept", value: "application/json, text/event-stream")
@@ -307,16 +270,16 @@ func postJSON(
     head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
-    try channel.writeInbound(HTTPServerRequestPart.head(head))
-    try channel.writeInbound(HTTPServerRequestPart.body(body))
-    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    try await channel.writeInbound(HTTPServerRequestPart.head(head))
+    try await channel.writeInbound(HTTPServerRequestPart.body(body))
+    try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 }
 
 func postJSONArray(
     _ payload: [Any],
     sessionID: String?,
-    to channel: EmbeddedChannel
-) throws {
+    to channel: NIOAsyncTestingChannel
+) async throws {
     let data = try JSONSerialization.data(withJSONObject: payload, options: [])
     var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
     head.headers.add(name: "Accept", value: "application/json, text/event-stream")
@@ -327,9 +290,9 @@ func postJSONArray(
     }
     var body = channel.allocator.buffer(capacity: data.count)
     body.writeBytes(data)
-    try channel.writeInbound(HTTPServerRequestPart.head(head))
-    try channel.writeInbound(HTTPServerRequestPart.body(body))
-    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    try await channel.writeInbound(HTTPServerRequestPart.head(head))
+    try await channel.writeInbound(HTTPServerRequestPart.body(body))
+    try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 }
 
 func assertBatchRejected(_ response: (head: HTTPResponseHead, body: String)) {
@@ -489,7 +452,7 @@ func initializeHTTPSession(url: URL, clientName: String = "HTTPTests") async thr
     }
 }
 
-func initializeHTTPChannel(_ channel: EmbeddedChannel) async throws -> String {
+func initializeHTTPChannel(_ channel: NIOAsyncTestingChannel) async throws -> String {
     let initPayload: [String: Any] = [
         "jsonrpc": "2.0",
         "id": 1,
@@ -504,9 +467,9 @@ func initializeHTTPChannel(_ channel: EmbeddedChannel) async throws -> String {
     initHead.headers.add(name: "Content-Type", value: "application/json")
     var initBody = channel.allocator.buffer(capacity: initData.count)
     initBody.writeBytes(initData)
-    try channel.writeInbound(HTTPServerRequestPart.head(initHead))
-    try channel.writeInbound(HTTPServerRequestPart.body(initBody))
-    try channel.writeInbound(HTTPServerRequestPart.end(nil))
+    try await channel.writeInbound(HTTPServerRequestPart.head(initHead))
+    try await channel.writeInbound(HTTPServerRequestPart.body(initBody))
+    try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
     let initResponse = try await collectResponse(from: channel)
     return try #require(initResponse.head.headers.first(name: "Mcp-Session-Id"))

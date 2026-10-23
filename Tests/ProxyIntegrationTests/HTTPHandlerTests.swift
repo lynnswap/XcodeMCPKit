@@ -16,14 +16,13 @@ import XcodeMCPProxyTestSupport
 struct HTTPHandlerTests {
     @Test func httpHealthCheck() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -33,14 +32,13 @@ struct HTTPHandlerTests {
     @Test func httpDebugUpstreamsReturnsSnapshot() async throws {
         var config = makeHTTPConfig()
         config.enablesDebugEndpoints = true
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/debug/upstreams")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -62,14 +60,13 @@ struct HTTPHandlerTests {
         config.listenHost = "0.0.0.0"
         config.enablesDebugEndpoints = true
 
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/debug/upstreams")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notFound)
@@ -126,14 +123,13 @@ struct HTTPHandlerTests {
         config.listenHost = "0.0.0.0"
         config.enablesDebugEndpoints = true
 
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/debug/reset")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notFound)
@@ -143,13 +139,13 @@ struct HTTPHandlerTests {
     @Test(arguments: [(HTTPMethod.GET, "/debug/upstreams?includeSensitive=1"), (.POST, "/debug/reset")])
     func httpDebugEndpointsRequireTheOptIn(method: HTTPMethod, uri: String) async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try channel.writeInbound(HTTPServerRequestPart.head(HTTPRequestHead(version: .http1_1, method: method, uri: uri)))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(
+            HTTPServerRequestPart.head(HTTPRequestHead(version: .http1_1, method: method, uri: uri)))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notFound)
@@ -157,14 +153,13 @@ struct HTTPHandlerTests {
 
     @Test func httpSSERequiresAcceptHeader() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notAcceptable)
@@ -174,10 +169,9 @@ struct HTTPHandlerTests {
     /// A client that cannot read event streams is still served; its replies come as JSON.
     @Test func httpPostWithoutEventStreamAcceptIsAnsweredWithJSON() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -194,9 +188,9 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -205,11 +199,10 @@ struct HTTPHandlerTests {
 
     @Test func httpPostKeepsRequestActiveUntilResponseWriteCompletes() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
         let responseCompletions = NIOLockedValueBox<[@Sendable () -> Void]>([])
-        try addHTTPHandler(
+        try await addHTTPHandler(
             to: channel,
             config: config,
             runtime: runtime,
@@ -233,9 +226,9 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         try await waitWithTimeout("the initialize response was scheduled", timeout: .seconds(5)) {
             while responseCompletions.withLockedValue({ $0.isEmpty }) { await Task.yield() }
@@ -250,13 +243,14 @@ struct HTTPHandlerTests {
             completions.removeAll()
             return pending
         }
-        for completion in completions {
-            completion()
+        try await channel.testingEventLoop.executeInContext {
+            for completion in completions {
+                completion()
+            }
         }
-        channel.embeddedEventLoop.run()
 
         let response = try await collectResponse(from: channel)
-        channel.embeddedEventLoop.run()
+        await channel.testingEventLoop.run()
         #expect(response.head.status == .ok)
         let sessionID = try #require(response.head.headers.first(name: "Mcp-Session-Id"))
         #expect(runtime.hasSession(sessionID))
@@ -268,13 +262,12 @@ struct HTTPHandlerTests {
     /// A 404 asks a client to initialize again, which cannot help while the runtime stops.
     @Test func httpInitializeIsRefusedWhileTheRuntimeIsUnavailable() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         await runtime.shutdown()
 
-        try writeInitializePost(to: channel)
+        try await writeInitializePost(to: channel)
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .serviceUnavailable)
@@ -284,19 +277,18 @@ struct HTTPHandlerTests {
 
     @Test func httpPostRejectsNonJSONContentType() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "text/plain")
         var body = channel.allocator.buffer(capacity: 2)
         body.writeString("{}")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .unsupportedMediaType)
@@ -304,10 +296,9 @@ struct HTTPHandlerTests {
 
     @Test func httpPostNonInitializeRequiresSessionHeader() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let data = try JSONSerialization.data(withJSONObject: toolsListPayload(id: 2), options: [])
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
@@ -315,9 +306,9 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .badRequest)
@@ -326,12 +317,11 @@ struct HTTPHandlerTests {
 
     @Test func httpPostUnknownSessionReturnsNotFound() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try postJSON(toolsListPayload(id: 2), sessionID: "missing-session", to: channel)
+        try await postJSON(toolsListPayload(id: 2), sessionID: "missing-session", to: channel)
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .notFound)
@@ -342,12 +332,12 @@ struct HTTPHandlerTests {
         for route in ProtocolVersionRoute.allCases {
             for headerCase in ProtocolVersionHeaderCase.allCases {
                 let config = makeHTTPConfig()
-                let channel = EmbeddedChannel()
+                let channel = makeHTTPTestChannel()
                 let runtime = try HTTPTestRuntime(config: config)
-                try addHTTPHandler(to: channel, config: config, runtime: runtime)
+                try await addHTTPHandler(to: channel, config: config, runtime: runtime)
                 let sessionID = try await initializeHTTPChannel(channel)
 
-                try writeProtocolVersionRequest(
+                try await writeProtocolVersionRequest(
                     route,
                     headerCase: headerCase,
                     sessionID: sessionID,
@@ -371,7 +361,7 @@ struct HTTPHandlerTests {
                     #expect(runtime.hasSession(sessionID))
                 }
 
-                _ = try? channel.finish()
+                _ = try? await channel.finish()
             }
         }
     }
@@ -386,17 +376,16 @@ struct HTTPHandlerTests {
 
     @Test func httpDeleteTerminatesSession() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
         var deleteHead = HTTPRequestHead(version: .http1_1, method: .DELETE, uri: "/mcp")
         deleteHead.headers.add(name: "MCP-Session-Id", value: sessionID)
         deleteHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
-        try channel.writeInbound(HTTPServerRequestPart.head(deleteHead))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(deleteHead))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let deleteResponse = try await collectResponse(from: channel)
         #expect(deleteResponse.head.status == .ok)
@@ -406,8 +395,8 @@ struct HTTPHandlerTests {
         sseHead.headers.add(name: "Accept", value: "text/event-stream")
         sseHead.headers.add(name: "MCP-Session-Id", value: sessionID)
         sseHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
-        try channel.writeInbound(HTTPServerRequestPart.head(sseHead))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(sseHead))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let afterDeleteResponse = try await collectResponse(from: channel)
         #expect(afterDeleteResponse.head.status == .notFound)
@@ -417,18 +406,18 @@ struct HTTPHandlerTests {
     /// A client that disconnects gives up its request: the host learns of it, and the session can expire.
     @Test func aClientDisconnectCancelsItsRequestAndReleasesTheSession() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)
-        let channel = EmbeddedChannel()
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
-        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
-                     sessionID: sessionID, to: channel)
+        try await postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                           sessionID: sessionID, to: channel)
         let held = try await runtime.waitForHostMessages("tools/call")
         let hostRequestID = try #require(held.first?["id"])
         runtime.controlService.sessions.expire(inactiveFor: .nanoseconds(0))
         #expect(runtime.hasSession(sessionID))
 
-        _ = try? channel.finish()
+        _ = try? await channel.finish()
         let cancellations = try await runtime.waitForHostMessages("notifications/cancelled")
         guard case .object(let params)? = cancellations.first?["params"] else {
             Issue.record("the host cancellation has no parameters")
@@ -478,17 +467,16 @@ struct HTTPHandlerTests {
     /// opens early and carries keepalives until the reply.
     @Test func aSlowReplyComesOnAnEventStreamThatOpensEarly() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
-        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
-                     sessionID: sessionID, to: channel)
+        try await postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                           sessionID: sessionID, to: channel)
         let held = try await runtime.waitForHostMessages("tools/call")
         let hostRequestID = try #require(held.first?["id"])
 
-        channel.embeddedEventLoop.advanceTime(by: HTTPHandler.keepaliveInterval + HTTPHandler.keepaliveInterval)
+        await channel.testingEventLoop.advanceTime(by: HTTPHandler.keepaliveInterval + HTTPHandler.keepaliveInterval)
         let opened = try await collectResponse(from: channel)
         #expect(opened.head.status == .ok)
         #expect(opened.head.headers.first(name: "Content-Type") == "text/event-stream")
@@ -498,8 +486,8 @@ struct HTTPHandlerTests {
                                                  "result": .object(["content": .array([])])]))
         var rest = ""
         var ended = false
-        try runEmbedded(channel, until: "the reply ended the stream") {
-            while let part = try? channel.readOutbound(as: HTTPServerResponsePart.self) {
+        try await runEventLoop(of: channel, until: "the reply ended the stream") {
+            while let part = try? await channel.readOutbound(as: HTTPServerResponsePart.self) {
                 switch part {
                 case .body(.byteBuffer(var buffer)): rest += buffer.readString(length: buffer.readableBytes) ?? ""
                 case .end: ended = true
@@ -516,43 +504,38 @@ struct HTTPHandlerTests {
     /// closes the connection instead of being answered out of order.
     @Test func aRequestBeforeThePreviousResponseEndsClosesTheConnection() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
-        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
-                     sessionID: sessionID, to: channel)
+        try await postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                           sessionID: sessionID, to: channel)
         _ = try await runtime.waitForHostMessages("tools/call")
         let closed = NIOLockedValueBox(false)
         channel.closeFuture.whenComplete { _ in closed.withLockedValue { $0 = true } }
 
-        try channel.writeInbound(HTTPServerRequestPart.head(HTTPRequestHead(version: .http1_1, method: .GET,
-                                                                            uri: "/health")))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(
+            HTTPServerRequestPart.head(HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
-        try runEmbedded(channel, until: "the connection closed") { closed.withLockedValue { $0 } }
-        #expect(try channel.readOutbound(as: HTTPServerResponsePart.self) == nil)
+        try await runEventLoop(of: channel, until: "the connection closed") { closed.withLockedValue { $0 } }
+        #expect(try await channel.readOutbound(as: HTTPServerResponsePart.self) == nil)
     }
 
     /// A cancellation sent right after a request, on another connection, finds that request.
     @Test func aCancellationFindsTheRequestSentBeforeIt() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)
-        let requestChannel = EmbeddedChannel()
-        let cancelChannel = EmbeddedChannel()
-        defer {
-            _ = try? requestChannel.finish()
-            _ = try? cancelChannel.finish()
-        }
+        let requestChannel = makeHTTPTestChannel()
+        let cancelChannel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
-        try addHTTPHandler(to: requestChannel, config: config, runtime: runtime)
-        try addHTTPHandler(to: cancelChannel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: requestChannel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: cancelChannel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(requestChannel)
 
-        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
-                     sessionID: sessionID, to: requestChannel)
-        try postJSON(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": 2]],
-                     sessionID: sessionID, to: cancelChannel)
+        try await postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                           sessionID: sessionID, to: requestChannel)
+        try await postJSON(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": 2]],
+                           sessionID: sessionID, to: cancelChannel)
         #expect(try await collectResponse(from: cancelChannel).head.status == .accepted)
 
         let cancelled = try await collectResponse(from: requestChannel)
@@ -564,17 +547,16 @@ struct HTTPHandlerTests {
     /// A client that stops reading skips later progress but still gets the reply.
     @Test func progressIsSkippedWhileTheClientFallsBehind() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let socket = StalledWrites()
-        try channel.pipeline.syncOperations.addHandler(socket, position: .first)
+        try await channel.pipeline.addHandler(socket, position: .first)
         let sessionID = try await initializeHTTPChannel(channel)
         var payload = toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"])
         payload["params"] = ["name": "DocumentationSearch", "arguments": ["query": "held"],
                              "_meta": ["progressToken": "build"]]
-        try postJSON(payload, sessionID: sessionID, to: channel)
+        try await postJSON(payload, sessionID: sessionID, to: channel)
         let held = try await runtime.waitForHostMessages("tools/call")
         let host = try #require(runtime.host)
         guard case .object(let params)? = held.first?["params"], case .object(let meta)? = params["_meta"],
@@ -591,12 +573,14 @@ struct HTTPHandlerTests {
         // The client stops reading: writes stay pending, and once one is, the channel is not writable.
         socket.isStalled = true
         host.emit(progress("first"))
-        try runEmbedded(channel, until: "the first progress reached the stalled socket") { socket.hasPendingWrites }
+        try await runEventLoop(of: channel, until: "the first progress reached the stalled socket") {
+            socket.hasPendingWrites
+        }
         channel.isWritable = false
         host.emit(progress("skipped"))
         host.emit(.object(["jsonrpc": .string("2.0"), "id": hostRequestID,
                            "result": .object(["content": .array([])])]))
-        try runEmbedded(channel, until: "the reply reached the stalled socket") { socket.hasPendingEnd }
+        try await runEventLoop(of: channel, until: "the reply reached the stalled socket") { socket.hasPendingEnd }
 
         let body = socket.pendingBody
         #expect(body.contains("first"))
@@ -607,25 +591,21 @@ struct HTTPHandlerTests {
     /// A request that started is answered when its session is deleted; only later requests get a 404.
     @Test func deletingASessionAnswersItsRunningRequestAndRefusesLaterOnes() async throws {
         let config = makeHTTPConfig(requestTimeout: 60)
-        let requestChannel = EmbeddedChannel()
-        let deleteChannel = EmbeddedChannel()
-        defer {
-            _ = try? requestChannel.finish()
-            _ = try? deleteChannel.finish()
-        }
+        let requestChannel = makeHTTPTestChannel()
+        let deleteChannel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
-        try addHTTPHandler(to: requestChannel, config: config, runtime: runtime)
-        try addHTTPHandler(to: deleteChannel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: requestChannel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: deleteChannel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(requestChannel)
-        try postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
-                     sessionID: sessionID, to: requestChannel)
+        try await postJSON(toolsCallPayload(id: 2, name: "DocumentationSearch", arguments: ["query": "held"]),
+                           sessionID: sessionID, to: requestChannel)
         try await runtime.waitForToolCalls(1)
 
         var deleteHead = HTTPRequestHead(version: .http1_1, method: .DELETE, uri: "/mcp")
         deleteHead.headers.add(name: "MCP-Session-Id", value: sessionID)
         deleteHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
-        try deleteChannel.writeInbound(HTTPServerRequestPart.head(deleteHead))
-        try deleteChannel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await deleteChannel.writeInbound(HTTPServerRequestPart.head(deleteHead))
+        try await deleteChannel.writeInbound(HTTPServerRequestPart.end(nil))
         #expect(try await collectResponse(from: deleteChannel).head.status == .ok)
 
         let running = try await collectResponse(from: requestChannel)
@@ -635,8 +615,8 @@ struct HTTPHandlerTests {
         let error = try #require(body["error"] as? [String: Any])
         #expect((error["code"] as? NSNumber)?.intValue == -32800)
 
-        try postJSON(toolsCallPayload(id: 3, name: "DocumentationSearch", arguments: ["query": "late"]),
-                     sessionID: sessionID, to: requestChannel)
+        try await postJSON(toolsCallPayload(id: 3, name: "DocumentationSearch", arguments: ["query": "late"]),
+                           sessionID: sessionID, to: requestChannel)
         let late = try await collectResponse(from: requestChannel)
         #expect(late.head.status == .notFound)
         #expect(late.body == "session not found")
@@ -654,12 +634,12 @@ struct HTTPHandlerTests {
                     // listener keeps this Cartesian header test synchronous.
                     config.listenHost = "0.0.0.0"
                 }
-                let channel = EmbeddedChannel()
+                let channel = makeHTTPTestChannel()
                 let runtime = try HTTPTestRuntime(config: config)
-                try addHTTPHandler(to: channel, config: config, runtime: runtime)
+                try await addHTTPHandler(to: channel, config: config, runtime: runtime)
                 let sentinelSessionID = try await initializeHTTPChannel(channel)
 
-                try writeOriginPolicyRequest(
+                try await writeOriginPolicyRequest(
                     route,
                     originCase: originCase,
                     to: channel
@@ -680,7 +660,7 @@ struct HTTPHandlerTests {
                     #expect(runtime.startedHostCount == 0)
                 }
 
-                _ = try? channel.finish()
+                _ = try? await channel.finish()
             }
         }
     }
@@ -703,18 +683,18 @@ struct HTTPHandlerTests {
         for origin in rejectedOrigins {
             var config = makeHTTPConfig()
             config.listenPort = 8765
-            let channel = EmbeddedChannel()
+            let channel = makeHTTPTestChannel()
             let runtime = try HTTPTestRuntime(config: config)
-            try addHTTPHandler(to: channel, config: config, runtime: runtime)
+            try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
             var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
             head.headers.add(name: "Origin", value: origin)
-            try channel.writeInbound(HTTPServerRequestPart.head(head))
-            try channel.writeInbound(HTTPServerRequestPart.end(nil))
+            try await channel.writeInbound(HTTPServerRequestPart.head(head))
+            try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
             let response = try await collectResponse(from: channel)
             #expect(response.head.status == .forbidden, "origin=\(origin)")
-            _ = try? channel.finish()
+            _ = try? await channel.finish()
         }
     }
 
@@ -730,18 +710,18 @@ struct HTTPHandlerTests {
         for origin in allowedOrigins {
             var config = makeHTTPConfig()
             config.listenPort = 8765
-            let channel = EmbeddedChannel()
+            let channel = makeHTTPTestChannel()
             let runtime = try HTTPTestRuntime(config: config)
-            try addHTTPHandler(to: channel, config: config, runtime: runtime)
+            try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
             var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
             head.headers.add(name: "Origin", value: origin)
-            try channel.writeInbound(HTTPServerRequestPart.head(head))
-            try channel.writeInbound(HTTPServerRequestPart.end(nil))
+            try await channel.writeInbound(HTTPServerRequestPart.head(head))
+            try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
             let response = try await collectResponse(from: channel)
             #expect(response.head.status == .ok, "origin=\(origin)")
-            _ = try? channel.finish()
+            _ = try? await channel.finish()
         }
     }
 
@@ -751,19 +731,19 @@ struct HTTPHandlerTests {
             var config = makeHTTPConfig()
             config.listenPort = 8765
             config.enablesDebugEndpoints = true
-            let channel = EmbeddedChannel()
+            let channel = makeHTTPTestChannel()
             let runtime = try HTTPTestRuntime(config: config)
-            try addHTTPHandler(to: channel, config: config, runtime: runtime)
+            try await addHTTPHandler(to: channel, config: config, runtime: runtime)
             let sentinelSessionID = try await initializeHTTPChannel(channel)
 
-            try writeOriginPolicyRequest(route, originCase: .missing, host: "attacker.example:8765", to: channel)
+            try await writeOriginPolicyRequest(route, originCase: .missing, host: "attacker.example:8765", to: channel)
             let response = try await collectResponse(from: channel)
 
             #expect(response.head.status == .forbidden, "route=\(route)")
             #expect(response.body == "host not allowed", "route=\(route)")
             #expect(runtime.hasSession(sentinelSessionID))
             #expect(runtime.startedHostCount == 0)
-            _ = try? channel.finish()
+            _ = try? await channel.finish()
         }
     }
 
@@ -784,19 +764,19 @@ struct HTTPHandlerTests {
                 var config = makeHTTPConfig()
                 config.listenHost = testCase.listenHost
                 config.listenPort = 8765
-                let channel = EmbeddedChannel()
+                let channel = makeHTTPTestChannel()
                 let runtime = try HTTPTestRuntime(config: config)
-                try addHTTPHandler(to: channel, config: config, runtime: runtime)
+                try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
                 var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
                 head.headers.add(name: "Host", value: host)
-                try channel.writeInbound(HTTPServerRequestPart.head(head))
-                try channel.writeInbound(HTTPServerRequestPart.end(nil))
+                try await channel.writeInbound(HTTPServerRequestPart.head(head))
+                try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
                 let response = try await collectResponse(from: channel)
                 #expect(response.head.status == (testCase.allowed ? .ok : .forbidden),
                         "listen=\(testCase.listenHost) host=\(host)")
-                _ = try? channel.finish()
+                _ = try? await channel.finish()
             }
         }
     }
@@ -804,16 +784,15 @@ struct HTTPHandlerTests {
     @Test func httpRejectsMultipleHostHeaders() async throws {
         var config = makeHTTPConfig()
         config.listenPort = 8765
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/health")
         head.headers.add(name: "Host", value: "localhost:8765")
         head.headers.add(name: "Host", value: "attacker.example:8765")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
@@ -850,18 +829,17 @@ struct HTTPHandlerTests {
     @Test func httpRejectsOriginBeforeApplyingBodyLimit() async throws {
         var config = makeHTTPConfig(maxBodyBytes: 1)
         config.listenPort = 8765
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Origin", value: "http://example.invalid:8765")
         var body = channel.allocator.buffer(capacity: 2)
         body.writeString("{}")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
@@ -871,12 +849,11 @@ struct HTTPHandlerTests {
 
     @Test func httpRejectsInvalidOrigin() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try writeInitializePost(to: channel, origin: "https://example.invalid")
+        try await writeInitializePost(to: channel, origin: "https://example.invalid")
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
@@ -886,12 +863,11 @@ struct HTTPHandlerTests {
 
     @Test func httpRejectsOriginHostnameWithLoopbackPrefix() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try writeInitializePost(to: channel, origin: "http://127.attacker.example:8765")
+        try await writeInitializePost(to: channel, origin: "http://127.attacker.example:8765")
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .forbidden)
@@ -902,12 +878,11 @@ struct HTTPHandlerTests {
     @Test func httpRejectsOriginWithImplicitDefaultPortMismatch() async throws {
         var config = makeHTTPConfig()
         config.listenPort = 8765
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try writeInitializePost(
+        try await writeInitializePost(
             to: channel,
             host: "localhost:8765",
             origin: "http://localhost"
@@ -923,12 +898,11 @@ struct HTTPHandlerTests {
         var config = makeHTTPConfig()
         config.listenHost = "0.0.0.0"
         config.listenPort = 8765
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try writeInitializePost(
+        try await writeInitializePost(
             to: channel,
             host: "192.0.2.10:8765",
             origin: "http://192.0.2.10:8765"
@@ -944,12 +918,11 @@ struct HTTPHandlerTests {
         var config = makeHTTPConfig()
         config.listenHost = "0.0.0.0"
         config.listenPort = 8765
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try writeInitializePost(
+        try await writeInitializePost(
             to: channel,
             host: "attacker.example:8765",
             origin: "http://attacker.example:8765"
@@ -966,12 +939,11 @@ struct HTTPHandlerTests {
         var config = makeHTTPConfig()
         config.listenHost = "0.0.0.0"
         config.listenPort = 8765
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try writeInitializePost(
+        try await writeInitializePost(
             to: channel,
             host: "localhost:8765",
             origin: "http://localhost:8765"
@@ -986,12 +958,11 @@ struct HTTPHandlerTests {
         var config = makeHTTPConfig()
         config.listenHost = "192.0.2.10"
         config.listenPort = 8765
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try writeInitializePost(
+        try await writeInitializePost(
             to: channel,
             host: "192.0.2.10:8765",
             origin: "http://192.0.2.10:8765"
@@ -1006,12 +977,11 @@ struct HTTPHandlerTests {
         var config = makeHTTPConfig()
         config.listenHost = "192.0.2.10"
         config.listenPort = 8765
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try writeInitializePost(
+        try await writeInitializePost(
             to: channel,
             origin: "http://localhost:8765"
         )
@@ -1026,12 +996,11 @@ struct HTTPHandlerTests {
         var config = makeHTTPConfig()
         config.listenHost = "0.0.0.0"
         config.listenPort = 8765
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        try writeInitializePost(
+        try await writeInitializePost(
             to: channel,
             host: "192.0.2.10:8765",
             origin: "http://example.invalid:8765"
@@ -1045,19 +1014,18 @@ struct HTTPHandlerTests {
 
     @Test func httpPostRejectsLargeBody() async throws {
         let config = makeHTTPConfig(maxBodyBytes: 1)
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
         head.headers.add(name: "Accept", value: "application/json, text/event-stream")
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: 2)
         body.writeString("{}")
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .payloadTooLarge)
@@ -1065,10 +1033,9 @@ struct HTTPHandlerTests {
 
     @Test func httpInitializeCreatesSessionAndReturnsResponse() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -1090,9 +1057,9 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -1116,8 +1083,7 @@ struct HTTPHandlerTests {
 
     @Test func httpInitializedSessionSurvivesHostProcessLoss() async throws {
         let config = makeHTTPConfig(requestTimeout: 5)
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let toolCalls = NIOLockedValueBox(0)
         let runtime = try HTTPTestRuntime(config: config) { _, _ in
             let call = toolCalls.withLockedValue { count in
@@ -1126,10 +1092,10 @@ struct HTTPHandlerTests {
             }
             return call == 1 ? .hold : .result(.object(["content": .array([])]))
         }
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
-        try postJSON(
+        try await postJSON(
             toolsCallPayload(id: 2, name: "XcodeListTemplates", arguments: [:]),
             sessionID: sessionID,
             to: channel
@@ -1150,7 +1116,7 @@ struct HTTPHandlerTests {
                 == .initialized(protocolVersion: MCP.ProtocolVersion.current)
         )
 
-        try postJSON(
+        try await postJSON(
             toolsCallPayload(id: 3, name: "XcodeListTemplates", arguments: [:]),
             sessionID: sessionID,
             to: channel
@@ -1167,10 +1133,9 @@ struct HTTPHandlerTests {
 
     @Test func httpUnknownJSONRPCResponseRouteIsAcknowledgedWithoutForwarding() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let sessionID = try await initializeHTTPChannel(channel)
         let payload: [String: Any] = [
@@ -1178,7 +1143,7 @@ struct HTTPHandlerTests {
             "id": "xcode-mcp-proxy.server-request.999",
             "result": ["ok": true],
         ]
-        try postJSON(payload, sessionID: sessionID, to: channel)
+        try await postJSON(payload, sessionID: sessionID, to: channel)
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .accepted)
@@ -1188,17 +1153,16 @@ struct HTTPHandlerTests {
 
     @Test func httpMalformedJSONRPCObjectWithIDReturnsInvalidRequestError() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let sessionID = try await initializeHTTPChannel(channel)
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
             "id": 123,
         ]
-        try postJSON(payload, sessionID: sessionID, to: channel)
+        try await postJSON(payload, sessionID: sessionID, to: channel)
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -1214,10 +1178,9 @@ struct HTTPHandlerTests {
 
     @Test func httpInitializePrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -1239,9 +1202,9 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -1250,10 +1213,9 @@ struct HTTPHandlerTests {
 
     @Test func httpInitializeRequiresID() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -1273,9 +1235,9 @@ struct HTTPHandlerTests {
         head.headers.add(name: "Content-Type", value: "application/json")
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -1290,10 +1252,9 @@ struct HTTPHandlerTests {
 
     @Test func httpJSONArrayBodyIsRejectedBeforeInitializeRouting() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let payload: [[String: Any]] = [
             [
@@ -1309,7 +1270,7 @@ struct HTTPHandlerTests {
                 ],
             ]
         ]
-        try postJSONArray(payload, sessionID: nil, to: channel)
+        try await postJSONArray(payload, sessionID: nil, to: channel)
 
         let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
@@ -1326,29 +1287,28 @@ struct HTTPHandlerTests {
 
         for payload in payloads {
             let config = makeHTTPConfig()
-            let channel = EmbeddedChannel()
+            let channel = makeHTTPTestChannel()
             let runtime = try HTTPTestRuntime(config: config)
-            try addHTTPHandler(to: channel, config: config, runtime: runtime)
+            try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-            try postJSONArray(payload, sessionID: nil, to: channel)
+            try await postJSONArray(payload, sessionID: nil, to: channel)
             let response = try await collectResponse(from: channel)
             assertBatchRejected(response)
 
             #expect(response.head.headers.first(name: "Mcp-Session-Id") == nil)
             #expect(runtime.startedHostCount == 0)
-            _ = try channel.finish()
+            _ = try await channel.finish()
         }
     }
 
     @Test func httpJSONArrayBodyIsRejectedBeforeUpstreamRouting() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
-        try postJSONArray([toolsListPayload(id: 42)], sessionID: sessionID, to: channel)
+        try await postJSONArray([toolsListPayload(id: 42)], sessionID: sessionID, to: channel)
 
         let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
@@ -1358,13 +1318,12 @@ struct HTTPHandlerTests {
     @Test func httpTimeoutReturnsMCPErrorAndCancelsTheHostRequest() async throws {
         let config = makeHTTPConfig(requestTimeout: 1)
         let clock = TestClock()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config, clock: makeHTTPTestClock(clock)) { _, _ in .hold }
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
-        try postJSON(
+        try await postJSON(
             toolsCallPayload(id: 2001, name: "DocumentationSearch", arguments: ["query": "timeout"]),
             sessionID: sessionID,
             to: channel
@@ -1396,10 +1355,9 @@ struct HTTPHandlerTests {
 
     @Test func httpMalformedJSONReturnsParseErrorBeforeUpstreamUnavailable() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
         var malformedHead = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/mcp")
@@ -1409,9 +1367,9 @@ struct HTTPHandlerTests {
         malformedHead.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var malformedBody = channel.allocator.buffer(capacity: 20)
         malformedBody.writeString("{\"jsonrpc\":\"2.0\",")
-        try channel.writeInbound(HTTPServerRequestPart.head(malformedHead))
-        try channel.writeInbound(HTTPServerRequestPart.body(malformedBody))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(malformedHead))
+        try await channel.writeInbound(HTTPServerRequestPart.body(malformedBody))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -1426,16 +1384,15 @@ struct HTTPHandlerTests {
 
     @Test func httpOverloadedErrorResponseReachesTheClient() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { method, _ in
             #expect(method == "tools/call")
             return .error(code: -32002, message: "upstream overloaded")
         }
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
-        try postJSON(
+        try await postJSON(
             toolsCallPayload(id: 3101, name: "DocumentationSearch", arguments: ["query": "busy"]),
             sessionID: sessionID,
             to: channel
@@ -1454,10 +1411,9 @@ struct HTTPHandlerTests {
 
     @Test func httpInitializeIgnoresCallerProvidedSessionHeader() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
@@ -1475,9 +1431,9 @@ struct HTTPHandlerTests {
         head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -1491,18 +1447,17 @@ struct HTTPHandlerTests {
 
     @Test func httpSSEHandshakeSucceedsWithSession() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
         var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/mcp")
         head.headers.add(name: "Accept", value: "text/event-stream")
         head.headers.add(name: "Mcp-Session-Id", value: sessionID)
         head.headers.add(name: "MCP-Protocol-Version", value: MCP.ProtocolVersion.current)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -1510,8 +1465,9 @@ struct HTTPHandlerTests {
         #expect(response.body.contains(": ok"))
 
         // Clients drop an event stream that stays silent for a few minutes.
-        channel.embeddedEventLoop.advanceTime(by: HTTPHandler.keepaliveInterval)
-        guard case .body(.byteBuffer(var keepalive))? = try channel.readOutbound(as: HTTPServerResponsePart.self) else {
+        await channel.testingEventLoop.advanceTime(by: HTTPHandler.keepaliveInterval)
+        let keepalivePart = try await channel.readOutbound(as: HTTPServerResponsePart.self)
+        guard case .body(.byteBuffer(var keepalive))? = keepalivePart else {
             Issue.record("the idle event stream carried no keepalive")
             return
         }
@@ -1520,13 +1476,12 @@ struct HTTPHandlerTests {
 
     @Test func httpToolsListReturnsThePublicCatalog() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
-        try postJSON(toolsListPayload(id: 2), sessionID: sessionID, to: channel)
+        try await postJSON(toolsListPayload(id: 2), sessionID: sessionID, to: channel)
 
         let toolsResponse = try await collectResponse(from: channel)
         #expect(toolsResponse.head.status == .ok)
@@ -1549,10 +1504,9 @@ struct HTTPHandlerTests {
 
     @Test func httpToolsListRejectsUnissuedCursorWithoutCacheLookup() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
         // The public catalog never issues a downstream cursor.
@@ -1564,7 +1518,7 @@ struct HTTPHandlerTests {
                 "cursor": "cursor-1"
             ],
         ]
-        try postJSON(toolsPayload, sessionID: sessionID, to: channel)
+        try await postJSON(toolsPayload, sessionID: sessionID, to: channel)
 
         let toolsResponse = try await collectResponse(from: channel)
         #expect(toolsResponse.head.status == .ok)
@@ -1583,13 +1537,12 @@ struct HTTPHandlerTests {
 
     @Test func httpSingleItemBatchToolsListIsRejectedBeforeCacheLookup() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
-        try postJSONArray([toolsListPayload(id: 2)], sessionID: sessionID, to: channel)
+        try await postJSONArray([toolsListPayload(id: 2)], sessionID: sessionID, to: channel)
 
         let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
@@ -1599,10 +1552,9 @@ struct HTTPHandlerTests {
     @Test func httpToolsListCachesResultOnMissWhenParamsArePresent() async throws {
         var config = makeHTTPConfig()
         config.prewarmToolsList = false
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
         // The first listing loads the host catalog once; later listings reuse it even with params.
@@ -1614,7 +1566,7 @@ struct HTTPHandlerTests {
                 "_meta": ["trace": "first"]
             ],
         ]
-        try postJSON(toolsPayload, sessionID: sessionID, to: channel)
+        try await postJSON(toolsPayload, sessionID: sessionID, to: channel)
 
         let toolsResponse = try await collectResponse(from: channel)
         #expect(toolsResponse.head.status == .ok)
@@ -1628,7 +1580,7 @@ struct HTTPHandlerTests {
                 "_meta": ["trace": "second"]
             ],
         ]
-        try postJSON(toolsPayload2, sessionID: sessionID, to: channel)
+        try await postJSON(toolsPayload2, sessionID: sessionID, to: channel)
 
         let toolsResponse2 = try await collectResponse(from: channel)
         #expect(toolsResponse2.head.status == .ok)
@@ -1646,13 +1598,12 @@ struct HTTPHandlerTests {
             ]),
         ])])
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config, tools: nativeTools)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
-        try postJSON(toolsListPayload(id: 2), sessionID: sessionID, to: channel)
+        try await postJSON(toolsListPayload(id: 2), sessionID: sessionID, to: channel)
 
         let response = try await collectResponse(from: channel)
         let object =
@@ -1673,13 +1624,12 @@ struct HTTPHandlerTests {
 
     @Test func httpToolsListPrefersJSONWhenClientAcceptsJSONAndEventStream() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
-        try postJSON(toolsListPayload(id: 2), sessionID: sessionID, to: channel)
+        try await postJSON(toolsListPayload(id: 2), sessionID: sessionID, to: channel)
 
         let toolsResponse = try await collectResponse(from: channel)
         #expect(toolsResponse.head.status == .ok)
@@ -1690,15 +1640,14 @@ struct HTTPHandlerTests {
     func httpToolCallFailuresKeepTheirClassification(failure: HostFailureCase) async throws {
         let config = makeHTTPConfig(requestTimeout: 1)
         let clock = TestClock()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config, clock: makeHTTPTestClock(clock)) { _, _ in
             failure.hostReply
         }
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
-        try postJSON(
+        try await postJSON(
             toolsCallPayload(id: 501, name: "DocumentationSearch", arguments: ["query": "failure"]),
             sessionID: sessionID,
             to: channel
@@ -1733,10 +1682,9 @@ struct HTTPHandlerTests {
 
     @Test func httpResourceTemplatesListReturnsEmptyArray() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
         let payload: [String: Any] = [
@@ -1745,7 +1693,7 @@ struct HTTPHandlerTests {
             "method": "resources/templates/list",
             "params": [String: Any](),
         ]
-        try postJSON(payload, sessionID: sessionID, to: channel)
+        try await postJSON(payload, sessionID: sessionID, to: channel)
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -1784,10 +1732,10 @@ struct HTTPHandlerTests {
     }
 
     private func writeInitializePost(
-        to channel: EmbeddedChannel,
+        to channel: NIOAsyncTestingChannel,
         host: String? = nil,
         origin: String? = nil
-    ) throws {
+    ) async throws {
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
             "id": 1,
@@ -1808,9 +1756,9 @@ struct HTTPHandlerTests {
         }
         var body = channel.allocator.buffer(capacity: data.count)
         body.writeBytes(data)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
-        try channel.writeInbound(HTTPServerRequestPart.body(body))
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(body))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
     }
 
     private enum ProtocolVersionRoute: CaseIterable {
@@ -1874,8 +1822,8 @@ struct HTTPHandlerTests {
         _ route: ProtocolVersionRoute,
         headerCase: ProtocolVersionHeaderCase,
         sessionID: String,
-        to channel: EmbeddedChannel
-    ) throws {
+        to channel: NIOAsyncTestingChannel
+    ) async throws {
         let method: HTTPMethod =
             switch route {
             case .post: .POST
@@ -1894,15 +1842,15 @@ struct HTTPHandlerTests {
             break
         }
         headerCase.apply(to: &head.headers)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
 
         if route == .post {
             let data = try JSONSerialization.data(withJSONObject: toolsListPayload(id: 2), options: [])
             var body = channel.allocator.buffer(capacity: data.count)
             body.writeBytes(data)
-            try channel.writeInbound(HTTPServerRequestPart.body(body))
+            try await channel.writeInbound(HTTPServerRequestPart.body(body))
         }
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
     }
 
     private enum OriginPolicyRoute: CaseIterable {
@@ -1997,8 +1945,8 @@ struct HTTPHandlerTests {
         _ route: OriginPolicyRoute,
         originCase: OriginPolicyHeaderCase,
         host: String? = nil,
-        to channel: EmbeddedChannel
-    ) throws {
+        to channel: NIOAsyncTestingChannel
+    ) async throws {
         var head = HTTPRequestHead(version: .http1_1, method: route.method, uri: route.uri)
         if let host { head.headers.add(name: "Host", value: host) }
         if route == .sse {
@@ -2008,7 +1956,7 @@ struct HTTPHandlerTests {
             head.headers.add(name: "Content-Type", value: "application/json")
         }
         originCase.apply(to: &head.headers)
-        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
 
         if route == .post {
             let payload: [String: Any] = [
@@ -2020,9 +1968,9 @@ struct HTTPHandlerTests {
             let data = try JSONSerialization.data(withJSONObject: payload, options: [])
             var body = channel.allocator.buffer(capacity: data.count)
             body.writeBytes(data)
-            try channel.writeInbound(HTTPServerRequestPart.body(body))
+            try await channel.writeInbound(HTTPServerRequestPart.body(body))
         }
-        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
     }
 
 }
@@ -2061,16 +2009,15 @@ enum HostFailureCase: CaseIterable, Sendable {
     }
 }
 
-/// Runs the channel's scheduled work on the calling thread until `condition` holds.
-private func runEmbedded(_ channel: EmbeddedChannel, until description: String,
-                         _ condition: () -> Bool) throws {
+/// Runs the channel's scheduled work until `condition` holds.
+private func runEventLoop(of channel: NIOAsyncTestingChannel, until description: String,
+                          _ condition: () async throws -> Bool) async throws {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: .seconds(5))
-    while !condition() {
-        drainEmbeddedCompletions(for: channel)
-        channel.embeddedEventLoop.run()
+    while try await !condition() {
+        await channel.testingEventLoop.run()
         guard clock.now < deadline else { throw AsyncTestTimeoutError(description: description) }
-        sched_yield()
+        await Task.yield()
     }
 }
 
