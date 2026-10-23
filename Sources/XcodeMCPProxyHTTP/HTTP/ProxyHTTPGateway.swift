@@ -117,8 +117,8 @@ package final class ProxyHTTPGateway: ProxyHTTPGatewayServing, Sendable {
                     ChannelOptions.socketOption(.so_reuseaddr),
                     value: 1
                 )
-                bootstrap = bootstrap.serverChannelInitializer { channel in
-                    channel.pipeline.addHandler(ProxyAcceptedChannelHandler(tracker: tracker))
+                bootstrap = bootstrap.serverChannelInitializer { [logger] channel in
+                    channel.pipeline.addHandler(ProxyAcceptedChannelHandler(tracker: tracker, logger: logger))
                 }
                 bootstrap = bootstrap.childChannelInitializer { channel in
                     childInitializer.initialize(channel)
@@ -375,14 +375,26 @@ private final class ProxyAcceptedChannelHandler: ChannelInboundHandler, Sendable
     typealias InboundIn = Channel
 
     private let tracker: ProxyAcceptedChannelTracker
+    private let logger: Logger
 
-    init(tracker: ProxyAcceptedChannelTracker) {
+    init(tracker: ProxyAcceptedChannelTracker, logger: Logger) {
         self.tracker = tracker
+        self.logger = logger
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let channel = unwrapInboundIn(data)
         tracker.register(channel)
         context.fireChannelRead(data)
+    }
+
+    /// NIO retries an accept that failed for lack of file descriptors or memory without reporting
+    /// it, while the kernel resets the client, so clients would see a server that drops every
+    /// connection. Other accept failures concern a client that already left.
+    func errorCaught(context: ChannelHandlerContext, error: any Error) {
+        if let error = error as? IOError, [EMFILE, ENFILE, ENOBUFS, ENOMEM].contains(error.errnoCode) {
+            logger.warning("Failed to accept an HTTP connection", metadata: ["error": "\(error)"])
+        }
+        context.fireErrorCaught(error)
     }
 }

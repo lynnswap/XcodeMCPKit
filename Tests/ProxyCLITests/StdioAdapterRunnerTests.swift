@@ -64,7 +64,7 @@ struct StdioAdapterRunnerTests {
 
         #expect(exitCode == 0)
         #expect(captured.snapshot()?.endpoint == .url(URL(string: "http://localhost:9001/mcp")!))
-        #expect(captured.snapshot()?.requestTimeout == (timeout == nil ? .seconds(600) : .milliseconds(12_500)))
+        #expect(captured.snapshot()?.requestTimeout == (timeout == nil ? nil : .milliseconds(12_500)))
         #expect(await createdAdapter.startCount() == 1)
         #expect(await createdAdapter.waitCount() == 1)
     }

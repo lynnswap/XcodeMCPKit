@@ -76,8 +76,8 @@ fails instead of running with another session's settings. Build logs, issues,
 and preview state remain shared by every session that uses the workspace. GUI
 workspaces use the Xcode window's settings.
 
-`RenderPreview` defaults to a 300-second timeout; the SDK, proxy, and STDIO adapter
-default to 600 seconds per request. Set an external client's deadline above the
+`RenderPreview` defaults to a 300-second timeout. The proxy and STDIO adapter set no
+request timeout by default, and the SDK defaults to 600 seconds. Set an external client's deadline above the
 preview timeout to leave time for preparation and cleanup. In a headless workspace,
 RenderPreview builds saved changes and captures a fresh snapshot. Successful
 headless renders retain reusable planning, products, processes, and an owned

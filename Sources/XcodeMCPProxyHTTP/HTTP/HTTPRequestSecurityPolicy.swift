@@ -19,7 +19,7 @@ struct HTTPRequestSecurityPolicy: Sendable {
         let hostFields = head.headers["Host"]
         if hostFields.isEmpty == false {
             guard hostFields.count == 1,
-                requestHostIsAllowed(hostFields[0], localAddress: localAddress)
+                requestHostIsAllowed(hostFields[0])
             else {
                 return .rejectHost
             }
@@ -37,15 +37,10 @@ struct HTTPRequestSecurityPolicy: Sendable {
     }
 
     /// A DNS-rebinding page reaches the listener through a name its attacker controls, so the
-    /// `Host` must be an IP address, `localhost`, or the configured host, with the listener's port.
-    private func requestHostIsAllowed(
-        _ value: String,
-        localAddress: SocketAddress?
-    ) -> Bool {
-        guard let authority = Self.httpAuthority("http://" + value),
-            let endpointPort = endpointPort(localAddress: localAddress),
-            (authority.port ?? 80) == endpointPort
-        else {
+    /// `Host` must be an IP address, `localhost`, or the configured host. Its port is the one the
+    /// client connected to, which differs from the listener's behind a port forward.
+    private func requestHostIsAllowed(_ value: String) -> Bool {
+        guard let authority = Self.httpAuthority("http://" + value) else {
             return false
         }
         let host = Self.normalizedHost(authority.host)

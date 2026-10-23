@@ -5,14 +5,14 @@ import NIOHTTP1
 import XcodeMCPCore
 import XcodeMCPProxyRuntimeContract
 
-/// The response to one POST request. The request's first progress notification opens it as an
-/// event stream, which then carries the reply; without progress, the reply is sent as JSON.
+/// The response to one POST request. The request's first progress notification or keepalive
+/// opens it as an event stream, which then carries the reply; a quick reply is sent as JSON.
 final class HTTPPostResponse: Sendable {
     enum Event {
-        /// The notification opens the stream.
+        /// The event opens the stream.
         case opensStream
         case continuesStream
-        /// The reply was sent, so the notification is dropped.
+        /// The reply was sent, so the event is dropped.
         case dropped
     }
 
@@ -48,8 +48,14 @@ final class HTTPPostResponse: Sendable {
 }
 
 extension HTTPHandler {
-    func sendProgress(
-        _ data: Data,
+    enum StreamEvent {
+        /// A progress notification.
+        case message(Data)
+        case keepalive
+    }
+
+    func sendStreamEvent(
+        _ event: StreamEvent,
         in response: HTTPPostResponse,
         on channel: Channel,
         keepAlive: Bool,
@@ -67,7 +73,12 @@ extension HTTPHandler {
             // the server queueing them without bound.
             guard channel.isWritable else { return }
         }
-        _ = MCPResponseEmitter.sendEvent(data, on: channel)
+        switch event {
+        case .message(let data):
+            _ = MCPResponseEmitter.sendEvent(data, on: channel)
+        case .keepalive:
+            _ = MCPResponseEmitter.sendKeepalive(on: channel)
+        }
     }
 
     func sendPostResolution(
