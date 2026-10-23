@@ -120,10 +120,9 @@ extension HTTPHandlerTests {
 
     @Test func httpResourcesListReturnsEmptyArray() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
         let payload: [String: Any] = [
@@ -132,7 +131,7 @@ extension HTTPHandlerTests {
             "method": "resources/list",
             "params": [String: Any](),
         ]
-        try postJSON(payload, sessionID: sessionID, to: channel)
+        try await postJSON(payload, sessionID: sessionID, to: channel)
 
         let response = try await collectResponse(from: channel)
         #expect(response.head.status == .ok)
@@ -152,10 +151,9 @@ extension HTTPHandlerTests {
 
     @Test func httpSingleItemBatchResourcesListIsRejected() async throws {
         let config = makeHTTPConfig()
-        let channel = EmbeddedChannel()
-        defer { _ = try? channel.finish() }
+        let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
-        try addHTTPHandler(to: channel, config: config, runtime: runtime)
+        try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
 
         let payload: [[String: Any]] = [[
@@ -164,7 +162,7 @@ extension HTTPHandlerTests {
             "method": "resources/list",
             "params": [String: Any](),
         ]]
-        try postJSONArray(payload, sessionID: sessionID, to: channel)
+        try await postJSONArray(payload, sessionID: sessionID, to: channel)
 
         let response = try await collectResponse(from: channel)
         assertBatchRejected(response)
