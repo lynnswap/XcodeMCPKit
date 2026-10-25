@@ -1,8 +1,8 @@
 # Architecture
 
 `xcode-mcp-proxy-server` exposes one public MCP tool contract over Streamable
-HTTP. Workspace and device-session handles retain their execution context;
-clients do not switch tool catalogs when moving between GUI and headless work.
+HTTP. Workspace and device-session handles retain their owned headless execution
+context across requests.
 
 ## Request routing
 
@@ -11,21 +11,18 @@ flowchart LR
   client["MCP client"] -->|"Streamable HTTP"| proxy["Public tool contract"]
   proxy --> handles["Workspace and session handles"]
   handles --> headless["Owned native host"]
-  handles --> gui["GUI Xcode bridge"]
   headless --> saved["Saved workspace models"]
-  gui --> windows["Xcode windows and editor state"]
 ```
 
-`XcodeListWorkspaces` returns proxy identifiers for loaded headless models and
-open GUI workspaces. A handle binds one native workspace or tab to its host.
-Multiple tabs for the same path remain distinct. The public input is always
+`XcodeListWorkspaces` returns proxy identifiers for loaded headless models.
+A handle binds one native workspace to its host. The public input is
 `workspaceIdentifier`; adapters supply the owning backend's selector.
+Running GUI Xcode processes are not discovered or connected by proxy requests.
 
 `XcodeOpenWorkspace` uses the default headless host unless the caller explicitly
-requests another host. Installation and process selection happen when a handle
-is created. Existing handles retain their original route, including progress,
-cancellation, queued work, and completion. GUI work does not silently fall back
-to a saved model because that would change the operation's state and effects.
+requests another installation. Installation selection happens when a handle is
+created. Existing handles retain their original route, including progress,
+cancellation, queued work, and completion.
 
 Native hosts own workspace contents, schemes, destinations, and test plans.
 The handle registry owns references and resource lifetime; it does not copy that
@@ -36,7 +33,7 @@ of replaying an operation against another host.
 ## Public and native catalogs
 
 The proxy owns public tool names and schemas. Its adapters translate arguments
-and results at the native boundary, including GUI tab selectors and device-key
+and results at the native boundary, including workspace selectors and device-key
 spellings. Public tools remain callable without relying on a client to process
 `notifications/tools/list_changed` after a routing change. An unavailable backend
 operation returns a tool error.
@@ -49,8 +46,8 @@ alter that request's response contract.
 
 ## Processes and failure
 
-Each Xcode installation has at most one headless host process, and each running
-GUI Xcode process has at most one `mcpbridge`. Every MCP session shares them.
+Each Xcode installation has at most one owned headless host process, shared by
+every MCP session.
 A host connection owns its process: it starts it on first use, sends one
 `initialize`, assigns upstream request IDs, returns progress to the requesting
 session, and sends `notifications/cancelled` when a request is cancelled or
@@ -68,9 +65,8 @@ removes it from the client's result.
 When a process exits or violates the protocol, its in-flight requests fail with
 `upstream unavailable`, handles created by that process expire, and the next
 request starts a new process. Delivery-unknown mutations are not replayed.
-Closing an MCP session releases its handles; it does not quit a GUI Xcode process.
-GUI bridges stop once no session references or uses them. A headless host for
-a non-default installation stops after `NativeHostBroker.idleHostGracePeriod`
+Closing an MCP session releases its handles. A headless host for a non-default
+installation stops after `NativeHostBroker.idleHostGracePeriod`
 (five minutes) without references or requests; the default host keeps its process.
 
 Shutdown stops admission, cancels and drains owned request/event tasks, stops
@@ -123,8 +119,7 @@ Service. The process owns its AppKit event loop, document controller, framework
 values, and workspace resources. Apple's frameworks remain in the installed
 Xcode and are not redistributed.
 
-GUI execution uses Apple's `mcpbridge` for the requested running Xcode process.
-A process identity includes its launch time so a reused PID cannot redirect work.
-The optional Accessibility permission monitor is composed separately and has no
-role in tool routing. See the [maintainer guide](maintainer-architecture.md) for
+The optional Accessibility permission monitor approves other agents' direct
+connections to GUI Xcode. It is composed separately and has no role in tool
+routing. See the [maintainer guide](maintainer-architecture.md) for
 module boundaries, native corrections, signing, and verification.

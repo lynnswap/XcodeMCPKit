@@ -26,9 +26,6 @@ enum XcodeToolCatalog {
         if tools["DeviceInteractionStartSession"] == nil, let workspaceSession {
             tools["DeviceInteractionStartSession"] = normalized(workspaceSession, name: "DeviceInteractionStartSession")
         }
-        for editor in editorTools {
-            if let name = toolName(editor), tools[name] == nil { tools[name] = editor }
-        }
         for managed in managementTools {
             if let name = toolName(managed) { tools[name] = managed }
         }
@@ -249,11 +246,11 @@ enum XcodeToolCatalog {
         "UpdateTargetBuildSetting": "Update a target's build setting.",
         "XcodeGlob": "Find files in the Xcode project using a glob pattern.",
         "XcodeGrep": "Search project files using a regular expression and optional file and context filters.",
-        "XcodeGetCurrentFile": "Read the active editor file and selection. Requires a GUI workspace. Content has numbered lines, up to 600 by default.",
+        "XcodeGetCurrentFile": "Read the workspace's current file and selection. Content has numbered lines, up to 600 by default.",
         "XcodeLS": "List files in the Xcode project, optionally recursively.",
         "XcodeListRunDestinations": "List run destinations for the selected scheme.",
         "XcodeListSchemes": "List schemes available in the workspace.",
-        "XcodeListNavigatorIssues": "List GUI workspace Issue Navigator diagnostics, including package and configuration issues.",
+        "XcodeListNavigatorIssues": "List workspace diagnostics, including package and configuration issues.",
         "XcodeListTargets": "List project targets, optionally filtering by product type.",
         "XcodeListTemplates": "List Xcode project and target templates.",
         "XcodeListTestPlans": "List test plans for the selected scheme.",
@@ -270,60 +267,6 @@ enum XcodeToolCatalog {
         "XcodeUpdate": "Replace text in a project file; replaceAll controls whether all matches change.",
         "XcodeWrite": "Write a project file and add it to the Xcode project organization.",
     ]
-
-    private static var editorTools: [JSONValue] {
-        [
-            .object([
-                "name": .string("XcodeGetCurrentFile"),
-                "description": .string("Read the active editor file and selection. Requires a GUI workspace. Content has numbered lines, up to 600 by default."),
-                "inputSchema": schema([
-                    "workspaceIdentifier": workspaceProperty,
-                    "includeContent": .object(["type": .string("boolean")]),
-                    "includeSelection": .object(["type": .string("boolean")]),
-                    "offset": .object(["type": .string("integer")]),
-                    "limit": .object(["type": .string("integer")]),
-                ], required: ["workspaceIdentifier"]),
-                "outputSchema": schema([
-                    "filePath": .object(["type": .string("string")]),
-                    "content": .object(["type": .string("string")]),
-                    "isEditable": .object(["type": .string("boolean")]),
-                    "linesRead": .object(["type": .string("integer")]),
-                    "totalLines": .object(["type": .string("integer")]),
-                    "startLine": .object(["type": .string("integer")]),
-                    "selection": schema([
-                        "text": .object(["type": .string("string")]),
-                        "lineRange": .object(["type": .string("object")]),
-                        "characterRange": .object(["type": .string("object")]),
-                    ], required: ["text", "lineRange", "characterRange"]),
-                ], required: ["isEditable"]),
-                "annotations": .object(["readOnlyHint": .bool(true)]),
-            ]),
-            .object([
-                "name": .string("XcodeListNavigatorIssues"),
-                "description": .string("List GUI workspace Issue Navigator diagnostics, including package and configuration issues."),
-                "inputSchema": schema([
-                    "workspaceIdentifier": workspaceProperty,
-                    "severity": .object(["type": .string("string"), "description": .string("Minimum severity: error, warning, or remark. Defaults to error.")]),
-                    "glob": .object(["type": .string("string")]),
-                    "pattern": .object(["type": .string("string")]),
-                ], required: ["workspaceIdentifier"]),
-                "outputSchema": schema([
-                    "issues": .object(["type": .string("array"), "items": schema([
-                        "message": .object(["type": .string("string")]),
-                        "severity": .object(["type": .string("string")]),
-                        "path": .object(["type": .string("string")]),
-                        "line": .object(["type": .string("integer")]),
-                        "category": .object(["type": .string("string")]),
-                        "vitality": .object(["type": .string("string"), "enum": .array([.string("fresh"), .string("stale")])]),
-                    ], required: ["message", "severity"])]),
-                    "truncated": .object(["type": .string("boolean")]),
-                    "totalFound": .object(["type": .string("integer")]),
-                    "message": .object(["type": .string("string")]),
-                ], required: ["issues", "truncated", "totalFound"]),
-                "annotations": .object(["readOnlyHint": .bool(true)]),
-            ]),
-        ]
-    }
 
     private static func schema(_ properties: [String: JSONValue], required: [String]) -> JSONValue {
         .object(["type": .string("object"), "properties": .object(properties),

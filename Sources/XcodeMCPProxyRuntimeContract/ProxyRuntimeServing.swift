@@ -35,7 +35,7 @@ package enum ProxyRuntimeReply: Sendable {
 }
 
 package struct ProxyRuntimeSnapshot: Sendable {
-    /// One Xcode host: a headless host for an installation, or a bridge to a running Xcode app.
+    /// One owned headless host for an Xcode installation.
     package struct Host: Equatable, Sendable {
         package enum State: Equatable, Sendable {
             case stopped
@@ -45,16 +45,13 @@ package struct ProxyRuntimeSnapshot: Sendable {
 
         package let identifier: String
         package let developerDirectory: URL
-        /// The running Xcode app a GUI bridge connects to; `nil` for a headless host.
-        package let guiProcessIdentifier: Int32?
         package let state: State
         package let activeRequestCount: Int
 
-        package init(identifier: String, developerDirectory: URL, guiProcessIdentifier: Int32?,
+        package init(identifier: String, developerDirectory: URL,
                      state: State, activeRequestCount: Int) {
             self.identifier = identifier
             self.developerDirectory = developerDirectory
-            self.guiProcessIdentifier = guiProcessIdentifier
             self.state = state
             self.activeRequestCount = activeRequestCount
         }

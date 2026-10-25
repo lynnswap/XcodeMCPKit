@@ -54,7 +54,7 @@ may be incomplete, even though the server lifecycle has stopped.
 - `nativeHostBundleURL`: signed native helper app bundle, or `nil` for automatic lookup.
 - `developerDirectoryURL`: preferred Xcode app/developer directory. Unavailable selections fall through to installed-Xcode discovery.
 - `sharesCompilationCache`: enables shared compilation caching and Swift/Clang prefix mapping in native hosts. Defaults to `false`; see [compilation caching](../../Docs/configuration.md#compilation-caching) for behavior and limits.
-- `approvalPolicy`: `.manual` by default. `.automatic` approves GUI Xcode MCP connection dialogs for all agents, including clients outside this proxy, using macOS Accessibility access.
+- `approvalPolicy`: `.manual` by default. `.automatic` approves MCP connection dialogs for agents connecting directly to GUI Xcode, using macOS Accessibility access.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` for no timeout, the default. A client that gives up cancels its request or disconnects, which also ends the work; starting a host stays bounded either way.
 - `initializeHandshake`: typed upstream initialization for embedding.
@@ -62,18 +62,19 @@ may be incomplete, even though the server lifecycle has stopped.
 - `prewarmToolsList`: whether discovery begins during startup.
 
 The server owns the public tool contract and routes workspace handles to their
-headless model or GUI Xcode process. `XcodeListWorkspaces` discovers existing
-workspaces; `XcodeOpenWorkspace` loads a saved model in the default headless host
-unless another host is requested. Workspace and device-session handles retain
+owned headless model. `XcodeListWorkspaces` lists loaded models;
+`XcodeOpenWorkspace` loads a saved model in the default headless host unless
+another installation is requested. Workspace and device-session handles retain
 their native context without a client-side host switch. See
 [workspace usage](../../Docs/usage.md) for the tool contract.
 
 Install `XcodeMCPNativeHost.app` beside the proxy executable, or supply its bundle
 URL. Missing helpers or required native contracts return diagnostics. The helper
-owns its AppKit event loop. Server startup does not require a GUI workspace or
-Xcode Service. With `.automatic` approval, a separate monitor presses `Allow` on
-GUI Xcode MCP connection dialogs until server shutdown. It does not change tool
-routing or directly rewrite Xcode's agent permission store.
+owns its AppKit event loop. Workspace operations run independently of GUI Xcode
+and its MCP connection approval. With `.automatic` approval, a separate monitor
+presses `Allow` on GUI Xcode MCP connection dialogs for other agents until server
+shutdown. It does not change tool routing or directly rewrite Xcode's agent
+permission store.
 
 Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` do not select a proxy backend.
 For a standalone headless or generic MCP process, use `XcodeMCPKit`'s explicit
@@ -98,8 +99,8 @@ session shares an Xcode host, so no client can answer the host requests those
 capabilities allow.
 
 `snapshot()` returns a sanitized read model: lifecycle phase, endpoint, and one
-entry per Xcode host with its identifier, kind (headless or GUI Xcode process),
-state, and active request count. It does not expose traffic payloads, tool
+entry per owned headless host with its identifier, kind, state, and active
+request count. It does not expose traffic payloads, tool
 arguments, or stderr.
 
 `XcodeMCPProxyServer.run(...)` handles `SIGINT` and `SIGTERM` while the server

@@ -18,7 +18,6 @@ enum NativeHostRuntime {
     }
 
     struct Configuration: Sendable {
-        let guiProcess: XcodeGUIProcess?
         let nativeHostBundleURL: URL?
         let developerDirectoryURL: URL?
         let sharesCompilationCache: Bool
@@ -26,12 +25,10 @@ enum NativeHostRuntime {
 
         init(
             nativeHostBundleURL: URL? = nil,
-            guiProcess: XcodeGUIProcess? = nil,
             developerDirectoryURL: URL? = nil,
             sharesCompilationCache: Bool = false,
             maxBodyBytes: Int
         ) {
-            self.guiProcess = guiProcess
             self.nativeHostBundleURL = nativeHostBundleURL
             self.developerDirectoryURL = developerDirectoryURL
             self.sharesCompilationCache = sharesCompilationCache
@@ -47,15 +44,6 @@ enum NativeHostRuntime {
         environment.removeValue(forKey: "XCODE_PID")
         environment.removeValue(forKey: "MCP_XCODE_PID")
         environment.removeValue(forKey: "MCP_XCODE_SESSION_ID")
-        if let guiProcess = config.guiProcess {
-            let developerDirectory = guiProcess.installation.developerDirectory
-            environment["DEVELOPER_DIR"] = developerDirectory.path
-            environment["MCP_XCODE_PID"] = String(guiProcess.processID)
-            return UpstreamProcess.Config(
-                command: developerDirectory.appending(path: "usr/bin/mcpbridge").path,
-                args: [], environment: environment,
-                maxQueuedWriteBytes: maxQueuedWriteBytes(for: config))
-        }
         let developerDirectoryURL = config.developerDirectoryURL
         let invocation = try NativeHostInvocation.resolve(
             bundleURL: config.nativeHostBundleURL,
@@ -133,12 +121,6 @@ struct NativeHostSessionFactory: UpstreamSessionFactory {
     }
 
     func startSession() async throws -> any UpstreamSession {
-        if let guiProcess = configuration.guiProcess {
-            guard guiProcess.isRunning else {
-                throw NativeHostBrokerError("The selected Xcode process is no longer running")
-            }
-            return try await UpstreamProcess(configuration: processConfiguration(environment: environment)).startSession()
-        }
         let environment = try await NativeHostRuntime.buildServiceEnvironment(baseEnvironment: environment)
         return try await UpstreamProcess(configuration: processConfiguration(environment: environment)).startSession()
     }

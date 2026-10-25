@@ -40,19 +40,19 @@ extension NativeHostBroker {
     static var managementTools: [JSONValue] {
         [
             tool(listTool,
-                description: "List available Xcode installations and running GUI hosts. Only needed to choose a non-default host when opening a workspace.",
+                description: "List available Xcode installations. Only needed to choose a non-default installation when opening a workspace.",
                 properties: [:]),
             tool(listWorkspacesTool,
-                description: "List headless workspaces and open Xcode windows. Each workspaceIdentifier names one execution context; use it with workspace tools. Errors identify hosts whose workspaces could not be listed.",
+                description: "List loaded headless workspaces. Open a saved project, workspace, or Swift package with XcodeOpenWorkspace first. Each workspaceIdentifier names one execution context; use it with workspace tools. Errors identify hosts whose workspaces could not be listed.",
                 properties: [:]),
             tool(openWorkspaceTool,
-                description: "Open a saved project, workspace, or Swift package and return its workspaceIdentifier. Defaults to the default installation's headless host. Optionally choose a host from XcodeMCPKitListHosts; a GUI host attaches an already open window. Each installation has one headless host; sessions opening the same path share its model, and each session keeps its own scheme, run destination, and test plan in it.",
+                description: "Open a saved project, workspace, or Swift package in an owned headless host and return its workspaceIdentifier. Defaults to the default Xcode installation. Optionally choose another installation from XcodeMCPKitListHosts. Each installation has one headless host; sessions opening the same path share its model, and each session keeps its own scheme, run destination, and test plan in it.",
                 properties: [
                     "path": .object(["type": .string("string"), "description": .string("Absolute project, workspace, or Swift package path.")]),
                     "hostIdentifier": .object(["type": .string("string")]),
                 ], required: ["path"]),
             tool(closeWorkspaceTool,
-                description: "Close an owned headless workspace, or release a GUI workspace reference while leaving its Xcode window open.",
+                description: "Close an owned headless workspace, or release this session's reference if another session still uses it.",
                 properties: ["workspaceIdentifier": .object(["type": .string("string")])],
                 required: ["workspaceIdentifier"]),
         ]
@@ -139,7 +139,7 @@ extension NativeHostBroker {
                                 launchSession: NativeBrokerLaunchSession? = nil) -> JSONValue {
         guard case .object(var fields) = payload else { return payload }
         if let workspace {
-            let nativeKey = workspace.gui ? "tabIdentifier" : "workspaceIdentifier"
+            let nativeKey = "workspaceIdentifier"
             if fields[nativeKey] == .string(workspace.nativeIdentifier) {
                 fields.removeValue(forKey: nativeKey)
                 fields["workspaceIdentifier"] = .string(workspace.identifier)
