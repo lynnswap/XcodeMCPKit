@@ -1,6 +1,7 @@
 #if (os(iOS) || os(watchOS)) && targetEnvironment(simulator)
 import ABIBridge
 import ABIBridgeCore
+import ABIBridgeCore.Backend
 import Darwin
 import Foundation
 import SwiftUI
@@ -71,28 +72,37 @@ func widgetVariantCatalog(source: NativeSwiftValue) async throws -> WidgetVarian
     let runtime = ABIRuntime.shared
     let shell = ImageSelector.framework(named: "PreviewShellKit")
     let messaging = ImageSelector.framework(named: "PreviewsMessagingOS")
-    let sourceCategoryType = try await runtime.resolveSwiftType(named: "DeveloperToolsSupport.PreviewSourceContentCategory",
-        in: .framework(named: "DeveloperToolsSupport"))
-    let categoryGetter = try await source.type.resolveGetter(named: "contentCategory", as: (() -> NativeSwiftValue).self,
-        valueABIs: [sourceCategoryType: .opaque(named: sourceCategoryType.name)], receiverABI: .opaque(named: source.type.name))
+    let sourceCategoryType = try await runtime.resolve(
+        .swift(.type("DeveloperToolsSupport.PreviewSourceContentCategory")), in: .framework(named: "DeveloperToolsSupport"))
+    let categoryGetter = try await source.type.resolve(
+        .swift(
+            .getter(
+                "contentCategory", as: (() -> NativeSwiftValue).self, valueABIs: [sourceCategoryType: .opaque(named: sourceCategoryType.name)],
+                receiverABI: .opaque(named: source.type.name))))
     let sourceCategory = try unsafe categoryGetter.unsafeInvoke(on: source)
-    let categoryType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.ContentCategory", in: messaging)
-    let makeCategory = try await categoryType.resolveStaticMethod(
-        named: "(extension in PreviewShellKit):PreviewsMessagingOS.ContentCategory.source(DeveloperToolsSupport.PreviewSourceContentCategory) -> PreviewsMessagingOS.ContentCategory",
-        as: ((NativeSwiftValue) -> NativeSwiftValue).self,
-        valueABIs: [sourceCategoryType: .opaque(named: sourceCategoryType.name), categoryType: .opaque(named: categoryType.name)])
+    let categoryType = try await runtime.resolve(.swift(.type("PreviewsMessagingOS.ContentCategory")), in: messaging)
+    let makeCategory = try await categoryType.resolve(
+        .swift(
+            .staticMethod(
+                "(extension in PreviewShellKit):PreviewsMessagingOS.ContentCategory.source(DeveloperToolsSupport.PreviewSourceContentCategory) -> PreviewsMessagingOS.ContentCategory",
+                as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+                valueABIs: [sourceCategoryType: .opaque(named: sourceCategoryType.name), categoryType: .opaque(named: categoryType.name)])))
     let category = try unsafe makeCategory.unsafeInvoke(sourceCategory)
-    let descriptor = try await runtime.resolve(.init(machOName: "_$s15PreviewShellKit15ContentProviderMp", language: .swift, kind: .data), in: shell)
-    let thunk = try await runtime.resolve(.init(machOName:
-        "_$s15PreviewShellKit15ContentProviderP22supportedVariantGroups3forSay19PreviewsMessagingOS0aG5GroupVGAF0D8CategoryV_tFZTj",
-        language: .swift), in: shell)
+    let descriptor = try await runtime.resolve(.swift(.symbol(machOName: "_$s15PreviewShellKit15ContentProviderMp", kind: .data)), in: shell)
+    let thunk = try await runtime.resolve(
+        .swift(
+            .symbol(
+                machOName:
+                    "_$s15PreviewShellKit15ContentProviderP22supportedVariantGroups3forSay19PreviewsMessagingOS0aG5GroupVGAF0D8CategoryV_tFZTj")), in: shell
+    )
     let metadata = unsafe unsafeBitCast(provider as Any.Type, to: UnsafeRawPointer.self)
     guard let witness = unsafe descriptor.withUnsafeAddress({ unsafe ABISwiftConformance(metadata, $0) }) else {
         throw NativePreviewPipelineRequired()
     }
-    let groupType = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewVariantGroup", in: messaging)
-    let factory = try await runtime.resolveSwiftFunction(named: "XcodeMCPPreviewRenderer.widgetVariantType<A>() -> A.Type",
-        as: (() -> NativeSwiftValue).self, genericArguments: [.type(groupType)])
+    let groupType = try await runtime.resolve(.swift(.type("PreviewsMessagingOS.PreviewVariantGroup")), in: messaging)
+    let factory = try await runtime.resolve(
+        .swift(
+            .function("XcodeMCPPreviewRenderer.widgetVariantType<A>() -> A.Type", as: (() -> NativeSwiftValue).self, genericArguments: [.type(groupType)])))
     let nativeType = try unsafe factory.unsafeInvoke()
     guard let type = try nativeType.withCopy({ $0 as? Any.Type }) else { throw NativePreviewPipelineRequired() }
     let categoryCopy = try category.withCopy { $0 }
@@ -149,22 +159,25 @@ private func widgetVariantField(_ value: Any, _ name: String) throws -> Any {
 @MainActor
 func applyWidgetEffects(_ effects: NativeSwiftValue, to environment: inout EnvironmentValues) async throws -> WidgetFamily? {
     let runtime = ABIRuntime.shared
-    let familyType = try await runtime.resolveSwiftType(named: "WidgetKit.WidgetFamily", in: .framework(named: "WidgetKit"))
+    let familyType = try await runtime.resolve(.swift(.type("WidgetKit.WidgetFamily")), in: .framework(named: "WidgetKit"))
     let optionalFamily = try await widgetValue(Optional<WidgetFamily>.none)
-    let familyConverter = try await familyType.resolveInitializer(
-        named: "init(Swift.Array<PreviewsMessagingOS.RenderEffect>) -> Swift.Optional<WidgetKit.WidgetFamily>",
-        as: ((NativeSwiftValue) -> NativeSwiftValue).self,
-        valueABIs: [effects.type: .pointer, optionalFamily.type: .opaque(named: optionalFamily.type.name)])
+    let familyConverter = try await familyType.resolve(
+        .swift(
+            .initializer(
+                "init(Swift.Array<PreviewsMessagingOS.RenderEffect>) -> Swift.Optional<WidgetKit.WidgetFamily>",
+                as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+                valueABIs: [effects.type: .pointer, optionalFamily.type: .opaque(named: optionalFamily.type.name)])))
     let family = try unsafe familyConverter.unsafeInvoke(effects.copy()).take(as: WidgetFamily?.self)
     let redactionType = try await widgetValue(RedactionReasons()).type
     let optionalRedaction = try await widgetValue(Optional<RedactionReasons>.none)
-    let redaction = try await redactionType.resolveInitializer(
-        named: "init(Swift.Array<PreviewsMessagingOS.RenderEffect>) -> Swift.Optional<SwiftUI.RedactionReasons>",
-        as: ((NativeSwiftValue) -> NativeSwiftValue).self,
-        valueABIs: [effects.type: .pointer, optionalRedaction.type: .opaque(named: optionalRedaction.type.name)])
+    let redaction = try await redactionType.resolve(
+        .swift(
+            .initializer(
+                "init(Swift.Array<PreviewsMessagingOS.RenderEffect>) -> Swift.Optional<SwiftUI.RedactionReasons>",
+                as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+                valueABIs: [effects.type: .pointer, optionalRedaction.type: .opaque(named: optionalRedaction.type.name)])))
     environment.redactionReasons = try unsafe redaction.unsafeInvoke(effects.copy()).take(as: RedactionReasons?.self) ?? []
-    let luminance = try await effects.type.resolveGetter(named: "isLuminanceReduced", as: (() -> Bool).self,
-        receiverABI: .pointer)
+    let luminance = try await effects.type.resolve(.swift(.getter("isLuminanceReduced", as: (() -> Bool).self, receiverABI: .pointer)))
     environment.isLuminanceReduced = try unsafe luminance.unsafeInvoke(on: effects)
     return family
 }
@@ -179,7 +192,7 @@ private final class WidgetVariantABI {
         if let value = unsafe pointer { unsafe ABIReleaseValueType(value) }
     }
     func error(_ failure: inout OpaquePointer?) -> PreviewRendererError {
-        let message = unsafe failure.map { unsafe String(cString: ABIResolutionFailureMessage($0)) } ?? "Widget variant preparation failed"
+        let message = unsafe failure.map { unsafe String(cString: ABIResolutionFailureGetMessage($0)) } ?? "Widget variant preparation failed"
         if let value = unsafe failure { unsafe ABIReleaseResolutionFailure(value) }
         unsafe failure = nil
         return PreviewRendererError(message)

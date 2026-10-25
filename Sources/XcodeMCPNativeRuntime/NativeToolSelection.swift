@@ -15,18 +15,24 @@ final class NativeToolSelection {
 
     init(installation: NativeXcodeInstallation) async throws {
         let image = installation.framework("IDEIntelligenceChat", in: "PlugIns")
-        let type = try await runtime.resolveSwiftType(named: "IDEIntelligenceChat.AppStorageChatSettings", in: .path(image))
-        let shared = try await type.resolveStaticGetter(named: "shared.getter : IDEIntelligenceChat.AppStorageChatSettings", as: (() -> AnyObject).self)
+        let type = try await runtime.resolve(.swift(.type("IDEIntelligenceChat.AppStorageChatSettings")), in: .path(image))
+        let shared = try await type.resolve(.swift(.staticGetter("shared.getter : IDEIntelligenceChat.AppStorageChatSettings", as: (() -> AnyObject).self)))
         settings = try unsafe shared.unsafeInvoke()
         unsafe (metadata = unsafeBitCast(Swift.type(of: settings), to: UnsafeRawPointer.self))
-        let protocolSymbol = try await runtime.resolve(.init(name: "protocol descriptor for IDEIntelligenceChat.ChatSettings", language: .swift, kind: .data), in: .path(image))
-        let conforms = try unsafe await runtime.resolveCFunction(named: "swift_conformsToProtocol", as: ((UnsafeRawPointer, UnsafeRawPointer) -> UnsafeRawPointer?).self)
+        let protocolSymbol = try await runtime.resolve(
+            .swift(.symbol("protocol descriptor for IDEIntelligenceChat.ChatSettings", kind: .data)), in: .path(image))
+        let conforms = try unsafe await runtime.resolve(
+            .c(.function("swift_conformsToProtocol", as: ((UnsafeRawPointer, UnsafeRawPointer) -> UnsafeRawPointer?).self)))
         let settingsMetadata = unsafe metadata
         guard let conformance = try unsafe protocolSymbol.withUnsafeAddress({ try unsafe conforms.unsafeInvoke(settingsMetadata, $0) }) else {
             throw NativeRuntimeError.unsupportedContract("Native chat settings do not conform to ChatSettings")
         }
         unsafe (witness = conformance)
-        headlessGetter = try await runtime.resolve(.init(name: "async function pointer to (extension in IDEIntelligenceChat):IDEIntelligenceChat.ChatSettings.enabledHeadlessMCPTools.getter : Swift.Set<Swift.String>", language: .swift, kind: .data), in: .path(image))
+        headlessGetter = try await runtime.resolve(
+            .swift(
+                .symbol(
+                    "async function pointer to (extension in IDEIntelligenceChat):IDEIntelligenceChat.ChatSettings.enabledHeadlessMCPTools.getter : Swift.Set<Swift.String>",
+                    kind: .data)), in: .path(image))
         let pointer = try unsafe abi.scalar(Int32(ABIValuePointer))
         let result = try unsafe abi.storage(for: Set<String>.self, components: [pointer])
         unsafe (interface = try abi.asyncInterface(result: result, parameters: [pointer, pointer]))

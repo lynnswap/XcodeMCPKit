@@ -54,20 +54,22 @@ func ownedPreview(_ preview: Preview) async throws -> NativeSwiftValue {
 
 @MainActor
 func ownedPreviewValue<Value>(_ value: Value) async throws -> NativeSwiftValue {
-    let identity = try await ABIRuntime.shared.resolveSwiftFunction(
-        named: "XcodeMCPPreviewRenderer.previewValue<A>(A) -> A",
-        as: ((Value) -> NativeSwiftValue).self, genericArguments: [.type(Value.self)])
+    let identity = try await ABIRuntime.shared.resolve(
+        .swift(.function("XcodeMCPPreviewRenderer.previewValue<A>(A) -> A", as: ((Value) -> NativeSwiftValue).self, genericArguments: [.type(Value.self)])))
     return try unsafe identity.unsafeInvoke(value)
 }
 
 @MainActor
 func previewSource(_ preview: NativeSwiftValue) async throws -> NativeSwiftValue {
-    let dataSource = try await ABIRuntime.shared.resolveSwiftType(
-        named: "DeveloperToolsSupport.Preview.DataSource", in: .framework(named: "DeveloperToolsSupport"))
-    let getter = try await preview.type.resolveGetter(named: "dataSource", as: (() -> NativeSwiftValue).self,
-        valueABIs: [dataSource: .opaque(named: dataSource.name)], receiverABI: .opaque(named: preview.type.name))
+    let dataSource = try await ABIRuntime.shared.resolve(
+        .swift(.type("DeveloperToolsSupport.Preview.DataSource")), in: .framework(named: "DeveloperToolsSupport"))
+    let getter = try await preview.type.resolve(
+        .swift(
+            .getter(
+                "dataSource", as: (() -> NativeSwiftValue).self, valueABIs: [dataSource: .opaque(named: dataSource.name)],
+                receiverABI: .opaque(named: preview.type.name))))
     let value = try unsafe getter.unsafeInvoke(on: preview)
-    guard let source = try await value.resolveEnumPayload(forCase: "preview") else {
+    guard let source = try await value.copyEnumPayload(forCase: "preview") else {
         throw NativePreviewPipelineRequired()
     }
     return try source.copyUnderlyingValue()
@@ -87,11 +89,11 @@ func makeViewPreview(source: NativeSwiftValue, groupItemIndex: Int? = nil) async
     let makeView: @MainActor (NativeSwiftValue) async throws -> AnyView
     switch source.type.name {
     case "DeveloperToolsSupport.DefaultPreviewSource<SwiftUI.ViewPreviewBody>":
-        let bodyType = try await runtime.resolveSwiftType(named: "SwiftUI.ViewPreviewBody", in: previewFrameworkImage(named: "SwiftUI"))
+        let bodyType = try await runtime.resolve(.swift(.type("SwiftUI.ViewPreviewBody")), in: previewFrameworkImage(named: "SwiftUI"))
         bodyArgument = .type(bodyType)
         makeView = { body in
-            let getter = try await body.type.resolveGetter(named: "body", as: (() -> NativeSwiftValue).self,
-                receiverABI: .opaque(named: body.type.name))
+            let getter = try await body.type.resolve(
+                .swift(.getter("body", as: (() -> NativeSwiftValue).self, receiverABI: .opaque(named: body.type.name))))
             let existential = try unsafe getter.unsafeInvoke(on: body)
             return try AnyView(NativeSwiftView(existential.copyUnderlyingValue()))
         }
@@ -140,24 +142,28 @@ func makeViewPreview(source: NativeSwiftValue, groupItemIndex: Int? = nil) async
 private func previewBody(source: NativeSwiftValue, bodyArgument: NativeSwiftGenericArgument,
                          groupItemIndex: Int?) async throws -> (body: NativeSwiftValue, groupItems: [String?]?, errors: [String]) {
     let runtime = ABIRuntime.shared
-    let structureType = try await runtime.resolveSwiftType(
-        named: "DeveloperToolsSupport.DefaultPreviewSource.Structure", in: .framework(named: "DeveloperToolsSupport"),
-        genericArguments: [bodyArgument])
-    let structureGetter = try await source.type.resolveGetter(named: "structure", as: (() -> NativeSwiftValue).self,
-        valueABIs: [structureType: .opaque(named: structureType.name)], receiverABI: .opaque(named: source.type.name))
+    let structureType = try await runtime.resolve(
+        .swift(.type("DeveloperToolsSupport.DefaultPreviewSource.Structure", genericArguments: [bodyArgument])),
+        in: .framework(named: "DeveloperToolsSupport"))
+    let structureGetter = try await source.type.resolve(
+        .swift(
+            .getter(
+                "structure", as: (() -> NativeSwiftValue).self, valueABIs: [structureType: .opaque(named: structureType.name)],
+                receiverABI: .opaque(named: source.type.name))))
     let structure = try unsafe structureGetter.unsafeInvoke(on: source)
-    if let payload = try await structure.resolveEnumPayload(forCase: "singlePreview") {
+    if let payload = try await structure.copyEnumPayload(forCase: "singlePreview") {
         let function = try payload.copyTupleElement(at: 0)
-        let closure = try await function.resolveClosure(as: (@MainActor () -> NativeSwiftValue).self)
+        let closure = try await function.copyClosure(as: (@MainActor () -> NativeSwiftValue).self)
         let errors = groupItemIndex.map { [unsupportedPreviewGroupItemMessage($0, supportsGroups: false)] } ?? []
         return (try unsafe closure.unsafeInvoke(), nil, errors)
     }
-    let indexType = try await runtime.resolveSwiftType(named: "DeveloperToolsSupport.PreviewGroupIndex",
-        in: .framework(named: "DeveloperToolsSupport"))
-    let optionalIndexType = try await runtime.resolveSwiftType(named: "Swift.Optional", genericArguments: [.type(indexType)])
+    let indexType = try await runtime.resolve(.swift(.type("DeveloperToolsSupport.PreviewGroupIndex")), in: .framework(named: "DeveloperToolsSupport"))
+    let optionalIndexType = try await runtime.resolve(.swift(.type("Swift.Optional", genericArguments: [.type(indexType)])))
     // These resilient closed values use indirect parameters and results. The
     // body's generic argument keeps its declaration's formal ABI.
-    guard let payload = try await structure.resolveEnumPayload(forCase: "previewGroup",
+    guard
+        let payload = try await structure.copyEnumPayload(
+            forCase: "previewGroup",
         valueABIs: [indexType: .opaque(named: indexType.name), optionalIndexType: .opaque(named: optionalIndexType.name)]) else {
         throw NativePreviewPipelineRequired()
     }
@@ -166,9 +172,11 @@ private func previewBody(source: NativeSwiftValue, bodyArgument: NativeSwiftGene
     var errors: [String] = []
     if let groupItemIndex, items.indices.contains(groupItemIndex) {
         let item = items[groupItemIndex]
-        let initializer = try await indexType.resolveInitializer(
-            named: "init(section: Swift.Int, preview: Swift.Int) -> DeveloperToolsSupport.PreviewGroupIndex",
-            as: ((Int, Int) -> NativeSwiftValue).self, valueABIs: [indexType: .opaque(named: indexType.name)])
+        let initializer = try await indexType.resolve(
+            .swift(
+                .initializer(
+                    "init(section: Swift.Int, preview: Swift.Int) -> DeveloperToolsSupport.PreviewGroupIndex", as: ((Int, Int) -> NativeSwiftValue).self,
+                    valueABIs: [indexType: .opaque(named: indexType.name)])))
         requestedIndex = try await optionalPreviewIndex(unsafe initializer.unsafeInvoke(item.section, item.preview))
     } else {
         if let groupItemIndex { errors.append(unsupportedPreviewGroupItemMessage(groupItemIndex, supportsGroups: true)) }
@@ -181,7 +189,7 @@ private func previewBody(source: NativeSwiftValue, bodyArgument: NativeSwiftGene
         requestedIndex = try await _openExistential(metadata, do: none)
     }
     let function = try payload.copyTupleElement(at: 1)
-    let closure = try await function.resolveClosure(as: (@MainActor (NativeSwiftValue) -> NativeSwiftValue).self)
+    let closure = try await function.copyClosure(as: (@MainActor (NativeSwiftValue) -> NativeSwiftValue).self)
     let result = try unsafe closure.unsafeInvoke(requestedIndex)
     return (try result.copyTupleElement(at: 0), items.map(\.description), errors)
 }
@@ -204,13 +212,16 @@ private func optionalPreviewIndex(_ index: NativeSwiftValue) async throws -> Nat
 
 @MainActor
 private func previewGroupItems(_ metadata: NativeSwiftValue) async throws -> [(section: Int, preview: Int, description: String?)] {
-    let sectionType = try await ABIRuntime.shared.resolveSwiftType(named: "DeveloperToolsSupport.PreviewGroupMetadata.Section",
-        in: .framework(named: "DeveloperToolsSupport"))
-    let firstGetter = try await metadata.type.resolveGetter(named: "firstSection", as: (() -> NativeSwiftValue).self,
-        valueABIs: [sectionType: .opaque(named: sectionType.name)], receiverABI: .opaque(named: metadata.type.name))
+    let sectionType = try await ABIRuntime.shared.resolve(
+        .swift(.type("DeveloperToolsSupport.PreviewGroupMetadata.Section")), in: .framework(named: "DeveloperToolsSupport"))
+    let firstGetter = try await metadata.type.resolve(
+        .swift(
+            .getter(
+                "firstSection", as: (() -> NativeSwiftValue).self, valueABIs: [sectionType: .opaque(named: sectionType.name)],
+                receiverABI: .opaque(named: metadata.type.name))))
     var sections = [try unsafe firstGetter.unsafeInvoke(on: metadata)]
-    let moreGetter = try await metadata.type.resolveGetter(named: "moreSections", as: (() -> NativeSwiftValue).self,
-        receiverABI: .opaque(named: metadata.type.name))
+    let moreGetter = try await metadata.type.resolve(
+        .swift(.getter("moreSections", as: (() -> NativeSwiftValue).self, receiverABI: .opaque(named: metadata.type.name))))
     let more = try unsafe moreGetter.unsafeInvoke(on: metadata)
     let values = try more.withCopy { value -> [Any] in
         guard let collection = value as? any Collection else {
@@ -224,13 +235,13 @@ private func previewGroupItems(_ metadata: NativeSwiftValue) async throws -> [(s
     }
     var items: [(section: Int, preview: Int, description: String?)] = []
     for (sectionIndex, section) in sections.enumerated() {
-        let countGetter = try await section.type.resolveGetter(named: "previewCount", as: (() -> Int).self,
-            receiverABI: .opaque(named: section.type.name))
+        let countGetter = try await section.type.resolve(
+            .swift(.getter("previewCount", as: (() -> Int).self, receiverABI: .opaque(named: section.type.name))))
         let count = try unsafe countGetter.unsafeInvoke(on: section)
         let descriptions: [String?]
         do {
-            let getter = try await section.type.resolveGetter(named: "itemDescriptions", as: (() -> [String?]).self,
-                receiverABI: .opaque(named: section.type.name))
+            let getter = try await section.type.resolve(
+                .swift(.getter("itemDescriptions", as: (() -> [String?]).self, receiverABI: .opaque(named: section.type.name))))
             descriptions = try unsafe getter.unsafeInvoke(on: section)
         } catch ABIResolutionError.declarationNotFound {
             // Earlier runtimes provide the count but no per-item descriptions.
@@ -249,9 +260,11 @@ func applyViewPreviewTraits(_ view: AnyView, preview: NativeSwiftValue) async th
         throw PreviewRendererError("The installed preview modifier trait is unavailable")
     }
     @MainActor func read<T>(_ trait: T.Type) async throws -> [any PreviewModifier] {
-        let getter = try await preview.type.resolveMethod(
-            named: "value<A where A: DeveloperToolsSupport.PreviewTraitProtocol>(for: A.Type) -> A.Value",
-            as: ((T.Type) -> NativeSwiftValue).self, genericArguments: [.type(T.self)], receiverABI: .opaque(named: preview.type.name))
+        let getter = try await preview.type.resolve(
+            .swift(
+                .method(
+                    "value<A where A: DeveloperToolsSupport.PreviewTraitProtocol>(for: A.Type) -> A.Value", as: ((T.Type) -> NativeSwiftValue).self,
+                    genericArguments: [.type(T.self)], receiverABI: .opaque(named: preview.type.name))))
         let value = try unsafe getter.unsafeInvoke(on: preview, trait)
         return try value.withCopy {
             guard let modifiers = $0 as? [any PreviewModifier] else {
@@ -273,11 +286,13 @@ func applyViewPreviewTraits(_ view: AnyView, preview: NativeSwiftValue) async th
                 context = try await M.makeSharedContext()
                 contexts[key] = context
             }
-            let wrapperType = try await ABIRuntime.shared.resolveSwiftType(named: "SwiftUI.PreviewModifierViewModifier",
-                in: previewFrameworkImage(named: "SwiftUI"), genericArguments: [.type(M.self)])
-            let initializer = try await wrapperType.resolveInitializer(
-                named: "init(modifier: A, context: A.Context) -> SwiftUI.PreviewModifierViewModifier<A>",
-                as: ((M, M.Context) -> NativeSwiftValue).self, valueABIs: [wrapperType: .opaque(named: wrapperType.name)])
+            let wrapperType = try await ABIRuntime.shared.resolve(
+                .swift(.type("SwiftUI.PreviewModifierViewModifier", genericArguments: [.type(M.self)])), in: previewFrameworkImage(named: "SwiftUI"))
+            let initializer = try await wrapperType.resolve(
+                .swift(
+                    .initializer(
+                        "init(modifier: A, context: A.Context) -> SwiftUI.PreviewModifierViewModifier<A>", as: ((M, M.Context) -> NativeSwiftValue).self,
+                        valueABIs: [wrapperType: .opaque(named: wrapperType.name)])))
             let wrapper = try unsafe initializer.unsafeInvoke(modifier, context)
             guard let viewModifier = try wrapper.withCopy({ $0 as? any ViewModifier }) else {
                 throw PreviewRendererError("The installed preview modifier wrapper does not conform to ViewModifier")
@@ -298,9 +313,11 @@ func applyViewPreviewTraits(_ view: AnyView, preview: NativeSwiftValue) async th
                 let receiver = try await ownedPreviewValue(content)
                 // Injection consumes the effective trait through this native
                 // factory, rather than setting the public accessibility Bool.
-                let factory = try await receiver.type.resolveMethod(
-                    named: "(extension in SwiftUI):SwiftUI.View.clarityUIIdiom() -> some",
-                    as: (() -> NativeSwiftValue).self, receiverABI: .opaque(named: receiver.type.name))
+                let factory = try await receiver.type.resolve(
+                    .swift(
+                        .method(
+                            "(extension in SwiftUI):SwiftUI.View.clarityUIIdiom() -> some", as: (() -> NativeSwiftValue).self,
+                            receiverABI: .opaque(named: receiver.type.name))))
                 let result = try unsafe factory.unsafeInvoke(on: receiver)
                 guard let view = try result.withCopy({ $0 as? any View }) else {
                     throw NativePreviewPipelineRequired()
@@ -399,10 +416,11 @@ func viewPreviewLayout(_ preview: NativeSwiftValue) async throws -> DeveloperToo
 func previewTraitValue(_ preview: NativeSwiftValue, named mangledName: String) async throws -> NativeSwiftValue {
     guard let metatype = _typeByName(mangledName) else { throw NativePreviewPipelineRequired() }
     func read<T>(_ trait: T.Type) async throws -> NativeSwiftValue {
-        let value = try await preview.type.resolveMethod(
-            named: "value<A where A: DeveloperToolsSupport.PreviewTraitProtocol>(for: A.Type) -> A.Value",
-            as: ((T.Type) -> NativeSwiftValue).self, genericArguments: [.type(T.self)],
-            receiverABI: .opaque(named: preview.type.name))
+        let value = try await preview.type.resolve(
+            .swift(
+                .method(
+                    "value<A where A: DeveloperToolsSupport.PreviewTraitProtocol>(for: A.Type) -> A.Value", as: ((T.Type) -> NativeSwiftValue).self,
+                    genericArguments: [.type(T.self)], receiverABI: .opaque(named: preview.type.name))))
         return try unsafe value.unsafeInvoke(on: preview, trait)
     }
     return try await _openExistential(metatype, do: read)

@@ -29,7 +29,7 @@ final class NativeAnalyticsProductManager: NSObject {
     @objc var products: NSArray {
         do {
             let runtime = ABIRuntime.shared
-            let getter = try runtime.object(manager).resolveMethodAndWait(selector: "products", as: (() -> NSArray).self)
+            let getter = try runtime.object(manager).resolveAndWait(.objc(.method("products", as: (() -> NSArray).self)))
             let original = try unsafe getter.unsafeInvoke()
             let selected = try original.filter { item in
                 let product = item as AnyObject
@@ -57,26 +57,26 @@ final class NativeAnalyticsProductManager: NSObject {
 
     private static func bundleIdentifier(for product: AnyObject) throws -> String? {
         let identifier = try requiredObject(product, selector: "identifier")
-        let getter = try ABIRuntime.shared.object(identifier).resolveMethodAndWait(selector: "bundleIdentifier", as: (() -> String?).self)
+        let getter = try ABIRuntime.shared.object(identifier).resolveAndWait(.objc(.method("bundleIdentifier", as: (() -> String?).self)))
         return try unsafe getter.unsafeInvoke()
     }
 
     private static func familyIdentifier(for product: AnyObject) throws -> String? {
         let identifier = try requiredObject(product, selector: "identifier")
         let category = try requiredObject(identifier, selector: "productCategory")
-        let getter = try ABIRuntime.shared.object(category).resolveMethodAndWait(selector: "platform", as: (() -> AnyObject?).self)
+        let getter = try ABIRuntime.shared.object(category).resolveAndWait(.objc(.method("platform", as: (() -> AnyObject?).self)))
         guard let platform = try unsafe getter.unsafeInvoke() else { return nil }
         return try platformFamilyIdentifier(platform)
     }
 
     static func platformFamilyIdentifier(_ platform: AnyObject) throws -> String {
         let family = try requiredObject(platform, selector: "family")
-        let getter = try ABIRuntime.shared.object(family).resolveMethodAndWait(selector: "identifier", as: (() -> String).self)
+        let getter = try ABIRuntime.shared.object(family).resolveAndWait(.objc(.method("identifier", as: (() -> String).self)))
         return try unsafe getter.unsafeInvoke()
     }
 
     private static func requiredObject(_ object: AnyObject, selector: String) throws -> AnyObject {
-        let getter = try ABIRuntime.shared.object(object).resolveMethodAndWait(selector: selector, as: (() -> AnyObject).self)
+        let getter = try ABIRuntime.shared.object(object).resolveAndWait(.objc(.method(selector, as: (() -> AnyObject).self)))
         return try unsafe getter.unsafeInvoke()
     }
 }

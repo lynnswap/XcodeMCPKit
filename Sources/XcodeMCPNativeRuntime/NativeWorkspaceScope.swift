@@ -15,14 +15,16 @@ final class NativeWorkspaceScope {
 
     init(installation: NativeXcodeInstallation) async throws {
         let core = URL(fileURLWithPath: "/usr/lib/swift/libswiftCore.dylib")
-        entry = try await runtime.resolve(.init(name: "swift_getAssociatedTypeWitness", language: .c), in: .path(core))
+        entry = try await runtime.resolve(.c(.symbol("swift_getAssociatedTypeWitness")), in: .path(core))
         let foundation = installation.framework("DVTFoundation", in: "SharedFrameworks")
-        base = try await runtime.resolve(.init(name: "protocol requirements base descriptor for DVTFoundation.DVTStatelessAction", language: .swift, kind: .data), in: .path(foundation))
-        associated = try await runtime.resolve(.init(name: "associated type descriptor for DVTFoundation.DVTStatelessAction.Input", language: .swift, kind: .data), in: .path(foundation))
+        base = try await runtime.resolve(
+            .swift(.symbol("protocol requirements base descriptor for DVTFoundation.DVTStatelessAction", kind: .data)), in: .path(foundation))
+        associated = try await runtime.resolve(
+            .swift(.symbol("associated type descriptor for DVTFoundation.DVTStatelessAction.Input", kind: .data)), in: .path(foundation))
         let kit = installation.framework("IDEKit")
         var descriptors: [ResolvedSymbol] = []
         for name in ["IDEKit.IDEWorkspaceStatefulActionInputV2", "IDEKit.IDEWorkspaceStatefulActionInput"] {
-            descriptors.append(try await runtime.resolve(.init(name: "protocol descriptor for \(name)", language: .swift, kind: .data), in: .path(kit)))
+            descriptors.append(try await runtime.resolve(.swift(.symbol("protocol descriptor for \(name)", kind: .data)), in: .path(kit)))
         }
         protocols = descriptors
         let pointer = try unsafe abi.scalar(Int32(ABIValuePointer))
@@ -62,7 +64,8 @@ final class NativeWorkspaceScope {
 
     func isWorkspaceScoped(_ action: NativeActionClass) async throws -> Bool {
         let input = unsafe unsafeBitCast(try inputType(for: action), to: UnsafeRawPointer.self)
-        let conforms = try unsafe await runtime.resolveCFunction(named: "swift_conformsToProtocol", as: ((UnsafeRawPointer, UnsafeRawPointer) -> UnsafeRawPointer?).self)
+        let conforms = try unsafe await runtime.resolve(
+            .c(.function("swift_conformsToProtocol", as: ((UnsafeRawPointer, UnsafeRawPointer) -> UnsafeRawPointer?).self)))
         for descriptor in protocols {
             if try unsafe descriptor.withUnsafeAddress({ try unsafe conforms.unsafeInvoke(input, $0) }) != nil {
                 return true

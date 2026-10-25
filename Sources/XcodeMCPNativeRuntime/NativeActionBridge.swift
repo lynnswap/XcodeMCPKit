@@ -21,9 +21,9 @@ actor NativeActionBridge {
         guard let type = NSClassFromString("DVTFoundation.DVTStatelessActionManager") else {
             throw NativeRuntimeError.unavailable("Xcode's native action registry is unavailable")
         }
-        let getter = try runtime.object(type as AnyObject).resolveMethodAndWait(selector: "shared", as: (() -> AnyObject).self)
+        let getter = try runtime.object(type as AnyObject).resolveAndWait(.objc(.method("shared", as: (() -> AnyObject).self)))
         let manager = try unsafe getter.unsafeInvoke()
-        let actions = try runtime.object(manager).resolveMethodAndWait(selector: "allActionMetadata", as: (() -> NSDictionary).self)
+        let actions = try runtime.object(manager).resolveAndWait(.objc(.method("allActionMetadata", as: (() -> NSDictionary).self)))
         guard let values = try unsafe actions.unsafeInvoke() as? [String: AnyObject] else {
             throw NativeRuntimeError.unsupportedContract("Native action registry has an unsupported representation")
         }
@@ -31,22 +31,23 @@ actor NativeActionBridge {
     }
 
     @MainActor func actionClass(for metadata: AnyObject) async throws -> NativeActionClass {
-        let getter = try unsafe await runtime.object(metadata).resolveGetter(
-            named: "actionClass.getter : DVTFoundation.DVTStatelessAction.Type", as: (() -> NativeActionClass).self
-        )
+        let getter = try unsafe await runtime.object(metadata).resolve(
+            .swift(.getter("actionClass.getter : DVTFoundation.DVTStatelessAction.Type", as: (() -> NativeActionClass).self)))
         return try unsafe getter.unsafeInvoke()
     }
 
     func schema(action: NativeActionClass) async throws -> Data {
         let messaging = installation.framework("IDEIntelligenceMessaging", in: "PlugIns")
-        _ = try await runtime.resolveSwiftType(named: "IDEIntelligenceMessaging.ToolSchema", in: .path(messaging))
+        _ = try await runtime.resolve(.swift(.type("IDEIntelligenceMessaging.ToolSchema")), in: .path(messaging))
         guard let schemaType = _typeByName("24IDEIntelligenceMessaging10ToolSchemaV") as? any Encodable.Type else {
             throw NativeRuntimeError.unsupportedContract("Native ToolSchema does not expose its Encodable contract")
         }
         if schemaEntry == nil {
-            schemaEntry = try await runtime.resolve(.init(
-                name: "static (extension in IDEIntelligenceMessaging):DVTFoundation.DVTStatelessAction.toolSchema.getter : IDEIntelligenceMessaging.ToolSchema", language: .swift
-            ), in: .path(messaging))
+            schemaEntry = try await runtime.resolve(
+                .swift(
+                    .symbol(
+                        "static (extension in IDEIntelligenceMessaging):DVTFoundation.DVTStatelessAction.toolSchema.getter : IDEIntelligenceMessaging.ToolSchema"
+                    )), in: .path(messaging))
         }
         guard let schemaEntry else { throw NativeRuntimeError.unavailable("Native schema getter is unavailable") }
         return try unsafe encodeSchema(schemaType, entry: schemaEntry, action: action)
@@ -73,9 +74,11 @@ actor NativeActionBridge {
 
     func execute(action: NativeActionClass, input: Data, context: NativeToolContext) async throws -> AsyncStream<Data> {
         if streamEntry == nil {
-            streamEntry = try await runtime.resolve(.init(
-                name: "static (extension in DVTFoundation):DVTFoundation.DVTStatelessAction.executeStream(inputJSON: Foundation.Data) -> Swift.AsyncStream<Foundation.Data>", language: .swift
-            ), in: .path(installation.framework("DVTFoundation", in: "SharedFrameworks")))
+            streamEntry = try await runtime.resolve(
+                .swift(
+                    .symbol(
+                        "static (extension in DVTFoundation):DVTFoundation.DVTStatelessAction.executeStream(inputJSON: Foundation.Data) -> Swift.AsyncStream<Foundation.Data>"
+                    )), in: .path(installation.framework("DVTFoundation", in: "SharedFrameworks")))
             let word = try unsafe abi.scalar(Int32(ABIValueUInt64))
             let pointer = try unsafe abi.scalar(Int32(ABIValuePointer))
             let data = try unsafe abi.storage(for: Data.self, components: [word, word])

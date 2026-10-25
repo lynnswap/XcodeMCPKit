@@ -117,10 +117,12 @@ final class NativeCrashToolCorrection {
         let manager = try productManager()
         let view = NativeAnalyticsProductManager(manager: manager, bundleIdentifier: context.bundleIdentifier,
             familyIdentifier: try NativeAnalyticsProductManager.platformFamilyIdentifier(context.platform))
-        let type = try await runtime.resolveSwiftType(named: "IDEAnalytics.OrganizerMCPLogDownloader",
-            in: .path(installation.framework("IDEAnalytics", in: "PlugIns")))
-        let initialize = try await type.resolveInitializer(
-            named: "init(productManager: __C.DVTProductManagerProtocol) -> IDEAnalytics.OrganizerMCPLogDownloader", as: ((AnyObject) -> AnyObject).self)
+        let type = try await runtime.resolve(
+            .swift(.type("IDEAnalytics.OrganizerMCPLogDownloader")), in: .path(installation.framework("IDEAnalytics", in: "PlugIns")))
+        let initialize = try await type.resolve(
+            .swift(
+                .initializer(
+                    "init(productManager: __C.DVTProductManagerProtocol) -> IDEAnalytics.OrganizerMCPLogDownloader", as: ((AnyObject) -> AnyObject).self)))
         let downloader = try unsafe initialize.unsafeInvoke(view)
         let value: [String: Any]
         do {
@@ -128,9 +130,12 @@ final class NativeCrashToolCorrection {
             case .topIssues:
                 let prepared: NativeSwiftMethod<@concurrent (String, AnyObject, NativeAnalyticsBoolean, String?, NativeAnalyticsInteger) async throws -> NativeAnalyticsDictionary>
                 if let topMethod { prepared = topMethod } else {
-                    let bound = try await runtime.object(downloader).resolveMethod(
-                        named: "getTopCrashPoints(bundleId: Swift.String, platform: __C.DVTPlatform, isBeta: Swift.Optional<Swift.Bool>, appVersion: Swift.Optional<Swift.String>, count: Swift.Optional<Swift.Int>) async throws -> Swift.Dictionary<Swift.String, Any>",
-                        as: (@concurrent (String, AnyObject, NativeAnalyticsBoolean, String?, NativeAnalyticsInteger) async throws -> NativeAnalyticsDictionary).self)
+                    let bound = try await runtime.object(downloader).resolve(
+                        .swift(
+                            .method(
+                                "getTopCrashPoints(bundleId: Swift.String, platform: __C.DVTPlatform, isBeta: Swift.Optional<Swift.Bool>, appVersion: Swift.Optional<Swift.String>, count: Swift.Optional<Swift.Int>) async throws -> Swift.Dictionary<Swift.String, Any>",
+                                as: (@concurrent (String, AnyObject, NativeAnalyticsBoolean, String?, NativeAnalyticsInteger) async throws ->
+                                    NativeAnalyticsDictionary).self)))
                     prepared = bound.method
                     topMethod = prepared
                 }
@@ -140,9 +145,11 @@ final class NativeCrashToolCorrection {
             case .logs:
                 let prepared: NativeSwiftMethod<@concurrent (String, String, AnyObject, NativeAnalyticsBoolean, String?) async throws -> NativeAnalyticsDictionary>
                 if let logsMethod { prepared = logsMethod } else {
-                    let bound = try await runtime.object(downloader).resolveMethod(
-                        named: "getCrashLogs(bundleId: Swift.String, signatureName: Swift.String, platform: __C.DVTPlatform, isBeta: Swift.Optional<Swift.Bool>, appVersion: Swift.Optional<Swift.String>) async throws -> Swift.Dictionary<Swift.String, Any>",
-                        as: (@concurrent (String, String, AnyObject, NativeAnalyticsBoolean, String?) async throws -> NativeAnalyticsDictionary).self)
+                    let bound = try await runtime.object(downloader).resolve(
+                        .swift(
+                            .method(
+                                "getCrashLogs(bundleId: Swift.String, signatureName: Swift.String, platform: __C.DVTPlatform, isBeta: Swift.Optional<Swift.Bool>, appVersion: Swift.Optional<Swift.String>) async throws -> Swift.Dictionary<Swift.String, Any>",
+                                as: (@concurrent (String, String, AnyObject, NativeAnalyticsBoolean, String?) async throws -> NativeAnalyticsDictionary).self)))
                     prepared = bound.method
                     logsMethod = prepared
                 }
@@ -165,14 +172,16 @@ final class NativeCrashToolCorrection {
         }
         let json = String(decoding: try JSONSerialization.data(withJSONObject: value, options: .prettyPrinted), as: UTF8.self)
         guard kind == .logs else { return json }
-        let reportType = try await runtime.resolveSwiftType(named: "DVTAnalytics.AnalyticsReportType",
-            in: .path(installation.framework("DVTAnalytics", in: "SharedFrameworks")))
-        let crashType = try await reportType.resolveStaticGetter(named: "crashPoint.getter : DVTAnalytics.AnalyticsReportType", as: (() -> AnyObject).self)
-        let provider = try await runtime.resolveSwiftType(named: "IDEAnalytics.TriageKnowledgeProvider",
-            in: .path(installation.framework("IDEAnalytics", in: "PlugIns")))
-        let format = try await provider.resolveStaticMethod(
-            named: "formatWithTriageKnowledge(diagnosticData: Swift.String, reportType: DVTAnalytics.AnalyticsReportType) throws -> Swift.String",
-            as: ((String, AnyObject) throws -> String).self)
+        let reportType = try await runtime.resolve(
+            .swift(.type("DVTAnalytics.AnalyticsReportType")), in: .path(installation.framework("DVTAnalytics", in: "SharedFrameworks")))
+        let crashType = try await reportType.resolve(.swift(.staticGetter("crashPoint.getter : DVTAnalytics.AnalyticsReportType", as: (() -> AnyObject).self)))
+        let provider = try await runtime.resolve(
+            .swift(.type("IDEAnalytics.TriageKnowledgeProvider")), in: .path(installation.framework("IDEAnalytics", in: "PlugIns")))
+        let format = try await provider.resolve(
+            .swift(
+                .staticMethod(
+                    "formatWithTriageKnowledge(diagnosticData: Swift.String, reportType: DVTAnalytics.AnalyticsReportType) throws -> Swift.String",
+                    as: ((String, AnyObject) throws -> String).self)))
         return try unsafe format.unsafeInvoke(json, crashType.unsafeInvoke())
     }
 
@@ -213,14 +222,14 @@ final class NativeCrashToolCorrection {
                             guard let family = try object(choice, selector: "family") else {
                                 throw NativeRuntimeError.unsupportedContract("Native analytics platform has no family")
                             }
-                            let getter = try runtime.object(family).resolveMethodAndWait(selector: "displayName", as: (() -> String).self)
+                            let getter = try runtime.object(family).resolveAndWait(.objc(.method("displayName", as: (() -> String).self)))
                             return try unsafe getter.unsafeInvoke()
                         }
                         return .platformSelectionRequired(bundleIdentifier: bundle, platforms: Array(Set(names)).sorted())
                     }
                     throw NativeRuntimeError.invalidRequest("Could not resolve the platform from the active run destination")
                 }
-                let description = try runtime.object(family).resolveMethodAndWait(selector: "displayName", as: (() -> String).self)
+                let description = try runtime.object(family).resolveAndWait(.objc(.method("displayName", as: (() -> String).self)))
                 platform = try unsafe self.platform(description: description.unsafeInvoke())
             }
         }
@@ -236,20 +245,20 @@ final class NativeCrashToolCorrection {
         guard let actionClass = NSClassFromString("IDESchemeAction") else {
             throw NativeRuntimeError.unsupportedContract("Xcode's scheme action class is unavailable")
         }
-        let getter = try runtime.object(actionClass as AnyObject).resolveMethodAndWait(selector: "bundleIdentifierFromBuildableProduct:withBuildParameters:",
-            as: ((AnyObject, AnyObject?) -> String?).self)
+        let getter = try runtime.object(actionClass as AnyObject).resolveAndWait(
+            .objc(.method("bundleIdentifierFromBuildableProduct:withBuildParameters:", as: ((AnyObject, AnyObject?) -> String?).self)))
         return try unsafe getter.unsafeInvoke(product, nil)
     }
 
     private func availableBundleIdentifiers() throws -> [String] {
-        let getter = try runtime.object(productManager()).resolveMethodAndWait(selector: "products", as: (() -> NSArray).self)
+        let getter = try runtime.object(productManager()).resolveAndWait(.objc(.method("products", as: (() -> NSArray).self)))
         let products = try unsafe getter.unsafeInvoke()
         var identifiers = Set<String>()
         for product in products {
-            let appStoreID = try runtime.object(product as AnyObject).resolveMethodAndWait(selector: "adamId", as: (() -> AnyObject?).self)
+            let appStoreID = try runtime.object(product as AnyObject).resolveAndWait(.objc(.method("adamId", as: (() -> AnyObject?).self)))
             guard try unsafe appStoreID.unsafeInvoke() != nil,
                   let identifier = try object(product as AnyObject, selector: "identifier") else { continue }
-            let bundle = try runtime.object(identifier).resolveMethodAndWait(selector: "bundleIdentifier", as: (() -> String?).self)
+            let bundle = try runtime.object(identifier).resolveAndWait(.objc(.method("bundleIdentifier", as: (() -> String?).self)))
             if let value = try unsafe bundle.unsafeInvoke() { identifiers.insert(value) }
         }
         return identifiers.sorted()
@@ -259,18 +268,18 @@ final class NativeCrashToolCorrection {
         guard let type = NSClassFromString("IDEProductManager") else {
             throw NativeRuntimeError.unsupportedContract("Xcode's product manager is unavailable")
         }
-        let getter = try runtime.object(type as AnyObject).resolveMethodAndWait(selector: "defaultManager", as: (() -> AnyObject).self)
+        let getter = try runtime.object(type as AnyObject).resolveAndWait(.objc(.method("defaultManager", as: (() -> AnyObject).self)))
         return try unsafe getter.unsafeInvoke()
     }
 
     private func waitForProductInventory() async throws {
         let manager = try productManager()
-        let started = try runtime.object(manager).resolveMethodAndWait(selector: "hasStartedLocating", as: (() -> Bool).self)
+        let started = try runtime.object(manager).resolveAndWait(.objc(.method("hasStartedLocating", as: (() -> Bool).self)))
         if try unsafe !started.unsafeInvoke() {
-            let load = try runtime.object(manager).resolveMethodAndWait(selector: "load", as: (() -> Void).self)
+            let load = try runtime.object(manager).resolveAndWait(.objc(.method("load", as: (() -> Void).self)))
             try unsafe load.unsafeInvoke()
         }
-        let completed = try runtime.object(manager).resolveMethodAndWait(selector: "hasCompletedInitialLoading", as: (() -> Bool).self)
+        let completed = try runtime.object(manager).resolveAndWait(.objc(.method("hasCompletedInitialLoading", as: (() -> Bool).self)))
         while try unsafe !completed.unsafeInvoke() {
             try await Task.sleep(for: .milliseconds(50))
         }
@@ -280,7 +289,7 @@ final class NativeCrashToolCorrection {
         guard let type = NSClassFromString("DVTPlatform") else {
             throw NativeRuntimeError.unsupportedContract("Xcode's platform registry is unavailable")
         }
-        let getter = try runtime.object(type as AnyObject).resolveMethodAndWait(selector: "platformForUserDescription:", as: ((String) -> AnyObject?).self)
+        let getter = try runtime.object(type as AnyObject).resolveAndWait(.objc(.method("platformForUserDescription:", as: ((String) -> AnyObject?).self)))
         guard let value = try unsafe getter.unsafeInvoke(description) else {
             throw NativeRuntimeError.invalidRequest("Unknown platform '\(description)'")
         }
@@ -288,12 +297,12 @@ final class NativeCrashToolCorrection {
     }
 
     private func productPlatforms(bundleIdentifier: String) throws -> [AnyObject] {
-        let getter = try runtime.object(productManager()).resolveMethodAndWait(selector: "products", as: (() -> NSArray).self)
+        let getter = try runtime.object(productManager()).resolveAndWait(.objc(.method("products", as: (() -> NSArray).self)))
         let products = try unsafe getter.unsafeInvoke()
         var platforms: [String: AnyObject] = [:]
         for product in products {
             guard let identifier = try object(product as AnyObject, selector: "identifier") else { continue }
-            let bundle = try runtime.object(identifier).resolveMethodAndWait(selector: "bundleIdentifier", as: (() -> String?).self)
+            let bundle = try runtime.object(identifier).resolveAndWait(.objc(.method("bundleIdentifier", as: (() -> String?).self)))
             guard try unsafe bundle.unsafeInvoke() == bundleIdentifier,
                   let category = try object(identifier, selector: "productCategory"),
                   let platform = try object(category, selector: "platform") else { continue }
@@ -305,15 +314,16 @@ final class NativeCrashToolCorrection {
 
     private func workspace(identifier: String?) async throws -> AnyObject? {
         guard let identifier else { return nil }
-        let type = try await runtime.resolveSwiftType(named: "IDEFoundation.IDEWorkspaceRegistry", in: .path(installation.framework("IDEFoundation")))
-        let shared = try await type.resolveStaticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)
+        let type = try await runtime.resolve(.swift(.type("IDEFoundation.IDEWorkspaceRegistry")), in: .path(installation.framework("IDEFoundation")))
+        let shared = try await type.resolve(.swift(.staticGetter("shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)))
         let registry = try unsafe shared.unsafeInvoke()
-        let lookup = try await runtime.object(registry).resolveMethod(named: "workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)
+        let lookup = try await runtime.object(registry).resolve(
+            .swift(.method("workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)))
         return try unsafe lookup.unsafeInvoke(identifier)
     }
 
     private func object(_ receiver: AnyObject, selector: String) throws -> AnyObject? {
-        let getter = try runtime.object(receiver).resolveMethodAndWait(selector: selector, as: (() -> AnyObject?).self)
+        let getter = try runtime.object(receiver).resolveAndWait(.objc(.method(selector, as: (() -> AnyObject?).self)))
         return try unsafe getter.unsafeInvoke()
     }
 

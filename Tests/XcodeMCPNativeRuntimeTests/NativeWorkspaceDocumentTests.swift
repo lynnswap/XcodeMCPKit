@@ -92,8 +92,7 @@ private final class WorkspaceStateRepositoryFixture: NSObject {
     func select(_ scheme: String) throws {
         selectedScheme = scheme
         guard let delegate else { return }
-        let changed = try ABIRuntime.shared.object(delegate).resolveMethodAndWait(
-            selector: "stateRepositoryDidChange:", as: ((AnyObject) -> Void).self)
+        let changed = try ABIRuntime.shared.object(delegate).resolveAndWait(.objc(.method("stateRepositoryDidChange:", as: ((AnyObject) -> Void).self)))
         try unsafe changed.unsafeInvoke(self)
     }
 

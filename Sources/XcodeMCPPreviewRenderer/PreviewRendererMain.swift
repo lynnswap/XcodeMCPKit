@@ -247,8 +247,8 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
                 if let index = request.groupItemIndex { errors.append(unsupportedPreviewGroupItemMessage(index, supportsGroups: false)) }
             default: throw NativePreviewPipelineRequired()
             }
-            let displayGetter = try await value.type.resolveGetter(named: "displayName", as: (() -> String?).self,
-                receiverABI: .opaque(named: value.type.name))
+            let displayGetter = try await value.type.resolve(
+                .swift(.getter("displayName", as: (() -> String?).self, receiverABI: .opaque(named: value.type.name))))
             displayName = try unsafe displayGetter.unsafeInvoke(on: value)
             sourceLineNumber = registry.line
         }

@@ -66,24 +66,24 @@ struct PreviewExclusionGeometry: Equatable {
 @MainActor
 func previewExclusionGeometry(in window: UIWindow) async throws -> PreviewExclusionGeometry? {
     let runtime = ABIRuntime.shared
-    let available = try await runtime.resolveCFunction(named: "SBSIsSystemApertureAvailable",
-        as: (() -> Bool).self, in: .framework(named: "SpringBoardServices"))
+    let available = try await runtime.resolve(
+        .c(.function("SBSIsSystemApertureAvailable", as: (() -> Bool).self)), in: .framework(named: "SpringBoardServices"))
     let enabled: Bool
     if try unsafe available.unsafeInvoke() { enabled = true }
     else { enabled = try await drawsLegacySystemAperture(using: runtime) }
     guard enabled else { return nil }
-    let getter = try await runtime.object(window.screen).resolveMethod(selector: "_exclusionArea", as: (() -> AnyObject?).self)
+    let getter = try await runtime.object(window.screen).resolve(.objc(.method("_exclusionArea", as: (() -> AnyObject?).self)))
     guard let shape = try unsafe getter.unsafeInvoke(), let object = shape as? NSObject,
           let shapeClass = NSClassFromString("UISDisplaySingleRectShape"), object.isKind(of: shapeClass) else { return nil }
-    let rectGetter = try await runtime.object(shape).resolveMethod(selector: "rect", as: (() -> CGRect).self)
+    let rectGetter = try await runtime.object(shape).resolve(.objc(.method("rect", as: (() -> CGRect).self)))
     return try unsafe PreviewExclusionGeometry(rect: rectGetter.unsafeInvoke(),
         bounds: CGRect(origin: .zero, size: window.screen.fixedCoordinateSpace.bounds.size), scale: window.screen.scale)
 }
 
 @MainActor
 private func drawsLegacySystemAperture(using runtime: ABIRuntime) async throws -> Bool {
-    let copy = try unsafe await runtime.resolveCFunction(named: "MGCopyAnswer",
-        as: ((Unmanaged<CFString>, UnsafeRawPointer?) -> Unmanaged<CFDictionary>?).self,
+    let copy = try unsafe await runtime.resolve(
+        .c(.function("MGCopyAnswer", as: ((Unmanaged<CFString>, UnsafeRawPointer?) -> Unmanaged<CFDictionary>?).self)),
         in: .installName("/usr/lib/libMobileGestalt.dylib"))
     let key = "ArtworkTraits" as CFString
     guard let answer = try unsafe copy.unsafeInvoke(.passUnretained(key), nil)?.takeRetainedValue() else { return false }

@@ -96,8 +96,8 @@ final class PreviewRendererScene: UIResponder, UIWindowSceneDelegate {
         #if os(tvOS)
         do {
             // Native IOSHostingParadigm sets this color on TV; its Swift API is unavailable there.
-            let background = try await ABIRuntime.shared.object(UIColor.self as AnyObject).resolveMethod(
-                selector: "systemBackgroundColor", as: (() -> UIColor).self)
+            let background = try await ABIRuntime.shared.object(UIColor.self as AnyObject).resolve(
+                .objc(.method("systemBackgroundColor", as: (() -> UIColor).self)))
             controller.view.backgroundColor = try unsafe background.unsafeInvoke()
         } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
         #endif
