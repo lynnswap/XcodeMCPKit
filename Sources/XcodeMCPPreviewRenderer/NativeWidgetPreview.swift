@@ -61,19 +61,27 @@ func renderNativeWidgetPreview(_ request: PreviewRendererRequest) async throws -
         }
         let renderer = NativeWidgetPreview(service: service, request: request)
         let specificationType = try await service.messagingType("PreviewSpecification")
-        let decoder = try await specificationType.resolveInitializer(
-            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewSpecification",
-            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
-            valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name),
-                        specificationType: .opaque(named: specificationType.name)])
+        let decoder = try await specificationType.resolve(
+            .swift(
+                .initializer(
+                    "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewSpecification",
+                    as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+                    valueABIs: [
+                        service.propertyListType: .opaque(named: service.propertyListType.name),
+                        specificationType: .opaque(named: specificationType.name),
+                    ])))
         let encodedSpecification = try await service.propertyList(sourceSpecification)
         let specification = try unsafe decoder.unsafeInvoke(encodedSpecification)
         let metadataType = try await service.messagingType("PreviewMetadata")
-        let metadataDecoder = try await metadataType.resolveInitializer(
-            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewMetadata",
-            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
-            valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name),
-                        metadataType: .opaque(named: metadataType.name)])
+        let metadataDecoder = try await metadataType.resolve(
+            .swift(
+                .initializer(
+                    "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewMetadata",
+                    as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+                    valueABIs: [
+                        service.propertyListType: .opaque(named: service.propertyListType.name),
+                        metadataType: .opaque(named: metadataType.name),
+                    ])))
         let encodedMetadata = try await service.propertyList(sourceMetadata)
         let metadata = try unsafe metadataDecoder.unsafeInvoke(encodedMetadata)
         return try await renderer.render(pid: pid, specification: specification,
@@ -90,12 +98,17 @@ private struct NativeWidgetPreview {
     func render(pid: Int32, specification: NativeSwiftValue, metadata: NativeSwiftValue,
                 variants: [String: String]) async throws -> PreviewRendererResult {
         let identifierType = try await service.messagingType("ContentIdentifier")
-        let makeIdentifier = try await identifierType.resolveInitializer(
-            named: "init(rawValue: Swift.String) -> PreviewsMessagingOS.ContentIdentifier",
-            as: ((String) -> NativeSwiftValue).self, valueABIs: [identifierType: .opaque(named: identifierType.name)])
+        let makeIdentifier = try await identifierType.resolve(
+            .swift(
+                .initializer(
+                    "init(rawValue: Swift.String) -> PreviewsMessagingOS.ContentIdentifier", as: ((String) -> NativeSwiftValue).self,
+                    valueABIs: [identifierType: .opaque(named: identifierType.name)])))
         let categoryType = try await service.messagingType("ContentCategory")
-        let categoryGetter = try await metadata.type.resolveGetter(named: "contentCategory", as: (() -> NativeSwiftValue).self,
-            valueABIs: [categoryType: .opaque(named: categoryType.name)], receiverABI: .opaque(named: metadata.type.name))
+        let categoryGetter = try await metadata.type.resolve(
+            .swift(
+                .getter(
+                    "contentCategory", as: (() -> NativeSwiftValue).self, valueABIs: [categoryType: .opaque(named: categoryType.name)],
+                    receiverABI: .opaque(named: metadata.type.name))))
         let previewCategory = try unsafe categoryGetter.unsafeInvoke(on: metadata)
         let catalog = try await variantCatalog(category: previewCategory)
         var selections: [String: String] = [:]
@@ -109,11 +122,15 @@ private struct NativeWidgetPreview {
         }
         let effects = try await catalog.effects(for: selections)
         let payloadType = try await service.messagingType("PreviewPayload")
-        let makePayload = try await payloadType.resolveInitializer(
-            named: "init(previewSpecification: PreviewsMessagingOS.PreviewSpecification, renderEffects: [PreviewsMessagingOS.RenderEffect]) -> PreviewsMessagingOS.PreviewPayload",
-            as: ((NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
-            valueABIs: [specification.type: .opaque(named: specification.type.name), effects.type: .pointer,
-                        payloadType: .opaque(named: payloadType.name)])
+        let makePayload = try await payloadType.resolve(
+            .swift(
+                .initializer(
+                    "init(previewSpecification: PreviewsMessagingOS.PreviewSpecification, renderEffects: [PreviewsMessagingOS.RenderEffect]) -> PreviewsMessagingOS.PreviewPayload",
+                    as: ((NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
+                    valueABIs: [
+                        specification.type: .opaque(named: specification.type.name), effects.type: .pointer,
+                        payloadType: .opaque(named: payloadType.name),
+                    ])))
         let payload = try unsafe makePayload.unsafeInvoke(specification, effects)
         let encoded = try await service.encode(payload)
         let identifier = try unsafe makeIdentifier.unsafeInvoke(UUID().uuidString)
@@ -138,8 +155,8 @@ private struct NativeWidgetPreview {
         let finalEncoded = try await service.encode(final)
         let resultMetadata = try await service.dictionary(finalEncoded)
         let descriptions = resultMetadata["controlDescriptions"] as? [[String: Any]] ?? []
-        let displayGetter = try await metadata.type.resolveGetter(named: "displayName", as: (() -> String?).self,
-            receiverABI: .opaque(named: metadata.type.name))
+        let displayGetter = try await metadata.type.resolve(
+            .swift(.getter("displayName", as: (() -> String?).self, receiverABI: .opaque(named: metadata.type.name))))
         let snapshot = try await image(final)
         let indexes = descriptions.compactMap { description -> [Int]? in
             guard let type = description["controlType"] as? [String: Any], type["discriminant"] as? String == "timeline",
@@ -160,33 +177,41 @@ private struct NativeWidgetPreview {
     private func variantCatalog(category: NativeSwiftValue) async throws -> WidgetVariantCatalog {
         let parameter = try await service.archivingParameter()
         let request = try await service.messagingType("RequestPreviewVariantsPayload")
-        let make = try await request.resolveInitializer(
-            named: "init(contentCategory: PreviewsMessagingOS.ContentCategory, \(parameter.declaration)) -> PreviewsMessagingOS.RequestPreviewVariantsPayload",
-            as: ((NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
-            valueABIs: [category.type: .opaque(named: category.type.name), parameter.value.type: .opaque(named: parameter.value.type.name),
-                        request: .opaque(named: request.name)])
+        let make = try await request.resolve(
+            .swift(
+                .initializer(
+                    "init(contentCategory: PreviewsMessagingOS.ContentCategory, \(parameter.declaration)) -> PreviewsMessagingOS.RequestPreviewVariantsPayload",
+                    as: ((NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
+                    valueABIs: [
+                        category.type: .opaque(named: category.type.name), parameter.value.type: .opaque(named: parameter.value.type.name),
+                        request: .opaque(named: request.name),
+                    ])))
         let payload = try unsafe make.unsafeInvoke(category.copy(), parameter.value)
         let encoded = try await service.encode(payload)
         let reply = try await service.send("variants", payload: encoded)
         let responseType = try await service.messagingType("PreviewVariantsPayload")
-        let decode = try await responseType.resolveInitializer(
-            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewVariantsPayload",
-            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
-            valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name), responseType: .opaque(named: responseType.name)])
+        let decode = try await responseType.resolve(
+            .swift(
+                .initializer(
+                    "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.PreviewVariantsPayload",
+                    as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+                    valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name), responseType: .opaque(named: responseType.name)])))
         let response = try unsafe decode.unsafeInvoke(reply)
         let group = try await service.messagingType("PreviewVariantGroup")
-        let array = try await runtime.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(group)])
-        let getter = try await responseType.resolveGetter(named: "groups", as: (() -> NativeSwiftValue).self,
-            valueABIs: [array: .pointer], receiverABI: .opaque(named: responseType.name))
+        let array = try await runtime.resolve(.swift(.type("Swift.Array", genericArguments: [.type(group)])))
+        let getter = try await responseType.resolve(
+            .swift(.getter("groups", as: (() -> NativeSwiftValue).self, valueABIs: [array: .pointer], receiverABI: .opaque(named: responseType.name))))
         return try unsafe getter.unsafeInvoke(on: response).withCopy { try WidgetVariantCatalog(nativeGroups: $0) }
     }
 
     private func staticReply(_ value: NativeSwiftValue) async throws -> NativeSwiftValue {
         let type = try await service.messagingType("StaticPreviewReply")
-        let decoder = try await type.resolveInitializer(
-            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.StaticPreviewReply",
-            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
-            valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name), type: .opaque(named: type.name)])
+        let decoder = try await type.resolve(
+            .swift(
+                .initializer(
+                    "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.StaticPreviewReply",
+                    as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+                    valueABIs: [service.propertyListType: .opaque(named: service.propertyListType.name), type: .opaque(named: type.name)])))
         return try unsafe decoder.unsafeInvoke(value)
     }
 
@@ -194,9 +219,11 @@ private struct NativeWidgetPreview {
         (states: NativeSwiftValue?, errors: [String]) {
         guard request.timelineIndex != nil || request.activityToggleState != nil else { return (nil, []) }
         let type = try await service.messagingType("PlistValueBox")
-        let arrayType = try await runtime.resolveSwiftType(named: "Swift.Array", genericArguments: [.type(type)])
-        let getter = try await reply.type.resolveGetter(named: "controlStates", as: (() -> NativeSwiftValue).self,
-            valueABIs: [arrayType: .pointer], receiverABI: .opaque(named: reply.type.name))
+        let arrayType = try await runtime.resolve(.swift(.type("Swift.Array", genericArguments: [.type(type)])))
+        let getter = try await reply.type.resolve(
+            .swift(
+                .getter("controlStates", as: (() -> NativeSwiftValue).self, valueABIs: [arrayType: .pointer], receiverABI: .opaque(named: reply.type.name)))
+        )
         let initial = try unsafe getter.unsafeInvoke(on: reply)
         var boxes = try initial.withCopy { value -> [Any] in
             guard let values = value as? [Any], values.count == descriptions.count else {
@@ -210,13 +237,19 @@ private struct NativeWidgetPreview {
             let kind = (description["controlType"] as? [String: Any])?["discriminant"] as? String
             let value: NativeSwiftValue
             if kind == "timeline", request.timelineIndex != nil {
-                let initializer = try await type.resolveInitializer(named: "init<A where A: PreviewsFoundationOS.PropertyListRepresentable>(value: A?) -> PreviewsMessagingOS.PlistValueBox",
-                    as: ((Int?) -> NativeSwiftValue).self, genericArguments: [.type(Int.self)], valueABIs: [type: .opaque(named: type.name)])
+                let initializer = try await type.resolve(
+                    .swift(
+                        .initializer(
+                            "init<A where A: PreviewsFoundationOS.PropertyListRepresentable>(value: A?) -> PreviewsMessagingOS.PlistValueBox",
+                            as: ((Int?) -> NativeSwiftValue).self, genericArguments: [.type(Int.self)], valueABIs: [type: .opaque(named: type.name)])))
                 value = try unsafe initializer.unsafeInvoke(request.timelineIndex)
                 appliedTimeline = true
             } else if kind == "toggle", request.activityToggleState != nil {
-                let initializer = try await type.resolveInitializer(named: "init<A where A: PreviewsFoundationOS.PropertyListRepresentable>(value: A?) -> PreviewsMessagingOS.PlistValueBox",
-                    as: ((Bool?) -> NativeSwiftValue).self, genericArguments: [.type(Bool.self)], valueABIs: [type: .opaque(named: type.name)])
+                let initializer = try await type.resolve(
+                    .swift(
+                        .initializer(
+                            "init<A where A: PreviewsFoundationOS.PropertyListRepresentable>(value: A?) -> PreviewsMessagingOS.PlistValueBox",
+                            as: ((Bool?) -> NativeSwiftValue).self, genericArguments: [.type(Bool.self)], valueABIs: [type: .opaque(named: type.name)])))
                 value = try unsafe initializer.unsafeInvoke(request.activityToggleState)
                 appliedToggle = true
             } else { continue }
@@ -242,21 +275,29 @@ private struct NativeWidgetPreview {
 
     private func image(_ reply: NativeSwiftValue) async throws -> Data {
         let propertyList = service.propertyListType
-        let getter = try await reply.type.resolveGetter(named: "contentPayload", as: (() -> NativeSwiftValue).self,
-            valueABIs: [propertyList: .opaque(named: propertyList.name)], receiverABI: .opaque(named: reply.type.name))
+        let getter = try await reply.type.resolve(
+            .swift(
+                .getter(
+                    "contentPayload", as: (() -> NativeSwiftValue).self, valueABIs: [propertyList: .opaque(named: propertyList.name)],
+                    receiverABI: .opaque(named: reply.type.name))))
         let content = try unsafe getter.unsafeInvoke(on: reply)
         let renderType = try await service.messagingType("RenderPayload")
-        let decoder = try await renderType.resolveInitializer(
-            named: "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.RenderPayload",
-            as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
-            valueABIs: [propertyList: .opaque(named: propertyList.name), renderType: .opaque(named: renderType.name)])
+        let decoder = try await renderType.resolve(
+            .swift(
+                .initializer(
+                    "init(propertyListValue: PreviewsFoundationOS.PropertyList) throws -> PreviewsMessagingOS.RenderPayload",
+                    as: ((NativeSwiftValue) throws -> NativeSwiftValue).self,
+                    valueABIs: [propertyList: .opaque(named: propertyList.name), renderType: .opaque(named: renderType.name)])))
         let render = try unsafe decoder.unsafeInvoke(content)
         let bitmapType = try await service.messagingType("BitmapDescription")
-        let bitmapGetter = try await renderType.resolveGetter(named: "bitmapDescription", as: (() -> NativeSwiftValue).self,
-            valueABIs: [bitmapType: .opaque(named: bitmapType.name)], receiverABI: .opaque(named: renderType.name))
+        let bitmapGetter = try await renderType.resolve(
+            .swift(
+                .getter(
+                    "bitmapDescription", as: (() -> NativeSwiftValue).self, valueABIs: [bitmapType: .opaque(named: bitmapType.name)],
+                    receiverABI: .opaque(named: renderType.name))))
         let bitmap = try unsafe bitmapGetter.unsafeInvoke(on: render)
-        let makeImage = try await bitmapType.resolveMethod(named: "makeImage() throws -> __C.CGImageRef",
-            as: (() throws -> CGImage).self, receiverABI: .opaque(named: bitmapType.name))
+        let makeImage = try await bitmapType.resolve(
+            .swift(.method("makeImage() throws -> __C.CGImageRef", as: (() throws -> CGImage).self, receiverABI: .opaque(named: bitmapType.name))))
         let image = try unsafe makeImage.unsafeInvoke(on: bitmap)
         #if os(iOS)
         guard let data = UIImage(cgImage: image).pngData() else { throw PreviewRendererError("The native preview bitmap could not encode as PNG") }

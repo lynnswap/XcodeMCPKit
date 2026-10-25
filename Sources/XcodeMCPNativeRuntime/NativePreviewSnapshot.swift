@@ -94,17 +94,16 @@ extension NativePreviewCorrection {
 
     private func snapshotRotationDegrees(_ rawValue: String) async throws -> Double {
         let runtime = ABIRuntime.shared
-        let type = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.PreviewTraits.Orientation",
-            in: .framework(named: "PreviewsMessagingHost"))
-        let optional = try await runtime.resolveSwiftType(named: "Swift.Optional", genericArguments: [.type(type)])
-        let initializer = try await type.resolveInitializer(
-            named: "init(rawValue: Swift.String) -> Swift.Optional<PreviewsMessagingHost.PreviewTraits.Orientation>",
-            as: ((String) -> NativeSwiftValue).self,
-            valueABIs: [type: .opaque(named: type.name), optional: .opaque(named: optional.name)])
+        let type = try await runtime.resolve(.swift(.type("PreviewsMessagingHost.PreviewTraits.Orientation")), in: .framework(named: "PreviewsMessagingHost"))
+        let optional = try await runtime.resolve(.swift(.type("Swift.Optional", genericArguments: [.type(type)])))
+        let initializer = try await type.resolve(
+            .swift(
+                .initializer(
+                    "init(rawValue: Swift.String) -> Swift.Optional<PreviewsMessagingHost.PreviewTraits.Orientation>", as: ((String) -> NativeSwiftValue).self,
+                    valueABIs: [type: .opaque(named: type.name), optional: .opaque(named: optional.name)])))
         let value = try unsafe initializer.unsafeInvoke(rawValue)
-        guard let orientation = try await value.resolveEnumPayload(forCase: "some") else { throw NativePipelineRequired() }
-        let getter = try await type.resolveGetter(named: "rotationDegrees", as: (() -> Double).self,
-            receiverABI: .opaque(named: type.name))
+        guard let orientation = try await value.copyEnumPayload(forCase: "some") else { throw NativePipelineRequired() }
+        let getter = try await type.resolve(.swift(.getter("rotationDegrees", as: (() -> Double).self, receiverABI: .opaque(named: type.name))))
         return try unsafe getter.unsafeInvoke(on: orientation)
     }
 

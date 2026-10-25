@@ -14,12 +14,10 @@ final class NativeExecutionOperations {
             throw NativeRuntimeError.unsupportedContract("Xcode's execution-operation tracker is unavailable")
         }
         let runtime = ABIRuntime.shared
-        let callback = Callback(operation: try runtime.resolveObjCMethodAndWait(
-            on: trackerClass, selector: "operation", as: (() -> AnyObject?).self))
+        let callback = Callback(operation: try runtime.resolveAndWait(.objc(.method("operation", as: (() -> AnyObject?).self)), on: trackerClass))
         self.callback = callback
         hook = try unsafe runtime.hookInitializer(
-            on: trackerClass, selector: "initWithOperation:serviceTier:",
-            as: ((AnyObject, Int32) -> AnyObject?).self,
+            .objc(.method("initWithOperation:serviceTier:", as: ((AnyObject, Int32) -> AnyObject?).self)), on: trackerClass,
             onFailure: { callback.recordFailure($0) },
             after: { tracker in
                 guard let tracker else { return }

@@ -38,7 +38,8 @@ private func captureAppKitWindow(_ window: NSWindow) async throws -> NSBitmapIma
     let runtime = ABIRuntime.shared
     var leases: [ResolvedSymbol] = []
     func constant(_ name: String) async throws -> NSString {
-        let symbol = try await runtime.resolve(.init(machOName: "_\(name)", language: .c, kind: .data),
+        let symbol = try await runtime.resolve(
+            .c(.symbol(machOName: "_\(name)", kind: .data)),
             in: .framework(named: "QuartzCore"))
         leases.append(symbol)
         return try unsafe symbol.withUnsafeAddress { address in
@@ -50,15 +51,15 @@ private func captureAppKitWindow(_ window: NSWindow) async throws -> NSBitmapIma
     }
     guard let displayClass = NSClassFromString("CADisplay") else { throw NativePreviewPipelineRequired() }
     let mainDisplay = try await runtime.object(displayClass as AnyObject)
-        .resolveMethod(selector: "mainDisplay", as: (() -> AnyObject?).self)
+        .resolve(.objc(.method("mainDisplay", as: (() -> AnyObject?).self)))
     guard let display = try unsafe mainDisplay.unsafeInvoke() else { throw NativePreviewPipelineRequired() }
     let nameGetter = try await runtime.object(display)
-        .resolveMethod(selector: "name", as: (() -> NSString?).self)
+        .resolve(.objc(.method("name", as: (() -> NSString?).self)))
     guard let displayName = try unsafe nameGetter.unsafeInvoke(), displayName.length > 0 else {
         throw NativePreviewPipelineRequired()
     }
     let contextGetter = try await runtime.object(window)
-        .resolveMethod(selector: "layerHostingContextID", as: (() -> UInt32).self)
+        .resolve(.objc(.method("layerHostingContextID", as: (() -> UInt32).self)))
     let contextID = try unsafe contextGetter.unsafeInvoke()
     let modeKey = try await constant("kCASnapshotMode")
     let mode = try await constant("kCASnapshotModeIncludeContextList")
@@ -73,8 +74,8 @@ private func captureAppKitWindow(_ window: NSWindow) async throws -> NSBitmapIma
     // The macOS 26.6.2 native caller and callee use a 32-bit port, an
     // NSDictionary pointer, and a return register normalized to 0/1.
     // This private C entry point has no declaration in the public SDK.
-    let snapshot = try await unsafe runtime.resolveCFunction(named: "CARenderServerSnapshot",
-        as: ((UInt32, UnsafeRawPointer) -> UInt32).self, in: .framework(named: "QuartzCore"))
+    let snapshot = try await unsafe runtime.resolve(
+        .c(.function("CARenderServerSnapshot", as: ((UInt32, UnsafeRawPointer) -> UInt32).self)), in: .framework(named: "QuartzCore"))
     try Task.checkCancellation()
     let originalAlpha = window.alphaValue
     window.alphaValue = 0

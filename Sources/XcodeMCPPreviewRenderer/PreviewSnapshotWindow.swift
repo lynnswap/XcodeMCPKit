@@ -53,9 +53,9 @@ final class PreviewSnapshotWindow {
                   let settings = try await Self.object(native, "settings"),
                   let mutable = try await Self.object(settings, "mutableCopy") else { throw NativePreviewPipelineRequired() }
             let runtime = ABIRuntime.shared
-            let frame = try await runtime.resolveObjCMethod(on: type(of: mutable), selector: "setFrame:", as: ((CGRect) -> Void).self)
+            let frame = try await runtime.resolve(.objc(.method("setFrame:", as: ((CGRect) -> Void).self)), on: type(of: mutable))
             typealias SettingsAction = @convention(block) (AnyObject, AnyObject) -> Void
-            let update = try await runtime.object(native).resolveMethod(selector: "updateSettings:", as: ((@escaping SettingsAction) -> Void).self)
+            let update = try await runtime.object(native).resolve(.objc(.method("updateSettings:", as: ((@escaping SettingsAction) -> Void).self)))
             var updateError: (any Error)?
             let configure: SettingsAction = { settings, _ in
                 MainActor.assumeIsolated {
@@ -83,23 +83,23 @@ final class PreviewSnapshotWindow {
               let displayConfiguration = try await object(originalSettings, "displayConfiguration"),
               let fbsClass = NSClassFromString("FBSScene") else { throw NativePreviewPipelineRequired() }
         #if os(iOS)
-        let edgeSymbol = try await runtime.resolve(.init(machOName: "_OBJC_CLASS_$_UISApplicationSupportDisplayEdgeInfo",
-            language: .objectiveC, kind: .data), in: .framework(named: "UIKitServices"))
+        let edgeSymbol = try await runtime.resolve(
+            .objc(.symbol(machOName: "_OBJC_CLASS_$_UISApplicationSupportDisplayEdgeInfo", kind: .data)), in: .framework(named: "UIKitServices"))
         guard let edgeClass = NSClassFromString("UISApplicationSupportDisplayEdgeInfo") else { throw NativePreviewPipelineRequired() }
         #endif
-        let factory = try await runtime.object(fbsClass as AnyObject).resolveMethod(
-            selector: "pseudoSceneWithIdentifier:specification:", as: ((String, AnyObject) -> AnyObject).self)
-        let connect = try await runtime.object(UIApplication.shared).resolveMethod(
-            selector: "_connectUISceneFromFBSScene:transitionContext:", as: ((AnyObject, AnyObject?) -> AnyObject?).self)
-        let invalidateUI = try await runtime.resolveObjCMethod(on: UIWindowScene.self, selector: "_invalidate", as: (() -> Void).self)
-        let remove = try await runtime.object(UIApplication.shared).resolveMethod(
-            selector: "_removeSessionFromSessionSet:", as: ((UISceneSession) -> Void).self)
+        let factory = try await runtime.object(fbsClass as AnyObject).resolve(
+            .objc(.method("pseudoSceneWithIdentifier:specification:", as: ((String, AnyObject) -> AnyObject).self)))
+        let connect = try await runtime.object(UIApplication.shared).resolve(
+            .objc(.method("_connectUISceneFromFBSScene:transitionContext:", as: ((AnyObject, AnyObject?) -> AnyObject?).self)))
+        let invalidateUI = try await runtime.resolve(.objc(.method("_invalidate", as: (() -> Void).self)), on: UIWindowScene.self)
+        let remove = try await runtime.object(UIApplication.shared).resolve(
+            .objc(.method("_removeSessionFromSessionSet:", as: ((UISceneSession) -> Void).self)))
         let identifier = identifierPrefix + UUID().uuidString
         let nativeScene = try unsafe factory.unsafeInvoke(identifier, specification)
         guard let queue = try await object(nativeScene, "callOutQueue") else { throw NativePreviewPipelineRequired() }
         typealias QueueAction = @convention(block) () -> Void
-        let enqueue = try await runtime.object(queue).resolveMethod(selector: "performAsync:", as: ((@escaping QueueAction) -> Void).self)
-        let invalidate = try await runtime.object(nativeScene).resolveMethod(selector: "invalidate", as: (() -> Void).self)
+        let enqueue = try await runtime.object(queue).resolve(.objc(.method("performAsync:", as: ((@escaping QueueAction) -> Void).self)))
+        let invalidate = try await runtime.object(nativeScene).resolve(.objc(.method("invalidate", as: (() -> Void).self)))
         let invalidateNative = {
             // The native updater requires its own call-out queue barrier. This
             // factory cannot create an agent, so invalidation finishes in this block.
@@ -125,11 +125,9 @@ final class PreviewSnapshotWindow {
                let selectedEdge = try await object(context, "displayEdgeInfo") {
                 edge = selectedEdge
             } else {
-                let allocate = try await runtime.object(edgeClass as AnyObject).resolveMethod(
-                    selector: "alloc", as: (() -> AnyObject).self)
+                let allocate = try await runtime.object(edgeClass as AnyObject).resolve(.objc(.method("alloc", as: (() -> AnyObject).self)))
                 let allocated = try unsafe allocate.unsafeInvoke()
-                let initialize = try await runtime.object(allocated).resolveMethod(
-                    selector: "init", as: (() -> AnyObject).self)
+                let initialize = try await runtime.object(allocated).resolve(.objc(.method("init", as: (() -> AnyObject).self)))
                 edge = try unsafe initialize.unsafeInvoke()
             }
             let portraitInsets = try await insets(edge, "safeAreaInsetsPortrait")
@@ -137,25 +135,28 @@ final class PreviewSnapshotWindow {
             let home = try await object(edge, "homeAffordanceOverlayAllowance") as? NSNumber
             #endif
             let settingsClass: AnyClass = type(of: mutable)
-            let frame = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setFrame:", as: ((CGRect) -> Void).self)
-            let interface = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setInterfaceOrientation:", as: ((Int64) -> Void).self)
-            let mode = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setInterfaceOrientationMode:", as: ((Int64) -> Void).self)
-            let device = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setDeviceOrientation:", as: ((Int64) -> Void).self)
-            let display = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setDisplayConfiguration:", as: ((AnyObject) -> Void).self)
+            let frame = try await runtime.resolve(.objc(.method("setFrame:", as: ((CGRect) -> Void).self)), on: settingsClass)
+            let interface = try await runtime.resolve(.objc(.method("setInterfaceOrientation:", as: ((Int64) -> Void).self)), on: settingsClass)
+            let mode = try await runtime.resolve(.objc(.method("setInterfaceOrientationMode:", as: ((Int64) -> Void).self)), on: settingsClass)
+            let device = try await runtime.resolve(.objc(.method("setDeviceOrientation:", as: ((Int64) -> Void).self)), on: settingsClass)
+            let display = try await runtime.resolve(.objc(.method("setDisplayConfiguration:", as: ((AnyObject) -> Void).self)), on: settingsClass)
             #if os(iOS)
-            let portrait = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setSafeAreaInsetsPortrait:", as: ((UIEdgeInsets) -> Void).self)
-            let periphery = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setPeripheryInsets:", as: ((UIEdgeInsets) -> Void).self)
-            let homeAllowance = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setHomeAffordanceOverlayAllowance:", as: ((Double) -> Void).self)
-            let statusHeight = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setDefaultStatusBarHeight:forOrientation:", as: ((Double, Int64) -> Void).self)
+            let portrait = try await runtime.resolve(.objc(.method("setSafeAreaInsetsPortrait:", as: ((UIEdgeInsets) -> Void).self)), on: settingsClass)
+            let periphery = try await runtime.resolve(.objc(.method("setPeripheryInsets:", as: ((UIEdgeInsets) -> Void).self)), on: settingsClass)
+            let homeAllowance = try await runtime.resolve(
+                .objc(.method("setHomeAffordanceOverlayAllowance:", as: ((Double) -> Void).self)), on: settingsClass)
+            let statusHeight = try await runtime.resolve(
+                .objc(.method("setDefaultStatusBarHeight:forOrientation:", as: ((Double, Int64) -> Void).self)), on: settingsClass)
             #endif
-            let persistence = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setPersistenceIdentifier:", as: ((String) -> Void).self)
-            let foreground = try await runtime.resolveObjCMethod(on: settingsClass, selector: "setForeground:", as: ((Bool) -> Void).self)
+            let persistence = try await runtime.resolve(.objc(.method("setPersistenceIdentifier:", as: ((String) -> Void).self)), on: settingsClass)
+            let foreground = try await runtime.resolve(.objc(.method("setForeground:", as: ((Bool) -> Void).self)), on: settingsClass)
             let referenceFrame: CGRect
             let interfaceOrientation: Int64
             let orientationMode: Int64
             let deviceOrientation: Int64
             #if os(iOS)
-            let readHeight = try await runtime.object(originalSettings).resolveMethod(selector: "defaultStatusBarHeightForOrientation:", as: ((Int64) -> Double).self)
+            let readHeight = try await runtime.object(originalSettings).resolve(
+                .objc(.method("defaultStatusBarHeightForOrientation:", as: ((Int64) -> Double).self)))
             let heights = try [UIInterfaceOrientation.portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight].map {
                 (Int64($0.rawValue), try unsafe readHeight.unsafeInvoke(Int64($0.rawValue)))
             }
@@ -184,7 +185,7 @@ final class PreviewSnapshotWindow {
             deviceOrientation = try await integer(originalSettings, "deviceOrientation")
             #endif
             typealias SettingsAction = @convention(block) (AnyObject, AnyObject) -> Void
-            let update = try await runtime.object(nativeScene).resolveMethod(selector: "updateSettings:", as: ((@escaping SettingsAction) -> Void).self)
+            let update = try await runtime.object(nativeScene).resolve(.objc(.method("updateSettings:", as: ((@escaping SettingsAction) -> Void).self)))
             var transition: AnyObject?
             var updateError: (any Error)?
             let configure: SettingsAction = { settings, context in
@@ -209,9 +210,11 @@ final class PreviewSnapshotWindow {
             }
             try unsafe update.unsafeInvoke(configure)
             if let updateError { throw updateError }
-            let created = try await runtime.object(nativeScene).resolveMethod(
-                selector: "_callOutQueue_didCreateWithTransitionContext:alternativeCreationCallout:completion:",
-                as: ((AnyObject?, QueueAction?, QueueAction?) -> Void).self)
+            let created = try await runtime.object(nativeScene).resolve(
+                .objc(
+                    .method(
+                        "_callOutQueue_didCreateWithTransitionContext:alternativeCreationCallout:completion:",
+                        as: ((AnyObject?, QueueAction?, QueueAction?) -> Void).self)))
             // UIKit content can send scene actions during its first layout.
             // Complete the native creation lifecycle before connecting its scene.
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
@@ -255,12 +258,13 @@ final class PreviewSnapshotWindow {
         guard let settings = try await object(nativeScene, "settings"),
               let delegate = try await object(nativeScene, "delegate") else { throw NativePreviewPipelineRequired() }
         let runtime = ABIRuntime.shared
-        let isUISettings = try await runtime.object(settings).resolveMethod(selector: "isUISubclass", as: (() -> Bool).self)
+        let isUISettings = try await runtime.object(settings).resolve(.objc(.method("isUISubclass", as: (() -> Bool).self)))
         guard try unsafe isUISettings.unsafeInvoke() else { throw NativePreviewPipelineRequired() }
         typealias Completion = @convention(block) @Sendable (AnyObject?) -> Void
-        let initialize = try await runtime.object(delegate).resolveMethod(
-            selector: "scene:didUpdateWithDiff:transitionContext:completion:",
-            as: ((AnyObject, AnyObject?, AnyObject?, @escaping Completion) -> Void).self)
+        let initialize = try await runtime.object(delegate).resolve(
+            .objc(
+                .method(
+                    "scene:didUpdateWithDiff:transitionContext:completion:", as: ((AnyObject, AnyObject?, AnyObject?, @escaping Completion) -> Void).self)))
         // UIApplication's workspace connection sends this nil-diff notification
         // after _connect. It primes UIKit's previous settings before a resize.
         // The commit-response completion may arrive off the main executor.
@@ -292,7 +296,7 @@ final class PreviewSnapshotWindow {
     }
 
     private static func object(_ owner: AnyObject, _ selector: String) async throws -> AnyObject? {
-        let getter = try await ABIRuntime.shared.object(owner).resolveMethod(selector: selector, as: (() -> AnyObject?).self)
+        let getter = try await ABIRuntime.shared.object(owner).resolve(.objc(.method(selector, as: (() -> AnyObject?).self)))
         return try unsafe getter.unsafeInvoke()
     }
 
@@ -301,14 +305,14 @@ final class PreviewSnapshotWindow {
         guard let wrapper = try await object(edge, name) else { return .zero }
         var values: [Double] = []
         for field in ["topInset", "leftInset", "bottomInset", "rightInset"] {
-            let getter = try await ABIRuntime.shared.object(wrapper).resolveMethod(selector: field, as: (() -> Double).self)
+            let getter = try await ABIRuntime.shared.object(wrapper).resolve(.objc(.method(field, as: (() -> Double).self)))
             values.append(try unsafe getter.unsafeInvoke())
         }
         return UIEdgeInsets(top: values[0], left: values[1], bottom: values[2], right: values[3])
     }
     #else
     private static func integer(_ owner: AnyObject, _ selector: String) async throws -> Int64 {
-        let getter = try await ABIRuntime.shared.object(owner).resolveMethod(selector: selector, as: (() -> Int64).self)
+        let getter = try await ABIRuntime.shared.object(owner).resolve(.objc(.method(selector, as: (() -> Int64).self)))
         return try unsafe getter.unsafeInvoke()
     }
     #endif

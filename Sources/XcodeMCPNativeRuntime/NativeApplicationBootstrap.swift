@@ -49,9 +49,9 @@ package final class NativeApplicationBootstrap {
             throw NativeRuntimeError.unavailable("Xcode native application classes are unavailable")
         }
         let runtime = ABIRuntime.shared
-        let shared = try runtime.object(applicationClass as AnyObject).resolveMethodAndWait(selector: "sharedApplication", as: (() -> NSApplication).self)
+        let shared = try runtime.object(applicationClass as AnyObject).resolveAndWait(.objc(.method("sharedApplication", as: (() -> NSApplication).self)))
         let application = try unsafe shared.unsafeInvoke()
-        let createController = try runtime.object(controllerClass as AnyObject).resolveMethodAndWait(selector: "new", as: (() -> AnyObject).self)
+        let createController = try runtime.object(controllerClass as AnyObject).resolveAndWait(.objc(.method("new", as: (() -> AnyObject).self)))
         documentController = try unsafe createController.unsafeInvoke()
         application.setActivationPolicy(.prohibited)
         try NativeErrorPresentation.install(on: application)
@@ -93,8 +93,9 @@ package final class NativeApplicationBootstrap {
     }
 
     package func initialize(installation: NativeXcodeInstallation) async throws {
-        let initialize = try unsafe await ABIRuntime.shared.resolveCFunction(named: "IDEInitialize", as: ((UInt64, UnsafeMutableRawPointer?) -> Bool).self,
-                                                             in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
+        let initialize = try unsafe await ABIRuntime.shared.resolve(
+            .c(.function("IDEInitialize", as: ((UInt64, UnsafeMutableRawPointer?) -> Bool).self)), in: .path(installation.framework("IDEFoundation")),
+            loading: .loadedOnly)
         var errorAddress: UnsafeRawPointer?
         let initialized = try withUnsafeMutablePointer(to: &errorAddress) {
             try unsafe initialize.unsafeInvoke(7, UnsafeMutableRawPointer($0))

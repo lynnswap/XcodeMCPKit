@@ -130,8 +130,7 @@ func makeGeneralPreview(_ request: PreviewRendererRequest) async throws ->
         let content = try await makeViewPreview(source: source, groupItemIndex: request.groupItemIndex)
         view = try await applyViewPreviewTraits(content.view, preview: value)
         layout = try await viewPreviewLayout(value)
-        let getter = try await value.type.resolveGetter(named: "displayName", as: (() -> String?).self,
-            receiverABI: .opaque(named: value.type.name))
+        let getter = try await value.type.resolve(.swift(.getter("displayName", as: (() -> String?).self, receiverABI: .opaque(named: value.type.name))))
         result = PreviewRendererResult(displayName: try unsafe getter.unsafeInvoke(on: value), sourceLineNumber: registry.line,
             groupItems: content.groupItems, errors: content.errors)
     }

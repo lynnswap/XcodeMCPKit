@@ -30,48 +30,48 @@ private func captureWatchPreview(controller: AnyObject, layout: DeveloperToolsSu
     // watchOS exposes SwiftUI's host protocol but marks UIKit controllers
     // unavailable. Use the existing ABI bridge for standard view containment.
     let applicationSymbol = try await runtime.resolve(
-        .init(machOName: "_OBJC_CLASS_$_UIApplication", language: .objectiveC, kind: .data),
+        .objc(.symbol(machOName: "_OBJC_CLASS_$_UIApplication", kind: .data)),
         in: .framework(named: "UIKitCore"))
     guard let applicationClass = NSClassFromString("UIApplication") else {
         throw PreviewRendererError("The watch preview's UIApplication class is unavailable")
     }
     let sharedApplication = try await runtime.object(applicationClass as AnyObject)
-        .resolveMethod(selector: "sharedApplication", as: (() -> AnyObject).self)
+        .resolve(.objc(.method("sharedApplication", as: (() -> AnyObject).self)))
     let application = try unsafe sharedApplication.unsafeInvoke()
     let keyWindow = try await runtime.object(application)
-        .resolveMethod(selector: "keyWindow", as: (() -> AnyObject?).self)
+        .resolve(.objc(.method("keyWindow", as: (() -> AnyObject?).self)))
     guard let window = try unsafe keyWindow.unsafeInvoke() else {
         throw PreviewRendererError("The running watch preview has no key window")
     }
     let rootController = try await runtime.object(window)
-        .resolveMethod(selector: "rootViewController", as: (() -> AnyObject?).self)
+        .resolve(.objc(.method("rootViewController", as: (() -> AnyObject?).self)))
     guard let parent = try unsafe rootController.unsafeInvoke() else {
         throw PreviewRendererError("The watch preview window has no root controller")
     }
     let hostGetter = try await runtime.object(controller)
-        .resolveMethod(selector: "view", as: (() -> AnyObject).self)
+        .resolve(.objc(.method("view", as: (() -> AnyObject).self)))
     let host = try unsafe hostGetter.unsafeInvoke()
     let parentViewGetter = try await runtime.object(parent)
-        .resolveMethod(selector: "view", as: (() -> AnyObject).self)
+        .resolve(.objc(.method("view", as: (() -> AnyObject).self)))
     let parentView = try unsafe parentViewGetter.unsafeInvoke()
     let setFrame = try await runtime.object(host)
-        .resolveMethod(selector: "setFrame:", as: ((CGRect) -> Void).self)
+        .resolve(.objc(.method("setFrame:", as: ((CGRect) -> Void).self)))
     let setBounds = try await runtime.object(host)
-        .resolveMethod(selector: "setBounds:", as: ((CGRect) -> Void).self)
+        .resolve(.objc(.method("setBounds:", as: ((CGRect) -> Void).self)))
     let layoutIfNeeded = try await runtime.object(host)
-        .resolveMethod(selector: "layoutIfNeeded", as: (() -> Void).self)
+        .resolve(.objc(.method("layoutIfNeeded", as: (() -> Void).self)))
     let addChild = try await runtime.object(parent)
-        .resolveMethod(selector: "addChildViewController:", as: ((AnyObject) -> Void).self)
+        .resolve(.objc(.method("addChildViewController:", as: ((AnyObject) -> Void).self)))
     let addSubview = try await runtime.object(parentView)
-        .resolveMethod(selector: "addSubview:", as: ((AnyObject) -> Void).self)
+        .resolve(.objc(.method("addSubview:", as: ((AnyObject) -> Void).self)))
     let didMove = try await runtime.object(controller)
-        .resolveMethod(selector: "didMoveToParentViewController:", as: ((AnyObject?) -> Void).self)
+        .resolve(.objc(.method("didMoveToParentViewController:", as: ((AnyObject?) -> Void).self)))
     let willMove = try await runtime.object(controller)
-        .resolveMethod(selector: "willMoveToParentViewController:", as: ((AnyObject?) -> Void).self)
+        .resolve(.objc(.method("willMoveToParentViewController:", as: ((AnyObject?) -> Void).self)))
     let removeFromSuperview = try await runtime.object(host)
-        .resolveMethod(selector: "removeFromSuperview", as: (() -> Void).self)
+        .resolve(.objc(.method("removeFromSuperview", as: (() -> Void).self)))
     let removeFromParent = try await runtime.object(controller)
-        .resolveMethod(selector: "removeFromParentViewController", as: (() -> Void).self)
+        .resolve(.objc(.method("removeFromParentViewController", as: (() -> Void).self)))
     let screen = WKInterfaceDevice.current().screenBounds.size
     var size: CGSize
     switch layout {
@@ -126,16 +126,15 @@ private func requireWatchDrawableSize(_ size: CGSize) throws {
 @MainActor
 private func captureWatchHierarchy(_ host: AnyObject, size: CGSize) async throws -> CGImage {
     let runtime = ABIRuntime.shared
-    let begin = try await runtime.resolveCFunction(named: "UIGraphicsBeginImageContextWithOptions",
-        as: ((CGSize, Bool, Double) -> Void).self, in: .framework(named: "UIKitCore"))
-    let end = try await runtime.resolveCFunction(named: "UIGraphicsEndImageContext",
-        as: (() -> Void).self, in: .framework(named: "UIKitCore"))
-    let currentImage = try await unsafe runtime.resolveCFunction(named: "UIGraphicsGetImageFromCurrentImageContext",
-        as: (() -> UnsafeRawPointer?).self, in: .framework(named: "UIKitCore"))
-    let currentContext = try await unsafe runtime.resolveCFunction(named: "UIGraphicsGetCurrentContext",
-        as: (() -> UnsafeRawPointer?).self, in: .framework(named: "UIKitCore"))
+    let begin = try await runtime.resolve(
+        .c(.function("UIGraphicsBeginImageContextWithOptions", as: ((CGSize, Bool, Double) -> Void).self)), in: .framework(named: "UIKitCore"))
+    let end = try await runtime.resolve(.c(.function("UIGraphicsEndImageContext", as: (() -> Void).self)), in: .framework(named: "UIKitCore"))
+    let currentImage = try await unsafe runtime.resolve(
+        .c(.function("UIGraphicsGetImageFromCurrentImageContext", as: (() -> UnsafeRawPointer?).self)), in: .framework(named: "UIKitCore"))
+    let currentContext = try await unsafe runtime.resolve(
+        .c(.function("UIGraphicsGetCurrentContext", as: (() -> UnsafeRawPointer?).self)), in: .framework(named: "UIKitCore"))
     let drawHierarchy = try await runtime.object(host)
-        .resolveMethod(selector: "drawViewHierarchyInRect:afterScreenUpdates:", as: ((CGRect, Bool) -> Bool).self)
+        .resolve(.objc(.method("drawViewHierarchyInRect:afterScreenUpdates:", as: ((CGRect, Bool) -> Bool).self)))
     try unsafe begin.unsafeInvoke(size, true, Double(WKInterfaceDevice.current().screenScale))
     let image: CGImage
     do {
@@ -152,7 +151,7 @@ private func captureWatchHierarchy(_ host: AnyObject, size: CGSize) async throws
         }
         let imageObject = unsafe Unmanaged<NSObject>.fromOpaque(imagePointer).takeUnretainedValue()
         let cgImage = try await unsafe runtime.object(imageObject)
-            .resolveMethod(selector: "CGImage", as: (() -> UnsafeRawPointer?).self)
+            .resolve(.objc(.method("CGImage", as: (() -> UnsafeRawPointer?).self)))
         guard let cgImagePointer = try unsafe cgImage.unsafeInvoke() else {
             throw PreviewRendererError("The watch preview snapshot has no CGImage")
         }

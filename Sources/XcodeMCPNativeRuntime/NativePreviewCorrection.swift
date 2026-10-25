@@ -1266,34 +1266,33 @@ final class NativePreviewCorrection {
 
     private func supportedLocalizations(in workspace: AnyObject) async throws -> [String] {
         let runtime = ABIRuntime.shared
-        let getLocalizations = try await runtime.object(workspace).resolveGetter(
-            named: "(extension in PreviewsXcode):__C.IDEWorkspace.supportedLocalizations.getter : [PreviewsXcode.Locale]",
-            as: (() -> NativeSwiftValue).self)
+        let getLocalizations = try await runtime.object(workspace).resolve(
+            .swift(
+                .getter(
+                    "(extension in PreviewsXcode):__C.IDEWorkspace.supportedLocalizations.getter : [PreviewsXcode.Locale]", as: (() -> NativeSwiftValue).self)))
         let localizations = try unsafe getLocalizations.unsafeInvoke()
-        let type = try await runtime.resolveSwiftType(named: "PreviewsXcode.Locale",
-            in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
-        let getLocale = try await type.resolveGetter(named: "locale.getter : __C.DVTLocale", as: (() -> AnyObject).self,
-            receiverABI: .opaque(named: type.name))
+        let type = try await runtime.resolve(.swift(.type("PreviewsXcode.Locale")), in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
+        let getLocale = try await type.resolve(
+            .swift(.getter("locale.getter : __C.DVTLocale", as: (() -> AnyObject).self, receiverABI: .opaque(named: type.name))))
         return try localizations.withCopy { value in
             guard let values = value as? [Any] else {
                 throw NativeRuntimeError.unsupportedContract("Native supported localizations are not an array")
             }
             return try values.map { value in
                 let locale = try unsafe getLocale.unsafeInvoke(on: value)
-                let identifier = try runtime.object(locale).resolveMethodAndWait(selector: "localeIdentifier", as: (() -> String).self)
+                let identifier = try runtime.object(locale).resolveAndWait(.objc(.method("localeIdentifier", as: (() -> String).self)))
                 return try unsafe identifier.unsafeInvoke()
             }
         }
     }
 
     private func workspace(_ identifier: String?) async throws -> AnyObject {
-        let type = try await ABIRuntime.shared.resolveSwiftType(named: "IDEFoundation.IDEWorkspaceRegistry",
-            in: .path(installation.framework("IDEFoundation")))
-        let shared = try await type.resolveStaticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)
+        let type = try await ABIRuntime.shared.resolve(.swift(.type("IDEFoundation.IDEWorkspaceRegistry")), in: .path(installation.framework("IDEFoundation")))
+        let shared = try await type.resolve(.swift(.staticGetter("shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)))
         let registry = try unsafe shared.unsafeInvoke()
         guard let identifier else { throw NativeRuntimeError.invalidRequest("A workspaceIdentifier is required") }
-        let lookup = try await type.resolveMethod(
-            named: "workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)
+        let lookup = try await type.resolve(
+            .swift(.method("workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)))
         guard let workspace = try unsafe lookup.unsafeInvoke(on: registry, identifier) else {
             throw NativeRuntimeError.invalidRequest("Workspace '\(identifier)' is not open")
         }
@@ -1301,11 +1300,13 @@ final class NativePreviewCorrection {
     }
 
     private func sourceURL(_ path: String, workspace: AnyObject) async throws -> URL {
-        let type = try await ABIRuntime.shared.resolveSwiftType(named: "PreviewsXcode.RenderPreviewAction",
-            in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
-        let resolve = try await type.resolveStaticMethod(
-            named: "(resolveSourceFileURL in _FEA7E13ECD12FBA8521281D73C9764CE)(at: Swift.String, in: __C.IDEWorkspace) async throws -> Foundation.URL",
-            as: (@concurrent (String, AnyObject) async throws -> PreviewURL).self)
+        let type = try await ABIRuntime.shared.resolve(
+            .swift(.type("PreviewsXcode.RenderPreviewAction")), in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
+        let resolve = try await type.resolve(
+            .swift(
+                .staticMethod(
+                    "(resolveSourceFileURL in _FEA7E13ECD12FBA8521281D73C9764CE)(at: Swift.String, in: __C.IDEWorkspace) async throws -> Foundation.URL",
+                    as: (@concurrent (String, AnyObject) async throws -> PreviewURL).self)))
         return try unsafe await resolve.unsafeInvoke(path, workspace).value
     }
 
@@ -1391,13 +1392,15 @@ final class NativePreviewCorrection {
 
     private func previewDefinition(source: URL, index: Int) async throws -> Definition {
         let runtime = ABIRuntime.shared
-        let action = try await runtime.resolveSwiftType(named: "PreviewsXcode.RenderPreviewAction",
-            in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
-        let unit = try await runtime.resolveSwiftType(named: "PreviewsPipeline.PreviewTranslationUnit",
-            in: .path(installation.framework("PreviewsPipeline", in: "SharedFrameworks")))
-        let parse = try await action.resolveStaticMethod(
-            named: "(parseTranslationUnit in _FEA7E13ECD12FBA8521281D73C9764CE)(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.(RenderPreviewType in _FEA7E13ECD12FBA8521281D73C9764CE)])",
-            as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])
+        let action = try await runtime.resolve(
+            .swift(.type("PreviewsXcode.RenderPreviewAction")), in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
+        let unit = try await runtime.resolve(
+            .swift(.type("PreviewsPipeline.PreviewTranslationUnit")), in: .path(installation.framework("PreviewsPipeline", in: "SharedFrameworks")))
+        let parse = try await action.resolve(
+            .swift(
+                .staticMethod(
+                    "(parseTranslationUnit in _FEA7E13ECD12FBA8521281D73C9764CE)(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.(RenderPreviewType in _FEA7E13ECD12FBA8521281D73C9764CE)])",
+                    as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])))
         let parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
         let translationUnit = try parsed.copyTupleElement(at: 0)
         let array = try parsed.copyTupleElement(at: 1)
@@ -1411,15 +1414,15 @@ final class NativePreviewCorrection {
             throw NativeRuntimeError.invalidRequest("Preview index \(index) is outside the \(previews.count) definitions in \(source.lastPathComponent)")
         }
         func own<T>(_ value: T) async throws -> NativeSwiftValue {
-            let identity = try await runtime.resolveSwiftFunction(named: "XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A",
-                as: ((T) -> NativeSwiftValue).self, genericArguments: [.type(T.self)])
+            let identity = try await runtime.resolve(
+                .swift(.function("XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A", as: ((T) -> NativeSwiftValue).self, genericArguments: [.type(T.self)])))
             return try unsafe identity.unsafeInvoke(value)
         }
         let model = ImageSelector.path(installation.framework("PreviewsModel", in: "SharedFrameworks"))
-        let locationType = try await runtime.resolveSwiftType(named: "PreviewsModel.SourceLocation", in: model)
-        let boundType = try await runtime.resolveSwiftType(named: "PreviewsModel.SourceLocation.Bound", in: model)
-        let pathType = try await runtime.resolveSwiftType(named: "PreviewsModel.MangleableTypePath", in: model)
-        let syntaxType = try await runtime.resolveSwiftType(named: "PreviewsModel.SyntaxLocation", in: model)
+        let locationType = try await runtime.resolve(.swift(.type("PreviewsModel.SourceLocation")), in: model)
+        let boundType = try await runtime.resolve(.swift(.type("PreviewsModel.SourceLocation.Bound")), in: model)
+        let pathType = try await runtime.resolve(.swift(.type("PreviewsModel.MangleableTypePath")), in: model)
+        let syntaxType = try await runtime.resolve(.swift(.type("PreviewsModel.SyntaxLocation")), in: model)
         let contents = try String(contentsOf: source, encoding: .utf8)
         var definitions: [Definition] = []
         for value in previews {
@@ -1429,41 +1432,56 @@ final class NativePreviewCorrection {
             let displayName: String
             let providerPath: NativeSwiftValue?
             let registryRecord: NativeSwiftValue?
-            if let provider = try await definition.resolveEnumPayload(forCase: "previewProvider") {
+            if let provider = try await definition.copyEnumPayload(forCase: "previewProvider") {
                 record = provider
                 registryRecord = nil
-                let getPath = try await provider.type.resolveGetter(named: "path", as: (() -> NativeSwiftValue).self,
-                    valueABIs: [pathType: .opaque(named: pathType.name)], receiverABI: .opaque(named: provider.type.name))
+                let getPath = try await provider.type.resolve(
+                    .swift(
+                        .getter(
+                            "path", as: (() -> NativeSwiftValue).self, valueABIs: [pathType: .opaque(named: pathType.name)],
+                            receiverABI: .opaque(named: provider.type.name))))
                 providerPath = try unsafe getPath.unsafeInvoke(on: provider)
-                let getSyntax = try await provider.type.resolveGetter(named: "location", as: (() -> NativeSwiftValue).self,
-                    valueABIs: [syntaxType: .opaque(named: syntaxType.name)], receiverABI: .opaque(named: provider.type.name))
+                let getSyntax = try await provider.type.resolve(
+                    .swift(
+                        .getter(
+                            "location", as: (() -> NativeSwiftValue).self, valueABIs: [syntaxType: .opaque(named: syntaxType.name)],
+                            receiverABI: .opaque(named: provider.type.name))))
                 let syntax = try unsafe getSyntax.unsafeInvoke(on: provider)
-                let getLocation = try await syntax.type.resolveGetter(named: "locationExcludingTrivia", as: (() -> NativeSwiftValue).self,
-                    valueABIs: [locationType: .opaque(named: locationType.name)], receiverABI: .opaque(named: syntax.type.name))
+                let getLocation = try await syntax.type.resolve(
+                    .swift(
+                        .getter(
+                            "locationExcludingTrivia", as: (() -> NativeSwiftValue).self, valueABIs: [locationType: .opaque(named: locationType.name)],
+                            receiverABI: .opaque(named: syntax.type.name))))
                 location = try unsafe getLocation.unsafeInvoke(on: syntax)
-                let getName = try await provider.type.resolveGetter(named: "displayName", as: (() -> String).self,
-                    receiverABI: .opaque(named: provider.type.name))
+                let getName = try await provider.type.resolve(
+                    .swift(.getter("displayName", as: (() -> String).self, receiverABI: .opaque(named: provider.type.name))))
                 displayName = try unsafe getName.unsafeInvoke(on: provider)
-            } else if let registry = try await definition.resolveEnumPayload(forCase: "registryPreview") {
+            } else if let registry = try await definition.copyEnumPayload(forCase: "registryPreview") {
                 record = registry
                 registryRecord = registry
                 providerPath = nil
-                let getName = try await registry.type.resolveGetter(
-                    named: "(extension in PreviewsPipeline):PreviewsModel.RegistryDefinition.defaultDisplayName.getter : Swift.String",
-                    as: (() -> String).self, receiverABI: .opaque(named: registry.type.name))
+                let getName = try await registry.type.resolve(
+                    .swift(
+                        .getter(
+                            "(extension in PreviewsPipeline):PreviewsModel.RegistryDefinition.defaultDisplayName.getter : Swift.String",
+                            as: (() -> String).self, receiverABI: .opaque(named: registry.type.name))))
                 displayName = try unsafe getName.unsafeInvoke(on: registry)
-                let getLocation = try await registry.type.resolveGetter(named: "fullSourceLocation", as: (() -> NativeSwiftValue).self,
-                    valueABIs: [locationType: .opaque(named: locationType.name)], receiverABI: .opaque(named: registry.type.name))
+                let getLocation = try await registry.type.resolve(
+                    .swift(
+                        .getter(
+                            "fullSourceLocation", as: (() -> NativeSwiftValue).self, valueABIs: [locationType: .opaque(named: locationType.name)],
+                            receiverABI: .opaque(named: registry.type.name))))
                 location = try unsafe getLocation.unsafeInvoke(on: registry)
             } else { throw NativePipelineRequired() }
-            let getLine = try await record.type.resolveGetter(named: "lineNumber", as: (() -> Int).self,
-                receiverABI: .opaque(named: record.type.name))
+            let getLine = try await record.type.resolve(.swift(.getter("lineNumber", as: (() -> Int).self, receiverABI: .opaque(named: record.type.name))))
             let line = try unsafe getLine.unsafeInvoke(on: record)
-            let getBound = try await location.type.resolveGetter(named: "lowerBound", as: (() -> NativeSwiftValue).self,
-                valueABIs: [boundType: .opaque(named: boundType.name)], receiverABI: .opaque(named: location.type.name))
+            let getBound = try await location.type.resolve(
+                .swift(
+                    .getter(
+                        "lowerBound", as: (() -> NativeSwiftValue).self, valueABIs: [boundType: .opaque(named: boundType.name)],
+                        receiverABI: .opaque(named: location.type.name))))
             let bound = try unsafe getBound.unsafeInvoke(on: location)
-            let getColumn = try await bound.type.resolveGetter(named: "column", as: (() -> Int).self,
-                receiverABI: .opaque(named: bound.type.name))
+            let getColumn = try await bound.type.resolve(.swift(.getter("column", as: (() -> Int).self, receiverABI: .opaque(named: bound.type.name))))
             let column = try unsafe getColumn.unsafeInvoke(on: bound)
             definitions.append(Definition(line: line, column: try Self.registryColumn(in: contents, line: line, utf16Column: column),
                 displayName: displayName, providerPath: providerPath, registry: registryRecord,
@@ -1478,34 +1496,47 @@ final class NativePreviewCorrection {
         let runtime = ABIRuntime.shared
         let model = ImageSelector.path(installation.framework("PreviewsModel", in: "SharedFrameworks"))
         let messaging = ImageSelector.path(installation.framework("PreviewsMessagingHost", in: "SharedFrameworks"))
-        let optionalUUID = try await runtime.resolveSwiftType(named: "Swift.Optional", genericArguments: [.type(UUID.self)])
-        let getSidecar = try await registry.type.resolveGetter(
-            named: "sidecarIdentifier.getter : Swift.Optional<Foundation.UUID>", as: (() -> NativeSwiftValue).self,
-            valueABIs: [optionalUUID: .opaque(named: optionalUUID.name)], receiverABI: .opaque(named: registry.type.name))
+        let optionalUUID = try await runtime.resolve(.swift(.type("Swift.Optional", genericArguments: [.type(UUID.self)])))
+        let getSidecar = try await registry.type.resolve(
+            .swift(
+                .getter(
+                    "sidecarIdentifier.getter : Swift.Optional<Foundation.UUID>", as: (() -> NativeSwiftValue).self,
+                    valueABIs: [optionalUUID: .opaque(named: optionalUUID.name)], receiverABI: .opaque(named: registry.type.name))))
         let sidecar = try unsafe getSidecar.unsafeInvoke(on: registry)
-        guard try await sidecar.resolveEnumPayload(forCase: "some") == nil else { throw NativePipelineRequired() }
-        let idType = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.RegistryID", in: messaging)
-        let getID = try await registry.type.resolveGetter(named: "id.getter : PreviewsMessagingHost.RegistryID",
-            as: (() -> NativeSwiftValue).self, valueABIs: [idType: .opaque(named: idType.name)],
-            receiverABI: .opaque(named: registry.type.name))
+        guard try await sidecar.copyEnumPayload(forCase: "some") == nil else { throw NativePipelineRequired() }
+        let idType = try await runtime.resolve(.swift(.type("PreviewsMessagingHost.RegistryID")), in: messaging)
+        let getID = try await registry.type.resolve(
+            .swift(
+                .getter(
+                    "id.getter : PreviewsMessagingHost.RegistryID", as: (() -> NativeSwiftValue).self, valueABIs: [idType: .opaque(named: idType.name)],
+                    receiverABI: .opaque(named: registry.type.name))))
         let id = try unsafe getID.unsafeInvoke(on: registry)
-        let moduleType = try await runtime.resolveSwiftType(named: "PreviewsModel.Module", in: model)
-        let initializeModule = try await moduleType.resolveInitializer(named: "init(name: Swift.String) -> PreviewsModel.Module",
-            as: ((String) -> NativeSwiftValue).self, valueABIs: [moduleType: .opaque(named: moduleType.name)])
+        let moduleType = try await runtime.resolve(.swift(.type("PreviewsModel.Module")), in: model)
+        let initializeModule = try await moduleType.resolve(
+            .swift(
+                .initializer(
+                    "init(name: Swift.String) -> PreviewsModel.Module", as: ((String) -> NativeSwiftValue).self,
+                    valueABIs: [moduleType: .opaque(named: moduleType.name)])))
         let module = try unsafe initializeModule.unsafeInvoke(moduleName)
-        let locationType = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.RuntimeRegistryLocation", in: messaging)
-        let locate = try await registry.type.resolveMethod(
-            named: "runtimeLocation(in: PreviewsModel.Module) -> PreviewsMessagingHost.RuntimeRegistryLocation",
-            as: ((NativeSwiftValue) -> NativeSwiftValue).self,
-            valueABIs: [moduleType: .opaque(named: moduleType.name), locationType: .opaque(named: locationType.name)],
-            receiverABI: .opaque(named: registry.type.name))
+        let locationType = try await runtime.resolve(.swift(.type("PreviewsMessagingHost.RuntimeRegistryLocation")), in: messaging)
+        let locate = try await registry.type.resolve(
+            .swift(
+                .method(
+                    "runtimeLocation(in: PreviewsModel.Module) -> PreviewsMessagingHost.RuntimeRegistryLocation",
+                    as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+                    valueABIs: [moduleType: .opaque(named: moduleType.name), locationType: .opaque(named: locationType.name)],
+                    receiverABI: .opaque(named: registry.type.name))))
         let location = try unsafe locate.unsafeInvoke(on: registry, module)
-        let specificationType = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.PreviewSpecification", in: messaging)
-        let makeSpecification = try await specificationType.resolveStaticMethod(
-            named: "registryPreview(stableID: PreviewsMessagingHost.RegistryID, location: PreviewsMessagingHost.RuntimeRegistryLocation) -> PreviewsMessagingHost.PreviewSpecification",
-            as: ((NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
-            valueABIs: [idType: .opaque(named: idType.name), locationType: .opaque(named: locationType.name),
-                        specificationType: .opaque(named: specificationType.name)])
+        let specificationType = try await runtime.resolve(.swift(.type("PreviewsMessagingHost.PreviewSpecification")), in: messaging)
+        let makeSpecification = try await specificationType.resolve(
+            .swift(
+                .staticMethod(
+                    "registryPreview(stableID: PreviewsMessagingHost.RegistryID, location: PreviewsMessagingHost.RuntimeRegistryLocation) -> PreviewsMessagingHost.PreviewSpecification",
+                    as: ((NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
+                    valueABIs: [
+                        idType: .opaque(named: idType.name), locationType: .opaque(named: locationType.name),
+                        specificationType: .opaque(named: specificationType.name),
+                    ])))
         let specification = try unsafe makeSpecification.unsafeInvoke(id, location)
         return try await previewSpecificationData(specification)
     }
@@ -1513,20 +1544,24 @@ final class NativePreviewCorrection {
     private func providerSpecification(name: String, description: Data) async throws -> Data {
         let runtime = ABIRuntime.shared
         let messaging = ImageSelector.path(installation.framework("PreviewsMessagingHost", in: "SharedFrameworks"))
-        let providerType = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.ProviderPayload", in: messaging)
-        let makeProvider = try await providerType.resolveInitializer(
-            named: "init(providerName: Swift.String) -> PreviewsMessagingHost.ProviderPayload",
-            as: ((String) -> NativeSwiftValue).self, valueABIs: [providerType: .opaque(named: providerType.name)])
+        let providerType = try await runtime.resolve(.swift(.type("PreviewsMessagingHost.ProviderPayload")), in: messaging)
+        let makeProvider = try await providerType.resolve(
+            .swift(
+                .initializer(
+                    "init(providerName: Swift.String) -> PreviewsMessagingHost.ProviderPayload", as: ((String) -> NativeSwiftValue).self,
+                    valueABIs: [providerType: .opaque(named: providerType.name)])))
         let provider = try unsafe makeProvider.unsafeInvoke(name)
         let description = try await builder.decodePreviewValue(description, named: "PreviewDescription")
-        let getIndex = try await description.type.resolveGetter(named: "index.getter : Swift.Int",
-            as: (() -> Int).self, receiverABI: .opaque(named: description.type.name))
+        let getIndex = try await description.type.resolve(
+            .swift(.getter("index.getter : Swift.Int", as: (() -> Int).self, receiverABI: .opaque(named: description.type.name))))
         let index = try unsafe getIndex.unsafeInvoke(on: description)
-        let specificationType = try await runtime.resolveSwiftType(named: "PreviewsMessagingHost.PreviewSpecification", in: messaging)
-        let makeSpecification = try await specificationType.resolveStaticMethod(
-            named: "providerPreview(provider: PreviewsMessagingHost.ProviderPayload, indexInProvider: Swift.Int) -> PreviewsMessagingHost.PreviewSpecification",
-            as: ((NativeSwiftValue, Int) -> NativeSwiftValue).self,
-            valueABIs: [providerType: .opaque(named: providerType.name), specificationType: .opaque(named: specificationType.name)])
+        let specificationType = try await runtime.resolve(.swift(.type("PreviewsMessagingHost.PreviewSpecification")), in: messaging)
+        let makeSpecification = try await specificationType.resolve(
+            .swift(
+                .staticMethod(
+                    "providerPreview(provider: PreviewsMessagingHost.ProviderPayload, indexInProvider: Swift.Int) -> PreviewsMessagingHost.PreviewSpecification",
+                    as: ((NativeSwiftValue, Int) -> NativeSwiftValue).self,
+                    valueABIs: [providerType: .opaque(named: providerType.name), specificationType: .opaque(named: specificationType.name)])))
         let specification = try unsafe makeSpecification.unsafeInvoke(provider, index)
         return try await previewSpecificationData(specification)
     }
@@ -1534,17 +1569,19 @@ final class NativePreviewCorrection {
     private func previewSpecificationData(_ specification: NativeSwiftValue) async throws -> Data {
         let runtime = ABIRuntime.shared
         let foundation = ImageSelector.path(installation.framework("PreviewsFoundationHost", in: "SharedFrameworks"))
-        let propertyListType = try await runtime.resolveSwiftType(named: "PreviewsFoundationHost.PropertyList", in: foundation)
-        let encode = try await specification.type.resolveGetter(
-            named: "propertyListValue.getter : PreviewsFoundationHost.PropertyList", as: (() -> NativeSwiftValue).self,
-            valueABIs: [propertyListType: .opaque(named: propertyListType.name)],
-            receiverABI: .opaque(named: specification.type.name))
+        let propertyListType = try await runtime.resolve(.swift(.type("PreviewsFoundationHost.PropertyList")), in: foundation)
+        let encode = try await specification.type.resolve(
+            .swift(
+                .getter(
+                    "propertyListValue.getter : PreviewsFoundationHost.PropertyList", as: (() -> NativeSwiftValue).self,
+                    valueABIs: [propertyListType: .opaque(named: propertyListType.name)], receiverABI: .opaque(named: specification.type.name))))
         let propertyList = try unsafe encode.unsafeInvoke(on: specification)
-        let dictionaryType = try await runtime.resolveSwiftType(named: "Swift.Dictionary",
-            genericArguments: [.type(String.self), .type(Any.self)])
-        let serialize = try await propertyListType.resolveGetter(named: "serializableDictionary.getter : [Swift.String : Any]",
-            as: (() -> NativeSwiftValue).self, valueABIs: [dictionaryType: .pointer],
-            receiverABI: .opaque(named: propertyListType.name))
+        let dictionaryType = try await runtime.resolve(.swift(.type("Swift.Dictionary", genericArguments: [.type(String.self), .type(Any.self)])))
+        let serialize = try await propertyListType.resolve(
+            .swift(
+                .getter(
+                    "serializableDictionary.getter : [Swift.String : Any]", as: (() -> NativeSwiftValue).self, valueABIs: [dictionaryType: .pointer],
+                    receiverABI: .opaque(named: propertyListType.name))))
         let dictionary = try unsafe serialize.unsafeInvoke(on: propertyList)
         return try dictionary.withCopy { value in
             guard let dictionary = value as? [String: Any] else {
@@ -1556,13 +1593,17 @@ final class NativePreviewCorrection {
 
     private func providerTypeName(path: NativeSwiftValue, moduleName: String) async throws -> String {
         let model = ImageSelector.path(installation.framework("PreviewsModel", in: "SharedFrameworks"))
-        let type = try await ABIRuntime.shared.resolveSwiftType(named: "PreviewsModel.Module", in: model)
-        let initialize = try await type.resolveInitializer(named: "init(name: Swift.String) -> PreviewsModel.Module",
-            as: ((String) -> NativeSwiftValue).self, valueABIs: [type: .opaque(named: type.name)])
+        let type = try await ABIRuntime.shared.resolve(.swift(.type("PreviewsModel.Module")), in: model)
+        let initialize = try await type.resolve(
+            .swift(
+                .initializer(
+                    "init(name: Swift.String) -> PreviewsModel.Module", as: ((String) -> NativeSwiftValue).self, valueABIs: [type: .opaque(named: type.name)])))
         let module = try unsafe initialize.unsafeInvoke(moduleName)
-        let mangle = try await path.type.resolveMethod(named: "mangledName(in: PreviewsModel.Module) -> Swift.String",
-            as: ((NativeSwiftValue) -> String).self, valueABIs: [type: .opaque(named: type.name)],
-            receiverABI: .opaque(named: path.type.name))
+        let mangle = try await path.type.resolve(
+            .swift(
+                .method(
+                    "mangledName(in: PreviewsModel.Module) -> Swift.String", as: ((NativeSwiftValue) -> String).self,
+                    valueABIs: [type: .opaque(named: type.name)], receiverABI: .opaque(named: path.type.name))))
         return try unsafe mangle.unsafeInvoke(on: path, module)
     }
 
@@ -2390,8 +2431,8 @@ final class NativePreviewCorrection {
         let requestKey = arguments.filter {
             !["temporaryArtifactsPath", "conversationID", "workspaceIdentifier", "timeout"].contains($0.key)
         }
-        let identity = try ABIRuntime.shared.resolveSwiftFunctionAndWait(named: "XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A",
-            as: ((T) -> NativeSwiftValue).self, genericArguments: [.type(type)])
+        let identity = try ABIRuntime.shared.resolveAndWait(
+            .swift(.function("XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A", as: ((T) -> NativeSwiftValue).self, genericArguments: [.type(type)])))
         let nativeValue = try unsafe identity.unsafeInvoke(value)
         let fields = Dictionary(uniqueKeysWithValues: Mirror(reflecting: value).children.compactMap { field in field.label.map { ($0, field.value) } })
         guard let artifacts = fields["temporaryArtifactsPath"] as? String,
@@ -2400,13 +2441,13 @@ final class NativePreviewCorrection {
         }
         // These native properties use Default wrappers. Call their getters so
         // the action's decoded defaults are preserved without unwrapping storage.
-        let nativeType = try ABIRuntime.shared.resolveSwiftTypeAndWait(named: "PreviewsXcode.RenderPreviewAction.Input", as: type,
-            in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
+        let nativeType = try ABIRuntime.shared.resolveAndWait(
+            .swift(.type("PreviewsXcode.RenderPreviewAction.Input", as: type)), in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
         let receiverABI = try NativeType.opaque(named: nativeType.name)
-        let indexGetter = try nativeType.resolveGetterAndWait(named: "previewDefinitionIndexInFile", as: (() -> Int).self, receiverABI: receiverABI)
-        let variantsGetter = try nativeType.resolveGetterAndWait(named: "previewVariantOverrides.getter : [Swift.String : Swift.String]",
-            as: (() -> PreviewVariants).self, receiverABI: receiverABI)
-        let timeoutGetter = try nativeType.resolveGetterAndWait(named: "timeout", as: (() -> Int).self, receiverABI: receiverABI)
+        let indexGetter = try nativeType.resolveAndWait(.swift(.getter("previewDefinitionIndexInFile", as: (() -> Int).self, receiverABI: receiverABI)))
+        let variantsGetter = try nativeType.resolveAndWait(
+            .swift(.getter("previewVariantOverrides.getter : [Swift.String : Swift.String]", as: (() -> PreviewVariants).self, receiverABI: receiverABI)))
+        let timeoutGetter = try nativeType.resolveAndWait(.swift(.getter("timeout", as: (() -> Int).self, receiverABI: receiverABI)))
         let index = try unsafe indexGetter.unsafeInvoke(on: value)
         let variants = try unsafe variantsGetter.unsafeInvoke(on: value).value
         let timeout = try unsafe timeoutGetter.unsafeInvoke(on: value)

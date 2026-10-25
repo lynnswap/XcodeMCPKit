@@ -108,15 +108,18 @@ func viewPreviewOrientation(_ preview: NativeSwiftValue) async throws -> UIInter
         let value = try await previewTraitValue(preview, named: "21DeveloperToolsSupport32PreviewInterfaceOrientationTraitV")
         let runtime = ABIRuntime.shared
         // The extension lives in a different image from the trait's enum.
-        let support = try await runtime.resolveSwiftType(named: "PreviewsOSSupportUI.CounterRotationViewController",
-            in: .framework(named: "PreviewsOSSupportUI"))
-        let type = try await runtime.resolveSwiftType(named: "PreviewsMessagingOS.PreviewTraits.Orientation",
-            in: .framework(named: "PreviewsMessagingOS"))
-        let converter = try await value.type.resolveGetter(named: "previewOrientation", as: (() -> NativeSwiftValue).self,
-            valueABIs: [type: .opaque(named: type.name)], receiverABI: .opaque(named: value.type.name))
+        let support = try await runtime.resolve(
+            .swift(.type("PreviewsOSSupportUI.CounterRotationViewController")), in: .framework(named: "PreviewsOSSupportUI"))
+        let type = try await runtime.resolve(
+            .swift(.type("PreviewsMessagingOS.PreviewTraits.Orientation")), in: .framework(named: "PreviewsMessagingOS"))
+        let converter = try await value.type.resolve(
+            .swift(
+                .getter(
+                    "previewOrientation", as: (() -> NativeSwiftValue).self, valueABIs: [type: .opaque(named: type.name)],
+                    receiverABI: .opaque(named: value.type.name))))
         let orientation = try withExtendedLifetime(support) { try unsafe converter.unsafeInvoke(on: value) }
-        let getter = try await orientation.type.resolveGetter(named: "rawValue", as: (() -> String).self,
-            receiverABI: .opaque(named: orientation.type.name))
+        let getter = try await orientation.type.resolve(
+            .swift(.getter("rawValue", as: (() -> String).self, receiverABI: .opaque(named: orientation.type.name))))
         return try interfaceOrientation(rawValue: unsafe getter.unsafeInvoke(on: orientation))
     } catch is ABIResolutionError { throw NativePreviewPipelineRequired() }
 }
@@ -154,14 +157,16 @@ func interfaceOrientationName(_ orientation: UIInterfaceOrientation) throws -> S
 @MainActor
 func makeCounterRotationController(content: UIHostingController<AnyView>, orientation: UIInterfaceOrientation) async throws -> UIViewController {
     do {
-        let type = try await ABIRuntime.shared.resolveSwiftType(named: "PreviewsOSSupportUI.CounterRotationViewController",
-            in: .framework(named: "PreviewsOSSupportUI"))
+        let type = try await ABIRuntime.shared.resolve(
+            .swift(.type("PreviewsOSSupportUI.CounterRotationViewController")), in: .framework(named: "PreviewsOSSupportUI"))
         // UIKit's imported enum has no discoverable nominal descriptor. Owning a
         // compiled value supplies its metadata; NS_ENUM(NSInteger) uses Int64 on arm64.
         let value = try await ownedPreviewValue(orientation)
-        let initializer = try await type.resolveInitializer(
-            named: "init(contentView: __C.UIView, contentOrientation: __C.UIInterfaceOrientation) -> PreviewsOSSupportUI.CounterRotationViewController",
-            as: ((UIView, NativeSwiftValue) -> NativeSwiftValue).self, valueABIs: [value.type: .int64])
+        let initializer = try await type.resolve(
+            .swift(
+                .initializer(
+                    "init(contentView: __C.UIView, contentOrientation: __C.UIInterfaceOrientation) -> PreviewsOSSupportUI.CounterRotationViewController",
+                    as: ((UIView, NativeSwiftValue) -> NativeSwiftValue).self, valueABIs: [value.type: .int64])))
         let result = try unsafe initializer.unsafeInvoke(content.view, value)
         guard let controller = try result.withCopy({ $0 as? UIViewController }) else {
             throw NativePreviewPipelineRequired()

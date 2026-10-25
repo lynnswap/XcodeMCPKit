@@ -21,8 +21,7 @@ final class NativeWorkspaceDocument: NSObject {
             self.document = document
             self.wasAlreadyOpen = wasAlreadyOpen
             do {
-                let getter = try ABIRuntime.shared.object(document).resolveMethodAndWait(
-                    selector: "workspace", as: (() -> AnyObject?).self)
+                let getter = try ABIRuntime.shared.object(document).resolveAndWait(.objc(.method("workspace", as: (() -> AnyObject?).self)))
                 guard let workspace = try unsafe getter.unsafeInvoke() else {
                     throw NativeRuntimeError.invocation("The native document has no workspace")
                 }
@@ -49,11 +48,11 @@ final class NativeWorkspaceDocument: NSObject {
     init(document: AnyObject) throws {
         self.document = document
         let runtime = ABIRuntime.shared
-        let getter = try runtime.object(document).resolveMethodAndWait(selector: "stateRepository", as: (() -> AnyObject).self)
+        let getter = try runtime.object(document).resolveAndWait(.objc(.method("stateRepository", as: (() -> AnyObject).self)))
         let repository = try unsafe getter.unsafeInvoke()
-        collectState = try runtime.object(repository).resolveMethodAndWait(selector: "collectStateFromRegisteredObjects", as: (() -> Void).self)
-        let setDelegate = try runtime.object(repository).resolveMethodAndWait(selector: "setDelegate:", as: ((AnyObject?) -> Void).self)
-        closeDocument = try runtime.object(document).resolveMethodAndWait(selector: "close", as: (() -> Void).self)
+        collectState = try runtime.object(repository).resolveAndWait(.objc(.method("collectStateFromRegisteredObjects", as: (() -> Void).self)))
+        let setDelegate = try runtime.object(repository).resolveAndWait(.objc(.method("setDelegate:", as: ((AnyObject?) -> Void).self)))
+        closeDocument = try runtime.object(document).resolveAndWait(.objc(.method("close", as: (() -> Void).self)))
         super.init()
         if let nativeProtocol = unsafe objc_getProtocol("DVTStateRepositoryDelegate") {
             _ = class_addProtocol(Self.self, nativeProtocol)
@@ -63,8 +62,8 @@ final class NativeWorkspaceDocument: NSObject {
 
     static func open(workspace: AnyObject) throws -> NativeWorkspaceDocument? {
         let runtime = ABIRuntime.shared
-        let storeGetter = try runtime.object(workspace).resolveMethodAndWait(selector: "activeRunContextStore", as: (() -> AnyObject?).self)
-        let delegateGetter = try runtime.object(workspace).resolveMethodAndWait(selector: "workspaceDelegate", as: (() -> AnyObject?).self)
+        let storeGetter = try runtime.object(workspace).resolveAndWait(.objc(.method("activeRunContextStore", as: (() -> AnyObject?).self)))
+        let delegateGetter = try runtime.object(workspace).resolveAndWait(.objc(.method("workspaceDelegate", as: (() -> AnyObject?).self)))
         guard try unsafe storeGetter.unsafeInvoke() == nil,
               try unsafe delegateGetter.unsafeInvoke() == nil else { return nil }
         guard let documentClass = NSClassFromString("IDEWorkspaceDocument"),
@@ -72,9 +71,9 @@ final class NativeWorkspaceDocument: NSObject {
             throw NativeRuntimeError.unsupportedContract("Xcode's workspace document or state-repository protocol is unavailable")
         }
         _ = class_addProtocol(Self.self, nativeProtocol)
-        let allocate = try runtime.object(documentClass as AnyObject).resolveMethodAndWait(selector: "alloc", as: (() -> AnyObject).self)
+        let allocate = try runtime.object(documentClass as AnyObject).resolveAndWait(.objc(.method("alloc", as: (() -> AnyObject).self)))
         let allocated = try unsafe allocate.unsafeInvoke()
-        let initialize = try runtime.object(allocated).resolveMethodAndWait(selector: "initWithWorkspace:", as: ((AnyObject) -> AnyObject?).self)
+        let initialize = try runtime.object(allocated).resolveAndWait(.objc(.method("initWithWorkspace:", as: ((AnyObject) -> AnyObject?).self)))
         guard let document = try unsafe initialize.unsafeInvoke(workspace) else {
             throw NativeRuntimeError.invocation("IDEWorkspaceDocument.initWithWorkspace: returned nil")
         }
@@ -83,7 +82,7 @@ final class NativeWorkspaceDocument: NSObject {
         } catch {
             let original = error
             do {
-                let close = try runtime.object(document).resolveMethodAndWait(selector: "close", as: (() -> Void).self)
+                let close = try runtime.object(document).resolveAndWait(.objc(.method("close", as: (() -> Void).self)))
                 try unsafe close.unsafeInvoke()
             } catch {
                 throw NativeRuntimeError.invocation("Cannot connect workspace state: \(original); document cleanup failed: \(error)")

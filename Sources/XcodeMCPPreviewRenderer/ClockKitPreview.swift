@@ -30,21 +30,21 @@ func makeClockKitPreview(from preview: SwiftUI._Preview, request: PreviewRendere
 func makeClockKitPreviewController(_ preview: ClockKitPreview) async throws -> AnyObject {
     let runtime = ABIRuntime.shared
     let symbol = try await runtime.resolve(
-        .init(machOName: "_OBJC_CLASS_$_NTKUVPreviewComplicationViewController", language: .objectiveC, kind: .data),
+        .objc(.symbol(machOName: "_OBJC_CLASS_$_NTKUVPreviewComplicationViewController", kind: .data)),
         in: .framework(named: "NanoTimeKit"))
     guard let type = NSClassFromString("NTKUVPreviewComplicationViewController") else {
         throw PreviewRendererError("The native complication preview controller is unavailable")
     }
     let allocate = try await runtime.object(type as AnyObject)
-        .resolveMethod(selector: "alloc", as: (() -> AnyObject).self)
+        .resolve(.objc(.method("alloc", as: (() -> AnyObject).self)))
     let allocated = try unsafe allocate.unsafeInvoke()
     let initialize = try await runtime.object(allocated)
-        .resolveMethod(selector: "initWithTimeline:", as: ((NSArray) -> AnyObject?).self)
+        .resolve(.objc(.method("initWithTimeline:", as: ((NSArray) -> AnyObject?).self)))
     guard let controller = try unsafe initialize.unsafeInvoke(preview.timeline as NSArray) else {
         throw PreviewRendererError("The native complication preview controller rejected the timeline")
     }
     let setLive = try await runtime.object(controller)
-        .resolveMethod(selector: "setDisplayingLivePreview:", as: ((Bool) -> Void).self)
+        .resolve(.objc(.method("setDisplayingLivePreview:", as: ((Bool) -> Void).self)))
     try unsafe setLive.unsafeInvoke(false)
     withExtendedLifetime(symbol) {}
     return controller

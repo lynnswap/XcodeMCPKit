@@ -21,12 +21,13 @@ func makeLegacyActivityPreview(context: any PreviewContext, programRootNames: [S
         }
         @MainActor func open<Attributes: ActivityAttributes>(_ attributes: Attributes) async throws -> ActivityPreview {
             guard let state = state as? Attributes.ContentState else { throw NativePreviewPipelineRequired() }
-            let type = try await ABIRuntime.shared.resolveSwiftType(named: "ActivityKit.ActivityAttributesType",
-                in: .framework(named: "ActivityKit"))
-            let initialize = try await type.resolveInitializer(
-                named: "init<A where A: ActivityKit.ActivityAttributes>(from: A.Type) -> ActivityKit.ActivityAttributesType",
-                as: ((Attributes.Type) -> NativeSwiftValue).self, genericArguments: [.type(Attributes.self)],
-                valueABIs: [type: .opaque(named: type.name)])
+            let type = try await ABIRuntime.shared.resolve(.swift(.type("ActivityKit.ActivityAttributesType")), in: .framework(named: "ActivityKit"))
+            let initialize = try await type.resolve(
+                .swift(
+                    .initializer(
+                        "init<A where A: ActivityKit.ActivityAttributes>(from: A.Type) -> ActivityKit.ActivityAttributesType",
+                        as: ((Attributes.Type) -> NativeSwiftValue).self, genericArguments: [.type(Attributes.self)],
+                        valueABIs: [type: .opaque(named: type.name)])))
             let nativeType = try unsafe initialize.unsafeInvoke(Attributes.self)
             let descriptors = try await legacyActivityDescriptors(programRootNames: programRootNames, environment: environment)
             let configuration = try await matchingLegacyActivityConfiguration(descriptors, attributesType: nativeType)
@@ -56,17 +57,19 @@ private func legacyActivityDescriptors(programRootNames: [String], environment: 
     if let bundle = root as? any WidgetBundle.Type {
         @MainActor func open<Bundle: WidgetBundle>(_ type: Bundle.Type) async throws -> [Any] {
             let root = try await ownedPreviewValue(Bundle())
-            let hostType = try await ABIRuntime.shared.resolveSwiftType(named: "SwiftUI.WidgetBundleHost",
-                in: .framework(named: "SwiftUI"))
-            let initialize = try await hostType.resolveInitializer(
-                named: "init<A where A: SwiftUI.WidgetBundle>(bundle: A) -> SwiftUI.WidgetBundleHost",
-                as: ((NativeSwiftValue) -> NativeSwiftValue).self, genericArguments: [.type(root.type)],
-                valueABIs: [root.type: .opaque(named: root.type.name), hostType: .pointer])
+            let hostType = try await ABIRuntime.shared.resolve(.swift(.type("SwiftUI.WidgetBundleHost")), in: .framework(named: "SwiftUI"))
+            let initialize = try await hostType.resolve(
+                .swift(
+                    .initializer(
+                        "init<A where A: SwiftUI.WidgetBundle>(bundle: A) -> SwiftUI.WidgetBundleHost", as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+                        genericArguments: [.type(root.type)], valueABIs: [root.type: .opaque(named: root.type.name), hostType: .pointer])))
             let host = try unsafe initialize.unsafeInvoke(root.copy())
             let nativeEnvironment = try await ownedPreviewValue(environment)
-            let set = try await hostType.resolveMethod(named: "setEnvironment(_:)",
-                as: ((NativeSwiftValue) -> Void).self,
-                valueABIs: [nativeEnvironment.type: .opaque(named: nativeEnvironment.type.name)], receiverABI: .pointer)
+            let set = try await hostType.resolve(
+                .swift(
+                    .method(
+                        "setEnvironment(_:)", as: ((NativeSwiftValue) -> Void).self,
+                        valueABIs: [nativeEnvironment.type: .opaque(named: nativeEnvironment.type.name)], receiverABI: .pointer)))
             try unsafe set.unsafeInvoke(on: host, nativeEnvironment.copy())
             return try await legacyBundleDescriptors(host)
         }
@@ -90,9 +93,11 @@ private func legacyBundleDescriptors(_ host: NativeSwiftValue) async throws -> [
         // element type has no exported nominal descriptor. The generic getter
         // retains its formal indirect result ABI.
         let defaultValue = try await ownedPreviewValue(Key.defaultValue)
-        let read = try await host.type.resolveMethod(named: "readPreference(_:)",
-            as: ((Key.Type) -> NativeSwiftValue).self, genericArguments: [.type(Key.self)],
-            valueABIs: [defaultValue.type: .pointer], receiverABI: .pointer)
+        let read = try await host.type.resolve(
+            .swift(
+                .method(
+                    "readPreference(_:)", as: ((Key.Type) -> NativeSwiftValue).self, genericArguments: [.type(Key.self)],
+                    valueABIs: [defaultValue.type: .pointer], receiverABI: .pointer)))
         let result = try unsafe read.unsafeInvoke(on: host, key)
         return try result.withCopy { value in
             guard let values = value as? any Collection else { throw NativePreviewPipelineRequired() }

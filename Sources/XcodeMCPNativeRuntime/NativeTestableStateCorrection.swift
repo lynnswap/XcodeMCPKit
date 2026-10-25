@@ -15,14 +15,12 @@ final class NativeTestableStateCorrection {
         let runtime = ABIRuntime.shared
         // Preparing the getter first lets the class synthesize its native
         // invalidation methods before the creation hook is installed.
-        let callback = NativeTestableStateCallback(isValid: try runtime.resolveObjCMethodAndWait(
-            on: stateClass, selector: "isValid", as: (() -> Bool).self))
+        let callback = NativeTestableStateCallback(isValid: try runtime.resolveAndWait(.objc(.method("isValid", as: (() -> Bool).self)), on: stateClass))
         self.callback = callback
         // Xcode's deferred loading callback can run after state invalidation.
         // A provider created then misses its owner's invalidation cleanup.
-        hook = try unsafe runtime.hookMethod(
-            on: stateClass, selector: "createNoticeProviderForWorkspace:", as: ((AnyObject?) -> Void).self,
-            onFailure: { callback.recordFailure($0) }
+        hook = try unsafe runtime.hookCalls(
+            .objc(.method("createNoticeProviderForWorkspace:", as: ((AnyObject?) -> Void).self)), on: stateClass, onFailure: { callback.recordFailure($0) }
         ) { call, workspace in
             do {
                 guard try unsafe callback.isValid.unsafeInvoke(on: call.receiver) else { return }

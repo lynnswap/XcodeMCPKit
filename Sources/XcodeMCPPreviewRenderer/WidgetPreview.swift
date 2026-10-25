@@ -30,8 +30,8 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, presentation: 
     if let localization { publicEnvironment.locale = Locale(identifier: localization) }
     let requestedFamily = try await applyWidgetEffects(effects, to: &publicEnvironment)
     try await applyWidgetDisplayProperties(to: &publicEnvironment, screen: screen)
-    let makeGetter = try await source.type.resolveGetter(named: "makeWidget",
-        as: (() -> NativeSwiftClosure<() -> NativeSwiftValue>).self, receiverABI: .opaque(named: source.type.name))
+    let makeGetter = try await source.type.resolve(
+        .swift(.getter("makeWidget", as: (() -> NativeSwiftClosure<() -> NativeSwiftValue>).self, receiverABI: .opaque(named: source.type.name))))
     let make = try unsafe makeGetter.unsafeInvoke(on: source)
     let widget = try unsafe make.unsafeInvoke()
     guard let swiftWidget = try widget.withCopy({ $0 as? any Widget }) else { throw NativePreviewPipelineRequired() }
@@ -40,8 +40,8 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, presentation: 
     let descriptor = try await widgetConfigurationDescriptor(fullConfiguration)
     var configuration = fullConfiguration
     if configuration.type.name == "SwiftUI.ModifiedContent" {
-        let base = try await configuration.type.resolveGetter(named: "baseConfiguration", as: (() -> NativeSwiftValue).self,
-            receiverABI: .opaque(named: configuration.type.name))
+        let base = try await configuration.type.resolve(
+            .swift(.getter("baseConfiguration", as: (() -> NativeSwiftValue).self, receiverABI: .opaque(named: configuration.type.name))))
         let existential = try unsafe base.unsafeInvoke(on: configuration)
         configuration = try existential.copyUnderlyingValue()
     }
@@ -51,50 +51,70 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, presentation: 
     if let requestedFamily {
         familyValue = try await widgetValue(requestedFamily)
     } else {
-        let getter = try await source.type.resolveGetter(named: "family", as: (() -> NativeSwiftValue).self,
-            valueABIs: [publicFamilyType: .opaque(named: publicFamilyType.name)], receiverABI: .opaque(named: source.type.name))
+        let getter = try await source.type.resolve(
+            .swift(
+                .getter(
+                    "family", as: (() -> NativeSwiftValue).self, valueABIs: [publicFamilyType: .opaque(named: publicFamilyType.name)],
+                    receiverABI: .opaque(named: source.type.name))))
         familyValue = try unsafe getter.unsafeInvoke(on: source)
     }
     let internalType = try await widgetType("WidgetKit.InternalWidgetFamily")
-    let familyInit = try await internalType.resolveInitializer(named: "init(WidgetKit.WidgetFamily) -> WidgetKit.InternalWidgetFamily",
-        as: ((NativeSwiftValue) -> NativeSwiftValue).self,
-        valueABIs: [publicFamilyType: .opaque(named: publicFamilyType.name), internalType: .opaque(named: internalType.name)])
+    let familyInit = try await internalType.resolve(
+        .swift(
+            .initializer(
+                "init(WidgetKit.WidgetFamily) -> WidgetKit.InternalWidgetFamily", as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+                valueABIs: [publicFamilyType: .opaque(named: publicFamilyType.name), internalType: .opaque(named: internalType.name)])))
     let internalFamily = try unsafe familyInit.unsafeInvoke(familyValue)
-    let familyGetter = try await internalType.resolveGetter(named: "chsWidgetFamily.getter : __C.CHSWidgetFamily",
-        as: (() -> Int).self, receiverABI: .opaque(named: internalType.name))
+    let familyGetter = try await internalType.resolve(
+        .swift(.getter("chsWidgetFamily.getter : __C.CHSWidgetFamily", as: (() -> Int).self, receiverABI: .opaque(named: internalType.name))))
     let rawFamily = try unsafe familyGetter.unsafeInvoke(on: internalFamily)
     let (providedWidget, providedMetrics) = try await widgetIdentity(kind: descriptor.kind, family: rawFamily, screen: screen)
 
     let swiftEnvironment = try await widgetValue(publicEnvironment)
-    let widgetSetter = try await swiftEnvironment.type.resolveSetter(
-        named: "(extension in WidgetKit):SwiftUI.EnvironmentValues.widget.setter : Swift.Optional<__C.CHSWidget>",
-        as: (AnyObject?).self, receiverABI: .opaque(named: swiftEnvironment.type.name))
+    let widgetSetter = try await swiftEnvironment.type.resolve(
+        .swift(
+            .setter(
+                "(extension in WidgetKit):SwiftUI.EnvironmentValues.widget.setter : Swift.Optional<__C.CHSWidget>", as: ((AnyObject?) -> Void).self,
+                receiverABI: .opaque(named: swiftEnvironment.type.name))))
     try unsafe widgetSetter.unsafeInvoke(on: swiftEnvironment, providedWidget)
-    let metricsSetter = try await swiftEnvironment.type.resolveSetter(
-        named: "(extension in WidgetKit):SwiftUI.EnvironmentValues._widgetMetrics.setter : __C.CHSWidgetMetrics",
-        as: AnyObject.self, receiverABI: .opaque(named: swiftEnvironment.type.name))
+    let metricsSetter = try await swiftEnvironment.type.resolve(
+        .swift(
+            .setter(
+                "(extension in WidgetKit):SwiftUI.EnvironmentValues._widgetMetrics.setter : __C.CHSWidgetMetrics", as: ((AnyObject) -> Void).self,
+                receiverABI: .opaque(named: swiftEnvironment.type.name))))
     try unsafe metricsSetter.unsafeInvoke(on: swiftEnvironment, providedMetrics)
-    let familySetter = try await swiftEnvironment.type.resolveSetter(
-        named: "(extension in WidgetKit):SwiftUI.EnvironmentValues._widgetFamily.setter : WidgetKit.InternalWidgetFamily",
-        as: NativeSwiftValue.self, valueABIs: [internalType: .opaque(named: internalType.name)],
-        receiverABI: .opaque(named: swiftEnvironment.type.name))
+    let familySetter = try await swiftEnvironment.type.resolve(
+        .swift(
+            .setter(
+                "(extension in WidgetKit):SwiftUI.EnvironmentValues._widgetFamily.setter : WidgetKit.InternalWidgetFamily",
+                as: ((NativeSwiftValue) -> Void).self,
+                valueABIs: [internalType: .opaque(named: internalType.name)], receiverABI: .opaque(named: swiftEnvironment.type.name))))
     try unsafe familySetter.unsafeInvoke(on: swiftEnvironment, internalFamily.copy())
     let environmentType = try await widgetType("WidgetKit.WidgetEnvironment")
-    let environmentInit = try await environmentType.resolveInitializer(
-        named: "init(from: SwiftUI.EnvironmentValues) -> WidgetKit.WidgetEnvironment", as: ((NativeSwiftValue) -> NativeSwiftValue).self,
-        valueABIs: [swiftEnvironment.type: .opaque(named: swiftEnvironment.type.name), environmentType: .opaque(named: environmentType.name)])
+    let environmentInit = try await environmentType.resolve(
+        .swift(
+            .initializer(
+                "init(from: SwiftUI.EnvironmentValues) -> WidgetKit.WidgetEnvironment", as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+                valueABIs: [swiftEnvironment.type: .opaque(named: swiftEnvironment.type.name), environmentType: .opaque(named: environmentType.name)])))
     let environment = try unsafe environmentInit.unsafeInvoke(swiftEnvironment.copy())
     let variantsType = try await widgetType("WidgetKit.TimelineProviderContext.EnvironmentVariants")
-    let variantsInit = try await variantsType.resolveInitializer(
-        named: "init(WidgetKit.WidgetEnvironment) -> WidgetKit.TimelineProviderContext.EnvironmentVariants",
-        as: ((NativeSwiftValue) -> NativeSwiftValue).self,
-        valueABIs: [environmentType: .opaque(named: environmentType.name), variantsType: .opaque(named: variantsType.name)])
+    let variantsInit = try await variantsType.resolve(
+        .swift(
+            .initializer(
+                "init(WidgetKit.WidgetEnvironment) -> WidgetKit.TimelineProviderContext.EnvironmentVariants",
+                as: ((NativeSwiftValue) -> NativeSwiftValue).self,
+                valueABIs: [environmentType: .opaque(named: environmentType.name), variantsType: .opaque(named: variantsType.name)])))
     let variants = try unsafe variantsInit.unsafeInvoke(environment)
     let contextType = try await widgetType("WidgetKit.TimelineProviderContext")
-    let contextInit = try await contextType.resolveInitializer(named: "init(environmentVariants:family:isPreview:personaIdentifier:)",
-        as: ((NativeSwiftValue, NativeSwiftValue, Bool, String?) -> NativeSwiftValue).self,
-        valueABIs: [variantsType: .opaque(named: variantsType.name), internalType: .opaque(named: internalType.name),
-                    contextType: .opaque(named: contextType.name)])
+    let contextInit = try await contextType.resolve(
+        .swift(
+            .initializer(
+                "init(environmentVariants:family:isPreview:personaIdentifier:)",
+                as: ((NativeSwiftValue, NativeSwiftValue, Bool, String?) -> NativeSwiftValue).self,
+                valueABIs: [
+                    variantsType: .opaque(named: variantsType.name), internalType: .opaque(named: internalType.name),
+                    contextType: .opaque(named: contextType.name),
+                ])))
     let context = try unsafe contextInit.unsafeInvoke(variants, internalFamily, false, nil)
     let collection = try await widgetTimeline(configuration: configuration, source: source, context: context)
     guard let sequence = try collection.withCopy({ $0 as? any Sequence }) else { throw NativePreviewPipelineRequired() }
@@ -106,19 +126,19 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, presentation: 
     }
     let entry = try await widgetAnyValue(values[selectedIndex])
     let anyViewType = try await widgetValue(AnyView(EmptyView())).type
-    let viewGetter = try await entry.type.resolveGetter(named: "view", as: (() -> NativeSwiftValue).self,
-        valueABIs: [anyViewType: .pointer], receiverABI: .opaque(named: entry.type.name))
+    let viewGetter = try await entry.type.resolve(
+        .swift(.getter("view", as: (() -> NativeSwiftValue).self, valueABIs: [anyViewType: .pointer], receiverABI: .opaque(named: entry.type.name))))
     let nativeView = try unsafe viewGetter.unsafeInvoke(on: entry)
     let view = try nativeView.take(as: AnyView.self)
-    let widgetGetter = try await collection.type.resolveGetter(named: "widget", as: (() -> NativeSwiftValue).self)
-    let metricsGetter = try await collection.type.resolveGetter(named: "metrics", as: (() -> NativeSwiftValue).self)
+    let widgetGetter = try await collection.type.resolve(.swift(.getter("widget", as: (() -> NativeSwiftValue).self)))
+    let metricsGetter = try await collection.type.resolve(.swift(.getter("metrics", as: (() -> NativeSwiftValue).self)))
     let nativeIdentity = try unsafe widgetGetter.unsafeInvoke(on: collection)
     let nativeMetrics = try unsafe metricsGetter.unsafeInvoke(on: collection)
     let identity = try nativeIdentity.withCopy { $0 as AnyObject }
     let metrics = try nativeMetrics.withCopy { $0 as AnyObject }
-    let sizeGetter = try await ABIRuntime.shared.object(metrics).resolveMethod(selector: "size", as: (() -> CGSize).self)
+    let sizeGetter = try await ABIRuntime.shared.object(metrics).resolve(.objc(.method("size", as: (() -> CGSize).self)))
     let size = try unsafe sizeGetter.unsafeInvoke()
-    let radiusGetter = try await ABIRuntime.shared.object(metrics).resolveMethod(selector: "cornerRadius", as: (() -> Double).self)
+    let radiusGetter = try await ABIRuntime.shared.object(metrics).resolve(.objc(.method("cornerRadius", as: (() -> Double).self)))
     let radius = try unsafe radiusGetter.unsafeInvoke()
     let typedEnvironment = try swiftEnvironment.withCopy { value in
         guard let environment = value as? EnvironmentValues else { throw NativePreviewPipelineRequired() }
@@ -126,10 +146,12 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, presentation: 
     }
     let modifierEnvironment = try await widgetValue(Optional.some(typedEnvironment))
     let modifierType = try await widgetType("WidgetKit.CommonServerEnvironmentModifier")
-    let modifierInit = try await modifierType.resolveInitializer(
-        named: "init(widget: __C.CHSWidget, metrics: __C.CHSWidgetMetrics, environment: Swift.Optional<SwiftUI.EnvironmentValues>, applyWidgetIdiom: Swift.Bool) -> WidgetKit.CommonServerEnvironmentModifier",
-        as: ((AnyObject, AnyObject, NativeSwiftValue, Bool) -> NativeSwiftValue).self,
-        valueABIs: [modifierEnvironment.type: .opaque(named: modifierEnvironment.type.name), modifierType: .opaque(named: modifierType.name)])
+    let modifierInit = try await modifierType.resolve(
+        .swift(
+            .initializer(
+                "init(widget: __C.CHSWidget, metrics: __C.CHSWidgetMetrics, environment: Swift.Optional<SwiftUI.EnvironmentValues>, applyWidgetIdiom: Swift.Bool) -> WidgetKit.CommonServerEnvironmentModifier",
+                as: ((AnyObject, AnyObject, NativeSwiftValue, Bool) -> NativeSwiftValue).self,
+                valueABIs: [modifierEnvironment.type: .opaque(named: modifierEnvironment.type.name), modifierType: .opaque(named: modifierType.name)])))
     let nativeModifier = try unsafe modifierInit.unsafeInvoke(identity, metrics, modifierEnvironment, true)
     guard let modifier = try nativeModifier.withCopy({ $0 as? any ViewModifier }) else { throw NativePreviewPipelineRequired() }
     func apply<M: ViewModifier>(_ modifier: M) -> AnyView { AnyView(view.modifier(modifier)) }
@@ -142,8 +164,8 @@ func makeWidgetPreview(source: NativeSwiftValue, family: String?, presentation: 
 
 @MainActor
 func widgetValue<Value>(_ value: Value) async throws -> NativeSwiftValue {
-    let identity = try await ABIRuntime.shared.resolveSwiftFunction(named: "XcodeMCPPreviewRenderer.previewValue<A>(A) -> A",
-        as: ((Value) -> NativeSwiftValue).self, genericArguments: [.type(Value.self)])
+    let identity = try await ABIRuntime.shared.resolve(
+        .swift(.function("XcodeMCPPreviewRenderer.previewValue<A>(A) -> A", as: ((Value) -> NativeSwiftValue).self, genericArguments: [.type(Value.self)])))
     return try unsafe identity.unsafeInvoke(value)
 }
 
@@ -154,7 +176,7 @@ func widgetAnyValue(_ value: Any) async throws -> NativeSwiftValue {
 }
 
 private func widgetType(_ name: String) async throws -> NativeSwiftType {
-    try await ABIRuntime.shared.resolveSwiftType(named: name, in: .framework(named: "WidgetKit"))
+    try await ABIRuntime.shared.resolve(.swift(.type(name)), in: .framework(named: "WidgetKit"))
 }
 
 @MainActor
@@ -171,7 +193,7 @@ private func widgetObject(_ name: String, framework: String) async throws -> Any
         }
     }
     guard let type = NSClassFromString(name) else { throw NativePreviewPipelineRequired() }
-    let allocate = try await ABIRuntime.shared.object(type as AnyObject).resolveMethod(selector: "alloc", as: (() -> AnyObject).self)
+    let allocate = try await ABIRuntime.shared.object(type as AnyObject).resolve(.objc(.method("alloc", as: (() -> AnyObject).self)))
     return try unsafe allocate.unsafeInvoke()
 }
 
@@ -179,25 +201,22 @@ private func widgetObject(_ name: String, framework: String) async throws -> Any
 private func widgetIdentity(kind: String, family: Int, screen: UIScreen) async throws -> (AnyObject, AnyObject) {
     guard let bundleIdentifier = Bundle.main.bundleIdentifier else { throw NativePreviewPipelineRequired() }
     let allocatedProvider = try await widgetObject("SBHWidgetMetricsProvider", framework: "SpringBoardHome")
-    let screenType = try await ABIRuntime.shared.object(screen).resolveMethod(selector: "sbh_screenType", as: (() -> UInt64).self)
-    let providerInit = try await ABIRuntime.shared.object(allocatedProvider).resolveMethod(selector: "initWithScreenType:",
-        as: ((UInt64) -> AnyObject).self)
+    let screenType = try await ABIRuntime.shared.object(screen).resolve(.objc(.method("sbh_screenType", as: (() -> UInt64).self)))
+    let providerInit = try await ABIRuntime.shared.object(allocatedProvider).resolve(
+        .objc(.method("initWithScreenType:", as: ((UInt64) -> AnyObject).self)))
     let provider = try unsafe providerInit.unsafeInvoke(screenType.unsafeInvoke())
     let allocatedLayout = try await widgetObject("SBHDefaultIconListLayoutProvider", framework: "SpringBoardHome")
-    let layoutInit = try await ABIRuntime.shared.object(allocatedLayout).resolveMethod(selector: "initWithScreen:",
-        as: ((AnyObject) -> AnyObject).self)
+    let layoutInit = try await ABIRuntime.shared.object(allocatedLayout).resolve(.objc(.method("initWithScreen:", as: ((AnyObject) -> AnyObject).self)))
     let layout = try unsafe layoutInit.unsafeInvoke(screen)
     let delegate = WidgetMetricsDelegate(layout)
-    let setDelegate = try await ABIRuntime.shared.object(provider).resolveMethod(selector: "setDelegate:", as: ((AnyObject) -> Void).self)
+    let setDelegate = try await ABIRuntime.shared.object(provider).resolve(.objc(.method("setDelegate:", as: ((AnyObject) -> Void).self)))
     try unsafe setDelegate.unsafeInvoke(delegate)
-    let factory = try await ABIRuntime.shared.object(provider).resolveMethod(selector: "systemMetricsForFamily:",
-        as: ((Int64) -> AnyObject?).self)
+    let factory = try await ABIRuntime.shared.object(provider).resolve(.objc(.method("systemMetricsForFamily:", as: ((Int64) -> AnyObject?).self)))
     guard let metrics = try unsafe factory.unsafeInvoke(Int64(family)) else { throw NativePreviewPipelineRequired() }
     withExtendedLifetime(delegate) {}
     let allocatedWidget = try await widgetObject("CHSWidget", framework: "ChronoServices")
-    let widgetInit = try await ABIRuntime.shared.object(allocatedWidget).resolveMethod(
-        selector: "initWithExtensionBundleIdentifier:kind:family:intent:",
-        as: ((String, String, Int64, AnyObject?) -> AnyObject).self)
+    let widgetInit = try await ABIRuntime.shared.object(allocatedWidget).resolve(
+        .objc(.method("initWithExtensionBundleIdentifier:kind:family:intent:", as: ((String, String, Int64, AnyObject?) -> AnyObject).self)))
     let widget = try unsafe widgetInit.unsafeInvoke(bundleIdentifier, kind, Int64(family), nil)
     return (widget, metrics)
 }
@@ -236,23 +255,25 @@ private func widgetTimeline(configuration: NativeSwiftValue, source: NativeSwift
     }
     defer { mailbox.cancel(); withExtendedLifetime(callback) {} }
     let collectionType = try await widgetType("WidgetKit.WidgetViewCollection")
-    let resultType = try await ABIRuntime.shared.resolveSwiftType(named: "Swift.Result",
-        genericArguments: [.type(collectionType), .type((any Error).self)])
+    let resultType = try await ABIRuntime.shared.resolve(.swift(.type("Swift.Result", genericArguments: [.type(collectionType), .type((any Error).self)])))
     // The arm64 Swift ABI for Result<native class, Error> is a pointer and i8 tag.
     let resultABI = try NativeType.structure(named: resultType.name, fields: [.uint64, .uint8])
-    let timeline = try await configuration.type.resolveMethod(named: "previewTimeline(source:with:completion:)",
-        as: ((NativeSwiftValue, NativeSwiftValue, NativeSwiftClosure<(NativeSwiftValue) -> Void>) -> Void).self,
-        genericArguments: [.type(source.type)],
-        valueABIs: [source.type: .opaque(named: source.type.name), context.type: .opaque(named: context.type.name), resultType: resultABI],
-        receiverABI: .opaque(named: configuration.type.name))
+    let timeline = try await configuration.type.resolve(
+        .swift(
+            .method(
+                "previewTimeline(source:with:completion:)",
+                as: ((NativeSwiftValue, NativeSwiftValue, NativeSwiftClosure<(NativeSwiftValue) -> Void>) -> Void).self,
+                genericArguments: [.type(source.type)],
+                valueABIs: [source.type: .opaque(named: source.type.name), context.type: .opaque(named: context.type.name), resultType: resultABI],
+                receiverABI: .opaque(named: configuration.type.name))))
     try Task.checkCancellation()
     try unsafe timeline.unsafeInvoke(on: configuration, source, context, callback)
     while true {
         try Task.checkCancellation()
         if let completion = mailbox.take() {
             let result = try completion.get()
-            if let success = try await result.resolveEnumPayload(forCase: "success") { return success }
-            guard let failure = try await result.resolveEnumPayload(forCase: "failure"),
+            if let success = try await result.copyEnumPayload(forCase: "success") { return success }
+            guard let failure = try await result.copyEnumPayload(forCase: "failure"),
                   let error = try failure.withCopy({ $0 as? any Error }) else { throw NativePreviewPipelineRequired() }
             throw error
         }

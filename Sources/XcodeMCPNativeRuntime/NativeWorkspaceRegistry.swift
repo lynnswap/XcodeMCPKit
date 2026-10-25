@@ -41,27 +41,28 @@ final class NativeWorkspaceRegistry {
     }
 
     init(installation: NativeXcodeInstallation) async throws {
-        let type = try await runtime.resolveSwiftType(named: "IDEFoundation.IDEWorkspaceRegistry", in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
-        let shared = try await type.resolveStaticGetter(named: "shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)
+        let type = try await runtime.resolve(
+            .swift(.type("IDEFoundation.IDEWorkspaceRegistry")), in: .path(installation.framework("IDEFoundation")), loading: .loadedOnly)
+        let shared = try await type.resolve(.swift(.staticGetter("shared.getter : IDEFoundation.IDEWorkspaceRegistry", as: (() -> AnyObject).self)))
         registry = try unsafe shared.unsafeInvoke()
-        identifyWorkspace = try await runtime.object(registry).resolveMethod(
-            named: "identifier(for: __C.IDEWorkspace) -> Swift.String", as: ((AnyObject) -> String).self)
-        listEntries = try await runtime.object(registry).resolveMethod(
-            named: "list() -> Swift.Array<IDEFoundation.IDEWorkspaceRegistry.WorkspaceInfo>", as: (() -> NativeSwiftValue).self)
-        let callbackType = try await runtime.resolveSwiftType(named: "Swift.Optional", genericArguments: [.type(WorkspaceCallback.self)])
+        identifyWorkspace = try await runtime.object(registry).resolve(
+            .swift(.method("identifier(for: __C.IDEWorkspace) -> Swift.String", as: ((AnyObject) -> String).self)))
+        listEntries = try await runtime.object(registry).resolve(
+            .swift(.method("list() -> Swift.Array<IDEFoundation.IDEWorkspaceRegistry.WorkspaceInfo>", as: (() -> NativeSwiftValue).self)))
+        let callbackType = try await runtime.resolve(.swift(.type("Swift.Optional", genericArguments: [.type(WorkspaceCallback.self)])))
         // Both the selected Xcode's accessors and a compiler-emitted Optional
         // callback use direct function/context words. Value witnesses own copies.
         let callbackABI = try NativeType.structure(named: callbackType.name, fields: [.pointer, .pointer])
         let valueABIs = [callbackType: callbackABI]
-        let getChangeHandler = try await type.resolveGetter(
-            named: "onChange.getter : Swift.Optional<@Swift.MainActor () -> ()>", as: (() -> NativeSwiftValue).self,
-            valueABIs: valueABIs).bind(to: registry)
-        setChangeHandler = try await type.resolveSetter(
-            named: "onChange.setter : Swift.Optional<@Swift.MainActor () -> ()>", as: NativeSwiftValue.self,
-            valueABIs: valueABIs).bind(to: registry)
+        let getChangeHandler = try await type.resolve(
+            .swift(.getter("onChange.getter : Swift.Optional<@Swift.MainActor () -> ()>", as: (() -> NativeSwiftValue).self, valueABIs: valueABIs))
+        ).bind(to: registry)
+        setChangeHandler = try await type.resolve(
+            .swift(.setter("onChange.setter : Swift.Optional<@Swift.MainActor () -> ()>", as: ((NativeSwiftValue) -> Void).self, valueABIs: valueABIs))
+        ).bind(to: registry)
         previousChangeHandler = try unsafe getChangeHandler.unsafeInvoke()
-        let previous = try await previousChangeHandler.resolveEnumPayload(forCase: "some")
-        callPreviousChangeHandler = try await previous?.resolveClosure(as: (@MainActor () -> Void).self)
+        let previous = try await previousChangeHandler.copyEnumPayload(forCase: "some")
+        callPreviousChangeHandler = try await previous?.copyClosure(as: (@MainActor () -> Void).self)
         let onChange = optionalWorkspaceCallback { [weak self] in
             guard let self else { return }
             do {
@@ -70,10 +71,11 @@ final class NativeWorkspaceRegistry {
             }
             catch { NativeErrorPresentation.report(error as NSError) }
         }
-        let ownCallback = try await runtime.resolveSwiftFunction(
-            named: "XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A",
-            as: ((WorkspaceCallback?) -> NativeSwiftValue).self,
-            genericArguments: [.type(WorkspaceCallback?.self)], valueABIs: valueABIs)
+        let ownCallback = try await runtime.resolve(
+            .swift(
+                .function(
+                    "XcodeMCPNativeRuntime.nativePreviewValue<A>(A) -> A", as: ((WorkspaceCallback?) -> NativeSwiftValue).self,
+                    genericArguments: [.type(WorkspaceCallback?.self)], valueABIs: valueABIs)))
         let callback = try unsafe ownCallback.unsafeInvoke(onChange)
         try unsafe setChangeHandler.unsafeInvoke(callback)
     }
@@ -142,9 +144,11 @@ final class NativeWorkspaceRegistry {
 
     static func waitForSourcePackages(in workspace: AnyObject) async throws {
         try Task.checkCancellation()
-        let wait = try await ABIRuntime.shared.object(workspace).resolveMethod(
-            named: "(extension in IDEFoundation):__C.IDEWorkspace.waitForFinishedResolvingSourcePackages() async throws -> ()",
-            as: (@concurrent () async throws -> Void).self)
+        let wait = try await ABIRuntime.shared.object(workspace).resolve(
+            .swift(
+                .method(
+                    "(extension in IDEFoundation):__C.IDEWorkspace.waitForFinishedResolvingSourcePackages() async throws -> ()",
+                    as: (@concurrent () async throws -> Void).self)))
         do { try unsafe await wait.unsafeInvoke() }
         catch let error as NativeSwiftError {
             if error.withUnderlyingError({ $0 is CancellationError }) { throw CancellationError() }
@@ -170,7 +174,8 @@ final class NativeWorkspaceRegistry {
                 throw NativeRuntimeError.invalidRequest("No open native workspace matches '\(selector)'")
             }
             try await prepareOpen(path: path, request: request)
-            let open = try await runtime.object(registry).resolveMethod(named: "open(path: Swift.String) async throws -> __C.IDEWorkspace", as: (@concurrent (String) async throws -> AnyObject).self)
+            let open = try await runtime.object(registry).resolve(
+                .swift(.method("open(path: Swift.String) async throws -> __C.IDEWorkspace", as: (@concurrent (String) async throws -> AnyObject).self)))
             try Task.checkCancellation()
             let workspace: AnyObject
             do {
@@ -179,7 +184,7 @@ final class NativeWorkspaceRegistry {
                 if error.withUnderlyingError({ $0 is CancellationError }) { throw CancellationError() }
                 throw NativeToolExecutionError(message: error.description)
             }
-            let getter = try await runtime.object(workspace).resolveGetter(named: "workspaceIdentifier", as: (() -> String).self)
+            let getter = try await runtime.object(workspace).resolve(.swift(.getter("workspaceIdentifier", as: (() -> String).self)))
             let identifier = try unsafe getter.unsafeInvoke()
             try finishOpen(request: request)
             try prepareDocument(workspace: workspace, identifier: identifier)
@@ -191,7 +196,7 @@ final class NativeWorkspaceRegistry {
 
     func prepareDebugger(for identifier: String) async throws {
         guard let workspace = try await workspace(with: identifier) else { return }
-        let manager = try runtime.object(workspace).resolveMethodAndWait(selector: "breakpointManager", as: (() -> AnyObject?).self)
+        let manager = try runtime.object(workspace).resolveAndWait(.objc(.method("breakpointManager", as: (() -> AnyObject?).self)))
         _ = try unsafe manager.unsafeInvoke()
     }
 
@@ -202,7 +207,8 @@ final class NativeWorkspaceRegistry {
     }
 
     private func workspace(with identifier: String) async throws -> AnyObject? {
-        let lookup = try await runtime.object(registry).resolveMethod(named: "workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)
+        let lookup = try await runtime.object(registry).resolve(
+            .swift(.method("workspace(withIdentifier: Swift.String) -> Swift.Optional<__C.IDEWorkspace>", as: ((String) -> AnyObject?).self)))
         try Task.checkCancellation()
         return try unsafe lookup.unsafeInvoke(identifier)
     }
@@ -235,9 +241,8 @@ final class NativeWorkspaceRegistry {
     }
 
     func closeRemovedWorkspaces(request: URL) async throws {
-        let close = try await runtime.object(registry).resolveMethod(
-            named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self
-        )
+        let close = try await runtime.object(registry).resolve(
+            .swift(.method("close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self)))
         let snapshot = try entries()
         var failures: [String] = []
         do { try closeUnregisteredDocuments() }
@@ -288,7 +293,8 @@ final class NativeWorkspaceRegistry {
         var failures: [String] = []
         do {
             let identifiers = Set(try entries().map(\.identifier))
-            let close = try await runtime.object(registry).resolveMethod(named: "close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self)
+            let close = try await runtime.object(registry).resolve(
+                .swift(.method("close(identifier: Swift.String) throws -> ()", as: ((String) throws -> Void).self)))
             for identifier in identifiers.union(documents.keys).sorted() {
                 do {
                     if identifiers.contains(identifier) {

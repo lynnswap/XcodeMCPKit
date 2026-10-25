@@ -9,9 +9,11 @@ struct NativeAnalyticsValueTests {
     @Test(arguments: [Bool?.none, .some(false), .some(true)], [Int?.none, .some(0), .some(7)])
     func standardOptionalValuesUseTheCompilerKnownABI(boolean: Bool?, integer: Int?) async throws {
         let executable = try #require(Bundle(for: AnalyticsFixtureLocator.self).executableURL)
-        let function = try await ABIRuntime.shared.resolveSwiftFunction(
-            named: "XcodeMCPNativeRuntimeTests.nativeAnalyticsValueFixture(Swift.Optional<Swift.Bool>, Swift.Optional<Swift.String>, Swift.Optional<Swift.Int>) async -> Swift.Dictionary<Swift.String, Any>",
-            as: (@concurrent (NativeAnalyticsBoolean, String?, NativeAnalyticsInteger) async -> NativeAnalyticsDictionary).self,
+        let function = try await ABIRuntime.shared.resolve(
+            .swift(
+                .function(
+                    "XcodeMCPNativeRuntimeTests.nativeAnalyticsValueFixture(Swift.Optional<Swift.Bool>, Swift.Optional<Swift.String>, Swift.Optional<Swift.Int>) async -> Swift.Dictionary<Swift.String, Any>",
+                    as: (@concurrent (NativeAnalyticsBoolean, String?, NativeAnalyticsInteger) async -> NativeAnalyticsDictionary).self)),
             in: .path(executable), loading: .loadedOnly)
         for string: String? in [nil, String(repeating: "retained text", count: 128)] {
             let output = try unsafe await function.unsafeInvoke(NativeAnalyticsBoolean(value: boolean), string,
@@ -24,9 +26,8 @@ struct NativeAnalyticsValueTests {
 
     @Test func runtimeOnlyArraysPreserveFieldsAndOptionalPaths() async throws {
         let fixture = NativeWorkspaceSnapshotFixture()
-        let list = try await ABIRuntime.shared.object(fixture).resolveMethod(
-            named: "list() -> Swift.Array<XcodeMCPNativeRuntimeTests.NativeWorkspaceSnapshotEntry>",
-            as: (() -> NativeSwiftValue).self)
+        let list = try await ABIRuntime.shared.object(fixture).resolve(
+            .swift(.method("list() -> Swift.Array<XcodeMCPNativeRuntimeTests.NativeWorkspaceSnapshotEntry>", as: (() -> NativeSwiftValue).self)))
         let snapshot = try unsafe list.unsafeInvoke()
         try snapshot.withCopy { value in
             let entries = try #require(value as? [Any])

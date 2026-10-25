@@ -1,5 +1,6 @@
 import ABIBridge
 import ABIBridgeCore
+import ABIBridgeCore.Backend
 import Foundation
 
 @_silgen_name("ABIInvokeSwiftAsync")
@@ -35,7 +36,7 @@ final class NativeABI {
 
     func require<T>(_ value: T?, failure: inout OpaquePointer?) throws -> T {
         guard let value else {
-            let message = unsafe failure.map { unsafe String(cString: ABIResolutionFailureMessage($0)) } ?? "Native ABI preparation failed"
+            let message = unsafe failure.map { unsafe String(cString: ABIResolutionFailureGetMessage($0)) } ?? "Native ABI preparation failed"
             if let error = unsafe failure { unsafe ABIReleaseResolutionFailure(error); unsafe failure = nil }
             throw NativeRuntimeError.invocation(message)
         }
@@ -51,7 +52,7 @@ final class NativeABI {
 
     nonisolated(nonsending) func typeMetadata(named name: String, in image: URL) async throws -> Any.Type {
         let accessor = try await ABIRuntime.shared.resolve(
-            .init(name: "type metadata accessor for " + name, language: .swift),
+            .swift(.symbol("type metadata accessor for " + name)),
             in: .path(image), loading: .loadedOnly)
         let pointer = try unsafe scalar(Int32(ABIValuePointer))
         let word = try unsafe scalar(Int32(ABIValueUInt64))
