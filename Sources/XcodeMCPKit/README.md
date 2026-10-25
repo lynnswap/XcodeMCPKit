@@ -6,7 +6,7 @@ Swift client API for calling Xcode MCP from an app or tool.
 
 Use `XcodeMCPKit` when Swift code needs to discover and call Xcode MCP tools.
 The default transport discovers a running `xcode-mcp-proxy-server` endpoint.
-The proxy routes public workspace handles to headless models or GUI Xcode.
+The proxy routes public workspace handles to owned headless models.
 Start the proxy before constructing a default client.
 
 The public API is intentionally small:
@@ -96,8 +96,7 @@ let config = XcodeMCPConfiguration(
 
 ### Workspace routing
 
-Use `XcodeListWorkspaces` for existing GUI/headless workspaces, or open a saved
-workspace and use its returned identifier:
+Open a saved workspace and use its returned identifier:
 
 ```swift
 let opened = try await xcode.callTool("XcodeOpenWorkspace", arguments: [
@@ -112,8 +111,8 @@ if let workspace = opened.structuredContent?["workspaceIdentifier"]?.stringValue
 }
 ```
 
-The proxy retains each workspace's host and translates native workspace/tab
-selectors internally. Obtain fresh identifiers after a new MCP session or host
+`XcodeListWorkspaces` lists already loaded headless models. The proxy retains
+each workspace's host and translates native workspace selectors internally. Obtain fresh identifiers after a new MCP session or host
 restart. Absolute workspace paths also load saved models in the default headless
 host when explicit Open is unnecessary. See [workspace usage](../../Docs/usage.md)
 for saved-file behavior, schemes, device sessions, and optional host selection.

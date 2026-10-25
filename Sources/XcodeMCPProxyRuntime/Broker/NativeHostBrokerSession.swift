@@ -3,24 +3,21 @@ import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProxyRuntimeContract
 
-/// One Xcode installation's headless host or one running GUI Xcode process, with the
-/// connection that owns its process.
+/// One Xcode installation's headless host and the connection that owns its process.
 final class NativeBrokerHost: Sendable {
     let identifier: String
     let index: Int
     let installation: XcodeHostInstallation
-    let guiProcess: XcodeGUIProcess?
     let connection: NativeHostConnection
     /// Requests that wait in the broker for a session's turn on one of this host's models. Their
     /// limit is the host queue's, which they would otherwise be in.
     let waitingRequests = NativeBrokerByteBudget(limit: 32 * 1024 * 1024)
 
-    init(identifier: String, index: Int, installation: XcodeHostInstallation, guiProcess: XcodeGUIProcess?,
+    init(identifier: String, index: Int, installation: XcodeHostInstallation,
          connection: NativeHostConnection) {
         self.identifier = identifier
         self.index = index
         self.installation = installation
-        self.guiProcess = guiProcess
         self.connection = connection
     }
 

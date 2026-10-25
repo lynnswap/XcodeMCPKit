@@ -33,29 +33,12 @@ struct NativeHostRuntimeTests {
         #expect(!NativeHostRuntime.isTerminalCoreSimulatorDiagnostic(message))
     }
 
-    @Test func guiTargetConnectsUsingItsOwnBridgeAndPID() throws {
-        var runtime = try makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5))
-        runtime = NativeHostRuntime.Configuration(nativeHostBundleURL: runtime.nativeHostBundleURL,
-            guiProcess: XcodeGUIProcess(processID: 2468, launchDate: Date(timeIntervalSince1970: 100),
-                installation: XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/GUI.app"))),
-            maxBodyBytes: runtime.maxBodyBytes)
-        let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
-            config: runtime,
-            baseEnvironment: ["MCP_XCODE_PID": "old", "MCP_XCODE_SESSION_ID": "old-session",
-                              "XCODE_PID": "old", "PATH": "/usr/bin"])
-        #expect(configuration.command == "/Fixture/GUI.app/Contents/Developer/usr/bin/mcpbridge")
-        #expect(configuration.args.isEmpty)
-        #expect(configuration.environment["MCP_XCODE_PID"] == "2468")
-        #expect(configuration.environment["DEVELOPER_DIR"] == "/Fixture/GUI.app/Contents/Developer")
-        #expect(configuration.environment["MCP_XCODE_SESSION_ID"] == nil)
-        #expect(configuration.environment["XCODE_PID"] == nil)
-    }
-
     @Test func nativeHostIgnoresInheritedGUIRoutingConfiguration() throws {
         let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)),
             baseEnvironment: ["MCP_XCODE_PID": "9876", "MCP_XCODE_SESSION_ID": "parent-session",
                 "XCODE_PID": "legacy", "DEVELOPER_DIR": "/Parent/Developer", "PATH": "/usr/bin"])
+        #expect(configuration.command.hasSuffix("/xcode-mcp-native-host"))
         #expect(configuration.environment["MCP_XCODE_PID"] == nil)
         #expect(configuration.environment["MCP_XCODE_SESSION_ID"] == nil)
         #expect(configuration.environment["XCODE_PID"] == nil)

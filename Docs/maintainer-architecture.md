@@ -21,10 +21,9 @@ and session recovery in its client session authority.
 ## State and lifetime boundaries
 
 The broker owns public workspace and device-session references and binds them to
-native resources. It must preserve a GUI tab's identity even when another tab
-uses the same path. Native workspace state remains authoritative for contents,
-scheme, destination, and test plan. A handle must not become a cached second copy
-of those values or silently move to a replacement host.
+native resources in owned headless hosts. Native workspace state remains
+authoritative for contents, scheme, destination, and test plan. A handle must not
+become a cached second copy of those values or silently move to a replacement host.
 
 `NativeHostConnection` is the only owner of a host process. Each start increments
 its generation; handles record the generation that created them, and a request
@@ -212,7 +211,9 @@ on exit. Non-loopback endpoints require `--allow-non-loopback`.
 For live checks, use the [tool verifier](../Sources/XcodeMCPProxyToolVerifier/README.md)
 and disposable saved projects with an explicit scheme, destination, and test plan.
 The legacy `ProxyLiveMCPBridgeTests` suite name remains a test identifier for
-owned-host smoke cases. Keep GUI Xcode closed when proving headless independence.
+owned-host smoke cases. Verify workspace listing and operations with GUI Xcode
+both closed and running; neither case may connect to the GUI process or require
+its MCP connection approval.
 Isolate discovery, fixtures, and logs under a temporary root and stop only servers,
 models, devices, and processes created by the run. Do not use the user's default
 discovery file for tests. Match verification claims to the operations actually run.

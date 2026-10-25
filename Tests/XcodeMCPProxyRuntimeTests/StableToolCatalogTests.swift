@@ -147,7 +147,7 @@ struct StableToolCatalogTests {
         }
     }
 
-    @Test func stableCatalogIncludesEditorToolsAndManagementOverridesWithoutNativeGuidance() throws {
+    @Test func stableCatalogKeepsNativeToolsAndManagementOverridesWithoutInventingEditorTools() throws {
         let native = catalog([
             tool("StringCatalogRead", properties: ["workspaceIdentifier": string], required: [], extra: [
                 "description": .string("Native skill MUST be loaded before calling."),
@@ -159,10 +159,8 @@ struct StableToolCatalogTests {
         let result = try XcodeToolCatalog.publicResult(from: native, managementTools: [open])
         #expect(find("XcodeListWindows", in: result) == nil)
         #expect(find("XcodeOpenWorkspace", in: result) == open)
-        let editor = try #require(find("XcodeGetCurrentFile", in: result))
-        #expect(field(editor, "inputSchema", "properties", "workspaceIdentifier") != nil)
-        #expect(field(editor, "inputSchema", "properties", "tabIdentifier") == nil)
-        #expect(field(editor, "outputSchema", "properties", "selection") != nil)
+        #expect(find("XcodeGetCurrentFile", in: result) == nil)
+        #expect(find("XcodeListNavigatorIssues", in: result) == nil)
         let read = try #require(find("StringCatalogRead", in: result))
         guard case .string(let description)? = field(read, "description") else {
             Issue.record("Missing public description"); return

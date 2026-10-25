@@ -7,7 +7,6 @@ struct NativeBrokerWorkspace: Sendable, Equatable {
     let hostIdentifier: String
     let generation: UInt64
     let nativeIdentifier: String
-    let gui: Bool
     let path: String?
     let name: String
 
@@ -26,7 +25,7 @@ struct NativeBrokerWorkspace: Sendable, Equatable {
         var fields: [String: JSONValue] = [
             "workspaceIdentifier": .string(identifier),
             "name": .string(name),
-            "kind": .string(gui ? "gui" : "headless"),
+            "kind": .string("headless"),
         ]
         if let path { fields["path"] = .string(path) }
         return .object(fields)
@@ -100,7 +99,7 @@ extension NativeBrokerSession {
             } else {
                 workspace = NativeBrokerWorkspace(identifier: Self.reference(prefix: "w"),
                     hostIdentifier: host.identifier, generation: generation, nativeIdentifier: nativeIdentifier,
-                    gui: host.guiProcess != nil, path: path,
+                    path: path,
                     name: name ?? path.map { URL(filePath: $0).deletingPathExtension().lastPathComponent }
                         ?? nativeIdentifier)
                 state.workspaces[workspace.identifier] = workspace

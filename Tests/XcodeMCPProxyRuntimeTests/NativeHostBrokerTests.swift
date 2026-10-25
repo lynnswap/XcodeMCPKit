@@ -10,81 +10,6 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .timeLimit(.minutes(1)), .asyncTestCleanup)
 struct NativeHostBrokerTests {
-    @Test func guiHandlesKeepIdenticalPathsAndTabsOnTheirNativeHosts() async throws {
-        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let fixture = try BrokerFixture(guiProcesses: [
-            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
-            .init(processID: 102, launchDate: Date(timeIntervalSince1970: 2), installation: installation),
-        ])
-        let a = try await fixture.initialize("gui-a")
-        let b = try await fixture.initialize("gui-b")
-        let before = try await fixture.request(a, method: "tools/list")
-        let workspaces = try await fixture.workspaces(a).filter { $0["kind"] == .string("gui") }
-        #expect(workspaces.count == 4)
-        let first = try #require(workspaces.first?["workspaceIdentifier"])
-        let last = try #require(workspaces.last?["workspaceIdentifier"])
-        let left = try await fixture.call(a, name: "GetBuildLog", arguments: ["workspaceIdentifier": first])
-        let right = try await fixture.call(a, name: "GetBuildLog", arguments: ["workspaceIdentifier": last])
-        #expect(left != right)
-        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
-        let logged = try #require(gui.calls.withLockedValue { $0.last { $0.name == "GetBuildLog" } })
-        #expect(logged.arguments["tabIdentifier"] == .string("tab-1"))
-        #expect(logged.arguments["workspaceIdentifier"] == nil)
-        #expect(try await fixture.request(a, method: "tools/list") == before)
-        #expect(try await fixture.request(b, method: "tools/list") == before)
-        let rejected = try await fixture.toolResult(b, name: "GetBuildLog", arguments: ["workspaceIdentifier": first])
-        #expect(NativeHostBroker.isToolError(rejected))
-    }
-
-    @Test func ambiguousGUIOpenDoesNotRetainWorkspaceReferences() async throws {
-        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let fixture = try BrokerFixture(guiProcesses: [
-            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
-        ])
-        let session = try await fixture.initialize("gui-open")
-        let host = try #require(try await fixture.list(session).first { $0["kind"] == .string("gui") }?["hostIdentifier"])
-        let ambiguous = try await fixture.toolResult(session, name: NativeHostBroker.openWorkspaceTool,
-            arguments: ["path": .string("/Fixture/App.xcodeproj"), "hostIdentifier": host])
-        #expect(NativeHostBroker.isToolError(ambiguous))
-        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
-        try await gui.stopped.wait(description: "ambiguous GUI open released its bridge")
-    }
-
-    @Test func openingOneGUIWorkspaceDoesNotRetainOtherProjectTabs() async throws {
-        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let fixture = try BrokerFixture(guiProcesses: [
-            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
-        ])
-        fixture.factory.guiWorkspacePaths.withLockedValue { $0 = ["/Fixture/App.xcodeproj", "/Fixture/Other.xcodeproj"] }
-        let session = try await fixture.initialize("gui-open-one")
-        let host = try #require(try await fixture.list(session).first { $0["kind"] == .string("gui") }?["hostIdentifier"])
-        let identifier = try await fixture.open(session, host: host)
-        _ = try await fixture.call(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": identifier])
-        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
-        #expect(gui.calls.withLockedValue { $0.last { $0.name == "GetBuildLog" }?.arguments["tabIdentifier"] } == .string("tab-1"))
-        let closed = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
-                                             arguments: ["workspaceIdentifier": identifier])
-        #expect(closed["released"] == .bool(true))
-        try await gui.stopped.wait(description: "the opened GUI workspace released its only reference")
-        #expect(gui.calls.withLockedValue { !$0.contains { $0.name == NativeHostBroker.closeWorkspaceTool } })
-        #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: "GetBuildLog",
-            arguments: ["workspaceIdentifier": identifier])))
-    }
-
-    @Test func exitedGUIProcessDoesNotReuseAWorkspaceHandleWhenPIDIsReused() async throws {
-        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let original = XcodeGUIProcess(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation)
-        let fixture = try BrokerFixture(guiProcesses: [original])
-        let session = try await fixture.initialize("gui-exit")
-        let identifier = try #require(try await fixture.workspaces(session).first { $0["kind"] == .string("gui") }?["workspaceIdentifier"])
-        fixture.guiProcesses.withLockedValue {
-            $0 = [.init(processID: 101, launchDate: Date(timeIntervalSince1970: 2), installation: installation)]
-        }
-        let result = try await fixture.toolResult(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": identifier])
-        #expect(NativeHostBroker.isToolError(result))
-        #expect(fixture.factory.transports.withLockedValue { $0.count } == 2)
-    }
-
     @Test(arguments: ["XcodeOpenWorkspace", "XcodeNewProject"])
     func nonStringHostDoesNotDispatchAnOperationOnTheDefaultHost(operation: String) async throws {
         let fixture = try BrokerFixture()
@@ -160,7 +85,10 @@ struct NativeHostBrokerTests {
         let fixture = try BrokerFixture()
         let a = try await fixture.initialize("shared-a")
         let b = try await fixture.initialize("shared-b")
-        let other = try #require(try await fixture.list(a).first { $0["isDefault"] == .bool(false) }?["hostIdentifier"])
+        let hosts = try await fixture.list(a)
+        #expect(hosts.allSatisfy { $0["kind"] == .string("headless") })
+        let other = try #require(hosts.first { $0["isDefault"] == .bool(false) }?["hostIdentifier"])
+        #expect(try await fixture.workspaces(a).isEmpty)
         // Clients that still send the removed option must not start another process.
         let left = try #require(try await fixture.call(a, name: NativeHostBroker.openWorkspaceTool, arguments: [
             "path": .string("/Fixture/App.xcodeproj"), "createsNewHost": .bool(true),
@@ -169,6 +97,7 @@ struct NativeHostBrokerTests {
         _ = try await fixture.open(a, host: other)
         _ = try await fixture.open(b, host: other)
         #expect(fixture.factory.transports.withLockedValue { $0.count } == 2)
+        #expect(try await fixture.workspaces(a).allSatisfy { $0["kind"] == .string("headless") })
         #expect(try await fixture.call(a, name: "GetBuildLog", arguments: ["workspaceIdentifier": left])["host"] == .number(.int(1)))
         #expect(try await fixture.call(b, name: "GetBuildLog", arguments: ["workspaceIdentifier": right])["host"] == .number(.int(1)))
     }
@@ -383,22 +312,6 @@ struct NativeHostBrokerTests {
             arguments: ["workspaceIdentifier": reopened])))
     }
 
-    @Test func admittedWorkRetainsItsScopeWhenTheWorkspaceReferenceIsClosed() async throws {
-        let fixture = try BrokerFixture.singleGUIWindow()
-        let session = try await fixture.initialize("inflight")
-        let workspace = try await fixture.openGUI(session)
-        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
-        let pending = Task { try await fixture.toolResult(session, name: "BuildProject",
-            arguments: ["workspaceIdentifier": workspace], id: 71) }
-        try await transport.waiting.wait(description: "build admitted")
-        _ = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
-                                  arguments: ["workspaceIdentifier": workspace])
-        #expect(!transport.stopped.isSignaled())
-        await transport.releaseWait()
-        #expect(!NativeHostBroker.isToolError(try await pending.value))
-        try await transport.stopped.wait(description: "admitted work released its host")
-    }
-
     @Test func numericCancellationReachesOnlyTheOriginalHost() async throws {
         let fixture = try BrokerFixture()
         let session = try await fixture.initialize("callbacks")
@@ -458,40 +371,6 @@ struct NativeHostBrokerTests {
         _ = try await fixture.call(session, name: "DeviceInteractionEndSession", arguments: ["interactionSessionKey": key])
         #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: "DeviceInteractionSynthesize",
             arguments: ["interactionSessionKey": key])))
-    }
-
-    @Test func guiSessionReferencesRetainTheirOriginalTabAfterTheWorkspaceReferenceCloses() async throws {
-        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let fixture = try BrokerFixture(guiProcesses: [
-            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
-        ])
-        let session = try await fixture.initialize("gui-dependent-sessions")
-        let entries = try await fixture.workspaces(session).filter { $0["kind"] == .string("gui") }
-        let workspace = try #require(entries.first?["workspaceIdentifier"])
-        let otherTab = try #require(entries.last?["workspaceIdentifier"])
-        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
-            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
-        ])
-        let key = try #require(started["interactionSessionKey"])
-        let run = try await fixture.call(session, name: "RunProject", arguments: ["workspaceIdentifier": workspace])
-        let launch = try #require(run["launchSessionReference"])
-        _ = try await fixture.call(session, name: NativeHostBroker.closeWorkspaceTool,
-                                  arguments: ["workspaceIdentifier": workspace])
-        #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: "GetBuildLog",
-            arguments: ["workspaceIdentifier": workspace])))
-        #expect(NativeHostBroker.isToolError(try await fixture.toolResult(session, name: "DeviceInteractionInstallAndRun",
-            arguments: ["interactionSessionKey": key, "workspaceIdentifier": otherTab])))
-        let console = try await fixture.toolResult(session, name: "GetConsoleOutput",
-                                                   arguments: ["launchSessionReference": launch])
-        let installed = try await fixture.toolResult(session, name: "DeviceInteractionInstallAndRun",
-                                                     arguments: ["interactionSessionKey": key])
-        #expect(!NativeHostBroker.isToolError(console))
-        #expect(!NativeHostBroker.isToolError(installed))
-        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
-        let consoleCall = try #require(gui.calls.withLockedValue { $0.last { $0.name == "GetConsoleOutput" } })
-        let installCall = try #require(gui.calls.withLockedValue { $0.last { $0.name == "DeviceInteractionInstallAndRun" } })
-        #expect(consoleCall.arguments["tabIdentifier"] == .string("tab-1"))
-        #expect(installCall.arguments["tabIdentifier"] == .string("tab-1"))
     }
 
     @Test func nativeCatalogChangesUpdateTheAdapterWithoutChangingThePublicCatalog() async throws {
@@ -555,25 +434,6 @@ struct NativeHostBrokerTests {
         _ = try await fixture.call(session, name: "GetBuildLog", arguments: ["workspaceIdentifier": newWorkspace])
         #expect(replacement.calls.withLockedValue { $0.last { $0.name == "GetBuildLog" }?.arguments["workspaceIdentifier"] }
             == .string("native-w-\(original.index)"))
-    }
-
-    @Test func expiredGenerationReferencesDoNotRetainAGUIBridge() async throws {
-        let fixture = try BrokerFixture.singleGUIWindow()
-        let session = try await fixture.initialize("recovery-lifetime")
-        let workspace = try await fixture.openGUI(session)
-        let started = try await fixture.call(session, name: "DeviceInteractionStartSession", arguments: [
-            "workspaceIdentifier": workspace, "sessionIdentifier": .string("fixture"),
-        ])
-        _ = try #require(started["interactionSessionKey"])
-        let launched = try await fixture.call(session, name: "RunProject", arguments: ["workspaceIdentifier": workspace])
-        _ = try #require(launched["launchSessionReference"])
-        let original = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        original.emitExit()
-        let stoppedHost = try await waitWithTimeout("expired references released the GUI bridge", timeout: .seconds(5)) {
-            try await fixture.factory.shutdowns.nextValue(at: 0)
-        }
-        #expect(stoppedHost == original.index)
-        #expect(fixture.factory.transports.withLockedValue { $0.allSatisfy { $0.stopped.isSignaled() } })
     }
 
     @Test func explicitNonObjectArgumentsAreRejectedBeforeNativeDispatchWhileOmittedArgumentsWork() async throws {
@@ -706,21 +566,15 @@ struct NativeHostBrokerTests {
                                            "tabIdentifier": .string("user-data")]))
     }
 
-    @Test(arguments: [false, true])
-    func listWorkspacesReportsPartialNativeFailures(transportFailure: Bool) async throws {
-        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let fixture = try BrokerFixture(guiProcesses: [
-            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
-        ])
+    @Test func listWorkspacesReportsPartialNativeFailures() async throws {
+        let fixture = try BrokerFixture()
         let session = try await fixture.initialize("partial-list")
-        _ = try await fixture.workspaces(session)
-        let gui = try #require(fixture.factory.transports.withLockedValue { $0.first { $0.gui } })
-        if transportFailure {
-            _ = fixture.factory.invalidResponses.withLockedValue { $0.insert("XcodeListWindows") }
-        } else {
-            _ = gui.toolFailures.withLockedValue { $0.insert("XcodeListWindows") }
-        }
         _ = try await fixture.open(session)
+        let other = try #require(try await fixture.list(session).first { $0["isDefault"] == .bool(false) }?["hostIdentifier"])
+        _ = try await fixture.open(session, host: other)
+        let failingHost = try #require(fixture.factory.transports.withLockedValue { $0.last })
+        _ = failingHost.toolFailures.withLockedValue { $0.insert("XcodeListWorkspaces") }
+
         let result = try await fixture.toolResult(session, name: NativeHostBroker.listWorkspacesTool)
         #expect(NativeHostBroker.isToolError(result))
         let payload = try NativeHostBroker.toolPayload(result)
@@ -729,29 +583,6 @@ struct NativeHostBrokerTests {
         }
         #expect(workspaces.count == 1)
         #expect(errors.count == 1)
-        if transportFailure, case .object(let error)? = errors.first {
-            #expect(error["error"] == .object(["code": .number(.int(-32603)), "message": .string("invalid upstream response")]))
-        }
-    }
-
-    @Test func guiBridgeStopsAfterItsSessionCloses() async throws {
-        let fixture = try BrokerFixture.singleGUIWindow()
-        let session = try await fixture.initialize("expiry")
-        _ = try await fixture.openGUI(session)
-        let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
-        fixture.close(session)
-        try await transport.stopped.wait(description: "session released the GUI bridge")
-    }
-
-    @Test func snapshotOmitsGUIHostsWhoseXcodeExited() async throws {
-        let fixture = try BrokerFixture.singleGUIWindow()
-        let session = try await fixture.initialize("gui-exit")
-        _ = try await fixture.list(session)
-        #expect(fixture.broker.snapshot().hosts.compactMap(\.guiProcessIdentifier) == [101])
-        fixture.guiProcesses.withLockedValue { $0 = [] }
-        let hosts = fixture.broker.snapshot().hosts
-        #expect(hosts.compactMap(\.guiProcessIdentifier).isEmpty)
-        #expect(hosts.contains { $0.identifier == NativeHostBroker.defaultHostIdentifier })
     }
 
     @Test func anUnusedHostForAnotherInstallationStopsAfterTheGracePeriod() async throws {
@@ -945,16 +776,16 @@ struct NativeHostBrokerTests {
         #expect(call.metadata[NativeHostBroker.conversationKey] != nil)
     }
 
-    @Test func resetWaitsForTheGUIBridgeToStop() async throws {
-        let fixture = try BrokerFixture.singleGUIWindow()
+    @Test func resetWaitsForTheOwnedHostToStop() async throws {
+        let fixture = try BrokerFixture()
         let session = try await fixture.initialize("reset")
-        _ = try await fixture.openGUI(session)
+        _ = try await fixture.open(session)
         let transport = try #require(fixture.factory.transports.withLockedValue { $0.first })
         transport.holdsStop.withLockedValue { $0 = true }
         defer { transport.releaseStop.signal() }
         let completed = TestSignal()
         let resetting = Task { await fixture.broker.reset(); completed.signal() }
-        try await transport.stopped.wait(description: "GUI bridge stop began")
+        try await transport.stopped.wait(description: "owned host stop began")
         #expect(!completed.isSignaled())
         transport.releaseStop.signal()
         await resetting.value
@@ -1016,8 +847,6 @@ private final class BrokerTransport: UpstreamSession, Sendable {
     let serverResponseIDs = NIOLockedValueBox<[JSONValue]>([])
     let index: Int64
     let processID: Int64
-    let gui: Bool
-    let guiWorkspacePaths: [String]
     let manifestOpensDirectory: Bool
     let interactionKeyProperty = NIOLockedValueBox("interactSessionKey")
     let methods = NIOLockedValueBox<[String]>([])
@@ -1041,8 +870,7 @@ private final class BrokerTransport: UpstreamSession, Sendable {
     private let reportsSelection: SelectionReport
     private let onStop: @Sendable (Int64) -> Void
 
-    init(index: Int64, holdsInitialization: Bool, gui: Bool = false,
-         guiWorkspacePaths: [String] = ["/Fixture/App.xcodeproj", "/Fixture/App.xcodeproj"],
+    init(index: Int64, holdsInitialization: Bool,
          manifestOpensDirectory: Bool = false, processID: Int64? = nil,
          respondsInvalidly: @escaping @Sendable (String) -> Bool = { _ in false },
          reportsSelection: @escaping SelectionReport = { _, _, _ in nil },
@@ -1052,8 +880,6 @@ private final class BrokerTransport: UpstreamSession, Sendable {
         self.reportsSelection = reportsSelection
         self.onStop = onStop
         self.processID = processID ?? 1000 + index
-        self.gui = gui
-        self.guiWorkspacePaths = guiWorkspacePaths
         self.manifestOpensDirectory = manifestOpensDirectory
         initialization.withLockedValue { $0.held = holdsInitialization }
         let pair = AsyncStream<Upstream.Event>.makeStream()
@@ -1065,7 +891,7 @@ private final class BrokerTransport: UpstreamSession, Sendable {
         onStop(index)
         stopped.signal()
         if holdsStop.withLockedValue({ $0 }) {
-            do { try await releaseStop.wait(description: "release held bridge stop") }
+            do { try await releaseStop.wait(description: "release held host stop") }
             catch { Issue.record(error) }
         }
         continuation.finish()
@@ -1102,7 +928,7 @@ private final class BrokerTransport: UpstreamSession, Sendable {
             case "tools/list":
                 let scoped = ["GetBuildLog", "BuildProject", "XcodeCloseWorkspace", "RunProject", "GetConsoleOutput",
                               "DeviceInteractionInstallAndRun", "XcodeSwitchScheme"]
-                var tools = scoped.map { descriptor($0, properties: [gui ? "tabIdentifier" : "workspaceIdentifier": .object(["type": .string("string")])]) }
+                var tools = scoped.map { descriptor($0, properties: ["workspaceIdentifier": .object(["type": .string("string")])]) }
                 tools.append(contentsOf: [
                     descriptor("DocumentationSearch", properties: ["query": .object(["type": .string("string")])]),
                     descriptor("XcodeListTemplates"),
@@ -1112,14 +938,14 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                         "destinationPath": .object(["type": .string("string")]),
                     ]),
                     descriptor("XcodeOpenWorkspace", properties: ["path": .object(["type": .string("string")])]),
-                    descriptor(gui ? "XcodeListWindows" : "XcodeListWorkspaces"),
+                    descriptor("XcodeListWorkspaces"),
                     descriptor("DeviceInteractionStartSession", properties: ["deviceIdentifier": .object(["type": .string("string")]),
                         "sessionIdentifier": .object(["type": .string("string")])]),
                     descriptor("DeviceInteractionSynthesize", properties: [interactionKeyProperty.withLockedValue { $0 }: .object(["type": .string("string")])]),
                     descriptor("DeviceInteractionEndSession", properties: ["interactionSessionKey": .object(["type": .string("string")])]),
                 ])
                 tools.append(descriptor("DeviceInteractionStartWorkspaceSession", properties: [
-                    gui ? "tabIdentifier" : "workspaceIdentifier": .object(["type": .string("string")]),
+                    "workspaceIdentifier": .object(["type": .string("string")]),
                     "sessionIdentifier": .object(["type": .string("string")]),
                 ]))
                 result = .object(["tools": .array(tools), "_meta": .object([
@@ -1170,11 +996,6 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                         let message = openedPath.withLockedValue { $0 }.map {
                             "* workspaceIdentifier: native-w-\(index), workspacePath: \($0)\n"
                         } ?? "No open workspaces."
-                        result = try NativeHostBroker.toolResult(.object(["message": .string(message)]))
-                    case "XcodeListWindows":
-                        let message = guiWorkspacePaths.enumerated().map { offset, path in
-                            "* tabIdentifier: tab-\(offset + 1), workspacePath: \(path)"
-                        }.joined(separator: "\n")
                         result = try NativeHostBroker.toolResult(.object(["message": .string(message)]))
                     case "XcodeCloseWorkspace":
                         openedPath.withLockedValue { $0 = nil }
@@ -1251,7 +1072,6 @@ private final class BrokerTransport: UpstreamSession, Sendable {
 
 private final class BrokerRuntimeFactory: Sendable {
     let transports = NIOLockedValueBox<[BrokerTransport]>([])
-    let guiWorkspacePaths = NIOLockedValueBox(["/Fixture/App.xcodeproj", "/Fixture/App.xcodeproj"])
     let manifestOpensDirectory = NIOLockedValueBox(false)
     let replacements = LockedRecordedValues<BrokerTransport>()
     let shutdowns = LockedRecordedValues<Int64>()
@@ -1263,7 +1083,7 @@ private final class BrokerRuntimeFactory: Sendable {
     let created = TestSignal()
 
     func make(_ configuration: NativeHostRuntime.Configuration) -> any UpstreamSessionFactory {
-        BrokerHostProcesses(owner: self, gui: configuration.guiProcess != nil)
+        BrokerHostProcesses(owner: self)
     }
 
     fileprivate func start(_ host: BrokerHostProcesses) throws -> BrokerTransport {
@@ -1273,8 +1093,7 @@ private final class BrokerRuntimeFactory: Sendable {
             let index = previous ?? Int64(values.count + 1)
             host.index.withLockedValue { $0 = index }
             let transport = BrokerTransport(index: index,
-                holdsInitialization: holdsInitialization.withLockedValue { $0 }, gui: host.gui,
-                guiWorkspacePaths: guiWorkspacePaths.withLockedValue { $0 },
+                holdsInitialization: holdsInitialization.withLockedValue { $0 },
                 manifestOpensDirectory: manifestOpensDirectory.withLockedValue { $0 },
                 processID: previous == nil ? nil : Int64(1001 + values.count),
                 respondsInvalidly: { [invalidResponses] in invalidResponses.withLockedValue { $0 }.contains($0) },
@@ -1293,12 +1112,10 @@ private final class BrokerRuntimeFactory: Sendable {
 /// The processes of one host; each start is a new transport that keeps the host's index.
 private final class BrokerHostProcesses: UpstreamSessionFactory, Sendable {
     let owner: BrokerRuntimeFactory
-    let gui: Bool
     let index = NIOLockedValueBox<Int64?>(nil)
 
-    init(owner: BrokerRuntimeFactory, gui: Bool) {
+    init(owner: BrokerRuntimeFactory) {
         self.owner = owner
-        self.gui = gui
     }
 
     func startSession() async throws -> any UpstreamSession { try owner.start(self) }
@@ -1310,20 +1127,15 @@ private final class BrokerFixture: Sendable {
     let sessions = NIOLockedValueBox<[ProxySessionID: any ProxyRuntimeSession]>([:])
     /// Host notifications that reached each session.
     let notifications = NIOLockedValueBox<[(session: ProxySessionID, data: Data)]>([])
-    let guiProcesses = NIOLockedValueBox<[XcodeGUIProcess]>([])
     let defaultInstallation = XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Default.app"))
 
     init(clock: ClockClient = .liveValue, requestTimeout: TimeInterval = 5, holdsInitialization: Bool = false,
-         guiProcesses: [XcodeGUIProcess] = [], prewarmToolsList: Bool = false,
+         prewarmToolsList: Bool = false,
          logger: Logger = ProxyLogging.make("broker")) throws {
         let factory = factory
         factory.holdsInitialization.withLockedValue { $0 = holdsInitialization }
         let defaultInstallation = defaultInstallation
-        let processes = self.guiProcesses
-        processes.withLockedValue { $0 = guiProcesses }
-        let inventory = XcodeHostInventory(defaultInstallation: defaultInstallation,
-            runningGUIProcesses: { processes.withLockedValue { $0 } },
-            isGUIProcessRunning: { process in processes.withLockedValue { $0.contains(process) } }) {
+        let inventory = XcodeHostInventory(defaultInstallation: defaultInstallation) {
             [defaultInstallation, XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Other.app"))]
         }
         var configuration = makeConfig(requestTimeout: requestTimeout)
@@ -1332,23 +1144,6 @@ private final class BrokerFixture: Sendable {
                                       logger: logger, sessionFactory: factory.make)
         let broker = broker
         #expect(registerAsyncTestCleanup(description: "broker shutdown") { await broker.shutdown() })
-    }
-
-    /// A running GUI Xcode whose two windows have distinct paths.
-    static func singleGUIWindow() throws -> BrokerFixture {
-        let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))
-        let fixture = try BrokerFixture(guiProcesses: [
-            .init(processID: 101, launchDate: Date(timeIntervalSince1970: 1), installation: installation),
-        ])
-        fixture.factory.guiWorkspacePaths.withLockedValue { $0 = ["/Fixture/App.xcodeproj", "/Fixture/Other.xcodeproj"] }
-        return fixture
-    }
-
-    func openGUI(_ session: ProxySessionID) async throws -> JSONValue {
-        guard let host = try await list(session).first(where: { $0["kind"] == .string("gui") })?["hostIdentifier"] else {
-            throw NativeHostBrokerError("missing GUI host")
-        }
-        return try await open(session, host: host)
     }
 
     func open(_ session: ProxySessionID, host: JSONValue? = nil) async throws -> JSONValue {

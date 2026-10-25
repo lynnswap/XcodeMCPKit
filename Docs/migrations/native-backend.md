@@ -6,15 +6,16 @@ current public tool definitions. Installation instructions are in the
 
 ## Workspace and host routing
 
-Use `XcodeListWorkspaces`, then pass a returned `workspaceIdentifier` to an
-operation. The identifier retains its native workspace/tab and host. Public tool
-names and inputs stay the same across GUI and headless workspaces.
+Open a saved project with `XcodeOpenWorkspace`, then pass its returned
+`workspaceIdentifier` to an operation. The identifier retains its native
+headless workspace and host. `XcodeListWorkspaces` lists loaded headless models;
+proxy operations do not connect to GUI Xcode.
 
 | Previous call or value | Replacement |
 | --- | --- |
 | `XcodeMCPKitSelectHost({hostIdentifier})` followed by `tools/list` | Use the workspace identifier directly. For another installation, pass `hostIdentifier` to `XcodeOpenWorkspace`. |
 | `XcodeMCPKitSelectHost({hostIdentifier,createsNewHost:true})` or `XcodeOpenWorkspace({path,createsNewHost:true})` | `XcodeOpenWorkspace({path,hostIdentifier})`. Each installation has one shared headless host; use a separate checkout when settings must differ. |
-| `XcodeListWindows` and its native tab ID | `XcodeListWorkspaces` and its proxy `workspaceIdentifier`. |
+| `XcodeListWindows` and its native tab ID | Open the saved project with `XcodeOpenWorkspace`; use `XcodeListWorkspaces` to list loaded headless models. |
 | `GetBuildLog({tabIdentifier: ...})` or other GUI workspace inputs | `GetBuildLog({workspaceIdentifier: ...})` using the identifier from List/Open. |
 | A native workspace ID retained across host selection | A new proxy identifier from List/Open. Do not reuse an old native ID. |
 | `DeviceInteractionStartWorkspaceSession` | `DeviceInteractionStartSession` with `workspaceIdentifier`; omit that field for standalone device interaction. |
@@ -32,11 +33,12 @@ For example, replace the host-selection sequence with:
 
 Call `XcodeOpenWorkspace` with those arguments and use its returned
 `workspaceIdentifier` for subsequent calls. Omit `hostIdentifier` for the default
-headless host. GUI tabs for the same path remain separate; use List when choosing
-among them. `XcodeCloseWorkspace` releases a GUI handle without closing its window.
+headless host. `XcodeCloseWorkspace` releases the calling session's reference to
+its headless model.
 
-Headless work uses saved files. GUI editor state, scheme, destination, and debugger
-state belong to their GUI workspace; they are not imported into a saved model.
+Headless work uses saved files. Save editor changes before calling tools.
+GUI editor state, scheme, destination, and debugger state are not imported into
+the saved model.
 After a new MCP session or host restart, obtain fresh workspace and device-session
 identifiers. See [workspace usage](../usage.md) for normal operations.
 
@@ -58,9 +60,9 @@ Remove these older settings from startup scripts and embedding configuration:
 | `xcode-mcp-proxy` STDIO adapter, its `--stdio` / `--url` options, and `XCODE_MCP_PROXY_ENDPOINT` | Register the client with the server's Streamable HTTP endpoint, normally `http://localhost:8765/mcp`. |
 
 `--auto-approve` and the embedding `.automatic` approval policy remain opt-in
-Accessibility automation for GUI Xcode connection dialogs, including other
-agents. They do not change routing or Xcode's permission store. Headless startup
-does not require that monitor. See [configuration](../configuration.md).
+Accessibility automation for agents connecting directly to GUI Xcode. They do
+not change routing or Xcode's permission store. Headless operations do not require
+that monitor. See [configuration](../configuration.md).
 
 ## Swift client
 
@@ -104,7 +106,7 @@ The current server API is documented in
 | Public installer library APIs | `xcode-mcp-proxy-install` executable; `--dry-run` remains supported. |
 | `XcodeMCPProxyStdioAdapter` and its configuration | Removed. Connect clients over Streamable HTTP; Swift clients use the [SDK](../../Sources/XcodeMCPKit/README.md). |
 | `TimeInterval` request timeout | Positive `Duration?`; `nil` disables it. CLI `--request-timeout 0` also disables it. |
-| `Status.upstreams`, `Status.Upstream.Health`, `queuedRequestCount`, `proxyInitialized`, `catalogAvailable` | `Status.hosts`: one `Status.Host` per Xcode installation or running Xcode app, with its `identifier` (the `hostIdentifier` from `XcodeMCPKitListHosts`), `kind`, `state` (`stopped`, `starting`, `running`), and `activeRequestCount`. Requests queue inside each host, and the catalog is available whenever the server runs. |
+| `Status.upstreams`, `Status.Upstream.Health`, `queuedRequestCount`, `proxyInitialized`, `catalogAvailable` | `Status.hosts`: one `Status.Host` per Xcode installation, with its `identifier` (the `hostIdentifier` from `XcodeMCPKitListHosts`), `kind`, `state` (`stopped`, `starting`, `running`), and `activeRequestCount`. Requests queue inside each host, and the catalog is available whenever the server runs. |
 
 Server instances are one-shot. Await `shutdown()` for
 completion. Cleanup errors preserve the startup failure and remaining resource

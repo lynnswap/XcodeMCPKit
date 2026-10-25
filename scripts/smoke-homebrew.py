@@ -76,7 +76,13 @@ async def exercise(request, fixture):
     names = {tool["name"] for tool in tools["tools"]}
     if not {"XcodeRead", "XcodeListWorkspaces"} <= names:
         raise RuntimeError("Installed native backend is missing required headless tools")
-    result = await request(3, "tools/call", dict(name="XcodeRead", arguments=dict(
+    listed = await request(3, "tools/call", dict(name="XcodeListWorkspaces", arguments={}))
+    if listed.get("isError"):
+        raise RuntimeError(f"Installed native backend could not list headless workspaces: {listed}")
+    workspaces = listed.get("structuredContent", {}).get("workspaces", [])
+    if any(workspace.get("kind") == "gui" for workspace in workspaces):
+        raise RuntimeError("Installed proxy exposed GUI workspaces during headless discovery")
+    result = await request(4, "tools/call", dict(name="XcodeRead", arguments=dict(
         workspaceIdentifier=str(fixture / "ProxyToolVerifierFixture.xcodeproj"),
         filePath="ProxyToolVerifierFixture/VerifierCore.swift", limit=40)))
     if result.get("isError") or "VerifierCore" not in json.dumps(result):

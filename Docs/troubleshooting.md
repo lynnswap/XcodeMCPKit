@@ -2,17 +2,16 @@
 
 ## A workspace operation uses the wrong state
 
-Call `XcodeListWorkspaces` and use the returned `workspaceIdentifier`. GUI entries
-use that Xcode tab's state; headless entries use saved files and their native
-model's scheme, destination, and test plan. Two tabs for the same path can differ.
-Do not pass a native `tabIdentifier` or call the removed `XcodeMCPKitSelectHost`.
+Open the saved project with `XcodeOpenWorkspace` and use its returned
+`workspaceIdentifier`, or use `XcodeListWorkspaces` to find an already loaded
+headless model. Operations use saved files and the model's scheme, destination,
+and test plan. Do not pass a native `tabIdentifier` or call the removed
+`XcodeMCPKitSelectHost`.
 See [migration](migrations/native-backend.md#workspace-and-host-routing) for older
 clients and scripts.
 
 If a host or MCP session restarted, list or open the workspace again. Workspace
-and device-session identifiers from the old context are invalid. A GUI process
-that has exited is not replaced with a headless model automatically. Reopen the
-intended GUI workspace or explicitly open a saved model.
+and device-session identifiers from the old context are invalid.
 
 ## An operation is unavailable
 
@@ -22,8 +21,8 @@ for the unsupported operation or missing native contract. A public schema does
 not guarantee that every installed Xcode supports that operation.
 
 For a stale client catalog after upgrading the server, restart the MCP client.
-New calls use `workspaceIdentifier` for GUI and headless work alike. Routing does
-not require the client to refresh definitions after opening another workspace.
+New calls use `workspaceIdentifier` for the owned headless model. Routing does not
+require the client to refresh definitions after opening another workspace.
 
 ## The native helper cannot be found or started
 
@@ -44,8 +43,8 @@ after such a failure. See [Xcode compatibility](configuration.md#xcode-compatibi
 Inspect the proxy/helper error before increasing deadlines. `MCP_LOG_LEVEL=debug`
 shows HTTP, initialization, catalog, cancellation, and recovery telemetry.
 Confirm the workspace path exists, save headless source/project changes, and
-inspect the owning workspace's scheme, destination, and test plan. GUI selections
-do not configure a separate headless model.
+inspect the owning workspace's scheme, destination, and test plan. Selections made
+in the Xcode app do not configure the owned headless model.
 
 A `Native error presentation suppressed` message retains the native domain,
 code, and context in stderr or the tool failure. `Native workspace cleanup failed`

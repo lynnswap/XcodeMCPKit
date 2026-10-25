@@ -284,14 +284,13 @@ public final class XcodeMCPProxyServer: Sendable {
             case stopped
         }
 
-        /// An Xcode host the server uses: one headless host per Xcode installation, or a bridge
-        /// to a running Xcode app.
+        /// An owned headless host the server uses for an Xcode installation.
         public struct Host: Equatable, Sendable {
             /// What the host connects to.
             public enum Kind: Equatable, Sendable {
                 /// A headless native host the server starts for an Xcode installation.
                 case headless
-                /// A bridge to the running Xcode app with this process identifier.
+                /// A legacy GUI host kind. The server creates only headless hosts.
                 case gui(processIdentifier: Int32)
             }
 

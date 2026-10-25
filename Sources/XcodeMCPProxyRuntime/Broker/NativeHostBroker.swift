@@ -11,7 +11,6 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private struct State: Sendable {
         var hosts: [String: NativeBrokerHost] = [:]
         var installations: [URL: String] = [:]
-        var guiProcesses: [XcodeGUIProcess.Identity: String] = [:]
         var sessions: [ProxySessionID: NativeBrokerSession] = [:]
         var closing: [UUID: Task<Void, Never>] = [:]
         /// Pending stops of unused headless hosts for other installations, by host identifier.
@@ -72,18 +71,15 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         _ = try register(installation: inventory.defaultInstallation, identifier: Self.defaultHostIdentifier)
     }
 
-    /// Returns the one host for an installation's headless models or for a running GUI process.
-    private func register(installation: XcodeHostInstallation, identifier: String? = nil,
-                          guiProcess: XcodeGUIProcess? = nil) throws -> NativeBrokerHost {
+    /// Returns the one owned headless host for an Xcode installation.
+    private func register(installation: XcodeHostInstallation, identifier: String? = nil) throws -> NativeBrokerHost {
         try state.withLockedValue { storage in
             guard !storage.stopped else { throw CancellationError() }
-            if let guiProcess, let id = storage.guiProcesses[guiProcess.identity],
-               let host = storage.hosts[id] { return host }
-            if guiProcess == nil, let id = storage.installations[installation.developerDirectory],
+            if let id = storage.installations[installation.developerDirectory],
                let host = storage.hosts[id] { return host }
             let id = identifier ?? "host-" + UUID().uuidString
             let processConfiguration = NativeHostRuntime.Configuration(
-                nativeHostBundleURL: configuration.nativeHostBundleURL, guiProcess: guiProcess,
+                nativeHostBundleURL: configuration.nativeHostBundleURL,
                 developerDirectoryURL: installation.developerDirectory,
                 sharesCompilationCache: configuration.sharesCompilationCache,
                 maxBodyBytes: configuration.maxMessageBytes)
@@ -99,10 +95,9 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 logger: ProxyLogging.make("native-host"),
                 onEvent: { [weak self] event in self?.receive(event, from: id) })
             let host = NativeBrokerHost(identifier: id, index: (storage.hosts.values.map(\.index).max() ?? -1) + 1,
-                installation: installation, guiProcess: guiProcess, connection: connection)
+                installation: installation, connection: connection)
             storage.hosts[id] = host
-            if let guiProcess { storage.guiProcesses[guiProcess.identity] = id }
-            else { storage.installations[installation.developerDirectory] = id }
+            storage.installations[installation.developerDirectory] = id
             return host
         }
     }
@@ -166,7 +161,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             deadline = clock.now().addingTimeInterval(Double(timeout.nanoseconds) / 1_000_000_000)
         }
         // Admission pins the host under the broker lock, which the unused-host scan also holds,
-        // so a GUI bridge is either kept for this request or retired before the request uses it.
+        // so a host is kept for this request before idle retirement can stop its process.
         // It also cancels the host's pending idle stop.
         let admission = state.withLockedValue { broker in
             let admission = session.state.withLockedValue { storage -> Admission? in
@@ -357,11 +352,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     // MARK: - Host communication
 
     /// Converts connection failures into the replies clients have always received for them.
-    private func communicate<T: Sendable>(with host: NativeBrokerHost,
-                                          _ operation: () async throws -> T) async throws -> T {
-        if let process = host.guiProcess, !inventory.isGUIProcessRunning(process) {
-            throw NativeHostBrokerError("The workspace's Xcode process is no longer running")
-        }
+    private func communicate<T: Sendable>(_ operation: () async throws -> T) async throws -> T {
         do { return try await operation() }
         catch let error as NativeHostConnectionError {
             switch error {
@@ -384,11 +375,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
 
     /// Starts the host's process if needed and returns its generation.
     private func runningGeneration(of host: NativeBrokerHost) async throws -> UInt64 {
-        try await communicate(with: host) { try await host.connection.start() }
+        try await communicate { try await host.connection.start() }
     }
 
     private func nativeCatalog(of host: NativeBrokerHost) async throws -> (generation: UInt64, result: JSONValue) {
-        try await communicate(with: host) { try await host.connection.nativeCatalog() }
+        try await communicate { try await host.connection.nativeCatalog() }
     }
 
     /// Sends a request to the host process with `generation` and returns its JSON-RPC response.
@@ -397,12 +388,12 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private func send(_ request: JSONValue, to host: NativeBrokerHost, session: NativeBrokerSession,
                       generation: UInt64, selection: JSONValue? = nil) async throws -> NativeBrokerReply {
         var request = request
-        if host.guiProcess == nil, case .object(let object) = request, object["method"] == .string("tools/call") {
+        if case .object(let object) = request, object["method"] == .string("tools/call") {
             var metadata: [String: JSONValue] = [Self.conversationKey: .string(session.conversationID)]
             if let selection { metadata[Self.selectionKey] = selection }
             request = Self.addingMetadata(metadata, to: request)
         }
-        let data = try await communicate(with: host) {
+        let data = try await communicate {
             try await host.connection.send(request, owner: session.identifier, generation: generation)
         }
         return .response(data)
@@ -436,16 +427,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
 
     private func descriptor(_ host: NativeBrokerHost) -> JSONValue {
         var result = host.installation.fields
-        result["kind"] = .string(host.guiProcess == nil ? "headless" : "gui")
+        result["kind"] = .string("headless")
         result["hostIdentifier"] = .string(host.identifier)
         result["isDefault"] = .bool(host.identifier == Self.defaultHostIdentifier)
         let status = host.status
-        let isRunning = host.guiProcess.map(inventory.isGUIProcessRunning)
-        result["isReady"] = .bool(status.phase == .ready && isRunning != false)
-        if let process = host.guiProcess {
-            result["processIdentifier"] = .number(.int(Int64(process.processID)))
-            result["isRunning"] = .bool(isRunning == true)
-        }
+        result["isReady"] = .bool(status.phase == .ready)
         if case .object(let fields)? = status.origin, let version = fields["xcodeVersion"] {
             result["xcodeVersion"] = version
         }
@@ -470,16 +456,13 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         state.withLockedValue { reapUnusedHosts(in: &$0) }
     }
 
-    /// Stops hosts that no session references or uses: a GUI bridge at once, while the GUI Xcode
-    /// itself keeps running, and a headless host for another installation after
-    /// `idleHostGracePeriod`. The default host keeps its process.
+    /// Stops unused hosts for other installations after `idleHostGracePeriod`.
+    /// The default host keeps its process.
     private func reapUnusedHosts(in storage: inout State) {
         guard !storage.stopped else { return }
         for host in storage.hosts.values where host.identifier != Self.defaultHostIdentifier
             && host.status.phase != .idle && !isUsed(host, in: storage) {
-            if host.guiProcess != nil {
-                retire(host, in: &storage)
-            } else if storage.idleStops[host.identifier] == nil {
+            if storage.idleStops[host.identifier] == nil {
                 scheduleIdleStop(of: host, in: &storage)
             }
         }
@@ -542,7 +525,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         // Shutdown and reset stop the hosts, which close their models anyway.
         guard !state.withLockedValue({ $0.stopped || $0.resetsInProgress > 0 }) else { return }
         var seen: Set<NativeBrokerWorkspace.Scope> = []
-        for workspace in workspaces where !workspace.gui && seen.insert(workspace.scope).inserted {
+        for workspace in workspaces where seen.insert(workspace.scope).inserted {
             guard closingWorkspaces.withLockedValue({ markClosingIfUnreferenced(workspace, closing: &$0) }) else { continue }
             if let host = state.withLockedValue({ $0.hosts[workspace.hostIdentifier] }) {
                 let request = JSONValue.object([
@@ -602,7 +585,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     private func scheduleUnreferencedClose(_ workspaces: [NativeBrokerWorkspace]) {
-        guard workspaces.contains(where: { !$0.gui }) else { return }
+        guard !workspaces.isEmpty else { return }
         state.withLockedValue { storage in
             let key = UUID()
             storage.closing[key] = Task { [self] in
@@ -651,8 +634,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         }
     }
     package func snapshot() -> ProxyRuntimeSnapshot {
-        // A GUI host whose Xcode has exited cannot serve requests again.
-        let hosts = hosts().filter { $0.guiProcess.map(inventory.isGUIProcessRunning) ?? true }.map { host -> ProxyRuntimeSnapshot.Host in
+        let hosts = hosts().map { host -> ProxyRuntimeSnapshot.Host in
             let status = host.status
             let state: ProxyRuntimeSnapshot.Host.State = switch status.phase {
             case .idle, .stopped: .stopped
@@ -660,7 +642,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             case .ready: .running
             }
             return .init(identifier: host.identifier, developerDirectory: host.installation.developerDirectory,
-                         guiProcessIdentifier: host.guiProcess?.processID, state: state,
+                         state: state,
                          activeRequestCount: status.inFlightRequests)
         }
         return .init(generatedAt: Date(), hosts: hosts)
@@ -671,7 +653,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             var result: [String: Any] = [
                 "hostIdentifier": host.identifier,
                 "developerDirectory": host.installation.developerDirectory.path,
-                "kind": host.guiProcess == nil ? "headless" : "gui",
+                "kind": "headless",
                 "phase": status.phase.rawValue,
                 "inFlightRequests": status.inFlightRequests,
             ]
@@ -715,10 +697,7 @@ private extension NativeHostBroker {
         switch name {
         case Self.listTool:
             for installation in try await inventory.discover() { _ = try register(installation: installation) }
-            try discoverGUIHosts()
-            result = try Self.toolResult(.object(["hosts": .array(hosts().filter { host in
-                host.guiProcess.map(inventory.isGUIProcessRunning) ?? true
-            }.map(descriptor))]))
+            result = try Self.toolResult(.object(["hosts": .array(hosts().map(descriptor))]))
         case Self.listWorkspacesTool:
             result = try await listWorkspaces(request, session: session)
         case Self.openWorkspaceTool:
@@ -731,13 +710,7 @@ private extension NativeHostBroker {
                 throw NativeHostBrokerError("The workspace's Xcode host is unavailable")
             }
             guard try await runningGeneration(of: host) == workspace.generation else { throw Self.expiredReference() }
-            if workspace.gui {
-                _ = session.state.withLockedValue { $0.workspaces.removeValue(forKey: workspace.identifier) }
-                result = try Self.toolResult(.object([
-                    "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
-                    "message": .string("Released the workspace reference. The Xcode window remains open."),
-                ]))
-            } else if !electNativeClose(of: workspace, in: session) {
+            if !electNativeClose(of: workspace, in: session) {
                 session.forgetSelectionIfUnreferenced(workspace)
                 result = try Self.toolResult(.object([
                     "workspaceIdentifier": .string(workspace.identifier), "released": .bool(true),
@@ -808,12 +781,6 @@ private extension NativeHostBroker {
         }
     }
 
-    private func discoverGUIHosts() throws {
-        for process in inventory.runningGUIProcesses() {
-            _ = try register(installation: process.installation, guiProcess: process)
-        }
-    }
-
     /// Keeps a reclaimable host in use while `operation` runs.
     private func withPinnedHost<T: Sendable>(_ host: NativeBrokerHost, session: NativeBrokerSession,
                                              operation: () async throws -> T) async throws -> T {
@@ -829,9 +796,7 @@ private extension NativeHostBroker {
     }
 
     private func listWorkspaces(_ request: ProxyRuntimeRequest, session: NativeBrokerSession) async throws -> JSONValue {
-        try discoverGUIHosts()
         let targets = hosts().filter {
-            if let gui = $0.guiProcess { return inventory.isGUIProcessRunning(gui) }
             return $0.identifier == Self.defaultHostIdentifier || $0.status.phase == .ready
         }
         var entries: [JSONValue] = []
@@ -878,8 +843,7 @@ private extension NativeHostBroker {
 
     private func workspaceEntries(host: NativeBrokerHost, generation: UInt64, request: ProxyRuntimeRequest,
                                   session: NativeBrokerSession) async throws -> [NativeBrokerWorkspaceEntry] {
-        let gui = host.guiProcess != nil
-        let native = try Self.toolRequest(request, name: gui ? "XcodeListWindows" : Self.listWorkspacesTool,
+        let native = try Self.toolRequest(request, name: Self.listWorkspacesTool,
                                          arguments: [:])
         let value = try Self.result(in: await send(native, to: host, session: session, generation: generation))
         if Self.isToolError(value) { throw NativeBrokerToolFailure(result: value) }
@@ -887,7 +851,7 @@ private extension NativeHostBroker {
         guard let message = Self.string(payload["message"]) else {
             throw NativeHostBrokerError("Native workspace enumeration returned no message")
         }
-        let selector = gui ? "tabIdentifier: " : "workspaceIdentifier: "
+        let selector = "workspaceIdentifier: "
         return try message.split(separator: "\n").compactMap { line in
             guard let marker = line.range(of: selector) else { return nil }
             let entry = line[marker.upperBound...]
@@ -913,24 +877,6 @@ private extension NativeHostBroker {
         }
         return try await withPinnedHost(host, session: session) {
             let generation = try await runningGeneration(of: host)
-            if host.guiProcess != nil {
-                let entries = try await workspaceEntries(host: host, generation: generation, request: request,
-                                                         session: session)
-                let normalized = Self.normalizedWorkspacePath(path)
-                let matches = entries.filter {
-                    Self.normalizedWorkspacePath($0.path) == normalized
-                }
-                guard matches.count == 1, let entry = matches.first else {
-                    if matches.isEmpty {
-                        throw NativeHostBrokerError("The GUI host has no open window for this path. Open it in Xcode, or omit hostIdentifier to open a headless workspace.")
-                    }
-                    throw NativeHostBrokerError("Several Xcode windows have this path. Call XcodeListWorkspaces and choose the intended window's workspaceIdentifier.")
-                }
-                let workspace = try bindWorkspace(in: session, host: host, generation: generation,
-                                                  nativeIdentifier: entry.nativeIdentifier, path: entry.path, name: nil,
-                                                  retainsForRequest: retainsForRequest)
-                return (try Self.toolResult(workspace.descriptor), workspace)
-            }
             let native = try Self.toolRequest(request, name: Self.openWorkspaceTool,
                                              arguments: ["path": .string(path)])
             let opened = try Self.takingSelection(from: await send(native, to: host, session: session,
@@ -1024,7 +970,7 @@ private extension NativeHostBroker {
         nativeArguments.removeValue(forKey: "hostIdentifier")
         if let workspace {
             nativeArguments.removeValue(forKey: "workspaceIdentifier")
-            nativeArguments[workspace.gui ? "tabIdentifier" : "workspaceIdentifier"] = .string(workspace.nativeIdentifier)
+            nativeArguments["workspaceIdentifier"] = .string(workspace.nativeIdentifier)
         }
         if let device = admission.deviceSession {
             nativeArguments["interactionSessionKey"] = .string(device.nativeIdentifier)
@@ -1038,7 +984,7 @@ private extension NativeHostBroker {
             nativeCatalog: catalog.result)
         let forwarded = try Self.toolRequest(request, name: native.name, arguments: native.arguments)
         let sent: (reply: NativeBrokerReply, selection: JSONValue?)
-        if let workspace, !workspace.gui {
+        if let workspace {
             // The session's operations on one model run one at a time, as the host runs them anyway,
             // so each carries the selection that the previous one reported.
             do {
@@ -1093,7 +1039,7 @@ private extension NativeHostBroker {
             if let nativeID = Self.string(payload["workspaceIdentifier"]) {
                 let created = try bindWorkspace(in: session, host: host, generation: generation, nativeIdentifier: nativeID,
                     path: Self.string(payload["workspacePath"]), name: nil)
-                if !created.gui, let selection = sent.selection {
+                if let selection = sent.selection {
                     session.recordSelection(selection, for: created, replacing: false)
                 }
                 workspace = created

@@ -1,7 +1,7 @@
 # XcodeMCPKit
 
 XcodeMCPKit runs Xcode's MCP tools through one server, using saved workspace
-models headlessly or an open Xcode window.
+models in an owned headless process.
 
 ## Requirements
 
@@ -39,15 +39,15 @@ xcode-mcp-proxy-server
 
 Keep this terminal open while using MCP. You can leave Xcode closed.
 
-To also automatically allow MCP connections to the Xcode app, start the server
-with `--auto-approve`. This includes other agents connecting directly to Xcode:
+To automatically allow other agents' MCP connections directly to the Xcode app,
+start the server with `--auto-approve`:
 
 ```bash
 xcode-mcp-proxy-server --auto-approve
 ```
 
 Grant macOS Accessibility access to the server's host process when prompted.
-Without the flag, GUI connection dialogs require manual approval.
+Headless operations do not need this monitor.
 
 ### Connect your MCP client
 

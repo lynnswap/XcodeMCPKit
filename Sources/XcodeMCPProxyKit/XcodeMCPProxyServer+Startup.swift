@@ -219,7 +219,7 @@ extension XcodeMCPProxyServer {
                 defer {
                     terminalHosts = acquired.runtime.snapshot().hosts.map { host in
                         Status.Host(identifier: host.identifier, developerDirectory: host.developerDirectory,
-                                    kind: Self.publicKind(of: host), state: .stopped, activeRequestCount: 0)
+                                    kind: .headless, state: .stopped, activeRequestCount: 0)
                     }
                 }
                 try await Self.release(acquired)
@@ -369,11 +369,7 @@ extension XcodeMCPProxyServer {
             case .running: .running
             }
             return Status.Host(identifier: host.identifier, developerDirectory: host.developerDirectory,
-                               kind: publicKind(of: host), state: state, activeRequestCount: host.activeRequestCount)
-        }
-
-        private static func publicKind(of host: ProxyRuntimeSnapshot.Host) -> Status.Host.Kind {
-            host.guiProcessIdentifier.map { .gui(processIdentifier: $0) } ?? .headless
+                               kind: .headless, state: state, activeRequestCount: host.activeRequestCount)
         }
     }
 }

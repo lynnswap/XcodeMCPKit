@@ -55,7 +55,7 @@ Use `xcode-mcp-proxy-server --help` for CLI usage.
 | `--request-timeout seconds` | Request timeout. Requests have none by default, and `0` also means none; starting a host remains bounded. |
 | `--max-body-bytes bytes` | Maximum accepted HTTP request body size. |
 | `--share-compilation-cache` | Enable shared compilation caching and Swift/Clang prefix mapping in native hosts. Off by default; see [compilation caching](#compilation-caching). |
-| `--auto-approve` | Automatically allow GUI Xcode MCP connection dialogs for all agents, including external clients. Off by default; requires macOS Accessibility access. |
+| `--auto-approve` | Automatically allow MCP connection dialogs for agents connecting directly to GUI Xcode. Off by default; requires macOS Accessibility access. |
 | `--debug-endpoints` | Serve `/debug/upstreams` and `/debug/reset` when the listener is loopback. Off by default. |
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port before starting. |
 | `--dry-run` | Print the resolved server command without starting it. |
@@ -73,7 +73,7 @@ Each owned headless process has an independent execution queue with these limits
 Calls for the same workspace remain exclusive through preparation, native stream
 consumption, and cleanup. Mutations without a workspace selector are exclusive
 with every workspace in that process. The limits have no public configuration
-option and do not serialize other headless hosts or GUI Xcode processes. See
+option and do not serialize other headless hosts. See
 [operation ordering and cancellation](usage.md#tools-failures-and-cancellation)
 for admission and completion boundaries.
 
@@ -92,8 +92,9 @@ for admission and completion boundaries.
 ### Automatic connection approval
 
 `--auto-approve` monitors running Xcode permission-dialog processes and presses
-`Allow` on MCP connection dialogs. It includes agents connecting directly to
-Xcode outside the proxy. Grant macOS Accessibility access to the process hosting
+`Allow` on MCP connection dialogs for agents connecting directly to Xcode
+outside the proxy. Proxy workspace operations run headlessly and do not create
+these dialogs. Grant macOS Accessibility access to the process hosting
 the server when prompted; otherwise dialogs remain for manual approval.
 
 The monitor runs until the server shuts down. It recognizes the English
@@ -102,8 +103,6 @@ sentences naming an agent that requests Xcode's tools. The default button must
 be `Allow` or `許可`, or use `action-button-1` when its title is unavailable.
 Agent names, PIDs, and executable paths alone do not identify a connection
 request. Other dialogs keep their normal behavior.
-Use a GUI workspace returned by `XcodeListWorkspaces` to work with its window.
-The default installation for saved models remains the owned headless host.
 
 ### Compilation caching
 
