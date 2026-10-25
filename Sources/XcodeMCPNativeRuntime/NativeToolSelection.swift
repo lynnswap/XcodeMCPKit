@@ -11,6 +11,7 @@ final class NativeToolSelection {
     private let metadata: UnsafeRawPointer
     private let witness: UnsafeRawPointer
     private let headlessGetter: ResolvedSymbol
+    private let asynchronous: Bool
     private let interface: OpaquePointer
 
     init(installation: NativeXcodeInstallation) async throws {
@@ -28,14 +29,21 @@ final class NativeToolSelection {
             throw NativeRuntimeError.unsupportedContract("Native chat settings do not conform to ChatSettings")
         }
         unsafe (witness = conformance)
-        headlessGetter = try await runtime.resolve(
-            .swift(
-                .symbol(
-                    "async function pointer to (extension in IDEIntelligenceChat):IDEIntelligenceChat.ChatSettings.enabledHeadlessMCPTools.getter : Swift.Set<Swift.String>",
-                    kind: .data)), in: .path(image))
+        let declaration = "(extension in IDEIntelligenceChat):IDEIntelligenceChat.ChatSettings.enabledHeadlessMCPTools.getter : Swift.Set<Swift.String>"
+        // Xcode 27.2 made this getter synchronous; earlier versions export an async descriptor.
+        do {
+            headlessGetter = try await runtime.resolve(
+                .swift(.symbol("async function pointer to " + declaration, kind: .data)), in: .path(image))
+            asynchronous = true
+        } catch ABIResolutionError.declarationNotFound {
+            headlessGetter = try await runtime.resolve(.swift(.symbol(declaration, kind: .function)), in: .path(image))
+            asynchronous = false
+        }
         let pointer = try unsafe abi.scalar(Int32(ABIValuePointer))
         let result = try unsafe abi.storage(for: Set<String>.self, components: [pointer])
-        unsafe (interface = try abi.asyncInterface(result: result, parameters: [pointer, pointer]))
+        unsafe (interface = try asynchronous
+            ? abi.asyncInterface(result: result, parameters: [pointer, pointer])
+            : abi.callInterface(result: result, parameters: [pointer, pointer]))
     }
 
     func publicToolNames() async throws -> Set<String> {
@@ -53,6 +61,11 @@ final class NativeToolSelection {
         unsafe genericSelf.initialize(to: UnsafeRawPointer(Unmanaged.passUnretained(settings).toOpaque()))
         defer { unsafe genericSelf.deinitialize(count: 1); unsafe genericSelf.deallocate() }
         defer { withExtendedLifetime(settings) {} }
+        if !asynchronous {
+            return try unsafe abi.invoke(symbol: getter, interface: interface,
+                                         arguments: [UnsafeMutableRawPointer(inputs), UnsafeMutableRawPointer(inputs + 1)],
+                                         context: UnsafeRawPointer(genericSelf), returning: Set<String>.self)
+        }
         return try unsafe await abi.invokeAsync(symbol: getter, interface: interface,
                                          arguments: [UnsafeMutableRawPointer(inputs), UnsafeMutableRawPointer(inputs + 1)],
                                          context: UnsafeRawPointer(genericSelf), returning: Set<String>.self)
