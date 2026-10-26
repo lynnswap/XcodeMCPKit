@@ -360,7 +360,7 @@ final class NativePreviewBuild {
                           path.hasPrefix("/"),
                           let filePath = try object(path as NSString, selector: "dvt_absoluteFilePath") else { return nil }
                     baseFiles[URL(filePath: path).standardizedFileURL] = filePath
-                    let watched = try runtime.object(configuration).value(forObjCIvar: "_watchedBaseConfigurationFilePaths", as: NSSet?.self)
+                    let watched = try unsafe runtime.object(configuration).value(forObjCIvar: "_watchedBaseConfigurationFilePaths", as: NSSet?.self)
                     for filePath in watched?.allObjects ?? [] {
                         guard let url = try object(filePath as AnyObject, selector: "fileURL") as? URL,
                               url.isFileURL, url.path.hasPrefix("/") else { return nil }
