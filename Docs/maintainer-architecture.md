@@ -84,9 +84,12 @@ installed Metal toolchain without changing persisted Xcode preferences. The
 Metal provider receives the directory containing `.xctoolchain` bundles, not the
 bundle itself. Restart the host after replacing either asset. The breakpoint
 manager is prepared on the main thread before debugger launch to avoid native
-global-store initialization assertions. Crash-product lookup matches both bundle
-ID and platform; a bundle-ID-only match can choose another platform's cache.
-Cached analytics results do not establish online account access.
+global-store initialization assertions. Crash collection calls the lower-level
+analytics services through ABIBridge with explicit product, platform, upload
+platform, filters, period, and page. The native MCP downloader's most-recent-item
+fallback is bypassed. Server-owned crash cache entries use the complete resolved
+request as their key and retain the original fetch time. Cached analytics results
+do not establish online account access.
 
 ### Preview rendering
 

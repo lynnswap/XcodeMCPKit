@@ -795,9 +795,9 @@ private struct VerificationState {
                 "outputType": .string("all"),
                 "tailLimit": .integer(100),
             ])
-        case "GetCrashIssueLogs":
+        case "GetCrashIssue":
             return try withWorkspaceScope(toolName, [
-                "signature_name": .string("ProxyVerifierCrashSignature"),
+                "issue_id": .string("ProxyVerifierCrashIssue"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("iOS"),
                 "app_version": .string("1.0"),
@@ -821,9 +821,10 @@ private struct VerificationState {
             ])
         case "GetTestList":
             return try withWorkspaceScope(toolName)
-        case "GetTopCrashIssues":
+        case "ListCrashIssues":
             return try withWorkspaceScope(toolName, [
-                "count": .integer(1),
+                "page": .integer(0),
+                "page_size": .integer(1),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("iOS"),
             ])
@@ -1240,8 +1241,8 @@ private func verificationStatus(
 
 private func isExternalPrerequisiteResult(toolName: String, detail: String) -> Bool {
     let appStoreConnectTools: Set<String> = [
-        "GetTopCrashIssues",
-        "GetCrashIssueLogs",
+        "ListCrashIssues",
+        "GetCrashIssue",
         "GetTopFieldPerformanceIssues",
         "GetFieldPerformanceIssueLogs",
     ]
@@ -1387,8 +1388,8 @@ private func runtimeToolNames() -> [String] {
 
 private func fieldReportToolNames() -> [String] {
     [
-        "GetTopCrashIssues",
-        "GetCrashIssueLogs",
+        "ListCrashIssues",
+        "GetCrashIssue",
         "GetTopFieldPerformanceIssues",
         "GetFieldPerformanceIssueLogs",
     ]

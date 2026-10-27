@@ -109,9 +109,14 @@ package final class NativeXcodeBackend: NativeToolBackend {
             let action = try unsafe await bridge.actionClass(for: metadata)
             let workspaceScoped = try unsafe await scope.isWorkspaceScoped(action)
             let schema = try unsafe await bridge.schema(action: action)
-            unsafe (nextActions[name] = action)
             let tool = try NativeSchemaConverter.tool(from: schema, workspaceScoped: workspaceScoped)
-            nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
+            if let crash = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
+                unsafe (nextActions[crash.toolName] = action)
+                nextTools[crash.toolName] = NativeCrashContract.describe(tool, detail: crash == .logs)
+            } else {
+                unsafe (nextActions[name] = action)
+                nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
+            }
         }
         unsafe (actions = nextActions)
         tools = nextTools
@@ -195,8 +200,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         if isPreview { arguments = NativePreviewCorrection.prepareArguments(arguments) }
         let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
         if let kind = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
-            return try unsafe crashCorrection.execute(kind, inputType: scope.inputType(for: action), input: input,
-                                                       request: context.artifactsDirectory)
+            return try crashCorrection.execute(kind, input: input, context: context)
         }
         if isPreview {
             return try unsafe await previewCorrection.execute(inputType: scope.inputType(for: action), input: input,

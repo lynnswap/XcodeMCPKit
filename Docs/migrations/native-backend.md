@@ -42,6 +42,22 @@ the saved model.
 After a new MCP session or host restart, obtain fresh workspace and device-session
 identifiers. See [workspace usage](../usage.md) for normal operations.
 
+## Crash collection
+
+`ListCrashIssues` replaces `GetTopCrashIssues`. Replace `count` with `page` and
+`page_size`, then follow `pagination.nextPage` until it is null. Read structured
+`issues` instead of parsing the old `data` string.
+
+`GetCrashIssue` replaces `GetCrashIssueLogs`. Pass `issue_id` from the list's
+`issueId` instead of `signature_name`. It returns structured device trends and
+local sample-log paths. Its distributions cover all versions and channels;
+`app_version` filters sample logs only, and `is_beta` is unsupported for detail.
+
+Check `status`, `errors`, and `provenance` when saving or updating results.
+See [crash collection](../usage.md#collect-crash-reports) for query scopes,
+pagination, caching, and metric definitions. Restart connected clients to load
+the replacement tool definitions.
+
 ## Native helper and server configuration
 
 Install `XcodeMCPNativeHost.app` beside the proxy commands. Reinstall the complete

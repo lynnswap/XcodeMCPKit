@@ -95,6 +95,74 @@ After starting a new MCP session or restarting a host, start a new device sessio
 
 Native device, debugger, signing, and account permissions still apply.
 
+## Collect crash reports
+
+Call `ListCrashIssues` with the app's bundle identifier and platform. Xcode's
+App Store Connect account access is required; no Organizer selection is needed.
+
+```json
+{
+  "bundle_id": "com.example.app",
+  "platform": "iOS",
+  "time_period": "last14Days",
+  "page": 0,
+  "page_size": 25
+}
+```
+
+The response contains structured `issues`, the resolved `query`, `pagination`,
+`provenance`, and `errors`. Save each response and follow `pagination.nextPage`
+with the same filters and page size until it is null. Nonempty pages require a
+probe of the next page because the native service supplies no total or snapshot
+token. Rankings can change between calls; merge records by `issueId`. A missing
+issue does not establish that it was resolved.
+
+Use `app_version` to select a version and `is_beta` to select TestFlight (`true`)
+or App Store (`false`); omit either to include all. Supported aggregation periods
+are `last24Hours`, `last14Days` (default), and `last365Days`. `platform` selects
+where the app ran. For an iOS app running on macOS or visionOS, also pass
+`upload_platform: "iOS"`. It otherwise defaults to the selected platform.
+
+Pass an issue's stable `issueId` to `GetCrashIssue`; its display name is not an
+input:
+
+```json
+{
+  "bundle_id": "com.example.app",
+  "platform": "iOS",
+  "issue_id": "issueId-from-the-list",
+  "time_period": "last14Days"
+}
+```
+
+`timeSeries` preserves the native interval boundaries, granularity, and unique
+device counts. Missing intervals remain missing, and interval device counts
+cannot be added to obtain the period's unique-device count. The native detail
+service returns distributions across all versions and release channels.
+`app_version` filters its sample logs only; `is_beta` is unsupported for this
+operation. The response states these scopes explicitly and retains all original
+distributions in `native`.
+
+`logs` contains local file paths and SHA-256 content IDs. A log's content ID can
+change when its contents change. `sampleLogCount` counts saved sample files;
+it does not count crash occurrences or affected devices. `responsePath` names
+the complete structured response saved locally.
+
+The default `source: "network"` calls Xcode's analytics services directly.
+`source: "cache"` reads only a response previously fetched by this server for
+the exact query and page (or issue ID). `source: "networkWithCacheFallback"`
+preserves the network failure and original cache fetch time when falling back.
+Organizer's most-recent cached page is never substituted. `sourceUpdatedAt`
+is null because these native results provide no update timestamp or conditional
+change token; refetch to detect updates.
+
+`status` is `complete`, `partial`, or `failed`. A partial response retains usable
+data and diagnostics; a failed response also sets MCP `isError`. Errors include
+the operation, native domain/code, and available underlying causes. Retry a
+failed page with the same inputs. Successful pages and downloads remain on disk
+if a later request fails. When sample-file writes fail, the cached raw response
+can be reprocessed with `source: "cache"` without another download.
+
 ## Choose another Xcode installation
 
 Host selection is optional for normal workspace operations. To open a headless

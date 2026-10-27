@@ -7,13 +7,3 @@ struct NativeAnalyticsBoolean: ABIBridgeSwiftValue {
     let value: Bool?
     static let swiftABIType: NativeType = .uint8
 }
-
-struct NativeAnalyticsInteger: ABIBridgeSwiftValue {
-    let value: Int?
-    static let swiftABIType: NativeType = try! .structure(named: "OptionalInt", fields: [.int, .uint8])
-}
-
-struct NativeAnalyticsDictionary: ABIBridgeSwiftValue {
-    let value: [String: Any]
-    static let swiftABIType: NativeType = .pointer
-}

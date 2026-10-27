@@ -134,8 +134,8 @@ struct StableToolCatalogTests {
     }
 
     @Test func ownerReferencesAndExplicitAppIdentityDoNotRequireAnotherWorkspaceSelector() throws {
-        let names = ["DeviceInteractionInstallAndRun", "GetConsoleOutput", "GetTopCrashIssues",
-                     "GetCrashIssueLogs", "GetTopFieldPerformanceIssues", "GetFieldPerformanceIssueLogs"]
+        let names = ["DeviceInteractionInstallAndRun", "GetConsoleOutput", "ListCrashIssues",
+                     "GetCrashIssue", "GetTopFieldPerformanceIssues", "GetFieldPerformanceIssueLogs"]
         let native = catalog(names.map { name in
             tool(name, properties: ["workspaceIdentifier": string], required: [])
         })
@@ -144,6 +144,44 @@ struct StableToolCatalogTests {
             let value = try #require(find(name, in: result))
             #expect(field(value, "inputSchema", "properties", "workspaceIdentifier") != nil)
             #expect(field(value, "inputSchema", "required") == .array([]))
+        }
+    }
+
+    @Test func crashQueriesPreservePagingAndStableIDsWithOptionalWorkspace() throws {
+        let integer: JSONValue = .object(["type": .string("integer")])
+        for name in ["ListCrashIssues", "GetCrashIssue"] {
+            let detail = name == "GetCrashIssue"
+            var properties: [String: JSONValue] = ["workspaceIdentifier": string, "bundle_id": string,
+                "platform": string, "app_version": string, "time_period": string, "source": string]
+            var arguments: [String: JSONValue] = ["bundle_id": .string("com.example.app"),
+                "platform": .string("iOS"), "app_version": .string("1.0"),
+                "time_period": .string("last365Days"), "source": .string("network")]
+            if detail {
+                properties["issue_id"] = string
+                arguments["issue_id"] = .string("native-issue-id")
+            } else {
+                properties["page"] = integer
+                properties["page_size"] = integer
+                arguments["page"] = .number(.int(2))
+                arguments["page_size"] = .number(.int(25))
+            }
+            let required = detail ? ["issue_id"] : []
+            let output: JSONValue = .object(["type": .string("object"), "properties": .object([
+                "status": string, "responsePath": string,
+            ])])
+            let native = catalog([tool(name, properties: properties, required: required,
+                extra: ["outputSchema": output])])
+            let result = try XcodeToolCatalog.publicResult(from: native, managementTools: [])
+            let descriptor = try #require(find(name, in: result))
+            for (key, value) in properties where key != "workspaceIdentifier" {
+                #expect(field(descriptor, "inputSchema", "properties", key) == value)
+            }
+            #expect(field(descriptor, "inputSchema", "properties", "workspaceIdentifier") != nil)
+            #expect(field(descriptor, "inputSchema", "required") == .array(required.map(JSONValue.string)))
+            #expect(field(descriptor, "outputSchema") == output)
+            let call = try XcodeToolCatalog.nativeCall(name: name, arguments: arguments, nativeCatalog: native)
+            #expect(call.name == name)
+            #expect(call.arguments == arguments)
         }
     }
 
