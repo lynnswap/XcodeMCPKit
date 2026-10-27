@@ -45,53 +45,61 @@ identifiers. See [workspace usage](../usage.md) for normal operations.
 
 ## Crash collection
 
-`ListCrashIssues` replaces `GetTopCrashIssues`. Remove `count` and omit `page`
-to collect all pages in one call. The response contains successful `pages` and
-combined `issues`. A partial result retains those pages and sets
-`pagination.nextPage` to the failed page. Specify that zero-based `page` with the
-same filters to retrieve or retry it individually. `page_size` is fixed at 25.
-Every nonempty page, including a short page, requires another probe; an empty
-page and normal Organizer UI establish the end. Read structured `issues`
-instead of parsing the old `data` string.
+Replace `GetTopCrashIssues` / `ListCrashIssues` and `GetCrashIssueLogs` /
+`GetCrashIssue` with `SyncCrashReports` and `ReadCrashChanges`.
 
-`GetCrashIssue` replaces `GetCrashIssueLogs`. Pass `issue_id` from the list's
-`issueId` instead of `signature_name`. It returns structured device trends and
-local sample-log paths. Remove `app_version` and `is_beta` from detail calls;
-both are rejected. Organizer downloads detail across all versions, builds, and
-channels for the last year. `time_period` selects one of the three returned
-distributions, without filtering samples. Samples can include logs already
-saved by Organizer; their count is not an occurrence or device count.
+1. Call Sync with `collection: "issues"` and the bundle/platform query. Remove
+   `count`, `page`, and `page_size`; provider paging is internal.
+2. Finish bounded imports by following Sync's `nextCursor`.
+3. Call Read for the same issue collection and follow its `nextCursor`. Read
+   returns saved changes instead of the old `data` string or an unbounded list.
+4. Pass each issue's stable `issueId` to Sync with `collection: "logs"` and
+   `issue_id`. Use its ID rather than its displayed signature name.
+5. Read that logs collection. Process each page before saving its continuation,
+   and persist the terminal `checkpoint` for the next change window.
 
-Network crash calls start a dedicated GUI instance of the selected Xcode and
-close that instance on completion, failure, or cancellation. Configure App Store
-Connect account access in that Xcode and grant the native host Accessibility
-permission beforehand; no API key or manually opened Xcode is needed.
-Organizer windows can appear and Xcode can become active. The tool opens the
-requested Organizer route, waits for its initial network download, and scrolls
-to load further pages. Short lists without a scrollbar temporarily use the
-pointer for a normal scroll gesture. Window or pointer interference stops
-collection with completed pages preserved; retry `pagination.nextPage`.
-It clears the name search and disables the unresolved-only
-display filter in the dedicated instance. Collection shares a global lock across
-server processes for Xcode's Products disk cache. Normal workspace calls remain
-headless. Refreshed results use
-`provenance.source: "organizer"`; `fetchedAt` is the native cache-header's local
-refresh time and `sourceUpdatedAt` remains null. `source: "cache"` uses only
-the server's exact-query store without starting GUI Xcode, and preserves partial
-results. With explicit bundle and platform inputs, it also works without the app
-in Products or a saved workspace. Network fallback retains product-lookup or
-refresh errors, saved diagnostics, and the original fetch time. A partial attempt
-leaves an existing exact saved response intact; with fallback enabled, the new
-attempt appears separately in `recovery` with its own provenance and diagnostics.
-A failed detail refresh can return saved Organizer samples
-as a partial result with source `organizerCache` and `fetchedAt: null`. Their
-freshness is unverified, and a cached distribution is not returned as current
-time-series data.
+Sync imports at most `max_records` and `max_bytes` per step (defaults 100 and
+64 MiB); one oversized file can exceed the byte budget to make progress. Read's
+`limit` and `max_bytes` bound returned pages (defaults 25 and 256 KiB). Sync and
+Read cursors identify different operations and cannot be interchanged. Both
+retain durable progress; Read never performs network access or consumes records
+on behalf of another client. Each consumer stores its own tokens.
 
-Check `status`, `errors`, and `provenance` when saving or updating results.
-See [crash collection](../usage.md#collect-crash-reports) for query scopes,
-pagination, caching, and metric definitions. Restart connected clients to load
-the replacement tool definitions.
+Shared content blobs replace per-request copies. Read returns local paths and
+content IDs for new or changed observations. Use `contentId` for the SHA-256
+byte identity previously exposed as `logId`; the new `logId` identifies a logical
+saved sample across content updates. `observedNewestFirst` means local
+observation order; optional log order `occurredAtDescending` uses known event
+dates and places unknown dates last. A frozen read window does not freeze
+Apple's service. New observations wait for the next window, and an issue missing
+from a scan is not reported as deleted or resolved.
+Each changed item is returned in its latest version at the window boundary;
+intermediate versions are combined rather than returned as an update history.
+
+Remove `app_version` and `is_beta` from log Sync calls. Organizer downloads
+samples and distributions for all versions, builds, and channels over the last
+year. `time_period` selects a returned distribution, without filtering samples.
+Sample counts are not occurrence or device counts. Unchanged issue metadata
+cannot establish that an issue's sample content has not changed; synchronize its
+logs again to check.
+
+Network Sync still uses a dedicated GUI instance of the selected Xcode and
+requires configured App Store Connect account access and Accessibility permission.
+It closes its instance after completion, failure, or cancellation. No API key or
+manually opened Xcode is needed. Window/pointer interference can interrupt
+collection; completed source metadata and imports remain available. Normal
+workspace operations and Read remain headless.
+
+`source: "cache"` imports only exact saved metadata and local files, without
+starting Xcode. Explicit bundle/platform inputs do not require Products inventory
+or a workspace. Network fallback retains refresh errors and original fetch times;
+unverified recovered samples retain unknown freshness. A partial source attempt
+does not overwrite a complete saved snapshot. Check diagnostics and acquisition
+progress separately from local read completion.
+
+See [crash collection](../usage.md#collect-crash-reports) for examples, query
+scopes, progress, and metric definitions. Restart connected clients to load the
+new tool definitions.
 
 ## Native helper and server configuration
 

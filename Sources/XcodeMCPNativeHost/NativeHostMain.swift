@@ -9,6 +9,7 @@ import XcodeMCPWire
 private struct HostArguments {
     var developerDirectory: String?
     var artifactsDirectory: String?
+    var crashCacheDirectory: String?
     var maxMessageBytes = 32 * 1024 * 1024
     var sharesCompilationCache = false
     var help = false
@@ -26,6 +27,7 @@ private struct HostArguments {
             switch argument {
             case "--developer-dir": developerDirectory = value
             case "--artifacts-root": artifactsDirectory = value
+            case "--crash-cache-root": crashCacheDirectory = value
             case "--max-message-bytes":
                 guard let bytes = Int(value), bytes > 0 else { throw NativeRuntimeError.invalidRequest("Message size must be a positive integer") }
                 maxMessageBytes = bytes
@@ -41,7 +43,11 @@ private enum NativeHostMain {
         do {
             let arguments = try HostArguments(Array(CommandLine.arguments.dropFirst()))
             if arguments.help {
-                print("Usage: xcode-mcp-native-host [--developer-dir path] [--artifacts-root path] [--max-message-bytes bytes] [--share-compilation-cache]\nRun from the packaged native host application to provide headless Xcode MCP over STDIO.")
+                print("""
+                    Usage: xcode-mcp-native-host [--developer-dir path] [--artifacts-root path] [--crash-cache-root path] [--max-message-bytes bytes] [--share-compilation-cache]
+                    Run from the packaged native host application to provide headless Xcode MCP over STDIO.
+                    Crash data defaults to ~/Library/Application Support/XcodeMCPKit/CrashCache, independently of temporary request artifacts.
+                    """)
                 return
             }
             let developerDirectory = try selectedDeveloperDirectory(arguments)
@@ -62,13 +68,16 @@ private enum NativeHostMain {
             let application = try bootstrap.application(for: installation, sharesCompilationCache: arguments.sharesCompilationCache)
             let artifacts = arguments.artifactsDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? FileManager.default.temporaryDirectory.appendingPathComponent("XcodeMCPNativeHost", isDirectory: true)
+            let crashCache = try arguments.crashCacheDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                    appropriateFor: nil, create: true).appendingPathComponent("XcodeMCPKit/CrashCache", isDirectory: true)
             let maxMessageBytes = arguments.maxMessageBytes
             Task { @MainActor in
                 let session: NativeMCPSession
                 do {
                     try await bootstrap.initialize(installation: installation)
                     let backend = try await NativeXcodeBackend(installation: installation)
-                    session = NativeMCPSession(backend: backend, artifactsRoot: artifacts) { data in
+                    session = NativeMCPSession(backend: backend, artifactsRoot: artifacts, crashCacheRoot: crashCache) { data in
                         try output.write(contentsOf: data + Data([0x0A]))
                     }
                 } catch {

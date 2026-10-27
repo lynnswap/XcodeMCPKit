@@ -795,12 +795,12 @@ private struct VerificationState {
                 "outputType": .string("all"),
                 "tailLimit": .integer(100),
             ])
-        case "GetCrashIssue":
-            return try withWorkspaceScope(toolName, [
-                "issue_id": .string("ProxyVerifierCrashIssue"),
+        case "ReadCrashChanges":
+            return [
+                "collection": .string("issues"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("iOS"),
-            ])
+            ]
         case "GetFieldPerformanceIssueLogs":
             return try withWorkspaceScope(toolName, [
                 "app_version": .string("1.0"),
@@ -820,10 +820,10 @@ private struct VerificationState {
             ])
         case "GetTestList":
             return try withWorkspaceScope(toolName)
-        case "ListCrashIssues":
+        case "SyncCrashReports":
             return try withWorkspaceScope(toolName, [
-                "page": .integer(0),
-                "page_size": .integer(25),
+                "collection": .string("issues"),
+                "max_records": .integer(25),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("iOS"),
             ])
@@ -1240,8 +1240,7 @@ private func verificationStatus(
 
 private func isExternalPrerequisiteResult(toolName: String, detail: String) -> Bool {
     let appStoreConnectTools: Set<String> = [
-        "ListCrashIssues",
-        "GetCrashIssue",
+        "SyncCrashReports",
         "GetTopFieldPerformanceIssues",
         "GetFieldPerformanceIssueLogs",
     ]
@@ -1387,8 +1386,8 @@ private func runtimeToolNames() -> [String] {
 
 private func fieldReportToolNames() -> [String] {
     [
-        "ListCrashIssues",
-        "GetCrashIssue",
+        "SyncCrashReports",
+        "ReadCrashChanges",
         "GetTopFieldPerformanceIssues",
         "GetFieldPerformanceIssueLogs",
     ]

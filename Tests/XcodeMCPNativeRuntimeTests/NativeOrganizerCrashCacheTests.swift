@@ -56,7 +56,7 @@ struct NativeOrganizerCrashCacheTests {
         #expect(snapshot.key == pageKey(requested))
     }
 
-    @Test @MainActor func issueIdentityAndLogFiltersAreExactAndReadFailuresPreserveSuccessfulLogs() async throws {
+    @Test @MainActor func issueIdentityAndLogDirectoryAreExactWithoutReadingSamples() throws {
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let cache = NativeOrganizerCrashCache(productsRoot: root)
@@ -68,11 +68,6 @@ struct NativeOrganizerCrashCacheTests {
         try write(pointInfo(query()), to: unfiltered.appending(component: "PointInfo.json"))
         try write(distribution(bundle: "another.App"), to: selected.appending(component: "DistributionInfo.json"))
         try write(distribution(), to: unfiltered.appending(component: "DistributionInfo.json"))
-        let logs = selected.appending(component: "Logs")
-        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
-        let text = Data("Incident Identifier: stable-log\n".utf8)
-        try text.write(to: logs.appending(component: "good.crash"))
-        try FileManager.default.createDirectory(at: logs.appending(component: "unreadable.crash"), withIntermediateDirectories: false)
 
         let partial = cache.readIssue(requested, issueID: "stable-issue")
         let snapshot = try #require(partial.snapshot)
@@ -81,54 +76,67 @@ struct NativeOrganizerCrashCacheTests {
             == selected.appending(component: "PointInfo.json").resolvingSymlinksInPath())
         #expect(snapshot.distribution == nil)
         #expect(snapshot.fetchedAt == nil)
-        #expect(snapshot.logs.count == 1)
-        #expect(snapshot.logs.first?.data == text)
-        #expect(partial.errors.count == 2)
+        #expect(snapshot.logDirectory.path
+            == snapshot.pointInfoURL.deletingLastPathComponent().appending(component: "Logs").path)
+        #expect(partial.errors.count == 1)
         #expect(partial.errors.contains { (try? object($0)["operation"]) == .string("organizerDistributionRead") })
-        #expect(partial.errors.contains { (try? object($0)["operation"]) == .string("organizerLogRead") })
         #expect(cache.readIssue(requested, issueID: "another-issue").snapshot == nil)
 
         let refreshFailure = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
         let recovered = try NativeOrganizerCrashService.recoverIssue(partial, after: refreshFailure)
-        let savedStore = NativeCrashStore(root: root.appending(component: "saved-responses"))
-        let key = requested.query.json(issueID: "stable-issue")
-        let loaded = try await NativeCrashData.load(key: key, source: .network, store: savedStore) { recovered }
-        #expect(loaded.source == "organizerCache")
-        #expect(loaded.fetchedAt == nil)
-        #expect(loaded.errors.count == 3)
-        let recoveredValue = try object(loaded.value)
+        #expect(recovered.source == "organizerCache")
+        #expect(recovered.fetchedAt == nil)
+        #expect(recovered.errors.count == 2)
+        #expect(!recovered.isComplete)
+        let recoveredValue = try object(recovered.value)
         #expect(recoveredValue["distribution"] == nil)
         #expect(recoveredValue["sampleFreshness"] == .string("unverifiedSavedSamples"))
-        let savedLogs = NativeCrashData.saveLogs(recoveredValue, directory: root)
-        let savedLog = try #require(savedLogs.logs.first)
-        guard case .string(let savedPath) = try object(savedLog)["path"] else { throw FixtureError.invalidObject }
-        #expect(try Data(contentsOf: URL(fileURLWithPath: savedPath)) == text)
-        let reread = try await NativeCrashData.load(key: key, source: .cache, store: savedStore) {
-            throw FixtureError.invalidObject
-        }
-        #expect(reread.source == "cache")
-        #expect(reread.fetchedAt == nil)
-        #expect(reread.errors == loaded.errors)
-        #expect(reread.value == loaded.value)
+        #expect(recoveredValue["logDirectory"] == .string(snapshot.logDirectory.path))
+        #expect(recoveredValue["logs"] == nil)
 
         try write(distribution(), to: selected.appending(component: "DistributionInfo.json"))
         let refreshed = cache.readIssue(requested, issueID: "stable-issue")
         #expect(refreshed.snapshot?.fetchedAt == ISO8601DateFormatter().date(from: "2024-01-02T00:00:00Z"))
         #expect(refreshed.snapshot?.distribution != nil)
-        #expect(refreshed.snapshot?.logs.first?.data == text)
-        #expect(refreshed.errors.count == 1)
+        #expect(refreshed.snapshot?.logDirectory == snapshot.logDirectory)
+        #expect(refreshed.errors.isEmpty)
 
         let staleRecovery = try NativeOrganizerCrashService.recoverIssue(refreshed, after: refreshFailure)
         let staleValue = try object(staleRecovery.value)
         #expect(staleValue["distribution"] == nil)
         #expect(staleValue["cachedDistribution"] != nil)
         #expect(staleRecovery.fetchedAt == nil)
+    }
 
-        try FileManager.default.removeItem(at: logs)
-        let withoutSamples = cache.readIssue(requested, issueID: "stable-issue")
-        #expect(withoutSamples.snapshot?.distribution != nil)
-        #expect(withoutSamples.snapshot?.logs.isEmpty == true)
-        #expect(withoutSamples.errors.isEmpty)
+    @Test func sampleReferencesRetainIdentityWhenLocalSymbolicationChangesTheBytes() throws {
+        let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let raw = root.appending(component: "2024-01-02_03-04-05.1250_+0900-" + String(repeating: "a", count: 40) + ".crash")
+        try Data("raw stack".utf8).write(to: raw)
+        let original = try NativeCrashLogSource.inspect(rawURL: raw)
+        #expect(original.variant == "raw")
+        #expect(original.url == raw)
+        #expect(original.occurredAt == Date(timeIntervalSince1970: 1_704_132_245.125))
+
+        let symbolicated = root.appending(component: "LocallySymbolicated").appending(component: raw.lastPathComponent)
+        try FileManager.default.createDirectory(at: symbolicated.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("symbolicated stack".utf8).write(to: symbolicated)
+        let updated = try NativeCrashLogSource.inspect(rawURL: raw)
+        #expect(updated.nativeID == original.nativeID)
+        #expect(updated.variant == "locallySymbolicated")
+        #expect(updated.url == symbolicated)
+        #expect(updated.occurredAt == original.occurredAt)
+        #expect(updated.byteCount == 18)
+        #expect(!NativeCrashLogSource.matchesFingerprint(original.fingerprint, updated.fingerprint))
+
+        let fallback = root.appending(component: "older-format.crash")
+        try Data("Date/Time: 2024-01-02 03:04:05.1250 +0900\n".utf8).write(to: fallback)
+        #expect(try NativeCrashLogSource.inspect(rawURL: fallback).occurredAt == original.occurredAt)
+
+        let bounded = root.appending(component: "no-date-in-header.crash")
+        try Data((String(repeating: "x", count: 16 * 1024) + "\nDate/Time: 2024-01-02 03:04:05.1250 +0900\n").utf8).write(to: bounded)
+        #expect(try NativeCrashLogSource.inspect(rawURL: bounded).occurredAt == nil)
     }
 
     @Test func aColdCacheIsAbsentWhileAnUnreadableCacheRetainsItsFailure() throws {

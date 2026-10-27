@@ -18,57 +18,55 @@ struct NativeCrashToolCorrectionTests {
         let artifacts = root.appending(component: "request")
         try FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: false)
         let context = NativeToolContext(artifactsDirectory: artifacts, artifactsRoot: root, conversationID: "crash-cache")
-        let key: JSONValue = .object([
-            "bundleId": .string("example.App"), "platform": .string("com.apple.platform.macosx"),
-            "uploadPlatform": .string("com.apple.platform.iphoneos"), "appVersion": .null, "isBeta": .null,
-            "timePeriod": .string("last14Days"), "allPages": .bool(false),
-            "page": .number(.int(0)), "pageSize": .number(.int(25)),
-        ])
-        let store = NativeCrashStore(root: root.appending(component: "CrashAnalytics"))
+        let query = NativeCrashQuery(bundleIdentifier: "example.App", platformIdentifier: "com.apple.platform.macosx",
+            uploadPlatformIdentifier: "com.apple.platform.iphoneos", appVersion: nil, isBeta: nil,
+            timePeriod: "last14Days", pageIndex: 0, pageSize: 25, collectsAllPages: true)
+        let key = query.json(issueID: nil)
+        let store = NativeCrashStore(root: context.crashCacheRoot.appending(component: "SourceSnapshots"))
         let originalTime = "2024-01-01T00:00:00Z"
         let saved = try store.write(.object(["points": .array([])]), key: key, fetchedAt: originalTime)
         let bytes = try Data(contentsOf: URL(fileURLWithPath: saved.path))
         let input: JSONValue = .object([
             "workspaceIdentifier": .string("unavailable-workspace"), "bundle_id": .string("example.App"),
-            "platform": .string("macOS"), "upload_platform": .string("iOS"),
-            "page": .number(.int(0)), "source": .string(source),
+            "platform": .string("macOS"), "upload_platform": .string("iOS"), "source": .string(source),
         ])
         let correction = NativeCrashToolCorrection(installation: installation)
-        let stream = try correction.execute(.topIssues, input: NativeCrashStore.encode(input), context: context)
-        var events: [[String: JSONValue]] = []
-        for await event in stream { events.append(try NativeCrashStore.object(event)) }
-
-        let event = try #require(events.last)
-        guard case .object(let result) = event["data"], case .object(let provenance) = result["provenance"],
-              case .array(let errors) = result["errors"] else {
-            Issue.record("A cached crash response must preserve its structured result")
+        let result = try await execute(.sync, input: input, correction: correction, context: context)
+        guard case .string(let metadataPath) = result["metadataPath"] else {
+            Issue.record("Sync must retain its source metadata without returning all records")
             return
         }
-        #expect(event["type"] == .string("completed"))
-        #expect(result["query"] == key)
-        #expect(result["issues"] == .array([]))
-        #expect(provenance["source"] == .string("cache"))
-        #expect(provenance["fetchedAt"] == .string(originalTime))
-        if source == "cache" {
-            #expect(result["status"] == .string("complete"))
-            #expect(errors.isEmpty)
-        } else {
-            #expect(result["status"] == .string("partial"))
+        let metadata = try NativeCrashStore.object(Data(contentsOf: URL(fileURLWithPath: metadataPath)))
+        let provenance = try nativeTestField(.object(metadata), "provenance")
+        #expect(try nativeTestField(provenance, "source") == .string("cache"))
+        #expect(try nativeTestField(provenance, "fetchedAt") == .string(originalTime))
+        guard case .array(let errors) = result["errors"] else { throw FixtureError.missingField }
+        if source == "cache" { #expect(errors.isEmpty) }
+        else {
             #expect(errors.count == 1)
-            guard case .object(let failure) = try #require(errors.first) else { return }
-            #expect(failure["operation"] == .string("download"))
-            #expect(failure["message"] == .string("Xcode's product manager is unavailable"))
+            #expect(try nativeTestField(try #require(errors.first), "operation") == .string("download"))
+            #expect(try nativeTestField(try #require(errors.first), "message") == .string("Xcode's product manager is unavailable"))
         }
         #expect(try Data(contentsOf: URL(fileURLWithPath: saved.path)) == bytes)
+
+        let read = try await execute(.read, input: .object(["bundle_id": .string("example.App"),
+            "platform": .string("macOS"), "upload_platform": .string("iOS")]),
+            correction: correction, context: context)
+        #expect(read["changes"] == .array([]))
+        guard case .string = read["checkpoint"] else {
+            Issue.record("A locally completed empty read must issue a checkpoint")
+            return
+        }
+        #expect(try nativeTestField(.object(read), "cacheInfo", "readComplete") == .bool(true))
     }
 
-    @Test func aRecoveredSampleIsSavedWithoutReplacingTheCachedDistribution() throws {
+    @Test func aRecoveredSampleIsImportedWithoutReplacingTheCachedDistribution() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let contents = root.appending(path: "Xcode.app/Contents")
-        try FileManager.default.createDirectory(at: contents.appending(path: "Frameworks/IDEFoundation.framework"),
-                                               withIntermediateDirectories: true)
-        let installation = try NativeXcodeInstallation(developerDirectory: contents.appending(component: "Developer"))
+        let primaryLogs = root.appending(component: "primary-logs")
+        let recoveredLogs = root.appending(component: "recovered-logs")
+        try FileManager.default.createDirectory(at: primaryLogs, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: recoveredLogs, withIntermediateDirectories: true)
         let query = NativeCrashQuery(bundleIdentifier: "example.App", platformIdentifier: "com.apple.platform.iphoneos",
             uploadPlatformIdentifier: "com.apple.platform.iphoneos", appVersion: nil, isBeta: nil,
             timePeriod: "last14Days", pageIndex: 0, pageSize: 25)
@@ -77,33 +75,44 @@ struct NativeCrashToolCorrectionTests {
                 "uniqueDeviceCountForTimePeriod": .number(.int(9)), "timeDistributionDatas": .array([])])]),
         ])])])
         let text = "Exception Type: EXC_BAD_ACCESS\nThread 0 Crashed:\n0   Fixture.crash()\n"
+        try Data(text.utf8).write(to: recoveredLogs.appending(component: "sample.crash"))
         let failure: JSONValue = .object(["operation": .string("organizerIssueRefresh"), "message": .string("Refresh failed")])
-        let loaded = NativeCrashData.Loaded(value: .object(["distribution": distribution, "logs": .array([])]),
+        let loaded = NativeCrashData.Loaded(value: .object(["distribution": distribution, "logDirectory": .string(primaryLogs.path)]),
             source: "cache", fetchedAt: "2024-01-01T00:00:00Z",
             recovery: NativeCrashData.Fetched(value: .object(["cachedDistribution": distribution,
-                "sampleFreshness": .string("unverifiedSavedSamples"),
-                "logs": .array([.object(["data": .string(Data(text.utf8).base64EncodedString())])])]),
-                fetchedAt: nil, source: "organizerCache", errors: [failure], isComplete: false), errors: [failure])
+                "sampleFreshness": .string("unverifiedSavedSamples"), "logDirectory": .string(recoveredLogs.path)]),
+                fetchedAt: nil, source: "organizerCache", errors: [failure], isComplete: false), errors: [failure], isComplete: true)
+        let snapshot = try NativeCrashToolCorrection.snapshot(collection: .logs, query: query, issueID: "stable-issue", loaded: loaded)
+        #expect(try nativeTestField(snapshot.metadata, "provenance", "source") == .string("cache"))
+        #expect(try nativeTestField(snapshot.metadata, "provenance", "fetchedAt") == .string("2024-01-01T00:00:00Z"))
+        #expect(try nativeTestField(snapshot.metadata, "timeSeries", "uniqueDeviceCountForTimePeriod") == .number(.int(9)))
+        #expect(try nativeTestField(snapshot.metadata, "recovery", "provenance", "fetchedAt") == .null)
+        #expect(try nativeTestField(snapshot.metadata, "recovery", "native", "sampleFreshness") == .string("unverifiedSavedSamples"))
+        #expect(try nativeTestField(snapshot.metadata, "importProvenance", "source") == .string("organizerCache"))
+        #expect(try nativeTestField(snapshot.metadata, "importProvenance", "fetchedAt") == .null)
+        #expect(!snapshot.isComplete)
 
-        let correction = NativeCrashToolCorrection(installation: installation)
-        let response = try correction.response(.logs, query: query, loaded: loaded, issueID: "stable-issue", directory: root)
-
-        #expect(try nativeTestField(.object(response), "provenance", "source") == .string("cache"))
-        #expect(try nativeTestField(.object(response), "provenance", "fetchedAt") == .string("2024-01-01T00:00:00Z"))
-        #expect(try nativeTestField(.object(response), "timeSeries", "uniqueDeviceCountForTimePeriod") == .number(.int(9)))
-        #expect(response["sampleLogCount"] == .number(.int(0)))
-        #expect(response["errors"] == .array([failure]))
-        let recovered = try nativeTestField(.object(response), "recovery")
-        #expect(try nativeTestField(recovered, "status") == .string("partial"))
-        #expect(try nativeTestField(recovered, "provenance", "source") == .string("organizerCache"))
-        #expect(try nativeTestField(recovered, "provenance", "fetchedAt") == .null)
-        #expect(try nativeTestField(recovered, "native", "sampleFreshness") == .string("unverifiedSavedSamples"))
-        #expect(try nativeTestField(recovered, "sampleLogCount") == .number(.int(1)))
-        guard case .array(let logs) = try nativeTestField(recovered, "logs"),
-              case .string(let path) = try nativeTestField(try #require(logs.first), "path") else {
-            Issue.record("Recovery must expose a saved sample path")
-            return
-        }
+        let store = try NativeCrashSyncStore(root: root.appending(component: "cache"))
+        let sync = try await store.synchronize(snapshot, maxRecords: 100, maxBytes: 64 * 1024 * 1024)
+        #expect(try nativeTestField(sync, "cacheInfo", "sourceComplete") == .bool(false))
+        let read = try await store.readChanges(collection: .logs, query: snapshot.query, checkpoint: nil,
+            limit: 25, maxBytes: 256 * 1024, order: .observedNewestFirst)
+        guard case .array(let changes) = try nativeTestField(read, "changes") else { throw FixtureError.missingField }
+        #expect(changes.count == 1)
+        guard case .string(let path) = try nativeTestField(try #require(changes.first), "path") else { throw FixtureError.missingField }
         #expect(try String(contentsOfFile: path, encoding: .utf8) == text)
     }
+
+    private func execute(_ kind: NativeCrashToolCorrection.Kind, input: JSONValue,
+                         correction: NativeCrashToolCorrection, context: NativeToolContext) async throws -> [String: JSONValue] {
+        let stream = try correction.execute(kind, input: NativeCrashStore.encode(input), context: context)
+        var events: [[String: JSONValue]] = []
+        for await event in stream { events.append(try NativeCrashStore.object(event)) }
+        let event = try #require(events.last)
+        #expect(event["type"] == .string("completed"))
+        guard case .object(let result) = event["data"] else { throw FixtureError.missingField }
+        return result
+    }
+
+    private enum FixtureError: Error { case missingField }
 }

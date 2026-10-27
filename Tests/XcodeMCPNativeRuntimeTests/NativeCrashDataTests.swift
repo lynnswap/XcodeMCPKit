@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import Testing
 import XcodeMCPWire
@@ -6,29 +5,51 @@ import XcodeMCPWire
 
 @Suite
 struct NativeCrashDataTests {
-    @Test func crashRequestsDecodeThePublishedSelectionAndPagingInputs() throws {
-        let input = Data(#"{"workspaceIdentifier":"workspace","bundle_id":"example.App","platform":"iOS","app_version":"2.0","is_beta":false,"time_period":"last365Days","page":2,"page_size":25,"issue_id":"stable-issue","source":"cache"}"#.utf8)
-        let request = try JSONDecoder().decode(NativeCrashRequest.self, from: input)
-        #expect(request.workspaceIdentifier == "workspace")
-        #expect(request.bundleIdentifier == "example.App")
-        #expect(request.platform == "iOS")
-        #expect(request.appVersion == "2.0")
-        #expect(request.isBeta == false)
-        #expect(request.timePeriod == "last365Days")
-        #expect(request.pageIndex == 2)
-        #expect(request.pageSize == 25)
-        #expect(request.issueID == "stable-issue")
+    @Test func syncRequestsDecodeThePublishedSelectionAndImportBudget() throws {
+        let input = Data(#"{"workspaceIdentifier":"workspace","bundle_id":"example.App","platform":"iOS","app_version":"2.0","is_beta":false,"time_period":"last365Days","collection":"issues","source":"cache","max_records":3,"max_bytes":4096}"#.utf8)
+        let request = try JSONDecoder().decode(NativeCrashSyncRequest.self, from: input)
+        #expect(request.query.workspaceIdentifier == "workspace")
+        #expect(request.query.bundleIdentifier == "example.App")
+        #expect(request.query.platform == "iOS")
+        #expect(request.query.appVersion == "2.0")
+        #expect(request.query.isBeta == false)
+        #expect(request.query.timePeriod == "last365Days")
+        #expect(request.query.specifiedFields.contains("time_period"))
+        #expect(request.collection == .issues)
+        #expect(request.maxRecords == 3)
+        #expect(request.maxBytes == 4096)
         #expect(request.source == .cache)
     }
 
-    @Test func aMinimalRequestCollectsAllPagesWithNativePeriodDefaults() throws {
-        let request = try JSONDecoder().decode(NativeCrashRequest.self, from: Data(#"{"bundle_id":"example.App","platform":"iOS"}"#.utf8))
-        #expect(request.timePeriod == "last14Days")
-        #expect(request.pageIndex == nil)
-        #expect(request.pageSize == 25)
+    @Test func aMinimalSyncRequestKeepsQueryAndImportDefaults() throws {
+        let request = try JSONDecoder().decode(NativeCrashSyncRequest.self, from: Data(#"{"bundle_id":"example.App","platform":"iOS"}"#.utf8))
+        #expect(request.query.timePeriod == "last14Days")
+        #expect(!request.query.specifiedFields.contains("time_period"))
+        #expect(request.collection == nil)
+        #expect(request.maxRecords == 100)
+        #expect(request.maxBytes == 64 * 1024 * 1024)
         #expect(request.source == .network)
-        #expect(request.appVersion == nil)
-        #expect(request.isBeta == nil)
+        #expect(request.query.appVersion == nil)
+        #expect(request.query.isBeta == nil)
+    }
+
+    @Test func readContinuationsKeepTokenScopeAndRejectConflictingTokensOrInvalidBudgets() throws {
+        let request = try JSONDecoder().decode(NativeCrashReadRequest.self, from: Data(#"{"cursor":"read-cursor"}"#.utf8))
+        #expect(request.query.bundleIdentifier == nil)
+        #expect(request.query.specifiedFields.isEmpty)
+        #expect(request.collection == nil)
+        #expect(request.order == nil)
+        #expect(request.limit == 25)
+        #expect(request.maxBytes == 256 * 1024)
+        #expect(throws: NativeRuntimeError.self) {
+            try JSONDecoder().decode(NativeCrashReadRequest.self, from: Data(#"{"cursor":"read-cursor","checkpoint":"baseline"}"#.utf8))
+        }
+        #expect(throws: NativeRuntimeError.self) {
+            try JSONDecoder().decode(NativeCrashReadRequest.self, from: Data(#"{"max_bytes":0}"#.utf8))
+        }
+        #expect(throws: NativeRuntimeError.self) {
+            try JSONDecoder().decode(NativeCrashSyncRequest.self, from: Data(#"{"max_records":0}"#.utf8))
+        }
     }
 
     @Test @MainActor func networkFallbackUsesOnlyTheExactCachedRequestAndItsOriginalFetchTime() async throws {
@@ -71,16 +92,19 @@ struct NativeCrashDataTests {
             "timeSeriesDistribution": .object(["timeDistributionMetaDatas": .array([
                 .object(["timePeriod": .string("last14Days"), "subTotal": .number(.int(12))]),
             ])]),
-        ])]), "logs": .array([])])
+        ])]), "logDirectory": .string(root.appendingPathComponent("Logs").path)])
         let originalTime = "2024-01-01T00:00:00Z"
         let cachedError = NativeCrashData.diagnostic(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError),
             operation: "organizerLogRead")
         let entry = try store.write(original, key: key, fetchedAt: originalTime, errors: [cachedError])
         let originalEnvelope = try Data(contentsOf: URL(fileURLWithPath: entry.path))
         let pointURL = root.appendingPathComponent("PointInfo.json")
+        let logDirectory = root.appendingPathComponent("Logs")
+        try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: false)
+        try Data("saved sample".utf8).write(to: logDirectory.appendingPathComponent("saved.crash"))
         let saved = NativeOrganizerCrashCache.IssueSnapshot(pointInfo: .object([:]), pointInfoURL: pointURL,
             distribution: nil, distributionURL: root.appendingPathComponent("DistributionInfo.json"), fetchedAt: nil,
-            logs: [.init(url: root.appendingPathComponent("saved.crash"), data: Data("saved sample".utf8))])
+            logDirectory: logDirectory)
         let recovered = try NativeOrganizerCrashService.recoverIssue(.init(snapshot: saved),
             after: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut))
 
@@ -90,6 +114,7 @@ struct NativeCrashDataTests {
         #expect(fallback.value == original)
         #expect(fallback.fetchedAt == originalTime)
         #expect(fallback.errors == recovered.errors + [cachedError])
+        #expect(fallback.isComplete)
         #expect(fallback.recovery?.value == recovered.value)
         #expect(fallback.recovery?.source == "organizerCache")
         #expect(fallback.recovery?.fetchedAt == nil)
@@ -101,6 +126,7 @@ struct NativeCrashDataTests {
         #expect(network.fetchedAt == nil)
         #expect(network.cachePath == nil)
         #expect(network.errors == recovered.errors)
+        #expect(!network.isComplete)
         #expect(try Data(contentsOf: URL(fileURLWithPath: entry.path)) == originalEnvelope)
 
         let emptyStore = NativeCrashStore(root: root.appendingPathComponent("empty"))
@@ -109,6 +135,7 @@ struct NativeCrashDataTests {
         #expect(uncached.value == recovered.value)
         #expect(uncached.fetchedAt == nil)
         #expect(uncached.errors == recovered.errors)
+        #expect(!uncached.isComplete)
         #expect(try emptyStore.read(key: key)?.value == recovered.value)
     }
 
@@ -163,6 +190,7 @@ struct NativeCrashDataTests {
         #expect(result.source == "organizer")
         #expect(result.fetchedAt != nil)
         #expect(result.cachePath == nil)
+        #expect(result.isComplete)
         let error = try #require(result.errors.first)
         #expect(try nativeTestField(error, "operation") == .string("cacheWrite"))
         #expect(try Data(contentsOf: root) == occupied)
@@ -205,9 +233,9 @@ struct NativeCrashDataTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = NativeCrashStore(root: root)
         let failure = NativeCrashData.diagnostic(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError), operation: "organizerLogRead")
-        let value: JSONValue = .object(["logs": .array([.object(["data": .string("c2FtcGxl")])])])
+        let value: JSONValue = .object(["logDirectory": .string(root.appendingPathComponent("Logs").path)])
         let fetched = try await NativeCrashData.load(key: cacheKey(), source: .network, store: store) {
-            NativeCrashData.Fetched(value: value, fetchedAt: "2024-01-04T00:00:00Z", errors: [failure])
+            NativeCrashData.Fetched(value: value, fetchedAt: "2024-01-04T00:00:00Z", errors: [failure], isComplete: false)
         }
         let cached = try await NativeCrashData.load(key: cacheKey(), source: .cache, store: store) {
             Issue.record("A cache-only read must not operate Organizer")
@@ -216,38 +244,41 @@ struct NativeCrashDataTests {
         #expect(cached.value == fetched.value)
         #expect(cached.errors == [failure])
         #expect(cached.fetchedAt == "2024-01-04T00:00:00Z")
+        #expect(!cached.isComplete)
     }
 
     @Test(arguments: [false, true])
-    func advertisedCrashContractsUseInputsThatTheRequestDecoderAccepts(detail: Bool) throws {
-        let oldDescriptor: JSONValue = .object(["name": .string("LegacyCrashTool")])
-        let native = NativeTool(name: "LegacyCrashTool", descriptor: oldDescriptor, workspaceScoped: false)
-        let tool = NativeCrashContract.describe(native, detail: detail)
+    func advertisedCrashContractsUseInputsThatTheRequestDecoderAccepts(read: Bool) throws {
+        let tool = NativeCrashContract.describe(read ? .read : .sync)
         let properties = try nativeTestObject(nativeTestField(tool.descriptor, "inputSchema", "properties"))
-        var arguments: [String: JSONValue] = ["bundle_id": .string("example.App"), "platform": .string("iOS")]
+        var arguments: [String: JSONValue] = read ? ["cursor": .string("read-cursor")]
+            : ["bundle_id": .string("example.App"), "platform": .string("iOS"), "issue_id": .string("stable-issue")]
         for (name, descriptor) in properties {
             if let value = try nativeTestObject(descriptor)["default"] { arguments[name] = value }
         }
-        arguments[detail ? "issue_id" : "page"] = detail ? .string("stable-issue") : .number(.int(2))
         #expect(Set(arguments.keys).isSubset(of: Set(properties.keys)))
-
-        let request = try JSONDecoder().decode(NativeCrashRequest.self, from: NativeCrashStore.encode(.object(arguments)))
-
-        #expect(tool.name == (detail ? "GetCrashIssue" : "ListCrashIssues"))
-        #expect(try nativeTestField(tool.descriptor, "inputSchema", "required") == .array(detail ? [.string("issue_id")] : []))
-        #expect(request.bundleIdentifier == "example.App")
-        #expect(request.timePeriod == "last14Days")
-        #expect(request.source == .network)
-        if detail { #expect(request.issueID == "stable-issue") }
-        else {
-            #expect(request.pageIndex == 2)
-            #expect(request.pageSize == 25)
+        #expect(tool.name == (read ? "ReadCrashChanges" : "SyncCrashReports"))
+        #expect(try nativeTestField(tool.descriptor, "inputSchema", "required") == .array([]))
+        let data = try NativeCrashStore.encode(.object(arguments))
+        if read {
+            let request = try JSONDecoder().decode(NativeCrashReadRequest.self, from: data)
+            #expect(request.cursor == "read-cursor")
+            #expect(request.collection == nil)
+            #expect(request.order == nil)
+            #expect(request.limit == 25)
+            #expect(request.maxBytes == 256 * 1024)
+            #expect(properties["workspaceIdentifier"] == nil)
+        } else {
+            let request = try JSONDecoder().decode(NativeCrashSyncRequest.self, from: data)
+            #expect(request.query.bundleIdentifier == "example.App")
+            #expect(request.query.issueID == "stable-issue")
+            #expect(request.source == .network)
+            #expect(request.maxRecords == 100)
+            #expect(request.maxBytes == 64 * 1024 * 1024)
         }
         let output = try nativeTestObject(nativeTestField(tool.descriptor, "outputSchema", "properties"))
-        #expect(output[detail ? "timeSeries" : "pagination"] != nil)
-        #expect(output[detail ? "logs" : "issues"] != nil)
         #expect(output["errors"] != nil)
-        #expect(output["provenance"] != nil)
+        #expect(output["collection"] != nil)
     }
 
     @Test func aCacheEnvelopeWithAnotherRequestIsNeverReturned() throws {
@@ -305,33 +336,6 @@ struct NativeCrashDataTests {
         #expect(try nativeTestField(series, "metric") == .string("uniqueDevices"))
         #expect(try nativeTestField(series, "nativeGranularity") == .number(.int(1)))
         #expect(try nativeTestField(series, "granularity") == .string("day"))
-    }
-
-    @Test func aSampleWriteFailureDoesNotDiscardSuccessfullySavedPlainTextLogs() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let text = "Exception Type: EXC_BAD_ACCESS\nThread 0 Crashed:\n0   アプリ.start() + 32\n"
-        let unwritableText = "Exception Type: EXC_CRASH\nThread 1 Crashed:\n0   App.launch() + 64\n"
-        let blockedPath = directory.appendingPathComponent(SHA256.hash(data: Data(unwritableText.utf8)).hexString + ".crash")
-        try FileManager.default.createDirectory(at: blockedPath, withIntermediateDirectories: false)
-        let response: [String: JSONValue] = ["logs": .array([
-            .object(["data": .string(Data(text.utf8).base64EncodedString())]),
-            .object(["data": .string(Data(unwritableText.utf8).base64EncodedString())]),
-        ])]
-
-        let result = NativeCrashData.saveLogs(response, directory: directory)
-
-        #expect(result.logs.count == 1)
-        #expect(result.errors.count == 1)
-        let log = try #require(result.logs.first)
-        guard case .string(let path) = try nativeTestField(log, "path") else {
-            Issue.record("A saved sample must provide its local path")
-            return
-        }
-        #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == Data(text.utf8))
-        let failure = try #require(result.errors.first)
-        #expect(try nativeTestField(failure, "operation") == .string("logWrite"))
     }
 
     @Test func aMissingRequestedPeriodDoesNotUseAnotherPeriod() throws {

@@ -8,6 +8,7 @@ package actor NativeMCPSession {
     private var failed = false
     private var shutdownTask: Task<Void, any Error>?
     private let artifactsRoot: URL
+    private let crashCacheRoot: URL
     private let executionQueue: NativeExecutionQueue
     /// The `_meta` key that names the calling MCP session.
     package static let conversationKey = "com.lynnswap.xcode-mcpkit/conversation"
@@ -20,9 +21,11 @@ package actor NativeMCPSession {
     package init(backend: any NativeToolBackend, artifactsRoot: URL,
                  maximumConcurrentOperations: Int = 4, maximumHeavyOperations: Int = 1,
                  maximumQueuedBytes: Int = 32 * 1024 * 1024,
+                 crashCacheRoot: URL? = nil,
                  output: @escaping @Sendable (Data) throws -> Void) {
         self.backend = backend
         self.artifactsRoot = artifactsRoot
+        self.crashCacheRoot = crashCacheRoot ?? artifactsRoot.appendingPathComponent("CrashCache", isDirectory: true)
         self.output = output
         executionQueue = NativeExecutionQueue(maximumConcurrentOperations: maximumConcurrentOperations,
             maximumHeavyOperations: maximumHeavyOperations, maximumQueuedBytes: maximumQueuedBytes)
@@ -195,7 +198,7 @@ package actor NativeMCPSession {
             artifactsDirectory: directory, artifactsRoot: artifactsRoot,
             conversationID: NativeWorkspaceSelection.string(metadata[Self.conversationKey]) ?? conversationID,
             selection: NativeWorkspaceSelection(json: metadata[NativeWorkspaceSelection.metadataKey]),
-            executionResource: resource)
+            executionResource: resource, crashCacheRoot: crashCacheRoot)
         return try await NativeExecutionOperations.$scope.withValue(context.executionScope) {
             try await withTaskCancellationHandler {
                 try await executeTool(params: params, name: name, arguments: arguments, context: context)

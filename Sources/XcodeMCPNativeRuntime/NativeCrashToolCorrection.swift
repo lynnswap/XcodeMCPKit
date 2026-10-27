@@ -5,19 +5,11 @@ import XcodeMCPWire
 @safe
 @MainActor
 final class NativeCrashToolCorrection {
-    enum Kind {
-        case topIssues, logs
+    enum Kind: String, CaseIterable {
+        case sync = "SyncCrashReports"
+        case read = "ReadCrashChanges"
 
-        var toolName: String { self == .topIssues ? "ListCrashIssues" : "GetCrashIssue" }
-
-        static func forAction(_ action: NativeActionClass) -> Kind? {
-            let type = unsafe unsafeBitCast(action.metadata, to: Any.Type.self)
-            switch String(reflecting: type) {
-            case "IDEAnalyticsKit.GetTopCrashIssuesAction": return .topIssues
-            case "IDEAnalyticsKit.GetCrashIssueLogsAction": return .logs
-            default: return nil
-            }
-        }
+        var toolName: String { rawValue }
     }
 
     private let runtime = ABIRuntime.shared
@@ -31,19 +23,14 @@ final class NativeCrashToolCorrection {
     }
 
     func execute(_ kind: Kind, input: Data, context: NativeToolContext) throws -> AsyncStream<Data> {
-        let parameters: NativeCrashRequest
-        do { parameters = try JSONDecoder().decode(NativeCrashRequest.self, from: input) }
-        catch let error as DecodingError { throw NativeRuntimeError.invalidRequest(String(describing: error)) }
-        if kind == .logs {
-            guard let id = parameters.issueID, !id.isEmpty else {
-                throw NativeRuntimeError.invalidRequest("GetCrashIssue requires issue_id from ListCrashIssues")
+        let operation: Operation
+        do {
+            switch kind {
+            case .sync: operation = .sync(try JSONDecoder().decode(NativeCrashSyncRequest.self, from: input))
+            case .read: operation = .read(try JSONDecoder().decode(NativeCrashReadRequest.self, from: input))
             }
-            guard parameters.isBeta == nil else {
-                throw NativeRuntimeError.invalidRequest("GetCrashIssue cannot filter sample logs by is_beta; the native service does not support that filter")
-            }
-            guard parameters.appVersion == nil else {
-                throw NativeRuntimeError.invalidRequest("GetCrashIssue returns Organizer's samples and distributions for all app versions; use app_version on ListCrashIssues")
-            }
+        } catch let error as DecodingError {
+            throw NativeRuntimeError.invalidRequest(String(describing: error))
         }
         let result = AsyncStream<Data>.makeStream()
         let identifier = UUID()
@@ -54,52 +41,95 @@ final class NativeCrashToolCorrection {
             }
             do {
                 try Task.checkCancellation()
-                let query: NativeCrashQuery
-                switch try await resolve(parameters) {
-                case .resolved(let value): query = value
-                case .selectionRequired(let identifiers):
-                    throw NativeRuntimeError.invalidRequest("Specify bundle_id. Available apps: " + identifiers.joined(separator: ", "))
-                case .platformSelectionRequired(_, let platforms):
-                    throw NativeRuntimeError.invalidRequest("Specify platform. Available platforms: " + platforms.joined(separator: ", "))
-                }
-                let key = query.json(issueID: kind == .logs ? parameters.issueID : nil)
-                let store = NativeCrashStore(root: context.artifactsRoot.appendingPathComponent("CrashAnalytics", isDirectory: true))
-                let loaded = try await NativeCrashData.load(key: key, source: parameters.source, store: store) { [self] in
-                    let prepared = try await serviceQuery(query)
-                    if kind == .topIssues { return try await service.fetchIssues(prepared, store: store) }
-                    return try await service.fetchIssue(prepared, issueID: parameters.issueID!)
+                let store = try NativeCrashSyncStore(root: context.crashCacheRoot)
+                let payload: JSONValue
+                switch operation {
+                case .sync(let request):
+                    if let cursor = request.cursor {
+                        payload = try await store.resumeSync(cursor,
+                            matching: Self.constraints(request.query, collection: request.collection,
+                                options: request.specifiedFields.contains("max_records") ? ["max_records": request.maxRecords] : [:],
+                                maxBytes: request.specifiedFields.contains("max_bytes") ? request.maxBytes : nil))
+                    } else {
+                        let collection = try Self.collection(request.collection, input: request.query)
+                        let query: NativeCrashQuery
+                        switch try await resolve(request.query) {
+                        case .resolved(let value): query = value
+                        case .selectionRequired(let identifiers):
+                            throw NativeRuntimeError.invalidRequest("Specify bundle_id. Available apps: " + identifiers.joined(separator: ", "))
+                        case .platformSelectionRequired(_, let platforms):
+                            throw NativeRuntimeError.invalidRequest("Specify platform. Available platforms: " + platforms.joined(separator: ", "))
+                        }
+                        let sourceStore = NativeCrashStore(root: context.crashCacheRoot.appending(component: "SourceSnapshots"))
+                        let loaded = try await NativeCrashData.load(key: query.json(issueID: collection == .logs ? request.query.issueID : nil),
+                            source: request.source, store: sourceStore) { [self] in
+                            let prepared = try await serviceQuery(query)
+                            if collection == .issues { return try await service.fetchIssues(prepared, store: sourceStore) }
+                            return try await service.fetchIssue(prepared, issueID: request.query.issueID!)
+                        }
+                        let snapshot = try Self.snapshot(collection: collection, query: query,
+                            issueID: request.query.issueID, loaded: loaded)
+                        payload = try await store.synchronize(snapshot, maxRecords: request.maxRecords, maxBytes: request.maxBytes)
+                    }
+                case .read(let request):
+                    if let cursor = request.cursor {
+                        payload = try await store.resumeRead(cursor,
+                            matching: Self.constraints(request.query, collection: request.collection, order: request.order,
+                                options: request.specifiedFields.contains("limit") ? ["limit": request.limit] : [:],
+                                maxBytes: request.specifiedFields.contains("max_bytes") ? request.maxBytes : nil))
+                    } else {
+                        let query: JSONValue?
+                        let collection: NativeCrashCollection?
+                        if request.checkpoint != nil {
+                            collection = request.collection
+                            query = try Self.constraints(request.query, collection: request.collection)
+                        } else {
+                            let resolved = try Self.collection(request.collection, input: request.query)
+                            collection = resolved
+                            query = try Self.scope(Self.explicitQuery(request.query), collection: resolved,
+                                issueID: request.query.issueID)
+                        }
+                        let order = request.order ?? .observedNewestFirst
+                        if collection == .issues, order == .occurredAtDescending {
+                            throw NativeRuntimeError.invalidRequest("occurredAtDescending is available only for logs")
+                        }
+                        payload = try await store.readChanges(collection: collection, query: query,
+                            checkpoint: request.checkpoint, limit: request.limit, maxBytes: request.maxBytes, order: order)
+                    }
                 }
                 try Task.checkCancellation()
-                var payload: [String: JSONValue]
-                do {
-                    payload = try response(kind, query: query, loaded: loaded, issueID: parameters.issueID,
-                                           directory: context.artifactsDirectory)
-                } catch {
-                    payload = ["status": .string("failed"), "query": key, "provenance": loaded.provenance,
-                        "errors": .array(loaded.errors + [NativeCrashData.diagnostic(error, operation: "normalize")])]
-                }
-                let path = context.artifactsDirectory.appendingPathComponent("crash-response.json")
-                payload["responsePath"] = .string(path.path)
-                do { try NativeCrashStore.encode(.object(payload)).write(to: path, options: .atomic) }
-                catch {
-                    var errors = loaded.errors
-                    if case .array(let existing) = payload["errors"] { errors = existing }
-                    errors.append(NativeCrashData.diagnostic(error, operation: "responseWrite"))
-                    payload["errors"] = .array(errors)
-                    payload["status"] = .string(loaded.value == nil ? "failed" : "partial")
-                    payload.removeValue(forKey: "responsePath")
-                }
-                let failed = payload["status"] == .string("failed")
-                result.continuation.yield(try event(failed ? "error" : "completed", data: .object(payload)))
+                let failed: Bool
+                if case .object(let fields) = payload { failed = fields["status"] == .string("failed") }
+                else { failed = false }
+                result.continuation.yield(try event(failed ? "error" : "completed", data: payload))
             } catch is CancellationError {
                 return
             } catch {
-                result.continuation.yield(errorEvent(error, input: parameters))
+                result.continuation.yield(errorEvent(error, operation: operation))
             }
         }
         operations[identifier] = (context.artifactsDirectory, task)
         result.continuation.onTermination = { _ in task.cancel() }
         return result.stream
+    }
+
+    private enum Operation {
+        case sync(NativeCrashSyncRequest)
+        case read(NativeCrashReadRequest)
+
+        var query: NativeCrashRequest {
+            switch self { case .sync(let request): request.query; case .read(let request): request.query }
+        }
+
+        var collection: NativeCrashCollection? {
+            switch self {
+            case .sync(let request):
+                request.collection ?? (request.cursor == nil ? (request.query.issueID == nil ? .issues : .logs) : nil)
+            case .read(let request):
+                request.collection ?? (request.cursor == nil && request.checkpoint == nil
+                    ? (request.query.issueID == nil ? .issues : .logs) : nil)
+            }
+        }
     }
 
     func cancelPendingOperations() {
@@ -137,76 +167,116 @@ final class NativeCrashToolCorrection {
         throw NativeRuntimeError.unavailable("No App Store product matches \(query.bundleIdentifier) on upload platform \(query.uploadPlatformIdentifier)")
     }
 
-    func response(_ kind: Kind, query: NativeCrashQuery, loaded: NativeCrashData.Loaded,
-                          issueID: String?, directory: URL) throws -> [String: JSONValue] {
-        var errors = loaded.errors
-        var result: [String: JSONValue] = ["query": query.json(issueID: kind == .logs ? issueID : nil),
-            "provenance": loaded.provenance]
-        if case .object(var native)? = loaded.value {
-            if kind == .topIssues {
-                guard case .array(let points) = native["points"] else {
-                    throw NativeRuntimeError.unsupportedContract("Native crash list has no points array")
-                }
-                result["issues"] = .array(try points.map(NativeCrashData.issue))
-                result["pages"] = native.removeValue(forKey: "pages") ?? .array([.object([
-                    "query": query.json(issueID: nil), "status": .string(errors.isEmpty ? "complete" : "partial"),
-                    "returnedCount": .number(.int(Int64(points.count))),
-                    "source": loaded.source.map(JSONValue.string) ?? .null,
-                    "fetchedAt": loaded.fetchedAt.map(JSONValue.string) ?? .null,
-                    "cachePath": loaded.cachePath.map(JSONValue.string) ?? .null,
-                ])])
-                let pagination = native.removeValue(forKey: "pagination")
-                var metadata = native
-                metadata.removeValue(forKey: "points")
-                result["native"] = .object(metadata)
-                let needsProbe = !points.isEmpty
-                result["pagination"] = pagination ?? .object(["page": .number(.int(Int64(query.pageIndex))),
-                    "pageSize": .number(.int(Int64(query.pageSize))), "returnedCount": .number(.int(Int64(points.count))),
-                    "hasMore": needsProbe ? .null : .bool(false),
-                    "nextPage": needsProbe ? .number(.int(Int64(query.pageIndex + 1))) : .null,
-                    "continuationRequiresProbe": .bool(needsProbe)])
-            } else {
-                result["issueId"] = issueID.map(JSONValue.string) ?? .null
-                do {
-                    guard let distribution = native["distribution"] else {
-                        throw NativeRuntimeError.unavailable("Organizer did not provide crash device distributions")
-                    }
-                    result["timeSeries"] = try NativeCrashData.timeSeries(distribution, timePeriod: query.timePeriod)
-                }
-                catch { errors.append(NativeCrashData.diagnostic(error, operation: "timeSeries")) }
-                let saved = NativeCrashData.saveLogs(native, directory: directory)
-                errors += saved.errors
-                let logs = saved.logs
-                native.removeValue(forKey: "logs")
-                result["logs"] = .array(logs)
-                result["sampleLogCount"] = .number(.int(Int64(logs.count)))
-                result["native"] = .object(native)
-                result["logFilters"] = .object(["appVersion": query.appVersion.map(JSONValue.string) ?? .null,
-                    "isBeta": .null, "limitation": .string("Organizer's saved samples and distributions cover all app versions and release channels. Saved samples can include previously downloaded logs; their count is not the number of crashes or devices.")])
+    static func collection(_ explicit: NativeCrashCollection?, input: NativeCrashRequest) throws -> NativeCrashCollection {
+        let collection = explicit ?? (input.issueID == nil ? .issues : .logs)
+        if collection == .logs {
+            guard let issueID = input.issueID, !issueID.isEmpty else {
+                throw NativeRuntimeError.invalidRequest("Log synchronization and reading require issue_id from the issues collection")
             }
-        } else if kind == .topIssues {
-            result["issues"] = .array([])
-            result["pagination"] = .object(["page": .number(.int(Int64(query.pageIndex))),
-                "pageSize": .number(.int(Int64(query.pageSize))), "returnedCount": .number(.int(0)),
-                "hasMore": .null, "nextPage": .number(.int(Int64(query.pageIndex))), "continuationRequiresProbe": .bool(false)])
+            guard input.appVersion == nil, input.isBeta == nil else {
+                throw NativeRuntimeError.invalidRequest("Log samples cover all app versions and release channels; app_version and is_beta apply only to issues")
+            }
+        } else if input.issueID != nil {
+            throw NativeRuntimeError.invalidRequest("issue_id identifies a logs collection; omit it for issues")
+        }
+        return collection
+    }
+
+    static func explicitQuery(_ input: NativeCrashRequest) throws -> NativeCrashQuery {
+        guard let bundle = input.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines), !bundle.isEmpty,
+              let platform = input.platform else {
+            throw NativeRuntimeError.invalidRequest("ReadCrashChanges requires bundle_id and platform, or a saved cursor/checkpoint")
+        }
+        let execution = try NativeCrashQuery.platformIdentifier(for: platform)
+        let upload = try input.uploadPlatform.map(NativeCrashQuery.platformIdentifier(for:)) ?? execution
+        return NativeCrashQuery(bundleIdentifier: bundle, platformIdentifier: execution,
+            uploadPlatformIdentifier: upload, appVersion: input.appVersion, isBeta: input.isBeta,
+            timePeriod: input.timePeriod, pageIndex: 0, pageSize: 25, collectsAllPages: true)
+    }
+
+    static func scope(_ query: NativeCrashQuery, collection: NativeCrashCollection, issueID: String?) -> JSONValue {
+        guard case .object(var fields) = query.json(issueID: collection == .logs ? issueID : nil) else { return .null }
+        fields.removeValue(forKey: "page")
+        fields.removeValue(forKey: "pageSize")
+        fields.removeValue(forKey: "allPages")
+        fields["collection"] = .string(collection.rawValue)
+        return .object(fields)
+    }
+
+    static func constraints(_ input: NativeCrashRequest, collection: NativeCrashCollection?,
+                            order: NativeCrashReadOrder? = nil, options: [String: Int] = [:],
+                            maxBytes: Int? = nil) throws -> JSONValue? {
+        var fields: [String: JSONValue] = [:]
+        for key in input.specifiedFields {
+            switch key {
+            case "bundle_id": fields["bundleId"] = input.bundleIdentifier.map { .string($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? .null
+            case "platform": fields["platform"] = try input.platform.map { .string(try NativeCrashQuery.platformIdentifier(for: $0)) } ?? .null
+            case "upload_platform": fields["uploadPlatform"] = try input.uploadPlatform.map { .string(try NativeCrashQuery.platformIdentifier(for: $0)) } ?? .null
+            case "app_version": fields["appVersion"] = input.appVersion.map(JSONValue.string) ?? .null
+            case "is_beta": fields["isBeta"] = input.isBeta.map(JSONValue.bool) ?? .null
+            case "time_period": fields["timePeriod"] = .string(input.timePeriod)
+            case "issue_id": fields["issueId"] = input.issueID.map(JSONValue.string) ?? .null
+            default: break
+            }
+        }
+        if let collection { fields["collection"] = .string(collection.rawValue) }
+        if let order { fields["order"] = .string(order.rawValue) }
+        for (key, value) in options { fields[key] = .number(.int(Int64(value))) }
+        if let maxBytes { fields["max_bytes"] = .number(.int(Int64(maxBytes))) }
+        return fields.isEmpty ? nil : .object(fields)
+    }
+
+    static func snapshot(collection: NativeCrashCollection, query: NativeCrashQuery,
+                         issueID: String?, loaded: NativeCrashData.Loaded) throws -> NativeCrashSyncSnapshot {
+        let key = scope(query, collection: collection, issueID: issueID)
+        var metadata: [String: JSONValue] = ["query": key, "provenance": loaded.provenance,
+            "importProvenance": loaded.provenance]
+        var issues: [JSONValue] = []
+        var logDirectory: URL?
+        var complete = loaded.isComplete
+        var errors = loaded.errors
+        if case .object(let native)? = loaded.value {
+            metadata["native"] = sourceMetadata(.object(native))
+            if collection == .issues {
+                if case .array(let points) = native["points"] { issues = try points.map(NativeCrashData.issue) }
+                else { throw NativeRuntimeError.unsupportedContract("Native crash list has no points array") }
+            } else {
+                if case .string(let path) = native["logDirectory"] { logDirectory = URL(fileURLWithPath: path, isDirectory: true) }
+                if let distribution = native["distribution"] {
+                    do { metadata["timeSeries"] = try NativeCrashData.timeSeries(distribution, timePeriod: query.timePeriod) }
+                    catch { errors.append(NativeCrashData.diagnostic(error, operation: "timeSeries")) }
+                }
+                metadata["logFilters"] = .object(["appVersion": .null, "isBeta": .null,
+                    "limitation": .string("Organizer's saved samples and distributions cover all app versions and release channels; saved sample counts are not crash occurrences or affected devices.")])
+            }
         }
         if let recovery = loaded.recovery {
-            let recovered = NativeCrashData.Loaded(value: recovery.value, source: recovery.source,
-                fetchedAt: recovery.fetchedAt, errors: recovery.errors)
-            do {
-                result["recovery"] = .object(try response(kind, query: query, loaded: recovered,
-                                                         issueID: issueID, directory: directory))
-            } catch {
-                let failure = NativeCrashData.diagnostic(error, operation: "recoveryNormalize")
-                errors.append(failure)
-                result["recovery"] = .object(["status": .string("failed"), "query": result["query"] ?? .null,
-                    "provenance": recovered.provenance, "native": recovery.value,
-                    "errors": .array(recovery.errors + [failure])])
+            let provenance = NativeCrashData.Loaded(value: recovery.value,
+                source: recovery.source, fetchedAt: recovery.fetchedAt, errors: recovery.errors).provenance
+            metadata["recovery"] = .object(["provenance": provenance,
+                "native": sourceMetadata(recovery.value), "errors": .array(recovery.errors)])
+            if case .object(let native) = recovery.value {
+                if collection == .logs, case .string(let path) = native["logDirectory"] {
+                    logDirectory = URL(fileURLWithPath: path, isDirectory: true)
+                    complete = recovery.isComplete
+                    metadata["importProvenance"] = provenance
+                } else if collection == .issues, case .array(let points) = native["points"] {
+                    issues = try points.map(NativeCrashData.issue)
+                    complete = recovery.isComplete
+                    metadata["importProvenance"] = provenance
+                }
             }
         }
-        result["errors"] = .array(errors)
-        result["status"] = .string(loaded.value == nil ? "failed" : errors.isEmpty ? "complete" : "partial")
-        return result
+        return NativeCrashSyncSnapshot(collection: collection, query: key, metadata: .object(metadata),
+            issues: issues, logDirectory: logDirectory, isComplete: complete, errors: errors)
+    }
+
+    private static func sourceMetadata(_ value: JSONValue) -> JSONValue {
+        guard case .object(var fields) = value else { return value }
+        for key in ["points", "issues", "logs", "organizerCache", "copiedPages"] {
+            fields.removeValue(forKey: key)
+        }
+        return .object(fields)
     }
 
     private func resolve(_ input: NativeCrashRequest) async throws -> NativeCrashResolution {
@@ -265,8 +335,7 @@ final class NativeCrashToolCorrection {
         let uploadIdentifier = try input.uploadPlatform.map(NativeCrashQuery.platformIdentifier(for:)) ?? executionIdentifier
         return .resolved(NativeCrashQuery(bundleIdentifier: bundle, platformIdentifier: executionIdentifier,
             uploadPlatformIdentifier: uploadIdentifier, appVersion: input.appVersion, isBeta: input.isBeta,
-            timePeriod: input.timePeriod, pageIndex: input.pageIndex ?? 0, pageSize: input.pageSize,
-            collectsAllPages: input.pageIndex == nil))
+            timePeriod: input.timePeriod, pageIndex: 0, pageSize: 25, collectsAllPages: true))
     }
 
     private func bundleFromActiveScheme(_ workspace: AnyObject?) throws -> String? {
@@ -362,20 +431,14 @@ final class NativeCrashToolCorrection {
         try JSONRPC.Wire.data(from: ["type": type, "data": data.foundationObject])
     }
 
-    private func errorEvent(_ error: any Error, input: NativeCrashRequest) -> Data {
+    private func errorEvent(_ error: any Error, operation: Operation) -> Data {
+        let input = operation.query
+        let query = (try? Self.constraints(input, collection: operation.collection)) ?? .object([:])
         do {
             return try event("error", data: .object(["status": .string("failed"),
-                "query": .object(["bundleId": input.bundleIdentifier.map(JSONValue.string) ?? .null,
-                    "platform": input.platform.map(JSONValue.string) ?? .null,
-                    "uploadPlatform": input.uploadPlatform.map(JSONValue.string) ?? .null,
-                    "appVersion": input.appVersion.map(JSONValue.string) ?? .null,
-                    "isBeta": input.isBeta.map(JSONValue.bool) ?? .null,
-                    "issueId": input.issueID.map(JSONValue.string) ?? .null,
-                    "page": input.pageIndex.map { .number(.int(Int64($0))) } ?? .null, "pageSize": .number(.int(Int64(input.pageSize))),
-                    "allPages": .bool(input.pageIndex == nil),
-                    "timePeriod": .string(input.timePeriod)]),
-                "provenance": NativeCrashData.Loaded().provenance,
-                "errors": .array([NativeCrashData.diagnostic(error, operation: "crashAnalytics")])]))
+                "collection": operation.collection.map { .string($0.rawValue) } ?? .null,
+                "query": query,
+                "errors": .array([NativeCrashData.diagnostic(error, operation: "crashReports")])]))
         }
         catch let encodingError {
             try? FileHandle.standardError.write(contentsOf: Data("Native analytics failed: \(error); error encoding also failed: \(encodingError)\n".utf8))

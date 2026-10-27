@@ -86,58 +86,66 @@ bundle itself. Restart the host after replacing either asset. The breakpoint
 manager is prepared on the main thread before debugger launch to avoid native
 global-store initialization assertions.
 
-Each network crash call starts a dedicated GUI instance of the selected,
-Apple-signed Xcode through `NSWorkspace.OpenConfiguration` with
-`createsNewApplicationInstance` and `-ApplePersistenceIgnoreState YES`.
-Organizer uses Xcode's existing account for authenticated downloads;
-Accessibility access is required and no API key is needed. The account must be
-configured beforehand, but a user-owned Xcode instance need not be running.
-AX operations target only the instance's PID, and completion, failure, or
-cancellation requests normal termination of that instance. GUI display and
-activation can occur. Other workspace operations stay headless; cache-only
-crash requests do not start a GUI instance.
+### Crash acquisition and change reading
 
-The native host opens an exact product/filter URL in the new instance, whose
-initial source load starts the network download. It clears the name search and
-unresolved-only display filter, waits for a fresh exact cache entry, and scrolls
-the list in fixed 25-issue pages. Omitted `page` collects all pages in the same
-instance; an explicit `page` requests one page for retrieval or retry. Native
-cache entries must match the complete header identity and displayed issue names.
-A short list without a scrollbar uses a normal scroll gesture with temporary
-pointer movement. A changed frontmost window or pointer target stops collection,
-preserving completed pages for retry.
-A nonempty page requires another probe; only an empty page with a normal, idle
-UI establishes the end. Each page is copied from Organizer's eight-entry
-list-cache LRU into the server-owned exact-query store as it arrives. A global
-lock serializes collection across server processes because Xcode's Products
-disk cache is shared across GUI instances. Batch responses retain their
-successful `pages` and combined `issues`; a failure leaves `nextPage` pointing
-to the failed page. Cache reads preserve that partial state.
+`SyncCrashReports` owns acquisition and bounded local import.
+`ReadCrashChanges` reads committed changes without network access, workspace
+resolution, or Products inventory. They replace the native crash actions in the
+catalog; the native action input/output schemas are not decoded or invoked.
 
-Detail URLs identify a stable issue ID and request Organizer's all-version,
-all-build, all-channel yearly detail. The requested period selects one of the
-three returned distributions. Saved samples can include earlier Organizer
-downloads and are not occurrence or device counts. Provenance identifies
-Organizer as the source and retains its local cache-header refresh time; the
-provider update time is unavailable. Exact-query cache reads and network fallback
-retain original timestamps, errors, and partial results. Cached results do not
-establish online account access. The server's canonical query contains the bundle,
-execution and upload platforms, version, release channel, period, and page mode.
-It excludes the inventory-derived App Store ID. Explicit bundle and platform
-inputs therefore allow server-cache reads without loading Products or resolving
-a workspace. Network product lookup occurs inside the fetch operation so its
-failure can use the same exact-cache fallback.
+Network Sync starts a dedicated Apple-signed Xcode with
+`NSWorkspace.OpenConfiguration`, `createsNewApplicationInstance`, and
+`-ApplePersistenceIgnoreState YES`. Organizer uses its existing account;
+Accessibility access is required. AX operations target that instance's PID,
+and completion, failure, or cancellation requests normal termination. GUI
+activation can occur. Other workspace operations stay headless.
 
-If a detail refresh fails, exact-matching saved Organizer samples can still be
-returned and stored as a partial result with source `organizerCache` and unknown
-`fetchedAt`. Their freshness is unverified. A cached distribution remains in raw
-metadata and is not promoted to current time-series data. Server-store reads
-preserve the unknown timestamp and diagnostics. A partial network attempt does
-not overwrite an existing exact server-cache entry. With fallback enabled, that
-entry remains the primary response and the new attempt is normalized separately
-in `recovery`, with its own issues or sample files, provenance, and diagnostics.
-This also preserves an incomplete all-page collection beside a saved response.
-Network-only calls return the new partial attempt directly.
+The host opens the exact product/filter URL, clears name and unresolved-only
+filters, waits for matching refreshed native cache headers and displayed issue
+names, and collects 25-issue pages. A normal idle empty page establishes the
+end. A short list uses a pointer scroll gesture when needed; window or pointer
+interference stops collection. Pages are copied from Organizer's eight-entry LRU
+to the server's exact-query source store as they arrive. A cross-process lock
+serializes access to Xcode's shared Products cache.
+
+Detail URLs use stable issue IDs and request all-version, all-build,
+all-channel yearly distributions and saved samples. The requested period selects
+a distribution. A failed detail refresh may recover saved samples with unknown
+freshness, without presenting a cached distribution as current. Partial attempts
+preserve a complete exact source snapshot and retain usable recovery data.
+
+Source snapshots contain metadata and log-directory references rather than
+base64 bodies. The canonical query excludes the inventory-derived App Store ID;
+explicit app/platform cache operations therefore need no workspace or inventory.
+Product lookup remains inside the network fetch closure so lookup failures can
+use exact-cache fallback. Original timestamps and diagnostics survive fallback.
+
+A durable SQLite cache records scope identities, observed issue/content changes,
+sync workqueues, and immutable read batches. Shared SHA-256 blobs hold sample
+bytes. Verified unchanged local file identity/generation can reuse a blob;
+otherwise import streams the file and hashes its contents. Source enumeration
+and body import are separate so bounded imports do not materialize every body
+before returning. A single oversized file is permitted as a streaming step to
+avoid starvation. Blob publication precedes committed references to it.
+
+Sync continuations preserve acquisition/import progress independently of consumer
+positions. Read freezes a change high-water mark and page ordering. Each cursor
+replays its saved result; only a terminal read returns a checkpoint for the next
+window. Consumers keep their own tokens, without a server-side consumer registry
+or acknowledgement operation. Cache status includes pending sync information for
+resuming interrupted work. Read's JSON byte budget is separate from Sync's import
+byte budget. Unavailable or mismatched tokens fail explicitly.
+Reader windows select each item's latest version at their upper boundary and
+compare its content with the checkpoint version. Intermediate revisions are
+coalesced; a return to the baseline content produces no change.
+
+Observation order is local and provider scans are non-atomic. Optional log event
+ordering places unknown dates last. No provider revision or conditional delta
+API exists; unchanged issue metadata cannot justify skipping future sample checks.
+Sample retention does not establish all incident history, and missing files or
+issues do not establish deletion. Local read completion and acquisition progress
+remain distinct. Counts describe native unique devices or saved samples and
+cannot be treated as additive occurrence counts.
 
 ### Preview rendering
 
