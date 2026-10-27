@@ -205,8 +205,8 @@ enum XcodeToolCatalog {
 
     private static let workspaceOptionalTools: Set<String> = [
         "DeviceInteractionStartSession", "DeviceInteractionInstallAndRun", "GetConsoleOutput",
-        "GetCrashIssueLogs", "GetFieldPerformanceIssueLogs",
-        "GetTopCrashIssues", "GetTopFieldPerformanceIssues",
+        "GetCrashIssue", "GetFieldPerformanceIssueLogs",
+        "ListCrashIssues", "GetTopFieldPerformanceIssues",
     ]
 
     private static let hostSelectableTools: Set<String> = [
@@ -224,12 +224,10 @@ enum XcodeToolCatalog {
         "DocumentationSearch": "Search Apple developer documentation.",
         "GetBuildLog": "Read the latest build log, optionally filtering by severity, file glob, or pattern.",
         "GetConsoleOutput": "Read app console output, optionally filtering by launch session, severity, or pattern.",
-        "GetCrashIssueLogs": "Retrieve logs for a crash signature.",
         "GetFieldPerformanceIssueLogs": "Retrieve logs for a field performance issue signature.",
         "GetFileCompilerFlags": "Read compiler flags for a file in a target.",
         "GetTargetBuildSettings": "Read a target's build settings.",
         "GetTestList": "List tests for the workspace's selected scheme and test plan.",
-        "GetTopCrashIssues": "List the app's most frequent crash issues.",
         "GetTopFieldPerformanceIssues": "List the app's most frequent field performance issues.",
         "InvokeDebuggerCommand": "Run an LLDB command in the workspace's debugger session.",
         "LocalizationPlanner": "Plan translation work for the requested locale.",

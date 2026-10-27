@@ -109,9 +109,14 @@ package final class NativeXcodeBackend: NativeToolBackend {
             let action = try unsafe await bridge.actionClass(for: metadata)
             let workspaceScoped = try unsafe await scope.isWorkspaceScoped(action)
             let schema = try unsafe await bridge.schema(action: action)
-            unsafe (nextActions[name] = action)
             let tool = try NativeSchemaConverter.tool(from: schema, workspaceScoped: workspaceScoped)
-            nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
+            if let crash = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
+                unsafe (nextActions[crash.toolName] = action)
+                nextTools[crash.toolName] = NativeCrashContract.describe(tool, detail: crash == .logs)
+            } else {
+                unsafe (nextActions[name] = action)
+                nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
+            }
         }
         unsafe (actions = nextActions)
         tools = nextTools
@@ -122,6 +127,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
         if tools[name] == nil { _ = try await listTools() }
         guard let tool = tools[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
+        }
+        if Self.hasExplicitCrashQuery(name, arguments: arguments) {
+            return NativeExecutionResource()
         }
         let heavy = ["BuildProject", "RunProject", "RunAllTests", "RunSomeTests", "RenderPreview"].contains(name)
         if name == "XcodeOpenWorkspace", case .string(let path) = arguments["path"] {
@@ -140,6 +148,11 @@ package final class NativeXcodeBackend: NativeToolBackend {
         try Task.checkCancellation()
         guard let tool = tools[name], let action = unsafe actions[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
+        }
+        if Self.hasExplicitCrashQuery(name, arguments: arguments),
+           let kind = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
+            let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
+            return try crashCorrection.execute(kind, input: input, context: context)
         }
         if ["BuildProject", "RunProject", "RunAllTests", "RunSomeTests"].contains(name), executionOperations == nil {
             executionOperations = try NativeExecutionOperations()
@@ -195,8 +208,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         if isPreview { arguments = NativePreviewCorrection.prepareArguments(arguments) }
         let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
         if let kind = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
-            return try unsafe crashCorrection.execute(kind, inputType: scope.inputType(for: action), input: input,
-                                                       request: context.artifactsDirectory)
+            return try crashCorrection.execute(kind, input: input, context: context)
         }
         if isPreview {
             return try unsafe await previewCorrection.execute(inputType: scope.inputType(for: action), input: input,
@@ -208,6 +220,12 @@ package final class NativeXcodeBackend: NativeToolBackend {
             }
         }
         return try unsafe await bridge.execute(action: action, input: input, context: context)
+    }
+
+    private static func hasExplicitCrashQuery(_ name: String, arguments: [String: JSONValue]) -> Bool {
+        guard ["ListCrashIssues", "GetCrashIssue"].contains(name),
+              case .string = arguments["bundle_id"], case .string = arguments["platform"] else { return false }
+        return true
     }
 
     package func resultMetadata(for name: String, output: JSONValue?,

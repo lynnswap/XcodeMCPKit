@@ -84,9 +84,60 @@ installed Metal toolchain without changing persisted Xcode preferences. The
 Metal provider receives the directory containing `.xctoolchain` bundles, not the
 bundle itself. Restart the host after replacing either asset. The breakpoint
 manager is prepared on the main thread before debugger launch to avoid native
-global-store initialization assertions. Crash-product lookup matches both bundle
-ID and platform; a bundle-ID-only match can choose another platform's cache.
-Cached analytics results do not establish online account access.
+global-store initialization assertions.
+
+Each network crash call starts a dedicated GUI instance of the selected,
+Apple-signed Xcode through `NSWorkspace.OpenConfiguration` with
+`createsNewApplicationInstance` and `-ApplePersistenceIgnoreState YES`.
+Organizer uses Xcode's existing account for authenticated downloads;
+Accessibility access is required and no API key is needed. The account must be
+configured beforehand, but a user-owned Xcode instance need not be running.
+AX operations target only the instance's PID, and completion, failure, or
+cancellation requests normal termination of that instance. GUI display and
+activation can occur. Other workspace operations stay headless; cache-only
+crash requests do not start a GUI instance.
+
+The native host opens an exact product/filter URL in the new instance, whose
+initial source load starts the network download. It clears the name search and
+unresolved-only display filter, waits for a fresh exact cache entry, and scrolls
+the list in fixed 25-issue pages. Omitted `page` collects all pages in the same
+instance; an explicit `page` requests one page for retrieval or retry. Native
+cache entries must match the complete header identity and displayed issue names.
+A short list without a scrollbar uses a normal scroll gesture with temporary
+pointer movement. A changed frontmost window or pointer target stops collection,
+preserving completed pages for retry.
+A nonempty page requires another probe; only an empty page with a normal, idle
+UI establishes the end. Each page is copied from Organizer's eight-entry
+list-cache LRU into the server-owned exact-query store as it arrives. A global
+lock serializes collection across server processes because Xcode's Products
+disk cache is shared across GUI instances. Batch responses retain their
+successful `pages` and combined `issues`; a failure leaves `nextPage` pointing
+to the failed page. Cache reads preserve that partial state.
+
+Detail URLs identify a stable issue ID and request Organizer's all-version,
+all-build, all-channel yearly detail. The requested period selects one of the
+three returned distributions. Saved samples can include earlier Organizer
+downloads and are not occurrence or device counts. Provenance identifies
+Organizer as the source and retains its local cache-header refresh time; the
+provider update time is unavailable. Exact-query cache reads and network fallback
+retain original timestamps, errors, and partial results. Cached results do not
+establish online account access. The server's canonical query contains the bundle,
+execution and upload platforms, version, release channel, period, and page mode.
+It excludes the inventory-derived App Store ID. Explicit bundle and platform
+inputs therefore allow server-cache reads without loading Products or resolving
+a workspace. Network product lookup occurs inside the fetch operation so its
+failure can use the same exact-cache fallback.
+
+If a detail refresh fails, exact-matching saved Organizer samples can still be
+returned and stored as a partial result with source `organizerCache` and unknown
+`fetchedAt`. Their freshness is unverified. A cached distribution remains in raw
+metadata and is not promoted to current time-series data. Server-store reads
+preserve the unknown timestamp and diagnostics. A partial network attempt does
+not overwrite an existing exact server-cache entry. With fallback enabled, that
+entry remains the primary response and the new attempt is normalized separately
+in `recovery`, with its own issues or sample files, provenance, and diagnostics.
+This also preserves an incomplete all-page collection beside a saved response.
+Network-only calls return the new partial attempt directly.
 
 ### Preview rendering
 
@@ -157,8 +208,9 @@ do not grant Apple privileges.
 
 Only the public dynamic-loader entitlement is used for loading the selected
 Xcode's frameworks under hardened runtime. Apple-restricted Service entitlements
-and BoardServices registration are not copied. The helper does not connect to
-GUI Xcode or alter agent permissions. The separate opt-in Accessibility monitor
+and BoardServices registration are not copied. Workspace operations use owned
+models, and crash downloads operate GUI Organizer without changing agent
+permissions. The separate opt-in Accessibility monitor
 presses recognized connection dialogs' Allow button.
 
 Verify helper startup and workspace operations under normal SIP/AMFI, including
