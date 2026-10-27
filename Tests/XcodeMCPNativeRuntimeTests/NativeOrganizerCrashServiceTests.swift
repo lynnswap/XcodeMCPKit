@@ -5,8 +5,27 @@ import Testing
 @Suite
 @MainActor
 struct NativeOrganizerCrashServiceTests {
+    @Test func allPageAndSinglePageCachesRemainSeparate() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NativeCrashStore(root: root)
+        let single = NativeCrashServiceQuery(adamIdentifier: "1234567890", bundleIdentifier: "example.App",
+            platformIdentifier: "com.apple.platform.iphoneos", uploadPlatformIdentifier: "com.apple.platform.iphoneos",
+            appVersion: nil, isBeta: nil, timePeriod: "last14Days", pageIndex: 0, pageSize: 25)
+        var batch = single
+        batch.collectsAllPages = true
+        let singleKey = single.json(issueID: nil)
+        let batchKey = batch.json(issueID: nil)
+        _ = try store.write(.string("single-page"), key: singleKey, fetchedAt: "2024-01-01T00:00:00Z")
+        _ = try store.write(.string("all-pages"), key: batchKey, fetchedAt: "2024-01-01T00:00:00Z")
+
+        #expect(try store.read(key: singleKey)?.value == .string("single-page"))
+        #expect(try store.read(key: batchKey)?.value == .string("all-pages"))
+        #expect(batch.withPage(0).json(issueID: nil) == singleKey)
+    }
+
     @Test func equalCountIssuesCanMoveAcrossPageBoundariesWithoutChangingTheCollection() {
-        let rows = ["other", "same", "first", "same"].map { NativeOrganizerAccessibility.Row(name: $0, displayText: $0) }
+        let rows = ["other", "same", "first", "same"]
         #expect(NativeOrganizerCrashService.displays(["first", "same", "same", "other"], rows: rows))
         #expect(!NativeOrganizerCrashService.displays(["same", "same", "same"], rows: rows))
     }

@@ -10,7 +10,7 @@ Open a saved project with `XcodeOpenWorkspace`, then pass its returned
 `workspaceIdentifier` to an operation. The identifier retains its native
 headless workspace and host. `XcodeListWorkspaces` lists loaded headless models;
 workspace operations use these headless models. Crash collection uses GUI
-Organizer as described below.
+Organizer in a dedicated instance as described below.
 
 | Previous call or value | Replacement |
 | --- | --- |
@@ -45,11 +45,14 @@ identifiers. See [workspace usage](../usage.md) for normal operations.
 
 ## Crash collection
 
-`ListCrashIssues` replaces `GetTopCrashIssues`. Replace `count` with `page` and
-`page_size: 25`, then follow `pagination.nextPage` until it is null. The page size
-is fixed. Probe after every nonempty page, even a short page; an empty page and
-normal Organizer UI establish the end. Read structured `issues` instead of
-parsing the old `data` string.
+`ListCrashIssues` replaces `GetTopCrashIssues`. Remove `count` and omit `page`
+to collect all pages in one call. The response contains successful `pages` and
+combined `issues`. A partial result retains those pages and sets
+`pagination.nextPage` to the failed page. Specify that zero-based `page` with the
+same filters to retrieve or retry it individually. `page_size` is fixed at 25.
+Every nonempty page, including a short page, requires another probe; an empty
+page and normal Organizer UI establish the end. Read structured `issues`
+instead of parsing the old `data` string.
 
 `GetCrashIssue` replaces `GetCrashIssueLogs`. Pass `issue_id` from the list's
 `issueId` instead of `signature_name`. It returns structured device trends and
@@ -59,15 +62,27 @@ channels for the last year. `time_period` selects one of the three returned
 distributions, without filtering samples. Samples can include logs already
 saved by Organizer; their count is not an occurrence or device count.
 
-Network crash calls now require the selected Xcode installation to be running
-with App Store Connect account access and the native host to have Accessibility
-permission. No API key is needed. The tool selects and reloads GUI Organizer,
-clears its name search, and disables its unresolved-only display filter.
-Normal workspace calls remain headless. Refreshed results use
+Network crash calls start a dedicated GUI instance of the selected Xcode and
+close that instance on completion, failure, or cancellation. Configure App Store
+Connect account access in that Xcode and grant the native host Accessibility
+permission beforehand; no API key or manually opened Xcode is needed.
+Organizer windows can appear and Xcode can become active. The tool opens the
+requested Organizer route, waits for its initial network download, and scrolls
+to load further pages. Short lists without a scrollbar temporarily use the
+pointer for a normal scroll gesture. Window or pointer interference stops
+collection with completed pages preserved; retry `pagination.nextPage`.
+It clears the name search and disables the unresolved-only
+display filter in the dedicated instance. Collection shares a global lock across
+server processes for Xcode's Products disk cache. Normal workspace calls remain
+headless. Refreshed results use
 `provenance.source: "organizer"`; `fetchedAt` is the native cache-header's local
 refresh time and `sourceUpdatedAt` remains null. `source: "cache"` uses only
-the server's exact-query store. Network fallback retains the refresh error,
-saved diagnostics, and original fetch time.
+the server's exact-query store without starting GUI Xcode, and preserves partial
+results. Network fallback retains the refresh error, saved diagnostics, and
+original fetch time. A failed detail refresh can return saved Organizer samples
+as a partial result with source `organizerCache` and `fetchedAt: null`. Their
+freshness is unverified, and a cached distribution is not returned as current
+time-series data.
 
 Check `status`, `errors`, and `provenance` when saving or updating results.
 See [crash collection](../usage.md#collect-crash-reports) for query scopes,
@@ -79,7 +94,8 @@ the replacement tool definitions.
 Install `XcodeMCPNativeHost.app` beside the proxy commands. Reinstall the complete
 package if it is missing. The default helper executes headlessly through the
 selected Xcode's frameworks without Xcode Service setup. Workspace operations
-work without an open GUI window; network crash collection uses Organizer.
+work without an open GUI window; network crash collection starts its own
+dedicated GUI Xcode instance for Organizer and closes it after the request.
 
 Remove these older settings from startup scripts and embedding configuration:
 

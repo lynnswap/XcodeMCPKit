@@ -5,35 +5,26 @@ import Foundation
 @safe
 @MainActor
 final class NativeOrganizerAccessibility {
-    struct Row: Equatable, Sendable {
-        let name: String
-        let displayText: String
+    struct ViewUpdating: LocalizedError {
+        var errorDescription: String? { "Organizer is updating its crash view" }
     }
-
     struct Snapshot: Sendable {
-        let rows: [Row]
+        let rows: [String]
         let filterValues: [String]
-        let selectedIssueName: String?
         let busyMessages: [String]
         let errorMessages: [String]
         let listStatusMessages: [String]
-        let hasScrollBar: Bool
-        let scrollValue: Double?
     }
 
     let processIdentifier: pid_t
     private let appURL: URL
     private let launchDate: Date?
 
-    init(installation: NativeXcodeInstallation) throws {
+    init(installation: NativeXcodeInstallation, application: NSRunningApplication) throws {
         let appURL = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath()
-        let applications = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Xcode").filter {
-            !$0.isTerminated && $0.bundleURL?.resolvingSymlinksInPath() == appURL
-        }
-        guard applications.count == 1, let application = applications.first else {
-            throw NativeRuntimeError.unavailable(applications.isEmpty
-                ? "Open the selected Xcode installation before fetching Organizer crashes: \(appURL.path)"
-                : "Several processes run the selected Xcode installation; close the extra processes: \(appURL.path)")
+        guard !application.isTerminated, application.processIdentifier > 0,
+              application.bundleURL?.resolvingSymlinksInPath() == appURL else {
+            throw NativeRuntimeError.unavailable("The owned Organizer application is not running from the selected Xcode installation: \(appURL.path)")
         }
         guard AXIsProcessTrusted() else {
             throw NativeRuntimeError.unavailable("Accessibility access is required for the native host to operate Xcode Organizer")
@@ -51,50 +42,31 @@ final class NativeOrganizerAccessibility {
         } else {
             nativeRows = try children(of: location.table).filter { try role(of: $0) == kAXRowRole as String }
         }
-        let rows = try nativeRows.map { row -> Row in
+        var rowStatus: [String] = []
+        let rows = try nativeRows.compactMap { row -> String? in
             let texts = try find(in: [row]) { try self.role(of: $0) == kAXStaticTextRole as String }
-            let named = try texts.compactMap { text -> Row? in
+            let names = try texts.compactMap { text -> String? in
                 guard let name = try string(kAXHelpAttribute, from: text), !name.isEmpty else { return nil }
-                return Row(name: name, displayText: try string(kAXValueAttribute, from: text) ?? name)
+                return name
             }
-            guard named.count == 1, let value = named.first else {
-                throw NativeRuntimeError.unsupportedContract("An Organizer crash row does not expose one signature in AXHelp")
-            }
-            return value
+            if let name = names.first { return name }
+            // Infinite paging also exposes loading and status rows. They have
+            // no crash signature and belong to the status, not the issue list.
+            rowStatus += try texts.compactMap { try string(kAXValueAttribute, from: $0) ?? string(kAXTitleAttribute, from: $0) }
+            return nil
         }
-        var selectedIssueName: String?
-        for (element, row) in zip(nativeRows, rows) {
-            guard let value = try attribute(kAXSelectedAttribute, from: element) else { continue }
-            guard let selected = value as? Bool else {
-                throw NativeRuntimeError.unsupportedContract("An Organizer crash row has a nonboolean AXSelected attribute")
-            }
-            if selected {
-                guard selectedIssueName == nil else {
-                    throw NativeRuntimeError.unavailable("Several Organizer crash rows are selected")
-                }
-                selectedIssueName = row.name
-            }
-        }
-        let scrollbar = try verticalScrollBar(in: location.scrollArea)
-        let scrollValue: Double?
-        if let scrollbar, let value = try attribute(kAXValueAttribute, from: scrollbar) {
-            guard let number = value as? NSNumber else {
-                throw NativeRuntimeError.unsupportedContract("The Organizer crash scrollbar has a nonnumeric AXValue")
-            }
-            scrollValue = number.doubleValue
-        } else { scrollValue = nil }
         var busy: [String] = []
         var failures: [String] = []
         let statusElements = try find(in: [location.scrollArea], skipTables: true) {
             try self.role(of: $0) == kAXStaticTextRole as String
         }
-        let listStatusMessages = try statusElements.flatMap { element -> [String] in
+        let listStatusMessages = rowStatus + (try statusElements.flatMap { element -> [String] in
             var texts: [String] = []
             for name in [kAXValueAttribute, kAXTitleAttribute] {
                 if let text = try string(name, from: element), !text.isEmpty, !texts.contains(text) { texts.append(text) }
             }
             return texts
-        }
+        })
         _ = try find(in: [location.window], skipTables: true) { element in
             let role = try self.role(of: element)
             if role == kAXProgressIndicatorRole as String {
@@ -112,9 +84,13 @@ final class NativeOrganizerAccessibility {
             }
             return false
         }
-        return Snapshot(rows: rows, filterValues: try filterValues(in: location.window), selectedIssueName: selectedIssueName,
+        for text in listStatusMessages {
+            let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ["loading", "downloading", "読み込み", "ダウンロード中"].contains(where: value.hasPrefix) { busy.append(text) }
+        }
+        return Snapshot(rows: rows, filterValues: try filterValues(in: location.window),
                         busyMessages: Array(Set(busy)).sorted(), errorMessages: Array(Set(failures)).sorted(),
-                        listStatusMessages: listStatusMessages, hasScrollBar: scrollbar != nil, scrollValue: scrollValue)
+                        listStatusMessages: listStatusMessages)
     }
 
     func prepareList() throws {
@@ -147,37 +123,152 @@ final class NativeOrganizerAccessibility {
         }
     }
 
-    func scrollToBottom() throws {
+    func scrollToBottom() async throws {
         let location = try locateList()
-        guard let scrollbar = try verticalScrollBar(in: location.scrollArea) else { return }
-        let result = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 1.0))
-        guard result == .success else { throw failure("Set the Organizer crash scrollbar AXValue", result) }
+        if let scrollbar = try verticalScrollBar(in: location.scrollArea) {
+            let result = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 1.0))
+            guard result == .success else { throw failure("Set the Organizer crash scrollbar AXValue", result) }
+            return
+        }
+        // A short page can fit without a scrollbar. A continuous gesture still
+        // overscrolls its clip view and asks Organizer to load the next page.
+        guard CGPreflightPostEventAccess() else {
+            throw NativeRuntimeError.unavailable("Accessibility permission is required to scroll the owned Organizer crash list")
+        }
+        let scrollFrame = try frame(of: location.scrollArea)
+        let center = CGPoint(x: scrollFrame.midX.rounded(), y: scrollFrame.midY.rounded())
+        guard let application = NSRunningApplication(processIdentifier: processIdentifier) else {
+            throw NativeRuntimeError.unavailable("The owned Organizer application ended before scrolling")
+        }
+        _ = application.activate(options: [.activateAllWindows])
+        let raised = AXUIElementPerformAction(location.window, kAXRaiseAction as CFString)
+        guard raised == .success else { throw failure("Raise the owned Organizer crash list", raised) }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while true {
+            try Task.checkCancellation()
+            _ = try applicationElement()
+            if application.isActive, NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier,
+               try ownsScreenPoint(center) { break }
+            guard clock.now < deadline else {
+                throw NativeRuntimeError.unavailable("The owned Organizer crash list did not become the frontmost pointer target")
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let originalCursor = CGEvent(source: nil)?.location else {
+            throw NativeRuntimeError.unavailable("Could not read the pointer position before scrolling Organizer")
+        }
+        let moved = CGWarpMouseCursorPosition(center)
+        guard moved == .success else { throw pointerFailure("Move the pointer over Organizer", moved) }
+        let placedCursor = center
+        var gestureActive = false
+        let outcome: Result<Void, any Error>
+        do {
+            try verifyPointer(placedCursor)
+            guard let hover = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                                      mouseCursorPosition: placedCursor, mouseButton: .left) else {
+                throw NativeRuntimeError.unavailable("Could not create the Organizer pointer event")
+            }
+            hover.post(tap: .cghidEventTap)
+            try await Task.sleep(for: .milliseconds(100))
+            let phases: [(CGScrollPhase, Int32)] = [(.began, -120)]
+                + Array(repeating: (.changed, -120), count: 10) + [(.ended, 0)]
+            for (phase, delta) in phases {
+                try Task.checkCancellation()
+                try verifyPointer(placedCursor)
+                guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+                                          wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0) else {
+                    throw NativeRuntimeError.unavailable("Could not create the Organizer scroll event")
+                }
+                event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+                event.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase.rawValue))
+                event.location = placedCursor
+                event.post(tap: .cghidEventTap)
+                gestureActive = phase != .ended
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            outcome = .success(())
+        } catch { outcome = .failure(error) }
+        var cleanup: [any Error] = []
+        if gestureActive, (try? verifyPointer(placedCursor)) != nil {
+            if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+                                   wheelCount: 1, wheel1: 0, wheel2: 0, wheel3: 0) {
+                event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+                event.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(CGScrollPhase.cancelled.rawValue))
+                event.location = placedCursor
+                event.post(tap: .cghidEventTap)
+            } else {
+                cleanup.append(NativeRuntimeError.unavailable("Could not create the Organizer gesture cancellation event"))
+            }
+        }
+        let restoration: (any Error)?
+        if let current = CGEvent(source: nil)?.location {
+            // Preserve a person's new pointer position if they intervened.
+            if current == placedCursor {
+                let restored = CGWarpMouseCursorPosition(originalCursor)
+                restoration = restored == .success ? nil : pointerFailure("Restore the pointer after scrolling Organizer", restored)
+            } else { restoration = nil }
+        } else {
+            restoration = NativeRuntimeError.unavailable("Could not read the pointer position to restore it after scrolling Organizer")
+        }
+        if let restoration { cleanup.append(restoration) }
+        if !cleanup.isEmpty {
+            if case .failure(let original) = outcome {
+                cleanup.insert(original, at: 0)
+            }
+            let combined = NSError(domain: "XcodeMCPKit.OrganizerPointer", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Organizer scroll gesture cleanup failed",
+                NSMultipleUnderlyingErrorsKey: cleanup.map { $0 as NSError },
+            ])
+            if Task.isCancelled { NativeExecutionOperations.scope?.recordFailure(combined) }
+            throw combined
+        }
+        try outcome.get()
     }
 
-    func reload() throws {
-        guard let menuBar = try element(kAXMenuBarAttribute, from: applicationElement()) else {
-            throw NativeRuntimeError.unavailable("The selected Xcode process does not expose its menu bar")
+    private func frame(of element: AXUIElement) throws -> CGRect {
+        guard let positionValue = try attribute(kAXPositionAttribute, from: element),
+              let sizeValue = try attribute(kAXSizeAttribute, from: element),
+              CFGetTypeID(positionValue) == AXValueGetTypeID(), CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            throw NativeRuntimeError.unsupportedContract("The Organizer crash scroll area has no position or size")
         }
-        // AppKit exposes stale references for descendants of closed menus.
-        // Open View before resolving its live Reload Organizer command.
-        let menuItems = try children(of: menuBar)
-        guard let viewMenu = try menuItems.first(where: { try string(kAXTitleAttribute, from: $0) == "View" }) else {
-            throw NativeRuntimeError.unavailable("Xcode does not expose its View menu")
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        let hasPosition = unsafe AXValueGetValue(unsafeDowncast(positionValue, to: AXValue.self), .cgPoint, &position)
+        let hasSize = unsafe AXValueGetValue(unsafeDowncast(sizeValue, to: AXValue.self), .cgSize, &size)
+        guard hasPosition, hasSize else {
+            throw NativeRuntimeError.unsupportedContract("The Organizer crash scroll area has an invalid position or size")
         }
-        let show = AXUIElementPerformAction(viewMenu, kAXPressAction as CFString)
-        guard show == .success else { throw failure("Open Xcode's View menu", show) }
-        let items = try find(in: [viewMenu]) { element in
-            try self.string(kAXIdentifierAttribute, from: element) == "productsWindow_reload:"
+        return CGRect(origin: position, size: size)
+    }
+
+    private func ownsScreenPoint(_ point: CGPoint) throws -> Bool {
+        var target: AXUIElement?
+        let hit = unsafe AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &target)
+        guard hit == .success, let target else { throw failure("Find the pointer target for Organizer scrolling", hit) }
+        var pid: pid_t = 0
+        let result = unsafe AXUIElementGetPid(target, &pid)
+        guard result == .success else { throw failure("Read the Organizer pointer target process", result) }
+        return pid == processIdentifier
+    }
+
+    private func verifyPointer(_ expected: CGPoint) throws {
+        _ = try applicationElement()
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier else {
+            throw NativeRuntimeError.unavailable("Organizer lost focus while scrolling; collection stopped")
         }
-        guard items.count == 1, let item = items.first else {
-            throw NativeRuntimeError.unavailable("Xcode does not expose the Reload Organizer menu item (productsWindow_reload:)")
+        guard CGEvent(source: nil)?.location == expected else {
+            throw NativeRuntimeError.unavailable("The pointer moved while scrolling Organizer; collection stopped")
         }
-        guard let enabled = try attribute(kAXEnabledAttribute, from: item) as? Bool else {
-            throw NativeRuntimeError.unsupportedContract("Reload Organizer has no boolean AXEnabled attribute")
+        guard try ownsScreenPoint(expected) else {
+            throw NativeRuntimeError.unavailable("Another application covered the Organizer scroll target; collection stopped")
         }
-        guard enabled else { throw NativeRuntimeError.unavailable("Reload Organizer is disabled in the selected Xcode process") }
-        let result = AXUIElementPerformAction(item, kAXPressAction as CFString)
-        guard result == .success else { throw failure("Press Reload Organizer", result) }
+    }
+
+    private func pointerFailure(_ operation: String, _ error: CGError) -> NSError {
+        NSError(domain: "XcodeMCPKit.OrganizerPointer", code: Int(error.rawValue), userInfo: [
+            NSLocalizedDescriptionKey: "\(operation) failed with Core Graphics error \(error.rawValue) (PID \(processIdentifier))",
+        ])
     }
 
     private func applicationElement() throws -> AXUIElement {
@@ -200,10 +291,9 @@ final class NativeOrganizerAccessibility {
             }
             for group in groups { lists.append((window, group)) }
         }
+        guard !lists.isEmpty else { throw ViewUpdating() }
         guard lists.count == 1, let (window, group) = lists.first else {
-            throw NativeRuntimeError.unavailable(lists.isEmpty
-                ? "Open Organizer's Crashes view in the selected Xcode installation"
-                : "Several Organizer crash lists are open in the selected Xcode process")
+            throw NativeRuntimeError.unavailable("Several Organizer crash lists are open in the selected Xcode process")
         }
         let tables = try find(in: [group]) { try self.role(of: $0) == kAXTableRole as String }
         guard tables.count == 1, let table = tables.first else {
@@ -253,6 +343,7 @@ final class NativeOrganizerAccessibility {
                 })
             }
         }
+        if candidates.isEmpty { return [] }
         guard candidates.count == 1, let values = candidates.first else {
             throw NativeRuntimeError.unsupportedContract("The Organizer crash window does not expose one filter collection")
         }
@@ -316,7 +407,10 @@ final class NativeOrganizerAccessibility {
         switch result {
         case .success, .noValue: return value
         case .attributeUnsupported where allowUnsupported: return nil
-        default: throw failure("Read Organizer \(name) from \(element)", result)
+        default:
+            throw NSError(domain: "XcodeMCPKit.OrganizerAccessibility", code: Int(result.rawValue),
+                userInfo: [NSLocalizedDescriptionKey: "Read Organizer \(name) failed with AX error \(result.rawValue)",
+                           "AXAttribute": name])
         }
     }
 

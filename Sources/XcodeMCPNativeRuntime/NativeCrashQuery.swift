@@ -10,4 +10,5 @@ struct NativeCrashServiceQuery: Sendable {
     let timePeriod: String
     let pageIndex: Int
     let pageSize: Int
+    var collectsAllPages = false
 }

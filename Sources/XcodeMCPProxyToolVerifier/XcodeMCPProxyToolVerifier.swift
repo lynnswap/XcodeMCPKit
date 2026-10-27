@@ -800,7 +800,6 @@ private struct VerificationState {
                 "issue_id": .string("ProxyVerifierCrashIssue"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("iOS"),
-                "app_version": .string("1.0"),
             ])
         case "GetFieldPerformanceIssueLogs":
             return try withWorkspaceScope(toolName, [
@@ -824,7 +823,7 @@ private struct VerificationState {
         case "ListCrashIssues":
             return try withWorkspaceScope(toolName, [
                 "page": .integer(0),
-                "page_size": .integer(1),
+                "page_size": .integer(25),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
                 "platform": .string("iOS"),
             ])

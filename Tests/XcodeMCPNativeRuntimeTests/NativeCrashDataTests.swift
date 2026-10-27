@@ -21,10 +21,10 @@ struct NativeCrashDataTests {
         #expect(request.source == .cache)
     }
 
-    @Test func aMinimalRequestStartsAtTheFirstPageWithNativePeriodDefaults() throws {
+    @Test func aMinimalRequestCollectsAllPagesWithNativePeriodDefaults() throws {
         let request = try JSONDecoder().decode(NativeCrashRequest.self, from: Data(#"{"bundle_id":"example.App","platform":"iOS"}"#.utf8))
         #expect(request.timePeriod == "last14Days")
-        #expect(request.pageIndex == 0)
+        #expect(request.pageIndex == nil)
         #expect(request.pageSize == 25)
         #expect(request.source == .network)
         #expect(request.appVersion == nil)
@@ -314,6 +314,11 @@ struct NativeCrashDataTests {
         ])
         let diagnostic = NativeCrashData.diagnostic(failure, operation: "download")
         #expect(try nativeTestField(diagnostic, "cacheErrors") == .array([cause]))
+    }
+
+    @Test func nativeRuntimeFailuresRetainTheirActionableMessage() throws {
+        let value = NativeCrashData.diagnostic(NativeRuntimeError.unavailable("Reload Organizer is disabled"), operation: "download")
+        #expect(try nativeTestField(value, "message") == .string("Reload Organizer is disabled"))
     }
 
     private func cacheKey(page: Int = 0, version: String = "2.0", period: String = "last14Days") -> JSONValue {

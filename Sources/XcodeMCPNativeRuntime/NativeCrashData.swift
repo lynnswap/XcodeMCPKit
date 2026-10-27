@@ -11,7 +11,7 @@ struct NativeCrashRequest: Decodable, Sendable {
     var appVersion: String?
     var isBeta: Bool?
     var timePeriod = "last14Days"
-    var pageIndex = 0
+    var pageIndex: Int?
     var pageSize = 25
     var issueID: String?
     var source = Source.network
@@ -36,14 +36,14 @@ struct NativeCrashRequest: Decodable, Sendable {
         appVersion = try values.decodeIfPresent(String.self, forKey: .appVersion)
         isBeta = try values.decodeIfPresent(Bool.self, forKey: .isBeta)
         timePeriod = try values.decodeIfPresent(String.self, forKey: .timePeriod) ?? timePeriod
-        pageIndex = try values.decodeIfPresent(Int.self, forKey: .pageIndex) ?? pageIndex
+        pageIndex = try values.decodeIfPresent(Int.self, forKey: .pageIndex)
         pageSize = try values.decodeIfPresent(Int.self, forKey: .pageSize) ?? pageSize
         issueID = try values.decodeIfPresent(String.self, forKey: .issueID)
         source = try values.decodeIfPresent(Source.self, forKey: .source) ?? source
         guard ["last24Hours", "last14Days", "last365Days"].contains(timePeriod) else {
             throw NativeRuntimeError.invalidRequest("Unsupported time_period: \(timePeriod)")
         }
-        guard pageIndex >= 0, pageSize == 25 else {
+        guard (pageIndex ?? 0) >= 0, pageSize == 25 else {
             throw NativeRuntimeError.invalidRequest("page must be nonnegative; Organizer uses a fixed page_size of 25")
         }
     }
@@ -64,22 +64,22 @@ enum NativeCrashContract {
             "time_period": .object(["type": .string("string"), "enum": .array([.string("last24Hours"), .string("last14Days"), .string("last365Days")]),
                 "default": .string("last14Days"), "description": .string("Native aggregation period; interval boundaries are returned without filling gaps.")]),
             "source": .object(["type": .string("string"), "enum": .array([.string("network"), .string("cache"), .string("networkWithCacheFallback")]),
-                "default": .string("network"), "description": .string("Network operates Organizer in the selected Xcode and verifies a refreshed, exact-query cache entry. Requires running Xcode and Accessibility access. Cache reads only this server's exact saved request. A fallback preserves the refresh error and original fetch time.")]),
+                "default": .string("network"), "description": .string("Network starts a temporary instance of the selected Xcode, operates Organizer, and verifies refreshed exact-query cache entries. Requires configured Xcode account access and Accessibility permission. Cache reads only this server's exact saved request without starting GUI Xcode. A fallback preserves errors and the original fetch time.")]),
         ]
         if detail {
             inputs.removeValue(forKey: "is_beta")
             inputs.removeValue(forKey: "app_version")
             inputs["issue_id"] = property("string", "Stable issueId from ListCrashIssues; independent of the displayed crash name.")
         } else {
-            inputs["page"] = .object(["type": .string("integer"), "minimum": .number(.int(0)), "default": .number(.int(0)),
-                "description": .string("Zero-based page. Repeat with pagination.nextPage until it is null; save each response before continuing.")])
+            inputs["page"] = .object(["type": .string("integer"), "minimum": .number(.int(0)),
+                "description": .string("Zero-based single page to fetch or retry. Omit to collect all pages in one owned Xcode instance.")])
             inputs["page_size"] = .object(["type": .string("integer"), "enum": .array([.number(.int(25))]), "default": .number(.int(25)),
                 "description": .string("Organizer's fixed page size of 25. Keep the filters unchanged when following nextPage.")])
         }
         var outputs: [String: JSONValue] = [
             "status": .object(["type": .string("string"), "enum": .array([.string("complete"), .string("partial"), .string("failed")])]),
             "query": property("object", "Resolved app, platform, filters, period, and page used for this response."),
-            "provenance": property("object", "Network or exact-match cache, original fetch time, source update time when available, and persisted response path."),
+            "provenance": property("object", "Source: organizer for a verified refresh, organizerCache for unverified saved samples after detail refresh failure, or cache for an exact server-store read. fetchedAt is the original native refresh time or null when unknown; sourceUpdatedAt is unavailable."),
             "errors": .object(["type": .string("array"), "items": property("object", "Failed operation and original error domain, code, reason, and underlying errors.")]),
             "responsePath": property("string", "Full structured response saved locally. Existing pages and successful downloads survive a later failure."),
             "native": property("object", "Original source metadata and available update information."),
@@ -92,12 +92,13 @@ enum NativeCrashContract {
             outputs["logFilters"] = property("object", "Effective log filters and native filtering limitations.")
         } else {
             outputs["issues"] = .object(["type": .string("array"), "items": property("object", "Stable issueId, display name, uniqueDeviceCount, and original source metadata.")])
-            outputs["pagination"] = property("object", "Requested page, returned count, nextPage, and hasMore. Nonempty pages require probing the next page because the service provides no total.")
+            outputs["pages"] = .object(["type": .string("array"), "items": property("object", "Per-page query, status, returned count, original fetch time, and saved cache path.")])
+            outputs["pagination"] = property("object", "Collection mode, endReached, and nextPage. A partial collection's nextPage identifies the failed page to retry explicitly.")
         }
         let name = detail ? "GetCrashIssue" : "ListCrashIssues"
         return NativeTool(name: name, descriptor: .object([
             "name": .string(name),
-            "description": .string(detail ? "Operate Xcode Organizer to download a crash issue by stable ID, including device trends and saved sample logs. Selection is automatic." : "Operate Xcode Organizer to list crash issues one page at a time with stable IDs, query scope, timestamps, and exact cache provenance."),
+            "description": .string(detail ? "Download a crash issue by stable ID in a temporary Xcode Organizer instance, including device trends and saved sample logs." : "Collect all crash issue pages in a temporary Xcode Organizer instance, with stable IDs, per-page scope, timestamps, and exact cache provenance. Supply page to fetch or retry one page."),
             "annotations": .object(["readOnlyHint": .bool(true)]),
             "inputSchema": .object(["type": .string("object"), "properties": .object(inputs), "required": .array(detail ? [.string("issue_id")] : [])]),
             "outputSchema": .object(["type": .string("object"), "properties": .object(outputs),
@@ -113,7 +114,7 @@ struct NativeCrashStore {
 
     struct Entry {
         let value: JSONValue
-        let fetchedAt: String
+        let fetchedAt: String?
         let path: String
         var errors: [JSONValue] = []
     }
@@ -122,9 +123,14 @@ struct NativeCrashStore {
         let url = try location(key)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let envelope = try Self.object(Data(contentsOf: url))
-        guard envelope["query"] == key, let value = envelope["value"],
-              case .string(let fetchedAt) = envelope["fetchedAt"] else {
+        guard envelope["query"] == key, let value = envelope["value"] else {
             throw NativeRuntimeError.unsupportedContract("Crash cache does not match its request: \(url.path)")
+        }
+        let fetchedAt: String?
+        switch envelope["fetchedAt"] {
+        case .string(let timestamp): fetchedAt = timestamp
+        case .null: fetchedAt = nil
+        default: throw NativeRuntimeError.unsupportedContract("Crash cache has no valid fetch time: \(url.path)")
         }
         let errors: [JSONValue]
         if case .array(let failures) = envelope["errors"] { errors = failures }
@@ -132,10 +138,11 @@ struct NativeCrashStore {
         return Entry(value: value, fetchedAt: fetchedAt, path: url.path, errors: errors)
     }
 
-    func write(_ value: JSONValue, key: JSONValue, fetchedAt: String, errors: [JSONValue] = []) throws -> Entry {
+    func write(_ value: JSONValue, key: JSONValue, fetchedAt: String?, errors: [JSONValue] = []) throws -> Entry {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let url = try location(key)
-        let envelope: JSONValue = .object(["query": key, "value": value, "fetchedAt": .string(fetchedAt), "errors": .array(errors)])
+        let envelope: JSONValue = .object(["query": key, "value": value,
+            "fetchedAt": fetchedAt.map(JSONValue.string) ?? .null, "errors": .array(errors)])
         try Self.encode(envelope).write(to: url, options: .atomic)
         return Entry(value: value, fetchedAt: fetchedAt, path: url.path, errors: errors)
     }
@@ -160,7 +167,7 @@ struct NativeCrashStore {
 enum NativeCrashData {
     struct Fetched {
         let value: JSONValue
-        let fetchedAt: String
+        let fetchedAt: String?
         var source = "organizer"
         var errors: [JSONValue] = []
     }
@@ -178,7 +185,7 @@ enum NativeCrashData {
                 "cachePath": cachePath.map(JSONValue.string) ?? .null,
                 "sourceUpdatedAt": .null,
                 "changeDetection": .string("refetch"),
-                "changeDetectionReason": .string("The native service provides no update timestamp or conditional change token.")])
+                "changeDetectionReason": .string("Xcode provides a local cache refresh time, but no server revision or conditional change token.")])
         }
     }
 
@@ -238,7 +245,7 @@ enum NativeCrashData {
             if let wrapped = error as? NativeSwiftError { return wrapped.withUnderlyingError(describe) }
             let native = error as NSError
             var fields: [String: JSONValue] = ["domain": .string(native.domain), "code": .number(.int(Int64(native.code))),
-                "message": .string(native.localizedDescription), "type": .string(String(reflecting: type(of: error)))]
+                "message": .string((error as? NativeRuntimeError)?.description ?? native.localizedDescription), "type": .string(String(reflecting: type(of: error)))]
             guard !seen.contains(where: { $0 === native }) else { return .object(fields) }
             seen.append(native)
             if let reason = native.localizedFailureReason { fields["failureReason"] = .string(reason) }

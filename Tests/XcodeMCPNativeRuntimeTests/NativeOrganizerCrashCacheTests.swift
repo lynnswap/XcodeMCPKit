@@ -56,7 +56,7 @@ struct NativeOrganizerCrashCacheTests {
         #expect(snapshot.key == pageKey(requested))
     }
 
-    @Test func issueIdentityAndLogFiltersAreExactAndReadFailuresPreserveSuccessfulLogs() throws {
+    @Test @MainActor func issueIdentityAndLogFiltersAreExactAndReadFailuresPreserveSuccessfulLogs() async throws {
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let cache = NativeOrganizerCrashCache(productsRoot: root)
@@ -88,12 +88,41 @@ struct NativeOrganizerCrashCacheTests {
         #expect(partial.errors.contains { (try? object($0)["operation"]) == .string("organizerLogRead") })
         #expect(cache.readIssue(requested, issueID: "another-issue").snapshot == nil)
 
+        let refreshFailure = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
+        let recovered = try NativeOrganizerCrashService.recoverIssue(partial, after: refreshFailure)
+        let savedStore = NativeCrashStore(root: root.appending(component: "saved-responses"))
+        let key = requested.json(issueID: "stable-issue")
+        let loaded = try await NativeCrashData.load(key: key, source: .network, store: savedStore) { recovered }
+        #expect(loaded.source == "organizerCache")
+        #expect(loaded.fetchedAt == nil)
+        #expect(loaded.errors.count == 3)
+        let recoveredValue = try object(loaded.value)
+        #expect(recoveredValue["distribution"] == nil)
+        #expect(recoveredValue["sampleFreshness"] == .string("unverifiedSavedSamples"))
+        let savedLogs = NativeCrashData.saveLogs(recoveredValue, directory: root)
+        let savedLog = try #require(savedLogs.logs.first)
+        guard case .string(let savedPath) = try object(savedLog)["path"] else { throw FixtureError.invalidObject }
+        #expect(try Data(contentsOf: URL(fileURLWithPath: savedPath)) == text)
+        let reread = try await NativeCrashData.load(key: key, source: .cache, store: savedStore) {
+            throw FixtureError.invalidObject
+        }
+        #expect(reread.source == "cache")
+        #expect(reread.fetchedAt == nil)
+        #expect(reread.errors == loaded.errors)
+        #expect(reread.value == loaded.value)
+
         try write(distribution(), to: selected.appending(component: "DistributionInfo.json"))
         let refreshed = cache.readIssue(requested, issueID: "stable-issue")
         #expect(refreshed.snapshot?.fetchedAt == ISO8601DateFormatter().date(from: "2024-01-02T00:00:00Z"))
         #expect(refreshed.snapshot?.distribution != nil)
         #expect(refreshed.snapshot?.logs.first?.data == text)
         #expect(refreshed.errors.count == 1)
+
+        let staleRecovery = try NativeOrganizerCrashService.recoverIssue(refreshed, after: refreshFailure)
+        let staleValue = try object(staleRecovery.value)
+        #expect(staleValue["distribution"] == nil)
+        #expect(staleValue["cachedDistribution"] != nil)
+        #expect(staleRecovery.fetchedAt == nil)
 
         try FileManager.default.removeItem(at: logs)
         let withoutSamples = cache.readIssue(requested, issueID: "stable-issue")

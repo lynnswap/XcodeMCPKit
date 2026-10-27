@@ -99,29 +99,40 @@ Native device, debugger, signing, and account permissions still apply.
 
 Call `ListCrashIssues` with the app's bundle identifier and platform. Xcode's
 existing App Store Connect account access is required; no API key is needed.
-For network requests, open the selected Xcode installation and grant the native
-host Accessibility access. Crash collection operates its GUI Organizer. Normal
-workspace operations continue to use headless models.
+Configure the account in the selected Xcode installation and grant the native
+host Accessibility access before fetching. Each network call starts a dedicated
+GUI instance of that Xcode installation and closes that instance when the call
+completes, fails, or is cancelled. You do not need to open Xcode manually.
+Organizer windows can appear and Xcode can become active during collection.
+Normal workspace operations continue to use headless models.
 
-The tool selects the requested product and filters, clears the name search,
-and turns off "Show only unresolved crash logs" before reloading Organizer.
-It changes the displayed selection and filters, without changing any issue's
-resolved state.
+In its dedicated instance, the tool selects the requested product and filters,
+clears the name search, and turns off "Show only unresolved crash logs".
+These operations do not change any issue's resolved state.
+
+When a short list has no scrollbar, collection temporarily moves the pointer
+over Organizer to send a normal scroll gesture. It restores the original
+position if you have not moved the pointer yourself. Switching windows or
+moving the pointer during that gesture stops collection. Completed pages are
+retained; retry `pagination.nextPage` from the partial result after the interruption.
 
 ```json
 {
   "bundle_id": "com.example.app",
   "platform": "iOS",
-  "time_period": "last14Days",
-  "page": 0,
-  "page_size": 25
+  "time_period": "last14Days"
 }
 ```
 
-The response contains structured `issues`, the resolved `query`, `pagination`,
-`provenance`, and `errors`. `page` starts at zero and `page_size` is fixed at 25.
-Save each response and follow `pagination.nextPage` with the same filters until
-it is null. Every nonempty page requires a probe of the next page, including a
+Omit `page` to collect all pages in one call using one dedicated Xcode instance.
+The response contains `pages` and combined `issues`, together with the resolved
+`query`, `pagination`, `provenance`, and `errors`. If collection fails partway
+through, it returns a partial result with the successful pages and
+`pagination.nextPage` set to the failed page. Retry that page with the same
+filters, for example by adding `"page": 2`.
+
+Specify `page` to retrieve or retry a single zero-based page. `page_size` is
+fixed at 25. Every nonempty page requires a probe of the next page, including a
 page with fewer than 25 issues. An empty page establishes the end only when
 Organizer also reports a normal, idle list. Rankings can change between calls;
 merge records by `issueId`. A missing issue does not establish that it was resolved.
@@ -160,19 +171,25 @@ occurrences or affected devices. `responsePath` names the complete structured
 response saved locally.
 
 The default `source: "network"` opens the requested Organizer route in the
-selected Xcode, invokes Reload Organizer, and scrolls to load the requested
-page. It accepts a refreshed native cache entry only when its complete header
-matches the query and its issue names match the displayed list. Each loaded
-page is also saved in this server's store, because Organizer retains only eight
-recent list-cache entries.
+dedicated Xcode instance and waits for the initial network download, then
+scrolls to load further pages. It accepts a refreshed native cache entry only
+when its complete header matches the query and its issue names match the
+displayed list. Each loaded page is also saved in this server's store, because
+Organizer retains only eight recent list-cache entries. Network crash calls
+share a lock across server processes while accessing Xcode's Products disk cache.
 
 `source: "cache"` reads only this server's saved response for the exact query
-and page (or issue ID). `source: "networkWithCacheFallback"` preserves the refresh
-failure, cached diagnostics, and original fetch time when falling back.
+and page or all-page request (or issue ID), without starting GUI Xcode. Cached
+partial results remain partial. `source: "networkWithCacheFallback"` preserves
+the refresh failure, cached diagnostics, and original fetch time when falling back.
 Organizer's most-recent cached page is never substituted. `provenance.source`
-is `organizer` for a refreshed result and `cache` for a saved result.
-`provenance.fetchedAt` is Organizer's native cache-header refresh time, a local
-refresh timestamp. `provenance.sourceUpdatedAt` is null because no provider
+is `organizer` for a refreshed result, `organizerCache` for saved Organizer samples
+recovered after a detail-refresh failure, and `cache` for a server-store read.
+Recovered samples have unknown freshness and `provenance.fetchedAt: null`;
+their cached distribution is retained in `native.cachedDistribution` without
+being returned as current `timeSeries`. Otherwise, `provenance.fetchedAt` is
+Organizer's native cache-header refresh time, a local refresh timestamp.
+`provenance.sourceUpdatedAt` is null because no provider
 update timestamp or conditional change token is available; refetch to detect
 updates.
 

@@ -66,7 +66,7 @@ final class NativeCrashToolCorrection {
                 let key = query.json(issueID: kind == .logs ? parameters.issueID : nil)
                 let store = NativeCrashStore(root: context.artifactsRoot.appendingPathComponent("CrashAnalytics", isDirectory: true))
                 let loaded = try await NativeCrashData.load(key: key, source: parameters.source, store: store) { [service] in
-                    if kind == .topIssues { return try await service.fetchPage(query, store: store) }
+                    if kind == .topIssues { return try await service.fetchIssues(query, store: store) }
                     return try await service.fetchIssue(query, issueID: parameters.issueID!)
                 }
                 try Task.checkCancellation()
@@ -139,7 +139,7 @@ final class NativeCrashToolCorrection {
             return NativeCrashServiceQuery(adamIdentifier: String(describing: adam), bundleIdentifier: context.bundleIdentifier,
                 platformIdentifier: executionIdentifier, uploadPlatformIdentifier: uploadIdentifier,
                 appVersion: input.appVersion, isBeta: input.isBeta, timePeriod: input.timePeriod,
-                pageIndex: input.pageIndex, pageSize: input.pageSize)
+                pageIndex: input.pageIndex ?? 0, pageSize: input.pageSize, collectsAllPages: input.pageIndex == nil)
         }
         throw NativeRuntimeError.unavailable("No App Store product matches \(context.bundleIdentifier) on upload platform \(uploadIdentifier)")
     }
@@ -155,11 +155,19 @@ final class NativeCrashToolCorrection {
                     throw NativeRuntimeError.unsupportedContract("Native crash list has no points array")
                 }
                 result["issues"] = .array(try points.map(NativeCrashData.issue))
+                result["pages"] = native.removeValue(forKey: "pages") ?? .array([.object([
+                    "query": query.json(issueID: nil), "status": .string(errors.isEmpty ? "complete" : "partial"),
+                    "returnedCount": .number(.int(Int64(points.count))),
+                    "source": loaded.source.map(JSONValue.string) ?? .null,
+                    "fetchedAt": loaded.fetchedAt.map(JSONValue.string) ?? .null,
+                    "cachePath": loaded.cachePath.map(JSONValue.string) ?? .null,
+                ])])
+                let pagination = native.removeValue(forKey: "pagination")
                 var metadata = native
                 metadata.removeValue(forKey: "points")
                 result["native"] = .object(metadata)
                 let needsProbe = !points.isEmpty
-                result["pagination"] = .object(["page": .number(.int(Int64(query.pageIndex))),
+                result["pagination"] = pagination ?? .object(["page": .number(.int(Int64(query.pageIndex))),
                     "pageSize": .number(.int(Int64(query.pageSize))), "returnedCount": .number(.int(Int64(points.count))),
                     "hasMore": needsProbe ? .null : .bool(false),
                     "nextPage": needsProbe ? .number(.int(Int64(query.pageIndex + 1))) : .null,
@@ -358,7 +366,8 @@ final class NativeCrashToolCorrection {
                     "appVersion": input.appVersion.map(JSONValue.string) ?? .null,
                     "isBeta": input.isBeta.map(JSONValue.bool) ?? .null,
                     "issueId": input.issueID.map(JSONValue.string) ?? .null,
-                    "page": .number(.int(Int64(input.pageIndex))), "pageSize": .number(.int(Int64(input.pageSize))),
+                    "page": input.pageIndex.map { .number(.int(Int64($0))) } ?? .null, "pageSize": .number(.int(Int64(input.pageSize))),
+                    "allPages": .bool(input.pageIndex == nil),
                     "timePeriod": .string(input.timePeriod)]),
                 "provenance": NativeCrashData.Loaded().provenance,
                 "errors": .array([NativeCrashData.diagnostic(error, operation: "crashAnalytics")])]))
@@ -391,6 +400,7 @@ extension NativeCrashServiceQuery {
             "timePeriod": .string(timePeriod)]
         if let issueID { value["issueId"] = .string(issueID) }
         else {
+            value["allPages"] = .bool(collectsAllPages)
             value["page"] = .number(.int(Int64(pageIndex)))
             value["pageSize"] = .number(.int(Int64(pageSize)))
         }
