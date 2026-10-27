@@ -6,19 +6,6 @@ import Testing
 @Suite
 @MainActor
 struct NativeAnalyticsValueTests {
-    @Test(arguments: [Bool?.none, .some(false), .some(true)])
-    func optionalBooleanUsesTheCompilerKnownABI(boolean: Bool?) async throws {
-        let executable = try #require(Bundle(for: AnalyticsFixtureLocator.self).executableURL)
-        let function = try await ABIRuntime.shared.resolve(
-            .swift(
-                .function(
-                    "XcodeMCPNativeRuntimeTests.nativeAnalyticsValueFixture(Swift.Optional<Swift.Bool>) async -> Swift.String",
-                    as: (@concurrent (NativeAnalyticsBoolean) async -> String).self)),
-            in: .path(executable), loading: .loadedOnly)
-        let output = try unsafe await function.unsafeInvoke(NativeAnalyticsBoolean(value: boolean))
-        #expect(output == (boolean.map(String.init) ?? "nil"))
-    }
-
     @Test func runtimeOnlyArraysPreserveFieldsAndOptionalPaths() async throws {
         let fixture = NativeWorkspaceSnapshotFixture()
         let list = try await ABIRuntime.shared.object(fixture).resolve(
@@ -38,9 +25,6 @@ struct NativeAnalyticsValueTests {
         }
     }
 }
-
-private final class AnalyticsFixtureLocator: NSObject {}
-
 public struct NativeWorkspaceSnapshotEntry {
     let identifier: String
     let path: String?
@@ -54,11 +38,4 @@ public final class NativeWorkspaceSnapshotFixture: NSObject {
             NativeWorkspaceSnapshotEntry(identifier: "workspace-1", path: nil),
         ]
     }
-}
-
-@inline(never)
-@concurrent
-public func nativeAnalyticsValueFixture(_ boolean: Bool?) async -> String {
-    await Task.yield()
-    return boolean.map(String.init) ?? "nil"
 }

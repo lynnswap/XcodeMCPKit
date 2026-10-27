@@ -98,7 +98,15 @@ Native device, debugger, signing, and account permissions still apply.
 ## Collect crash reports
 
 Call `ListCrashIssues` with the app's bundle identifier and platform. Xcode's
-App Store Connect account access is required; no Organizer selection is needed.
+existing App Store Connect account access is required; no API key is needed.
+For network requests, open the selected Xcode installation and grant the native
+host Accessibility access. Crash collection operates its GUI Organizer. Normal
+workspace operations continue to use headless models.
+
+The tool selects the requested product and filters, clears the name search,
+and turns off "Show only unresolved crash logs" before reloading Organizer.
+It changes the displayed selection and filters, without changing any issue's
+resolved state.
 
 ```json
 {
@@ -111,11 +119,12 @@ App Store Connect account access is required; no Organizer selection is needed.
 ```
 
 The response contains structured `issues`, the resolved `query`, `pagination`,
-`provenance`, and `errors`. Save each response and follow `pagination.nextPage`
-with the same filters and page size until it is null. Nonempty pages require a
-probe of the next page because the native service supplies no total or snapshot
-token. Rankings can change between calls; merge records by `issueId`. A missing
-issue does not establish that it was resolved.
+`provenance`, and `errors`. `page` starts at zero and `page_size` is fixed at 25.
+Save each response and follow `pagination.nextPage` with the same filters until
+it is null. Every nonempty page requires a probe of the next page, including a
+page with fewer than 25 issues. An empty page establishes the end only when
+Organizer also reports a normal, idle list. Rankings can change between calls;
+merge records by `issueId`. A missing issue does not establish that it was resolved.
 
 Use `app_version` to select a version and `is_beta` to select TestFlight (`true`)
 or App Store (`false`); omit either to include all. Supported aggregation periods
@@ -137,24 +146,35 @@ input:
 
 `timeSeries` preserves the native interval boundaries, granularity, and unique
 device counts. Missing intervals remain missing, and interval device counts
-cannot be added to obtain the period's unique-device count. The native detail
-service returns distributions across all versions and release channels.
-`app_version` filters its sample logs only; `is_beta` is unsupported for this
-operation. The response states these scopes explicitly and retains all original
-distributions in `native`.
+cannot be added to obtain the period's unique-device count. Organizer's detail
+download covers all versions, builds, and release channels over the last year.
+`time_period` selects one of its returned `last24Hours`, `last14Days`, or
+`last365Days` distributions; it does not filter the downloaded sample logs.
+`GetCrashIssue` rejects `app_version` and `is_beta`. The response states these
+scopes explicitly and retains the original distributions in `native`.
 
 `logs` contains local file paths and SHA-256 content IDs. A log's content ID can
-change when its contents change. `sampleLogCount` counts saved sample files;
-it does not count crash occurrences or affected devices. `responsePath` names
-the complete structured response saved locally.
+change when its contents change. Samples can include logs already saved by Organizer
+from earlier downloads. `sampleLogCount` counts saved sample files, not crash
+occurrences or affected devices. `responsePath` names the complete structured
+response saved locally.
 
-The default `source: "network"` calls Xcode's analytics services directly.
-`source: "cache"` reads only a response previously fetched by this server for
-the exact query and page (or issue ID). `source: "networkWithCacheFallback"`
-preserves the network failure and original cache fetch time when falling back.
-Organizer's most-recent cached page is never substituted. `sourceUpdatedAt`
-is null because these native results provide no update timestamp or conditional
-change token; refetch to detect updates.
+The default `source: "network"` opens the requested Organizer route in the
+selected Xcode, invokes Reload Organizer, and scrolls to load the requested
+page. It accepts a refreshed native cache entry only when its complete header
+matches the query and its issue names match the displayed list. Each loaded
+page is also saved in this server's store, because Organizer retains only eight
+recent list-cache entries.
+
+`source: "cache"` reads only this server's saved response for the exact query
+and page (or issue ID). `source: "networkWithCacheFallback"` preserves the refresh
+failure, cached diagnostics, and original fetch time when falling back.
+Organizer's most-recent cached page is never substituted. `provenance.source`
+is `organizer` for a refreshed result and `cache` for a saved result.
+`provenance.fetchedAt` is Organizer's native cache-header refresh time, a local
+refresh timestamp. `provenance.sourceUpdatedAt` is null because no provider
+update timestamp or conditional change token is available; refetch to detect
+updates.
 
 `status` is `complete`, `partial`, or `failed`. A partial response retains usable
 data and diagnostics; a failed response also sets MCP `isError`. Errors include

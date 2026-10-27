@@ -22,12 +22,12 @@ final class NativeCrashToolCorrection {
 
     private let runtime = ABIRuntime.shared
     private let installation: NativeXcodeInstallation
-    private let service: NativeCrashAnalyticsService
+    private let service: NativeOrganizerCrashService
     private var operations: [UUID: (request: URL?, task: Task<Void, Never>)] = [:]
 
     init(installation: NativeXcodeInstallation) {
         self.installation = installation
-        service = NativeCrashAnalyticsService(installation: installation)
+        service = NativeOrganizerCrashService(installation: installation)
     }
 
     func execute(_ kind: Kind, input: Data, context: NativeToolContext) throws -> AsyncStream<Data> {
@@ -40,6 +40,9 @@ final class NativeCrashToolCorrection {
             }
             guard parameters.isBeta == nil else {
                 throw NativeRuntimeError.invalidRequest("GetCrashIssue cannot filter sample logs by is_beta; the native service does not support that filter")
+            }
+            guard parameters.appVersion == nil else {
+                throw NativeRuntimeError.invalidRequest("GetCrashIssue returns Organizer's samples and distributions for all app versions; use app_version on ListCrashIssues")
             }
         }
         let result = AsyncStream<Data>.makeStream()
@@ -63,7 +66,7 @@ final class NativeCrashToolCorrection {
                 let key = query.json(issueID: kind == .logs ? parameters.issueID : nil)
                 let store = NativeCrashStore(root: context.artifactsRoot.appendingPathComponent("CrashAnalytics", isDirectory: true))
                 let loaded = try await NativeCrashData.load(key: key, source: parameters.source, store: store) { [service] in
-                    if kind == .topIssues { return try await service.fetchPage(query) }
+                    if kind == .topIssues { return try await service.fetchPage(query, store: store) }
                     return try await service.fetchIssue(query, issueID: parameters.issueID!)
                 }
                 try Task.checkCancellation()
@@ -163,18 +166,22 @@ final class NativeCrashToolCorrection {
                     "continuationRequiresProbe": .bool(needsProbe)])
             } else {
                 result["issueId"] = issueID.map(JSONValue.string) ?? .null
-                do { result["timeSeries"] = try NativeCrashData.timeSeries(.object(native), timePeriod: query.timePeriod) }
+                do {
+                    guard let distribution = native["distribution"] else {
+                        throw NativeRuntimeError.unavailable("Organizer did not provide crash device distributions")
+                    }
+                    result["timeSeries"] = try NativeCrashData.timeSeries(distribution, timePeriod: query.timePeriod)
+                }
                 catch { errors.append(NativeCrashData.diagnostic(error, operation: "timeSeries")) }
                 let saved = NativeCrashData.saveLogs(native, directory: directory)
                 errors += saved.errors
                 let logs = saved.logs
-                native.removeValue(forKey: "crashLogTexts")
-                native.removeValue(forKey: "logListContainer")
+                native.removeValue(forKey: "logs")
                 result["logs"] = .array(logs)
                 result["sampleLogCount"] = .number(.int(Int64(logs.count)))
                 result["native"] = .object(native)
                 result["logFilters"] = .object(["appVersion": query.appVersion.map(JSONValue.string) ?? .null,
-                    "isBeta": .null, "limitation": .string("Native logs support app-version filtering only; distributions cover all versions and release channels.")])
+                    "isBeta": .null, "limitation": .string("Organizer's saved samples and distributions cover all app versions and release channels. Saved samples can include previously downloaded logs; their count is not the number of crashes or devices.")])
             }
         } else if kind == .topIssues {
             result["issues"] = .array([])

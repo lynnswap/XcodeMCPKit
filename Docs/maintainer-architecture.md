@@ -84,12 +84,27 @@ installed Metal toolchain without changing persisted Xcode preferences. The
 Metal provider receives the directory containing `.xctoolchain` bundles, not the
 bundle itself. Restart the host after replacing either asset. The breakpoint
 manager is prepared on the main thread before debugger launch to avoid native
-global-store initialization assertions. Crash collection calls the lower-level
-analytics services through ABIBridge with explicit product, platform, upload
-platform, filters, period, and page. The native MCP downloader's most-recent-item
-fallback is bypassed. Server-owned crash cache entries use the complete resolved
-request as their key and retain the original fetch time. Cached analytics results
-do not establish online account access.
+global-store initialization assertions.
+
+Crash collection uses the selected running Xcode's Organizer for authenticated
+downloads with its existing account; it requires Accessibility access and no API
+key. The native host opens an exact product/filter URL, clears the name search
+and unresolved-only display filter, invokes Reload Organizer, and scrolls the
+list in fixed 25-issue pages. It accepts native cache entries by complete header
+identity and checks their issue names against the GUI list. A nonempty page
+requires another probe; only an empty page with a normal, idle UI establishes
+the end. Organizer's eight-entry list-cache LRU is copied into the server-owned
+exact-query store as pages arrive. Requests serialize GUI selection, refresh,
+and cache reads per Xcode process. Other workspace operations stay headless.
+
+Detail URLs identify a stable issue ID and request Organizer's all-version,
+all-build, all-channel yearly detail. The requested period selects one of the
+three returned distributions. Saved samples can include earlier Organizer
+downloads and are not occurrence or device counts. Provenance identifies
+Organizer as the source and retains its local cache-header refresh time; the
+provider update time is unavailable. Exact-query cache reads and network fallback
+retain original timestamps, errors, and partial results. Cached results do not
+establish online account access.
 
 ### Preview rendering
 
@@ -160,8 +175,9 @@ do not grant Apple privileges.
 
 Only the public dynamic-loader entitlement is used for loading the selected
 Xcode's frameworks under hardened runtime. Apple-restricted Service entitlements
-and BoardServices registration are not copied. The helper does not connect to
-GUI Xcode or alter agent permissions. The separate opt-in Accessibility monitor
+and BoardServices registration are not copied. Workspace operations use owned
+models, and crash downloads operate GUI Organizer without changing agent
+permissions. The separate opt-in Accessibility monitor
 presses recognized connection dialogs' Allow button.
 
 Verify helper startup and workspace operations under normal SIP/AMFI, including

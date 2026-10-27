@@ -7,7 +7,7 @@ import XcodeMCPWire
 @Suite
 struct NativeCrashDataTests {
     @Test func crashRequestsDecodeThePublishedSelectionAndPagingInputs() throws {
-        let input = Data(#"{"workspaceIdentifier":"workspace","bundle_id":"example.App","platform":"iOS","app_version":"2.0","is_beta":false,"time_period":"last365Days","page":2,"page_size":50,"issue_id":"stable-issue","source":"cache"}"#.utf8)
+        let input = Data(#"{"workspaceIdentifier":"workspace","bundle_id":"example.App","platform":"iOS","app_version":"2.0","is_beta":false,"time_period":"last365Days","page":2,"page_size":25,"issue_id":"stable-issue","source":"cache"}"#.utf8)
         let request = try JSONDecoder().decode(NativeCrashRequest.self, from: input)
         #expect(request.workspaceIdentifier == "workspace")
         #expect(request.bundleIdentifier == "example.App")
@@ -16,7 +16,7 @@ struct NativeCrashDataTests {
         #expect(request.isBeta == false)
         #expect(request.timePeriod == "last365Days")
         #expect(request.pageIndex == 2)
-        #expect(request.pageSize == 50)
+        #expect(request.pageSize == 25)
         #expect(request.issueID == "stable-issue")
         #expect(request.source == .cache)
     }
@@ -73,11 +73,11 @@ struct NativeCrashDataTests {
 
         let result = try await NativeCrashData.load(key: cacheKey(), source: .networkWithCacheFallback,
                                                    store: NativeCrashStore(root: root)) {
-            try NativeCrashStore.encode(downloaded)
+            NativeCrashData.Fetched(value: downloaded, fetchedAt: "2024-01-04T00:00:00Z")
         }
 
         #expect(result.value == downloaded)
-        #expect(result.source == "network")
+        #expect(result.source == "organizer")
         #expect(result.fetchedAt != nil)
         #expect(result.cachePath == nil)
         let error = try #require(result.errors.first)
@@ -92,7 +92,7 @@ struct NativeCrashDataTests {
         let firstPage: JSONValue = .object(["issues": .array([.string("first-issue")])])
         let secondPage: JSONValue = .object(["issues": .array([.string("second-issue")])])
         let first = try await NativeCrashData.load(key: cacheKey(), source: .network, store: store) {
-            try NativeCrashStore.encode(firstPage)
+            NativeCrashData.Fetched(value: firstPage, fetchedAt: "2024-01-04T00:00:00Z")
         }
 
         let failed = try await NativeCrashData.load(key: cacheKey(page: 1), source: .network, store: store) {
@@ -107,7 +107,7 @@ struct NativeCrashDataTests {
         #expect(try store.read(key: cacheKey(page: 1)) == nil)
 
         let retried = try await NativeCrashData.load(key: cacheKey(page: 1), source: .network, store: store) {
-            try NativeCrashStore.encode(secondPage)
+            NativeCrashData.Fetched(value: secondPage, fetchedAt: "2024-01-05T00:00:00Z")
         }
 
         #expect(retried.value == secondPage)
@@ -115,6 +115,24 @@ struct NativeCrashDataTests {
         #expect(try store.read(key: cacheKey())?.value == firstPage)
         #expect(try store.read(key: cacheKey())?.fetchedAt == first.fetchedAt)
         #expect(try store.read(key: cacheKey(page: 1))?.value == secondPage)
+    }
+
+    @Test @MainActor func aCachedPartialDownloadRetainsTheMissingSamplesAndOriginalFetchTime() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NativeCrashStore(root: root)
+        let failure = NativeCrashData.diagnostic(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError), operation: "organizerLogRead")
+        let value: JSONValue = .object(["logs": .array([.object(["data": .string("c2FtcGxl")])])])
+        let fetched = try await NativeCrashData.load(key: cacheKey(), source: .network, store: store) {
+            NativeCrashData.Fetched(value: value, fetchedAt: "2024-01-04T00:00:00Z", errors: [failure])
+        }
+        let cached = try await NativeCrashData.load(key: cacheKey(), source: .cache, store: store) {
+            Issue.record("A cache-only read must not operate Organizer")
+            throw CancellationError()
+        }
+        #expect(cached.value == fetched.value)
+        #expect(cached.errors == [failure])
+        #expect(cached.fetchedAt == "2024-01-04T00:00:00Z")
     }
 
     @Test(arguments: [false, true])
@@ -183,7 +201,7 @@ struct NativeCrashDataTests {
         ])
         let period: JSONValue = .object([
             "timePeriod": .string("last14Days"), "startDate": .string("2024-01-01T00:00:00Z"),
-            "endDate": .string("2024-01-15T00:00:00Z"), "subTotalBreakByTimePeriod": .string("byDay"),
+            "endDate": .string("2024-01-15T00:00:00Z"), "subTotalBreakByTimePeriod": .number(.int(1)),
             "uniqueDeviceCountForTimePeriod": .number(.int(4)), "timeDistributionDatas": intervals,
         ])
         let otherPeriod: JSONValue = .object([
@@ -193,7 +211,7 @@ struct NativeCrashDataTests {
         let nativeSeries: JSONValue = .object([
             "timeDistributionMetaDatas": .array([otherPeriod, period]),
         ])
-        let distribution: JSONValue = .object(["timeDistribution": nativeSeries])
+        let distribution: JSONValue = .object(["body": .object(["timeSeriesDistribution": nativeSeries])])
 
         let series = try NativeCrashData.timeSeries(distribution, timePeriod: "last14Days")
 
@@ -202,7 +220,7 @@ struct NativeCrashDataTests {
         #expect(try nativeTestField(series, "endDate") == .string("2024-01-15T00:00:00Z"))
         #expect(try nativeTestField(series, "uniqueDeviceCountForTimePeriod") == .number(.int(4)))
         #expect(try nativeTestField(series, "metric") == .string("uniqueDevices"))
-        #expect(try nativeTestField(series, "nativeGranularity") == .string("byDay"))
+        #expect(try nativeTestField(series, "nativeGranularity") == .number(.int(1)))
         #expect(try nativeTestField(series, "granularity") == .string("day"))
     }
 
@@ -214,12 +232,10 @@ struct NativeCrashDataTests {
         let unwritableText = "Exception Type: EXC_CRASH\nThread 1 Crashed:\n0   App.launch() + 64\n"
         let blockedPath = directory.appendingPathComponent(SHA256.hash(data: Data(unwritableText.utf8)).hexString + ".crash")
         try FileManager.default.createDirectory(at: blockedPath, withIntermediateDirectories: false)
-        let response: [String: JSONValue] = ["logListContainer": .object(["crashPointLogList": .object([
-            "logDatas": .array([
-                .object(["data": .object(["data": .string(text)])]),
-                .object(["data": .object(["data": .string(unwritableText)])]),
-            ]),
-        ])])]
+        let response: [String: JSONValue] = ["logs": .array([
+            .object(["data": .string(Data(text.utf8).base64EncodedString())]),
+            .object(["data": .string(Data(unwritableText.utf8).base64EncodedString())]),
+        ])]
 
         let result = NativeCrashData.saveLogs(response, directory: directory)
 
@@ -236,11 +252,11 @@ struct NativeCrashDataTests {
     }
 
     @Test func aMissingRequestedPeriodDoesNotUseAnotherPeriod() throws {
-        let distribution: JSONValue = .object(["timeDistribution": .object([
+        let distribution: JSONValue = .object(["body": .object(["timeSeriesDistribution": .object([
             "timeDistributionMetaDatas": .array([.object([
                 "timePeriod": .string("last24Hours"), "timeDistributionDatas": .array([]),
             ])]),
-        ])])
+        ])])])
 
         #expect(throws: NativeRuntimeError.self) {
             try NativeCrashData.timeSeries(distribution, timePeriod: "last14Days")
@@ -287,6 +303,17 @@ struct NativeCrashDataTests {
         #expect(failures.count == 2)
         #expect(failures.contains(.object(["domain": .string("AccountCredentials"), "code": .number(.int(401))])))
         #expect(failures.contains(.object(["domain": .string(NSURLErrorDomain), "code": .number(.int(Int64(NSURLErrorTimedOut)))])))
+    }
+
+    @Test func aRefreshTimeoutRetainsStructuredCacheReadCauses() throws {
+        let cause: JSONValue = .object(["domain": .string(NSCocoaErrorDomain), "code": .number(.int(260)),
+            "message": .string("Cache read failed"), "path": .string("/tmp/Organizer/DistributionInfo.json"),
+            "underlyingError": .object(["domain": .string(NSPOSIXErrorDomain), "code": .number(.int(13))])])
+        let failure = NSError(domain: "XcodeMCPKit.Organizer", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "Organizer did not refresh", "XcodeMCPKit.CrashDiagnostics": [cause.foundationObject],
+        ])
+        let diagnostic = NativeCrashData.diagnostic(failure, operation: "download")
+        #expect(try nativeTestField(diagnostic, "cacheErrors") == .array([cause]))
     }
 
     private func cacheKey(page: Int = 0, version: String = "2.0", period: String = "last14Days") -> JSONValue {
