@@ -1,10 +1,50 @@
 import Foundation
 import Testing
+import XcodeMCPWire
 @testable import XcodeMCPNativeRuntime
 
 @Suite
 @MainActor
 struct NativeOrganizerCrashServiceTests {
+    @Test func aSinglePagePrefixFailureUsesTheOriginalRequestedCache() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NativeCrashStore(root: root)
+        let query = NativeCrashServiceQuery(adamIdentifier: "1234567890", bundleIdentifier: "example.App",
+            platformIdentifier: "com.apple.platform.iphoneos", uploadPlatformIdentifier: "com.apple.platform.iphoneos",
+            appVersion: nil, isBeta: nil, timePeriod: "last14Days", pageIndex: 2, pageSize: 25)
+        let requestedKey = query.json(issueID: nil)
+        let prefixKey = query.withPage(0).json(issueID: nil)
+        let requested: JSONValue = .object(["points": .array([.object([
+            "analyticsPointIdentifier": .string("requested-issue"), "analyticsPointName": .string("Requested.crash()"),
+        ])])])
+        let prefix: JSONValue = .object(["points": .array([.object([
+            "analyticsPointIdentifier": .string("prefix-issue"), "analyticsPointName": .string("Prefix.crash()"),
+        ])])])
+        let cachedFailure: JSONValue = .object(["operation": .string("cacheWrite"), "message": .string("A previous partial result")])
+        let originalTime = "2024-01-01T00:00:00Z"
+        _ = try store.write(requested, key: requestedKey, fetchedAt: originalTime, errors: [cachedFailure])
+        _ = try store.write(prefix, key: prefixKey, fetchedAt: "2024-01-02T00:00:00Z")
+
+        let loaded = try await NativeCrashData.load(key: requestedKey, source: .networkWithCacheFallback, store: store) {
+            try NativeOrganizerCrashService.collectionAfterFailure(query, points: [], pages: [],
+                copiedPages: [.object(["query": prefixKey, "status": .string("complete")])],
+                fetchedAt: "2024-01-02T00:00:00Z", failedPage: 1, errors: [],
+                error: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut))
+        }
+
+        #expect(loaded.source == "cache")
+        #expect(loaded.value == requested)
+        #expect(loaded.fetchedAt == originalTime)
+        #expect(loaded.errors.contains(cachedFailure))
+        #expect(loaded.errors.count == 2)
+        let retained = try #require(try store.read(key: requestedKey))
+        #expect(retained.value == requested)
+        #expect(retained.fetchedAt == originalTime)
+        #expect(retained.errors == [cachedFailure])
+        #expect(try store.read(key: prefixKey)?.value == prefix)
+    }
+
     @Test func allPageAndSinglePageCachesRemainSeparate() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

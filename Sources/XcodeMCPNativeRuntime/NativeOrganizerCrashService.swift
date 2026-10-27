@@ -67,12 +67,8 @@ final class NativeOrganizerCrashService {
                     try await driver.scrollToBottom()
                 } catch {
                     try Task.checkCancellation()
-                    let failure = NativeCrashData.diagnostic(error, operation: "organizerPage\(index)")
-                    errors.append(failure)
-                    guard !copiedPages.isEmpty else { throw Self.timeoutError("Organizer could not collect crash issues", errors: errors) }
-                    pages.append(.object(["query": query.withPage(index).json(issueID: nil), "status": .string("failed"), "errors": .array([failure])]))
-                    return Self.collection(query, points: points, pages: pages, copiedPages: copiedPages,
-                        fetchedAt: fetchedAt, nextPage: index, terminal: false, errors: errors)
+                    return try Self.collectionAfterFailure(query, points: points, pages: pages, copiedPages: copiedPages,
+                        fetchedAt: fetchedAt, failedPage: index, errors: errors, error: error)
                 }
             }
         }
@@ -165,6 +161,22 @@ final class NativeOrganizerCrashService {
         NativeCrashData.Fetched(value: .object(["points": .array(page.points), "organizerCache": page.native,
             "organizerCachePath": .string(page.cacheURL.path), "organizerCacheKey": page.key,
         ]), fetchedAt: date(page.fetchedAt))
+    }
+
+    static func collectionAfterFailure(_ query: NativeCrashServiceQuery, points: [JSONValue], pages: [JSONValue],
+                                       copiedPages: [JSONValue], fetchedAt: String, failedPage: Int,
+                                       errors: [JSONValue], error: any Error) throws -> NativeCrashData.Fetched {
+        let failure = NativeCrashData.diagnostic(error, operation: "organizerPage\(failedPage)")
+        let failures = errors + [failure]
+        // Prefix pages are saved separately; they cannot satisfy a request for
+        // a later single page or replace its existing cached result.
+        guard query.collectsAllPages, !copiedPages.isEmpty else {
+            throw timeoutError("Organizer could not collect crash issues", errors: failures)
+        }
+        let failed: JSONValue = .object(["query": query.withPage(failedPage).json(issueID: nil),
+            "status": .string("failed"), "errors": .array([failure])])
+        return collection(query, points: points, pages: pages + [failed], copiedPages: copiedPages,
+            fetchedAt: fetchedAt, nextPage: failedPage, terminal: false, errors: failures)
     }
 
     private static func collection(_ query: NativeCrashServiceQuery, points: [JSONValue], pages: [JSONValue],
