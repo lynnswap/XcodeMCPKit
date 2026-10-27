@@ -160,7 +160,8 @@ enum NativeCrashContract {
             .object(["type": .array([.string("string"), .string("null")]), "description": .string(description)])
         }
         var outputs: [String: JSONValue] = [
-            "status": .object(["type": .string("string"), "enum": .array([.string("complete"), .string("partial"), .string("failed")])]),
+            "status": .object(["type": .string("string"), "enum": .array([.string("complete"), .string("partial"), .string("failed")]),
+                "description": .string("Failed when acquisition has no usable source, including a cache miss; partial when usable source data remains alongside errors. A successful empty source is complete.")]),
             "query": property("object", "Resolved query scope, retained with every continuation; only known requested fields are included if a failure prevents scope resolution."),
             "collection": .object(["type": .array([.string("string"), .string("null")]),
                 "description": .string("The issues or logs collection belonging to this query; null when a failure prevents resolving the token's scope.")]),
@@ -172,7 +173,7 @@ enum NativeCrashContract {
         switch kind {
         case .sync:
             outputs["metadataPath"] = property("string", "Persisted acquisition source metadata, including its original provenance and distributions.")
-            outputs["cacheInfo"] = property("object", "Acquisition state: syncId, capturedCount, processedCount, pendingCount, reusedCount, newCount, updatedCount, storedBytes, acquisitionComplete, sourceComplete, and nextSyncCursor. Finishing local import does not establish complete upstream coverage.")
+            outputs["cacheInfo"] = property("object", "Acquisition state: syncId, capturedCount, processedCount, pendingCount, reusedCount, newCount, updatedCount, storedBytes, sourceAvailable, acquisitionComplete, sourceComplete, and nextSyncCursor. sourceAvailable distinguishes a successful empty source from a missing or failed source. Finishing local import does not establish complete upstream coverage.")
         case .read:
             outputs["changes"] = .object(["type": .string("array"), "items": property("object", "New or updated record with itemId, contentId, revision, and change. Logs have logical logId, nativeLogId, reusable blob path, bytes, variant and optional actual occurredAt. Issues have issueId, name, counts and a payloadPath to native JSON.")])
             outputs["checkpoint"] = token("Baseline for a later change window, issued only at the end of this fixed reader window. It tracks locally observed records and is independent of pending acquisition.")

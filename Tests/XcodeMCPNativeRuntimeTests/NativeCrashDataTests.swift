@@ -81,6 +81,14 @@ struct NativeCrashDataTests {
         }
         #expect(uncachedPage.value == nil)
         #expect(uncachedPage.source == nil)
+        let query = NativeCrashQuery(bundleIdentifier: "com.example.app", platformIdentifier: "com.apple.platform.iphoneos",
+            uploadPlatformIdentifier: "com.apple.platform.iphoneos", appVersion: nil, isBeta: nil,
+            timePeriod: "last14Days", pageIndex: 0, pageSize: 25, collectsAllPages: true)
+        let snapshot = try NativeCrashToolCorrection.snapshot(collection: .issues, query: query,
+            issueID: nil, loaded: uncachedPage)
+        #expect(!snapshot.sourceAvailable)
+        #expect(!snapshot.isComplete)
+        #expect(snapshot.errors == uncachedPage.errors)
     }
 
     @Test @MainActor func recoveredOrganizerSamplesDoNotReplaceTheExactServerFallback() async throws {

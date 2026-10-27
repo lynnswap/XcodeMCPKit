@@ -12,6 +12,8 @@ struct NativeCrashSyncSnapshot: Sendable {
     var logDirectory: URL?
     var isComplete = true
     var errors: [JSONValue] = []
+    var sourceAvailable = true
+    var sourceObservedAt: Date?
 }
 
 /// Owns acquired versions and immutable reader windows. Acquisition never moves
@@ -33,11 +35,15 @@ actor NativeCrashSyncStore {
                 content TEXT NOT NULL, payload TEXT NOT NULL, occurred REAL, observed TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS versions_scope_item ON versions(scope,item,sequence);
             CREATE INDEX IF NOT EXISTS versions_scope_sequence ON versions(scope,sequence);
+            CREATE TABLE IF NOT EXISTS issue_observations (
+                scope TEXT NOT NULL, item TEXT NOT NULL, source_observed REAL, run_order INTEGER NOT NULL,
+                PRIMARY KEY(scope,item));
             CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
                 content TEXT NOT NULL, bytes INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS sync_runs (
                 id TEXT PRIMARY KEY, scope TEXT NOT NULL, metadata TEXT NOT NULL, directory TEXT,
-                complete INTEGER NOT NULL, captured INTEGER NOT NULL DEFAULT 0, processed INTEGER NOT NULL DEFAULT 0,
+                complete INTEGER NOT NULL, source_available INTEGER NOT NULL DEFAULT 1, source_observed REAL,
+                captured INTEGER NOT NULL DEFAULT 0, processed INTEGER NOT NULL DEFAULT 0,
                 reused INTEGER NOT NULL DEFAULT 0, added INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL DEFAULT 0,
                 stored_bytes INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL, errors TEXT NOT NULL,
                 capture_complete INTEGER NOT NULL DEFAULT 0);
@@ -66,10 +72,11 @@ actor NativeCrashSyncStore {
             let metadata = try saveJSON(snapshot.metadata, directory: "Metadata")
             try database.transaction {
                 try database.execute("""
-                    INSERT INTO sync_runs(id,scope,metadata,directory,complete,created,errors)
-                    VALUES(?,?,?,?,?,?,?)
+                    INSERT INTO sync_runs(id,scope,metadata,directory,complete,created,errors,source_available,source_observed)
+                    VALUES(?,?,?,?,?,?,?,?,?)
                     """, [.text(run), .text(scope), .text(metadata.path), snapshot.logDirectory.map { .text($0.path) } ?? .null,
-                           .integer(snapshot.isComplete ? 1 : 0), .text(Self.now), .text(try Self.json(.array(snapshot.errors)))])
+                           .integer(snapshot.isComplete && snapshot.sourceAvailable ? 1 : 0), .text(Self.now), .text(try Self.json(.array(snapshot.errors))),
+                           .integer(snapshot.sourceAvailable ? 1 : 0), snapshot.sourceObservedAt.map { .real($0.timeIntervalSince1970) } ?? .null])
                 try database.execute("INSERT INTO sync_pages(id,run,max_records,max_bytes) VALUES(?,?,?,?)",
                     [.text(page), .text(run), .integer(Int64(maxRecords)), .integer(Int64(maxBytes))])
                 if snapshot.collection == .issues {
@@ -316,7 +323,7 @@ actor NativeCrashSyncStore {
         let page = try requireRow("SELECT * FROM sync_pages WHERE id=?", [.text(id)])
         if let path = page.text("response") { return try Self.readJSON(URL(fileURLWithPath: path)) }
         let runID = try page.required("run")
-        let run = try requireRow("SELECT * FROM sync_runs WHERE id=?", [.text(runID)])
+        let run = try requireRow("SELECT rowid AS ordinal,* FROM sync_runs WHERE id=?", [.text(runID)])
         let scope = try run.required("scope")
         let scopeRow = try requireRow("SELECT * FROM scopes WHERE id=?", [.text(scope)])
         let collection = try scopeRow.required("collection")
@@ -362,6 +369,15 @@ actor NativeCrashSyncStore {
                     occurred = source.occurredAt?.timeIntervalSince1970
                     stored = blob.storedBytes
                 } else {
+                    if try isSupersededIssue(scope: scope, item: item, run: run) {
+                        try database.transaction {
+                            try database.execute("UPDATE work SET state=1,attempts=attempts+1,last_page=? WHERE run=? AND item=?",
+                                [.text(id), .text(runID), .text(item)])
+                            try database.execute("UPDATE sync_runs SET processed=processed+1,reused=reused+1 WHERE id=?", [.text(runID)])
+                        }
+                        processed += 1
+                        continue
+                    }
                     let data = try NativeCrashStore.encode(payload)
                     if processed > 0, Int64(data.count) > page.integer("max_bytes") - bytes { break }
                     oversized = oversized || Int64(data.count) > page.integer("max_bytes")
@@ -382,6 +398,12 @@ actor NativeCrashSyncStore {
                     guard case .object(var fields) = record else { throw NativeRuntimeError.unsupportedContract("A crash record is not an object") }
                     fields["syncId"] = .string(runID)
                     fields["metadataPath"] = .string(try run.required("metadata"))
+                    if collection == NativeCrashCollection.issues.rawValue {
+                        // Unchanged observations still supersede older queued issue payloads.
+                        try database.execute("INSERT OR REPLACE INTO issue_observations(scope,item,source_observed,run_order) VALUES(?,?,?,?)",
+                            [.text(scope), .text(item), run.real("source_observed").map(CrashSQLValue.real) ?? .null,
+                             .integer(run.integer("ordinal"))])
+                    }
                     let version = try storeVersion(scope: scope, item: item, content: content, payload: .object(fields), occurred: occurred)
                     try database.execute("UPDATE work SET state=1,attempts=attempts+1,last_page=? WHERE run=? AND item=?", [.text(id), .text(runID), .text(item)])
                     try database.execute("""
@@ -406,7 +428,8 @@ actor NativeCrashSyncStore {
             next = token(nextID, kind: "sync")
         }
         let result: [String: JSONValue] = [
-            "status": .string(failures.isEmpty ? "complete" : "partial"), "collection": .string(collection),
+            "status": .string(run.integer("source_available") == 0 ? "failed" : failures.isEmpty ? "complete" : "partial"),
+            "collection": .string(collection),
             "query": try Self.parse(try scopeRow.required("query")), "cursor": .string(token(id, kind: "sync")),
             "nextCursor": next.map(JSONValue.string) ?? .null, "cacheInfo": try syncInfo(runID, next: next),
             "metadataPath": .string(try run.required("metadata")), "errors": .array(failures),
@@ -415,6 +438,15 @@ actor NativeCrashSyncStore {
         let published = try publish(result, id: id, table: "sync_pages")
         if pending == 0 { try database.execute("DELETE FROM work WHERE run=?", [.text(runID)]) }
         return published
+    }
+
+    private func isSupersededIssue(scope: String, item: String, run: CrashSQLRow) throws -> Bool {
+        let observed = run.real("source_observed")
+        let ordinal = run.integer("ordinal")
+        guard let previous = try database.rows("SELECT * FROM issue_observations WHERE scope=? AND item=?",
+            [.text(scope), .text(item)]).first else { return false }
+        if let observed, let prior = previous.real("source_observed"), observed != prior { return observed < prior }
+        return ordinal < previous.integer("run_order")
     }
 
     private func storeVersion(scope: String, item: String, content: String, payload: JSONValue,
@@ -500,7 +532,8 @@ actor NativeCrashSyncStore {
         let run = try requireRow("SELECT * FROM sync_runs WHERE id=?", [.text(runID)])
         let pending = try database.rows("SELECT COUNT(*) AS n FROM work WHERE run=? AND state<>1", [.text(runID)]).first?.integer("n") ?? 0
         let failed = try database.rows("SELECT COUNT(*) AS n FROM work WHERE run=? AND state=2", [.text(runID)]).first?.integer("n") ?? 0
-        let complete = pending == 0 && run.integer("capture_complete") != 0 && run.integer("complete") != 0
+        let complete = pending == 0 && run.integer("capture_complete") != 0
+            && run.integer("complete") != 0 && run.integer("source_available") != 0
         let continuation: String?
         if let next { continuation = next }
         else if pending > 0 || run.integer("capture_complete") == 0,
@@ -513,6 +546,7 @@ actor NativeCrashSyncStore {
             "failedCount": .number(.int(failed)), "reusedCount": .number(.int(run.integer("reused"))),
             "newCount": .number(.int(run.integer("added"))), "updatedCount": .number(.int(run.integer("updated"))),
             "storedBytes": .number(.int(run.integer("stored_bytes"))), "sourceComplete": .bool(run.integer("complete") != 0),
+            "sourceAvailable": .bool(run.integer("source_available") != 0),
             "acquisitionComplete": .bool(complete), "captureComplete": .bool(run.integer("capture_complete") != 0),
             "nextSyncCursor": continuation.map(JSONValue.string) ?? .null,
             "coverage": .string("savedOrganizerSamplesObserved"), "createdAt": .string(try run.required("created")),

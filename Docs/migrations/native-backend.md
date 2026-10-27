@@ -96,6 +96,9 @@ or a workspace. Network fallback retains refresh errors and original fetch times
 unverified recovered samples retain unknown freshness. A partial source attempt
 does not overwrite a complete saved snapshot. Check diagnostics and acquisition
 progress separately from local read completion.
+An unavailable source, including a cache miss without fallback, returns `failed`
+with MCP `isError` and `cacheInfo.sourceAvailable: false`. This differs from a
+successful empty collection or a usable partial source.
 
 See [crash collection](../usage.md#collect-crash-reports) for examples, query
 scopes, progress, and metric definitions. Restart connected clients to load the

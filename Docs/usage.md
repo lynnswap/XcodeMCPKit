@@ -252,6 +252,10 @@ Saved metadata keeps the primary `provenance` and the actual import's
 `importProvenance` separately when recovery supplies the imported records.
 
 Check `status`, `errors`, and `cacheInfo` separately from read completion.
+Sync returns `failed` and MCP `isError` when no source is available, such as a
+cache miss or a refresh failure without fallback data. `cacheInfo.sourceAvailable`
+is then false. A successful empty source remains `complete`; usable partial
+source data remains `partial` with its errors preserved.
 Partial imports and acquisition failures retain completed blobs and pending
 work. Finishing a local read does not establish that every provider incident
 has been downloaded. Native fetch times are local refresh times; no provider

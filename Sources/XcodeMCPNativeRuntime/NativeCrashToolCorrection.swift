@@ -233,7 +233,9 @@ final class NativeCrashToolCorrection {
             "importProvenance": loaded.provenance]
         var issues: [JSONValue] = []
         var logDirectory: URL?
-        var complete = loaded.isComplete
+        let sourceAvailable = loaded.value != nil || loaded.recovery != nil
+        var complete = loaded.isComplete && sourceAvailable
+        var sourceObservedAt = loaded.fetchedAt
         var errors = loaded.errors
         if case .object(let native)? = loaded.value {
             metadata["native"] = sourceMetadata(.object(native))
@@ -259,16 +261,27 @@ final class NativeCrashToolCorrection {
                 if collection == .logs, case .string(let path) = native["logDirectory"] {
                     logDirectory = URL(fileURLWithPath: path, isDirectory: true)
                     complete = recovery.isComplete
+                    sourceObservedAt = recovery.fetchedAt
                     metadata["importProvenance"] = provenance
                 } else if collection == .issues, case .array(let points) = native["points"] {
                     issues = try points.map(NativeCrashData.issue)
                     complete = recovery.isComplete
+                    sourceObservedAt = recovery.fetchedAt
                     metadata["importProvenance"] = provenance
                 }
             }
         }
-        return NativeCrashSyncSnapshot(collection: collection, query: key, metadata: .object(metadata),
+        var snapshot = NativeCrashSyncSnapshot(collection: collection, query: key, metadata: .object(metadata),
             issues: issues, logDirectory: logDirectory, isComplete: complete, errors: errors)
+        snapshot.sourceAvailable = sourceAvailable
+        snapshot.sourceObservedAt = sourceObservedAt.flatMap { value in
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = formatter.date(from: value) { return date }
+            formatter.formatOptions.remove(.withFractionalSeconds)
+            return formatter.date(from: value)
+        }
+        return snapshot
     }
 
     private static func sourceMetadata(_ value: JSONValue) -> JSONValue {

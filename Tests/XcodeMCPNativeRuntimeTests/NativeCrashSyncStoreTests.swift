@@ -275,6 +275,55 @@ struct NativeCrashSyncStoreTests {
         #expect(try nativeTestField(unchanged, "cacheInfo", "storedBytes") == .number(.int(0)))
     }
 
+    @Test func olderIssueQueuesCannotReplaceNewerChangedOrUnchangedObservations() async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let query = scope(collection: .issues)
+        let store = try NativeCrashSyncStore(root: root.appending(component: "Cache"))
+        func issue(_ identifier: String, count: Int64) -> JSONValue {
+            .object(["issueId": .string(identifier), "name": .string(identifier + ".crash()"),
+                "uniqueDeviceCount": .number(.int(count))])
+        }
+        var initial = NativeCrashSyncSnapshot(collection: .issues, query: query, metadata: .object([:]),
+            issues: [issue("c", count: 9)])
+        initial.sourceObservedAt = Date(timeIntervalSince1970: 1000)
+        _ = try await store.synchronize(initial, maxRecords: 10, maxBytes: 1024 * 1024)
+        var old = NativeCrashSyncSnapshot(collection: .issues, query: query, metadata: .object([:]),
+            issues: [issue("a", count: 1), issue("b", count: 1), issue("c", count: 1)])
+        old.sourceObservedAt = Date(timeIntervalSince1970: 2000)
+        let first = try await store.synchronize(old, maxRecords: 1, maxBytes: 1024 * 1024)
+        let pending = try string(first, "nextCursor")
+        var fresh = NativeCrashSyncSnapshot(collection: .issues, query: query, metadata: .object([:]),
+            issues: [issue("b", count: 10), issue("c", count: 9)])
+        fresh.sourceObservedAt = Date(timeIntervalSince1970: 3000)
+        let current = try await store.synchronize(fresh, maxRecords: 10, maxBytes: 1024 * 1024)
+        #expect(try nativeTestField(current, "cacheInfo", "reusedCount") == .number(.int(1)))
+        let baseline = try await store.readChanges(collection: .issues, query: query, checkpoint: nil,
+            limit: 100, maxBytes: 256 * 1024, order: .observedNewestFirst)
+        let checkpoint = try string(baseline, "checkpoint")
+
+        var resumed = try await store.resumeSync(pending)
+        for _ in 0..<2 {
+            guard let cursor = try continuation(resumed) else { break }
+            resumed = try await store.resumeSync(cursor)
+        }
+        #expect(try nativeTestField(resumed, "cacheInfo", "acquisitionComplete") == .bool(true))
+        let afterResume = try await store.readChanges(collection: .issues, query: query, checkpoint: checkpoint,
+            limit: 100, maxBytes: 256 * 1024, order: .observedNewestFirst)
+        #expect(try changes(afterResume).isEmpty)
+        _ = try await store.synchronize(old, maxRecords: 10, maxBytes: 1024 * 1024)
+        let afterLaterOldSource = try await store.readChanges(collection: .issues, query: query, checkpoint: checkpoint,
+            limit: 100, maxBytes: 256 * 1024, order: .observedNewestFirst)
+        #expect(try changes(afterLaterOldSource).isEmpty)
+        let latest = try await store.readChanges(collection: .issues, query: query, checkpoint: nil,
+            limit: 100, maxBytes: 256 * 1024, order: .observedNewestFirst)
+        let records = try changes(latest)
+        let b = try #require(try records.first { try nativeTestField($0, "issueId") == .string("b") })
+        let c = try #require(try records.first { try nativeTestField($0, "issueId") == .string("c") })
+        #expect(try nativeTestField(b, "uniqueDeviceCount") == .number(.int(10)))
+        #expect(try nativeTestField(c, "uniqueDeviceCount") == .number(.int(9)))
+    }
+
     @Test func incompleteSourcesRetainUsableImportedFilesAndTheirDiagnostics() async throws {
         let root = try directory()
         defer { try? FileManager.default.removeItem(at: root) }

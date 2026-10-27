@@ -135,6 +135,12 @@ window. Consumers keep their own tokens, without a server-side consumer registry
 or acknowledgement operation. Cache status includes pending sync information for
 resuming interrupted work. Read's JSON byte budget is separate from Sync's import
 byte budget. Unavailable or mismatched tokens fail explicitly.
+
+Per-issue observation watermarks retain the selected source's known cache refresh
+time and the acquisition order, including observations whose content is unchanged.
+Resuming an older issue batch cannot replace newer imported metadata; a known
+older cache snapshot is also skipped when synchronized in a later run. Log imports
+compare the actual saved file contents at import time.
 Reader windows select each item's latest version at their upper boundary and
 compare its content with the checkpoint version. Intermediate revisions are
 coalesced; a return to the baseline content produces no change.
