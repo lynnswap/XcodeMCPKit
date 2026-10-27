@@ -344,9 +344,6 @@ final class NativeOrganizerCrashService {
     }
 
     private func checkFailure(_ snapshot: NativeOrganizerAccessibility.Snapshot) throws {
-        guard snapshot.errorMessages.isEmpty else {
-            throw NativeRuntimeError.unavailable("Organizer: " + snapshot.errorMessages.joined(separator: "\n"))
-        }
         guard snapshot.busyMessages.isEmpty, !snapshot.listStatusMessages.isEmpty else { return }
         let url = installation.framework("DVTAnalytics", in: "SharedFrameworks").deletingLastPathComponent()
             .appendingPathComponent("Resources/DVTAnalytics.xcplugindata")

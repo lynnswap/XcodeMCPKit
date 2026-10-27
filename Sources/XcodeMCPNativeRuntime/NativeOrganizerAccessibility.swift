@@ -12,7 +12,6 @@ final class NativeOrganizerAccessibility {
         let rows: [String]
         let filterValues: [String]
         let busyMessages: [String]
-        let errorMessages: [String]
         let listStatusMessages: [String]
     }
 
@@ -56,9 +55,13 @@ final class NativeOrganizerAccessibility {
             return nil
         }
         var busy: [String] = []
-        var failures: [String] = []
-        let statusElements = try find(in: [location.scrollArea], skipTables: true) {
-            try self.role(of: $0) == kAXStaticTextRole as String
+        let listFrame = try frame(of: location.scrollArea)
+        // The initial-page placeholder is a sibling of the scroll view.
+        // Restrict status text to that pane; signatures and exception reasons
+        // elsewhere in the window are crash data, even if they say "Error".
+        let statusElements = try find(in: [location.group], skipTables: true) {
+            guard try self.role(of: $0) == kAXStaticTextRole as String else { return false }
+            return try self.frame(of: $0).intersects(listFrame)
         }
         let listStatusMessages = rowStatus + (try statusElements.flatMap { element -> [String] in
             var texts: [String] = []
@@ -72,15 +75,6 @@ final class NativeOrganizerAccessibility {
             if role == kAXProgressIndicatorRole as String {
                 busy.append(try self.string(kAXDescriptionAttribute, from: element)
                     ?? self.string(kAXTitleAttribute, from: element) ?? "AXProgressIndicator")
-            } else if role == kAXStaticTextRole as String,
-                      let text = try self.string(kAXValueAttribute, from: element) {
-                let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                if ["loading", "downloading", "読み込み", "ダウンロード中"].contains(where: normalized.hasPrefix) {
-                    busy.append(text)
-                }
-                if ["error", "failed", "unable", "cannot", "could not", "an error", "エラー", "失敗"].contains(where: normalized.hasPrefix) {
-                    failures.append(text)
-                }
             }
             return false
         }
@@ -89,7 +83,7 @@ final class NativeOrganizerAccessibility {
             if ["loading", "downloading", "読み込み", "ダウンロード中"].contains(where: value.hasPrefix) { busy.append(text) }
         }
         return Snapshot(rows: rows, filterValues: try filterValues(in: location.window),
-                        busyMessages: Array(Set(busy)).sorted(), errorMessages: Array(Set(failures)).sorted(),
+                        busyMessages: Array(Set(busy)).sorted(),
                         listStatusMessages: listStatusMessages)
     }
 
@@ -360,7 +354,10 @@ final class NativeOrganizerAccessibility {
             visited.append(element)
             do {
                 if try matching(element) { matches.append(element); continue }
-                if skipTables, try role(of: element) == kAXTableRole as String { continue }
+                if skipTables {
+                    let role = try role(of: element)
+                    if role == kAXTableRole as String || role == kAXOutlineRole as String { continue }
+                }
                 pending.append(contentsOf: try children(of: element).reversed())
             } catch let error as NSError where error.domain == "XcodeMCPKit.OrganizerAccessibility"
                 && error.code == ApplicationServices.AXError.invalidUIElement.rawValue {
