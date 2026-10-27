@@ -78,8 +78,12 @@ headless. Refreshed results use
 `provenance.source: "organizer"`; `fetchedAt` is the native cache-header's local
 refresh time and `sourceUpdatedAt` remains null. `source: "cache"` uses only
 the server's exact-query store without starting GUI Xcode, and preserves partial
-results. Network fallback retains the refresh error, saved diagnostics, and
-original fetch time. A failed detail refresh can return saved Organizer samples
+results. With explicit bundle and platform inputs, it also works without the app
+in Products or a saved workspace. Network fallback retains product-lookup or
+refresh errors, saved diagnostics, and the original fetch time. A partial attempt
+leaves an existing exact saved response intact; with fallback enabled, the new
+attempt appears separately in `recovery` with its own provenance and diagnostics.
+A failed detail refresh can return saved Organizer samples
 as a partial result with source `organizerCache` and `fetchedAt: null`. Their
 freshness is unverified, and a cached distribution is not returned as current
 time-series data.

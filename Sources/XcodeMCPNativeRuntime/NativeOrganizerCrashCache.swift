@@ -42,8 +42,8 @@ struct NativeOrganizerCrashCache: Sendable {
         self.productsRoot = productsRoot
     }
 
-    func readPage(_ query: NativeCrashServiceQuery) -> Read<PageSnapshot> {
-        let url = crashDirectory(query).appending(component: "ListablePoints.json")
+    func readPage(_ request: NativeCrashServiceQuery) -> Read<PageSnapshot> {
+        let url = crashDirectory(request).appending(component: "ListablePoints.json")
         var result = Read<PageSnapshot>()
         do {
             guard let root = try optionalObject(at: url) else { return result }
@@ -52,27 +52,27 @@ struct NativeOrganizerCrashCache: Sendable {
             }
             // Codable represents a dictionary with native struct keys as alternating keys and values.
             for index in stride(from: 0, to: items.count, by: 2) {
-                guard case .object(let key) = items[index], matchesPage(key, query: query) else { continue }
+                guard case .object(let key) = items[index], matchesPage(key, query: request) else { continue }
                 do {
                     guard let dated = Self.fields(items[index + 1]),
                           let value = dated["value"], let native = Self.fields(value),
                           let header = Self.fields(native["header"]),
-                          header["adamIdentifier"] == .string(query.adamIdentifier),
-                          header["timePeriod"] == .string(query.timePeriod),
+                          header["adamIdentifier"] == .string(request.adamIdentifier),
+                          header["timePeriod"] == .string(request.query.timePeriod),
                           let fetchedAt = Self.date(header["refreshDate"]),
                           case .array(let points) = native["crashPoints"] else {
                         throw NativeRuntimeError.unsupportedContract("Organizer's matching crash page has an invalid header or points")
                     }
                     guard points.allSatisfy({ point in
                         guard let fields = Self.fields(point) else { return false }
-                        return fields["bundleIdentifier"] == .string(query.bundleIdentifier)
-                            && fields["platformSDKIdentifier"] == .string(query.platformIdentifier)
-                            && fields["uploadPlatformSDKIdentifier"] == .string(query.uploadPlatformIdentifier)
+                        return fields["bundleIdentifier"] == .string(request.query.bundleIdentifier)
+                            && fields["platformSDKIdentifier"] == .string(request.query.platformIdentifier)
+                            && fields["uploadPlatformSDKIdentifier"] == .string(request.query.uploadPlatformIdentifier)
                     }) else {
                         throw NativeRuntimeError.unsupportedContract("Organizer's matching crash page contains another product or platform")
                     }
                     let snapshot = PageSnapshot(native: value, fetchedAt: fetchedAt, cacheURL: url,
-                        points: points, pageIndex: query.pageIndex, pageSize: query.pageSize, key: items[index])
+                        points: points, pageIndex: request.query.pageIndex, pageSize: request.query.pageSize, key: items[index])
                     if result.snapshot.map({ $0.fetchedAt < fetchedAt }) ?? true { result.snapshot = snapshot }
                 } catch { result.errors.append(Self.diagnostic(error, operation: "organizerPageRead", url: url)) }
             }
@@ -81,8 +81,8 @@ struct NativeOrganizerCrashCache: Sendable {
     }
 
     /// `appVersion` selects a downloaded log filter; distribution bodies cover all versions and channels.
-    func readIssue(_ query: NativeCrashServiceQuery, issueID: String) -> Read<IssueSnapshot> {
-        let filters = crashDirectory(query).appending(component: "Points")
+    func readIssue(_ request: NativeCrashServiceQuery, issueID: String) -> Read<IssueSnapshot> {
+        let filters = crashDirectory(request).appending(component: "Points")
             .appending(component: issueID + ".xccrashpoint").appending(component: "Filters")
         var result = Read<IssueSnapshot>()
         let directories: [URL]
@@ -94,7 +94,7 @@ struct NativeOrganizerCrashCache: Sendable {
         for directory in directories.sorted(by: { $0.path < $1.path }) {
             let pointURL = directory.appending(component: "PointInfo.json")
             do {
-                guard let point = try optionalObject(at: pointURL), matchesIssue(point, query: query, issueID: issueID) else { continue }
+                guard let point = try optionalObject(at: pointURL), matchesIssue(point, query: request, issueID: issueID) else { continue }
                 let distributionURL = directory.appending(component: "DistributionInfo.json")
                 var distribution: JSONValue?
                 var fetchedAt: Date?
@@ -102,8 +102,8 @@ struct NativeOrganizerCrashCache: Sendable {
                     guard let value = try optionalObject(at: distributionURL),
                           let header = Self.fields(value["header"]),
                           header["analyticsPointIdentifier"] == .string(issueID),
-                          header["adamIdentifier"] == .string(query.adamIdentifier),
-                          header["bundleIdentifier"] == .string(query.bundleIdentifier),
+                          header["adamIdentifier"] == .string(request.adamIdentifier),
+                          header["bundleIdentifier"] == .string(request.query.bundleIdentifier),
                           let refresh = Self.date(header["lastRefresh"]), Self.fields(value["body"]) != nil else {
                         throw NativeRuntimeError.unsupportedContract("Organizer's matching crash issue has no valid distribution header")
                     }
@@ -122,42 +122,42 @@ struct NativeOrganizerCrashCache: Sendable {
         return result
     }
 
-    private func crashDirectory(_ query: NativeCrashServiceQuery) -> URL {
-        productsRoot.appending(component: query.bundleIdentifier).appending(component: "Crashes")
+    private func crashDirectory(_ request: NativeCrashServiceQuery) -> URL {
+        productsRoot.appending(component: request.query.bundleIdentifier).appending(component: "Crashes")
     }
 
-    private func matchesPage(_ key: [String: JSONValue], query: NativeCrashServiceQuery) -> Bool {
+    private func matchesPage(_ key: [String: JSONValue], query request: NativeCrashServiceQuery) -> Bool {
         guard let page = Self.fields(key["page"]),
-              page["pageIndex"] == .number(.int(Int64(query.pageIndex))),
-              page["pageSize"] == .number(.int(Int64(query.pageSize))),
+              page["pageIndex"] == .number(.int(Int64(request.query.pageIndex))),
+              page["pageSize"] == .number(.int(Int64(request.query.pageSize))),
               let parameters = Self.fields(key["pageAgnosticParameters"]),
-              parameters["adamIdentifier"] == .string(query.adamIdentifier),
-              parameters["timePeriod"] == .string(query.timePeriod),
-              parameters["releaseHistory"] == .string(query.isBeta.map { $0 ? "testFlight" : "appStore" } ?? "all"),
+              parameters["adamIdentifier"] == .string(request.adamIdentifier),
+              parameters["timePeriod"] == .string(request.query.timePeriod),
+              parameters["releaseHistory"] == .string(request.query.isBeta.map { $0 ? "testFlight" : "appStore" } ?? "all"),
               case .array(let products) = parameters["indexedSelectedProductVersions"], products.count == 2,
-              products[0] == .object(["bundleIdentifier": .string(query.bundleIdentifier),
-                  "platformIdentifier": .string(query.platformIdentifier)]),
+              products[0] == .object(["bundleIdentifier": .string(request.query.bundleIdentifier),
+                  "platformIdentifier": .string(request.query.platformIdentifier)]),
               let product = Self.fields(products[1]) else { return false }
-        let version: JSONValue = query.appVersion.map { .object(["type": .string("version"), "version": .string($0)]) }
+        let version: JSONValue = request.query.appVersion.map { .object(["type": .string("version"), "version": .string($0)]) }
             ?? .object(["type": .string("allVersions")])
-        return product["adamIdentifier"] == .string(query.adamIdentifier)
-            && product["bundleIdentifier"] == .string(query.bundleIdentifier)
-            && product["platformIdentifier"] == .string(query.platformIdentifier)
-            && product["uploadPlatformIdentifier"] == .string(query.uploadPlatformIdentifier)
+        return product["adamIdentifier"] == .string(request.adamIdentifier)
+            && product["bundleIdentifier"] == .string(request.query.bundleIdentifier)
+            && product["platformIdentifier"] == .string(request.query.platformIdentifier)
+            && product["uploadPlatformIdentifier"] == .string(request.query.uploadPlatformIdentifier)
             && product["version"] == version
             && product["build"] == .object(["type": .string("allBuilds")])
     }
 
-    private func matchesIssue(_ point: [String: JSONValue], query: NativeCrashServiceQuery, issueID: String) -> Bool {
+    private func matchesIssue(_ point: [String: JSONValue], query request: NativeCrashServiceQuery, issueID: String) -> Bool {
         guard let identifier = Self.fields(point["pointIdentifier"]),
-              identifier["uploadPlatformSDKIdentifier"] == .string(query.uploadPlatformIdentifier),
+              identifier["uploadPlatformSDKIdentifier"] == .string(request.query.uploadPlatformIdentifier),
               let selectable = Self.fields(identifier["selectableAnalyticsPointIdentifier"]) else { return false }
         return selectable["reportTypeIdentifier"] == .string("Xcode.Analytics.ReportType.CrashPoint")
             && selectable["analyticsPointIdentifier"] == .string(issueID)
-            && selectable["adamIdentifier"] == .string(query.adamIdentifier)
-            && selectable["bundleIdentifier"] == .string(query.bundleIdentifier)
-            && selectable["platformSDKIdentifier"] == .string(query.platformIdentifier)
-            && (selectable["appVersion"] ?? .null) == (query.appVersion.map(JSONValue.string) ?? .null)
+            && selectable["adamIdentifier"] == .string(request.adamIdentifier)
+            && selectable["bundleIdentifier"] == .string(request.query.bundleIdentifier)
+            && selectable["platformSDKIdentifier"] == .string(request.query.platformIdentifier)
+            && (selectable["appVersion"] ?? .null) == (request.query.appVersion.map(JSONValue.string) ?? .null)
             && (selectable["appBuild"] ?? .null) == .null
     }
 

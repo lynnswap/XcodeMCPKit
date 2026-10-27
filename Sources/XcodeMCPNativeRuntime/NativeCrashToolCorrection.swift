@@ -54,20 +54,20 @@ final class NativeCrashToolCorrection {
             }
             do {
                 try Task.checkCancellation()
-                let resolved: NativeCrashContext
+                let query: NativeCrashQuery
                 switch try await resolve(parameters) {
-                case .resolved(let value): resolved = value
+                case .resolved(let value): query = value
                 case .selectionRequired(let identifiers):
                     throw NativeRuntimeError.invalidRequest("Specify bundle_id. Available apps: " + identifiers.joined(separator: ", "))
                 case .platformSelectionRequired(_, let platforms):
                     throw NativeRuntimeError.invalidRequest("Specify platform. Available platforms: " + platforms.joined(separator: ", "))
                 }
-                let query = try serviceQuery(parameters, context: resolved)
                 let key = query.json(issueID: kind == .logs ? parameters.issueID : nil)
                 let store = NativeCrashStore(root: context.artifactsRoot.appendingPathComponent("CrashAnalytics", isDirectory: true))
-                let loaded = try await NativeCrashData.load(key: key, source: parameters.source, store: store) { [service] in
-                    if kind == .topIssues { return try await service.fetchIssues(query, store: store) }
-                    return try await service.fetchIssue(query, issueID: parameters.issueID!)
+                let loaded = try await NativeCrashData.load(key: key, source: parameters.source, store: store) { [self] in
+                    let prepared = try await serviceQuery(query)
+                    if kind == .topIssues { return try await service.fetchIssues(prepared, store: store) }
+                    return try await service.fetchIssue(prepared, issueID: parameters.issueID!)
                 }
                 try Task.checkCancellation()
                 var payload: [String: JSONValue]
@@ -118,14 +118,9 @@ final class NativeCrashToolCorrection {
         for task in pending { await task.value }
     }
 
-    private func serviceQuery(_ input: NativeCrashRequest, context: NativeCrashContext) throws -> NativeCrashServiceQuery {
+    private func serviceQuery(_ query: NativeCrashQuery) async throws -> NativeCrashServiceQuery {
+        try await waitForProductInventory()
         let getter = try runtime.object(productManager()).resolveAndWait(.objc(.method("products", as: (() -> NSArray).self)))
-        let uploadPlatform = try input.uploadPlatform.map { try platform(description: $0) } ?? context.platform
-        let uploadFamily = try platformFamilyIdentifier(uploadPlatform)
-        let platformID = try runtime.object(context.platform).resolveAndWait(.objc(.method("identifier", as: (() -> String).self)))
-        let uploadID = try runtime.object(uploadPlatform).resolveAndWait(.objc(.method("identifier", as: (() -> String).self)))
-        let executionIdentifier = try unsafe platformID.unsafeInvoke()
-        let uploadIdentifier = try unsafe uploadID.unsafeInvoke()
         let products = try unsafe getter.unsafeInvoke()
         for value in products {
             let product = value as AnyObject
@@ -133,18 +128,16 @@ final class NativeCrashToolCorrection {
                   let category = try object(identifier, selector: "productCategory"),
                   let platform = try object(category, selector: "platform") else { continue }
             let bundle = try runtime.object(identifier).resolveAndWait(.objc(.method("bundleIdentifier", as: (() -> String?).self)))
-            guard try unsafe bundle.unsafeInvoke() == context.bundleIdentifier,
-                  try platformFamilyIdentifier(platform) == uploadFamily,
+            let platformID = try runtime.object(platform).resolveAndWait(.objc(.method("identifier", as: (() -> String).self)))
+            guard try unsafe bundle.unsafeInvoke() == query.bundleIdentifier,
+                  try unsafe platformID.unsafeInvoke() == query.uploadPlatformIdentifier,
                   let adam = try object(product, selector: "adamId") else { continue }
-            return NativeCrashServiceQuery(adamIdentifier: String(describing: adam), bundleIdentifier: context.bundleIdentifier,
-                platformIdentifier: executionIdentifier, uploadPlatformIdentifier: uploadIdentifier,
-                appVersion: input.appVersion, isBeta: input.isBeta, timePeriod: input.timePeriod,
-                pageIndex: input.pageIndex ?? 0, pageSize: input.pageSize, collectsAllPages: input.pageIndex == nil)
+            return NativeCrashServiceQuery(query: query, adamIdentifier: String(describing: adam))
         }
-        throw NativeRuntimeError.unavailable("No App Store product matches \(context.bundleIdentifier) on upload platform \(uploadIdentifier)")
+        throw NativeRuntimeError.unavailable("No App Store product matches \(query.bundleIdentifier) on upload platform \(query.uploadPlatformIdentifier)")
     }
 
-    private func response(_ kind: Kind, query: NativeCrashServiceQuery, loaded: NativeCrashData.Loaded,
+    func response(_ kind: Kind, query: NativeCrashQuery, loaded: NativeCrashData.Loaded,
                           issueID: String?, directory: URL) throws -> [String: JSONValue] {
         var errors = loaded.errors
         var result: [String: JSONValue] = ["query": query.json(issueID: kind == .logs ? issueID : nil),
@@ -197,14 +190,30 @@ final class NativeCrashToolCorrection {
                 "pageSize": .number(.int(Int64(query.pageSize))), "returnedCount": .number(.int(0)),
                 "hasMore": .null, "nextPage": .number(.int(Int64(query.pageIndex))), "continuationRequiresProbe": .bool(false)])
         }
+        if let recovery = loaded.recovery {
+            let recovered = NativeCrashData.Loaded(value: recovery.value, source: recovery.source,
+                fetchedAt: recovery.fetchedAt, errors: recovery.errors)
+            do {
+                result["recovery"] = .object(try response(kind, query: query, loaded: recovered,
+                                                         issueID: issueID, directory: directory))
+            } catch {
+                let failure = NativeCrashData.diagnostic(error, operation: "recoveryNormalize")
+                errors.append(failure)
+                result["recovery"] = .object(["status": .string("failed"), "query": result["query"] ?? .null,
+                    "provenance": recovered.provenance, "native": recovery.value,
+                    "errors": .array(recovery.errors + [failure])])
+            }
+        }
         result["errors"] = .array(errors)
         result["status"] = .string(loaded.value == nil ? "failed" : errors.isEmpty ? "complete" : "partial")
         return result
     }
 
     private func resolve(_ input: NativeCrashRequest) async throws -> NativeCrashResolution {
-        try await waitForProductInventory()
-        let workspace = try await workspace(identifier: input.workspaceIdentifier)
+        let workspace: AnyObject?
+        if input.bundleIdentifier == nil || input.platform == nil {
+            workspace = try await self.workspace(identifier: input.workspaceIdentifier)
+        } else { workspace = nil }
         let bundle: String
         if let explicit = input.bundleIdentifier {
             bundle = explicit.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -212,6 +221,7 @@ final class NativeCrashToolCorrection {
             if let identifier = try bundleFromActiveScheme(workspace) {
                 bundle = identifier
             } else {
+                try await waitForProductInventory()
                 let identifiers = try availableBundleIdentifiers()
                 guard identifiers.count == 1, let only = identifiers.first else {
                     return .selectionRequired(identifiers)
@@ -220,13 +230,15 @@ final class NativeCrashToolCorrection {
             }
         }
         guard !bundle.isEmpty else { throw NativeRuntimeError.invalidRequest("The bundle identifier is empty") }
-        let platform: AnyObject
+        let executionIdentifier: String
         if let name = input.platform {
-            platform = try self.platform(description: name)
+            executionIdentifier = try NativeCrashQuery.platformIdentifier(for: name)
         } else {
+            try await waitForProductInventory()
             let choices = try productPlatforms(bundleIdentifier: bundle)
             if choices.count == 1, let only = choices.first {
-                platform = only
+                let identifier = try runtime.object(only).resolveAndWait(.objc(.method("identifier", as: (() -> String).self)))
+                executionIdentifier = try unsafe identifier.unsafeInvoke()
             } else {
                 guard let workspace,
                       let manager = try object(workspace, selector: "runContextManager"),
@@ -247,10 +259,14 @@ final class NativeCrashToolCorrection {
                     throw NativeRuntimeError.invalidRequest("Could not resolve the platform from the active run destination")
                 }
                 let description = try runtime.object(family).resolveAndWait(.objc(.method("displayName", as: (() -> String).self)))
-                platform = try unsafe self.platform(description: description.unsafeInvoke())
+                executionIdentifier = try unsafe NativeCrashQuery.platformIdentifier(for: description.unsafeInvoke())
             }
         }
-        return .resolved(NativeCrashContext(bundleIdentifier: bundle, platform: platform))
+        let uploadIdentifier = try input.uploadPlatform.map(NativeCrashQuery.platformIdentifier(for:)) ?? executionIdentifier
+        return .resolved(NativeCrashQuery(bundleIdentifier: bundle, platformIdentifier: executionIdentifier,
+            uploadPlatformIdentifier: uploadIdentifier, appVersion: input.appVersion, isBeta: input.isBeta,
+            timePeriod: input.timePeriod, pageIndex: input.pageIndex ?? 0, pageSize: input.pageSize,
+            collectsAllPages: input.pageIndex == nil))
     }
 
     private func bundleFromActiveScheme(_ workspace: AnyObject?) throws -> String? {
@@ -300,17 +316,6 @@ final class NativeCrashToolCorrection {
         while try unsafe !completed.unsafeInvoke() {
             try await Task.sleep(for: .milliseconds(50))
         }
-    }
-
-    private func platform(description: String) throws -> AnyObject {
-        guard let type = NSClassFromString("DVTPlatform") else {
-            throw NativeRuntimeError.unsupportedContract("Xcode's platform registry is unavailable")
-        }
-        let getter = try runtime.object(type as AnyObject).resolveAndWait(.objc(.method("platformForUserDescription:", as: ((String) -> AnyObject?).self)))
-        guard let value = try unsafe getter.unsafeInvoke(description) else {
-            throw NativeRuntimeError.invalidRequest("Unknown platform '\(description)'")
-        }
-        return value
     }
 
     private func platformFamilyIdentifier(_ platform: AnyObject) throws -> String {
@@ -379,31 +384,8 @@ final class NativeCrashToolCorrection {
     }
 }
 
-@MainActor
-private struct NativeCrashContext {
-    let bundleIdentifier: String
-    let platform: AnyObject
-}
-
-@MainActor
 private enum NativeCrashResolution {
-    case resolved(NativeCrashContext)
+    case resolved(NativeCrashQuery)
     case selectionRequired([String])
     case platformSelectionRequired(bundleIdentifier: String, platforms: [String])
-}
-
-extension NativeCrashServiceQuery {
-    func json(issueID: String?) -> JSONValue {
-        var value: [String: JSONValue] = ["adamId": .string(adamIdentifier), "bundleId": .string(bundleIdentifier),
-            "platform": .string(platformIdentifier), "uploadPlatform": .string(uploadPlatformIdentifier),
-            "appVersion": appVersion.map(JSONValue.string) ?? .null, "isBeta": isBeta.map(JSONValue.bool) ?? .null,
-            "timePeriod": .string(timePeriod)]
-        if let issueID { value["issueId"] = .string(issueID) }
-        else {
-            value["allPages"] = .bool(collectsAllPages)
-            value["page"] = .number(.int(Int64(pageIndex)))
-            value["pageSize"] = .number(.int(Int64(pageSize)))
-        }
-        return .object(value)
-    }
 }

@@ -80,7 +80,7 @@ enum NativeCrashContract {
             "status": .object(["type": .string("string"), "enum": .array([.string("complete"), .string("partial"), .string("failed")])]),
             "query": property("object", "Resolved app, platform, filters, period, and page used for this response."),
             "provenance": property("object", "Source: organizer for a verified refresh, organizerCache for unverified saved samples after detail refresh failure, or cache for an exact server-store read. fetchedAt is the original native refresh time or null when unknown; sourceUpdatedAt is unavailable."),
-            "errors": .object(["type": .string("array"), "items": property("object", "Failed operation and original error domain, code, reason, and underlying errors.")]),
+            "errors": .object(["type": .string("array"), "items": property("object", "Failed operation, captured error domain/code, displayed Organizer diagnostics, and underlying errors when available.")]),
             "responsePath": property("string", "Full structured response saved locally. Existing pages and successful downloads survive a later failure."),
             "native": property("object", "Original source metadata and available update information."),
         ]
@@ -95,6 +95,7 @@ enum NativeCrashContract {
             outputs["pages"] = .object(["type": .string("array"), "items": property("object", "Per-page query, status, returned count, original fetch time, and saved cache path.")])
             outputs["pagination"] = property("object", "Collection mode, endReached, and nextPage. A partial collection's nextPage identifies the failed page to retry explicitly.")
         }
+        outputs["recovery"] = property("object", "Partial attempt retained alongside an exact cached primary response, in the same response format with its own scope, provenance, errors, and available issues or sample files.")
         let name = detail ? "GetCrashIssue" : "ListCrashIssues"
         return NativeTool(name: name, descriptor: .object([
             "name": .string(name),
@@ -170,6 +171,7 @@ enum NativeCrashData {
         let fetchedAt: String?
         var source = "organizer"
         var errors: [JSONValue] = []
+        var isComplete = true
     }
 
     struct Loaded {
@@ -177,6 +179,7 @@ enum NativeCrashData {
         var source: String?
         var fetchedAt: String?
         var cachePath: String?
+        var recovery: Fetched?
         var errors: [JSONValue] = []
 
         var provenance: JSONValue {
@@ -201,8 +204,23 @@ enum NativeCrashData {
                 result.source = fetched.source
                 result.fetchedAt = fetched.fetchedAt
                 result.errors = fetched.errors
+                if !fetched.isComplete {
+                    do {
+                        if let entry = try store.read(key: key) {
+                            if source == .networkWithCacheFallback {
+                                result.value = entry.value
+                                result.source = "cache"
+                                result.fetchedAt = entry.fetchedAt
+                                result.cachePath = entry.path
+                                result.recovery = fetched
+                                result.errors += entry.errors
+                            }
+                            return result
+                        }
+                    } catch { result.errors.append(diagnostic(error, operation: "cacheRead")) }
+                }
                 do {
-                    let entry = try store.write(fetched.value, key: key, fetchedAt: fetched.fetchedAt, errors: fetched.errors)
+                    let entry = try store.write(fetched.value, key: key, fetchedAt: fetched.fetchedAt, errors: result.errors)
                     result.cachePath = entry.path
                 } catch { result.errors.append(diagnostic(error, operation: "cacheWrite")) }
                 return result

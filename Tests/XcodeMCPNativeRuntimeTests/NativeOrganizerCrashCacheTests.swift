@@ -19,7 +19,7 @@ struct NativeOrganizerCrashCacheTests {
             pageKey(requested), datedPage(requested, count: 4, refreshed: "2024-01-01T00:00:00Z"),
             .object(mixedProducts), datedPage(requested, count: 8, refreshed: "2024-01-04T00:00:00Z"),
             pageKey(query(page: 1)), datedPage(requested, count: 25, refreshed: "2024-01-03T00:00:00Z"),
-            pageKey(query(period: "last365Days")), datedPage(requested, count: 183, refreshed: "2024-01-02T00:00:00Z"),
+            pageKey(query(period: "last365Days")), datedPage(requested, count: 99, refreshed: "2024-01-02T00:00:00Z"),
         ])]), to: listURL(root))
 
         let read = cache.readPage(requested)
@@ -91,7 +91,7 @@ struct NativeOrganizerCrashCacheTests {
         let refreshFailure = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
         let recovered = try NativeOrganizerCrashService.recoverIssue(partial, after: refreshFailure)
         let savedStore = NativeCrashStore(root: root.appending(component: "saved-responses"))
-        let key = requested.json(issueID: "stable-issue")
+        let key = requested.query.json(issueID: "stable-issue")
         let loaded = try await NativeCrashData.load(key: key, source: .network, store: savedStore) { recovered }
         #expect(loaded.source == "organizerCache")
         #expect(loaded.fetchedAt == nil)
@@ -153,40 +153,40 @@ struct NativeOrganizerCrashCacheTests {
 
     private func query(platform: String = "com.apple.platform.iphoneos", upload: String = "com.apple.platform.iphoneos",
                        version: String? = nil, beta: Bool? = nil, period: String = "last14Days", page: Int = 0) -> NativeCrashServiceQuery {
-        NativeCrashServiceQuery(adamIdentifier: "123", bundleIdentifier: "example.App", platformIdentifier: platform,
-            uploadPlatformIdentifier: upload, appVersion: version, isBeta: beta, timePeriod: period, pageIndex: page, pageSize: 25)
+        NativeCrashServiceQuery(query: NativeCrashQuery(bundleIdentifier: "example.App", platformIdentifier: platform,
+            uploadPlatformIdentifier: upload, appVersion: version, isBeta: beta, timePeriod: period, pageIndex: page, pageSize: 25), adamIdentifier: "123")
     }
 
     private func pageKey(_ query: NativeCrashServiceQuery) -> JSONValue {
-        .object(["page": .object(["pageIndex": .number(.int(Int64(query.pageIndex))), "pageSize": .number(.int(25))]),
-            "pageAgnosticParameters": .object(["adamIdentifier": .string(query.adamIdentifier), "timePeriod": .string(query.timePeriod),
-                "releaseHistory": .string(query.isBeta.map { $0 ? "testFlight" : "appStore" } ?? "all"),
+        .object(["page": .object(["pageIndex": .number(.int(Int64(query.query.pageIndex))), "pageSize": .number(.int(25))]),
+            "pageAgnosticParameters": .object(["adamIdentifier": .string(query.adamIdentifier), "timePeriod": .string(query.query.timePeriod),
+                "releaseHistory": .string(query.query.isBeta.map { $0 ? "testFlight" : "appStore" } ?? "all"),
                 "indexedSelectedProductVersions": .array([
-                    .object(["platformIdentifier": .string(query.platformIdentifier), "bundleIdentifier": .string(query.bundleIdentifier)]),
-                    .object(["adamIdentifier": .string(query.adamIdentifier), "bundleIdentifier": .string(query.bundleIdentifier),
-                        "platformIdentifier": .string(query.platformIdentifier), "uploadPlatformIdentifier": .string(query.uploadPlatformIdentifier),
+                    .object(["platformIdentifier": .string(query.query.platformIdentifier), "bundleIdentifier": .string(query.query.bundleIdentifier)]),
+                    .object(["adamIdentifier": .string(query.adamIdentifier), "bundleIdentifier": .string(query.query.bundleIdentifier),
+                        "platformIdentifier": .string(query.query.platformIdentifier), "uploadPlatformIdentifier": .string(query.query.uploadPlatformIdentifier),
                         "appType": .object(["type": .string("app")]), "build": .object(["type": .string("allBuilds")]),
-                        "version": query.appVersion.map { .object(["type": .string("version"), "version": .string($0)]) }
+                        "version": query.query.appVersion.map { .object(["type": .string("version"), "version": .string($0)]) }
                             ?? .object(["type": .string("allVersions")])]),
                 ])])])
     }
 
     private func datedPage(_ query: NativeCrashServiceQuery, count: Int64, refreshed: String) -> JSONValue {
         .object(["lastAccess": .string("2030-01-01T00:00:00Z"), "value": .object([
-            "header": .object(["refreshDate": .string(refreshed), "adamIdentifier": .string(query.adamIdentifier), "timePeriod": .string(query.timePeriod)]),
+            "header": .object(["refreshDate": .string(refreshed), "adamIdentifier": .string(query.adamIdentifier), "timePeriod": .string(query.query.timePeriod)]),
             "crashPoints": .array([.object(["analyticsPointIdentifier": .string("stable-issue"), "analyticsPointName": .string("Fixture.crash()"),
-                "bundleIdentifier": .string(query.bundleIdentifier), "platformSDKIdentifier": .string(query.platformIdentifier),
-                "uploadPlatformSDKIdentifier": .string(query.uploadPlatformIdentifier), "uniqueDeviceCountFilteredWithTimePeriod": .number(.int(count))])]),
+                "bundleIdentifier": .string(query.query.bundleIdentifier), "platformSDKIdentifier": .string(query.query.platformIdentifier),
+                "uploadPlatformSDKIdentifier": .string(query.query.uploadPlatformIdentifier), "uniqueDeviceCountFilteredWithTimePeriod": .number(.int(count))])]),
         ])])
     }
 
     private func pointInfo(_ query: NativeCrashServiceQuery) -> JSONValue {
         var selectable: [String: JSONValue] = ["reportTypeIdentifier": .string("Xcode.Analytics.ReportType.CrashPoint"),
             "analyticsPointIdentifier": .string("stable-issue"), "adamIdentifier": .string(query.adamIdentifier),
-            "bundleIdentifier": .string(query.bundleIdentifier), "platformSDKIdentifier": .string(query.platformIdentifier)]
-        if let version = query.appVersion { selectable["appVersion"] = .string(version) }
+            "bundleIdentifier": .string(query.query.bundleIdentifier), "platformSDKIdentifier": .string(query.query.platformIdentifier)]
+        if let version = query.query.appVersion { selectable["appVersion"] = .string(version) }
         return .object(["pointIdentifier": .object(["selectableAnalyticsPointIdentifier": .object(selectable),
-            "uploadPlatformSDKIdentifier": .string(query.uploadPlatformIdentifier)])])
+            "uploadPlatformSDKIdentifier": .string(query.query.uploadPlatformIdentifier)])])
     }
 
     private func distribution(bundle: String = "example.App") -> JSONValue {

@@ -10,11 +10,11 @@ struct NativeOrganizerCrashServiceTests {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = NativeCrashStore(root: root)
-        let query = NativeCrashServiceQuery(adamIdentifier: "1234567890", bundleIdentifier: "example.App",
+        let query = NativeCrashServiceQuery(query: NativeCrashQuery(bundleIdentifier: "example.App",
             platformIdentifier: "com.apple.platform.iphoneos", uploadPlatformIdentifier: "com.apple.platform.iphoneos",
-            appVersion: nil, isBeta: nil, timePeriod: "last14Days", pageIndex: 2, pageSize: 25)
-        let requestedKey = query.json(issueID: nil)
-        let prefixKey = query.withPage(0).json(issueID: nil)
+            appVersion: nil, isBeta: nil, timePeriod: "last14Days", pageIndex: 2, pageSize: 25), adamIdentifier: "1234567890")
+        let requestedKey = query.query.json(issueID: nil)
+        let prefixKey = query.withPage(0).query.json(issueID: nil)
         let requested: JSONValue = .object(["points": .array([.object([
             "analyticsPointIdentifier": .string("requested-issue"), "analyticsPointName": .string("Requested.crash()"),
         ])])])
@@ -49,7 +49,7 @@ struct NativeOrganizerCrashServiceTests {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = NativeCrashStore(root: root)
-        let single = NativeCrashServiceQuery(adamIdentifier: "1234567890", bundleIdentifier: "example.App",
+        let single = NativeCrashQuery(bundleIdentifier: "example.App",
             platformIdentifier: "com.apple.platform.iphoneos", uploadPlatformIdentifier: "com.apple.platform.iphoneos",
             appVersion: nil, isBeta: nil, timePeriod: "last14Days", pageIndex: 0, pageSize: 25)
         var batch = single
@@ -71,9 +71,9 @@ struct NativeOrganizerCrashServiceTests {
     }
     @Test func listURLKeepsStoreAndExecutionPlatformsDistinctAndEscapesFilters() throws {
         let version = "2.0+beta & build/1?#"
-        let query = NativeCrashServiceQuery(adamIdentifier: "1234567890", bundleIdentifier: "example.App",
+        let query = NativeCrashServiceQuery(query: NativeCrashQuery(bundleIdentifier: "example.App",
             platformIdentifier: "com.apple.platform.macosx", uploadPlatformIdentifier: "com.apple.platform.iphoneos",
-            appVersion: version, isBeta: true, timePeriod: "last365Days", pageIndex: 2, pageSize: 25)
+            appVersion: version, isBeta: true, timePeriod: "last365Days", pageIndex: 2, pageSize: 25), adamIdentifier: "1234567890")
 
         let url = try NativeOrganizerCrashService.url(query, issueID: nil)
 
@@ -90,9 +90,9 @@ struct NativeOrganizerCrashServiceTests {
     }
 
     @Test func detailURLSelectsTheStableIssueWithoutClaimingListFilters() throws {
-        let query = NativeCrashServiceQuery(adamIdentifier: "1234567890", bundleIdentifier: "example.App",
+        let query = NativeCrashServiceQuery(query: NativeCrashQuery(bundleIdentifier: "example.App",
             platformIdentifier: "com.apple.platform.macosx", uploadPlatformIdentifier: "com.apple.platform.iphoneos",
-            appVersion: "2.0", isBeta: false, timePeriod: "last14Days", pageIndex: 0, pageSize: 25)
+            appVersion: "2.0", isBeta: false, timePeriod: "last14Days", pageIndex: 0, pageSize: 25), adamIdentifier: "1234567890")
 
         let url = try NativeOrganizerCrashService.url(query, issueID: "stable-issue-ID")
 

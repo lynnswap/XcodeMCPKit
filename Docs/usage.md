@@ -180,8 +180,18 @@ share a lock across server processes while accessing Xcode's Products disk cache
 
 `source: "cache"` reads only this server's saved response for the exact query
 and page or all-page request (or issue ID), without starting GUI Xcode. Cached
-partial results remain partial. `source: "networkWithCacheFallback"` preserves
+responses remain available when the app is absent from Xcode's Products inventory
+if `bundle_id` and `platform` are supplied explicitly. An optional workspace is
+then unused; omit `upload_platform` only when it matches `platform`.
+Cached partial results remain partial. `source: "networkWithCacheFallback"` preserves
 the refresh failure, cached diagnostics, and original fetch time when falling back.
+This includes failures while locating the app's App Store product. If a new
+attempt returns only part of a collection or unverified saved samples, an existing
+exact saved response remains intact. With fallback enabled, it stays the primary
+response and the new partial attempt is returned in `recovery`, using the same
+fields and its own provenance and errors. With `source: "network"`, the partial
+attempt is returned directly. Recovered log files are saved alongside the primary
+response's files; counts from these responses must not be added together.
 Organizer's most-recent cached page is never substituted. `provenance.source`
 is `organizer` for a refreshed result, `organizerCache` for saved Organizer samples
 recovered after a detail-refresh failure, and `cache` for a server-store read.

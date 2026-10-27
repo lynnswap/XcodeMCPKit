@@ -62,6 +62,89 @@ struct NativeCrashDataTests {
         #expect(uncachedPage.source == nil)
     }
 
+    @Test @MainActor func recoveredOrganizerSamplesDoNotReplaceTheExactServerFallback() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NativeCrashStore(root: root)
+        let key = cacheKey()
+        let original: JSONValue = .object(["distribution": .object(["body": .object([
+            "timeSeriesDistribution": .object(["timeDistributionMetaDatas": .array([
+                .object(["timePeriod": .string("last14Days"), "subTotal": .number(.int(12))]),
+            ])]),
+        ])]), "logs": .array([])])
+        let originalTime = "2024-01-01T00:00:00Z"
+        let cachedError = NativeCrashData.diagnostic(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError),
+            operation: "organizerLogRead")
+        let entry = try store.write(original, key: key, fetchedAt: originalTime, errors: [cachedError])
+        let originalEnvelope = try Data(contentsOf: URL(fileURLWithPath: entry.path))
+        let pointURL = root.appendingPathComponent("PointInfo.json")
+        let saved = NativeOrganizerCrashCache.IssueSnapshot(pointInfo: .object([:]), pointInfoURL: pointURL,
+            distribution: nil, distributionURL: root.appendingPathComponent("DistributionInfo.json"), fetchedAt: nil,
+            logs: [.init(url: root.appendingPathComponent("saved.crash"), data: Data("saved sample".utf8))])
+        let recovered = try NativeOrganizerCrashService.recoverIssue(.init(snapshot: saved),
+            after: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut))
+
+        let fallback = try await NativeCrashData.load(key: key, source: .networkWithCacheFallback, store: store) { recovered }
+
+        #expect(fallback.source == "cache")
+        #expect(fallback.value == original)
+        #expect(fallback.fetchedAt == originalTime)
+        #expect(fallback.errors == recovered.errors + [cachedError])
+        #expect(fallback.recovery?.value == recovered.value)
+        #expect(fallback.recovery?.source == "organizerCache")
+        #expect(fallback.recovery?.fetchedAt == nil)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: entry.path)) == originalEnvelope)
+
+        let network = try await NativeCrashData.load(key: key, source: .network, store: store) { recovered }
+        #expect(network.value == recovered.value)
+        #expect(network.source == "organizerCache")
+        #expect(network.fetchedAt == nil)
+        #expect(network.cachePath == nil)
+        #expect(network.errors == recovered.errors)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: entry.path)) == originalEnvelope)
+
+        let emptyStore = NativeCrashStore(root: root.appendingPathComponent("empty"))
+        let uncached = try await NativeCrashData.load(key: key, source: .networkWithCacheFallback, store: emptyStore) { recovered }
+        #expect(uncached.source == "organizerCache")
+        #expect(uncached.value == recovered.value)
+        #expect(uncached.fetchedAt == nil)
+        #expect(uncached.errors == recovered.errors)
+        #expect(try emptyStore.read(key: key)?.value == recovered.value)
+    }
+
+    @Test @MainActor func partialAllPageRefreshKeepsTheCompleteCachedCollectionAndNewAttempt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NativeCrashStore(root: root)
+        let query = NativeCrashQuery(bundleIdentifier: "example.App", platformIdentifier: "com.apple.platform.iphoneos",
+            uploadPlatformIdentifier: "com.apple.platform.iphoneos", appVersion: nil, isBeta: nil,
+            timePeriod: "last14Days", pageIndex: 0, pageSize: 25, collectsAllPages: true)
+        let key = query.json(issueID: nil)
+        let first: JSONValue = .object(["analyticsPointIdentifier": .string("first-issue"), "analyticsPointName": .string("First.crash()")])
+        let last: JSONValue = .object(["analyticsPointIdentifier": .string("last-issue"), "analyticsPointName": .string("Last.crash()")])
+        let original: JSONValue = .object(["points": .array([first, last])])
+        let originalTime = "2024-01-01T00:00:00Z"
+        _ = try store.write(original, key: key, fetchedAt: originalTime)
+        let page: JSONValue = .object(["query": query.withPage(0).json(issueID: nil), "status": .string("complete")])
+        let partial = try NativeOrganizerCrashService.collectionAfterFailure(.init(query: query, adamIdentifier: "123"),
+            points: [first], pages: [page], copiedPages: [page], fetchedAt: "2024-01-02T00:00:00Z", failedPage: 1,
+            errors: [], error: NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut))
+
+        let fallback = try await NativeCrashData.load(key: key, source: .networkWithCacheFallback, store: store) {
+            partial
+        }
+
+        #expect(fallback.value == original)
+        #expect(fallback.fetchedAt == originalTime)
+        #expect(fallback.source == "cache")
+        #expect(fallback.errors == partial.errors)
+        #expect(fallback.recovery?.value == partial.value)
+        #expect(fallback.recovery?.source == "organizer")
+        #expect(fallback.recovery?.fetchedAt == "2024-01-02T00:00:00Z")
+        #expect(try store.read(key: key)?.value == original)
+        #expect(try store.read(key: key)?.fetchedAt == originalTime)
+    }
+
     @Test @MainActor func cacheWriteFailurePreservesTheDownloadedData() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)

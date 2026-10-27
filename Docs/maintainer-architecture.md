@@ -121,13 +121,23 @@ downloads and are not occurrence or device counts. Provenance identifies
 Organizer as the source and retains its local cache-header refresh time; the
 provider update time is unavailable. Exact-query cache reads and network fallback
 retain original timestamps, errors, and partial results. Cached results do not
-establish online account access.
+establish online account access. The server's canonical query contains the bundle,
+execution and upload platforms, version, release channel, period, and page mode.
+It excludes the inventory-derived App Store ID. Explicit bundle and platform
+inputs therefore allow server-cache reads without loading Products or resolving
+a workspace. Network product lookup occurs inside the fetch operation so its
+failure can use the same exact-cache fallback.
 
 If a detail refresh fails, exact-matching saved Organizer samples can still be
 returned and stored as a partial result with source `organizerCache` and unknown
 `fetchedAt`. Their freshness is unverified. A cached distribution remains in raw
 metadata and is not promoted to current time-series data. Server-store reads
-preserve the unknown timestamp and diagnostics.
+preserve the unknown timestamp and diagnostics. A partial network attempt does
+not overwrite an existing exact server-cache entry. With fallback enabled, that
+entry remains the primary response and the new attempt is normalized separately
+in `recovery`, with its own issues or sample files, provenance, and diagnostics.
+This also preserves an incomplete all-page collection beside a saved response.
+Network-only calls return the new partial attempt directly.
 
 ### Preview rendering
 

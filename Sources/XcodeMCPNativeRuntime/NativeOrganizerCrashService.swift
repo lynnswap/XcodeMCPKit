@@ -18,11 +18,10 @@ final class NativeOrganizerCrashService {
         self.cache = cache
     }
 
-    func fetchIssues(_ query: NativeCrashServiceQuery, store: NativeCrashStore) async throws -> NativeCrashData.Fetched {
-        try await withOrganizerAccess(query, issueID: nil) { driver, began in
+    func fetchIssues(_ request: NativeCrashServiceQuery, store: NativeCrashStore) async throws -> NativeCrashData.Fetched {
+        try await withOrganizerAccess(request, issueID: nil) { driver, began in
             try await self.waitForList(driver)
             var errors: [JSONValue] = []
-            var filters: [String]?
             var precedingNames: [String] = []
             var points: [JSONValue] = []
             var pages: [JSONValue] = []
@@ -30,21 +29,19 @@ final class NativeOrganizerCrashService {
             var fetchedAt = Self.date(began)
             var index = 0
             while true {
-                let pageQuery = query.withPage(index)
+                let pageQuery = request.withPage(index)
                 do {
-                    let (page, selection) = try await self.waitForPage(pageQuery, began: began, driver: driver,
-                        filters: filters, precedingNames: precedingNames)
+                    let page = try await self.waitForPage(pageQuery, began: began, driver: driver,
+                        precedingNames: precedingNames)
                     precedingNames += try Self.names(page.points)
-                    filters = selection
                     fetchedAt = Self.date(page.fetchedAt)
-                    var descriptor: [String: JSONValue] = ["query": pageQuery.json(issueID: nil),
+                    var descriptor: [String: JSONValue] = ["query": pageQuery.query.json(issueID: nil),
                         "status": .string("complete"), "source": .string("organizer"), "fetchedAt": .string(fetchedAt),
                         "returnedCount": .number(.int(Int64(page.points.count))),
-                        "organizerCachePath": .string(page.cacheURL.path),
-                        "organizerSelection": .array(selection.map(JSONValue.string))]
-                    let fetched = Self.page(page, query: pageQuery)
+                        "organizerCachePath": .string(page.cacheURL.path)]
+                    let fetched = Self.page(page)
                     do {
-                        let saved = try store.write(fetched.value, key: pageQuery.json(issueID: nil), fetchedAt: fetchedAt)
+                        let saved = try store.write(fetched.value, key: pageQuery.query.json(issueID: nil), fetchedAt: fetchedAt)
                         descriptor["cachePath"] = .string(saved.path)
                     } catch {
                         let failure = NativeCrashData.diagnostic(error, operation: "cacheWrite")
@@ -53,29 +50,31 @@ final class NativeOrganizerCrashService {
                         descriptor["errors"] = .array([failure])
                     }
                     copiedPages.append(.object(descriptor))
-                    if query.collectsAllPages || index == query.pageIndex {
+                    if request.query.collectsAllPages || index == request.query.pageIndex {
                         points += page.points
                         pages.append(.object(descriptor))
                     }
                     let terminal = page.points.isEmpty
-                    if terminal || (!query.collectsAllPages && index == query.pageIndex) {
-                        return Self.collection(query, points: points, pages: pages, copiedPages: copiedPages,
+                    if terminal || (!request.query.collectsAllPages && index == request.query.pageIndex) {
+                        return Self.collection(request, points: points, pages: pages, copiedPages: copiedPages,
                             fetchedAt: fetchedAt, nextPage: terminal ? nil : index + 1, terminal: terminal,
                             terminalPage: terminal ? index : nil, errors: errors)
                     }
                     index += 1
-                    try await driver.scrollToBottom()
+                    try await self.withStableAccessibility(until: ContinuousClock().now.advanced(by: self.timeout)) {
+                        try await driver.scrollToBottom()
+                    }
                 } catch {
                     try Task.checkCancellation()
-                    return try Self.collectionAfterFailure(query, points: points, pages: pages, copiedPages: copiedPages,
+                    return try Self.collectionAfterFailure(request, points: points, pages: pages, copiedPages: copiedPages,
                         fetchedAt: fetchedAt, failedPage: index, errors: errors, error: error)
                 }
             }
         }
     }
 
-    func fetchIssue(_ query: NativeCrashServiceQuery, issueID: String) async throws -> NativeCrashData.Fetched {
-        try await withOrganizerAccess(query, issueID: issueID) { driver, began in
+    func fetchIssue(_ request: NativeCrashServiceQuery, issueID: String) async throws -> NativeCrashData.Fetched {
+        try await withOrganizerAccess(request, issueID: issueID) { driver, began in
             do {
                 try await self.waitForList(driver, prepare: false)
                 let clock = ContinuousClock()
@@ -83,18 +82,18 @@ final class NativeOrganizerCrashService {
                 var lastErrors: [JSONValue] = []
                 repeat {
                     try Task.checkCancellation()
-                    let read = self.cache.readIssue(query, issueID: issueID)
+                    let read = self.cache.readIssue(request, issueID: issueID)
                     lastErrors = read.errors
                     if let issue = read.snapshot, let fetchedAt = issue.fetchedAt,
                        fetchedAt >= Self.second(began) {
-                        let ui = try await self.snapshot(driver, until: deadline)
+                        let ui = try await self.withStableAccessibility(until: deadline) { try driver.snapshot() }
                         try self.checkFailure(ui)
                         if ui.busyMessages.isEmpty {
                             return NativeCrashData.Fetched(value: .object(Self.issueValue(issue)),
-                                fetchedAt: Self.date(fetchedAt), errors: read.errors)
+                                fetchedAt: Self.date(fetchedAt), errors: read.errors, isComplete: read.errors.isEmpty)
                         }
                     }
-                    let ui = try await self.snapshot(driver, until: deadline)
+                    let ui = try await self.withStableAccessibility(until: deadline) { try driver.snapshot() }
                     try self.checkFailure(ui)
                     try await Task.sleep(for: .milliseconds(250))
                 } while clock.now < deadline
@@ -102,7 +101,7 @@ final class NativeOrganizerCrashService {
             } catch {
                 try Task.checkCancellation()
                 if error is CancellationError { throw error }
-                return try Self.recoverIssue(self.cache.readIssue(query, issueID: issueID), after: error)
+                return try Self.recoverIssue(self.cache.readIssue(request, issueID: issueID), after: error)
             }
         }
     }
@@ -117,7 +116,7 @@ final class NativeOrganizerCrashService {
         value["cachedDistribution"] = value.removeValue(forKey: "distribution")
         value["cachedDistributionFetchedAt"] = issue.fetchedAt.map { .string(Self.date($0)) } ?? .null
         return NativeCrashData.Fetched(value: .object(value), fetchedAt: nil, source: "organizerCache",
-            errors: read.errors + [NativeCrashData.diagnostic(error, operation: "organizerIssueRefresh")])
+            errors: read.errors + [NativeCrashData.diagnostic(error, operation: "organizerIssueRefresh")], isComplete: false)
     }
 
     private static func issueValue(_ issue: NativeOrganizerCrashCache.IssueSnapshot) -> [String: JSONValue] {
@@ -131,7 +130,7 @@ final class NativeOrganizerCrashService {
         return value
     }
 
-    static func url(_ query: NativeCrashServiceQuery, issueID: String?) throws -> URL {
+    static func url(_ request: NativeCrashServiceQuery, issueID: String?) throws -> URL {
         func platform(_ value: String) throws -> String {
             guard let name = ["com.apple.platform.iphoneos": "iOS", "com.apple.platform.macosx": "macOS",
                 "com.apple.platform.watchos": "watchOS", "com.apple.platform.appletvos": "tvOS",
@@ -144,80 +143,77 @@ final class NativeOrganizerCrashService {
         components.scheme = "xcode"
         components.host = "organizer"
         components.path = "/crashes/" + (issueID == nil ? "listPoints" : "downloadPoint")
-        var parameters = ["adamId": query.adamIdentifier, "bundleId": query.bundleIdentifier,
-            "platformId": try platform(query.uploadPlatformIdentifier), "installPlatformId": try platform(query.platformIdentifier)]
+        var parameters = ["adamId": request.adamIdentifier, "bundleId": request.query.bundleIdentifier,
+            "platformId": try platform(request.query.uploadPlatformIdentifier), "installPlatformId": try platform(request.query.platformIdentifier)]
         if let issueID { parameters["analyticsPointId"] = issueID }
         else {
-            parameters["timePeriod"] = query.timePeriod
-            parameters["appVersion"] = query.appVersion
-            parameters["releaseHistory"] = query.isBeta.map { $0 ? "testFlight" : "appStore" } ?? "all"
+            parameters["timePeriod"] = request.query.timePeriod
+            parameters["appVersion"] = request.query.appVersion
+            parameters["releaseHistory"] = request.query.isBeta.map { $0 ? "testFlight" : "appStore" } ?? "all"
         }
         components.queryItems = parameters.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         guard let url = components.url else { throw NativeRuntimeError.invalidRequest("Could not form the Organizer crash URL") }
         return url
     }
 
-    private static func page(_ page: NativeOrganizerCrashCache.PageSnapshot, query: NativeCrashServiceQuery) -> NativeCrashData.Fetched {
+    private static func page(_ page: NativeOrganizerCrashCache.PageSnapshot) -> NativeCrashData.Fetched {
         NativeCrashData.Fetched(value: .object(["points": .array(page.points), "organizerCache": page.native,
             "organizerCachePath": .string(page.cacheURL.path), "organizerCacheKey": page.key,
         ]), fetchedAt: date(page.fetchedAt))
     }
 
-    static func collectionAfterFailure(_ query: NativeCrashServiceQuery, points: [JSONValue], pages: [JSONValue],
+    static func collectionAfterFailure(_ request: NativeCrashServiceQuery, points: [JSONValue], pages: [JSONValue],
                                        copiedPages: [JSONValue], fetchedAt: String, failedPage: Int,
                                        errors: [JSONValue], error: any Error) throws -> NativeCrashData.Fetched {
         let failure = NativeCrashData.diagnostic(error, operation: "organizerPage\(failedPage)")
         let failures = errors + [failure]
         // Prefix pages are saved separately; they cannot satisfy a request for
         // a later single page or replace its existing cached result.
-        guard query.collectsAllPages, !copiedPages.isEmpty else {
+        guard request.query.collectsAllPages, !copiedPages.isEmpty else {
             throw timeoutError("Organizer could not collect crash issues", errors: failures)
         }
-        let failed: JSONValue = .object(["query": query.withPage(failedPage).json(issueID: nil),
+        let failed: JSONValue = .object(["query": request.withPage(failedPage).query.json(issueID: nil),
             "status": .string("failed"), "errors": .array([failure])])
-        return collection(query, points: points, pages: pages + [failed], copiedPages: copiedPages,
+        return collection(request, points: points, pages: pages + [failed], copiedPages: copiedPages,
             fetchedAt: fetchedAt, nextPage: failedPage, terminal: false, errors: failures)
     }
 
-    private static func collection(_ query: NativeCrashServiceQuery, points: [JSONValue], pages: [JSONValue],
+    private static func collection(_ request: NativeCrashServiceQuery, points: [JSONValue], pages: [JSONValue],
                                    copiedPages: [JSONValue], fetchedAt: String, nextPage: Int?, terminal: Bool,
                                    terminalPage: Int? = nil, errors: [JSONValue]) -> NativeCrashData.Fetched {
         NativeCrashData.Fetched(value: .object(["points": .array(points), "pages": .array(pages),
             "copiedPages": .array(copiedPages), "pagination": .object([
-                "mode": .string(query.collectsAllPages ? "allPages" : "singlePage"),
-                "page": .number(.int(Int64(query.pageIndex))), "pageSize": .number(.int(Int64(query.pageSize))),
+                "mode": .string(request.query.collectsAllPages ? "allPages" : "singlePage"),
+                "page": .number(.int(Int64(request.query.pageIndex))), "pageSize": .number(.int(Int64(request.query.pageSize))),
                 "returnedCount": .number(.int(Int64(points.count))), "endReached": .bool(terminal),
                 "terminalPage": terminalPage.map { .number(.int(Int64($0))) } ?? .null,
                 "hasMore": terminal ? .bool(false) : .null,
                 "nextPage": nextPage.map { .number(.int(Int64($0))) } ?? .null,
                 "continuationRequiresProbe": .bool(!terminal),
-            ])]), fetchedAt: fetchedAt, errors: errors)
+            ])]), fetchedAt: fetchedAt, errors: errors, isComplete: !request.query.collectsAllPages || terminal)
     }
 
-    private func waitForPage(_ query: NativeCrashServiceQuery, began: Date,
-                             driver: NativeOrganizerAccessibility, filters: [String]?, precedingNames: [String]) async throws -> (NativeOrganizerCrashCache.PageSnapshot, [String]) {
+    private func waitForPage(_ request: NativeCrashServiceQuery, began: Date,
+                             driver: NativeOrganizerAccessibility, precedingNames: [String]) async throws -> NativeOrganizerCrashCache.PageSnapshot {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         var lastErrors: [JSONValue] = []
         repeat {
             try Task.checkCancellation()
-            let read = cache.readPage(query)
+            let read = cache.readPage(request)
             lastErrors = read.errors
-            let ui = try await snapshot(driver, until: deadline)
+            let ui = try await withStableAccessibility(until: deadline) { try driver.snapshot() }
             try checkFailure(ui)
-            if let filters, filters != ui.filterValues {
-                throw NativeRuntimeError.unavailable("Organizer's filters changed while collecting crash pages; retry the requested page")
-            }
             if let page = read.snapshot, page.fetchedAt >= Self.second(began), ui.busyMessages.isEmpty {
                 // Organizer re-sorts equal-count issues, including ties across
                 // page boundaries. Compare cumulative multiplicities, not ranks.
                 if Self.displays(precedingNames + (try Self.names(page.points)), rows: ui.rows) {
-                    return (page, ui.filterValues)
+                    return page
                 }
             }
             try await Task.sleep(for: .milliseconds(250))
         } while clock.now < deadline
-        throw Self.timeoutError("Organizer did not refresh the requested crash page \(query.pageIndex)", errors: lastErrors)
+        throw Self.timeoutError("Organizer did not refresh the requested crash page \(request.query.pageIndex)", errors: lastErrors)
     }
 
     static func displays(_ names: [String], rows: [String]) -> Bool {
@@ -255,10 +251,11 @@ final class NativeOrganizerCrashService {
         throw failure ?? NativeRuntimeError.unavailable("Organizer did not open its crash list")
     }
 
-    private func snapshot(_ driver: NativeOrganizerAccessibility, until deadline: ContinuousClock.Instant) async throws -> NativeOrganizerAccessibility.Snapshot {
+    private func withStableAccessibility<Value>(until deadline: ContinuousClock.Instant,
+                                                 _ operation: () async throws -> Value) async throws -> Value {
         repeat {
             try Task.checkCancellation()
-            do { return try driver.snapshot() }
+            do { return try await operation() }
             catch where Self.isTransientAccessibility(error) {
                 guard ContinuousClock().now < deadline else { throw error }
                 try await Task.sleep(for: .milliseconds(250))
@@ -279,7 +276,7 @@ final class NativeOrganizerCrashService {
         return [Int(ApplicationServices.AXError.invalidUIElement.rawValue), Int(ApplicationServices.AXError.cannotComplete.rawValue)].contains(error.code)
     }
 
-    private func withOrganizerAccess(_ query: NativeCrashServiceQuery, issueID: String?,
+    private func withOrganizerAccess(_ request: NativeCrashServiceQuery, issueID: String?,
         _ operation: (NativeOrganizerAccessibility, Date) async throws -> NativeCrashData.Fetched) async throws -> NativeCrashData.Fetched {
         let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/XcodeMCPKit/Organizer", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -298,7 +295,7 @@ final class NativeOrganizerCrashService {
             }
             try Task.checkCancellation()
             let began = try await Self.refreshBoundary()
-            let application = try await NativeOrganizerApplication.launch(installation: installation, url: Self.url(query, issueID: issueID))
+            let application = try await NativeOrganizerApplication.launch(installation: installation, url: Self.url(request, issueID: issueID))
             owned = application
             try Task.checkCancellation()
             let driver = try NativeOrganizerAccessibility(installation: installation, application: application.application)
@@ -328,7 +325,7 @@ final class NativeOrganizerCrashService {
                 value["organizerProcessId"] = .number(.int(Int64(owned.processIdentifier)))
                 value["organizerTerminated"] = .bool(owned.application.isTerminated)
                 result = NativeCrashData.Fetched(value: .object(value), fetchedAt: result.fetchedAt,
-                    source: result.source, errors: result.errors)
+                    source: result.source, errors: result.errors, isComplete: result.isComplete)
             }
             return result
         case .failure(let original):
@@ -372,13 +369,5 @@ final class NativeOrganizerCrashService {
     private static func timeoutError(_ message: String, errors: [JSONValue]) -> NSError {
         return NSError(domain: "XcodeMCPKit.Organizer", code: 1,
             userInfo: [NSLocalizedDescriptionKey: message, "XcodeMCPKit.CrashDiagnostics": errors.map(\.foundationObject)])
-    }
-}
-
-extension NativeCrashServiceQuery {
-    func withPage(_ page: Int) -> Self {
-        Self(adamIdentifier: adamIdentifier, bundleIdentifier: bundleIdentifier, platformIdentifier: platformIdentifier,
-             uploadPlatformIdentifier: uploadPlatformIdentifier, appVersion: appVersion, isBeta: isBeta,
-             timePeriod: timePeriod, pageIndex: page, pageSize: pageSize)
     }
 }

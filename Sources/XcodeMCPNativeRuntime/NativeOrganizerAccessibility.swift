@@ -10,7 +10,6 @@ final class NativeOrganizerAccessibility {
     }
     struct Snapshot: Sendable {
         let rows: [String]
-        let filterValues: [String]
         let busyMessages: [String]
         let listStatusMessages: [String]
     }
@@ -82,7 +81,7 @@ final class NativeOrganizerAccessibility {
             let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if ["loading", "downloading", "読み込み", "ダウンロード中"].contains(where: value.hasPrefix) { busy.append(text) }
         }
-        return Snapshot(rows: rows, filterValues: try filterValues(in: location.window),
+        return Snapshot(rows: rows,
                         busyMessages: Array(Set(busy)).sorted(),
                         listStatusMessages: listStatusMessages)
     }
@@ -311,37 +310,6 @@ final class NativeOrganizerAccessibility {
         if bars.count == 1 { return bars.first }
         if bars.isEmpty { return nil }
         throw NativeRuntimeError.unsupportedContract("The Organizer crash list has no identifiable vertical scrollbar")
-    }
-
-    private func filterValues(in window: AXUIElement) throws -> [String] {
-        let scrollAreas = try find(in: [window], skipTables: true) {
-            try self.role(of: $0) == kAXScrollAreaRole as String
-        }
-        var candidates: [[String]] = []
-        for scrollArea in scrollAreas {
-            let collections = try find(in: try children(of: scrollArea), skipTables: true) { element in
-                let role = try self.role(of: element)
-                if role == "AXCollection" || role == kAXListRole as String { return true }
-                return try self.string(kAXRoleDescriptionAttribute, from: element)?.lowercased() == "collection"
-            }
-            for collection in collections {
-                let popups = try find(in: [collection], skipTables: true) {
-                    try self.role(of: $0) == kAXPopUpButtonRole as String
-                }
-                guard !popups.isEmpty else { continue }
-                candidates.append(try popups.map { popup in
-                    guard let value = try string(kAXValueAttribute, from: popup) ?? string(kAXTitleAttribute, from: popup) else {
-                        throw NativeRuntimeError.unsupportedContract("An Organizer crash filter has no value or title")
-                    }
-                    return value
-                })
-            }
-        }
-        if candidates.isEmpty { return [] }
-        guard candidates.count == 1, let values = candidates.first else {
-            throw NativeRuntimeError.unsupportedContract("The Organizer crash window does not expose one filter collection")
-        }
-        return values
     }
 
     private func find(in roots: [AXUIElement], skipTables: Bool = false,

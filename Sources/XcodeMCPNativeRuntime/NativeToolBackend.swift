@@ -128,6 +128,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
         guard let tool = tools[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
+        if Self.hasExplicitCrashQuery(name, arguments: arguments) {
+            return NativeExecutionResource()
+        }
         let heavy = ["BuildProject", "RunProject", "RunAllTests", "RunSomeTests", "RenderPreview"].contains(name)
         if name == "XcodeOpenWorkspace", case .string(let path) = arguments["path"] {
             return NativeExecutionResource(workspace: try workspaces.executionKey(for: path), heavy: heavy)
@@ -145,6 +148,11 @@ package final class NativeXcodeBackend: NativeToolBackend {
         try Task.checkCancellation()
         guard let tool = tools[name], let action = unsafe actions[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
+        }
+        if Self.hasExplicitCrashQuery(name, arguments: arguments),
+           let kind = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
+            let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
+            return try crashCorrection.execute(kind, input: input, context: context)
         }
         if ["BuildProject", "RunProject", "RunAllTests", "RunSomeTests"].contains(name), executionOperations == nil {
             executionOperations = try NativeExecutionOperations()
@@ -212,6 +220,12 @@ package final class NativeXcodeBackend: NativeToolBackend {
             }
         }
         return try unsafe await bridge.execute(action: action, input: input, context: context)
+    }
+
+    private static func hasExplicitCrashQuery(_ name: String, arguments: [String: JSONValue]) -> Bool {
+        guard ["ListCrashIssues", "GetCrashIssue"].contains(name),
+              case .string = arguments["bundle_id"], case .string = arguments["platform"] else { return false }
+        return true
     }
 
     package func resultMetadata(for name: String, output: JSONValue?,
