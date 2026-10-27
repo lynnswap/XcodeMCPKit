@@ -213,20 +213,37 @@ enum NativeCrashData {
         if let wrapped = error as? NativeSwiftError {
             return wrapped.withUnderlyingError { diagnostic($0, operation: operation) }
         }
-        var seen = Set<ObjectIdentifier>()
-        func describe(_ error: NSError) -> JSONValue {
-            var fields: [String: JSONValue] = ["domain": .string(error.domain), "code": .number(.int(Int64(error.code))),
-                "message": .string(error.localizedDescription)]
-            guard seen.insert(ObjectIdentifier(error)).inserted else { return .object(fields) }
-            if let reason = error.localizedFailureReason { fields["failureReason"] = .string(reason) }
-            if let recovery = error.localizedRecoverySuggestion { fields["recoverySuggestion"] = .string(recovery) }
-            if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError { fields["underlyingError"] = describe(underlying) }
-            if let multiple = error.userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError] {
-                fields["underlyingErrors"] = .array(multiple.map(describe))
+        var seen: [NSError] = []
+        func containedErrors(_ value: Any) -> [any Error] {
+            if let error = value as? any Error { return [error] }
+            let mirror = Mirror(reflecting: value)
+            switch mirror.displayStyle {
+            case .enum, .tuple, .dictionary, .collection, .set, .optional:
+                return mirror.children.flatMap { containedErrors($0.value) }
+            default: return []
             }
+        }
+        func describe(_ error: any Error) -> JSONValue {
+            if let wrapped = error as? NativeSwiftError { return wrapped.withUnderlyingError(describe) }
+            let native = error as NSError
+            var fields: [String: JSONValue] = ["domain": .string(native.domain), "code": .number(.int(Int64(native.code))),
+                "message": .string(native.localizedDescription), "type": .string(String(reflecting: type(of: error)))]
+            guard !seen.contains(where: { $0 === native }) else { return .object(fields) }
+            seen.append(native)
+            if let reason = native.localizedFailureReason { fields["failureReason"] = .string(reason) }
+            if let recovery = native.localizedRecoverySuggestion { fields["recoverySuggestion"] = .string(recovery) }
+            if let underlying = native.userInfo[NSUnderlyingErrorKey] as? any Error { fields["underlyingError"] = describe(underlying) }
+            var multiple = native.userInfo[NSMultipleUnderlyingErrorsKey] as? [any Error] ?? []
+            // NSError bridging omits Swift enum payloads such as Xcode's
+            // allAccountsFailed(usernameToError:jobUserDescription:).
+            let mirror = Mirror(reflecting: error)
+            if mirror.displayStyle == .enum || mirror.displayStyle == .struct {
+                multiple += mirror.children.flatMap { containedErrors($0.value) }
+            }
+            if !multiple.isEmpty { fields["underlyingErrors"] = .array(multiple.map(describe)) }
             return .object(fields)
         }
-        guard case .object(var fields) = describe(error as NSError) else { return .null }
+        guard case .object(var fields) = describe(error) else { return .null }
         fields["operation"] = .string(operation)
         return .object(fields)
     }
@@ -276,10 +293,7 @@ enum NativeCrashData {
         guard case .object(let root) = distribution else {
             throw NativeRuntimeError.unsupportedContract("Native crash distribution is not an object")
         }
-        let seriesValue: JSONValue?
-        if case .object(let body) = root["body"] { seriesValue = body["timeSeriesDistribution"] }
-        else { seriesValue = root["timeDistribution"] }
-        guard case .object(let series) = seriesValue,
+        guard case .object(let series) = root["timeDistribution"],
               case .array(let periods) = series["timeDistributionMetaDatas"] else {
             throw NativeRuntimeError.unsupportedContract("Native crash distribution has no time series")
         }
@@ -293,9 +307,11 @@ enum NativeCrashData {
         output["metric"] = .string("uniqueDevices")
         output["missingIntervals"] = .string("unknown; native intervals are preserved without filling gaps")
         output["nativeGranularity"] = fields["subTotalBreakByTimePeriod"] ?? .null
-        if case .number(.int(let raw)) = fields["subTotalBreakByTimePeriod"] {
-            output["granularity"] = [0: "hour", 1: "day", 2: "month"][raw].map(JSONValue.string) ?? .null
-        }
+        let granularity: String?
+        if case .string(let raw) = fields["subTotalBreakByTimePeriod"] {
+            granularity = ["byHour": "hour", "byDay": "day", "byMonth": "month"][raw]
+        } else { granularity = nil }
+        output["granularity"] = granularity.map(JSONValue.string) ?? .null
         output["scope"] = .object(["appVersion": .null, "isBeta": .null])
         return .object(output)
     }

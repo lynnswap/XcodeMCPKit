@@ -176,15 +176,14 @@ struct NativeCrashDataTests {
         #expect(try nativeTestField(after, "uniqueDeviceCountLast24Hours") == .number(.int(1)))
     }
 
-    @Test(arguments: [false, true])
-    func timeSeriesRetainsGapsAndTheDeduplicatedPeriodCount(fromOrganizerCache: Bool) throws {
+    @Test func timeSeriesRetainsGapsAndTheDeduplicatedPeriodCount() throws {
         let intervals: JSONValue = .array([
             .object(["startDate": .string("2024-01-01T00:00:00Z"), "endDate": .string("2024-01-02T00:00:00Z"), "value": .number(.int(3))]),
             .object(["startDate": .string("2024-01-03T00:00:00Z"), "endDate": .string("2024-01-04T00:00:00Z"), "value": .number(.int(3))]),
         ])
         let period: JSONValue = .object([
             "timePeriod": .string("last14Days"), "startDate": .string("2024-01-01T00:00:00Z"),
-            "endDate": .string("2024-01-15T00:00:00Z"), "subTotalBreakByTimePeriod": .number(.int(1)),
+            "endDate": .string("2024-01-15T00:00:00Z"), "subTotalBreakByTimePeriod": .string("byDay"),
             "uniqueDeviceCountForTimePeriod": .number(.int(4)), "timeDistributionDatas": intervals,
         ])
         let otherPeriod: JSONValue = .object([
@@ -194,9 +193,7 @@ struct NativeCrashDataTests {
         let nativeSeries: JSONValue = .object([
             "timeDistributionMetaDatas": .array([otherPeriod, period]),
         ])
-        let distribution: JSONValue = fromOrganizerCache
-            ? .object(["body": .object(["timeSeriesDistribution": nativeSeries])])
-            : .object(["timeDistribution": nativeSeries])
+        let distribution: JSONValue = .object(["timeDistribution": nativeSeries])
 
         let series = try NativeCrashData.timeSeries(distribution, timePeriod: "last14Days")
 
@@ -205,7 +202,8 @@ struct NativeCrashDataTests {
         #expect(try nativeTestField(series, "endDate") == .string("2024-01-15T00:00:00Z"))
         #expect(try nativeTestField(series, "uniqueDeviceCountForTimePeriod") == .number(.int(4)))
         #expect(try nativeTestField(series, "metric") == .string("uniqueDevices"))
-        #expect(try nativeTestField(series, "nativeGranularity") == .number(.int(1)))
+        #expect(try nativeTestField(series, "nativeGranularity") == .string("byDay"))
+        #expect(try nativeTestField(series, "granularity") == .string("day"))
     }
 
     @Test func aSampleWriteFailureDoesNotDiscardSuccessfullySavedPlainTextLogs() throws {
@@ -238,11 +236,11 @@ struct NativeCrashDataTests {
     }
 
     @Test func aMissingRequestedPeriodDoesNotUseAnotherPeriod() throws {
-        let distribution: JSONValue = .object(["body": .object(["timeSeriesDistribution": .object([
+        let distribution: JSONValue = .object(["timeDistribution": .object([
             "timeDistributionMetaDatas": .array([.object([
                 "timePeriod": .string("last24Hours"), "timeDistributionDatas": .array([]),
             ])]),
-        ])])])
+        ])])
 
         #expect(throws: NativeRuntimeError.self) {
             try NativeCrashData.timeSeries(distribution, timePeriod: "last14Days")
@@ -271,6 +269,26 @@ struct NativeCrashDataTests {
         #expect(try nativeTestField(diagnostic, "underlyingError", "message") == .string("The analytics request timed out"))
     }
 
+    @Test func diagnosticsPreserveFailuresStoredInSwiftEnumAssociatedValues() throws {
+        let aggregation = CrashAccountFailure.allAccountsFailed(usernameToError: [
+            "first": NSError(domain: "AccountCredentials", code: 401),
+            "second": NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut),
+        ], jobUserDescription: "Downloading crash analytics")
+
+        let diagnostic = NativeCrashData.diagnostic(aggregation, operation: "download")
+
+        guard case .array(let errors) = try nativeTestField(diagnostic, "underlyingErrors") else {
+            Issue.record("An account failure must retain its original errors")
+            return
+        }
+        let failures = try errors.map { error in
+            JSONValue.object(["domain": try nativeTestField(error, "domain"), "code": try nativeTestField(error, "code")])
+        }
+        #expect(failures.count == 2)
+        #expect(failures.contains(.object(["domain": .string("AccountCredentials"), "code": .number(.int(401))])))
+        #expect(failures.contains(.object(["domain": .string(NSURLErrorDomain), "code": .number(.int(Int64(NSURLErrorTimedOut)))])))
+    }
+
     private func cacheKey(page: Int = 0, version: String = "2.0", period: String = "last14Days") -> JSONValue {
         .object(["bundleId": .string("example.App"), "platform": .string("iOS"), "appVersion": .string(version),
                  "isBeta": .bool(false), "timePeriod": .string(period), "page": .number(.int(Int64(page))),
@@ -282,4 +300,8 @@ struct NativeCrashDataTests {
                  "uniqueDeviceCountFilteredWithTimePeriod": .number(.int(4)),
                  "uniqueDeviceCountFilteredForLast24Hours": .number(.int(1))])
     }
+}
+
+private enum CrashAccountFailure: Error {
+    case allAccountsFailed(usernameToError: [String: any Error], jobUserDescription: String)
 }
