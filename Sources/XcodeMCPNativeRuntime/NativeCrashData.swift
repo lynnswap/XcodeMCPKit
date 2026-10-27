@@ -11,10 +11,9 @@ struct NativeCrashRequest: Decodable, Sendable {
     var appVersion: String?
     var isBeta: Bool?
     var timePeriod = "last14Days"
-    var pageIndex: Int?
-    var pageSize = 25
     var issueID: String?
     var source = Source.network
+    var specifiedFields: Set<String> = []
 
     enum Source: String, Decodable, Sendable {
         case network, cache, networkWithCacheFallback
@@ -24,11 +23,12 @@ struct NativeCrashRequest: Decodable, Sendable {
         case workspaceIdentifier, platform, source
         case uploadPlatform = "upload_platform"
         case bundleIdentifier = "bundle_id", appVersion = "app_version", isBeta = "is_beta"
-        case timePeriod = "time_period", pageIndex = "page", pageSize = "page_size", issueID = "issue_id"
+        case timePeriod = "time_period", issueID = "issue_id"
     }
 
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        specifiedFields = Set(values.allKeys.map(\.rawValue))
         workspaceIdentifier = try values.decodeIfPresent(String.self, forKey: .workspaceIdentifier)
         bundleIdentifier = try values.decodeIfPresent(String.self, forKey: .bundleIdentifier)
         platform = try values.decodeIfPresent(String.self, forKey: .platform)
@@ -36,75 +36,159 @@ struct NativeCrashRequest: Decodable, Sendable {
         appVersion = try values.decodeIfPresent(String.self, forKey: .appVersion)
         isBeta = try values.decodeIfPresent(Bool.self, forKey: .isBeta)
         timePeriod = try values.decodeIfPresent(String.self, forKey: .timePeriod) ?? timePeriod
-        pageIndex = try values.decodeIfPresent(Int.self, forKey: .pageIndex)
-        pageSize = try values.decodeIfPresent(Int.self, forKey: .pageSize) ?? pageSize
         issueID = try values.decodeIfPresent(String.self, forKey: .issueID)
         source = try values.decodeIfPresent(Source.self, forKey: .source) ?? source
         guard ["last24Hours", "last14Days", "last365Days"].contains(timePeriod) else {
             throw NativeRuntimeError.invalidRequest("Unsupported time_period: \(timePeriod)")
         }
-        guard (pageIndex ?? 0) >= 0, pageSize == 25 else {
-            throw NativeRuntimeError.invalidRequest("page must be nonnegative; Organizer uses a fixed page_size of 25")
+    }
+}
+
+enum NativeCrashCollection: String, Codable, Sendable {
+    case issues, logs
+}
+
+enum NativeCrashReadOrder: String, Codable, Sendable {
+    case observedNewestFirst, occurredAtDescending
+}
+
+struct NativeCrashSyncRequest: Decodable, Sendable {
+    let query: NativeCrashRequest
+    let collection: NativeCrashCollection?
+    let cursor: String?
+    let maxRecords: Int
+    let maxBytes: Int
+    let specifiedFields: Set<String>
+
+    var source: NativeCrashRequest.Source { query.source }
+
+    private enum CodingKeys: String, CodingKey {
+        case collection, cursor
+        case maxRecords = "max_records", maxBytes = "max_bytes"
+    }
+
+    init(from decoder: any Decoder) throws {
+        query = try NativeCrashRequest(from: decoder)
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        specifiedFields = Set(values.allKeys.map(\.rawValue))
+        collection = try values.decodeIfPresent(NativeCrashCollection.self, forKey: .collection)
+        cursor = try values.decodeIfPresent(String.self, forKey: .cursor)
+        maxRecords = try values.decodeIfPresent(Int.self, forKey: .maxRecords) ?? 100
+        maxBytes = try values.decodeIfPresent(Int.self, forKey: .maxBytes) ?? 64 * 1024 * 1024
+        guard maxRecords > 0, maxBytes > 0 else {
+            throw NativeRuntimeError.invalidRequest("max_records and max_bytes must be positive")
+        }
+    }
+}
+
+struct NativeCrashReadRequest: Decodable, Sendable {
+    let query: NativeCrashRequest
+    let collection: NativeCrashCollection?
+    let checkpoint: String?
+    let cursor: String?
+    let limit: Int
+    let maxBytes: Int
+    let order: NativeCrashReadOrder?
+    let specifiedFields: Set<String>
+
+    private enum CodingKeys: String, CodingKey {
+        case collection, checkpoint, cursor, limit, order
+        case maxBytes = "max_bytes"
+    }
+
+    init(from decoder: any Decoder) throws {
+        query = try NativeCrashRequest(from: decoder)
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        specifiedFields = Set(values.allKeys.map(\.rawValue))
+        collection = try values.decodeIfPresent(NativeCrashCollection.self, forKey: .collection)
+        checkpoint = try values.decodeIfPresent(String.self, forKey: .checkpoint)
+        cursor = try values.decodeIfPresent(String.self, forKey: .cursor)
+        limit = try values.decodeIfPresent(Int.self, forKey: .limit) ?? 25
+        maxBytes = try values.decodeIfPresent(Int.self, forKey: .maxBytes) ?? 256 * 1024
+        order = try values.decodeIfPresent(NativeCrashReadOrder.self, forKey: .order)
+        guard limit > 0, maxBytes > 0 else {
+            throw NativeRuntimeError.invalidRequest("limit and max_bytes must be positive")
+        }
+        guard checkpoint == nil || cursor == nil else {
+            throw NativeRuntimeError.invalidRequest("Use checkpoint to start a change window or cursor to continue one, not both")
         }
     }
 }
 
 enum NativeCrashContract {
-    static func describe(_ native: NativeTool, detail: Bool) -> NativeTool {
+    static func describe(_ kind: NativeCrashToolCorrection.Kind) -> NativeTool {
         func property(_ type: String, _ description: String) -> JSONValue {
             .object(["type": .string(type), "description": .string(description)])
         }
+        func positiveInteger(_ defaultValue: Int64, _ description: String) -> JSONValue {
+            .object(["type": .string("integer"), "minimum": .number(.int(1)),
+                "default": .number(.int(defaultValue)), "description": .string(description)])
+        }
         var inputs: [String: JSONValue] = [
-            "workspaceIdentifier": property("string", "Optional saved workspace used to infer the app and platform."),
-            "bundle_id": property("string", "App bundle identifier. Inferred from the active scheme when omitted."),
-            "platform": property("string", "App platform: iOS, macOS, watchOS, tvOS, or visionOS."),
-            "upload_platform": property("string", "Original app upload platform. Specify iOS for an iOS app running on macOS or visionOS. Defaults to platform."),
-            "app_version": property("string", "Filter by app version. Omit for all versions."),
-            "is_beta": property("boolean", "Filter by TestFlight (true) or App Store (false). Omit for both."),
-            "time_period": .object(["type": .string("string"), "enum": .array([.string("last24Hours"), .string("last14Days"), .string("last365Days")]),
-                "default": .string("last14Days"), "description": .string("Native aggregation period; interval boundaries are returned without filling gaps.")]),
-            "source": .object(["type": .string("string"), "enum": .array([.string("network"), .string("cache"), .string("networkWithCacheFallback")]),
-                "default": .string("network"), "description": .string("Network starts a temporary instance of the selected Xcode, operates Organizer, and verifies refreshed exact-query cache entries. Requires configured Xcode account access and Accessibility permission. Cache reads only this server's exact saved request without starting GUI Xcode. A fallback preserves errors and the original fetch time.")]),
+            "bundle_id": property("string", "App bundle identifier. Required with platform when no token supplies the query; Sync can infer it from a saved workspace."),
+            "platform": property("string", "Execution platform: iOS, macOS, watchOS, tvOS, or visionOS."),
+            "upload_platform": property("string", "Original upload platform. Specify iOS for an iOS app running on macOS or visionOS. Defaults to platform for a new query."),
+            "app_version": property("string", "Issues collection only: filter by app version. Omit for all versions."),
+            "is_beta": property("boolean", "Issues collection only: TestFlight (true) or App Store (false). Omit for both."),
+            "time_period": .object(["type": .string("string"),
+                "enum": .array([.string("last24Hours"), .string("last14Days"), .string("last365Days")]),
+                "description": .string("Aggregation period. Defaults to last14Days for a new query; omitted token continuations retain their scope. Logs and their native distributions cover all versions and release channels.")]),
+            "collection": .object(["type": .string("string"), "enum": .array([.string("issues"), .string("logs")]),
+                "description": .string("Collection to synchronize or read. A token supplies its collection. For a new query, defaults to logs when issue_id is supplied, otherwise issues.")]),
+            "issue_id": property("string", "Stable native issue identifier, required for a new logs query. Display names are not identifiers."),
         ]
-        if detail {
-            inputs.removeValue(forKey: "is_beta")
-            inputs.removeValue(forKey: "app_version")
-            inputs["issue_id"] = property("string", "Stable issueId from ListCrashIssues; independent of the displayed crash name.")
-        } else {
-            inputs["page"] = .object(["type": .string("integer"), "minimum": .number(.int(0)),
-                "description": .string("Zero-based single page to fetch or retry. Omit to collect all pages in one owned Xcode instance.")])
-            inputs["page_size"] = .object(["type": .string("integer"), "enum": .array([.number(.int(25))]), "default": .number(.int(25)),
-                "description": .string("Organizer's fixed page size of 25. Keep the filters unchanged when following nextPage.")])
+        switch kind {
+        case .sync:
+            inputs["workspaceIdentifier"] = property("string", "Optional saved workspace for inferring the app and platform. An explicit bundle_id and platform do not require a workspace.")
+            inputs["source"] = .object(["type": .string("string"),
+                "enum": .array([.string("network"), .string("cache"), .string("networkWithCacheFallback")]),
+                "default": .string("network"),
+                "description": .string("Applies when starting acquisition. Network starts an owned Xcode Organizer instance using the existing Xcode account and Accessibility permission. Cache imports exact saved data without GUI; explicit bundle_id and platform also bypass product inventory. Fallback preserves failures and the cached data's original provenance.")])
+            inputs["cursor"] = property("string", "Local import continuation returned by SyncCrashReports; does not fetch from the network again. Its budgets are retained, and any explicitly repeated budgets must match. Read cursors and checkpoints belong to ReadCrashChanges.")
+            inputs["max_records"] = positiveInteger(100, "Maximum records to import in this acquisition batch.")
+            inputs["max_bytes"] = positiveInteger(64 * 1024 * 1024, "Import byte budget. One oversized log file may be streamed alone so acquisition can advance; this is not the response JSON budget.")
+        case .read:
+            inputs["checkpoint"] = property("string", "Completed ReadCrashChanges checkpoint used as the baseline for a new fixed change window. Omit on the initial read.")
+            inputs["cursor"] = property("string", "ReadCrashChanges cursor for the next page of the same fixed window. Retrying the same cursor is stable, including after restart. Do not combine with checkpoint.")
+            inputs["limit"] = positiveInteger(25, "Maximum changed records in this response.")
+            inputs["max_bytes"] = positiveInteger(256 * 1024, "Maximum encoded structured result bytes, including result metadata and cursors, before MCP/JSON-RPC wrapping. Log bodies are referenced by saved blob paths. A budget smaller than the minimum result fails with the required size. A continuation that has not returned a successful page can increase this budget; saved pages retain their original budget.")
+            inputs["order"] = .object(["type": .string("string"),
+                "enum": .array([.string("observedNewestFirst"), .string("occurredAtDescending")]),
+                "description": .string("Defaults to observedNewestFirst for a new window. A continuation retains its order. occurredAtDescending applies to logs and uses their actual occurrence date when available; it does not substitute observation or file times.")])
+        }
+        func token(_ description: String) -> JSONValue {
+            .object(["type": .array([.string("string"), .string("null")]), "description": .string(description)])
         }
         var outputs: [String: JSONValue] = [
-            "status": .object(["type": .string("string"), "enum": .array([.string("complete"), .string("partial"), .string("failed")])]),
-            "query": property("object", "Resolved app, platform, filters, period, and page used for this response."),
-            "provenance": property("object", "Source: organizer for a verified refresh, organizerCache for unverified saved samples after detail refresh failure, or cache for an exact server-store read. fetchedAt is the original native refresh time or null when unknown; sourceUpdatedAt is unavailable."),
-            "errors": .object(["type": .string("array"), "items": property("object", "Failed operation, captured error domain/code, displayed Organizer diagnostics, and underlying errors when available.")]),
-            "responsePath": property("string", "Full structured response saved locally. Existing pages and successful downloads survive a later failure."),
-            "native": property("object", "Original source metadata and available update information."),
+            "status": .object(["type": .string("string"), "enum": .array([.string("complete"), .string("partial"), .string("failed")]),
+                "description": .string("Failed when acquisition has no usable source, including a cache miss; partial when usable source data remains alongside errors. A successful empty source is complete.")]),
+            "query": property("object", "Resolved query scope, retained with every continuation; only known requested fields are included if a failure prevents scope resolution."),
+            "collection": .object(["type": .array([.string("string"), .string("null")]),
+                "description": .string("The issues or logs collection belonging to this query; null when a failure prevents resolving the token's scope.")]),
+            "errors": .object(["type": .string("array"), "items": property("object", "Failed operation, original cause, and usable partial-state diagnostics.")]),
+            "cursor": token("The immutable acquisition batch or fixed reader page represented by this response."),
+            "nextCursor": token("Continuation for the same operation. Retry a cursor without advancing its recorded response; acquisition and reader cursors are different token types."),
+            "responsePath": property("string", "Saved complete structured response. Blob and payload paths refer to reusable persistent content."),
         ]
-        if detail {
-            outputs["issueId"] = property("string", "Stable native issue identifier.")
-            outputs["timeSeries"] = property("object", "Native period and interval unique-device counts, boundaries, and granularity. Missing intervals remain unknown; counts are not additive.")
-            outputs["logs"] = .object(["type": .string("array"), "items": property("object", "Sample log ID and local file path. Sample count is not a crash occurrence or device count.")])
-            outputs["sampleLogCount"] = property("integer", "Number of successfully saved sample log files; not crash occurrences or affected devices.")
-            outputs["logFilters"] = property("object", "Effective log filters and native filtering limitations.")
-        } else {
-            outputs["issues"] = .object(["type": .string("array"), "items": property("object", "Stable issueId, display name, uniqueDeviceCount, and original source metadata.")])
-            outputs["pages"] = .object(["type": .string("array"), "items": property("object", "Per-page query, status, returned count, original fetch time, and saved cache path.")])
-            outputs["pagination"] = property("object", "Collection mode, endReached, and nextPage. A partial collection's nextPage identifies the failed page to retry explicitly.")
+        switch kind {
+        case .sync:
+            outputs["metadataPath"] = property("string", "Persisted acquisition source metadata, including its original provenance and distributions.")
+            outputs["cacheInfo"] = property("object", "Acquisition state: syncId, capturedCount, processedCount, pendingCount, reusedCount, newCount, updatedCount, storedBytes, sourceAvailable, acquisitionComplete, sourceComplete, and nextSyncCursor. sourceAvailable distinguishes a successful empty source from a missing or failed source. Finishing local import does not establish complete upstream coverage.")
+        case .read:
+            outputs["changes"] = .object(["type": .string("array"), "items": property("object", "New or updated record with itemId, contentId, revision, and change. Logs have logical logId, nativeLogId, reusable blob path, bytes, variant and optional actual occurredAt. Issues have issueId, name, counts and a payloadPath to native JSON.")])
+            outputs["checkpoint"] = token("Baseline for a later change window, issued only at the end of this fixed reader window. It tracks locally observed records and is independent of pending acquisition.")
+            outputs["cacheInfo"] = property("object", "Reader state: baselineSequence, snapshotSequence, returnedCount, totalChanges, readOffset, readComplete, order, and latestSync with its separate acquisition/source completeness.")
         }
-        outputs["recovery"] = property("object", "Partial attempt retained alongside an exact cached primary response, in the same response format with its own scope, provenance, errors, and available issues or sample files.")
-        let name = detail ? "GetCrashIssue" : "ListCrashIssues"
-        return NativeTool(name: name, descriptor: .object([
-            "name": .string(name),
-            "description": .string(detail ? "Download a crash issue by stable ID in a temporary Xcode Organizer instance, including device trends and saved sample logs." : "Collect all crash issue pages in a temporary Xcode Organizer instance, with stable IDs, per-page scope, timestamps, and exact cache provenance. Supply page to fetch or retry one page."),
+        return NativeTool(name: kind.toolName, descriptor: .object([
+            "name": .string(kind.toolName),
+            "description": .string(kind == .sync
+                ? "Import crash issues or saved crash logs into persistent snapshots and reusable content blobs, in bounded acquisition batches. Use ReadCrashChanges to read new or changed records."
+                : "Read only new or changed crash records from a fixed local change window, with restart-safe cursors, checkpoints, and a bounded JSON response. Does not operate Xcode or access the network."),
             "annotations": .object(["readOnlyHint": .bool(true)]),
-            "inputSchema": .object(["type": .string("object"), "properties": .object(inputs), "required": .array(detail ? [.string("issue_id")] : [])]),
+            "inputSchema": .object(["type": .string("object"), "properties": .object(inputs), "required": .array([])]),
             "outputSchema": .object(["type": .string("object"), "properties": .object(outputs),
-                "required": .array([.string("status"), .string("query"), .string("provenance"), .string("errors")])]),
-        ]), workspaceScoped: native.workspaceScoped)
+                "required": .array([.string("status"), .string("query"), .string("collection"), .string("errors")])]),
+        ]), workspaceScoped: kind == .sync)
     }
 }
 
@@ -118,6 +202,7 @@ struct NativeCrashStore {
         let fetchedAt: String?
         let path: String
         var errors: [JSONValue] = []
+        var isComplete = true
     }
 
     func read(key: JSONValue) throws -> Entry? {
@@ -136,16 +221,22 @@ struct NativeCrashStore {
         let errors: [JSONValue]
         if case .array(let failures) = envelope["errors"] { errors = failures }
         else { errors = [] }
-        return Entry(value: value, fetchedAt: fetchedAt, path: url.path, errors: errors)
+        let isComplete: Bool
+        switch envelope["isComplete"] {
+        case .bool(let complete): isComplete = complete
+        case nil: isComplete = false
+        default: throw NativeRuntimeError.unsupportedContract("Crash cache has no valid source completeness: \(url.path)")
+        }
+        return Entry(value: value, fetchedAt: fetchedAt, path: url.path, errors: errors, isComplete: isComplete)
     }
 
-    func write(_ value: JSONValue, key: JSONValue, fetchedAt: String?, errors: [JSONValue] = []) throws -> Entry {
+    func write(_ value: JSONValue, key: JSONValue, fetchedAt: String?, errors: [JSONValue] = [], isComplete: Bool = true) throws -> Entry {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let url = try location(key)
         let envelope: JSONValue = .object(["query": key, "value": value,
-            "fetchedAt": fetchedAt.map(JSONValue.string) ?? .null, "errors": .array(errors)])
+            "fetchedAt": fetchedAt.map(JSONValue.string) ?? .null, "errors": .array(errors), "isComplete": .bool(isComplete)])
         try Self.encode(envelope).write(to: url, options: .atomic)
-        return Entry(value: value, fetchedAt: fetchedAt, path: url.path, errors: errors)
+        return Entry(value: value, fetchedAt: fetchedAt, path: url.path, errors: errors, isComplete: isComplete)
     }
 
     private func location(_ key: JSONValue) throws -> URL {
@@ -181,6 +272,7 @@ enum NativeCrashData {
         var cachePath: String?
         var recovery: Fetched?
         var errors: [JSONValue] = []
+        var isComplete = false
 
         var provenance: JSONValue {
             .object(["source": source.map(JSONValue.string) ?? .null,
@@ -204,6 +296,7 @@ enum NativeCrashData {
                 result.source = fetched.source
                 result.fetchedAt = fetched.fetchedAt
                 result.errors = fetched.errors
+                result.isComplete = fetched.isComplete
                 if !fetched.isComplete {
                     do {
                         if let entry = try store.read(key: key) {
@@ -214,13 +307,15 @@ enum NativeCrashData {
                                 result.cachePath = entry.path
                                 result.recovery = fetched
                                 result.errors += entry.errors
+                                result.isComplete = entry.isComplete
                             }
                             return result
                         }
                     } catch { result.errors.append(diagnostic(error, operation: "cacheRead")) }
                 }
                 do {
-                    let entry = try store.write(fetched.value, key: key, fetchedAt: fetched.fetchedAt, errors: result.errors)
+                    let entry = try store.write(fetched.value, key: key, fetchedAt: fetched.fetchedAt,
+                        errors: result.errors, isComplete: fetched.isComplete)
                     result.cachePath = entry.path
                 } catch { result.errors.append(diagnostic(error, operation: "cacheWrite")) }
                 return result
@@ -237,6 +332,7 @@ enum NativeCrashData {
                 result.fetchedAt = entry.fetchedAt
                 result.cachePath = entry.path
                 result.errors += entry.errors
+                result.isComplete = entry.isComplete
             } else {
                 result.errors.append(.object(["operation": .string("cacheRead"), "domain": .string("XcodeMCPKit.CrashCache"),
                     "code": .number(.int(1)), "message": .string("No cached response matches this complete request. Fetch from the network first.")]))
@@ -298,30 +394,6 @@ enum NativeCrashData {
         fields["uniqueDeviceCount"] = native["uniqueDeviceCountFilteredWithTimePeriod"] ?? .null
         fields["uniqueDeviceCountLast24Hours"] = native["uniqueDeviceCountFilteredForLast24Hours"] ?? .null
         return .object(fields)
-    }
-
-    static func saveLogs(_ native: [String: JSONValue], directory: URL) -> (logs: [JSONValue], errors: [JSONValue]) {
-        guard case .array(let samples) = native["logs"] else {
-            return ([], [.object(["operation": .string("logs"), "message": .string("Native response has no sample log list")])])
-        }
-        var logs: [JSONValue] = []
-        var errors: [JSONValue] = []
-        for (index, sample) in samples.enumerated() {
-            guard case .object(let fields) = sample, case .string(let encoded) = fields["data"],
-                  let data = Data(base64Encoded: encoded) else {
-                errors.append(.object(["operation": .string("logDecode"), "sampleIndex": .number(.int(Int64(index))),
-                    "message": .string("Saved Organizer sample has no valid encoded bytes; the raw cache retains the original value")]))
-                continue
-            }
-            let digest = SHA256.hash(data: data).hexString
-            let path = directory.appendingPathComponent(digest + ".crash")
-            do {
-                try data.write(to: path, options: .atomic)
-                logs.append(.object(["logId": .string(digest), "idKind": .string("sha256OfContent"),
-                    "bytes": .number(.int(Int64(data.count))), "path": .string(path.path)]))
-            } catch { errors.append(diagnostic(error, operation: "logWrite")) }
-        }
-        return (logs, errors)
     }
 
     /// Retain native intervals and holes. Missing intervals are not zero devices,

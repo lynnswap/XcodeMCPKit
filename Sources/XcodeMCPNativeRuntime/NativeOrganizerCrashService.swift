@@ -108,7 +108,7 @@ final class NativeOrganizerCrashService {
 
     static func recoverIssue(_ read: NativeOrganizerCrashCache.Read<NativeOrganizerCrashCache.IssueSnapshot>,
                              after error: any Error) throws -> NativeCrashData.Fetched {
-        guard let issue = read.snapshot, !issue.logs.isEmpty else { throw error }
+        guard let issue = read.snapshot else { throw error }
         var value = issueValue(issue)
         // Saved samples remain useful after a refresh failure, but their native
         // directory does not establish when each sample was downloaded.
@@ -122,9 +122,8 @@ final class NativeOrganizerCrashService {
     private static func issueValue(_ issue: NativeOrganizerCrashCache.IssueSnapshot) -> [String: JSONValue] {
         var value: [String: JSONValue] = [
             "pointInfo": issue.pointInfo, "organizerCachePath": .string(issue.pointInfoURL.path),
-            "logs": .array(issue.logs.map { .object([
-                "data": .string($0.data.base64EncodedString()), "sourcePath": .string($0.url.path),
-            ]) }), "distributionCachePath": .string(issue.distributionURL.path),
+            "logDirectory": .string(issue.logDirectory.path),
+            "distributionCachePath": .string(issue.distributionURL.path),
         ]
         if let distribution = issue.distribution { value["distribution"] = distribution }
         return value

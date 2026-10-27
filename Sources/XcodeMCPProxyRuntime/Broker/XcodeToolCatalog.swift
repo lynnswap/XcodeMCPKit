@@ -205,8 +205,8 @@ enum XcodeToolCatalog {
 
     private static let workspaceOptionalTools: Set<String> = [
         "DeviceInteractionStartSession", "DeviceInteractionInstallAndRun", "GetConsoleOutput",
-        "GetCrashIssue", "GetFieldPerformanceIssueLogs",
-        "ListCrashIssues", "GetTopFieldPerformanceIssues",
+        "ReadCrashChanges", "GetFieldPerformanceIssueLogs",
+        "SyncCrashReports", "GetTopFieldPerformanceIssues",
     ]
 
     private static let hostSelectableTools: Set<String> = [

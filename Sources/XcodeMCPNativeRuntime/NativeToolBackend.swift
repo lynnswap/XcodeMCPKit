@@ -4,6 +4,7 @@ import XcodeMCPWire
 package struct NativeToolContext: Sendable {
     package let artifactsDirectory: URL
     package let artifactsRoot: URL
+    package let crashCacheRoot: URL
     package let conversationID: String
     /// The calling session's selection for a headless workspace operation.
     package let selection: NativeWorkspaceSelection?
@@ -12,9 +13,10 @@ package struct NativeToolContext: Sendable {
 
     package init(artifactsDirectory: URL, artifactsRoot: URL, conversationID: String,
                  selection: NativeWorkspaceSelection? = nil,
-                 executionResource: NativeExecutionResource = NativeExecutionResource()) {
+                 executionResource: NativeExecutionResource = NativeExecutionResource(), crashCacheRoot: URL? = nil) {
         self.artifactsDirectory = artifactsDirectory
         self.artifactsRoot = artifactsRoot
+        self.crashCacheRoot = crashCacheRoot ?? artifactsRoot.appendingPathComponent("CrashCache", isDirectory: true)
         self.conversationID = conversationID
         self.selection = selection
         self.executionResource = executionResource
@@ -103,6 +105,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         var nextActions: [String: NativeActionClass] = unsafe [:]
         var nextTools: [String: NativeTool] = [:]
         for name in names.sorted() {
+            if ["GetTopCrashIssues", "GetCrashIssueLogs"].contains(name) { continue }
             guard let metadata = registered[name] else {
                 throw NativeRuntimeError.unsupportedContract("Public native tool '\(name)' is not registered")
             }
@@ -110,13 +113,11 @@ package final class NativeXcodeBackend: NativeToolBackend {
             let workspaceScoped = try unsafe await scope.isWorkspaceScoped(action)
             let schema = try unsafe await bridge.schema(action: action)
             let tool = try NativeSchemaConverter.tool(from: schema, workspaceScoped: workspaceScoped)
-            if let crash = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
-                unsafe (nextActions[crash.toolName] = action)
-                nextTools[crash.toolName] = NativeCrashContract.describe(tool, detail: crash == .logs)
-            } else {
-                unsafe (nextActions[name] = action)
-                nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
-            }
+            unsafe (nextActions[name] = action)
+            nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
+        }
+        for kind in NativeCrashToolCorrection.Kind.allCases {
+            nextTools[kind.toolName] = NativeCrashContract.describe(kind)
         }
         unsafe (actions = nextActions)
         tools = nextTools
@@ -128,7 +129,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         guard let tool = tools[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
-        if Self.hasExplicitCrashQuery(name, arguments: arguments) {
+        if Self.bypassesCrashWorkspace(name, arguments: arguments) {
             return NativeExecutionResource()
         }
         let heavy = ["BuildProject", "RunProject", "RunAllTests", "RunSomeTests", "RenderPreview"].contains(name)
@@ -146,11 +147,11 @@ package final class NativeXcodeBackend: NativeToolBackend {
         try testableStateCorrection.checkFailure()
         if tools[name] == nil { _ = try await listTools() }
         try Task.checkCancellation()
-        guard let tool = tools[name], let action = unsafe actions[name] else {
+        guard let tool = tools[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
-        if Self.hasExplicitCrashQuery(name, arguments: arguments),
-           let kind = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
+        if Self.bypassesCrashWorkspace(name, arguments: arguments),
+           let kind = NativeCrashToolCorrection.Kind(rawValue: name) {
             let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
             return try crashCorrection.execute(kind, input: input, context: context)
         }
@@ -168,7 +169,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
             try Task.checkCancellation()
         }
         var arguments = arguments
-        let isPreview = unsafe NativePreviewCorrection.handles(action)
+        let isPreview: Bool
+        if let action = unsafe actions[name] { isPreview = unsafe NativePreviewCorrection.handles(action) }
+        else { isPreview = false }
         let invalidatesPreviewBuild = !isPreview && tool.requiresPreviewBuildInvalidation
         if invalidatesPreviewBuild, !tool.workspaceScoped {
             previewBuildInvalidations.updateValue(nil, forKey: context.artifactsDirectory)
@@ -207,8 +210,11 @@ package final class NativeXcodeBackend: NativeToolBackend {
         arguments["conversationID"] = .string(context.conversationID)
         if isPreview { arguments = NativePreviewCorrection.prepareArguments(arguments) }
         let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
-        if let kind = unsafe NativeCrashToolCorrection.Kind.forAction(action) {
+        if let kind = NativeCrashToolCorrection.Kind(rawValue: name) {
             return try crashCorrection.execute(kind, input: input, context: context)
+        }
+        guard let action = unsafe actions[name] else {
+            throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
         if isPreview {
             return try unsafe await previewCorrection.execute(inputType: scope.inputType(for: action), input: input,
@@ -222,10 +228,12 @@ package final class NativeXcodeBackend: NativeToolBackend {
         return try unsafe await bridge.execute(action: action, input: input, context: context)
     }
 
-    private static func hasExplicitCrashQuery(_ name: String, arguments: [String: JSONValue]) -> Bool {
-        guard ["ListCrashIssues", "GetCrashIssue"].contains(name),
-              case .string = arguments["bundle_id"], case .string = arguments["platform"] else { return false }
-        return true
+    private static func bypassesCrashWorkspace(_ name: String, arguments: [String: JSONValue]) -> Bool {
+        guard let kind = NativeCrashToolCorrection.Kind(rawValue: name) else { return false }
+        if kind == .read { return true }
+        if case .string = arguments["cursor"] { return true }
+        if case .string = arguments["bundle_id"], case .string = arguments["platform"] { return true }
+        return false
     }
 
     package func resultMetadata(for name: String, output: JSONValue?,

@@ -18,21 +18,15 @@ struct NativeOrganizerCrashCache: Sendable {
         let key: JSONValue
     }
 
-    struct Log: Sendable {
-        let url: URL
-        let data: Data
-    }
-
     struct IssueSnapshot: Sendable {
         let pointInfo: JSONValue
         let pointInfoURL: URL
         let distribution: JSONValue?
         let distributionURL: URL
         let fetchedAt: Date?
-        let logs: [Log]
+        let logDirectory: URL
 
         var cacheURL: URL { distributionURL }
-        var logURLs: [URL] { logs.map(\.url) }
     }
 
     let productsRoot: URL
@@ -81,6 +75,8 @@ struct NativeOrganizerCrashCache: Sendable {
     }
 
     /// `appVersion` selects a downloaded log filter; distribution bodies cover all versions and channels.
+    /// This reads the request metadata only. Saved sample files are observed separately;
+    /// a refreshed distribution does not establish that the provider has finished saving all samples.
     func readIssue(_ request: NativeCrashServiceQuery, issueID: String) -> Read<IssueSnapshot> {
         let filters = crashDirectory(request).appending(component: "Points")
             .appending(component: issueID + ".xccrashpoint").appending(component: "Filters")
@@ -110,10 +106,10 @@ struct NativeOrganizerCrashCache: Sendable {
                     distribution = .object(value)
                     fetchedAt = refresh
                 } catch { result.errors.append(Self.diagnostic(error, operation: "organizerDistributionRead", url: distributionURL)) }
-                // A failed distribution read must not discard available point information or log files.
-                let logs = readLogs(directory.appending(component: "Logs"), errors: &result.errors)
+                // A failed distribution read must not discard the exact saved sample scope.
                 let snapshot = IssueSnapshot(pointInfo: .object(point), pointInfoURL: pointURL,
-                    distribution: distribution, distributionURL: distributionURL, fetchedAt: fetchedAt, logs: logs)
+                    distribution: distribution, distributionURL: distributionURL, fetchedAt: fetchedAt,
+                    logDirectory: directory.appending(component: "Logs"))
                 if result.snapshot.map({ ($0.fetchedAt ?? .distantPast) < (fetchedAt ?? .distantPast) }) ?? true {
                     result.snapshot = snapshot
                 }
@@ -159,23 +155,6 @@ struct NativeOrganizerCrashCache: Sendable {
             && selectable["platformSDKIdentifier"] == .string(request.query.platformIdentifier)
             && (selectable["appVersion"] ?? .null) == (request.query.appVersion.map(JSONValue.string) ?? .null)
             && (selectable["appBuild"] ?? .null) == .null
-    }
-
-    private func readLogs(_ directory: URL, errors: inout [JSONValue]) -> [Log] {
-        do {
-            let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)
-            return files.filter { $0.pathExtension == "crash" }.sorted { $0.path < $1.path }.compactMap { url in
-                do { return Log(url: url, data: try Data(contentsOf: url)) }
-                catch {
-                    errors.append(Self.diagnostic(error, operation: "organizerLogRead", url: url))
-                    return nil
-                }
-            }
-        } catch {
-            // Native empty log collections return before creating a Logs directory.
-            if !Self.isMissing(error) { errors.append(Self.diagnostic(error, operation: "organizerLogsRead", url: directory)) }
-            return []
-        }
     }
 
     private func optionalObject(at url: URL) throws -> [String: JSONValue]? {

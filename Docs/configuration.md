@@ -60,6 +60,21 @@ Use `xcode-mcp-proxy-server --help` for CLI usage.
 | `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port before starting. |
 | `--dry-run` | Print the resolved server command without starting it. |
 
+## Crash data storage
+
+Crash source metadata, shared log blobs, acquisition progress, and reader tokens
+are stored in `~/Library/Application Support/XcodeMCPKit/CrashCache`. This
+location is independent of temporary request artifacts and survives host and
+server restarts. Keep the same cache to resume its cursors and checkpoints;
+removing or replacing it makes those tokens unavailable. The cache can grow as
+new content versions are acquired.
+
+When launching the packaged native host directly, use `--crash-cache-root path`
+to select a different location. This is a native-host option, not an
+`xcode-mcp-proxy-server` option. Its `--artifacts-root` controls request artifacts
+and does not change the persistent crash cache. See
+[crash collection](usage.md#collect-crash-reports) for acquisition and reading.
+
 ## Owned headless execution limits
 
 Each owned headless process has an independent execution queue with these limits:

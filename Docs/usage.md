@@ -97,118 +97,169 @@ Native device, debugger, signing, and account permissions still apply.
 
 ## Collect crash reports
 
-Call `ListCrashIssues` with the app's bundle identifier and platform. Xcode's
-existing App Store Connect account access is required; no API key is needed.
-Configure the account in the selected Xcode installation and grant the native
-host Accessibility access before fetching. Each network call starts a dedicated
-GUI instance of that Xcode installation and closes that instance when the call
-completes, fails, or is cancelled. You do not need to open Xcode manually.
-Organizer windows can appear and Xcode can become active during collection.
-Normal workspace operations continue to use headless models.
+Use `SyncCrashReports` to acquire data, then `ReadCrashChanges` to read saved
+changes in bounded pages. Sync never marks anything consumed. Read uses only
+the durable local cache and does not start Xcode or contact Apple.
+Crash data and progress survive restarts in the
+[persistent crash cache](configuration.md#crash-data-storage).
 
-In its dedicated instance, the tool selects the requested product and filters,
-clears the name search, and turns off "Show only unresolved crash logs".
-These operations do not change any issue's resolved state.
-
-When a short list has no scrollbar, collection temporarily moves the pointer
-over Organizer to send a normal scroll gesture. It restores the original
-position if you have not moved the pointer yourself. Switching windows or
-moving the pointer during that gesture stops collection. Completed pages are
-retained; retry `pagination.nextPage` from the partial result after the interruption.
+Start by synchronizing issue metadata:
 
 ```json
 {
   "bundle_id": "com.example.app",
   "platform": "iOS",
+  "collection": "issues",
   "time_period": "last14Days"
 }
 ```
 
-Omit `page` to collect all pages in one call using one dedicated Xcode instance.
-The response contains `pages` and combined `issues`, together with the resolved
-`query`, `pagination`, `provenance`, and `errors`. If collection fails partway
-through, it returns a partial result with the successful pages and
-`pagination.nextPage` set to the failed page. Retry that page with the same
-filters, for example by adding `"page": 2`.
+`collection` defaults to `issues`, or to `logs` when `issue_id` is supplied.
+Use `app_version` and `is_beta` to filter issue metadata; omit them to include
+all versions and release channels. Supported periods are `last24Hours`,
+`last14Days` (default), and `last365Days`. `platform` identifies where the app
+ran. For an iOS app running on macOS or visionOS, also pass
+`upload_platform: "iOS"`; it otherwise defaults to `platform`.
 
-Specify `page` to retrieve or retry a single zero-based page. `page_size` is
-fixed at 25. Every nonempty page requires a probe of the next page, including a
-page with fewer than 25 issues. An empty page establishes the end only when
-Organizer also reports a normal, idle list. Rankings can change between calls;
-merge records by `issueId`. A missing issue does not establish that it was resolved.
+Sync reports counts, diagnostics, source metadata paths, and `cacheInfo` rather
+than returning every record or log body. Its `max_records` (default 100) and
+`max_bytes` (default 64 MiB) bound each import step. A single oversized file is
+streamed as one step so it cannot block all later files. Follow `nextCursor`
+with `{"cursor":"returned-sync-cursor"}` to finish pending local imports.
+Sync cursor retries replay their saved results. `cacheInfo` retains sync and
+pending-work information across sessions, including the next sync cursor.
 
-Use `app_version` to select a version and `is_beta` to select TestFlight (`true`)
-or App Store (`false`); omit either to include all. Supported aggregation periods
-are `last24Hours`, `last14Days` (default), and `last365Days`. `platform` selects
-where the app ran. For an iOS app running on macOS or visionOS, also pass
-`upload_platform: "iOS"`. It otherwise defaults to the selected platform.
-
-Pass an issue's stable `issueId` to `GetCrashIssue`; its display name is not an
-input:
+Read issue changes with `ReadCrashChanges`:
 
 ```json
 {
   "bundle_id": "com.example.app",
   "platform": "iOS",
-  "issue_id": "issueId-from-the-list",
-  "time_period": "last14Days"
+  "collection": "issues",
+  "time_period": "last14Days",
+  "limit": 25,
+  "max_bytes": 262144
 }
 ```
 
-`timeSeries` preserves the native interval boundaries, granularity, and unique
-device counts. Missing intervals remain missing, and interval device counts
-cannot be added to obtain the period's unique-device count. Organizer's detail
-download covers all versions, builds, and release channels over the last year.
-`time_period` selects one of its returned `last24Hours`, `last14Days`, or
-`last365Days` distributions; it does not filter the downloaded sample logs.
-`GetCrashIssue` rejects `app_version` and `is_beta`. The response states these
-scopes explicitly and retains the original distributions in `native`.
+`limit` defaults to 25; `max_bytes` defaults to 256 KiB and bounds the encoded
+structured result, including its metadata and cursors, before MCP/JSON-RPC
+wrapping. Follow `nextCursor` using only `{"cursor":"returned-read-cursor"}`.
+A read window fixes its upper change boundary, ordering, and page results.
+Repeated reads with the same cursor return the same page without another
+acquisition. Changes observed while the window is being read appear in the next
+window. Oversized records are returned through local artifact references.
+If the budget cannot fit the result envelope and one compact record, the call
+reports the required minimum. Retry the query or continuation with a larger
+`max_bytes`. A continuation's increase applies only before that
+page has returned a successful response; saved responses keep their original
+budget and contents. The baseline, upper boundary, and read position are retained.
+Each item appears with its latest version at that window's boundary. Intermediate
+versions are combined; an item that returns to its checkpoint content is not a
+change. This is a state difference, rather than a history of every update.
 
-`logs` contains local file paths and SHA-256 content IDs. A log's content ID can
-change when its contents change. Samples can include logs already saved by Organizer
-from earlier downloads. `sampleLogCount` counts saved sample files, not crash
-occurrences or affected devices. `responsePath` names the complete structured
-response saved locally.
+Process a page before saving its continuation. Only the terminal page returns
+a `checkpoint`. Persist that checkpoint and pass it to the next Read call to
+start a window containing later changes. Reading a response does not advance a
+server-side consumer position. Each consumer keeps its own cursor or checkpoint;
+consumers sharing a token file must coordinate their writes. A read checkpoint
+covers local observations and does not discard pending acquisition work.
 
-The default `source: "network"` opens the requested Organizer route in the
-dedicated Xcode instance and waits for the initial network download, then
-scrolls to load further pages. It accepts a refreshed native cache entry only
-when its complete header matches the query and its issue names match the
-displayed list. Each loaded page is also saved in this server's store, because
-Organizer retains only eight recent list-cache entries. Network crash calls
-share a lock across server processes while accessing Xcode's Products disk cache.
+The persistent cache retains blobs, record versions, and saved cursor responses
+so readers can resume after a restart. It does not expire unread versions or
+enforce a storage quota automatically. Removing the cache invalidates its tokens;
+start a new sync and read without the old checkpoint afterward. See
+[cache location settings](configuration.md#crash-data-storage) to place it on
+a volume with suitable capacity.
 
-`source: "cache"` reads only this server's saved response for the exact query
-and page or all-page request (or issue ID), without starting GUI Xcode. Cached
-responses remain available when the app is absent from Xcode's Products inventory
-if `bundle_id` and `platform` are supplied explicitly. An optional workspace is
-then unused; omit `upload_platform` only when it matches `platform`.
-Cached partial results remain partial. `source: "networkWithCacheFallback"` preserves
-the refresh failure, cached diagnostics, and original fetch time when falling back.
-This includes failures while locating the app's App Store product. If a new
-attempt returns only part of a collection or unverified saved samples, an existing
-exact saved response remains intact. With fallback enabled, it stays the primary
-response and the new partial attempt is returned in `recovery`, using the same
-fields and its own provenance and errors. With `source: "network"`, the partial
-attempt is returned directly. Recovered log files are saved alongside the primary
-response's files; counts from these responses must not be added together.
-Organizer's most-recent cached page is never substituted. `provenance.source`
-is `organizer` for a refreshed result, `organizerCache` for saved Organizer samples
-recovered after a detail-refresh failure, and `cache` for a server-store read.
-Recovered samples have unknown freshness and `provenance.fetchedAt: null`;
-their cached distribution is retained in `native.cachedDistribution` without
-being returned as current `timeSeries`. Otherwise, `provenance.fetchedAt` is
-Organizer's native cache-header refresh time, a local refresh timestamp.
-`provenance.sourceUpdatedAt` is null because no provider
-update timestamp or conditional change token is available; refetch to detect
-updates.
+Pass a saved issue's stable `issueId` to Sync to acquire its samples:
 
-`status` is `complete`, `partial`, or `failed`. A partial response retains usable
-data and diagnostics; a failed response also sets MCP `isError`. Errors include
-the operation, native domain/code, and available underlying causes. Retry a
-failed page with the same inputs. Successful pages and downloads remain on disk
-if a later request fails. When sample-file writes fail, the cached raw response
-can be reprocessed with `source: "cache"` without another download.
+```json
+{
+  "bundle_id": "com.example.app",
+  "platform": "iOS",
+  "collection": "logs",
+  "issue_id": "issueId-from-the-issue-record"
+}
+```
+
+Then read the same `logs` collection with `ReadCrashChanges`, saving its cursor
+and checkpoint independently of the issue-metadata stream. Query fields and the
+collection can be omitted when a token identifies the scope. Tokens for another
+scope or cache are rejected; unavailable tokens do not become empty successful
+results.
+
+Samples use shared SHA-256 content blobs. Unchanged saved files reuse the
+existing blob instead of being read and saved again when their file identity
+and generation can be verified. Changed bytes produce a different content ID.
+`logId` identifies the logical saved sample within its query scope;
+`contentId` identifies its SHA-256 byte version. An updated sample retains its
+logical ID and returns a new content ID.
+Log paths name local files; sample counts are neither crash occurrence counts
+nor affected-device counts. Samples may include earlier Organizer downloads.
+
+The default `order: "observedNewestFirst"` reads the most recently observed
+local changes first. It does not mean the crashes happened most recently.
+For logs, `order: "occurredAtDescending"` orders known event dates first, with
+unknown dates last. The order is frozen for each read window. Provider issue
+rankings reflect affected devices and can change during a scan. Missing issues
+are not evidence of deletion or resolution.
+
+For example, start a log read in crash-event order with:
+
+```json
+{
+  "bundle_id": "com.example.app",
+  "platform": "iOS",
+  "issue_id": "issueId-from-the-issue-record",
+  "order": "occurredAtDescending"
+}
+```
+
+Issue metadata has no provider revision. An unchanged issue list does not prove
+that existing issues have no new samples or symbolication changes; synchronize
+their log collections again to check. Organizer downloads samples and device
+distributions across all versions, builds, and channels for the last year.
+Log Sync rejects `app_version` and `is_beta`. `time_period` selects a returned
+device distribution without filtering samples. Missing intervals stay unknown,
+and interval unique-device counts cannot be added to obtain the period count.
+
+### Network access and saved results
+
+Network Sync requires existing App Store Connect account access in the selected
+Xcode and macOS Accessibility access for the native host. No API key is needed.
+Each network call starts a dedicated GUI Xcode instance and closes it after
+completion, failure, or cancellation. Xcode can appear and become active; other
+workspace operations remain headless. Collection clears the name search and
+unresolved-only display filter without changing any issue's resolved state.
+A short list without a scrollbar temporarily uses a normal pointer scroll
+gesture. Interference stops acquisition while preserving completed work.
+
+Sync defaults to `source: "network"`. It verifies refreshed exact-query cache
+entries and collects issue pages until a normal idle empty page establishes the
+end. A short page alone does not establish completion. Network calls share a
+lock while accessing Xcode's Products cache. Read windows freeze the resulting
+observations; they are not atomic snapshots of Apple's service.
+
+`source: "cache"` imports the server's exact saved source metadata without
+starting Xcode. Explicit `bundle_id` and `platform` work without an available
+workspace or a current Products inventory entry. `source:
+"networkWithCacheFallback"` retains refresh errors and the saved fetch time.
+Partial attempts preserve existing exact saved snapshots and usable recovery
+data. A failed detail refresh can recover Organizer samples with unknown
+freshness; this does not make a cached distribution current.
+Saved metadata keeps the primary `provenance` and the actual import's
+`importProvenance` separately when recovery supplies the imported records.
+
+Check `status`, `errors`, and `cacheInfo` separately from read completion.
+Sync returns `failed` and MCP `isError` when no source is available, such as a
+cache miss or a refresh failure without fallback data. `cacheInfo.sourceAvailable`
+is then false. A successful empty source remains `complete`; usable partial
+source data remains `partial` with its errors preserved.
+Partial imports and acquisition failures retain completed blobs and pending
+work. Finishing a local read does not establish that every provider incident
+has been downloaded. Native fetch times are local refresh times; no provider
+update timestamp or delta token is available.
 
 ## Choose another Xcode installation
 
