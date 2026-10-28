@@ -28,15 +28,15 @@ package final class NativeApplicationBootstrap {
         // The downloadable-asset coordinator can have no location in a headless host.
         do {
             if try NativeDocumentationSearchAsset.configureLatest() == nil {
-                try? FileHandle.standardError.write(contentsOf: Data("DocumentationSearch: no installed documentation index found\n".utf8))
+                NativeHostDiagnostic.report("DocumentationSearch: no installed documentation index found", level: .warning)
             }
         } catch {
-            try? FileHandle.standardError.write(contentsOf: Data("DocumentationSearch asset discovery failed: \(error)\n".utf8))
+            NativeHostDiagnostic.report("DocumentationSearch asset discovery failed: \(error)")
         }
         do {
             _ = try NativeMetalToolchain.configure(for: installation)
         } catch {
-            try? FileHandle.standardError.write(contentsOf: Data("Metal Toolchain discovery failed: \(error)\n".utf8))
+            NativeHostDiagnostic.report("Metal Toolchain discovery failed: \(error)")
         }
         let framework = installation.contentsDirectory.appendingPathComponent("Frameworks/IDEKit.framework")
         guard let bundle = Bundle(url: framework) else {

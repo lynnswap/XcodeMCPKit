@@ -454,7 +454,7 @@ final class NativeCrashToolCorrection {
                 "errors": .array([NativeCrashData.diagnostic(error, operation: "crashReports")])]))
         }
         catch let encodingError {
-            try? FileHandle.standardError.write(contentsOf: Data("Native analytics failed: \(error); error encoding also failed: \(encodingError)\n".utf8))
+            NativeHostDiagnostic.report("Native analytics failed: \(error); error encoding also failed: \(encodingError)")
             return Data(#"{"type":"error","data":"Could not encode the native analytics failure; see host diagnostics"}"#.utf8)
         }
     }

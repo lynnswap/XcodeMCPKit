@@ -315,7 +315,7 @@ final class NativeOrganizerCrashService {
             else { original = CancellationError() }
             let failure = Self.cleanupFailure(original, cleanup: cleanup)
             NativeExecutionOperations.scope?.recordFailure(failure)
-            try? FileHandle.standardError.write(contentsOf: Data("Organizer cleanup after cancellation: \(failure)\n".utf8))
+            NativeHostDiagnostic.report("Organizer cleanup after cancellation: \(failure)")
         }
         switch outcome {
         case .success(var result):

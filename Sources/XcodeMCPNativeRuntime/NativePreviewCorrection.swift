@@ -192,7 +192,7 @@ final class NativePreviewCorrection {
                 if !Task.isCancelled {
                     stream.continuation.yield(errorEvent(error))
                 } else if !(error is CancellationError) {
-                    try? FileHandle.standardError.write(contentsOf: Data("Native preview cancellation failed: \(error)\n".utf8))
+                    NativeHostDiagnostic.report("Native preview cancellation failed: \(error)")
                 }
             }
         }
@@ -2493,7 +2493,7 @@ final class NativePreviewCorrection {
     private func errorEvent(_ error: any Error) -> Data {
         do { return try event("error", .string(String(describing: error))) }
         catch let encodingError {
-            try? FileHandle.standardError.write(contentsOf: Data("Native preview failed: \(error); error encoding also failed: \(encodingError)\n".utf8))
+            NativeHostDiagnostic.report("Native preview failed: \(error); error encoding also failed: \(encodingError)")
             return Data(#"{"type":"error","data":"Could not encode the native preview failure; see host diagnostics"}"#.utf8)
         }
     }

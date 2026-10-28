@@ -3,12 +3,16 @@ import Foundation
 import Logging
 
 enum NativeHostRuntime {
-    static func isTerminalCoreSimulatorDiagnostic(_ message: String) -> Bool {
+    static func diagnostic(in message: String) -> Substring? {
         guard let hostFrame = message.range(
             of: #" xcode-mcp-native-host\[[0-9]+:[0-9]+\] "#,
             options: .regularExpression
-        ) else { return false }
-        let diagnostic = message[hostFrame.upperBound...]
+        ) else { return nil }
+        return message[hostFrame.upperBound...]
+    }
+
+    static func isTerminalCoreSimulatorDiagnostic(_ message: String) -> Bool {
+        guard let diagnostic = diagnostic(in: message) else { return false }
         // CoreSimulator logs these fixed reasons when it invalidates its context.
         // Unknown diagnostics remain logs; their wording is not a public API contract.
         return diagnostic.hasPrefix(

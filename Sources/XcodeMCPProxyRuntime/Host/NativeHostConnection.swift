@@ -530,13 +530,15 @@ actor NativeHostConnection {
     }
 
     private func log(stderr line: String) {
+        let level = UpstreamStderrLogFilter.level(for: line)
+        guard level >= logger.logLevel else { return }
         let decision = stderrLimiter.decision(upstreamIndex: 0, message: line, nowUptimeNs: clock.uptimeNanoseconds())
         guard decision.shouldLog else { return }
         var metadata: Logger.Metadata = [:]
         if decision.suppressedDuplicateCount > 0 {
             metadata["suppressed_duplicates"] = "\(decision.suppressedDuplicateCount)"
         }
-        logger.log(level: UpstreamStderrLogFilter.level(for: line), "\(line)", metadata: metadata)
+        logger.log(level: level, "\(line)", metadata: metadata)
     }
 
     // MARK: - Support
