@@ -44,6 +44,8 @@ struct ProxyLoggingTests {
         ),
         ("[-[SimServiceContext reportError:]:1495] DEBUG : Context remains available", .debug),
         ("[NativeDiagnostic:42]  WaRnInG  : Retrying operation", .warning),
+        ("[xcode-mcp-native-host] ERROR : Native host failed", .error),
+        ("[xcode-mcp-native-host] WARNING : Workspace cleanup failed", .warning),
     ])
     func upstreamStderrUsesTheDeclaredDiagnosticLevel(
         input: (message: String, level: Logger.Level)
@@ -52,15 +54,20 @@ struct ProxyLoggingTests {
     }
 
     @Test(arguments: [
+        "✔ Test example() passed after 0.001 seconds.",
         "Background DEBUG : No framed diagnostic level",
-        "2026-10-05 23:53:55.622 xcode-mcp-native-host[43311:36380528] CoreSimulatorService connection interrupted. DEBUG logging is enabled.",
         " [NativeDiagnostic:42] DEBUG : Leading text precedes the frame",
         "[NativeDiagnostic:42] VERBOSE : Unknown severity",
         "[NativeDiagnostic:42] DEBUG without a severity separator",
         "[NativeDiagnostic:42 DEBUG : Incomplete frame",
         "[NativeDiagnostic:42] errorHandler: DEBUG appears in the message",
     ])
-    func upstreamStderrWithoutARecognizedDiagnosticLevelRemainsAnError(message: String) async throws {
+    func upstreamConsoleOutputWithoutARecognizedDiagnosticLevelUsesDebug(message: String) async throws {
+        #expect(UpstreamStderrLogFilter.level(for: message) == .debug)
+    }
+
+    @Test func nativeHostNSLogWithoutADeclaredLevelRemainsAnError() {
+        let message = "2026-10-05 23:53:55.622 xcode-mcp-native-host[43311:36380528] CoreSimulatorService connection interrupted. DEBUG logging is enabled."
         #expect(UpstreamStderrLogFilter.level(for: message) == .error)
     }
 }

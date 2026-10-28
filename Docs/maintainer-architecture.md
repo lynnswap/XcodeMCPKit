@@ -50,8 +50,19 @@ product digests run off the main actor, which Xcode's models use. `deinit` is a 
 spawn an unowned task or promise graceful shutdown. Report cleanup failure
 alongside the original failure. Do not replay mutations with unknown delivery.
 
-Keep stdout exclusively for protocol messages and stderr for diagnostics. Parse
-an HTTP body once and pass its parsed message onward. Host and Origin validation happen
+The native host retains a dedicated stdout descriptor for MCP messages and
+redirects ordinary stdout to stderr, keeping framework output out of the protocol
+stream. The proxy logs stderr lines without a recognized diagnostic format at
+`debug`, including test progress and other console output. The default `info`
+level hides them; `MCP_LOG_LEVEL=debug` makes them available for diagnosis.
+Each line of the helper's own diagnostics carries
+`[xcode-mcp-native-host] ERROR : ...` or
+`[xcode-mcp-native-host] WARNING : ...`. Messages with an explicit severity
+retain that level, and native-host NSLog diagnostics remain errors. Log filtering
+does not change recovery: terminal CoreSimulator invalidation diagnostics still
+end the affected host connection.
+
+Parse an HTTP body once and pass its parsed message onward. Host and Origin validation happen
 before routing or side effects; JSON-RPC arrays are rejected at the HTTP boundary.
 See the [HTTP contract](architecture.md#streamable-http-contract) for session,
 header, and notification-buffer behavior.

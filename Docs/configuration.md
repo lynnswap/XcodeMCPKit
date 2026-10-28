@@ -100,9 +100,25 @@ for admission and completion boundaries.
 | `HOST` / `PORT` | Listen host and port when `LISTEN` is unset. |
 | `XCODE_MCP_NATIVE_HOST_BUNDLE` | Helper bundle override for custom embedded/install layouts. |
 | `DEVELOPER_DIR` | Xcode selection for the native host. |
-| `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, or `critical`. Defaults to `info`; `debug` includes HTTP access and routing telemetry. |
+| `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, or `critical`. Defaults to `info`; `debug` includes native console output, HTTP access, and routing telemetry. |
 | `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
 | `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root for the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
+
+### Logging
+
+Native console output, including test progress, is logged at `debug` unless it
+matches a recognized diagnostic format. The default `info` level hides these
+lines. To inspect them, start the server with:
+
+```bash
+MCP_LOG_LEVEL=debug xcode-mcp-proxy-server
+```
+
+The helper marks each line of its own diagnostics with
+`[xcode-mcp-native-host] ERROR : ...` or
+`[xcode-mcp-native-host] WARNING : ...`, so its errors and warnings remain
+visible at the default level. Messages with an explicit severity retain that
+level, and native-host NSLog diagnostics remain errors.
 
 ### Automatic connection approval
 

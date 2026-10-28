@@ -315,7 +315,7 @@ package actor NativeMCPSession {
         do { try sendError(id: id, code: code, message: message) }
         catch {
             // The parent can close stderr with stdout; diagnostics must not interrupt cleanup.
-            try? FileHandle.standardError.write(contentsOf: Data(("Native MCP output failed: \(error)\n").utf8))
+            NativeHostDiagnostic.report("Native MCP output failed: \(error)")
         }
     }
 

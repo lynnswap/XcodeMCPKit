@@ -185,7 +185,7 @@ private enum NativeHostMain {
     }
 
     private static func report(_ message: String) {
-        try? FileHandle.standardError.write(contentsOf: Data((message + "\n").utf8))
+        NativeHostDiagnostic.report(message)
     }
 
     @MainActor private static func terminate(_ application: NSApplication, failure: Bool) {

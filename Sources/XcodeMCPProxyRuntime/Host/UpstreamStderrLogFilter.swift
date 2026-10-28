@@ -5,14 +5,15 @@ import NIOConcurrencyHelpers
 
 enum UpstreamStderrLogFilter {
     static func level(for message: String) -> Logger.Level {
+        let defaultLevel: Logger.Level = NativeHostRuntime.diagnostic(in: message) == nil ? .debug : .error
         guard message.hasPrefix("["),
               let frameEnd = message.range(of: "] "),
               let separator = message[frameEnd.upperBound...].firstIndex(of: ":")
-        else { return .error }
+        else { return defaultLevel }
         let severity = message[frameEnd.upperBound..<separator]
             .trimmingCharacters(in: .whitespaces)
             .lowercased()
-        return Logger.Level(rawValue: severity) ?? .error
+        return Logger.Level(rawValue: severity) ?? defaultLevel
     }
 }
 

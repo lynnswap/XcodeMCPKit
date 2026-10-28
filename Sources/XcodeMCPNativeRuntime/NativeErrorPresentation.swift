@@ -35,7 +35,7 @@ enum NativeErrorPresentation {
     }
 
     static func reportBackground(_ message: String) {
-        try? FileHandle.standardError.write(contentsOf: Data((message + "\n").utf8))
+        NativeHostDiagnostic.report(message)
     }
 
     static func install(on application: NSApplication) throws {
