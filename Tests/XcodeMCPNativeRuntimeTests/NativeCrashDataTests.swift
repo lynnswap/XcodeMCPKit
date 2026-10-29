@@ -390,15 +390,21 @@ struct NativeCrashDataTests {
         #expect(request.cursor == nil)
         #expect(request.source == .network)
 
-        for kind in [NativeCrashToolCorrection.Kind.start, .wait, .cancel] {
+        for kind in [NativeCrashToolCorrection.Kind.start, .wait, .cancel, .resume] {
             let tool = NativeCrashContract.describe(kind)
             #expect(!tool.workspaceScoped)
             #expect(try nativeTestField(tool.descriptor, "annotations", "readOnlyHint") == .bool(kind == .wait))
-            #expect(try nativeTestField(tool.descriptor, "outputSchema", "required") == .array([
-                "jobId", "state", "revision", "createdAt", "updatedAt", "progress", "result", "errors",
-            ].map(JSONValue.string)))
+            var requiredOutputs = ["jobId", "state", "revision", "createdAt", "updatedAt", "progress", "result", "errors"]
+            if kind == .resume { requiredOutputs.append("previousJobId") }
+            #expect(try nativeTestField(tool.descriptor, "outputSchema", "required") == .array(requiredOutputs.map(JSONValue.string)))
             if kind != .start {
                 #expect(try nativeTestField(tool.descriptor, "inputSchema", "required") == .array([.string("job_id")]))
+            }
+            if kind == .resume {
+                let properties = try nativeTestObject(nativeTestField(tool.descriptor, "inputSchema", "properties"))
+                #expect(Set(properties.keys) == ["job_id"])
+                #expect(try nativeTestField(tool.descriptor, "outputSchema", "properties", "previousJobId", "type")
+                    == .array([.string("string"), .string("null")]))
             }
         }
         let waitInputs = try nativeTestObject(nativeTestField(NativeCrashContract.describe(.wait).descriptor,

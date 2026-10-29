@@ -51,6 +51,9 @@ struct NativeCrashSyncJobsTests {
         await #expect(throws: CancellationError.self) { try await waiter.value }
         let running = try observer.status(jobID: id)
         #expect(try fields(running)["state"] == .string("running"))
+        #expect(throws: NativeRuntimeError.self) {
+            try observer.resume(jobID: id) { _, _ in complete }
+        }
         #expect(try fields(running)["input"] == nil)
         #expect(try fields(running)["progress"] == .object(["capturedPages": .number(.int(1))]))
         release.signal()
@@ -172,6 +175,49 @@ struct NativeCrashSyncJobsTests {
         await jobs.shutdown()
     }
 
+    @Test func resumedJobsPreserveTheOriginalAndKeepTheirRecoveryLineage() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let jobs = try NativeCrashSyncJobs(root: root)
+        let input: JSONValue = .object(["bundle_id": .string("example.App"), "platform": .string("iOS")])
+        let partial: JSONValue = .object(["status": .string("partial"), "nextCursor": .string("saved-import")])
+        let pages: JSONValue = .array([.object(["query": .string("saved-page")])])
+        let originalID = try identifier(jobs.start(input: input) { context in
+            try context.updateProgress(["capturedPages": .number(.int(1)), "pages": pages])
+            return partial
+        })
+        #expect(try fields(await terminal(jobs, id: originalID))["state"] == .string("failed"))
+        let path = root.appending(path: "Jobs/\(originalID)/job.json")
+        let original = try Data(contentsOf: path)
+        let cancelledAttempt = try jobs.resume(jobID: originalID) { _, _ in
+            Issue.record("The queued resume was cancelled before its operation started")
+            return complete
+        }
+        let cancelledID = try identifier(cancelledAttempt)
+        #expect(cancelledID != originalID)
+        #expect(try fields(cancelledAttempt)["previousJobId"] == .string(originalID))
+        _ = try jobs.cancel(jobID: cancelledID)
+        #expect(try fields(await terminal(jobs, id: cancelledID))["state"] == .string("cancelled"))
+        let next = try jobs.resume(jobID: cancelledID) { _, recovery in
+            #expect(recovery.input == input)
+            #expect(recovery.previousJobID == originalID)
+            let ancestor = try jobs.recovery(jobID: originalID)
+            #expect(ancestor.directory == root.appending(path: "Jobs/\(originalID)"))
+            #expect(ancestor.input == input)
+            #expect(ancestor.progress["pages"] == pages)
+            #expect(ancestor.result == partial)
+            return complete
+        }
+        let nextID = try identifier(next)
+        #expect(try fields(next)["previousJobId"] == .string(cancelledID))
+        #expect(try fields(await terminal(jobs, id: nextID))["state"] == .string("completed"))
+        #expect(try Data(contentsOf: path) == original)
+        #expect(throws: NativeRuntimeError.self) {
+            try jobs.resume(jobID: nextID) { _, _ in complete }
+        }
+        await jobs.shutdown()
+    }
+
     @Test func anAbandonedOwnerIsInterruptedWithoutDiscardingSavedData() async throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -195,6 +241,15 @@ struct NativeCrashSyncJobsTests {
         #expect(interrupted["progress"] == .object(["capturedPages": .number(.int(2))]))
         #expect(try NativeCrashStore.object(Data(contentsOf: path))["state"] == .string("interrupted"))
         #expect(throws: (any Error).self) { try restored.status(jobID: "../outside") }
+        let resumed = try restored.resume(jobID: id) { _, recovery in
+            #expect(recovery.state == "interrupted")
+            #expect(recovery.result == partial)
+            #expect(!recovery.errors.isEmpty)
+            return complete
+        }
+        let resumedID = try identifier(resumed)
+        #expect(try fields(resumed)["previousJobId"] == .string(id))
+        #expect(try fields(await terminal(restored, id: resumedID))["state"] == .string("completed"))
         await restored.shutdown()
     }
 

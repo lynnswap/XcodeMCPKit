@@ -6,6 +6,46 @@ import XcodeMCPWire
 @Suite
 @MainActor
 struct NativeOrganizerCrashServiceTests {
+    @Test func missingSavedSamplesPermitARefreshWhileReadFailuresKeepBothDiagnostics() throws {
+        let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let contents = root.appending(path: "Xcode.app/Contents")
+        try FileManager.default.createDirectory(at: contents.appending(path: "Frameworks/IDEFoundation.framework"),
+                                               withIntermediateDirectories: true)
+        let installation = try NativeXcodeInstallation(developerDirectory: contents.appending(component: "Developer"))
+        let products = root.appending(component: "Products")
+        let service = NativeOrganizerCrashService(installation: installation,
+            cache: NativeOrganizerCrashCache(productsRoot: products))
+        let request = NativeCrashServiceQuery(query: NativeCrashQuery(bundleIdentifier: "example.App",
+            platformIdentifier: "com.apple.platform.iphoneos", uploadPlatformIdentifier: "com.apple.platform.iphoneos",
+            appVersion: nil, isBeta: nil, timePeriod: "last14Days", pageIndex: 0, pageSize: 25), adamIdentifier: "123")
+        let original = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
+        #expect(try service.savedIssueIfAvailable(request, issueID: "stable-issue", after: original) == nil)
+        let point = products.appending(path: "example.App/Crashes/Points/stable-issue.xccrashpoint/Filters/all/PointInfo.json")
+        try FileManager.default.createDirectory(at: point.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("invalid JSON".utf8).write(to: point)
+
+        do {
+            _ = try service.savedIssueIfAvailable(request, issueID: "stable-issue", after: original)
+            Issue.record("An unreadable saved sample scope must retain its read failure")
+        } catch {
+            let failure = NativeCrashData.diagnostic(error, operation: "recovery")
+            #expect(try nativeTestField(failure, "underlyingError", "domain") == .string(NSURLErrorDomain))
+            #expect(try nativeTestField(failure, "underlyingError", "code") == .number(.int(Int64(NSURLErrorTimedOut))))
+            guard case .array(let cacheErrors) = try nativeTestField(failure, "cacheErrors") else {
+                Issue.record("Saved-sample recovery must preserve cache-read diagnostics")
+                return
+            }
+            let readFailure = try #require(cacheErrors.first)
+            #expect(try nativeTestField(readFailure, "operation") == .string("organizerPointRead"))
+            guard case .string(let path) = try nativeTestField(readFailure, "path") else {
+                Issue.record("Saved-sample diagnostics must identify the unreadable file")
+                return
+            }
+            #expect(URL(filePath: path).resolvingSymlinksInPath() == point.resolvingSymlinksInPath())
+        }
+    }
+
     @Test func aSinglePagePrefixFailureUsesTheOriginalRequestedCache() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -128,7 +168,7 @@ struct NativeOrganizerCrashServiceTests {
                             fetchedAt: "2024-01-01T00:00:00Z")
         let descriptors: [JSONValue] = (0...1).map { .object(["query": request.withPage($0).query.json(issueID: nil)]) }
 
-        let recovered = try #require(try NativeOrganizerCrashService.savedPages(request, store: store,
+        let recovered = try #require(try NativeOrganizerCrashService.savedPages(request.query, store: store,
             descriptors: descriptors, after: CancellationError()))
 
         #expect(!recovered.isComplete)

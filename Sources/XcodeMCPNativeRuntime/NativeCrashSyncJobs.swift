@@ -33,6 +33,17 @@ final class NativeCrashSyncJobs {
         }
     }
 
+    struct Recovery: Sendable {
+        let id: String
+        let directory: URL
+        let input: JSONValue
+        let progress: [String: JSONValue]
+        let result: JSONValue
+        let state: String
+        let errors: [JSONValue]
+        let previousJobID: String?
+    }
+
     private let directory: URL
     private var tasks: [String: Task<Void, Never>] = [:]
     private var stopping = false
@@ -44,6 +55,60 @@ final class NativeCrashSyncJobs {
 
     func start(input: JSONValue,
                operation: @escaping @MainActor @Sendable (Context) async throws -> JSONValue) throws -> JSONValue {
+        try start(input: input, previousJobID: nil, operation: operation)
+    }
+
+    func resume(jobID: String,
+                operation: @escaping @MainActor @Sendable (Context, Recovery) async throws -> JSONValue) throws -> JSONValue {
+        let saved = try recovery(jobID: jobID)
+        guard ["interrupted", "failed", "cancelled"].contains(saved.state) else {
+            throw NativeRuntimeError.invalidRequest("Only interrupted, failed, or cancelled crash sync jobs can be resumed")
+        }
+        return try start(input: saved.input, previousJobID: saved.id) { context in
+            try await operation(context, saved)
+        }
+    }
+
+    func recovery(jobID: String) throws -> Recovery {
+        _ = try readRecovering(jobID)
+        let folder = try location(jobID)
+        return try locked(folder) {
+            let record = try read(folder)
+            guard Self.isTerminal(record["state"]) else {
+                throw NativeRuntimeError.invalidRequest("The crash sync job still has an active owner")
+            }
+            let lease = try openLock(folder.appending(component: "owner.lock"))
+            guard flock(lease.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else {
+                let code = errno
+                try lease.close()
+                if code == EWOULDBLOCK {
+                    throw NativeRuntimeError.invalidRequest("The crash sync job still has an active owner")
+                }
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            }
+            let outcome: Result<Recovery, any Error>
+            do {
+                guard let input = record["input"], let result = record["result"],
+                      case .object(let progress) = record["progress"], case .string(let state) = record["state"] else {
+                    throw NativeRuntimeError.unsupportedContract("The saved crash sync job has no recovery input")
+                }
+                let previousJobID: String?
+                if case .string(let previous) = record["previousJobId"] { previousJobID = previous }
+                else { previousJobID = nil }
+                outcome = .success(Recovery(id: jobID, directory: folder, input: input, progress: progress,
+                    result: result, state: state, errors: record["errors"]?.values ?? [], previousJobID: previousJobID))
+            } catch { outcome = .failure(error) }
+            do { try lease.close() }
+            catch {
+                if case .failure(let original) = outcome { throw Self.combined(original, error) }
+                throw error
+            }
+            return try outcome.get()
+        }
+    }
+
+    private func start(input: JSONValue, previousJobID: String?,
+                       operation: @escaping @MainActor @Sendable (Context) async throws -> JSONValue) throws -> JSONValue {
         guard !stopping else { throw NativeRuntimeError.unavailable("Crash sync jobs are shutting down") }
         let id = UUID().uuidString
         let folder = try location(id)
@@ -56,7 +121,8 @@ final class NativeCrashSyncJobs {
         }
         let now = Self.now
         let record: [String: JSONValue] = [
-            "jobId": .string(id), "state": .string("queued"), "input": input,
+            "jobId": .string(id), "previousJobId": previousJobID.map(JSONValue.string) ?? .null,
+            "state": .string("queued"), "input": input,
             "progress": .object([:]), "result": .null, "errors": .array([]),
             "createdAt": .string(now), "updatedAt": .string(now),
             "startedAt": .null, "finishedAt": .null, "revision": .number(.int(1)),
