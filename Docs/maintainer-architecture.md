@@ -127,21 +127,33 @@ Active owners and completed jobs reject resume. Reclaiming a leftover Organizer 
 and launch date to match its running instance. Read checkpoints are independent
 of the new job's acquisition and remain valid.
 
-Network Sync starts a dedicated Apple-signed Xcode with
-`NSWorkspace.OpenConfiguration`, `createsNewApplicationInstance`, and
-`-ApplePersistenceIgnoreState YES`. Organizer uses its existing account;
-Accessibility access is required. AX operations target that instance's PID,
-and completion, failure, or cancellation requests normal termination. GUI
-activation can occur. Other workspace operations stay headless.
+Network Sync retains one owned Apple-signed Xcode instance. It launches with
+`NSWorkspace.OpenConfiguration`, `createsNewApplicationInstance`,
+`activates = false`, `hides = true`, `promptsUserIfNeeded = false`, and
+`-ApplePersistenceIgnoreState YES`.
+Subsequent new queries send a noninteractive URL event to that instance's PID.
+A previously fetched URL, or an exact cache entry refreshed since the instance
+launched, uses a new hidden instance to avoid accepting an in-memory result as a
+fresh download. The latter also covers details prefetched while opening a list.
+Organizer uses its existing account; Accessibility access is required. Cancelling
+an active acquisition, acquisition failure, and host shutdown terminate only the
+owned instance.
 
+A record and held file-lock lease in Application Support identify the retained
+application's owner.
+Before acquisition, an abandoned lease permits identity-checked cleanup of a
+leftover process; a live lease prevents another host from reclaiming it. The
+Products cache lock serializes individual acquisitions across hosts.
 The host opens the exact product/filter URL, clears name and unresolved-only
 filters, waits for matching refreshed native cache headers and an idle crash
 list, and collects 25-issue pages. Displayed names are not page identifiers;
 unsymbolicated addresses can differ from the same issue's cached name. A normal
-idle empty page establishes the end. A short list uses a pointer scroll gesture when needed; window or pointer
-interference stops collection. Pages are copied from Organizer's eight-entry LRU
-to the server's exact-query source store as they arrive. A cross-process lock
-serializes access to Xcode's shared Products cache.
+idle empty page establishes the end. Paging uses the owned list's Accessibility
+scrollbar. If the list fits without a scrollbar, acquisition stops as incomplete
+and preserves captured pages; it does not activate Xcode or send global input.
+Pages are copied from Organizer's eight-entry LRU to the server's exact-query
+source store as they arrive. A cross-process lock serializes access to Xcode's
+shared Products cache.
 
 Detail URLs use stable issue IDs and request all-version, all-build,
 all-channel yearly distributions and saved samples. The requested period selects

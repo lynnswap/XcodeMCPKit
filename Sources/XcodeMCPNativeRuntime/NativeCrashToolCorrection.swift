@@ -184,11 +184,12 @@ final class NativeCrashToolCorrection {
         for operation in Array(operations.values) { operation.task.cancel() }
     }
 
-    func shutdown() async {
+    func shutdown() async throws {
         let pending = operations.values.map(\.task)
         for operation in pending { operation.cancel() }
         for operation in pending { await operation.value }
         for owner in jobOwners.values { await owner.shutdown() }
+        try await service.shutdown()
     }
 
     func finishExecution(request: URL) async {

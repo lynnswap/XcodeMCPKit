@@ -354,8 +354,8 @@ package final class NativeXcodeBackend: NativeToolBackend {
     package func shutdown() async throws {
         catalogTask?.cancel()
         if let catalogTask { _ = try? await catalogTask.value }
-        await crashCorrection.shutdown()
         var failures: [String] = []
+        do { try await crashCorrection.shutdown() } catch { failures.append(String(describing: error)) }
         do { try await previewCorrection.shutdown() } catch { failures.append(String(describing: error)) }
         await bridge.shutdown()
         do { try await workspaces.closeAllWorkspaces() } catch { failures.append(String(describing: error)) }

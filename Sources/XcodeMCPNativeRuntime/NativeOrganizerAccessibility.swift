@@ -14,8 +14,7 @@ final class NativeOrganizerAccessibility {
     }
 
     let processIdentifier: pid_t
-    private let appURL: URL
-    private let launchDate: Date?
+    private let application: NSRunningApplication
 
     init(installation: NativeXcodeInstallation, application: NSRunningApplication) throws {
         let appURL = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath()
@@ -27,8 +26,7 @@ final class NativeOrganizerAccessibility {
             throw NativeRuntimeError.unavailable("Accessibility access is required for the native host to operate Xcode Organizer")
         }
         processIdentifier = application.processIdentifier
-        self.appURL = appURL
-        launchDate = application.launchDate
+        self.application = application
     }
 
     func snapshot() throws -> Snapshot {
@@ -117,107 +115,13 @@ final class NativeOrganizerAccessibility {
         }
     }
 
-    func scrollToBottom() async throws {
+    func scrollToBottom() throws {
         let location = try locateList()
         if let scrollbar = try verticalScrollBar(in: location.scrollArea) {
             let result = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 1.0))
             guard result == .success else { throw failure("Set the Organizer crash scrollbar AXValue", result) }
             return
         }
-        // A short page can fit without a scrollbar. A continuous gesture still
-        // overscrolls its clip view and asks Organizer to load the next page.
-        guard CGPreflightPostEventAccess() else {
-            throw NativeRuntimeError.unavailable("Accessibility permission is required to scroll the owned Organizer crash list")
-        }
-        let scrollFrame = try frame(of: location.scrollArea)
-        let center = CGPoint(x: scrollFrame.midX.rounded(), y: scrollFrame.midY.rounded())
-        guard let application = NSRunningApplication(processIdentifier: processIdentifier) else {
-            throw NativeRuntimeError.unavailable("The owned Organizer application ended before scrolling")
-        }
-        _ = application.activate(options: [.activateAllWindows])
-        let raised = AXUIElementPerformAction(location.window, kAXRaiseAction as CFString)
-        guard raised == .success else { throw failure("Raise the owned Organizer crash list", raised) }
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(2))
-        while true {
-            try Task.checkCancellation()
-            _ = try applicationElement()
-            if application.isActive, NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier,
-               try ownsScreenPoint(center) { break }
-            guard clock.now < deadline else {
-                throw NativeRuntimeError.unavailable("The owned Organizer crash list did not become the frontmost pointer target")
-            }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        guard let originalCursor = CGEvent(source: nil)?.location else {
-            throw NativeRuntimeError.unavailable("Could not read the pointer position before scrolling Organizer")
-        }
-        let moved = CGWarpMouseCursorPosition(center)
-        guard moved == .success else { throw pointerFailure("Move the pointer over Organizer", moved) }
-        let placedCursor = center
-        var gestureActive = false
-        let outcome: Result<Void, any Error>
-        do {
-            try verifyPointer(placedCursor)
-            guard let hover = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
-                                      mouseCursorPosition: placedCursor, mouseButton: .left) else {
-                throw NativeRuntimeError.unavailable("Could not create the Organizer pointer event")
-            }
-            hover.post(tap: .cghidEventTap)
-            try await Task.sleep(for: .milliseconds(100))
-            let phases: [(CGScrollPhase, Int32)] = [(.began, -120)]
-                + Array(repeating: (.changed, -120), count: 10) + [(.ended, 0)]
-            for (phase, delta) in phases {
-                try Task.checkCancellation()
-                try verifyPointer(placedCursor)
-                guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
-                                          wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0) else {
-                    throw NativeRuntimeError.unavailable("Could not create the Organizer scroll event")
-                }
-                event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
-                event.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(phase.rawValue))
-                event.location = placedCursor
-                event.post(tap: .cghidEventTap)
-                gestureActive = phase != .ended
-                try await Task.sleep(for: .milliseconds(100))
-            }
-            outcome = .success(())
-        } catch { outcome = .failure(error) }
-        var cleanup: [any Error] = []
-        if gestureActive, (try? verifyPointer(placedCursor)) != nil {
-            if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
-                                   wheelCount: 1, wheel1: 0, wheel2: 0, wheel3: 0) {
-                event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
-                event.setIntegerValueField(.scrollWheelEventScrollPhase, value: Int64(CGScrollPhase.cancelled.rawValue))
-                event.location = placedCursor
-                event.post(tap: .cghidEventTap)
-            } else {
-                cleanup.append(NativeRuntimeError.unavailable("Could not create the Organizer gesture cancellation event"))
-            }
-        }
-        let restoration: (any Error)?
-        if let current = CGEvent(source: nil)?.location {
-            // Preserve a person's new pointer position if they intervened.
-            if current == placedCursor {
-                let restored = CGWarpMouseCursorPosition(originalCursor)
-                restoration = restored == .success ? nil : pointerFailure("Restore the pointer after scrolling Organizer", restored)
-            } else { restoration = nil }
-        } else {
-            restoration = NativeRuntimeError.unavailable("Could not read the pointer position to restore it after scrolling Organizer")
-        }
-        if let restoration { cleanup.append(restoration) }
-        if !cleanup.isEmpty {
-            if case .failure(let original) = outcome {
-                cleanup.insert(original, at: 0)
-            }
-            let combined = NSError(domain: "XcodeMCPKit.OrganizerPointer", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "Organizer scroll gesture cleanup failed",
-                NSMultipleUnderlyingErrorsKey: cleanup.map { $0 as NSError },
-            ])
-            if Task.isCancelled { NativeExecutionOperations.scope?.recordFailure(combined) }
-            throw combined
-        }
-        try outcome.get()
     }
 
     private func frame(of element: AXUIElement) throws -> CGRect {
@@ -236,39 +140,10 @@ final class NativeOrganizerAccessibility {
         return CGRect(origin: position, size: size)
     }
 
-    private func ownsScreenPoint(_ point: CGPoint) throws -> Bool {
-        var target: AXUIElement?
-        let hit = unsafe AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(point.x), Float(point.y), &target)
-        guard hit == .success, let target else { throw failure("Find the pointer target for Organizer scrolling", hit) }
-        var pid: pid_t = 0
-        let result = unsafe AXUIElementGetPid(target, &pid)
-        guard result == .success else { throw failure("Read the Organizer pointer target process", result) }
-        return pid == processIdentifier
-    }
-
-    private func verifyPointer(_ expected: CGPoint) throws {
-        _ = try applicationElement()
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier else {
-            throw NativeRuntimeError.unavailable("Organizer lost focus while scrolling; collection stopped")
-        }
-        guard CGEvent(source: nil)?.location == expected else {
-            throw NativeRuntimeError.unavailable("The pointer moved while scrolling Organizer; collection stopped")
-        }
-        guard try ownsScreenPoint(expected) else {
-            throw NativeRuntimeError.unavailable("Another application covered the Organizer scroll target; collection stopped")
-        }
-    }
-
-    private func pointerFailure(_ operation: String, _ error: CGError) -> NSError {
-        NSError(domain: "XcodeMCPKit.OrganizerPointer", code: Int(error.rawValue), userInfo: [
-            NSLocalizedDescriptionKey: "\(operation) failed with Core Graphics error \(error.rawValue) (PID \(processIdentifier))",
-        ])
-    }
-
     private func applicationElement() throws -> AXUIElement {
-        guard let application = NSRunningApplication(processIdentifier: processIdentifier), !application.isTerminated,
-              application.bundleURL?.resolvingSymlinksInPath() == appURL, application.launchDate == launchDate else {
-            throw NativeRuntimeError.unavailable("The selected Xcode process ended; resolve Organizer again")
+        guard let current = NSRunningApplication(processIdentifier: processIdentifier),
+              current.isEqual(application), !current.isTerminated else {
+            throw NativeRuntimeError.unavailable("The owned Organizer application is no longer running with its original process identity; resolve Organizer again")
         }
         return AXUIElementCreateApplication(processIdentifier)
     }

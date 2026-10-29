@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import XcodeMCPWire
 
@@ -9,31 +10,57 @@ final class NativeOrganizerApplication {
     let processIdentifier: pid_t
     private let appURL: URL
     private let launchDate: Date?
+    private let sendEvent: (NSAppleEventDescriptor, NSAppleEventDescriptor.SendOptions) throws -> Void
 
-    private init(application: NSRunningApplication, appURL: URL, launchDate: Date?) {
+    init(application: NSRunningApplication, appURL: URL, launchDate: Date?,
+         sendEvent: @escaping (NSAppleEventDescriptor, NSAppleEventDescriptor.SendOptions) throws -> Void = { event, options in
+             _ = try event.sendEvent(options: options, timeout: NSAppleEventTimeOutDefault)
+         }) {
         self.application = application
         processIdentifier = application.processIdentifier
         self.appURL = appURL
         self.launchDate = launchDate
+        self.sendEvent = sendEvent
     }
 
-    static func launch(installation: NativeXcodeInstallation, url: URL) async throws -> NativeOrganizerApplication {
+    static func launch(installation: NativeXcodeInstallation,
+        runningApplications: () -> [NSRunningApplication] = {
+            NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Xcode")
+        },
+        open: (URL, NSWorkspace.OpenConfiguration) async throws -> NSRunningApplication = { url, configuration in
+            try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+        }) async throws -> NativeOrganizerApplication {
         try Task.checkCancellation()
         let appURL = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath()
-        let existingPIDs = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Xcode")
-            .filter { !$0.isTerminated }.map(\.processIdentifier))
+        let existingPIDs = Set(runningApplications().filter { !$0.isTerminated }.map(\.processIdentifier))
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
         configuration.arguments = ["-ApplePersistenceIgnoreState", "YES"]
-        configuration.activates = true
+        configuration.activates = false
+        configuration.hides = true
+        configuration.promptsUserIfNeeded = false
         configuration.addsToRecentItems = false
-        let application = try await NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: configuration)
+        let application = try await open(appURL, configuration)
         guard !existingPIDs.contains(application.processIdentifier), application.processIdentifier > 0,
               application.bundleURL?.resolvingSymlinksInPath() == appURL else {
             throw failure(code: 1, processIdentifier: application.processIdentifier,
                           message: "Xcode did not return a new Organizer application owned by this request; no termination was requested")
         }
         return NativeOrganizerApplication(application: application, appURL: appURL, launchDate: application.launchDate)
+    }
+
+    func open(_ url: URL) throws {
+        try Task.checkCancellation()
+        guard !application.isTerminated else {
+            throw Self.failure(code: 1, processIdentifier: processIdentifier,
+                               message: "The owned Organizer application ended before receiving its URL")
+        }
+        try validateIdentity()
+        let event = NSAppleEventDescriptor(eventClass: AEEventClass(kInternetEventClass), eventID: AEEventID(kAEGetURL),
+            targetDescriptor: NSAppleEventDescriptor(processIdentifier: processIdentifier),
+            returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
+        event.setParam(NSAppleEventDescriptor(string: url.absoluteString), forKeyword: AEKeyword(keyDirectObject))
+        try sendEvent(event, [.noReply, .neverInteract])
     }
 
     static func shutdownRecovered(_ identity: JSONValue,
@@ -47,6 +74,39 @@ final class NativeOrganizerApplication {
                 appURL: appURL.resolvingSymlinksInPath(), launchDate: application.launchDate).shutdown()
         }) async throws {
         if case .object(let fields) = identity, fields["terminated"] == .bool(true) { return }
+        if case .object(var fields) = identity, case .string(let path) = fields["ownerLeasePath"] {
+            let lease: FileHandle
+            do { lease = try FileHandle(forUpdating: URL(filePath: path)) }
+            catch let error as CocoaError where [.fileNoSuchFile, .fileReadNoSuchFile].contains(error.code) {
+                fields["ownerLeasePath"] = nil
+                try await shutdownRecovered(.object(fields), application: application, shutdown: shutdown)
+                return
+            }
+            let acquired = flock(lease.fileDescriptor, LOCK_EX | LOCK_NB) == 0
+            let code = errno
+            let outcome: Result<Void, any Error>
+            do {
+                if acquired {
+                    fields["ownerLeasePath"] = nil
+                    try await shutdownRecovered(.object(fields), application: application, shutdown: shutdown)
+                } else if code != EWOULDBLOCK {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+                }
+                outcome = .success(())
+            } catch { outcome = .failure(error) }
+            do { try lease.close() }
+            catch {
+                if case .failure(let original) = outcome {
+                    throw NSError(domain: "XcodeMCPKit.OrganizerApplication", code: 4, userInfo: [
+                        NSLocalizedDescriptionKey: "Organizer recovery and owner lease cleanup failed",
+                        NSMultipleUnderlyingErrorsKey: [original as NSError, error as NSError],
+                    ])
+                }
+                throw error
+            }
+            try outcome.get()
+            return
+        }
         guard case .object(let fields) = identity,
               case .number(.int(let identifier)) = fields["processId"],
               let pid = pid_t(exactly: identifier), pid > 0,
@@ -73,12 +133,7 @@ final class NativeOrganizerApplication {
 
     func shutdown() async throws {
         if application.isTerminated { return }
-        guard application.processIdentifier == processIdentifier,
-              application.bundleURL?.resolvingSymlinksInPath() == appURL,
-              application.launchDate == launchDate else {
-            throw Self.failure(code: 1, processIdentifier: processIdentifier,
-                               message: "The owned Organizer application's identity changed; no termination was requested")
-        }
+        try validateIdentity()
         guard application.terminate() || application.isTerminated else {
             throw Self.failure(code: 2, processIdentifier: processIdentifier,
                                message: "The owned Organizer application refused the termination request")
@@ -91,6 +146,15 @@ final class NativeOrganizerApplication {
                                    message: "The owned Organizer application did not terminate within 10 seconds")
             }
             try await clock.sleep(until: min(clock.now.advanced(by: .milliseconds(100)), deadline))
+        }
+    }
+
+    private func validateIdentity() throws {
+        guard application.processIdentifier == processIdentifier,
+              application.bundleURL?.resolvingSymlinksInPath() == appURL,
+              application.launchDate == launchDate else {
+            throw Self.failure(code: 1, processIdentifier: processIdentifier,
+                               message: "The owned Organizer application's identity changed; no operation was requested")
         }
     }
 
