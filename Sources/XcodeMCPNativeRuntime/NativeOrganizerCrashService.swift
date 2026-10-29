@@ -276,7 +276,7 @@ final class NativeOrganizerCrashService {
             if request.query.pageIndex > 0, ui.busyMessages.isEmpty {
                 // Cache writes can precede the table's layout. Re-resolve the
                 // scrollbar as appended rows make the next page scrollable.
-                try await withStableAccessibility(until: deadline) { try driver.scrollToBottom() }
+                try await withStableAccessibility(until: deadline) { try await driver.scrollToBottom() }
             }
             try await Task.sleep(for: .milliseconds(250))
         } while clock.now < deadline

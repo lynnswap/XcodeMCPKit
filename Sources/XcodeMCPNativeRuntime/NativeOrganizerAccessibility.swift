@@ -115,13 +115,180 @@ final class NativeOrganizerAccessibility {
         }
     }
 
-    func scrollToBottom() throws {
+    func scrollToBottom() async throws {
         let location = try locateList()
         if let scrollbar = try verticalScrollBar(in: location.scrollArea) {
-            let result = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 1.0))
-            guard result == .success else { throw failure("Set the Organizer crash scrollbar AXValue", result) }
+            try scrollToBottom(scrollbar)
             return
         }
+        let windowFrame = try frame(of: location.window)
+        let listFrame = try frame(of: location.scrollArea)
+        let number = try windowNumber(frame: windowFrame)
+        // AXSize enforces the interactive minimum size. Xcode's standard
+        // scripting bounds use setFrame:display:, which can make a hidden
+        // viewport small enough to scroll even a single issue.
+        let height = Int(ceil(windowFrame.height - listFrame.height)) + 1
+        try await Self.withTemporaryWindowHeight(height, readBounds: {
+            _ = try self.applicationElement()
+            return try await Self.readWindowBounds(processIdentifier: self.processIdentifier, windowNumber: number)
+        }, writeBounds: { bounds in
+            _ = try self.applicationElement()
+            try await Self.writeWindowBounds(bounds, processIdentifier: self.processIdentifier, windowNumber: number)
+        }, operation: {
+            let resized = try self.locateList()
+            guard let scrollbar = try self.verticalScrollBar(in: resized.scrollArea) else { throw ViewUpdating() }
+            try self.scrollToBottom(scrollbar)
+        })
+    }
+
+    private func scrollToBottom(_ scrollbar: AXUIElement) throws {
+        let result = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 1.0))
+        guard result == .success else { throw failure("Set the Organizer crash scrollbar AXValue", result) }
+    }
+
+    struct WindowBounds: Equatable, Sendable {
+        let top: Int16
+        let left: Int16
+        let bottom: Int16
+        let right: Int16
+
+        init(top: Int16, left: Int16, bottom: Int16, right: Int16) {
+            self.top = top
+            self.left = left
+            self.bottom = bottom
+            self.right = right
+        }
+
+        nonisolated init(data: Data) throws {
+            guard data.count == 8 else {
+                throw NativeRuntimeError.unsupportedContract("Organizer scripting bounds are not an 8-byte QuickDraw rectangle")
+            }
+            let values = unsafe data.withUnsafeBytes { bytes in
+                (0..<4).map { unsafe bytes.loadUnaligned(fromByteOffset: $0 * 2, as: Int16.self) }
+            }
+            top = values[0]
+            left = values[1]
+            bottom = values[2]
+            right = values[3]
+        }
+
+        nonisolated var data: Data {
+            [top, left, bottom, right].withUnsafeBytes { unsafe Data($0) }
+        }
+
+        func withHeight(_ height: Int) throws -> WindowBounds {
+            guard let bottom = Int16(exactly: Int(top) + height) else {
+                throw NativeRuntimeError.unsupportedContract("The temporary Organizer height cannot be represented by its scripting rectangle")
+            }
+            return WindowBounds(top: top, left: left, bottom: bottom, right: right)
+        }
+    }
+
+    static func withTemporaryWindowHeight(_ height: Int,
+        readBounds: @MainActor () async throws -> WindowBounds,
+        writeBounds: @escaping @MainActor (WindowBounds) async throws -> Void,
+        operation: @MainActor () async throws -> Void) async throws {
+        let original = try await readBounds()
+        let resized = try original.withHeight(height)
+        let outcome: Result<Void, any Error>
+        do {
+            try Task.checkCancellation()
+            try await writeBounds(resized)
+            try await operation()
+            outcome = .success(())
+        } catch { outcome = .failure(error) }
+        // A cancelled acquisition still restores the owned window before its
+        // application is reused or shut down.
+        let restore = Task { @MainActor in try await writeBounds(original) }
+        do { try await restore.value }
+        catch {
+            if case .failure(let original) = outcome {
+                throw NSError(domain: "XcodeMCPKit.OrganizerAccessibility", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "Organizer pagination and window restoration failed",
+                    NSMultipleUnderlyingErrorsKey: [original as NSError, error as NSError],
+                ])
+            }
+            throw error
+        }
+        try outcome.get()
+    }
+
+    private func windowNumber(frame: CGRect) throws -> Int {
+        let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+        let matches = windows.compactMap { window -> Int? in
+            guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == processIdentifier,
+                  let bounds = window[kCGWindowBounds as String] as? NSDictionary,
+                  let rectangle = CGRect(dictionaryRepresentation: bounds), rectangle == frame else { return nil }
+            return (window[kCGWindowNumber as String] as? NSNumber)?.intValue
+        }
+        guard matches.count == 1, let number = matches.first else {
+            throw NativeRuntimeError.unsupportedContract("The owned Organizer window has no unique window number for its frame")
+        }
+        return number
+    }
+
+    private nonisolated static func readWindowBounds(processIdentifier: pid_t, windowNumber: Int) async throws -> WindowBounds {
+        try await Task.detached {
+            let value = try sendWindowBounds(processIdentifier: processIdentifier, windowNumber: windowNumber)
+            guard value.descriptorType == DescType(typeQDRectangle) else {
+                throw NativeRuntimeError.unsupportedContract("Organizer scripting bounds are not a QuickDraw rectangle")
+            }
+            return try WindowBounds(data: value.data)
+        }.value
+    }
+
+    private nonisolated static func writeWindowBounds(_ bounds: WindowBounds, processIdentifier: pid_t,
+                                                      windowNumber: Int) async throws {
+        try await Task.detached {
+            _ = try sendWindowBounds(processIdentifier: processIdentifier, windowNumber: windowNumber, bounds: bounds)
+        }.value
+    }
+
+    private nonisolated static func sendWindowBounds(processIdentifier: pid_t, windowNumber: Int,
+                                                     bounds: WindowBounds? = nil) throws -> NSAppleEventDescriptor {
+        var identifier = Int64(windowNumber)
+        let identifierData = withUnsafeBytes(of: &identifier) { unsafe Data($0) }
+        guard let identifier = NSAppleEventDescriptor(descriptorType: DescType(typeSInt64), data: identifierData) else {
+            throw NativeRuntimeError.unavailable("Could not encode the owned Organizer window number")
+        }
+        let window = NSAppleEventDescriptor.record()
+        window.setDescriptor(NSAppleEventDescriptor(typeCode: OSType(cWindow)), forKeyword: AEKeyword(keyAEDesiredClass))
+        window.setDescriptor(NSAppleEventDescriptor(enumCode: OSType(formUniqueID)), forKeyword: AEKeyword(keyAEKeyForm))
+        window.setDescriptor(identifier, forKeyword: AEKeyword(keyAEKeyData))
+        window.setDescriptor(NSAppleEventDescriptor.null(), forKeyword: AEKeyword(keyAEContainer))
+        guard let object = window.coerce(toDescriptorType: DescType(typeObjectSpecifier)) else {
+            throw NativeRuntimeError.unavailable("Could not encode the owned Organizer window specifier")
+        }
+        let property = NSAppleEventDescriptor.record()
+        property.setDescriptor(NSAppleEventDescriptor(typeCode: OSType(typeProperty)), forKeyword: AEKeyword(keyAEDesiredClass))
+        property.setDescriptor(NSAppleEventDescriptor(enumCode: OSType(formPropertyID)), forKeyword: AEKeyword(keyAEKeyForm))
+        property.setDescriptor(NSAppleEventDescriptor(typeCode: OSType(pBounds)), forKeyword: AEKeyword(keyAEKeyData))
+        property.setDescriptor(object, forKeyword: AEKeyword(keyAEContainer))
+        guard let specifier = property.coerce(toDescriptorType: DescType(typeObjectSpecifier)) else {
+            throw NativeRuntimeError.unavailable("Could not encode the owned Organizer bounds specifier")
+        }
+        let event = NSAppleEventDescriptor(eventClass: AEEventClass(kAECoreSuite),
+            eventID: AEEventID(bounds == nil ? kAEGetData : kAESetData),
+            targetDescriptor: NSAppleEventDescriptor(processIdentifier: processIdentifier),
+            returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
+        event.setParam(specifier, forKeyword: AEKeyword(keyDirectObject))
+        if let bounds {
+            guard let data = NSAppleEventDescriptor(descriptorType: DescType(typeQDRectangle), data: bounds.data) else {
+                throw NativeRuntimeError.unavailable("Could not encode the temporary Organizer bounds")
+            }
+            event.setParam(data, forKeyword: AEKeyword(keyAEData))
+        }
+        let options: NSAppleEventDescriptor.SendOptions = [.waitForReply, .neverInteract, .dontRecord,
+            .init(rawValue: UInt(kAEDoNotPromptForUserConsent))]
+        let reply = try event.sendEvent(options: options, timeout: 5)
+        let code = reply.paramDescriptor(forKeyword: AEKeyword(keyErrorNumber))?.int32Value ?? 0
+        guard code == 0 else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(code), userInfo: [
+                NSLocalizedDescriptionKey: reply.paramDescriptor(forKeyword: AEKeyword(keyErrorString))?.stringValue
+                    ?? "Organizer scripting bounds request failed",
+            ])
+        }
+        return reply.paramDescriptor(forKeyword: AEKeyword(keyDirectObject)) ?? .null()
     }
 
     private func frame(of element: AXUIElement) throws -> CGRect {

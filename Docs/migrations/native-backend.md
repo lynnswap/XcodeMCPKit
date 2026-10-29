@@ -93,9 +93,10 @@ the owned instance.
 No API key or manually opened Xcode is needed. Completed source metadata and
 imports remain available. Workspace operations and Read remain headless.
 
-A list without a vertical scrollbar cannot currently advance in the background.
-Sync preserves captured pages and reports the acquisition as incomplete instead
-of activating Xcode or moving the pointer.
+For a list without a vertical scrollbar, Sync temporarily reduces the hidden
+window's height using Xcode's standard scripting bounds, scrolls it, and restores
+the original bounds. This also requires macOS Automation access to Xcode. Missing
+permission is reported without prompting; captured pages remain available.
 
 `source: "cache"` imports only exact saved metadata and local files, without
 starting Xcode. Explicit bundle/platform inputs do not require Products inventory
