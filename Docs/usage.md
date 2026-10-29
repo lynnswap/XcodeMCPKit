@@ -316,10 +316,13 @@ application path, and launch date.
 Collection clears the name search and unresolved-only display filter without
 changing any issue's resolved state.
 
-If an issue list fits without a vertical scrollbar, background pagination cannot
-advance it to verify the end. Sync reports an incomplete acquisition and retains
-the pages already captured. A short nonempty page alone does not establish that
-all issues were collected.
+For an issue list that fits without a vertical scrollbar, Sync temporarily
+reduces the hidden window's height through Xcode's standard scripting bounds,
+scrolls the resulting list, and restores the original bounds. This requires macOS
+Automation access to Xcode as well as Accessibility access. Missing permission
+is reported without prompting or activating Xcode; captured pages remain
+available. A short nonempty page alone does not establish that all issues were
+collected.
 
 Sync defaults to `source: "network"`. It verifies refreshed exact-query cache
 entries and collects issue pages until a normal idle empty page establishes the

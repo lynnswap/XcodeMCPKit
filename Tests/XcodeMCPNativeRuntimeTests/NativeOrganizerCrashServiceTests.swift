@@ -179,4 +179,57 @@ struct NativeOrganizerCrashServiceTests {
         #expect(try nativeTestField(recovered.value, "pagination", "endReached") == .bool(false))
     }
 
+    @Test func temporaryWindowHeightRestoresEveryOriginalBound() async throws {
+        let original = NativeOrganizerAccessibility.WindowBounds(top: 100, left: 80, bottom: 900, right: 1280)
+        var bounds = original
+
+        try await NativeOrganizerAccessibility.withTemporaryWindowHeight(240, readBounds: { bounds },
+            writeBounds: { bounds = $0 }, operation: {
+                #expect(bounds == NativeOrganizerAccessibility.WindowBounds(top: 100, left: 80, bottom: 340, right: 1280))
+            })
+
+        #expect(bounds == original)
+    }
+
+    @Test func temporaryWindowHeightRetainsOperationAndRestoreFailures() async throws {
+        let original = NativeOrganizerAccessibility.WindowBounds(top: 100, left: 80, bottom: 900, right: 1280)
+        let operationFailure = NSError(domain: "OrganizerOperation", code: 7)
+        let restoreFailure = NSError(domain: "OrganizerWindowRestore", code: 8)
+
+        do {
+            try await NativeOrganizerAccessibility.withTemporaryWindowHeight(240, readBounds: { original },
+                writeBounds: { if $0 == original { throw restoreFailure } },
+                operation: { throw operationFailure })
+            Issue.record("Operation and window restoration failures must remain available together")
+        } catch {
+            let errors = try #require((error as NSError).userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError])
+            #expect(errors.count == 2)
+            #expect(errors[0] === operationFailure)
+            #expect(errors[1] === restoreFailure)
+        }
+    }
+
+    @Test func temporaryWindowHeightRestoresBoundsAfterOperationCancellation() async throws {
+        let original = NativeOrganizerAccessibility.WindowBounds(top: 100, left: 80, bottom: 900, right: 1280)
+        var bounds = original
+        let task = Task { @MainActor in
+            try await NativeOrganizerAccessibility.withTemporaryWindowHeight(240, readBounds: { bounds },
+                writeBounds: {
+                    try Task.checkCancellation()
+                    bounds = $0
+                }, operation: {
+                    unsafe withUnsafeCurrentTask { unsafe $0?.cancel() }
+                    try Task.checkCancellation()
+                })
+        }
+
+        do {
+            try await task.value
+            Issue.record("The operation cancellation must remain observable")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        #expect(bounds == original)
+    }
+
 }
