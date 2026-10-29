@@ -129,6 +129,52 @@ struct NativeCrashDataTests {
         #expect(snapshot.errors == uncachedPage.errors)
     }
 
+    @Test @MainActor func cancellationPreservesTheProviderAndCleanupFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NativeCrashStore(root: root)
+        let cleanup = NSError(domain: "OrganizerCleanup", code: 1)
+        let combined = NSError(domain: "OrganizerAcquisition", code: 2, userInfo: [
+            NSMultipleUnderlyingErrorsKey: [CancellationError() as NSError, cleanup],
+        ])
+        let task = Task { @MainActor () -> NSError? in
+            do {
+                _ = try await NativeCrashData.load(key: cacheKey(), source: .networkWithCacheFallback, store: store) {
+                    unsafe withUnsafeCurrentTask { $0?.cancel() }
+                    #expect(Task.isCancelled)
+                    throw combined
+                }
+                Issue.record("Cancelled acquisition unexpectedly returned a cached result")
+                return nil
+            } catch { return error as NSError }
+        }
+
+        let failure = try #require(await task.value)
+        #expect(failure === combined)
+    }
+
+    @Test @MainActor func cancellationPreservesDiagnosticsReturnedByTheProvider() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NativeCrashStore(root: root)
+        let cleanup = NativeCrashData.diagnostic(NSError(domain: "OrganizerCleanup", code: 1), operation: "cleanup")
+        let task = Task { @MainActor () -> NSError? in
+            do {
+                _ = try await NativeCrashData.load(key: cacheKey(), source: .network, store: store) {
+                    unsafe withUnsafeCurrentTask { $0?.cancel() }
+                    #expect(Task.isCancelled)
+                    return NativeCrashData.Fetched(value: .array([]), fetchedAt: nil, errors: [cleanup])
+                }
+                Issue.record("Cancelled acquisition unexpectedly returned normally")
+                return nil
+            } catch { return error as NSError }
+        }
+
+        let failure = try #require(await task.value)
+        let diagnostic = NativeCrashData.diagnostic(failure, operation: "download")
+        #expect(try nativeTestField(diagnostic, "cacheErrors") == .array([cleanup]))
+    }
+
     @Test @MainActor func recoveredOrganizerSamplesDoNotReplaceTheExactServerFallback() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

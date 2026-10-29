@@ -174,6 +174,7 @@ final class NativeCrashToolCorrection {
         let pending = operations.values.map(\.task)
         for operation in pending { operation.cancel() }
         for operation in pending { await operation.value }
+        for owner in jobOwners.values { await owner.shutdown() }
     }
 
     func finishExecution(request: URL) async {
@@ -241,6 +242,7 @@ final class NativeCrashToolCorrection {
                     fetchedAt: recovered.fetchedAt, errors: recovered.errors, isComplete: false)
                 let snapshot = try Self.snapshot(collection: collection, query: query, issueID: request.query.issueID, loaded: saved)
                 let store = try NativeCrashSyncStore(root: cacheRoot)
+                try job.updateProgress(["phase": .string("importing")])
                 let result = try await store.synchronize(snapshot, maxRecords: request.maxRecords, maxBytes: request.maxBytes)
                 try job.setResult(result)
                 if case .object(let fields) = result, let info = fields["cacheInfo"] {
@@ -258,11 +260,15 @@ final class NativeCrashToolCorrection {
         }
         let snapshot = try Self.snapshot(collection: collection, query: query, issueID: request.query.issueID, loaded: loaded)
         let store = try NativeCrashSyncStore(root: cacheRoot)
+        try job.updateProgress(["phase": .string("importing")])
         var result = try await store.synchronize(snapshot, maxRecords: request.maxRecords, maxBytes: request.maxBytes)
         while true {
             try job.setResult(result)
             if case .object(let fields) = result {
                 try job.updateProgress(["phase": .string("importing"), "cacheInfo": fields["cacheInfo"] ?? .object([:])])
+                if case .object(let info) = fields["cacheInfo"], case .number(.int(let failed)) = info["failedCount"], failed > 0 {
+                    return result
+                }
                 guard case .string(let cursor) = fields["nextCursor"] else { return result }
                 try Task.checkCancellation()
                 result = try await store.resumeSync(cursor)

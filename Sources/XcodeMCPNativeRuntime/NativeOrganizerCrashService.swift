@@ -69,7 +69,7 @@ final class NativeOrganizerCrashService {
                         try await driver.scrollToBottom()
                     }
                 } catch {
-                    try Task.checkCancellation()
+                    if Task.isCancelled || error is CancellationError { throw error }
                     return try Self.collectionAfterFailure(request, points: points, pages: pages, copiedPages: copiedPages,
                         fetchedAt: fetchedAt, failedPage: index, errors: errors, error: error)
                 }
@@ -104,8 +104,7 @@ final class NativeOrganizerCrashService {
                 } while clock.now < deadline
                 throw Self.timeoutError("Organizer did not refresh crash issue \(issueID)", errors: lastErrors)
             } catch {
-                try Task.checkCancellation()
-                if error is CancellationError { throw error }
+                if Task.isCancelled || error is CancellationError { throw error }
                 return try Self.recoverIssue(self.cache.readIssue(request, issueID: issueID), after: error)
             }
         }

@@ -113,6 +113,9 @@ cleanup continues. Terminal state is published after the operation drains.
 Job records and revisions persist in the crash cache. An owner lease prevents
 another host from marking a live job interrupted; observing unfinished work
 after its owner has exited records an interrupted state and recovery diagnostic.
+Automatic import stops on a record failure and keeps the partial result's Sync
+continuation for an explicit retry. Source-only errors still permit importing
+the data that acquisition returned.
 
 Network Sync starts a dedicated Apple-signed Xcode with
 `NSWorkspace.OpenConfiguration`, `createsNewApplicationInstance`, and

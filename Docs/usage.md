@@ -141,11 +141,14 @@ progress can include the current `phase`, `capturedPages`, `capturedRecords`,
 resolved `query`, and import `cacheInfo`.
 
 Job states are `queued`, `running`, `cancelling`, `completed`, `failed`,
-`cancelled`, and `interrupted`. A completed job's `result` is its final Sync
-response, including cumulative import counts, source completeness, and saved
-artifact paths. Check that result's diagnostics and coverage as with a direct
-Sync call. A failed job is returned as job state and errors; a successful status
-query remains a successful MCP call.
+`cancelled`, and `interrupted`. A job's `result` retains its latest Sync response,
+including cumulative import counts, source completeness, and saved artifact
+paths. A record import failure ends automatic processing with a partial result
+and a saved `nextCursor` for an explicit retry through `SyncCrashReports`.
+Source errors alone still allow the job to import acquired data. Check the
+result's diagnostics and coverage as with a direct Sync call. A failed job is
+returned as job state and errors; a successful status query remains a successful
+MCP call.
 
 Call `CancelCrashSync` with `{"job_id":"job-id-from-start"}` to request a stop.
 It returns promptly with `cancelling` while active work and Organizer cleanup

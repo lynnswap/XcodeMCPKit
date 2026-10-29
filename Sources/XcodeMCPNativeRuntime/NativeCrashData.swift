@@ -263,7 +263,7 @@ enum NativeCrashContract {
             "progress": .object(["type": .string("object"),
                 "description": .string("Latest phase, capturedPages, capturedRecords, resolved query, and import cacheInfo when available. Phases include queued, waitingForOrganizer, acquiring, and importing.")]),
             "result": .object(["type": .array([.string("object"), .string("null")]),
-                "description": .string("Final SyncCrashReports response after all local import continuations, including cumulative cacheInfo, responsePath, and metadataPath. Null while no result has been committed.")]),
+                "description": .string("Latest SyncCrashReports response, including cumulative cacheInfo, responsePath, and metadataPath. Record import failures stop automatic processing and retain nextCursor for an explicit retry. Source-only errors still allow importing acquired data. Null while no result has been committed.")]),
             "errors": .object(["type": .string("array"), "items": .object(["type": .string("object")]),
                 "description": .string("Job failures and cleanup diagnostics. A failed job state does not make a successful status query an MCP error.")]),
         ]
@@ -377,6 +377,13 @@ enum NativeCrashData {
         if source != .cache {
             do {
                 let fetched = try await fetch()
+                if Task.isCancelled, !fetched.errors.isEmpty {
+                    throw NSError(domain: "XcodeMCPKit.CrashAcquisition", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "Crash acquisition was cancelled with provider diagnostics",
+                        NSUnderlyingErrorKey: CancellationError(),
+                        "XcodeMCPKit.CrashDiagnostics": fetched.errors.map(\.foundationObject),
+                    ])
+                }
                 try Task.checkCancellation()
                 result.value = fetched.value
                 result.source = fetched.source
@@ -406,7 +413,7 @@ enum NativeCrashData {
                 } catch { result.errors.append(diagnostic(error, operation: "cacheWrite")) }
                 return result
             } catch {
-                try Task.checkCancellation()
+                if Task.isCancelled || error is CancellationError { throw error }
                 result.errors.append(diagnostic(error, operation: "download"))
                 if source == .network { return result }
             }
