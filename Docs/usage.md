@@ -301,12 +301,25 @@ and interval unique-device counts cannot be added to obtain the period count.
 
 Network Sync requires existing App Store Connect account access in the selected
 Xcode and macOS Accessibility access for the native host. No API key is needed.
-Each network call starts a dedicated GUI Xcode instance and closes it after
-completion, failure, or cancellation. Xcode can appear and become active; other
-workspace operations remain headless. Collection clears the name search and
-unresolved-only display filter without changing any issue's resolved state.
-A short list without a scrollbar temporarily uses a normal pointer scroll
-gesture. Interference stops acquisition while preserving completed work.
+Network Sync launches an owned Xcode instance hidden, without activating it,
+and reuses it for subsequent new queries. It targets only that instance's PID;
+your existing Xcode windows are not used. Collection does not move the pointer
+or raise an Organizer window. The instance remains a GUI Xcode process, rather
+than a fully headless service, because downloads use Xcode's existing account.
+
+A query already fetched or prefetched by the retained instance starts a new
+hidden instance so Xcode's in-memory result cannot satisfy the refresh check.
+Cancelling an active acquisition, acquisition failure, and server shutdown close
+the owned instance. If the host exits unexpectedly, its ownership lease permits
+the next acquisition to reclaim that instance after checking its PID,
+application path, and launch date.
+Collection clears the name search and unresolved-only display filter without
+changing any issue's resolved state.
+
+If an issue list fits without a vertical scrollbar, background pagination cannot
+advance it to verify the end. Sync reports an incomplete acquisition and retains
+the pages already captured. A short nonempty page alone does not establish that
+all issues were collected.
 
 Sync defaults to `source: "network"`. It verifies refreshed exact-query cache
 entries and collects issue pages until a normal idle empty page establishes the

@@ -143,8 +143,8 @@ struct NativeCrashToolCorrectionTests {
         let unchanged = try await execute(.read, input: .object(["checkpoint": .string(checkpoint)]),
             correction: observer, context: observerContext)
         #expect(unchanged["changes"] == .array([]))
-        await owner.shutdown()
-        await observer.shutdown()
+        try await owner.shutdown()
+        try await observer.shutdown()
     }
 
     @Test func aFailedBackgroundSyncRemainsASuccessfulJobStatusResponseWithItsCause() async throws {
@@ -163,7 +163,7 @@ struct NativeCrashToolCorrectionTests {
             throw FixtureError.missingField
         }
         #expect(try nativeTestField(try #require(errors.first), "operation") == .string("cacheRead"))
-        await correction.shutdown()
+        try await correction.shutdown()
     }
 
     @Test func anUnreadableSampleStopsTheJobAndRetainsOneImportResponseForExplicitRetry() async throws {
@@ -224,7 +224,7 @@ struct NativeCrashToolCorrectionTests {
         let originalContinuation = try await execute(.sync, input: .object(["cursor": .string(cursor)]),
             correction: correction, context: context)
         #expect(.object(originalContinuation) == failedRetryResult)
-        await correction.shutdown()
+        try await correction.shutdown()
     }
 
     @Test(arguments: ["cache", "network", "missing-page"])
@@ -308,7 +308,7 @@ struct NativeCrashToolCorrectionTests {
         let replay = try await importer.resumeSync(token)
         #expect(try nativeTestField(replay, "cacheInfo", "processedCount") == .number(.int(2)))
         await jobs.shutdown()
-        await correction.shutdown()
+        try await correction.shutdown()
     }
 
     @Test(arguments: [false, true])
@@ -352,7 +352,7 @@ struct NativeCrashToolCorrectionTests {
                 == .string("Xcode's product manager is unavailable"))
         }
         await owner.shutdown()
-        await correction.shutdown()
+        try await correction.shutdown()
     }
 
     private func point(_ id: String, name: String) -> JSONValue {

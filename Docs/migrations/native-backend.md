@@ -9,8 +9,8 @@ current public tool definitions. Installation instructions are in the
 Open a saved project with `XcodeOpenWorkspace`, then pass its returned
 `workspaceIdentifier` to an operation. The identifier retains its native
 headless workspace and host. `XcodeListWorkspaces` lists loaded headless models;
-workspace operations use these headless models. Crash collection uses GUI
-Organizer in a dedicated instance as described below.
+workspace operations use these headless models. Crash collection uses a hidden, owned
+Organizer instance as described below.
 
 | Previous call or value | Replacement |
 | --- | --- |
@@ -83,12 +83,19 @@ Sample counts are not occurrence or device counts. Unchanged issue metadata
 cannot establish that an issue's sample content has not changed; synchronize its
 logs again to check.
 
-Network Sync still uses a dedicated GUI instance of the selected Xcode and
-requires configured App Store Connect account access and Accessibility permission.
-It closes its instance after completion, failure, or cancellation. No API key or
-manually opened Xcode is needed. Window/pointer interference can interrupt
-collection; completed source metadata and imports remain available. Normal
-workspace operations and Read remain headless.
+Network Sync uses a hidden, owned instance of the selected Xcode and requires
+configured App Store Connect account access and Accessibility permission. New
+queries reuse that process without activation or pointer movement. A previously
+fetched or prefetched query starts a new hidden instance to refresh Xcode's
+in-memory data.
+Cancelling an active acquisition, acquisition failure, and server shutdown close
+the owned instance.
+No API key or manually opened Xcode is needed. Completed source metadata and
+imports remain available. Workspace operations and Read remain headless.
+
+A list without a vertical scrollbar cannot currently advance in the background.
+Sync preserves captured pages and reports the acquisition as incomplete instead
+of activating Xcode or moving the pointer.
 
 `source: "cache"` imports only exact saved metadata and local files, without
 starting Xcode. Explicit bundle/platform inputs do not require Products inventory
@@ -109,8 +116,9 @@ new tool definitions.
 Install `XcodeMCPNativeHost.app` beside the proxy commands. Reinstall the complete
 package if it is missing. The default helper executes headlessly through the
 selected Xcode's frameworks without Xcode Service setup. Workspace operations
-work without an open GUI window; network crash collection starts its own
-dedicated GUI Xcode instance for Organizer and closes it after the request.
+work without an open GUI window; network crash collection retains its own
+hidden Xcode instance for Organizer until active acquisition cancellation,
+acquisition failure, or shutdown.
 
 Remove these older settings from startup scripts and embedding configuration:
 

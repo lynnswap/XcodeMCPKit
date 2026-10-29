@@ -12,10 +12,32 @@ final class NativeOrganizerCrashService {
     private let installation: NativeXcodeInstallation
     private let cache: NativeOrganizerCrashCache
     private let timeout: Duration = .seconds(90)
+    private let organizerRoot: URL?
+    private let launchOrganizer: (NativeXcodeInstallation) async throws -> NativeOrganizerApplication
+    private let recoverApplication: (JSONValue) async throws -> Void
+    private var owner: Owner?
 
-    init(installation: NativeXcodeInstallation, cache: NativeOrganizerCrashCache = .init()) {
+    private struct Owner {
+        let application: NativeOrganizerApplication
+        let directory: URL
+        let lease: FileHandle
+        var requestedURLs: Set<URL> = []
+        var reusable = true
+    }
+
+    init(installation: NativeXcodeInstallation, cache: NativeOrganizerCrashCache = .init(),
+         organizerRoot: URL? = nil,
+         launchOrganizer: @escaping (NativeXcodeInstallation) async throws -> NativeOrganizerApplication = {
+             try await NativeOrganizerApplication.launch(installation: $0)
+         },
+         recoverApplication: @escaping (JSONValue) async throws -> Void = {
+             try await NativeOrganizerApplication.shutdownRecovered($0)
+         }) {
         self.installation = installation
         self.cache = cache
+        self.organizerRoot = organizerRoot
+        self.launchOrganizer = launchOrganizer
+        self.recoverApplication = recoverApplication
     }
 
     typealias Observer = @MainActor ([String: JSONValue]) throws -> Void
@@ -65,9 +87,6 @@ final class NativeOrganizerCrashService {
                             terminalPage: terminal ? index : nil, errors: errors)
                     }
                     index += 1
-                    try await self.withStableAccessibility(until: ContinuousClock().now.advanced(by: self.timeout)) {
-                        try await driver.scrollToBottom()
-                    }
                 } catch {
                     if Task.isCancelled || error is CancellationError { throw error }
                     return try Self.collectionAfterFailure(request, points: points, pages: pages, copiedPages: copiedPages,
@@ -254,6 +273,11 @@ final class NativeOrganizerCrashService {
             let ui = try await withStableAccessibility(until: deadline) { try driver.snapshot() }
             try checkFailure(ui)
             if let page = read.snapshot, Self.isReady(page, since: began, snapshot: ui) { return page }
+            if request.query.pageIndex > 0, ui.busyMessages.isEmpty {
+                // Cache writes can precede the table's layout. Re-resolve the
+                // scrollbar as appended rows make the next page scrollable.
+                try await withStableAccessibility(until: deadline) { try driver.scrollToBottom() }
+            }
             try await Task.sleep(for: .milliseconds(250))
         } while clock.now < deadline
         throw Self.timeoutError("Organizer did not refresh the requested crash page \(request.query.pageIndex)", errors: lastErrors)
@@ -311,46 +335,213 @@ final class NativeOrganizerCrashService {
         return [Int(ApplicationServices.AXError.invalidUIElement.rawValue), Int(ApplicationServices.AXError.cannotComplete.rawValue)].contains(error.code)
     }
 
-    private func withOrganizerAccess(_ request: NativeCrashServiceQuery, issueID: String?, observe: Observer? = nil,
-        _ operation: (NativeOrganizerAccessibility, Date) async throws -> NativeCrashData.Fetched) async throws -> NativeCrashData.Fetched {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/XcodeMCPKit/Organizer", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let path = root.appendingPathComponent("products.lock")
-        if !FileManager.default.fileExists(atPath: path.path) { FileManager.default.createFile(atPath: path.path, contents: Data()) }
-        let file = try FileHandle(forUpdating: path)
-        // Every Xcode instance shares the Products disk cache. Serialize our
-        // collectors across processes, and release the lock after GUI shutdown.
-        var owned: NativeOrganizerApplication?
-        let outcome: Result<NativeCrashData.Fetched, any Error>
+    func shutdown() async throws {
+        guard owner != nil else { return }
+        let file = try await productsLock()
+        let outcome: Result<Void, any Error>
+        do { try await shutdownOwned(); outcome = .success(()) }
+        catch { outcome = .failure(error) }
+        do { try file.close() }
+        catch {
+            if case .failure(let original) = outcome { throw Self.cleanupFailure(original, cleanup: [error as NSError]) }
+            throw error
+        }
+        try outcome.get()
+    }
+
+    // The caller holds the shared Products lock while opening a route.
+    func organizerApplication(for url: URL, previousFetch: Date? = nil) async throws -> NativeOrganizerApplication {
+        try await recoverAbandonedOwners()
+        if let owner {
+            let prefetched = owner.application.application.launchDate.map { launchDate in
+                previousFetch.map { $0 >= Self.second(launchDate) } ?? false
+            } ?? false
+            if !owner.reusable || owner.application.application.isTerminated || owner.requestedURLs.contains(url) || prefetched {
+                // Organizer also prefetches unvisited issues. A cache refreshed
+                // during this owner's lifetime may already be held in memory.
+                try await shutdownOwned()
+            }
+        }
+        if owner == nil {
+            let directory = try ownerDirectory().appending(component: UUID().uuidString, directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let lease = try lockFile(directory.appending(component: "owner.lock"))
+            guard flock(lease.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else {
+                let error = NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                do { try lease.close() }
+                catch let cleanup { throw Self.cleanupFailure(error, cleanup: [cleanup as NSError]) }
+                throw error
+            }
+            let application: NativeOrganizerApplication
+            do { application = try await launchOrganizer(installation) }
+            catch {
+                let original = error
+                var cleanup: [NSError] = []
+                do { try lease.close() } catch { cleanup.append(error as NSError) }
+                do { try FileManager.default.removeItem(at: directory) } catch { cleanup.append(error as NSError) }
+                if !cleanup.isEmpty { throw Self.cleanupFailure(original, cleanup: cleanup) }
+                throw original
+            }
+            owner = Owner(application: application, directory: directory, lease: lease)
+            do { try saveOwner() }
+            catch {
+                let original = error
+                let cleanup = Task { @MainActor in try await self.shutdownOwned() }
+                do { try await cleanup.value }
+                catch { throw Self.cleanupFailure(original, cleanup: [error as NSError]) }
+                throw original
+            }
+        }
+        guard let application = owner?.application else {
+            throw NativeRuntimeError.unavailable("The owned Organizer application is unavailable")
+        }
+        try application.open(url)
+        owner?.requestedURLs.insert(url)
+        return application
+    }
+
+    private func saveOwner() throws {
+        guard let owner else { return }
+        try NativeCrashStore.encode(Self.identity(owner.application))
+            .write(to: owner.directory.appending(component: "owner.json"), options: .atomic)
+    }
+
+    private func shutdownOwned() async throws {
+        guard let owned = owner else { return }
+        try await owned.application.shutdown()
+        var cleanup: [NSError] = []
+        do { try saveOwner() } catch { cleanup.append(error as NSError) }
         do {
-            try observe?(["phase": .string("waitingForOrganizer")])
+            try owned.lease.close()
+            owner = nil
+            do { try FileManager.default.removeItem(at: owned.directory) }
+            catch { cleanup.append(error as NSError) }
+        } catch { cleanup.append(error as NSError) }
+        if let original = cleanup.first {
+            if cleanup.count == 1 { throw original }
+            throw Self.cleanupFailure(original, cleanup: Array(cleanup.dropFirst()))
+        }
+    }
+
+    private func ownerDirectory() throws -> URL {
+        if let organizerRoot { return organizerRoot.appending(component: "Owners", directoryHint: .isDirectory) }
+        // Recovery records must survive host exits and cache eviction.
+        return try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true).appending(path: "XcodeMCPKit/Organizer/Owners", directoryHint: .isDirectory)
+    }
+
+    private func recoverAbandonedOwners() async throws {
+        let directory = try ownerDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for folder in try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: nil, options: .skipsHiddenFiles) {
+            let lease = try lockFile(folder.appending(component: "owner.lock"))
+            let acquired = flock(lease.fileDescriptor, LOCK_EX | LOCK_NB) == 0
+            let code = errno
+            let outcome: Result<Void, any Error>
+            do {
+                if acquired {
+                    let record = folder.appending(component: "owner.json")
+                    if FileManager.default.fileExists(atPath: record.path) {
+                        let identity = try NativeCrashStore.object(Data(contentsOf: record))
+                        let cleanup = Task { @MainActor in try await self.recoverApplication(.object(identity)) }
+                        try await cleanup.value
+                    }
+                } else if code != EWOULDBLOCK {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+                }
+                outcome = .success(())
+            } catch { outcome = .failure(error) }
+            do { try lease.close() }
+            catch {
+                if case .failure(let original) = outcome { throw Self.cleanupFailure(original, cleanup: [error as NSError]) }
+                throw error
+            }
+            try outcome.get()
+            if acquired { try FileManager.default.removeItem(at: folder) }
+        }
+    }
+
+    private func productsLock() async throws -> FileHandle {
+        // Keep the established lock path so hosts on earlier versions still coordinate.
+        let root = organizerRoot ?? FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Caches/XcodeMCPKit/Organizer", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = try lockFile(root.appending(component: "products.lock"))
+        do {
             while flock(file.fileDescriptor, LOCK_EX | LOCK_NB) != 0 {
                 let code = errno
                 guard code == EWOULDBLOCK else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
                 try await Task.sleep(for: .milliseconds(100))
             }
+            return file
+        } catch {
+            let original = error
+            do { try file.close() }
+            catch { throw Self.cleanupFailure(original, cleanup: [error as NSError]) }
+            throw original
+        }
+    }
+
+    private func lockFile(_ url: URL) throws -> FileHandle {
+        if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: Data()) }
+        return try FileHandle(forUpdating: url)
+    }
+
+    private func withOrganizerAccess(_ request: NativeCrashServiceQuery, issueID: String?, observe: Observer? = nil,
+        _ operation: (NativeOrganizerAccessibility, Date) async throws -> NativeCrashData.Fetched) async throws -> NativeCrashData.Fetched {
+        try observe?(["phase": .string("waitingForOrganizer")])
+        let file = try await productsLock()
+        var owned: NativeOrganizerApplication?
+        var ownerLeasePath: String?
+        let outcome: Result<NativeCrashData.Fetched, any Error>
+        do {
             try Task.checkCancellation()
             let began = try await Self.refreshBoundary()
-            let application = try await NativeOrganizerApplication.launch(installation: installation, url: Self.url(request, issueID: issueID))
+            let previousFetch: Date?
+            if let issueID { previousFetch = cache.readIssue(request, issueID: issueID).snapshot?.fetchedAt }
+            else { previousFetch = cache.readPage(request).snapshot?.fetchedAt }
+            let application = try await organizerApplication(for: Self.url(request, issueID: issueID), previousFetch: previousFetch)
             owned = application
-            try observe?(["phase": .string("acquiring"), "organizer": Self.identity(application)])
+            ownerLeasePath = owner?.directory.appending(component: "owner.lock").path
+            try observe?(["phase": .string("acquiring"),
+                "organizer": Self.identity(application, ownerLeasePath: ownerLeasePath)])
             try Task.checkCancellation()
             let driver = try NativeOrganizerAccessibility(installation: installation, application: application.application)
             outcome = .success(try await operation(driver, began))
         } catch { outcome = .failure(error) }
         var cleanup: [NSError] = []
-        if let owned {
-            // An unstructured cleanup task finishes even when the request was cancelled.
-            let shutdown = Task { @MainActor in try await owned.shutdown() }
+        let failed: Bool
+        switch outcome {
+        case .failure: failed = true
+        case .success(let result): failed = !result.isComplete || !result.errors.isEmpty
+        }
+        if failed || Task.isCancelled {
+            owner?.reusable = false
+            let shutdown = Task { @MainActor in try await self.shutdownOwned() }
             do { try await shutdown.value }
             catch { cleanup.append(error as NSError) }
         }
         if let owned {
-            do { try observe?(["organizer": Self.identity(owned)]) }
+            do { try observe?(["organizer": Self.identity(owned, ownerLeasePath: ownerLeasePath)]) }
+            catch { cleanup.append(error as NSError) }
+        }
+        if !cleanup.isEmpty, !failed, !Task.isCancelled {
+            owner?.reusable = false
+            let shutdown = Task { @MainActor in try await self.shutdownOwned() }
+            do { try await shutdown.value }
             catch { cleanup.append(error as NSError) }
         }
         do { try file.close() }
-        catch { cleanup.append(error as NSError) }
+        catch {
+            cleanup.append(error as NSError)
+            if !failed, !Task.isCancelled {
+                owner?.reusable = false
+                let shutdown = Task { @MainActor in try await self.shutdownOwned() }
+                do { try await shutdown.value }
+                catch { cleanup.append(error as NSError) }
+            }
+        }
         if Task.isCancelled, !cleanup.isEmpty {
             let original: any Error
             if case .failure(let failure) = outcome { original = failure }
@@ -375,11 +566,13 @@ final class NativeOrganizerCrashService {
         }
     }
 
-    private static func identity(_ owned: NativeOrganizerApplication) -> JSONValue {
-        .object(["processId": .number(.int(Int64(owned.processIdentifier))),
+    private static func identity(_ owned: NativeOrganizerApplication, ownerLeasePath: String? = nil) -> JSONValue {
+        var fields: [String: JSONValue] = ["processId": .number(.int(Int64(owned.processIdentifier))),
             "appPath": owned.application.bundleURL.map { .string($0.resolvingSymlinksInPath().path) } ?? .null,
             "launchDate": owned.application.launchDate.map { .number(.double($0.timeIntervalSince1970)) } ?? .null,
-            "terminated": .bool(owned.application.isTerminated)])
+            "terminated": .bool(owned.application.isTerminated)]
+        if let ownerLeasePath { fields["ownerLeasePath"] = .string(ownerLeasePath) }
+        return .object(fields)
     }
 
     private static func cleanupFailure(_ original: any Error, cleanup: [NSError]) -> NSError {
