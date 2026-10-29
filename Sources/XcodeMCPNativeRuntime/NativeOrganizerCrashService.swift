@@ -18,8 +18,11 @@ final class NativeOrganizerCrashService {
         self.cache = cache
     }
 
-    func fetchIssues(_ request: NativeCrashServiceQuery, store: NativeCrashStore) async throws -> NativeCrashData.Fetched {
-        try await withOrganizerAccess(request, issueID: nil) { driver, began in
+    typealias Observer = @MainActor ([String: JSONValue]) throws -> Void
+
+    func fetchIssues(_ request: NativeCrashServiceQuery, store: NativeCrashStore,
+                     observe: Observer? = nil) async throws -> NativeCrashData.Fetched {
+        try await withOrganizerAccess(request, issueID: nil, observe: observe) { driver, began in
             try await self.waitForList(driver)
             var errors: [JSONValue] = []
             var points: [JSONValue] = []
@@ -52,6 +55,10 @@ final class NativeOrganizerCrashService {
                         pages.append(.object(descriptor))
                     }
                     let terminal = page.points.isEmpty
+                    try observe?(["phase": .string("acquiring"),
+                        "capturedPages": .number(.int(Int64(copiedPages.count))),
+                        "capturedRecords": .number(.int(Int64(points.count))),
+                        "pages": .array(copiedPages)])
                     if terminal || (!request.query.collectsAllPages && index == request.query.pageIndex) {
                         return Self.collection(request, points: points, pages: pages, copiedPages: copiedPages,
                             fetchedAt: fetchedAt, nextPage: terminal ? nil : index + 1, terminal: terminal,
@@ -70,8 +77,9 @@ final class NativeOrganizerCrashService {
         }
     }
 
-    func fetchIssue(_ request: NativeCrashServiceQuery, issueID: String) async throws -> NativeCrashData.Fetched {
-        try await withOrganizerAccess(request, issueID: issueID) { driver, began in
+    func fetchIssue(_ request: NativeCrashServiceQuery, issueID: String,
+                    observe: Observer? = nil) async throws -> NativeCrashData.Fetched {
+        try await withOrganizerAccess(request, issueID: issueID, observe: observe) { driver, began in
             do {
                 try await self.waitForList(driver, prepare: false)
                 let clock = ContinuousClock()
@@ -101,6 +109,40 @@ final class NativeOrganizerCrashService {
                 return try Self.recoverIssue(self.cache.readIssue(request, issueID: issueID), after: error)
             }
         }
+    }
+
+    func savedIssue(_ request: NativeCrashServiceQuery, issueID: String,
+                    after error: any Error) throws -> NativeCrashData.Fetched {
+        try Self.recoverIssue(cache.readIssue(request, issueID: issueID), after: error)
+    }
+
+    static func savedPages(_ request: NativeCrashServiceQuery, store: NativeCrashStore,
+                           descriptors: [JSONValue], after error: any Error) throws -> NativeCrashData.Fetched? {
+        guard !descriptors.isEmpty else { return nil }
+        var points: [JSONValue] = []
+        var errors = [NativeCrashData.diagnostic(error, operation: "organizerAcquisition")]
+        var fetchedAt: String?
+        var retained: [JSONValue] = []
+        for (index, descriptor) in descriptors.enumerated() {
+            let query = request.withPage(index).query.json(issueID: nil)
+            guard case .object(let fields) = descriptor, fields["query"] == query else {
+                throw NativeRuntimeError.unsupportedContract("A saved crash acquisition page belongs to another query")
+            }
+            if case .array(let failures) = fields["errors"] { errors += failures }
+            do {
+                guard let saved = try store.read(key: query), case .object(let value) = saved.value,
+                      case .array(let pagePoints) = value["points"] else {
+                    throw NativeRuntimeError.unavailable("A captured crash page is not available in its job source store")
+                }
+                points += pagePoints
+                fetchedAt = saved.fetchedAt ?? fetchedAt
+                errors += saved.errors
+                retained.append(descriptor)
+            } catch { errors.append(NativeCrashData.diagnostic(error, operation: "jobPageRecovery")) }
+        }
+        guard !retained.isEmpty else { throw timeoutError("No captured crash pages could be recovered", errors: errors) }
+        return collection(request, points: points, pages: retained, copiedPages: retained,
+            fetchedAt: fetchedAt, nextPage: descriptors.count, terminal: false, errors: errors)
     }
 
     static func recoverIssue(_ read: NativeOrganizerCrashCache.Read<NativeOrganizerCrashCache.IssueSnapshot>,
@@ -175,7 +217,7 @@ final class NativeOrganizerCrashService {
     }
 
     private static func collection(_ request: NativeCrashServiceQuery, points: [JSONValue], pages: [JSONValue],
-                                   copiedPages: [JSONValue], fetchedAt: String, nextPage: Int?, terminal: Bool,
+                                   copiedPages: [JSONValue], fetchedAt: String?, nextPage: Int?, terminal: Bool,
                                    terminalPage: Int? = nil, errors: [JSONValue]) -> NativeCrashData.Fetched {
         NativeCrashData.Fetched(value: .object(["points": .array(points), "pages": .array(pages),
             "copiedPages": .array(copiedPages), "pagination": .object([
@@ -258,7 +300,7 @@ final class NativeOrganizerCrashService {
         return [Int(ApplicationServices.AXError.invalidUIElement.rawValue), Int(ApplicationServices.AXError.cannotComplete.rawValue)].contains(error.code)
     }
 
-    private func withOrganizerAccess(_ request: NativeCrashServiceQuery, issueID: String?,
+    private func withOrganizerAccess(_ request: NativeCrashServiceQuery, issueID: String?, observe: Observer? = nil,
         _ operation: (NativeOrganizerAccessibility, Date) async throws -> NativeCrashData.Fetched) async throws -> NativeCrashData.Fetched {
         let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/XcodeMCPKit/Organizer", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -270,6 +312,7 @@ final class NativeOrganizerCrashService {
         var owned: NativeOrganizerApplication?
         let outcome: Result<NativeCrashData.Fetched, any Error>
         do {
+            try observe?(["phase": .string("waitingForOrganizer")])
             while flock(file.fileDescriptor, LOCK_EX | LOCK_NB) != 0 {
                 let code = errno
                 guard code == EWOULDBLOCK else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
@@ -279,6 +322,7 @@ final class NativeOrganizerCrashService {
             let began = try await Self.refreshBoundary()
             let application = try await NativeOrganizerApplication.launch(installation: installation, url: Self.url(request, issueID: issueID))
             owned = application
+            try observe?(["phase": .string("acquiring"), "organizer": Self.identity(application)])
             try Task.checkCancellation()
             let driver = try NativeOrganizerAccessibility(installation: installation, application: application.application)
             outcome = .success(try await operation(driver, began))
@@ -288,6 +332,10 @@ final class NativeOrganizerCrashService {
             // An unstructured cleanup task finishes even when the request was cancelled.
             let shutdown = Task { @MainActor in try await owned.shutdown() }
             do { try await shutdown.value }
+            catch { cleanup.append(error as NSError) }
+        }
+        if let owned {
+            do { try observe?(["organizer": Self.identity(owned)]) }
             catch { cleanup.append(error as NSError) }
         }
         do { try file.close() }
@@ -314,6 +362,13 @@ final class NativeOrganizerCrashService {
             guard !cleanup.isEmpty else { throw original }
             throw Self.cleanupFailure(original, cleanup: cleanup)
         }
+    }
+
+    private static func identity(_ owned: NativeOrganizerApplication) -> JSONValue {
+        .object(["processId": .number(.int(Int64(owned.processIdentifier))),
+            "appPath": owned.application.bundleURL.map { .string($0.resolvingSymlinksInPath().path) } ?? .null,
+            "launchDate": owned.application.launchDate.map { .number(.double($0.timeIntervalSince1970)) } ?? .null,
+            "terminated": .bool(owned.application.isTerminated)])
     }
 
     private static func cleanupFailure(_ original: any Error, cleanup: [NSError]) -> NSError {

@@ -230,7 +230,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
 
     private static func bypassesCrashWorkspace(_ name: String, arguments: [String: JSONValue]) -> Bool {
         guard let kind = NativeCrashToolCorrection.Kind(rawValue: name) else { return false }
-        if kind == .read { return true }
+        if [.read, .start, .wait, .cancel].contains(kind) { return true }
         if case .string = arguments["cursor"] { return true }
         if case .string = arguments["bundle_id"], case .string = arguments["platform"] { return true }
         return false

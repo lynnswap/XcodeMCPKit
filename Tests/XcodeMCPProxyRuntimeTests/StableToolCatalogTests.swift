@@ -187,6 +187,28 @@ struct StableToolCatalogTests {
         }
     }
 
+    @Test func crashJobsKeepExplicitIdentityAndJobControlsWithoutWorkspaceRouting() throws {
+        for name in ["StartCrashSync", "WaitForCrashSync", "CancelCrashSync"] {
+            let start = name == "StartCrashSync"
+            let required = start ? ["bundle_id", "platform"] : ["job_id"]
+            let properties = Dictionary(uniqueKeysWithValues: required.map { ($0, string) })
+            let annotations: JSONValue = .object(["readOnlyHint": .bool(name == "WaitForCrashSync")])
+            let native = catalog([tool(name, properties: properties, required: required,
+                extra: ["annotations": annotations])])
+            let result = try XcodeToolCatalog.publicResult(from: native, managementTools: [])
+            let descriptor = try #require(find(name, in: result))
+            #expect(field(descriptor, "inputSchema", "required") == .array(required.map(JSONValue.string)))
+            #expect(field(descriptor, "inputSchema", "properties", "workspaceIdentifier") == nil)
+            #expect(field(descriptor, "annotations") == annotations)
+            let arguments: [String: JSONValue] = start
+                ? ["bundle_id": .string("com.example.app"), "platform": .string("iOS")]
+                : ["job_id": .string("persistent-job-id")]
+            let call = try XcodeToolCatalog.nativeCall(name: name, arguments: arguments, nativeCatalog: native)
+            #expect(call.name == name)
+            #expect(call.arguments == arguments)
+        }
+    }
+
     @Test func stableCatalogKeepsNativeToolsAndManagementOverridesWithoutInventingEditorTools() throws {
         let native = catalog([
             tool("StringCatalogRead", properties: ["workspaceIdentifier": string], required: [], extra: [

@@ -52,6 +52,44 @@ struct NativeCrashDataTests {
         }
     }
 
+    @Test func crashJobControlsRequireAnIdentifierAndDefaultToABoundedWait() throws {
+        let input = Data(#"{"job_id":"saved-job"}"#.utf8)
+        let wait = try JSONDecoder().decode(NativeCrashJobWaitRequest.self, from: input)
+        #expect(wait.jobID == "saved-job")
+        #expect(wait.waitSeconds == 1)
+        #expect(wait.afterRevision == nil)
+        #expect(try JSONDecoder().decode(NativeCrashJobIDRequest.self, from: input).jobID == "saved-job")
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(NativeCrashJobWaitRequest.self, from: Data(#"{}"#.utf8))
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(NativeCrashJobIDRequest.self, from: Data(#"{}"#.utf8))
+        }
+    }
+
+    @Test(arguments: [0.0, 0.5, 30.0])
+    func crashJobWaitsAcceptImmediateFractionalAndMaximumDurations(seconds: Double) throws {
+        let input = Data("{\"job_id\":\"saved-job\",\"wait_seconds\":\(seconds)}".utf8)
+        #expect(try JSONDecoder().decode(NativeCrashJobWaitRequest.self, from: input).waitSeconds == seconds)
+    }
+
+    @Test(arguments: [-0.1, 30.1])
+    func crashJobWaitsRejectDurationsOutsideThePublishedBounds(seconds: Double) {
+        let input = Data("{\"job_id\":\"saved-job\",\"wait_seconds\":\(seconds)}".utf8)
+        #expect(throws: NativeRuntimeError.self) {
+            try JSONDecoder().decode(NativeCrashJobWaitRequest.self, from: input)
+        }
+    }
+
+    @Test func crashJobWaitsAcceptANonnegativeRevisionAndRejectNegativeRevisions() throws {
+        let input = Data(#"{"job_id":"saved-job","after_revision":0}"#.utf8)
+        #expect(try JSONDecoder().decode(NativeCrashJobWaitRequest.self, from: input).afterRevision == 0)
+        #expect(throws: NativeRuntimeError.self) {
+            try JSONDecoder().decode(NativeCrashJobWaitRequest.self,
+                from: Data(#"{"job_id":"saved-job","after_revision":-1}"#.utf8))
+        }
+    }
+
     @Test @MainActor func networkFallbackUsesOnlyTheExactCachedRequestAndItsOriginalFetchTime() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -287,6 +325,44 @@ struct NativeCrashDataTests {
         let output = try nativeTestObject(nativeTestField(tool.descriptor, "outputSchema", "properties"))
         #expect(output["errors"] != nil)
         #expect(output["collection"] != nil)
+    }
+
+    @Test func crashJobContractsKeepStartsExplicitAndControlCallsIndependentOfWorkspaces() throws {
+        let start = NativeCrashContract.describe(.start)
+        let inputs = try nativeTestObject(nativeTestField(start.descriptor, "inputSchema", "properties"))
+        #expect(try nativeTestField(start.descriptor, "inputSchema", "required") == .array([.string("bundle_id"), .string("platform")]))
+        #expect(inputs["cursor"] == nil)
+        #expect(inputs["workspaceIdentifier"] == nil)
+        var arguments: [String: JSONValue] = ["bundle_id": .string("example.App"), "platform": .string("iOS")]
+        for (name, descriptor) in inputs {
+            if let value = try nativeTestObject(descriptor)["default"] { arguments[name] = value }
+        }
+        let request = try JSONDecoder().decode(NativeCrashSyncRequest.self,
+            from: NativeCrashStore.encode(.object(arguments)))
+        #expect(request.query.bundleIdentifier == "example.App")
+        #expect(request.query.platform == "iOS")
+        #expect(request.cursor == nil)
+        #expect(request.source == .network)
+
+        for kind in [NativeCrashToolCorrection.Kind.start, .wait, .cancel] {
+            let tool = NativeCrashContract.describe(kind)
+            #expect(!tool.workspaceScoped)
+            #expect(try nativeTestField(tool.descriptor, "annotations", "readOnlyHint") == .bool(kind == .wait))
+            #expect(try nativeTestField(tool.descriptor, "outputSchema", "required") == .array([
+                "jobId", "state", "revision", "createdAt", "updatedAt", "progress", "result", "errors",
+            ].map(JSONValue.string)))
+            if kind != .start {
+                #expect(try nativeTestField(tool.descriptor, "inputSchema", "required") == .array([.string("job_id")]))
+            }
+        }
+        let waitInputs = try nativeTestObject(nativeTestField(NativeCrashContract.describe(.wait).descriptor,
+            "inputSchema", "properties"))
+        let waitSeconds = try #require(waitInputs["wait_seconds"])
+        #expect(try nativeTestField(waitSeconds, "minimum") == .number(.int(0)))
+        #expect(try nativeTestField(waitSeconds, "maximum") == .number(.int(30)))
+        #expect(try nativeTestField(waitSeconds, "default") == .number(.int(1)))
+        #expect(try nativeTestField(try #require(waitInputs["after_revision"]), "minimum") == .number(.int(0)))
+        #expect(Set(waitInputs.keys) == ["job_id", "wait_seconds", "after_revision"])
     }
 
     @Test func aCacheEnvelopeWithAnotherRequestIsNeverReturned() throws {

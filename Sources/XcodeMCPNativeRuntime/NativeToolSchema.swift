@@ -19,7 +19,7 @@ package struct NativeTool: Equatable, Sendable {
     // classification to preserve reusable builds without changing advertised schemas.
     private static let knownQueries: Set<String> = [
         "DocumentationSearch", "GetBuildLog", "GetConsoleOutput", "GetFileCompilerFlags",
-        "GetTargetBuildSettings", "GetTestList", "SyncCrashReports", "ReadCrashChanges",
+        "GetTargetBuildSettings", "GetTestList", "SyncCrashReports", "ReadCrashChanges", "WaitForCrashSync",
         "GetTopFieldPerformanceIssues", "GetFieldPerformanceIssueLogs",
         "StringCatalogContext", "StringCatalogRead", "XcodeGlob", "XcodeGrep", "XcodeLS",
         "XcodeRead", "XcodeListRunDestinations", "XcodeListSchemes", "XcodeListTargets",

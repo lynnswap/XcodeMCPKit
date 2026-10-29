@@ -114,4 +114,29 @@ struct NativeOrganizerCrashServiceTests {
         #expect(values == ["adamId": "1234567890", "bundleId": "example.App", "platformId": "iOS",
                            "installPlatformId": "macOS", "analyticsPointId": "stable-issue-ID"])
     }
+    @Test func interruptedAcquisitionRetainsReadablePagesAndReportsMissingPages() throws {
+        let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NativeCrashStore(root: root)
+        let query = NativeCrashQuery(bundleIdentifier: "example.App", platformIdentifier: "com.apple.platform.iphoneos",
+            uploadPlatformIdentifier: "com.apple.platform.iphoneos", appVersion: nil, isBeta: nil,
+            timePeriod: "last365Days", pageIndex: 0, pageSize: 25, collectsAllPages: true)
+        let request = NativeCrashServiceQuery(query: query, adamIdentifier: "123")
+        let points: [JSONValue] = [.object(["analyticsPointIdentifier": .string("captured"),
+            "analyticsPointName": .string("Example.crash()")])]
+        _ = try store.write(.object(["points": .array(points)]), key: request.withPage(0).query.json(issueID: nil),
+                            fetchedAt: "2024-01-01T00:00:00Z")
+        let descriptors: [JSONValue] = (0...1).map { .object(["query": request.withPage($0).query.json(issueID: nil)]) }
+
+        let recovered = try #require(try NativeOrganizerCrashService.savedPages(request, store: store,
+            descriptors: descriptors, after: CancellationError()))
+
+        #expect(!recovered.isComplete)
+        #expect(try nativeTestField(recovered.value, "points") == .array(points))
+        try #require(recovered.errors.count == 2)
+        #expect(try nativeTestField(recovered.errors[0], "operation") == .string("organizerAcquisition"))
+        #expect(try nativeTestField(recovered.errors[1], "operation") == .string("jobPageRecovery"))
+        #expect(try nativeTestField(recovered.value, "pagination", "endReached") == .bool(false))
+    }
+
 }
