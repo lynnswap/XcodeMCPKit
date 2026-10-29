@@ -137,6 +137,12 @@ final class NativeOrganizerAccessibility {
     func scrollToBottom() async throws {
         let location = try locateList()
         if let scrollbar = try verticalScrollBar(in: location.scrollArea) {
+            // Reload can retain the previous bottom position. Paging observes
+            // downward movement, so setting an already-maximal value is a no-op.
+            if (try attribute(kAXValueAttribute, from: scrollbar) as? NSNumber)?.doubleValue == 1.0 {
+                let reset = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 0.0))
+                guard reset == .success else { throw failure("Reset the Organizer crash scrollbar AXValue", reset) }
+            }
             let result = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 1.0))
             guard result == .success else { throw failure("Set the Organizer crash scrollbar AXValue", result) }
             return
