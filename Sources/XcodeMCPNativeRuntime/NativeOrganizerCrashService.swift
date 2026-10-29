@@ -22,7 +22,6 @@ final class NativeOrganizerCrashService {
         try await withOrganizerAccess(request, issueID: nil) { driver, began in
             try await self.waitForList(driver)
             var errors: [JSONValue] = []
-            var precedingNames: [String] = []
             var points: [JSONValue] = []
             var pages: [JSONValue] = []
             var copiedPages: [JSONValue] = []
@@ -31,9 +30,7 @@ final class NativeOrganizerCrashService {
             while true {
                 let pageQuery = request.withPage(index)
                 do {
-                    let page = try await self.waitForPage(pageQuery, began: began, driver: driver,
-                        precedingNames: precedingNames)
-                    precedingNames += try Self.names(page.points)
+                    let page = try await self.waitForPage(pageQuery, began: began, driver: driver)
                     fetchedAt = Self.date(page.fetchedAt)
                     var descriptor: [String: JSONValue] = ["query": pageQuery.query.json(issueID: nil),
                         "status": .string("complete"), "source": .string("organizer"), "fetchedAt": .string(fetchedAt),
@@ -193,7 +190,7 @@ final class NativeOrganizerCrashService {
     }
 
     private func waitForPage(_ request: NativeCrashServiceQuery, began: Date,
-                             driver: NativeOrganizerAccessibility, precedingNames: [String]) async throws -> NativeOrganizerCrashCache.PageSnapshot {
+                             driver: NativeOrganizerAccessibility) async throws -> NativeOrganizerCrashCache.PageSnapshot {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         var lastErrors: [JSONValue] = []
@@ -203,31 +200,17 @@ final class NativeOrganizerCrashService {
             lastErrors = read.errors
             let ui = try await withStableAccessibility(until: deadline) { try driver.snapshot() }
             try checkFailure(ui)
-            if let page = read.snapshot, page.fetchedAt >= Self.second(began), ui.busyMessages.isEmpty {
-                // Organizer re-sorts equal-count issues, including ties across
-                // page boundaries. Compare cumulative multiplicities, not ranks.
-                if Self.displays(precedingNames + (try Self.names(page.points)), rows: ui.rows) {
-                    return page
-                }
-            }
+            if let page = read.snapshot, Self.isReady(page, since: began, snapshot: ui) { return page }
             try await Task.sleep(for: .milliseconds(250))
         } while clock.now < deadline
         throw Self.timeoutError("Organizer did not refresh the requested crash page \(request.query.pageIndex)", errors: lastErrors)
     }
 
-    static func displays(_ names: [String], rows: [String]) -> Bool {
-        let expected = Dictionary(names.map { ($0, 1) }, uniquingKeysWith: +)
-        let visible = Dictionary(rows.map { ($0, 1) }, uniquingKeysWith: +)
-        return expected.allSatisfy { visible[$0.key, default: 0] >= $0.value }
-    }
-
-    private static func names(_ points: [JSONValue]) throws -> [String] {
-        try points.map { point in
-            guard case .object(let fields) = point, case .string(let name) = fields["analyticsPointName"] else {
-                throw NativeRuntimeError.unsupportedContract("An Organizer crash point has no analyticsPointName")
-            }
-            return name
-        }
+    static func isReady(_ page: NativeOrganizerCrashCache.PageSnapshot, since began: Date,
+                        snapshot: NativeOrganizerAccessibility.Snapshot) -> Bool {
+        // The exact-query cache identifies the page. AXHelp is presentation text;
+        // unsymbolicated addresses can differ from the same issue's cached name.
+        page.fetchedAt >= second(began) && snapshot.busyMessages.isEmpty
     }
 
     private func waitForList(_ driver: NativeOrganizerAccessibility, prepare: Bool = true) async throws {

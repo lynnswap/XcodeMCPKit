@@ -64,11 +64,21 @@ struct NativeOrganizerCrashServiceTests {
         #expect(batch.withPage(0).json(issueID: nil) == singleKey)
     }
 
-    @Test func equalCountIssuesCanMoveAcrossPageBoundariesWithoutChangingTheCollection() {
-        let rows = ["other", "same", "first", "same"]
-        #expect(NativeOrganizerCrashService.displays(["first", "same", "same", "other"], rows: rows))
-        #expect(!NativeOrganizerCrashService.displays(["same", "same", "same"], rows: rows))
+    @Test func refreshedIdlePageIsReadyWithoutMatchingDisplayedIssueNames() {
+        let began = Date(timeIntervalSince1970: 1_000)
+        let page = NativeOrganizerCrashCache.PageSnapshot(native: .null, fetchedAt: began,
+            cacheURL: URL(filePath: "/unused/ListablePoints.json"), points: [.object([
+                "analyticsPointIdentifier": .string("same-issue"),
+                "analyticsPointName": .string("UIKitCore: 0x180000000 + 1234"),
+            ])], pageIndex: 0, pageSize: 25, key: .null)
+        let idle = NativeOrganizerAccessibility.Snapshot(busyMessages: [], listStatusMessages: [])
+
+        #expect(NativeOrganizerCrashService.isReady(page, since: began, snapshot: idle))
+        #expect(!NativeOrganizerCrashService.isReady(page, since: began.addingTimeInterval(1), snapshot: idle))
+        let loading = NativeOrganizerAccessibility.Snapshot(busyMessages: ["Loading"], listStatusMessages: [])
+        #expect(!NativeOrganizerCrashService.isReady(page, since: began, snapshot: loading))
     }
+
     @Test func listURLKeepsStoreAndExecutionPlatformsDistinctAndEscapesFilters() throws {
         let version = "2.0+beta & build/1?#"
         let query = NativeCrashServiceQuery(query: NativeCrashQuery(bundleIdentifier: "example.App",

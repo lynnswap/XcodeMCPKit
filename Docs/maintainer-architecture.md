@@ -112,9 +112,10 @@ and completion, failure, or cancellation requests normal termination. GUI
 activation can occur. Other workspace operations stay headless.
 
 The host opens the exact product/filter URL, clears name and unresolved-only
-filters, waits for matching refreshed native cache headers and displayed issue
-names, and collects 25-issue pages. A normal idle empty page establishes the
-end. A short list uses a pointer scroll gesture when needed; window or pointer
+filters, waits for matching refreshed native cache headers and an idle crash
+list, and collects 25-issue pages. Displayed names are not page identifiers;
+unsymbolicated addresses can differ from the same issue's cached name. A normal
+idle empty page establishes the end. A short list uses a pointer scroll gesture when needed; window or pointer
 interference stops collection. Pages are copied from Organizer's eight-entry LRU
 to the server's exact-query source store as they arrive. A cross-process lock
 serializes access to Xcode's shared Products cache.
