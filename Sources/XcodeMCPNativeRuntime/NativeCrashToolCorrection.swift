@@ -11,6 +11,7 @@ final class NativeCrashToolCorrection {
         case start = "StartCrashSync"
         case wait = "WaitForCrashSync"
         case cancel = "CancelCrashSync"
+        case resume = "ResumeCrashSync"
 
         var toolName: String { rawValue }
     }
@@ -42,6 +43,7 @@ final class NativeCrashToolCorrection {
                 operation = .start(request, .object(try NativeCrashStore.object(input)))
             case .wait: operation = .wait(try JSONDecoder().decode(NativeCrashJobWaitRequest.self, from: input))
             case .cancel: operation = .cancel(try JSONDecoder().decode(NativeCrashJobIDRequest.self, from: input))
+            case .resume: operation = .resume(try JSONDecoder().decode(NativeCrashJobIDRequest.self, from: input))
             }
         } catch let error as DecodingError {
             throw NativeRuntimeError.invalidRequest(String(describing: error))
@@ -62,6 +64,17 @@ final class NativeCrashToolCorrection {
                     let collection = try Self.collection(request.collection, input: request.query)
                     payload = try jobs(at: context.crashCacheRoot).start(input: input) { [self] job in
                         try await runJob(request, query: query, collection: collection,
+                            job: job, cacheRoot: context.crashCacheRoot)
+                    }
+                case .resume(let request):
+                    let owner = try jobs(at: context.crashCacheRoot)
+                    payload = try owner.resume(jobID: request.jobID) { [self] job, recovery in
+                        let saved = try JSONDecoder().decode(NativeCrashSyncRequest.self, from: NativeCrashStore.encode(recovery.input))
+                        let query = try Self.explicitQuery(saved.query)
+                        let collection = try Self.collection(saved.collection, input: saved.query)
+                        try await recoverJob(recovery, owner: owner, request: saved, query: query,
+                            collection: collection, job: job, cacheRoot: context.crashCacheRoot)
+                        return try await runJob(saved, query: query, collection: collection,
                             job: job, cacheRoot: context.crashCacheRoot)
                     }
                 case .wait(let request):
@@ -145,12 +158,13 @@ final class NativeCrashToolCorrection {
         case start(NativeCrashSyncRequest, JSONValue)
         case wait(NativeCrashJobWaitRequest)
         case cancel(NativeCrashJobIDRequest)
+        case resume(NativeCrashJobIDRequest)
 
         var query: NativeCrashRequest? {
             switch self {
             case .sync(let request), .start(let request, _): request.query
             case .read(let request): request.query
-            case .wait, .cancel: nil
+            case .wait, .cancel, .resume: nil
             }
         }
 
@@ -161,7 +175,7 @@ final class NativeCrashToolCorrection {
             case .read(let request):
                 request.collection ?? (request.cursor == nil && request.checkpoint == nil
                     ? (request.query.issueID == nil ? .issues : .logs) : nil)
-            case .wait, .cancel: nil
+            case .wait, .cancel, .resume: nil
             }
         }
     }
@@ -217,6 +231,7 @@ final class NativeCrashToolCorrection {
                 source: request.source, store: sourceStore) { [self] in
                 let serviceRequest = try await serviceQuery(query)
                 prepared = serviceRequest
+                try job.updateProgress(["adamIdentifier": .string(serviceRequest.adamIdentifier)])
                 if collection == .issues {
                     return try await service.fetchIssues(serviceRequest, store: pageStore, observe: observe)
                 }
@@ -232,7 +247,7 @@ final class NativeCrashToolCorrection {
                     let record = try NativeCrashStore.object(Data(contentsOf: job.directory.appending(component: "job.json")))
                     var descriptors: [JSONValue] = []
                     if case .object(let progress) = record["progress"], case .array(let pages) = progress["pages"] { descriptors = pages }
-                    recovered = try NativeOrganizerCrashService.savedPages(prepared, store: pageStore,
+                    recovered = try NativeOrganizerCrashService.savedPages(prepared.query, store: pageStore,
                         descriptors: descriptors, after: original)
                 } else {
                     recovered = try service.savedIssue(prepared, issueID: request.query.issueID!, after: original)
@@ -261,11 +276,17 @@ final class NativeCrashToolCorrection {
         let snapshot = try Self.snapshot(collection: collection, query: query, issueID: request.query.issueID, loaded: loaded)
         let store = try NativeCrashSyncStore(root: cacheRoot)
         try job.updateProgress(["phase": .string("importing")])
-        var result = try await store.synchronize(snapshot, maxRecords: request.maxRecords, maxBytes: request.maxBytes)
+        let result = try await store.synchronize(snapshot, maxRecords: request.maxRecords, maxBytes: request.maxBytes)
+        return try await finishImport(result, store: store, job: job)
+    }
+
+    private func finishImport(_ initial: JSONValue, store: NativeCrashSyncStore,
+                              job: NativeCrashSyncJobs.Context) async throws -> JSONValue {
+        var result = initial
         while true {
             try job.setResult(result)
             if case .object(let fields) = result {
-                try job.updateProgress(["phase": .string("importing"), "cacheInfo": fields["cacheInfo"] ?? .object([:])])
+                try job.updateProgress(["cacheInfo": fields["cacheInfo"] ?? .object([:])])
                 if case .object(let info) = fields["cacheInfo"], case .number(.int(let failed)) = info["failedCount"], failed > 0 {
                     return result
                 }
@@ -273,6 +294,102 @@ final class NativeCrashToolCorrection {
                 try Task.checkCancellation()
                 result = try await store.resumeSync(cursor)
             } else { return result }
+        }
+    }
+
+    private func recoverJob(_ recovery: NativeCrashSyncJobs.Recovery, owner: NativeCrashSyncJobs,
+                            request: NativeCrashSyncRequest, query: NativeCrashQuery,
+                            collection: NativeCrashCollection, job: NativeCrashSyncJobs.Context,
+                            cacheRoot: URL) async throws {
+        var sources = [recovery]
+        while let previous = sources.last?.previousJobID {
+            sources.append(try owner.recovery(jobID: previous))
+        }
+        // A continuation response is immutable. Prefer the newest saved cursor
+        // for each import run rather than replaying an ancestor's failed batch.
+        var seenRuns: Set<String> = []
+        var continuations: [String: String] = [:]
+        for source in sources {
+            if case .object(let fields) = source.result, case .object(let info) = fields["cacheInfo"],
+               case .string(let runID) = info["syncId"], seenRuns.insert(runID).inserted,
+               case .string(let cursor) = fields["nextCursor"] {
+                continuations[source.id] = cursor
+            }
+        }
+        try job.updateProgress(["phase": .string("recovering")])
+        let store = try NativeCrashSyncStore(root: cacheRoot)
+        var imports: [JSONValue] = []
+        var recoveryErrors: [JSONValue] = []
+        for source in sources.reversed() {
+            var imported = source.result
+            try Task.checkCancellation()
+            if source.result != .null { try job.setResult(source.result) }
+            if let identity = source.progress["organizer"] {
+                let cleanup = Task { @MainActor in try await NativeOrganizerApplication.shutdownRecovered(identity) }
+                do { try await cleanup.value }
+                catch {
+                    throw NSError(domain: "XcodeMCPKit.CrashSyncRecovery", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "The previous crash job's Organizer could not be released",
+                        NSUnderlyingErrorKey: error,
+                        "XcodeMCPKit.CrashDiagnostics": source.errors.map(\.foundationObject),
+                    ])
+                }
+            }
+            if let cursor = continuations[source.id] {
+                let result = try await finishImport(try await store.resumeSync(cursor,
+                    matching: Self.scope(query, collection: collection, issueID: request.query.issueID)), store: store, job: job)
+                try Self.requireRecoveredImport(result)
+                imported = result
+            }
+            let snapshot: NativeCrashSyncSnapshot?
+            do {
+                let recovered: NativeCrashData.Fetched?
+                let reason = NativeRuntimeError.unavailable("Recovered saved data before rescanning the previous crash job")
+                if collection == .issues {
+                    let pages = NativeCrashStore(root: source.directory.appending(component: "Pages"))
+                    let descriptors: [JSONValue]
+                    if case .array(let saved) = source.progress["pages"] { descriptors = saved }
+                    else { descriptors = [] }
+                    recovered = try NativeOrganizerCrashService.savedPages(query, store: pages,
+                        descriptors: descriptors, after: reason)
+                } else if case .string(let adam) = source.progress["adamIdentifier"] {
+                    recovered = try service.savedIssueIfAvailable(NativeCrashServiceQuery(query: query, adamIdentifier: adam),
+                        issueID: request.query.issueID!, after: reason)
+                } else { recovered = nil }
+                if let recovered {
+                    let saved = NativeCrashData.Loaded(value: recovered.value, source: recovered.source,
+                        fetchedAt: recovered.fetchedAt, errors: recovered.errors, isComplete: false)
+                    snapshot = try Self.snapshot(collection: collection, query: query,
+                        issueID: request.query.issueID, loaded: saved)
+                } else { snapshot = nil }
+            } catch {
+                // These files accelerate recovery; a new acquisition can replace
+                // missing or damaged provider snapshots. Keep their diagnostics.
+                recoveryErrors.append(.object(["jobId": .string(source.id),
+                    "error": NativeCrashData.diagnostic(error, operation: "crashSyncSavedSourceRecovery")]))
+                try job.updateProgress(["recoveryErrors": .array(recoveryErrors)])
+                snapshot = nil
+            }
+            if let snapshot {
+                let result = try await finishImport(try await store.synchronize(snapshot,
+                    maxRecords: request.maxRecords, maxBytes: request.maxBytes), store: store, job: job)
+                try Self.requireRecoveredImport(result)
+                imported = result
+            }
+            if case .object(let fields) = imported {
+                imports.append(.object(["jobId": .string(source.id),
+                    "cacheInfo": fields["cacheInfo"] ?? .null,
+                    "responsePath": fields["responsePath"] ?? .null,
+                    "metadataPath": fields["metadataPath"] ?? .null]))
+                try job.updateProgress(["recoveredImports": .array(imports)])
+            }
+        }
+    }
+
+    private static func requireRecoveredImport(_ result: JSONValue) throws {
+        if case .object(let fields) = result, case .object(let info) = fields["cacheInfo"],
+           case .number(.int(let failed)) = info["failedCount"], failed > 0 {
+            throw NativeRuntimeError.unavailable("Saved crash records could not be imported; the partial result and continuation are retained")
         }
     }
 

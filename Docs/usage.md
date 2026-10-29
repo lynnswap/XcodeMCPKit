@@ -155,8 +155,25 @@ It returns promptly with `cancelling` while active work and Organizer cleanup
 finish. Continue using Wait until a terminal state and inspect any cleanup
 errors. Saved imports remain available through Read. Job records survive a restart;
 unfinished jobs without a live owner become `interrupted` when next observed.
-Start a new job to retry acquisition and use any saved Sync continuation to
-resume pending local import independently.
+
+To retry an `interrupted`, `failed`, or `cancelled` job, call `ResumeCrashSync`:
+
+```json
+{
+  "job_id": "job-id-to-resume"
+}
+```
+
+Resume returns a new `jobId` with `previousJobId` pointing to the original job,
+whose results remain available. It uses the saved query, source, and budgets,
+recovers saved pages and pending imports, then scans network sources again from
+the first page. Progress keeps recovered import counts and response paths even
+if the new acquisition fails. Recovery failures are reported in
+`progress.recoveryErrors` while a new scan is attempted. Use the new ID for Wait
+and Cancel. Existing Read checkpoints continue to identify the same consumer
+position. Jobs with a live owner and
+completed jobs cannot be resumed. A saved Sync continuation also remains usable
+for resuming only local import through `SyncCrashReports`.
 
 For acquisition and one bounded import batch within a single MCP call, use
 `SyncCrashReports`. For example, synchronize issue metadata with:

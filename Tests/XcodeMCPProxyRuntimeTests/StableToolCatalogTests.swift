@@ -188,7 +188,7 @@ struct StableToolCatalogTests {
     }
 
     @Test func crashJobsKeepExplicitIdentityAndJobControlsWithoutWorkspaceRouting() throws {
-        for name in ["StartCrashSync", "WaitForCrashSync", "CancelCrashSync"] {
+        for name in ["StartCrashSync", "WaitForCrashSync", "CancelCrashSync", "ResumeCrashSync"] {
             let start = name == "StartCrashSync"
             let required = start ? ["bundle_id", "platform"] : ["job_id"]
             let properties = Dictionary(uniqueKeysWithValues: required.map { ($0, string) })

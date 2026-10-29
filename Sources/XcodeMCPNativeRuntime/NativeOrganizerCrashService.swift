@@ -60,7 +60,7 @@ final class NativeOrganizerCrashService {
                         "capturedRecords": .number(.int(Int64(points.count))),
                         "pages": .array(copiedPages)])
                     if terminal || (!request.query.collectsAllPages && index == request.query.pageIndex) {
-                        return Self.collection(request, points: points, pages: pages, copiedPages: copiedPages,
+                        return Self.collection(request.query, points: points, pages: pages, copiedPages: copiedPages,
                             fetchedAt: fetchedAt, nextPage: terminal ? nil : index + 1, terminal: terminal,
                             terminalPage: terminal ? index : nil, errors: errors)
                     }
@@ -115,7 +115,19 @@ final class NativeOrganizerCrashService {
         try Self.recoverIssue(cache.readIssue(request, issueID: issueID), after: error)
     }
 
-    static func savedPages(_ request: NativeCrashServiceQuery, store: NativeCrashStore,
+    func savedIssueIfAvailable(_ request: NativeCrashServiceQuery, issueID: String,
+                               after error: any Error) throws -> NativeCrashData.Fetched? {
+        let read = cache.readIssue(request, issueID: issueID)
+        if read.snapshot != nil { return try Self.recoverIssue(read, after: error) }
+        guard !read.errors.isEmpty else { return nil }
+        throw NSError(domain: "XcodeMCPKit.Organizer", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "Saved crash samples could not be recovered",
+            NSUnderlyingErrorKey: error as NSError,
+            "XcodeMCPKit.CrashDiagnostics": read.errors.map(\.foundationObject),
+        ])
+    }
+
+    static func savedPages(_ request: NativeCrashQuery, store: NativeCrashStore,
                            descriptors: [JSONValue], after error: any Error) throws -> NativeCrashData.Fetched? {
         guard !descriptors.isEmpty else { return nil }
         var points: [JSONValue] = []
@@ -123,7 +135,7 @@ final class NativeOrganizerCrashService {
         var fetchedAt: String?
         var retained: [JSONValue] = []
         for (index, descriptor) in descriptors.enumerated() {
-            let query = request.withPage(index).query.json(issueID: nil)
+            let query = request.withPage(index).json(issueID: nil)
             guard case .object(let fields) = descriptor, fields["query"] == query else {
                 throw NativeRuntimeError.unsupportedContract("A saved crash acquisition page belongs to another query")
             }
@@ -211,23 +223,23 @@ final class NativeOrganizerCrashService {
         }
         let failed: JSONValue = .object(["query": request.withPage(failedPage).query.json(issueID: nil),
             "status": .string("failed"), "errors": .array([failure])])
-        return collection(request, points: points, pages: pages + [failed], copiedPages: copiedPages,
+        return collection(request.query, points: points, pages: pages + [failed], copiedPages: copiedPages,
             fetchedAt: fetchedAt, nextPage: failedPage, terminal: false, errors: failures)
     }
 
-    private static func collection(_ request: NativeCrashServiceQuery, points: [JSONValue], pages: [JSONValue],
+    private static func collection(_ request: NativeCrashQuery, points: [JSONValue], pages: [JSONValue],
                                    copiedPages: [JSONValue], fetchedAt: String?, nextPage: Int?, terminal: Bool,
                                    terminalPage: Int? = nil, errors: [JSONValue]) -> NativeCrashData.Fetched {
         NativeCrashData.Fetched(value: .object(["points": .array(points), "pages": .array(pages),
             "copiedPages": .array(copiedPages), "pagination": .object([
-                "mode": .string(request.query.collectsAllPages ? "allPages" : "singlePage"),
-                "page": .number(.int(Int64(request.query.pageIndex))), "pageSize": .number(.int(Int64(request.query.pageSize))),
+                "mode": .string(request.collectsAllPages ? "allPages" : "singlePage"),
+                "page": .number(.int(Int64(request.pageIndex))), "pageSize": .number(.int(Int64(request.pageSize))),
                 "returnedCount": .number(.int(Int64(points.count))), "endReached": .bool(terminal),
                 "terminalPage": terminalPage.map { .number(.int(Int64($0))) } ?? .null,
                 "hasMore": terminal ? .bool(false) : .null,
                 "nextPage": nextPage.map { .number(.int(Int64($0))) } ?? .null,
                 "continuationRequiresProbe": .bool(!terminal),
-            ])]), fetchedAt: fetchedAt, errors: errors, isComplete: !request.query.collectsAllPages || terminal)
+            ])]), fetchedAt: fetchedAt, errors: errors, isComplete: !request.collectsAllPages || terminal)
     }
 
     private func waitForPage(_ request: NativeCrashServiceQuery, began: Date,

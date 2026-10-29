@@ -117,6 +117,16 @@ Automatic import stops on a record failure and keeps the partial result's Sync
 continuation for an explicit retry. Source-only errors still permit importing
 the data that acquisition returned.
 
+`ResumeCrashSync` creates a job with a new ID and `previousJobId` from saved
+conditions of interrupted, failed, or cancelled work. It retains the original
+job and its results, recovers saved pages and pending imports, and starts network
+scans at the first page. Recovery selects the newest saved continuation for
+an import run because previous continuation responses are immutable. Unreadable
+acquisition snapshots retain their diagnostics while a new scan is attempted.
+Active owners and completed jobs reject resume. Reclaiming a leftover Organizer requires the recorded PID, application path,
+and launch date to match its running instance. Read checkpoints are independent
+of the new job's acquisition and remain valid.
+
 Network Sync starts a dedicated Apple-signed Xcode with
 `NSWorkspace.OpenConfiguration`, `createsNewApplicationInstance`, and
 `-ApplePersistenceIgnoreState YES`. Organizer uses its existing account;

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import XcodeMCPWire
 
 @safe
 @MainActor
@@ -33,6 +34,41 @@ final class NativeOrganizerApplication {
                           message: "Xcode did not return a new Organizer application owned by this request; no termination was requested")
         }
         return NativeOrganizerApplication(application: application, appURL: appURL, launchDate: application.launchDate)
+    }
+
+    static func shutdownRecovered(_ identity: JSONValue,
+        application: (pid_t) -> NSRunningApplication? = { NSRunningApplication(processIdentifier: $0) },
+        shutdown: (NSRunningApplication) async throws -> Void = { application in
+            guard let appURL = application.bundleURL else {
+                throw failure(code: 1, processIdentifier: application.processIdentifier,
+                              message: "The recovered Organizer application has no bundle URL")
+            }
+            try await NativeOrganizerApplication(application: application,
+                appURL: appURL.resolvingSymlinksInPath(), launchDate: application.launchDate).shutdown()
+        }) async throws {
+        if case .object(let fields) = identity, fields["terminated"] == .bool(true) { return }
+        guard case .object(let fields) = identity,
+              case .number(.int(let identifier)) = fields["processId"],
+              let pid = pid_t(exactly: identifier), pid > 0,
+              case .string(let appPath) = fields["appPath"], appPath.hasPrefix("/"),
+              case .number(let launchDate) = fields["launchDate"] else {
+            throw NativeRuntimeError.unsupportedContract("The saved Organizer process identity is incomplete; no termination was requested")
+        }
+        let seconds: Double
+        switch launchDate {
+        case .int(let value): seconds = Double(value)
+        case .double(let value): seconds = value
+        }
+        guard seconds.isFinite else {
+            throw NativeRuntimeError.unsupportedContract("The saved Organizer launch date is invalid; no termination was requested")
+        }
+        // A PID may have been reused after the owner exited. Only the original
+        // application instance may receive a termination request during recovery.
+        guard let current = application(pid), !current.isTerminated,
+              current.processIdentifier == pid,
+              current.bundleURL?.resolvingSymlinksInPath().path == appPath,
+              current.launchDate?.timeIntervalSince1970 == seconds else { return }
+        try await shutdown(current)
     }
 
     func shutdown() async throws {

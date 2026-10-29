@@ -206,12 +206,157 @@ struct NativeCrashToolCorrectionTests {
             includingPropertiesForKeys: nil)
         #expect(responses.count == 1)
 
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sample.path)
-        let retried = try await execute(.sync, input: .object(["cursor": .string(cursor)]),
+        let failedResume = try await execute(.resume, input: .object(["job_id": try nativeTestField(.object(finished), "jobId")]),
             correction: correction, context: context)
-        #expect(try nativeTestField(.object(retried), "cacheInfo", "acquisitionComplete") == .bool(true))
-        #expect(try nativeTestField(.object(retried), "cacheInfo", "processedCount") == .number(.int(1)))
+        let failedRetry = try await finishedJob(failedResume, correction: correction, context: context)
+        #expect(failedRetry["state"] == .string("failed"))
+        let failedRetryResult = try nativeTestField(.object(failedRetry), "result")
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sample.path)
+        let resumed = try await execute(.resume, input: .object(["job_id": try nativeTestField(.object(failedRetry), "jobId")]),
+            correction: correction, context: context)
+        let retriedJob = try await finishedJob(resumed, correction: correction, context: context)
+        #expect(retriedJob["state"] == .string("completed"))
+        #expect(retriedJob["previousJobId"] == failedRetry["jobId"])
+        let retried = try nativeTestField(.object(retriedJob), "result")
+        #expect(try nativeTestField(retried, "cacheInfo", "acquisitionComplete") == .bool(true))
+        #expect(try nativeTestField(retried, "cacheInfo", "processedCount") == .number(.int(1)))
+        // The original continuation remains replayable after Resume used it.
+        let originalContinuation = try await execute(.sync, input: .object(["cursor": .string(cursor)]),
+            correction: correction, context: context)
+        #expect(.object(originalContinuation) == failedRetryResult)
         await correction.shutdown()
+    }
+
+    @Test(arguments: ["cache", "network", "missing-page"])
+    func resumeRecoversSavedPagesAndImportsThenRefetchesChangedIssueNames(sourceMode: String) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let context = NativeToolContext(artifactsDirectory: root.appending(component: "request"),
+            artifactsRoot: root, conversationID: "resume-crash-job")
+        let query = NativeCrashQuery(bundleIdentifier: "example.App", platformIdentifier: "com.apple.platform.iphoneos",
+            uploadPlatformIdentifier: "com.apple.platform.iphoneos", appVersion: nil, isBeta: nil,
+            timePeriod: "last14Days", pageIndex: 0, pageSize: 25, collectsAllPages: true)
+        let input: JSONValue = .object(["bundle_id": .string("example.App"), "platform": .string("iOS"),
+            "source": .string(sourceMode == "network" ? "network" : "cache"), "max_records": .number(.int(1))])
+        let retained = point("retained", name: "Previously captured")
+        let before = point("changed", name: "Unsymbolicated")
+        let importer = try NativeCrashSyncStore(root: context.crashCacheRoot)
+        let partialSnapshot = try NativeCrashToolCorrection.snapshot(collection: .issues, query: query, issueID: nil,
+            loaded: .init(value: .object(["points": .array([before, retained])]), source: "organizer",
+                fetchedAt: "2024-01-01T00:00:00Z", isComplete: false))
+        let partial = try await importer.synchronize(partialSnapshot, maxRecords: 1, maxBytes: 1024 * 1024)
+        let cursor = try nativeTestField(partial, "nextCursor")
+        guard case .string = cursor else { throw FixtureError.missingField }
+        let firstRead = try await importer.readChanges(collection: .issues, query: partialSnapshot.query,
+            checkpoint: nil, limit: 25, maxBytes: 256 * 1024, order: .observedNewestFirst)
+        let checkpoint = try nativeTestField(firstRead, "checkpoint")
+        let jobs = try NativeCrashSyncJobs(root: context.crashCacheRoot)
+        let started = try jobs.start(input: input) { job in
+            let pageQuery = query.withPage(0).json(issueID: nil)
+            let pages = NativeCrashStore(root: job.directory.appending(component: "Pages"))
+            if sourceMode != "missing-page" {
+                _ = try pages.write(.object(["points": .array([before, retained])]), key: pageQuery,
+                    fetchedAt: "2024-01-01T00:00:00Z")
+            }
+            try job.updateProgress(["pages": .array([.object(["query": pageQuery])])])
+            return partial
+        }
+        let correction = NativeCrashToolCorrection(installation: try jobInstallation(at: root))
+        let previous = try await finishedJob(try nativeTestObject(started), correction: correction, context: context)
+        #expect(previous["state"] == .string("failed"))
+        guard case .string(let oldID) = previous["jobId"] else { throw FixtureError.missingField }
+        let ledger = context.crashCacheRoot.appending(path: "Jobs/\(oldID)/job.json")
+        let originalBytes = try Data(contentsOf: ledger)
+        let source = NativeCrashStore(root: context.crashCacheRoot.appending(component: "SourceSnapshots"))
+        _ = try source.write(.object(["points": .array([point("changed", name: "Symbolicated"),
+            point("new", name: "New issue")])]), key: query.json(issueID: nil), fetchedAt: "2024-01-02T00:00:00Z")
+
+        let resumed = try await execute(.resume, input: .object(["job_id": .string(oldID)]),
+            correction: correction, context: context)
+        let finished = try await finishedJob(resumed, correction: correction, context: context)
+        #expect(finished["state"] == .string(sourceMode != "network" ? "completed" : "failed"))
+        #expect(finished["previousJobId"] == .string(oldID))
+        #expect(finished["jobId"] != previous["jobId"])
+        #expect(try Data(contentsOf: ledger) == originalBytes)
+        #expect(try nativeTestField(.object(finished), "result", "cacheInfo", "sourceComplete") == .bool(sourceMode != "network"))
+        guard case .array(let recoveredImports) = try nativeTestField(.object(finished), "progress", "recoveredImports") else {
+            throw FixtureError.missingField
+        }
+        let imported = try #require(recoveredImports.first)
+        if sourceMode == "missing-page" {
+            guard case .array(let failures) = try nativeTestField(.object(finished), "progress", "recoveryErrors") else {
+                throw FixtureError.missingField
+            }
+            #expect(try nativeTestField(try #require(failures.first), "jobId") == .string(oldID))
+        }
+        #expect(try nativeTestField(imported, "cacheInfo", "processedCount") == .number(.int(2)))
+        guard case .string(let recoveryPath) = try nativeTestField(imported, "responsePath") else { throw FixtureError.missingField }
+        #expect(try NativeCrashStore.object(Data(contentsOf: URL(filePath: recoveryPath)))["cacheInfo"]
+            == nativeTestField(imported, "cacheInfo"))
+        let changes = try await execute(.read, input: .object(["checkpoint": checkpoint]),
+            correction: correction, context: context)
+        guard case .array(let records) = changes["changes"] else { throw FixtureError.missingField }
+        let names = try records.map { try nativeTestField($0, "name") }
+        #expect(names.contains(.string("Previously captured")))
+        #expect(names.contains(.string("Symbolicated")) == (sourceMode != "network"))
+        #expect(names.contains(.string("New issue")) == (sourceMode != "network"))
+        let secondCheckpoint = try #require(changes["checkpoint"])
+        let unchanged = try await execute(.read, input: .object(["checkpoint": secondCheckpoint]),
+            correction: correction, context: context)
+        #expect(unchanged["changes"] == .array([]))
+        guard case .string(let token) = cursor else { throw FixtureError.missingField }
+        let replay = try await importer.resumeSync(token)
+        #expect(try nativeTestField(replay, "cacheInfo", "processedCount") == .number(.int(2)))
+        await jobs.shutdown()
+        await correction.shutdown()
+    }
+
+    @Test(arguments: [false, true])
+    func resumeRetriesALogWithoutNativeSamplesAndRetainsPriorErrorsIfCleanupFails(incompleteIdentity: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let context = NativeToolContext(artifactsDirectory: root.appending(component: "request"),
+            artifactsRoot: root, conversationID: "resume-empty-log")
+        let input: JSONValue = .object(["bundle_id": .string("example.Resume." + UUID().uuidString),
+            "platform": .string("iOS"), "issue_id": .string("no-downloaded-samples")])
+        let originalFailure: JSONValue = .object(["operation": .string("download"), "message": .string("Original download failed")])
+        let partial: JSONValue = .object(["status": .string("failed"), "errors": .array([originalFailure])])
+        let owner = try NativeCrashSyncJobs(root: context.crashCacheRoot)
+        let started = try owner.start(input: input) { job in
+            try job.updateProgress(["adamIdentifier": .string("123")])
+            if incompleteIdentity { try job.updateProgress(["organizer": .object(["processId": .number(.int(123))])]) }
+            return partial
+        }
+        let correction = NativeCrashToolCorrection(installation: try jobInstallation(at: root))
+        let previous = try await finishedJob(try nativeTestObject(started), correction: correction, context: context)
+        let resumed = try await execute(.resume, input: .object(["job_id": try #require(previous["jobId"])]),
+            correction: correction, context: context)
+        let finished = try await finishedJob(resumed, correction: correction, context: context)
+        #expect(finished["state"] == .string("failed"))
+        if incompleteIdentity {
+            #expect(finished["result"] == partial)
+            guard case .array(let errors) = finished["errors"] else { throw FixtureError.missingField }
+            #expect(errors.contains(originalFailure))
+            let cleanup = try #require(errors.last)
+            #expect(try nativeTestField(cleanup, "cacheErrors") == .array([originalFailure]))
+            #expect(try nativeTestField(cleanup, "underlyingError", "message")
+                == .string("The saved Organizer process identity is incomplete; no termination was requested"))
+        } else {
+            // The product inventory failure identifies the new acquisition path:
+            // no saved native sample must prevent attempting that acquisition.
+            #expect(try nativeTestField(.object(finished), "result", "cacheInfo", "sourceAvailable") == .bool(false))
+            guard case .array(let errors) = try nativeTestField(.object(finished), "result", "errors") else {
+                throw FixtureError.missingField
+            }
+            #expect(try nativeTestField(try #require(errors.first), "message")
+                == .string("Xcode's product manager is unavailable"))
+        }
+        await owner.shutdown()
+        await correction.shutdown()
+    }
+
+    private func point(_ id: String, name: String) -> JSONValue {
+        .object(["analyticsPointIdentifier": .string(id), "analyticsPointName": .string(name)])
     }
 
     @Test func aRecoveredSampleIsImportedWithoutReplacingTheCachedDistribution() async throws {
