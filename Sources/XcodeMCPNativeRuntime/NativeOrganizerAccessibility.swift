@@ -9,7 +9,6 @@ final class NativeOrganizerAccessibility {
         var errorDescription: String? { "Organizer is updating its crash view" }
     }
     struct Snapshot: Sendable {
-        let rows: [String]
         let busyMessages: [String]
         let listStatusMessages: [String]
     }
@@ -35,23 +34,26 @@ final class NativeOrganizerAccessibility {
     func snapshot() throws -> Snapshot {
         let location = try locateList()
         let nativeRows: [AXUIElement]
-        if let rows = try elements(kAXRowsAttribute, from: location.table) {
+        // Only loading/status rows need inspection. Reading every accumulated
+        // issue through AX makes each successive page more expensive.
+        if let rows = try elements(kAXVisibleRowsAttribute, from: location.table) {
+            nativeRows = rows
+        } else if let rows = try elements(kAXRowsAttribute, from: location.table) {
             nativeRows = rows
         } else {
             nativeRows = try children(of: location.table).filter { try role(of: $0) == kAXRowRole as String }
         }
         var rowStatus: [String] = []
-        let rows = try nativeRows.compactMap { row -> String? in
+        for row in nativeRows {
             let texts = try find(in: [row]) { try self.role(of: $0) == kAXStaticTextRole as String }
             let names = try texts.compactMap { text -> String? in
                 guard let name = try string(kAXHelpAttribute, from: text), !name.isEmpty else { return nil }
                 return name
             }
-            if let name = names.first { return name }
+            if !names.isEmpty { continue }
             // Infinite paging also exposes loading and status rows. They have
             // no crash signature and belong to the status, not the issue list.
             rowStatus += try texts.compactMap { try string(kAXValueAttribute, from: $0) ?? string(kAXTitleAttribute, from: $0) }
-            return nil
         }
         var busy: [String] = []
         let listFrame = try frame(of: location.scrollArea)
@@ -81,8 +83,7 @@ final class NativeOrganizerAccessibility {
             let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if ["loading", "downloading", "読み込み", "ダウンロード中"].contains(where: value.hasPrefix) { busy.append(text) }
         }
-        return Snapshot(rows: rows,
-                        busyMessages: Array(Set(busy)).sorted(),
+        return Snapshot(busyMessages: Array(Set(busy)).sorted(),
                         listStatusMessages: listStatusMessages)
     }
 
