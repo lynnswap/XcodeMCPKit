@@ -8,6 +8,9 @@ final class NativeCrashToolCorrection {
     enum Kind: String, CaseIterable {
         case sync = "SyncCrashReports"
         case read = "ReadCrashChanges"
+        case start = "StartCrashSync"
+        case wait = "WaitForCrashSync"
+        case cancel = "CancelCrashSync"
 
         var toolName: String { rawValue }
     }
@@ -15,6 +18,7 @@ final class NativeCrashToolCorrection {
     private let runtime = ABIRuntime.shared
     private let installation: NativeXcodeInstallation
     private let service: NativeOrganizerCrashService
+    private var jobOwners: [URL: NativeCrashSyncJobs] = [:]
     private var operations: [UUID: (request: URL?, task: Task<Void, Never>)] = [:]
 
     init(installation: NativeXcodeInstallation) {
@@ -28,6 +32,16 @@ final class NativeCrashToolCorrection {
             switch kind {
             case .sync: operation = .sync(try JSONDecoder().decode(NativeCrashSyncRequest.self, from: input))
             case .read: operation = .read(try JSONDecoder().decode(NativeCrashReadRequest.self, from: input))
+            case .start:
+                let request = try JSONDecoder().decode(NativeCrashSyncRequest.self, from: input)
+                guard request.cursor == nil else {
+                    throw NativeRuntimeError.invalidRequest("Use SyncCrashReports to continue a local import cursor")
+                }
+                _ = try Self.explicitQuery(request.query)
+                _ = try Self.collection(request.collection, input: request.query)
+                operation = .start(request, .object(try NativeCrashStore.object(input)))
+            case .wait: operation = .wait(try JSONDecoder().decode(NativeCrashJobWaitRequest.self, from: input))
+            case .cancel: operation = .cancel(try JSONDecoder().decode(NativeCrashJobIDRequest.self, from: input))
             }
         } catch let error as DecodingError {
             throw NativeRuntimeError.invalidRequest(String(describing: error))
@@ -41,10 +55,21 @@ final class NativeCrashToolCorrection {
             }
             do {
                 try Task.checkCancellation()
-                let store = try NativeCrashSyncStore(root: context.crashCacheRoot)
                 let payload: JSONValue
                 switch operation {
+                case .start(let request, let input):
+                    let query = try Self.explicitQuery(request.query)
+                    let collection = try Self.collection(request.collection, input: request.query)
+                    payload = try jobs(at: context.crashCacheRoot).start(input: input) { [self] job in
+                        try await runJob(request, query: query, collection: collection,
+                            job: job, cacheRoot: context.crashCacheRoot)
+                    }
+                case .wait(let request):
+                    payload = try await jobs(at: context.crashCacheRoot).wait(jobID: request.jobID, timeout: request.waitSeconds, afterRevision: request.afterRevision)
+                case .cancel(let request):
+                    payload = try jobs(at: context.crashCacheRoot).cancel(jobID: request.jobID)
                 case .sync(let request):
+                    let store = try NativeCrashSyncStore(root: context.crashCacheRoot)
                     if let cursor = request.cursor {
                         payload = try await store.resumeSync(cursor,
                             matching: Self.constraints(request.query, collection: request.collection,
@@ -72,6 +97,7 @@ final class NativeCrashToolCorrection {
                         payload = try await store.synchronize(snapshot, maxRecords: request.maxRecords, maxBytes: request.maxBytes)
                     }
                 case .read(let request):
+                    let store = try NativeCrashSyncStore(root: context.crashCacheRoot)
                     if let cursor = request.cursor {
                         payload = try await store.resumeRead(cursor,
                             matching: Self.constraints(request.query, collection: request.collection, order: request.order,
@@ -116,18 +142,26 @@ final class NativeCrashToolCorrection {
     private enum Operation {
         case sync(NativeCrashSyncRequest)
         case read(NativeCrashReadRequest)
+        case start(NativeCrashSyncRequest, JSONValue)
+        case wait(NativeCrashJobWaitRequest)
+        case cancel(NativeCrashJobIDRequest)
 
-        var query: NativeCrashRequest {
-            switch self { case .sync(let request): request.query; case .read(let request): request.query }
+        var query: NativeCrashRequest? {
+            switch self {
+            case .sync(let request), .start(let request, _): request.query
+            case .read(let request): request.query
+            case .wait, .cancel: nil
+            }
         }
 
         var collection: NativeCrashCollection? {
             switch self {
-            case .sync(let request):
+            case .sync(let request), .start(let request, _):
                 request.collection ?? (request.cursor == nil ? (request.query.issueID == nil ? .issues : .logs) : nil)
             case .read(let request):
                 request.collection ?? (request.cursor == nil && request.checkpoint == nil
                     ? (request.query.issueID == nil ? .issues : .logs) : nil)
+            case .wait, .cancel: nil
             }
         }
     }
@@ -140,12 +174,106 @@ final class NativeCrashToolCorrection {
         let pending = operations.values.map(\.task)
         for operation in pending { operation.cancel() }
         for operation in pending { await operation.value }
+        for owner in jobOwners.values { await owner.shutdown() }
     }
 
     func finishExecution(request: URL) async {
         let pending = operations.values.filter { $0.request == request }.map(\.task)
         if Task.isCancelled { for task in pending { task.cancel() } }
         for task in pending { await task.value }
+    }
+
+    private func jobs(at root: URL) throws -> NativeCrashSyncJobs {
+        if let owner = jobOwners[root] { return owner }
+        let owner = try NativeCrashSyncJobs(root: root)
+        jobOwners[root] = owner
+        return owner
+    }
+
+    private func runJob(_ request: NativeCrashSyncRequest, query: NativeCrashQuery,
+                        collection: NativeCrashCollection, job: NativeCrashSyncJobs.Context,
+                        cacheRoot: URL) async throws -> JSONValue {
+        try job.setInput(.object([
+            "bundle_id": .string(query.bundleIdentifier),
+            "platform": request.query.platform.map(JSONValue.string) ?? .null,
+            "upload_platform": (request.query.uploadPlatform ?? request.query.platform).map(JSONValue.string) ?? .null,
+            "app_version": query.appVersion.map(JSONValue.string) ?? .null,
+            "is_beta": query.isBeta.map(JSONValue.bool) ?? .null,
+            "issue_id": request.query.issueID.map(JSONValue.string) ?? .null,
+            "collection": .string(collection.rawValue), "time_period": .string(query.timePeriod),
+            "source": .string(request.source.rawValue),
+            "max_records": .number(.int(Int64(request.maxRecords))),
+            "max_bytes": .number(.int(Int64(request.maxBytes))),
+        ]))
+        try job.updateProgress(["phase": .string("acquiring"),
+            "query": Self.scope(query, collection: collection, issueID: request.query.issueID)])
+        let sourceStore = NativeCrashStore(root: cacheRoot.appending(component: "SourceSnapshots"))
+        let pageStore = NativeCrashStore(root: job.directory.appending(component: "Pages"))
+        let observe: NativeOrganizerCrashService.Observer = { fields in try job.updateProgress(fields) }
+        var prepared: NativeCrashServiceQuery?
+        let loaded: NativeCrashData.Loaded
+        do {
+            loaded = try await NativeCrashData.load(key: query.json(issueID: collection == .logs ? request.query.issueID : nil),
+                source: request.source, store: sourceStore) { [self] in
+                let serviceRequest = try await serviceQuery(query)
+                prepared = serviceRequest
+                if collection == .issues {
+                    return try await service.fetchIssues(serviceRequest, store: pageStore, observe: observe)
+                }
+                return try await service.fetchIssue(serviceRequest, issueID: request.query.issueID!, observe: observe)
+            }
+        } catch {
+            let original = error
+            // Preserve captured data after cancellation in an independent cleanup task.
+            let preservation = Task { @MainActor [self] in
+                guard let prepared else { return }
+                let recovered: NativeCrashData.Fetched?
+                if collection == .issues {
+                    let record = try NativeCrashStore.object(Data(contentsOf: job.directory.appending(component: "job.json")))
+                    var descriptors: [JSONValue] = []
+                    if case .object(let progress) = record["progress"], case .array(let pages) = progress["pages"] { descriptors = pages }
+                    recovered = try NativeOrganizerCrashService.savedPages(prepared, store: pageStore,
+                        descriptors: descriptors, after: original)
+                } else {
+                    recovered = try service.savedIssue(prepared, issueID: request.query.issueID!, after: original)
+                }
+                guard let recovered else { return }
+                let saved = NativeCrashData.Loaded(value: recovered.value, source: recovered.source,
+                    fetchedAt: recovered.fetchedAt, errors: recovered.errors, isComplete: false)
+                let snapshot = try Self.snapshot(collection: collection, query: query, issueID: request.query.issueID, loaded: saved)
+                let store = try NativeCrashSyncStore(root: cacheRoot)
+                try job.updateProgress(["phase": .string("importing")])
+                let result = try await store.synchronize(snapshot, maxRecords: request.maxRecords, maxBytes: request.maxBytes)
+                try job.setResult(result)
+                if case .object(let fields) = result, let info = fields["cacheInfo"] {
+                    try job.updateProgress(["cacheInfo": info])
+                }
+            }
+            do { try await preservation.value }
+            catch {
+                throw NSError(domain: "XcodeMCPKit.CrashSyncJob", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "Crash acquisition and partial-result preservation failed",
+                    NSMultipleUnderlyingErrorsKey: [original as NSError, error as NSError],
+                ])
+            }
+            throw original
+        }
+        let snapshot = try Self.snapshot(collection: collection, query: query, issueID: request.query.issueID, loaded: loaded)
+        let store = try NativeCrashSyncStore(root: cacheRoot)
+        try job.updateProgress(["phase": .string("importing")])
+        var result = try await store.synchronize(snapshot, maxRecords: request.maxRecords, maxBytes: request.maxBytes)
+        while true {
+            try job.setResult(result)
+            if case .object(let fields) = result {
+                try job.updateProgress(["phase": .string("importing"), "cacheInfo": fields["cacheInfo"] ?? .object([:])])
+                if case .object(let info) = fields["cacheInfo"], case .number(.int(let failed)) = info["failedCount"], failed > 0 {
+                    return result
+                }
+                guard case .string(let cursor) = fields["nextCursor"] else { return result }
+                try Task.checkCancellation()
+                result = try await store.resumeSync(cursor)
+            } else { return result }
+        }
     }
 
     private func serviceQuery(_ query: NativeCrashQuery) async throws -> NativeCrashServiceQuery {
@@ -445,8 +573,7 @@ final class NativeCrashToolCorrection {
     }
 
     private func errorEvent(_ error: any Error, operation: Operation) -> Data {
-        let input = operation.query
-        let query = (try? Self.constraints(input, collection: operation.collection)) ?? .object([:])
+        let query = operation.query.flatMap { try? Self.constraints($0, collection: operation.collection) } ?? .object([:])
         do {
             return try event("error", data: .object(["status": .string("failed"),
                 "collection": operation.collection.map { .string($0.rawValue) } ?? .null,

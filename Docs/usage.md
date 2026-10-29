@@ -103,7 +103,63 @@ the durable local cache and does not start Xcode or contact Apple.
 Crash data and progress survive restarts in the
 [persistent crash cache](configuration.md#crash-data-storage).
 
-Start by synchronizing issue metadata:
+For network acquisition that can outlive an MCP request, call `StartCrashSync`
+with an explicit bundle and platform:
+
+```json
+{
+  "bundle_id": "com.example.app",
+  "platform": "iOS",
+  "collection": "issues",
+  "time_period": "last365Days"
+}
+```
+
+Start saves a job and returns its `jobId` promptly. Product lookup, Organizer
+startup, acquisition, and local import run in the background. Start accepts the
+same source, filters, and import budgets as Sync, with required `bundle_id` and
+`platform`; it accepts neither `workspaceIdentifier` nor a cursor. A job follows
+all local import continuations automatically.
+
+Pass the returned ID to `WaitForCrashSync`:
+
+```json
+{
+  "job_id": "job-id-from-start",
+  "after_revision": 1,
+  "wait_seconds": 30
+}
+```
+
+Wait returns when the job changes, reaches a terminal state, or the wait limit
+expires. Pass the previous Start or Wait response's `revision` as `after_revision`
+to wait for a newer revision. Omit it to use the revision when this wait begins.
+`wait_seconds` defaults to 1 and accepts 0 through 30, including
+fractional seconds; 0 reads the current state immediately. Wait limits and client
+disconnects leave the job running. Follow the returned `revision` and `progress`;
+progress can include the current `phase`, `capturedPages`, `capturedRecords`,
+resolved `query`, and import `cacheInfo`.
+
+Job states are `queued`, `running`, `cancelling`, `completed`, `failed`,
+`cancelled`, and `interrupted`. A job's `result` retains its latest Sync response,
+including cumulative import counts, source completeness, and saved artifact
+paths. A record import failure ends automatic processing with a partial result
+and a saved `nextCursor` for an explicit retry through `SyncCrashReports`.
+Source errors alone still allow the job to import acquired data. Check the
+result's diagnostics and coverage as with a direct Sync call. A failed job is
+returned as job state and errors; a successful status query remains a successful
+MCP call.
+
+Call `CancelCrashSync` with `{"job_id":"job-id-from-start"}` to request a stop.
+It returns promptly with `cancelling` while active work and Organizer cleanup
+finish. Continue using Wait until a terminal state and inspect any cleanup
+errors. Saved imports remain available through Read. Job records survive a restart;
+unfinished jobs without a live owner become `interrupted` when next observed.
+Start a new job to retry acquisition and use any saved Sync continuation to
+resume pending local import independently.
+
+For acquisition and one bounded import batch within a single MCP call, use
+`SyncCrashReports`. For example, synchronize issue metadata with:
 
 ```json
 {

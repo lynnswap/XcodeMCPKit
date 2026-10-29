@@ -412,7 +412,7 @@ actor NativeCrashSyncStore {
                                .integer(stored), .text(runID)])
                 }
             } catch {
-                try Task.checkCancellation()
+                if Task.isCancelled || error is CancellationError { throw error }
                 failures.append(NativeCrashData.diagnostic(error, operation: "importCrashRecord"))
                 try database.execute("UPDATE work SET state=2,attempts=attempts+1,last_page=? WHERE run=? AND item=?", [.text(id), .text(runID), .text(item)])
             }

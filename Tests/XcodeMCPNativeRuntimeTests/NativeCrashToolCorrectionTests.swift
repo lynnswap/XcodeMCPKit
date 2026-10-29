@@ -87,6 +87,133 @@ struct NativeCrashToolCorrectionTests {
         #expect(try nativeTestField(try #require(errors.first), "operation") == .string("cacheRead"))
     }
 
+    @Test(arguments: ["cache", "networkWithCacheFallback"])
+    func aStartedJobFinishesEveryImportAfterItsRequestEndsAndAnotherRequestCanReadTheChanges(source: String) async throws {
+        try #require(NSClassFromString("IDEProductManager") == nil)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = try jobInstallation(at: root)
+        let cache = root.appending(component: "shared-cache")
+        let startContext = NativeToolContext(artifactsDirectory: root.appending(path: "start/request"),
+            artifactsRoot: root.appending(component: "start"), conversationID: "start-crash-job", crashCacheRoot: cache)
+        let observerContext = NativeToolContext(artifactsDirectory: root.appending(path: "observer/request"),
+            artifactsRoot: root.appending(component: "observer"), conversationID: "observe-crash-job", crashCacheRoot: cache)
+        let query = NativeCrashQuery(bundleIdentifier: "example.App", platformIdentifier: "com.apple.platform.iphoneos",
+            uploadPlatformIdentifier: "com.apple.platform.iphoneos", appVersion: nil, isBeta: nil,
+            timePeriod: "last14Days", pageIndex: 0, pageSize: 25, collectsAllPages: true)
+        let identifiers = ["first-issue", "second-issue"]
+        let points: [JSONValue] = identifiers.map { id in
+            .object(["analyticsPointIdentifier": .string(id), "analyticsPointName": .string(id + ".crash()")])
+        }
+        let sourceStore = NativeCrashStore(root: cache.appending(component: "SourceSnapshots"))
+        _ = try sourceStore.write(.object(["points": .array(points)]), key: query.json(issueID: nil),
+            fetchedAt: "2024-01-01T00:00:00Z")
+        let input: JSONValue = .object(["bundle_id": .string("example.App"), "platform": .string("iOS"),
+            "source": .string(source), "max_records": .number(.int(1))])
+        let owner = NativeCrashToolCorrection(installation: installation)
+        let observer = NativeCrashToolCorrection(installation: installation)
+
+        // The Start response stream has fully ended before the separate request waits.
+        let started = try await execute(.start, input: input, correction: owner, context: startContext)
+        #expect(started["state"] == .string("queued"))
+        await owner.finishExecution(request: startContext.artifactsDirectory)
+        let finished = try await finishedJob(started, correction: observer, context: observerContext)
+        let expectedState = source == "cache" ? "completed" : "failed"
+        #expect(finished["state"] == .string(expectedState))
+        let result = try nativeTestObject(try nativeTestField(.object(finished), "result"))
+        #expect(try nativeTestField(.object(result), "cacheInfo", "processedCount") == .number(.int(2)))
+        #expect(result["nextCursor"] == .null)
+        guard case .string(let responsePath) = result["responsePath"] else { throw FixtureError.missingField }
+        #expect(try NativeCrashStore.object(Data(contentsOf: URL(fileURLWithPath: responsePath))) == result)
+
+        let read = try await execute(.read, input: .object(["bundle_id": .string("example.App"), "platform": .string("iOS")]),
+            correction: observer, context: observerContext)
+        guard case .array(let changes) = read["changes"], case .string(let checkpoint) = read["checkpoint"] else {
+            throw FixtureError.missingField
+        }
+        let readIdentifiers = try changes.map { change -> String in
+            guard case .string(let identifier) = try nativeTestField(change, "issueId") else { throw FixtureError.missingField }
+            return identifier
+        }
+        #expect(readIdentifiers.sorted() == identifiers.sorted())
+
+        let repeated = try await execute(.start, input: input, correction: owner, context: startContext)
+        let repeatedResult = try await finishedJob(repeated, correction: observer, context: observerContext)
+        #expect(repeatedResult["state"] == .string(expectedState))
+        let unchanged = try await execute(.read, input: .object(["checkpoint": .string(checkpoint)]),
+            correction: observer, context: observerContext)
+        #expect(unchanged["changes"] == .array([]))
+        await owner.shutdown()
+        await observer.shutdown()
+    }
+
+    @Test func aFailedBackgroundSyncRemainsASuccessfulJobStatusResponseWithItsCause() async throws {
+        try #require(NSClassFromString("IDEProductManager") == nil)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let correction = NativeCrashToolCorrection(installation: try jobInstallation(at: root))
+        let context = NativeToolContext(artifactsDirectory: root.appending(component: "request"),
+            artifactsRoot: root, conversationID: "missing-crash-job-source")
+        let started = try await execute(.start, input: .object(["bundle_id": .string("example.App"),
+            "platform": .string("iOS"), "source": .string("cache")]), correction: correction, context: context)
+        let finished = try await finishedJob(started, correction: correction, context: context)
+        #expect(finished["state"] == .string("failed"))
+        #expect(try nativeTestField(.object(finished), "result", "status") == .string("failed"))
+        guard case .array(let errors) = try nativeTestField(.object(finished), "result", "errors") else {
+            throw FixtureError.missingField
+        }
+        #expect(try nativeTestField(try #require(errors.first), "operation") == .string("cacheRead"))
+        await correction.shutdown()
+    }
+
+    @Test func anUnreadableSampleStopsTheJobAndRetainsOneImportResponseForExplicitRetry() async throws {
+        try #require(NSClassFromString("IDEProductManager") == nil)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let logs = root.appending(component: "Logs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let sample = logs.appending(component: "2024-01-01_00-00-00_+0000-" + String(repeating: "a", count: 40) + ".crash")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sample.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try Data("saved sample".utf8).write(to: sample)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: sample.path)
+        try #require(!FileManager.default.isReadableFile(atPath: sample.path))
+        // A native filename supplies the date, so import reaches the body read after metadata capture succeeds.
+        #expect(try NativeCrashLogSource.inspect(rawURL: sample, includeHeaderDate: false).nativeID
+            == sample.deletingPathExtension().lastPathComponent)
+        let correction = NativeCrashToolCorrection(installation: try jobInstallation(at: root))
+        let context = NativeToolContext(artifactsDirectory: root.appending(component: "request"),
+            artifactsRoot: root, conversationID: "unreadable-crash-job-sample")
+        let query = NativeCrashQuery(bundleIdentifier: "example.App", platformIdentifier: "com.apple.platform.iphoneos",
+            uploadPlatformIdentifier: "com.apple.platform.iphoneos", appVersion: nil, isBeta: nil,
+            timePeriod: "last14Days", pageIndex: 0, pageSize: 25, collectsAllPages: true)
+        let source = NativeCrashStore(root: context.crashCacheRoot.appending(component: "SourceSnapshots"))
+        _ = try source.write(.object(["logDirectory": .string(logs.path)]), key: query.json(issueID: "stable-issue"),
+            fetchedAt: "2024-01-01T00:00:00Z")
+        let started = try await execute(.start, input: .object(["bundle_id": .string("example.App"),
+            "platform": .string("iOS"), "issue_id": .string("stable-issue"), "source": .string("cache")]),
+            correction: correction, context: context)
+        let finished = try await finishedJob(started, correction: correction, context: context)
+        #expect(finished["state"] == .string("failed"))
+        let result = try nativeTestField(.object(finished), "result")
+        #expect(try nativeTestField(result, "status") == .string("partial"))
+        #expect(try nativeTestField(result, "cacheInfo", "failedCount") == .number(.int(1)))
+        guard case .string(let cursor) = try nativeTestField(result, "nextCursor") else { throw FixtureError.missingField }
+        guard case .array(let errors) = try nativeTestField(result, "errors") else { throw FixtureError.missingField }
+        #expect(try nativeTestField(try #require(errors.first), "operation") == .string("importCrashRecord"))
+        let responses = try FileManager.default.contentsOfDirectory(at: context.crashCacheRoot.appending(component: "Responses"),
+            includingPropertiesForKeys: nil)
+        #expect(responses.count == 1)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sample.path)
+        let retried = try await execute(.sync, input: .object(["cursor": .string(cursor)]),
+            correction: correction, context: context)
+        #expect(try nativeTestField(.object(retried), "cacheInfo", "acquisitionComplete") == .bool(true))
+        #expect(try nativeTestField(.object(retried), "cacheInfo", "processedCount") == .number(.int(1)))
+        await correction.shutdown()
+    }
+
     @Test func aRecoveredSampleIsImportedWithoutReplacingTheCachedDistribution() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -150,5 +277,30 @@ struct NativeCrashToolCorrectionTests {
         return result
     }
 
-    private enum FixtureError: Error { case missingField }
+    private func jobInstallation(at root: URL) throws -> NativeXcodeInstallation {
+        let contents = root.appending(path: "Xcode.app/Contents")
+        try FileManager.default.createDirectory(at: contents.appending(path: "Frameworks/IDEFoundation.framework"),
+                                               withIntermediateDirectories: true)
+        return try NativeXcodeInstallation(developerDirectory: contents.appending(component: "Developer"))
+    }
+
+    private func finishedJob(_ started: [String: JSONValue], correction: NativeCrashToolCorrection,
+                             context: NativeToolContext) async throws -> [String: JSONValue] {
+        guard case .string(let jobID) = started["jobId"] else { throw FixtureError.missingField }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        var latest = started
+        while true {
+            guard case .string(let state) = latest["state"], case .number(.int(let revision)) = latest["revision"] else {
+                throw FixtureError.missingField
+            }
+            if ["completed", "failed", "cancelled", "interrupted"].contains(state) { return latest }
+            guard clock.now < deadline else { throw FixtureError.jobDidNotFinish }
+            latest = try await execute(.wait, input: .object(["job_id": .string(jobID),
+                "after_revision": .number(.int(revision)), "wait_seconds": .number(.int(5))]),
+                correction: correction, context: context)
+        }
+    }
+
+    private enum FixtureError: Error { case missingField, jobDidNotFinish }
 }

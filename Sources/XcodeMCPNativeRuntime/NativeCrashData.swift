@@ -81,6 +81,37 @@ struct NativeCrashSyncRequest: Decodable, Sendable {
     }
 }
 
+struct NativeCrashJobIDRequest: Decodable, Sendable {
+    let jobID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case jobID = "job_id"
+    }
+}
+
+struct NativeCrashJobWaitRequest: Decodable, Sendable {
+    let jobID: String
+    let waitSeconds: Double
+    let afterRevision: Int64?
+
+    private enum CodingKeys: String, CodingKey {
+        case jobID = "job_id", waitSeconds = "wait_seconds", afterRevision = "after_revision"
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        jobID = try values.decode(String.self, forKey: .jobID)
+        waitSeconds = try values.decodeIfPresent(Double.self, forKey: .waitSeconds) ?? 1
+        afterRevision = try values.decodeIfPresent(Int64.self, forKey: .afterRevision)
+        guard (0...30).contains(waitSeconds) else {
+            throw NativeRuntimeError.invalidRequest("wait_seconds must be between 0 and 30")
+        }
+        if let afterRevision, afterRevision < 0 {
+            throw NativeRuntimeError.invalidRequest("after_revision must be nonnegative")
+        }
+    }
+}
+
 struct NativeCrashReadRequest: Decodable, Sendable {
     let query: NativeCrashRequest
     let collection: NativeCrashCollection?
@@ -124,6 +155,20 @@ enum NativeCrashContract {
             .object(["type": .string("integer"), "minimum": .number(.int(1)),
                 "default": .number(.int(defaultValue)), "description": .string(description)])
         }
+        if kind == .wait || kind == .cancel {
+            var inputs = ["job_id": property("string", "Job identifier returned by StartCrashSync.")]
+            if kind == .wait {
+                inputs["wait_seconds"] = .object(["type": .string("number"),
+                    "minimum": .number(.int(0)), "maximum": .number(.int(30)), "default": .number(.int(1)),
+                    "description": .string("Maximum seconds to wait for a job update or terminal state. Defaults to 1; 0 returns immediately. Reaching this limit or disconnecting does not cancel the job.")])
+                inputs["after_revision"] = .object(["type": .string("integer"), "minimum": .number(.int(0)),
+                    "description": .string("Revision from the previous StartCrashSync or WaitForCrashSync response. Return when the job has a newer revision, reaches a terminal state, or the wait limit expires. Omit to use the revision at the start of this wait.")])
+            }
+            let description = kind == .wait
+                ? "Wait briefly for a crash sync job update or terminal state. A wait timeout or client disconnect leaves the job running. A failed job is returned as job state with its diagnostics."
+                : "Request cancellation of a crash sync job and return promptly. Use WaitForCrashSync to confirm cancellation and Organizer cleanup have finished."
+            return describeJob(kind, description: description, inputs: inputs, required: ["job_id"])
+        }
         var inputs: [String: JSONValue] = [
             "bundle_id": property("string", "App bundle identifier. Required with platform when no token supplies the query; Sync can infer it from a saved workspace."),
             "platform": property("string", "Execution platform: iOS, macOS, watchOS, tvOS, or visionOS."),
@@ -138,13 +183,17 @@ enum NativeCrashContract {
             "issue_id": property("string", "Stable native issue identifier, required for a new logs query. Display names are not identifiers."),
         ]
         switch kind {
-        case .sync:
-            inputs["workspaceIdentifier"] = property("string", "Optional saved workspace for inferring the app and platform. An explicit bundle_id and platform do not require a workspace.")
+        case .sync, .start:
+            if kind == .sync {
+                inputs["workspaceIdentifier"] = property("string", "Optional saved workspace for inferring the app and platform. An explicit bundle_id and platform do not require a workspace.")
+            }
             inputs["source"] = .object(["type": .string("string"),
                 "enum": .array([.string("network"), .string("cache"), .string("networkWithCacheFallback")]),
                 "default": .string("network"),
                 "description": .string("Applies when starting acquisition. Network starts an owned Xcode Organizer instance using the existing Xcode account and Accessibility permission. Cache imports exact saved data without GUI; explicit bundle_id and platform also bypass product inventory. Fallback preserves failures and the cached data's original provenance.")])
-            inputs["cursor"] = property("string", "Local import continuation returned by SyncCrashReports; does not fetch from the network again. Its budgets are retained, and any explicitly repeated budgets must match. Read cursors and checkpoints belong to ReadCrashChanges.")
+            if kind == .sync {
+                inputs["cursor"] = property("string", "Local import continuation returned by SyncCrashReports; does not fetch from the network again. Its budgets are retained, and any explicitly repeated budgets must match. Read cursors and checkpoints belong to ReadCrashChanges.")
+            }
             inputs["max_records"] = positiveInteger(100, "Maximum records to import in this acquisition batch.")
             inputs["max_bytes"] = positiveInteger(64 * 1024 * 1024, "Import byte budget. One oversized log file may be streamed alone so acquisition can advance; this is not the response JSON budget.")
         case .read:
@@ -155,6 +204,13 @@ enum NativeCrashContract {
             inputs["order"] = .object(["type": .string("string"),
                 "enum": .array([.string("observedNewestFirst"), .string("occurredAtDescending")]),
                 "description": .string("Defaults to observedNewestFirst for a new window. A continuation retains its order. occurredAtDescending applies to logs and uses their actual occurrence date when available; it does not substitute observation or file times.")])
+        case .wait, .cancel: break
+        }
+        if kind == .start {
+            inputs["bundle_id"] = property("string", "App bundle identifier. Required for a new job.")
+            return describeJob(kind,
+                description: "Start crash acquisition and local import as a host-owned job and return promptly. Supply bundle_id and platform explicitly, then use WaitForCrashSync to observe progress and ReadCrashChanges to read committed records.",
+                inputs: inputs, required: ["bundle_id", "platform"])
         }
         func token(_ description: String) -> JSONValue {
             .object(["type": .array([.string("string"), .string("null")]), "description": .string(description)])
@@ -178,6 +234,7 @@ enum NativeCrashContract {
             outputs["changes"] = .object(["type": .string("array"), "items": property("object", "New or updated record with itemId, contentId, revision, and change. Logs have logical logId, nativeLogId, reusable blob path, bytes, variant and optional actual occurredAt. Issues have issueId, name, counts and a payloadPath to native JSON.")])
             outputs["checkpoint"] = token("Baseline for a later change window, issued only at the end of this fixed reader window. It tracks locally observed records and is independent of pending acquisition.")
             outputs["cacheInfo"] = property("object", "Reader state: baselineSequence, snapshotSequence, returnedCount, totalChanges, readOffset, readComplete, order, and latestSync with its separate acquisition/source completeness.")
+        case .start, .wait, .cancel: break
         }
         return NativeTool(name: kind.toolName, descriptor: .object([
             "name": .string(kind.toolName),
@@ -189,6 +246,35 @@ enum NativeCrashContract {
             "outputSchema": .object(["type": .string("object"), "properties": .object(outputs),
                 "required": .array([.string("status"), .string("query"), .string("collection"), .string("errors")])]),
         ]), workspaceScoped: kind == .sync)
+    }
+
+    private static func describeJob(_ kind: NativeCrashToolCorrection.Kind, description: String, inputs: [String: JSONValue],
+                                    required: [String]) -> NativeTool {
+        let outputs: [String: JSONValue] = [
+            "jobId": .object(["type": .string("string"), "description": .string("Persistent crash sync job identifier.")]),
+            "state": .object(["type": .string("string"), "enum": .array([
+                "queued", "running", "cancelling", "completed", "failed", "cancelled", "interrupted",
+            ].map(JSONValue.string))]),
+            "revision": .object(["type": .string("integer"), "description": .string("Job revision, incremented when the saved state or progress changes.")]),
+            "createdAt": .object(["type": .string("string")]),
+            "updatedAt": .object(["type": .string("string")]),
+            "startedAt": .object(["type": .array([.string("string"), .string("null")])]),
+            "finishedAt": .object(["type": .array([.string("string"), .string("null")])]),
+            "progress": .object(["type": .string("object"),
+                "description": .string("Latest phase, capturedPages, capturedRecords, resolved query, and import cacheInfo when available. Phases include queued, waitingForOrganizer, acquiring, and importing.")]),
+            "result": .object(["type": .array([.string("object"), .string("null")]),
+                "description": .string("Latest SyncCrashReports response, including cumulative cacheInfo, responsePath, and metadataPath. Record import failures stop automatic processing and retain nextCursor for an explicit retry. Source-only errors still allow importing acquired data. Null while no result has been committed.")]),
+            "errors": .object(["type": .string("array"), "items": .object(["type": .string("object")]),
+                "description": .string("Job failures and cleanup diagnostics. A failed job state does not make a successful status query an MCP error.")]),
+        ]
+        return NativeTool(name: kind.toolName, descriptor: .object([
+            "name": .string(kind.toolName), "description": .string(description),
+            "annotations": .object(["readOnlyHint": .bool(kind == .wait)]),
+            "inputSchema": .object(["type": .string("object"), "properties": .object(inputs),
+                "required": .array(required.map(JSONValue.string))]),
+            "outputSchema": .object(["type": .string("object"), "properties": .object(outputs),
+                "required": .array(["jobId", "state", "revision", "createdAt", "updatedAt", "progress", "result", "errors"].map(JSONValue.string))]),
+        ]), workspaceScoped: false)
     }
 }
 
@@ -291,6 +377,13 @@ enum NativeCrashData {
         if source != .cache {
             do {
                 let fetched = try await fetch()
+                if Task.isCancelled, !fetched.errors.isEmpty {
+                    throw NSError(domain: "XcodeMCPKit.CrashAcquisition", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "Crash acquisition was cancelled with provider diagnostics",
+                        NSUnderlyingErrorKey: CancellationError(),
+                        "XcodeMCPKit.CrashDiagnostics": fetched.errors.map(\.foundationObject),
+                    ])
+                }
                 try Task.checkCancellation()
                 result.value = fetched.value
                 result.source = fetched.source
@@ -320,7 +413,7 @@ enum NativeCrashData {
                 } catch { result.errors.append(diagnostic(error, operation: "cacheWrite")) }
                 return result
             } catch {
-                try Task.checkCancellation()
+                if Task.isCancelled || error is CancellationError { throw error }
                 result.errors.append(diagnostic(error, operation: "download"))
                 if source == .network { return result }
             }
