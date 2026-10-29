@@ -9,8 +9,8 @@ current public tool definitions. Installation instructions are in the
 Open a saved project with `XcodeOpenWorkspace`, then pass its returned
 `workspaceIdentifier` to an operation. The identifier retains its native
 headless workspace and host. `XcodeListWorkspaces` lists loaded headless models;
-workspace operations use these headless models. Crash collection uses a hidden, owned
-Organizer instance as described below.
+workspace operations use these headless models. Network crash collection uses
+Organizer in an already running Xcode as described below.
 
 | Previous call or value | Replacement |
 | --- | --- |
@@ -83,20 +83,18 @@ Sample counts are not occurrence or device counts. Unchanged issue metadata
 cannot establish that an issue's sample content has not changed; synchronize its
 logs again to check.
 
-Network Sync uses a hidden, owned instance of the selected Xcode and requires
-configured App Store Connect account access and Accessibility permission. New
-queries reuse that process without activation or pointer movement. A previously
-fetched or prefetched query starts a new hidden instance to refresh Xcode's
-in-memory data.
-Cancelling an active acquisition, acquisition failure, and server shutdown close
-the owned instance.
-No API key or manually opened Xcode is needed. Completed source metadata and
-imports remain available. Workspace operations and Read remain headless.
+Network Sync now uses an already running instance of the selected Xcode. Open
+that Xcode with App Store Connect account access and grant Accessibility access
+to the native host. Sync waits for Xcode to leave the foreground before opening
+an Organizer route. Previously fetched queries refresh through **Reload
+Organizer**, without launching or restarting Xcode. Failure, cancellation, and
+server shutdown leave Xcode running. Completed source metadata and imports remain
+available. Workspace operations and Read remain headless.
 
-For a list without a vertical scrollbar, Sync temporarily reduces the hidden
-window's height using Xcode's standard scripting bounds, scrolls it, and restores
-the original bounds. This also requires macOS Automation access to Xcode. Missing
-permission is reported without prompting; captured pages remain available.
+The Organizer window stays available in the background. Collection changes its
+product, filters, issue selection, and scroll position. Short lists use a
+window-directed scroll gesture to request the next page without resizing the
+window or moving the pointer. The former scripting-bounds fallback is removed.
 
 `source: "cache"` imports only exact saved metadata and local files, without
 starting Xcode. Explicit bundle/platform inputs do not require Products inventory
@@ -117,9 +115,8 @@ new tool definitions.
 Install `XcodeMCPNativeHost.app` beside the proxy commands. Reinstall the complete
 package if it is missing. The default helper executes headlessly through the
 selected Xcode's frameworks without Xcode Service setup. Workspace operations
-work without an open GUI window; network crash collection retains its own
-hidden Xcode instance for Organizer until active acquisition cancellation,
-acquisition failure, or shutdown.
+work without an open GUI window; network crash collection uses Organizer in an
+already running Xcode and leaves that application running.
 
 Remove these older settings from startup scripts and embedding configuration:
 

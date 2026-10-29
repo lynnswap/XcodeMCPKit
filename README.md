@@ -37,7 +37,8 @@ With Homebrew set up, no additional `PATH` setting is needed.
 xcode-mcp-proxy-server
 ```
 
-Keep this terminal open while using MCP. You can leave Xcode closed.
+Keep this terminal open while using MCP. Workspace operations work with Xcode
+closed. Network crash sync uses Organizer in an already running Xcode.
 
 To automatically allow other agents' MCP connections directly to the Xcode app,
 start the server with `--auto-approve`:

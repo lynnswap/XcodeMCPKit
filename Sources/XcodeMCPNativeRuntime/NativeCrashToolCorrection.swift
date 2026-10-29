@@ -1,4 +1,5 @@
 import ABIBridge
+import AppKit
 import Foundation
 import XcodeMCPWire
 
@@ -326,7 +327,13 @@ final class NativeCrashToolCorrection {
             try Task.checkCancellation()
             if source.result != .null { try job.setResult(source.result) }
             if let identity = source.progress["organizer"] {
-                let cleanup = Task { @MainActor in try await NativeOrganizerApplication.shutdownRecovered(identity) }
+                let appURL = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath()
+                let existing = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dt.Xcode")
+                    .filter { !$0.isTerminated && $0.bundleURL?.resolvingSymlinksInPath() == appURL }
+                    .map(\.processIdentifier))
+                let cleanup = Task { @MainActor in
+                    try await NativeOrganizerApplication.shutdownRecovered(identity, preservingProcessIdentifiers: existing)
+                }
                 do { try await cleanup.value }
                 catch {
                     throw NSError(domain: "XcodeMCPKit.CrashSyncRecovery", code: 1, userInfo: [

@@ -299,30 +299,26 @@ and interval unique-device counts cannot be added to obtain the period count.
 
 ### Network access and saved results
 
-Network Sync requires existing App Store Connect account access in the selected
-Xcode and macOS Accessibility access for the native host. No API key is needed.
-Network Sync launches an owned Xcode instance hidden, without activating it,
-and reuses it for subsequent new queries. It targets only that instance's PID;
-your existing Xcode windows are not used. Collection does not move the pointer
-or raise an Organizer window. The instance remains a GUI Xcode process, rather
-than a fully headless service, because downloads use Xcode's existing account.
+Network Sync uses an already running instance of the selected Xcode with App
+Store Connect account access. Open that Xcode before synchronizing and grant
+macOS Accessibility access to the native host. No API key is needed. If several
+instances of the selected Xcode are running, activate the one to use first.
 
-A query already fetched or prefetched by the retained instance starts a new
-hidden instance so Xcode's in-memory result cannot satisfy the refresh check.
-Cancelling an active acquisition, acquisition failure, and server shutdown close
-the owned instance. If the host exits unexpectedly, its ownership lease permits
-the next acquisition to reclaim that instance after checking its PID,
-application path, and launch date.
+Sync waits while Xcode is the foreground application before opening an Organizer
+route. It then operates that Xcode's Organizer and uses **Reload Organizer** to
+request fresh data, including previously fetched or prefetched details. The
+Organizer's displayed product, filters, selected issue, and scroll position can
+change during collection. Keep its window available in the background. Sync does
+not start, terminate, or restart Xcode, including after failure, cancellation, or
+server shutdown.
+
 Collection clears the name search and unresolved-only display filter without
-changing any issue's resolved state.
-
-For an issue list that fits without a vertical scrollbar, Sync temporarily
-reduces the hidden window's height through Xcode's standard scripting bounds,
-scrolls the resulting list, and restores the original bounds. This requires macOS
-Automation access to Xcode as well as Accessibility access. Missing permission
-is reported without prompting or activating Xcode; captured pages remain
-available. A short nonempty page alone does not establish that all issues were
-collected.
+changing any issue's resolved state. It uses the list's Accessibility scrollbar
+when available. Short lists receive a scroll gesture directed to the Organizer
+window, allowing elastic scrolling to request the terminal page. The gesture
+does not move the pointer, resize the window, or send global input. Permission
+failures are reported without opening permission dialogs; captured pages remain
+available.
 
 Sync defaults to `source: "network"`. It verifies refreshed exact-query cache
 entries and collects issue pages until a normal idle empty page establishes the
