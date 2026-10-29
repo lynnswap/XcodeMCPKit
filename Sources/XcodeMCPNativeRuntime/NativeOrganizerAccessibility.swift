@@ -34,7 +34,11 @@ final class NativeOrganizerAccessibility {
     func snapshot() throws -> Snapshot {
         let location = try locateList()
         let nativeRows: [AXUIElement]
-        if let rows = try elements(kAXRowsAttribute, from: location.table) {
+        // Only loading/status rows need inspection. Reading every accumulated
+        // issue through AX makes each successive page more expensive.
+        if let rows = try elements(kAXVisibleRowsAttribute, from: location.table) {
+            nativeRows = rows
+        } else if let rows = try elements(kAXRowsAttribute, from: location.table) {
             nativeRows = rows
         } else {
             nativeRows = try children(of: location.table).filter { try role(of: $0) == kAXRowRole as String }
