@@ -123,38 +123,38 @@ job and its results, recovers saved pages and pending imports, and starts networ
 scans at the first page. Recovery selects the newest saved continuation for
 an import run because previous continuation responses are immutable. Unreadable
 acquisition snapshots retain their diagnostics while a new scan is attempted.
-Active owners and completed jobs reject resume. Reclaiming a leftover Organizer requires the recorded PID, application path,
-and launch date to match its running instance. Read checkpoints are independent
-of the new job's acquisition and remain valid.
+Active owners and completed jobs reject resume. Legacy dedicated Organizer
+records require matching PID, application path, and launch date before cleanup;
+currently running instances of the selected Xcode are protected during job
+recovery. Read checkpoints are independent of the new job's acquisition and
+remain valid.
 
-Network Sync retains one owned Apple-signed Xcode instance. It launches with
-`NSWorkspace.OpenConfiguration`, `createsNewApplicationInstance`,
-`activates = false`, `hides = true`, `promptsUserIfNeeded = false`, and
-`-ApplePersistenceIgnoreState YES`.
-Subsequent new queries send a noninteractive URL event to that instance's PID.
-A previously fetched URL, or an exact cache entry refreshed since the instance
-launched, uses a new hidden instance to avoid accepting an in-memory result as a
-fresh download. The latter also covers details prefetched while opening a list.
-Organizer uses its existing account; Accessibility access is required. Cancelling
-an active acquisition, acquisition failure, and host shutdown terminate only the
-owned instance.
+Network Sync borrows a running Apple-signed Xcode from the selected installation.
+It prefers that installation's active instance or its single running instance;
+ambiguous background instances require the user to select one by activating it.
+The host never launches or terminates the borrowed application. Before opening
+an Organizer route, it waits until Xcode is inactive so the route cannot interrupt
+foreground editing. Each request sends a noninteractive URL to the selected PID,
+waits for the list, then invokes the `productsWindow_reload:` menu item through
+Accessibility. The refresh boundary precedes this explicit reload; exact native
+cache headers must be current and the crash list idle before data is accepted.
+Reload refreshes both list and selected-detail network sources.
 
-A record and held file-lock lease in Application Support identify the retained
-application's owner.
-Before acquisition, an abandoned lease permits identity-checked cleanup of a
-leftover process; a live lease prevents another host from reclaiming it. The
-Products cache lock serializes individual acquisitions across hosts.
-The host opens the exact product/filter URL, clears name and unresolved-only
-filters, waits for matching refreshed native cache headers and an idle crash
-list, and collects 25-issue pages. Displayed names are not page identifiers;
-unsymbolicated addresses can differ from the same issue's cached name. A normal
-idle empty page establishes the end. Paging uses the owned list's Accessibility
-scrollbar. When the list fits, standard AppleEvents target the owned process
-and window number to reduce its hidden window's height below the interactive
-minimum, expose a scrollbar, and restore the original bounds after scrolling.
-Restoration also runs after failure or cancellation, retaining both failures if
-needed. Automation permission errors do not prompt. Acquisition does not activate
-Xcode or send global input.
+New progress records use `borrowedOrganizer`, separate from the legacy
+`organizer` field consumed by older recovery code. Borrowed applications are
+never written to `Owners/*/owner.json`. Legacy owner records are still reclaimed
+under their file-lock lease with the selected borrowed PID excluded. The Products
+cache lock continues to serialize individual acquisitions across hosts.
+
+Collection clears name and unresolved-only filters and collects 25-issue pages.
+Displayed names are not page identifiers; unsymbolicated addresses can differ
+from the same issue's cached name. A normal idle empty page establishes the end.
+Paging sets the list's Accessibility scrollbar value when one exists. Otherwise,
+a continuous scroll gesture targets the Organizer's PID and window number;
+elastic bounds changes trigger the next page even when all rows fit. The event
+location is window-local, and no mouse movement or global input is posted. The
+window remains at its original size. Organizer content and selection can change
+during acquisition; Xcode's editor windows are not operated.
 Pages are copied from Organizer's eight-entry LRU to the server's exact-query
 source store as they arrive. A cross-process lock serializes access to Xcode's
 shared Products cache.

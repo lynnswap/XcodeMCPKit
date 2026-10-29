@@ -47,6 +47,13 @@ struct NativeOrganizerApplicationTests {
         #expect(received === current)
     }
 
+    @Test func aMatchingLegacyOwnerIsTerminatedByRecovery() async throws {
+        let current = Application()
+        try await NativeOrganizerApplication.shutdownRecovered(identity(), application: { _ in current })
+        #expect(current.terminationRequests == 1)
+        #expect(current.isTerminated)
+    }
+
     @Test func anAlreadyTerminatedOrganizerDoesNotLookUpAReusedPID() async throws {
         // Termination is already confirmed even if AppKit no longer provides
         // all of the departed process's identity metadata.
@@ -71,40 +78,79 @@ struct NativeOrganizerApplicationTests {
         }
     }
 
-    @Test func aDedicatedLaunchDoesNotActivateAndNeverAdoptsAnExistingApplication() async throws {
+    @Test func theActiveMatchingXcodeIsPreferredWithoutStartingAnotherInstance() throws {
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let installation = try installation(at: root)
         let appPath = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path
-        let existing = Application(identifier: 10, appPath: appPath)
-        let created = Application(identifier: 11, appPath: appPath)
-        let owned = try await NativeOrganizerApplication.launch(installation: installation,
-            runningApplications: { [existing] }, open: { url, configuration in
-                #expect(url.path == appPath)
-                #expect(configuration.createsNewApplicationInstance)
-                #expect(!configuration.activates)
-                #expect(configuration.hides)
-                #expect(!configuration.promptsUserIfNeeded)
-                #expect(!configuration.addsToRecentItems)
-                return created
-            })
-        #expect(owned.processIdentifier == created.processIdentifier)
-        await #expect(throws: (any Error).self) {
-            try await NativeOrganizerApplication.launch(installation: installation,
-                runningApplications: { [existing] }, open: { _, _ in existing })
-        }
-        #expect(existing.terminationRequests == 0)
-        try await owned.shutdown()
-        #expect(created.isTerminated)
-        #expect(!existing.isTerminated)
+        let inactive = Application(identifier: 10, appPath: appPath)
+        let active = Application(identifier: 11, appPath: appPath, active: true)
+        let anotherInstallation = Application(identifier: 12, appPath: "/other/Xcode.app", active: true)
+        let borrowed = try NativeOrganizerApplication.running(installation: installation,
+            runningApplications: { [anotherInstallation, inactive, active] })
+        #expect(borrowed.application === active)
+        #expect(inactive.terminationRequests == 0)
+        #expect(active.terminationRequests == 0)
     }
 
-    @Test func routeEventsTargetOnlyTheOwnedPIDWithoutInteraction() throws {
+    @Test func aSingleInactiveXcodeCanBeUsedButMissingOrAmbiguousInstancesCannot() throws {
+        let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installation = try installation(at: root)
+        let appPath = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path
+        let current = Application(appPath: appPath)
+        let borrowed = try NativeOrganizerApplication.running(installation: installation, runningApplications: { [current] })
+        #expect(borrowed.application === current)
+        for applications in [[], [Application(appPath: "/other/Xcode.app")],
+                             [Application(appPath: appPath, terminated: true)],
+                             [current, Application(identifier: 124, appPath: appPath)]] {
+            #expect(throws: (any Error).self) {
+                try NativeOrganizerApplication.running(installation: installation, runningApplications: { applications })
+            }
+        }
+        #expect(current.terminationRequests == 0)
+    }
+
+    @Test func borrowedAndPreservedApplicationsNeverEnterLegacyTermination() async throws {
+        guard case .object(var borrowed) = identity() else { return }
+        borrowed["ownership"] = .string("borrowed")
+        let cases: [(JSONValue, Set<pid_t>)] = [(.object(borrowed), []), (identity(), [123])]
+        for (saved, preserved) in cases {
+            try await NativeOrganizerApplication.shutdownRecovered(saved, preservingProcessIdentifiers: preserved,
+                application: { _ in
+                    Issue.record("A borrowed or preserved Xcode must not be resolved for termination")
+                    return Application()
+                }, shutdown: { _ in Issue.record("A borrowed or preserved Xcode must not be terminated") })
+        }
+    }
+
+    @Test func foregroundEditingDefersOrganizerRoutesAndWaitingCanBeCancelled() async throws {
+        let application = Application(active: true)
+        var delivered = false
+        let borrowed = NativeOrganizerApplication(application: application,
+            appURL: URL(filePath: "/example/Xcode.app"), launchDate: application.launchDate,
+            sendEvent: { _, _ in delivered = true })
+        let task = Task { @MainActor in
+            try await borrowed.waitUntilInactive()
+            try borrowed.open(URL(string: "xcode://organizer/crashes/listPoints")!)
+        }
+        await Task.yield()
+        #expect(!delivered)
+        task.cancel()
+        do {
+            try await task.value
+            Issue.record("Cancellation while waiting for foreground editing must remain observable")
+        } catch { #expect(error is CancellationError) }
+        #expect(!delivered)
+        #expect(application.terminationRequests == 0)
+    }
+
+    @Test func routeEventsTargetOnlyTheBorrowedPIDWithoutInteraction() throws {
         let application = Application()
         let urls = [URL(string: "xcode://organizer/crashes/listPoints?timePeriod=last14Days")!,
                     URL(string: "xcode://organizer/crashes/downloadPoint?analyticsPointId=stable-id")!]
         var delivered: [String] = []
-        let owned = NativeOrganizerApplication(application: application,
+        let borrowed = NativeOrganizerApplication(application: application,
             appURL: URL(filePath: "/example/Xcode.app"), launchDate: application.launchDate,
             sendEvent: { event, options in
                 #expect(event.eventClass == AEEventClass(kInternetEventClass))
@@ -112,10 +158,10 @@ struct NativeOrganizerApplicationTests {
                 let target = try #require(event.attributeDescriptor(forKeyword: AEKeyword(keyAddressAttr)))
                 #expect(target.descriptorType == DescType(typeKernelProcessID))
                 #expect(target.data == NSAppleEventDescriptor(processIdentifier: application.processIdentifier).data)
-                #expect(options == [.noReply, .neverInteract])
+                #expect(options == [.noReply, .neverInteract, .init(rawValue: UInt(kAEDoNotPromptForUserConsent))])
                 delivered.append(try #require(event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue))
             })
-        for url in urls { try owned.open(url) }
+        for url in urls { try borrowed.open(url) }
         #expect(delivered == urls.map(\.absoluteString))
 
         let mismatched = NativeOrganizerApplication(application: application,
@@ -124,92 +170,70 @@ struct NativeOrganizerApplicationTests {
         #expect(throws: (any Error).self) { try mismatched.open(urls[0]) }
     }
 
-    @Test func differentRoutesReuseTheOwnedApplicationAndRevisitedRoutesRefreshCold() async throws {
+    @Test func differentAndRepeatedRoutesReuseXcodeWithoutSavingOwnershipOrTerminatingIt() async throws {
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let installation = try installation(at: root)
         let organizer = root.appending(component: "Organizer")
         let appURL = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath()
-        let appPath = appURL.path
-        var applications: [Application] = []
-        var targets: [pid_t] = []
-        let service = NativeOrganizerCrashService(installation: installation, organizerRoot: organizer,
-            launchOrganizer: { _ in
-                let application = Application(identifier: pid_t(100 + applications.count), appPath: appPath,
-                                              launchSeconds: 100.75)
-                applications.append(application)
-                return NativeOrganizerApplication(application: application, appURL: appURL,
-                    launchDate: application.launchDate, sendEvent: { _, _ in targets.append(application.processIdentifier) })
+        let application = Application(appPath: appURL.path)
+        var delivered: [String] = []
+        let borrowed = NativeOrganizerApplication(application: application, appURL: appURL,
+            launchDate: application.launchDate, sendEvent: { event, _ in
+                delivered.append(try #require(event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue))
             })
+        let service = NativeOrganizerCrashService(installation: installation, organizerRoot: organizer,
+                                                 runningOrganizer: { _ in borrowed })
         let firstURL = URL(string: "xcode://organizer/crashes/downloadPoint?analyticsPointId=first")!
         let secondURL = URL(string: "xcode://organizer/crashes/downloadPoint?analyticsPointId=second")!
-        let prefetchedURL = URL(string: "xcode://organizer/crashes/downloadPoint?analyticsPointId=prefetched")!
-        let unfetchedURL = URL(string: "xcode://organizer/crashes/downloadPoint?analyticsPointId=unfetched")!
-        let oldFetch = Date(timeIntervalSince1970: 99)
-        let first = try await service.organizerApplication(for: firstURL, previousFetch: oldFetch)
-        let second = try await service.organizerApplication(for: secondURL, previousFetch: oldFetch)
-        #expect(first === second)
-        #expect(!first.application.isTerminated)
-        let prefetched = try await service.organizerApplication(for: prefetchedURL,
-            previousFetch: Date(timeIntervalSince1970: 100))
-        #expect(prefetched !== first)
-        #expect(first.application.isTerminated)
-        let unfetched = try await service.organizerApplication(for: unfetchedURL)
-        #expect(unfetched === prefetched)
-        #expect(!prefetched.application.isTerminated)
-        let refreshed = try await service.organizerApplication(for: prefetchedURL)
-        #expect(refreshed !== prefetched)
-        #expect(prefetched.application.isTerminated)
-        #expect(applications.count == 3)
-        #expect(targets == [100, 100, 101, 101, 102])
-        let records = try FileManager.default.contentsOfDirectory(at: organizer.appending(component: "Owners"),
-                                                                 includingPropertiesForKeys: nil)
-        let record = try NativeCrashStore.object(Data(contentsOf: try #require(records.first).appending(component: "owner.json")))
-        #expect(record["processId"] == .number(.int(102)))
-        #expect(record["ownerLeasePath"] == nil)
-        try await service.shutdown()
-        #expect(refreshed.application.isTerminated)
+        for url in [firstURL, secondURL, firstURL] {
+            #expect(try await service.organizerApplication(for: url) === borrowed)
+        }
+        #expect(delivered == [firstURL, secondURL, firstURL].map(\.absoluteString))
         #expect(try FileManager.default.contentsOfDirectory(at: organizer.appending(component: "Owners"),
                                                           includingPropertiesForKeys: nil).isEmpty)
+        try await service.shutdown()
+        #expect(application.terminationRequests == 0)
+        #expect(!application.isTerminated)
     }
 
-    @Test func onlyAnOwnerWhoseLeaseEndedIsReclaimedBeforeAnotherAcquisition() async throws {
+    @Test func legacyRecoveryWaitsForItsLeaseAndPreservesTheBorrowedXcode() async throws {
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let installation = try installation(at: root)
         let organizer = root.appending(component: "Organizer")
-        let appURL = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath()
-        let appPath = appURL.path
-        let departedApplication = Application(identifier: 123, appPath: appPath)
-        var departed: NativeOrganizerCrashService? = NativeOrganizerCrashService(installation: installation,
-            organizerRoot: organizer, launchOrganizer: { _ in
-                NativeOrganizerApplication(application: departedApplication, appURL: appURL,
-                    launchDate: departedApplication.launchDate, sendEvent: { _, _ in })
-            })
-        _ = try await departed?.organizerApplication(for: URL(string: "xcode://organizer/crashes/listPoints")!)
+        let legacy = organizer.appending(path: "Owners/legacy")
+        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        let lock = legacy.appending(component: "owner.lock")
+        try Data().write(to: lock)
+        try NativeCrashStore.encode(identity()).write(to: legacy.appending(component: "owner.json"))
+        let lease = try FileHandle(forUpdating: lock)
+        defer { try? lease.close() }
+        #expect(flock(lease.fileDescriptor, LOCK_EX | LOCK_NB) == 0)
         try Data().write(to: organizer.appending(path: "Owners/.DS_Store"))
+        let appURL = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath()
+        let departed = Application()
+        let current = Application(identifier: 124, appPath: appURL.path)
+        let borrowed = NativeOrganizerApplication(application: current, appURL: appURL,
+            launchDate: current.launchDate, sendEvent: { _, _ in })
         var reclaimed: [JSONValue] = []
-        let currentApplication = Application(identifier: 124, appPath: appPath)
-        let observer = NativeOrganizerCrashService(installation: installation, organizerRoot: organizer,
-            launchOrganizer: { _ in
-                NativeOrganizerApplication(application: currentApplication, appURL: appURL,
-                    launchDate: currentApplication.launchDate, sendEvent: { _, _ in })
-            }, recoverApplication: { saved in
+        let service = NativeOrganizerCrashService(installation: installation, organizerRoot: organizer,
+            runningOrganizer: { _ in borrowed }, recoverApplication: { saved, preserved in
                 reclaimed.append(saved)
-                let identifier = try nativeTestField(saved, "processId")
-                #expect(identifier == .number(.int(123)))
-                #expect(departedApplication.terminate())
+                #expect(preserved == [current.processIdentifier])
+                try await NativeOrganizerApplication.shutdownRecovered(saved, preservingProcessIdentifiers: preserved,
+                    application: { _ in departed }, shutdown: { #expect($0.terminate()) })
             })
-        _ = try await observer.organizerApplication(for: URL(string: "xcode://organizer/crashes/downloadPoint?analyticsPointId=first")!)
+        let url = URL(string: "xcode://organizer/crashes/listPoints")!
+        _ = try await service.organizerApplication(for: url)
         #expect(reclaimed.isEmpty)
-        #expect(!departedApplication.isTerminated)
-        // Simulate host loss: its held owner lease closes while Xcode remains.
-        departed = nil
-        _ = try await observer.organizerApplication(for: URL(string: "xcode://organizer/crashes/downloadPoint?analyticsPointId=second")!)
+        #expect(!departed.isTerminated)
+        try lease.close()
+        _ = try await service.organizerApplication(for: url)
         #expect(reclaimed.count == 1)
-        #expect(departedApplication.isTerminated)
-        #expect(!currentApplication.isTerminated)
-        try await observer.shutdown()
+        #expect(departed.isTerminated)
+        try await service.shutdown()
+        #expect(current.terminationRequests == 0)
     }
 
     @Test func jobRecoveryDoesNotTerminateAnApplicationStillOwnedByAnotherAcquisition() async throws {
@@ -236,34 +260,63 @@ struct NativeOrganizerApplicationTests {
         #expect(terminated == 1)
     }
 
-    @Test func routeDeliveryAndOwnedCleanupFailuresRemainAvailableTogether() async throws {
+    @Test(arguments: [false, true])
+    func preparationFailureRecoversSavedScopeButCancellationDoesNot(cancelled: Bool) async throws {
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let installation = try installation(at: root)
         let appURL = installation.contentsDirectory.deletingLastPathComponent().resolvingSymlinksInPath()
-        let appPath = appURL.path
-        let application = Application(appPath: appPath)
-        application.permitsTermination = false
-        let failure = NSError(domain: "OrganizerURLDelivery", code: 7)
-        let service = NativeOrganizerCrashService(installation: installation, organizerRoot: root.appending(component: "Organizer"),
-            launchOrganizer: { _ in
+        let application = Application(appPath: appURL.path)
+        let failure: any Error = cancelled ? CancellationError() : NSError(domain: "OrganizerURLDelivery", code: 7)
+        let products = root.appending(component: "Products")
+        let service = NativeOrganizerCrashService(installation: installation,
+            cache: NativeOrganizerCrashCache(productsRoot: products), organizerRoot: root.appending(component: "Organizer"),
+            runningOrganizer: { _ in
                 NativeOrganizerApplication(application: application, appURL: appURL,
                     launchDate: application.launchDate, sendEvent: { _, _ in throw failure })
             })
         let request = NativeCrashServiceQuery(query: NativeCrashQuery(bundleIdentifier: "example.App",
             platformIdentifier: "com.apple.platform.iphoneos", uploadPlatformIdentifier: "com.apple.platform.iphoneos",
             appVersion: nil, isBeta: nil, timePeriod: "last365Days", pageIndex: 0, pageSize: 25), adamIdentifier: "123")
+        let scope = products.appending(path: "example.App/Crashes/Points/stable-id.xccrashpoint/Filters/all")
+        try FileManager.default.createDirectory(at: scope, withIntermediateDirectories: true)
+        let point: JSONValue = .object(["pointIdentifier": .object([
+            "uploadPlatformSDKIdentifier": .string(request.query.uploadPlatformIdentifier),
+            "selectableAnalyticsPointIdentifier": .object([
+                "reportTypeIdentifier": .string("Xcode.Analytics.ReportType.CrashPoint"),
+                "analyticsPointIdentifier": .string("stable-id"), "adamIdentifier": .string("123"),
+                "bundleIdentifier": .string("example.App"), "platformSDKIdentifier": .string(request.query.platformIdentifier),
+            ]),
+        ])])
+        let distribution: JSONValue = .object(["header": .object([
+            "analyticsPointIdentifier": .string("stable-id"), "adamIdentifier": .string("123"),
+            "bundleIdentifier": .string("example.App"), "lastRefresh": .string("2024-01-01T00:00:00Z"),
+        ]), "body": .object([:])])
+        try NativeCrashStore.encode(point).write(to: scope.appending(component: "PointInfo.json"))
+        try NativeCrashStore.encode(distribution).write(to: scope.appending(component: "DistributionInfo.json"))
         do {
-            _ = try await service.fetchIssue(request, issueID: "stable-id")
-            Issue.record("Delivery and cleanup failures must not become success")
+            let recovered = try await service.fetchIssue(request, issueID: "stable-id")
+            #expect(!cancelled)
+            #expect(recovered.source == "organizerCache")
+            #expect(!recovered.isComplete)
+            #expect(recovered.fetchedAt == nil)
+            #expect(try nativeTestField(recovered.value, "sampleFreshness") == .string("unverifiedSavedSamples"))
+            guard case .string(let directory) = try nativeTestField(recovered.value, "logDirectory") else {
+                Issue.record("Recovered samples must keep their saved log directory")
+                return
+            }
+            let logDirectory = URL(filePath: directory)
+            #expect(logDirectory.lastPathComponent == "Logs")
+            #expect(logDirectory.deletingLastPathComponent().resolvingSymlinksInPath() == scope.resolvingSymlinksInPath())
+            #expect(recovered.errors.count == 1)
+            #expect(try nativeTestField(recovered.errors[0], "message") == .string((failure as NSError).localizedDescription))
         } catch {
-            let errors = try #require((error as NSError).userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError])
-            #expect(errors.count == 2)
-            #expect(errors[0] === failure)
-            #expect(errors[1].domain == "XcodeMCPKit.OrganizerApplication")
+            if cancelled { #expect(error is CancellationError) }
+            else { throw error }
         }
-        application.permitsTermination = true
         try await service.shutdown()
+        #expect(application.terminationRequests == 0)
+        #expect(!application.isTerminated)
     }
 
     private func installation(at root: URL) throws -> NativeXcodeInstallation {
@@ -283,15 +336,17 @@ struct NativeOrganizerApplicationTests {
         private let path: String
         private let launchSeconds: Double
         private var finished: Bool
+        private let simulatedActive: Bool
         var permitsTermination = true
         private(set) var terminationRequests = 0
 
         init(identifier: pid_t = 123, appPath: String = "/example/Xcode.app",
-             launchSeconds: Double = 100, terminated: Bool = false) {
+             launchSeconds: Double = 100, terminated: Bool = false, active: Bool = false) {
             self.identifier = identifier
             path = appPath
             self.launchSeconds = launchSeconds
             finished = terminated
+            simulatedActive = active
             super.init()
         }
 
@@ -299,6 +354,7 @@ struct NativeOrganizerApplicationTests {
         override var bundleURL: URL? { URL(filePath: path) }
         override var launchDate: Date? { Date(timeIntervalSince1970: launchSeconds) }
         override var isTerminated: Bool { finished }
+        override var isActive: Bool { simulatedActive }
         override func terminate() -> Bool {
             terminationRequests += 1
             if permitsTermination { finished = true }

@@ -195,7 +195,7 @@ enum NativeCrashContract {
             inputs["source"] = .object(["type": .string("string"),
                 "enum": .array([.string("network"), .string("cache"), .string("networkWithCacheFallback")]),
                 "default": .string("network"),
-                "description": .string("Applies when starting acquisition. Network starts an owned Xcode Organizer instance using the existing Xcode account and Accessibility permission. Cache imports exact saved data without GUI; explicit bundle_id and platform also bypass product inventory. Fallback preserves failures and the cached data's original provenance.")])
+                "description": .string("Applies when starting acquisition. Network uses Organizer in an already running instance of the selected Xcode with account access and Accessibility permission. Open that Xcode first; acquisition waits while it is foreground and leaves it running. Cache imports exact saved data without GUI; explicit bundle_id and platform also bypass product inventory. Fallback preserves failures and the cached data's original provenance.")])
             if kind == .sync {
                 inputs["cursor"] = property("string", "Local import continuation returned by SyncCrashReports; does not fetch from the network again. Its budgets are retained, and any explicitly repeated budgets must match. Read cursors and checkpoints belong to ReadCrashChanges.")
             }
