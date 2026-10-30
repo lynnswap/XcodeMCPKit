@@ -56,6 +56,8 @@ struct PreviewRendererAppKit {
         }
         let content = try await makeGeneralPreview(request)
         let controller = NSHostingController(rootView: content.view)
+        // Preview layout controls the window size, including fixed-size previews.
+        controller.sizingOptions = []
         let proposal = CGSize(width: 600, height: 400)
         let size: CGSize
         switch content.layout {
