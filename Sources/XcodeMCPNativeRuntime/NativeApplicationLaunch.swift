@@ -28,7 +28,7 @@ struct NativeApplicationLaunch: Sendable {
     }
 
     func captureSuspendedProcess() -> CapturedProcess? {
-        guard processIdentifier > 0, debuggerIdentifier?.isEmpty != false, let simulatorIdentifier,
+        guard processIdentifier > 0, let simulatorIdentifier,
               let process = Self.process(processIdentifier), process.canResume(in: simulatorIdentifier) else { return nil }
         return CapturedProcess(launch: self, process: process)
     }
