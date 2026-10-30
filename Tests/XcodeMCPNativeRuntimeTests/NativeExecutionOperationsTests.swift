@@ -5,6 +5,66 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct NativeExecutionOperationsTests {
+    @Test @MainActor func completedTrackersDoNotReceiveLateNativeCancellation() async throws {
+        let scope = NativeExecutionOperations.Scope()
+        let cancelled = Mutex(false)
+        let operation = BlockOperation {}
+        scope.register(operation, cancel: { cancelled.withLock { $0 = true } })
+        let queue = OperationQueue()
+        queue.addOperation(operation)
+        try await scope.finish()
+
+        scope.cancel()
+        await scope.finishCancellation()
+
+        #expect(!cancelled.withLock { $0 })
+    }
+
+    @Test @MainActor func cancellationStopsTheNativeWorkBeforeFinishing() async throws {
+        let scope = NativeExecutionOperations.Scope()
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        let started = AsyncStream<Void>.makeStream()
+        let operation = BlockOperation { started.continuation.yield(()); gate.wait() }
+        scope.register(operation, cancel: { gate.signal() })
+        let queue = OperationQueue()
+        queue.addOperation(operation)
+        var iterator = started.stream.makeAsyncIterator()
+        _ = await iterator.next(isolation: MainActor.shared)
+
+        scope.cancel()
+        try await scope.finish()
+
+        #expect(operation.isFinished)
+    }
+
+    @Test @MainActor func cancellationAlsoReachesATrackerRegisteredLater() async throws {
+        let scope = NativeExecutionOperations.Scope()
+        let cancelled = Mutex(false)
+        scope.cancel()
+        let operation = BlockOperation {}
+        scope.register(operation, cancel: { cancelled.withLock { $0 = true } })
+        let queue = OperationQueue()
+        queue.addOperation(operation)
+
+        try await scope.finish()
+
+        #expect(cancelled.withLock { $0 })
+        #expect(operation.isFinished)
+    }
+
+    @Test @MainActor func nativeCancellationFailureIsReportedAfterDraining() async {
+        let scope = NativeExecutionOperations.Scope()
+        let operation = BlockOperation {}
+        scope.register(operation, cancel: { throw NativeRuntimeError.invocation("native cancellation failed") })
+        scope.cancel()
+        let queue = OperationQueue()
+        queue.addOperation(operation)
+
+        await #expect(throws: (any Error).self) { try await scope.finish() }
+        #expect(operation.isFinished)
+    }
+
     @Test @MainActor func onlyTheCompletedLaunchMayOutliveTheRequest() async throws {
         let scope = NativeExecutionOperations.Scope()
         let launchGate = DispatchSemaphore(value: 0)

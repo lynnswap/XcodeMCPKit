@@ -64,6 +64,11 @@ final class NativeExecutionTracker: @unchecked Sendable {
 
     init(_ tracker: AnyObject) { self.tracker = tracker }
 
+    @MainActor func cancel() throws {
+        let cancel = try ABIRuntime.shared.object(tracker).resolveAndWait(.objc(.method("cancel", as: (() -> Void).self)))
+        try unsafe cancel.unsafeInvoke()
+    }
+
     @MainActor func launch() throws -> NativeApplicationLaunch? {
         guard let session = try Self.object(tracker, "launchSession") else { return nil }
         let pid = try ABIRuntime.shared.object(session).resolveAndWait(.objc(.method("runnablePID", as: (() -> Int32).self)))
