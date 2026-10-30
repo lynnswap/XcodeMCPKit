@@ -40,6 +40,14 @@ relay. The next request for the same workspace waits for this boundary. An actio
 with no cancellable Operation can take until natural completion; opaque native
 Swift Task handles are not joined by this mechanism.
 
+A successful `RunProject` keeps its launched application's Operation under the
+native workspace's ownership rather than waiting for the app to exit. Only a
+tracker whose launch-session PID matches the successful output is excluded;
+other Operations and failed or cancelled requests still drain. After the native
+stream ends, a stopped simulator app without a debugger is resumed only when its
+local executable belongs to the launch session's simulator. Physical-device PIDs
+are never used for local process signaling.
+
 Shutdown stops admission and awaits owned tasks before closing workspace and
 transport resources. In the native host, the main task owns shutdown and runs it
 once, for whichever comes first: input end, input or output failure, or a failure

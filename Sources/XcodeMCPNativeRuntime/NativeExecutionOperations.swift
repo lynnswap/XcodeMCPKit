@@ -23,7 +23,8 @@ final class NativeExecutionOperations {
                 guard let tracker else { return }
                 guard let scope = Self.scope else { return }
                 if let operation = try unsafe callback.operation.unsafeInvoke(on: tracker) as? Operation {
-                    scope.register(operation)
+                    let tracker = NativeExecutionTracker(tracker)
+                    scope.register(operation, launch: { try tracker.launch() })
                 } else {
                     scope.recordFailure(NativeRuntimeError.unsupportedContract("Xcode's execution tracker does not contain an Operation"))
                 }
@@ -37,17 +38,22 @@ final class NativeExecutionOperations {
     // The native Objective-C initializer cannot await an actor. This scope only
     // associates its caller's native operations with the existing request owner.
     final class Scope: Sendable {
+        private struct TrackedOperation: Sendable {
+            var operation: Operation
+            var launch: @MainActor @Sendable () throws -> NativeApplicationLaunch?
+        }
+
         private struct State {
-            var operations: [ObjectIdentifier: Operation] = [:]
+            var operations: [ObjectIdentifier: TrackedOperation] = [:]
             var cancelled = false
             var failure: (any Error)?
         }
 
         private let state = Mutex(State())
 
-        func register(_ operation: Operation) {
+        func register(_ operation: Operation, launch: @escaping @MainActor @Sendable () throws -> NativeApplicationLaunch? = { nil }) {
             let cancelled = state.withLock { state in
-                state.operations[ObjectIdentifier(operation)] = operation
+                state.operations[ObjectIdentifier(operation)] = TrackedOperation(operation: operation, launch: launch)
                 return state.cancelled
             }
             if cancelled { operation.cancel() }
@@ -57,24 +63,52 @@ final class NativeExecutionOperations {
             let operations = state.withLock { state -> [Operation] in
                 guard !state.cancelled else { return [] }
                 state.cancelled = true
-                return Array(state.operations.values)
+                return state.operations.values.map(\.operation)
             }
             for operation in operations { operation.cancel() }
         }
 
         // Joining the observed operations does not expose or join private Swift
         // producer Tasks retained inside a native AsyncStream.
-        nonisolated(nonsending) func finish() async throws {
+        nonisolated(nonsending) func finish(continuingLaunchPID: Int32? = nil) async throws {
             var finished: Set<ObjectIdentifier> = []
+            var continuing: [ObjectIdentifier: Operation] = [:]
             while true {
                 let pending = state.withLock { state in
                     state.operations.filter { !finished.contains($0.key) }
                 }
                 guard !pending.isEmpty else { break }
-                for (identifier, operation) in pending {
-                    await Self.waitForCompletion(of: operation)
+                for (identifier, tracked) in pending {
+                    let launch: NativeApplicationLaunch?
+                    do { launch = continuingLaunchPID == nil ? nil : try await tracked.launch() }
+                    catch {
+                        cancel()
+                        recordFailure(error)
+                        launch = nil
+                    }
+                    if let continuingLaunchPID, let launch, launch.processIdentifier == continuingLaunchPID,
+                       !state.withLock({ $0.cancelled }) {
+                        do { try launch.resumeIfStopped() }
+                        catch {
+                            cancel()
+                            recordFailure(error)
+                        }
+                        continuing[identifier] = tracked.operation
+                    } else {
+                        await Self.waitForCompletion(of: tracked.operation)
+                    }
                     finished.insert(identifier)
                 }
+            }
+            let cancelled = state.withLock { state in
+                guard !state.cancelled else { return true }
+                // A completed launch belongs to the workspace. Later cancellation
+                // of its finished request must not stop it without draining it.
+                for identifier in continuing.keys { state.operations[identifier] = nil }
+                return false
+            }
+            if cancelled {
+                for operation in continuing.values { await Self.waitForCompletion(of: operation) }
             }
             try checkFailure()
         }

@@ -211,13 +211,13 @@ package actor NativeMCPSession {
     private func executeTool(params: JSONValue?, name: String, arguments: [String: JSONValue],
                              context: NativeToolContext) async throws -> JSONValue {
         do {
-            let result = try await consumeTool(params: params, name: name, arguments: arguments, context: context)
-            do { try await backend.finishExecution(context: context) }
+            let completion = try await consumeTool(params: params, name: name, arguments: arguments, context: context)
+            do { try await backend.finishExecution(context: context, outcome: completion.outcome) }
             catch { await NativeErrorPresentation.report(error as NSError) }
-            return result
+            return completion.result
         } catch {
             let original = error
-            do { try await backend.finishExecution(context: context) }
+            do { try await backend.finishExecution(context: context, outcome: .failed) }
             catch {
                 throw NativeRuntimeError.invocation("\(original); workspace cleanup failed: \(error)")
             }
@@ -225,14 +225,19 @@ package actor NativeMCPSession {
         }
     }
 
+    private struct ToolCompletion {
+        var result: JSONValue
+        var outcome: NativeToolOutcome
+    }
+
     private func consumeTool(params: JSONValue?, name: String, arguments: [String: JSONValue],
-                             context: NativeToolContext) async throws -> JSONValue {
+                             context: NativeToolContext) async throws -> ToolCompletion {
         let updates: AsyncStream<Data>
         do {
             updates = try await backend.execute(name, arguments: arguments, context: context)
         } catch let error as NativeToolExecutionError {
             try Task.checkCancellation()
-            return try toolResult(.string(error.message), isError: true)
+            return try ToolCompletion(result: toolResult(.string(error.message), isError: true), outcome: .failed)
         }
         var completed: JSONValue?
         var output: JSONValue?
@@ -260,6 +265,7 @@ package actor NativeMCPSession {
                 output = result
                 completed = try toolResult(result, isError: false)
             case "error":
+                output = nil
                 completed = try toolResult(fields["data"] ?? .string("Native tool failed"), isError: true)
             default:
                 throw NativeRuntimeError.unsupportedContract("Unsupported native event '\(type)'")
@@ -271,7 +277,7 @@ package actor NativeMCPSession {
         }
         let metadata = await backend.resultMetadata(for: name, output: output, context: context)
         if !metadata.isEmpty { result["_meta"] = .object(metadata) }
-        return .object(result)
+        return ToolCompletion(result: .object(result), outcome: output.map(NativeToolOutcome.succeeded) ?? .failed)
     }
 
     private func withOrigin(_ fields: [String: JSONValue]) async -> JSONValue {
