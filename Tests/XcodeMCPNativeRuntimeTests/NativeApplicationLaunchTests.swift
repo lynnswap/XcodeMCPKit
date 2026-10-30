@@ -6,7 +6,8 @@ import XcodeMCPWire
 
 @Suite
 struct NativeApplicationLaunchTests {
-    @Test func cancellationReapsOnlyTheOwnedSuspendedProcess() async throws {
+    @Test(arguments: [nil, "Xcode.DebuggerFoundation.Debugger.LLDB"] as [String?])
+    func cancellationReapsOnlyTheOwnedSuspendedProcess(debuggerIdentifier: String?) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let device = UUID()
         let directory = root.appendingPathComponent("\(device)/data/Containers/Bundle/Application/\(UUID())/Fixture.app")
@@ -27,14 +28,16 @@ struct NativeApplicationLaunchTests {
         }
         try process.run()
         #expect(kill(process.processIdentifier, SIGSTOP) == 0)
-        let launch = NativeApplicationLaunch(processIdentifier: process.processIdentifier, simulatorIdentifier: device)
+        let launch = NativeApplicationLaunch(processIdentifier: process.processIdentifier,
+            debuggerIdentifier: debuggerIdentifier, simulatorIdentifier: device)
         for _ in 0..<100 where launch.captureSuspendedProcess() == nil {
             try await Task.sleep(for: .milliseconds(10))
         }
         let captured = try #require(launch.captureSuspendedProcess())
-        var debugger = launch
-        debugger.debuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
-        #expect(debugger.captureSuspendedProcess() == nil)
+        if debuggerIdentifier != nil {
+            try launch.resumeIfStopped()
+            #expect(launch.captureSuspendedProcess() != nil)
+        }
         var physical = launch
         physical.simulatorIdentifier = nil
         #expect(physical.captureSuspendedProcess() == nil)

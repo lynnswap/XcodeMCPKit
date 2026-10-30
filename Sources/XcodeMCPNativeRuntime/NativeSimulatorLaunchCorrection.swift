@@ -18,7 +18,7 @@ final class NativeSimulatorLaunchCorrection {
                 guard let launcher, let scope = NativeExecutionOperations.scope,
                       let session = try NativeApplicationLaunch.object(launcher, "launchSession") else { return }
                 let template = try NativeApplicationLaunch.read(session: session, processIdentifier: 0)
-                guard template.simulatorIdentifier != nil, template.debuggerIdentifier?.isEmpty != false else { return }
+                guard template.simulatorIdentifier != nil else { return }
                 // The native PID callback can run off the request's Task and
                 // before Xcode assigns runnablePID to its launch session.
                 let hook = try unsafe ABIRuntime.shared.object(launcher).hookCalls(
