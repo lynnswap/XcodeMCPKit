@@ -164,7 +164,28 @@ final class NativePreviewCorrection {
         return arguments
     }
 
+    static func formatResult(_ result: JSONValue, outputSchema: JSONValue?) -> JSONValue {
+        guard case .object(let schema) = outputSchema,
+              case .object(let properties) = schema["properties"], properties["snapshot"] != nil,
+              case .object(var fields) = result else { return result }
+        if let path = fields.removeValue(forKey: "previewSnapshotPath") {
+            fields["snapshot"] = .object(["path": path])
+        }
+        var overrides: [String: JSONValue] = [:]
+        for (legacy, current) in [
+            ("availableRenderDestinations", "renderDestinations"),
+            ("supportedLocalizations", "localizations"),
+            ("supportedPreviewVariantOverrides", "previewVariants"),
+            ("supportedCanvasControlOverrides", "canvasControls"),
+        ] {
+            overrides[current] = fields.removeValue(forKey: legacy)
+        }
+        fields["supportedOverrides"] = .object(overrides)
+        return .object(fields)
+    }
+
     func execute(inputType: Any.Type, input: Data, artifactsRoot: URL, request: URL? = nil,
+                 outputSchema: JSONValue? = nil,
                  native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws -> AsyncStream<Data> {
         guard let inputType = inputType as? any Decodable.Type else {
             return try await native()
@@ -187,7 +208,8 @@ final class NativePreviewCorrection {
                 stream.continuation.yield(try event("update", .object([
                     "message": .string("Building the preview target..."), "progress": .number(.int(10)), "total": .number(.int(100)),
                 ])))
-                try await produce(parameters, artifactsRoot: artifactsRoot, continuation: stream.continuation, native: native)
+                try await produce(parameters, artifactsRoot: artifactsRoot, outputSchema: outputSchema,
+                    continuation: stream.continuation, native: native)
             } catch {
                 if !Task.isCancelled {
                     stream.continuation.yield(errorEvent(error))
@@ -248,7 +270,7 @@ final class NativePreviewCorrection {
         }
     }
 
-    private func produce(_ input: Input, artifactsRoot: URL, continuation: AsyncStream<Data>.Continuation,
+    private func produce(_ input: Input, artifactsRoot: URL, outputSchema: JSONValue?, continuation: AsyncStream<Data>.Continuation,
                          native: @escaping @MainActor @Sendable () async throws -> AsyncStream<Data>) async throws {
         if input.requiresNativePipeline {
             try await relayNative(native, continuation: continuation)
@@ -263,7 +285,7 @@ final class NativePreviewCorrection {
             }
         }
         try Task.checkCancellation()
-        if let result { continuation.yield(try event("completed", result)) }
+        if let result { continuation.yield(try event("completed", Self.formatResult(result, outputSchema: outputSchema))) }
     }
 
     private func relayNative(_ native: @MainActor @Sendable () async throws -> AsyncStream<Data>,

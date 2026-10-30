@@ -1,10 +1,37 @@
 import Foundation
 import Testing
+import XcodeMCPWire
 @testable import XcodeMCPNativeRuntime
 
 @Suite
 @MainActor
 struct NativePreviewCorrectionTests {
+    @Test func previewResultMatchesTheAdvertisedOutputContract() {
+        let result: JSONValue = .object([
+            "previewSnapshotPath": .string("/preview.png"),
+            "displayName": .string("Preview"), "errors": .array([]),
+            "supportedLocalizations": .array([.string("en")]),
+            "availableRenderDestinations": .array([.object(["identifier": .string("mac")])]),
+            "supportedCanvasControlOverrides": .object(["groupItems": .array([])]),
+            "supportedPreviewVariantOverrides": .object(["Color Scheme": .array([.string("Dark")])]),
+        ])
+        let current: JSONValue = .object(["properties": .object(["snapshot": .object([:])])])
+        #expect(NativePreviewCorrection.formatResult(result, outputSchema: current) == .object([
+            "snapshot": .object(["path": .string("/preview.png")]),
+            "displayName": .string("Preview"), "errors": .array([]),
+            "supportedOverrides": .object([
+                "localizations": .array([.string("en")]),
+                "renderDestinations": .array([.object(["identifier": .string("mac")])]),
+                "canvasControls": .object(["groupItems": .array([])]),
+                "previewVariants": .object(["Color Scheme": .array([.string("Dark")])]),
+            ]),
+        ]))
+        #expect(NativePreviewCorrection.formatResult(result, outputSchema: .object([
+            "properties": .object(["previewSnapshotPath": .object([:])]),
+        ])) == result)
+        #expect(NativePreviewCorrection.formatResult(result, outputSchema: nil) == result)
+    }
+
     @Test func decodedDefaultsAndExplicitValuesDoNotRequireNativeGetters() throws {
         struct StoredDefault<Value> { var wrappedValue: Value }
         let fields: [String: Any] = [
