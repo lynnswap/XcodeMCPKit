@@ -7,6 +7,29 @@ import XcodeMCPWire
 @Suite(.timeLimit(.minutes(1)))
 @MainActor
 struct NativeMCPSessionTests {
+    @Test(arguments: [false, true]) func cleanupReceivesTheFinalNativeOutcome(finalError: Bool) async throws {
+        try await withNativeSession { harness in
+            _ = try await harness.initialize()
+            try await harness.call("RunProject", id: "launch")
+            let execution = try await harness.backend.nextExecution()
+            let output = JSONValue.object(["buildErrors": .array([]), "processIdentifier": .number(.int(42))])
+            try execution.emit("completed", data: output)
+            if finalError { try execution.emit("error", data: .string("launch failed")) }
+            execution.finish()
+
+            let response = try await harness.nextMessage()
+            #expect(try nativeTestField(response, "result", "isError") == .bool(finalError))
+            let outcome = try #require(harness.backend.finishedOutcomes.last)
+            switch outcome {
+            case .succeeded(let actual):
+                #expect(!finalError)
+                #expect(actual == output)
+            case .failed:
+                #expect(finalError)
+            }
+        }
+    }
+
     @Test func initializationAdvertisesTheNativeToolCapability() async throws {
         try await withNativeSession { harness in
             let response = try await harness.initialize()
@@ -1190,6 +1213,7 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
     private(set) var metadataOutputs: [JSONValue?] = []
     private(set) var executions: [NativeSessionExecution] = []
     private(set) var finishedContexts: [NativeToolContext] = []
+    private(set) var finishedOutcomes: [NativeToolOutcome] = []
     private(set) var listCalls = 0
     private(set) var shutdownCalls = 0
     private(set) var beginShutdownCalls = 0
@@ -1234,8 +1258,9 @@ private final class NativeSessionBackendProbe: NativeToolBackend {
         onBeginShutdown?()
     }
 
-    func finishExecution(context: NativeToolContext) async throws {
+    func finishExecution(context: NativeToolContext, outcome: NativeToolOutcome) async throws {
         finishedContexts.append(context)
+        finishedOutcomes.append(outcome)
         try await onFinish?(context)
     }
 

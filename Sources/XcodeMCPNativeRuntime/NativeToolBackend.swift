@@ -1,6 +1,11 @@
 import Foundation
 import XcodeMCPWire
 
+package enum NativeToolOutcome: Sendable {
+    case succeeded(JSONValue)
+    case failed
+}
+
 package struct NativeToolContext: Sendable {
     package let artifactsDirectory: URL
     package let artifactsRoot: URL
@@ -31,7 +36,7 @@ package protocol NativeToolBackend: AnyObject, Sendable {
     func listTools() async throws -> [NativeTool]
     func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data>
     func executionResource(for name: String, arguments: [String: JSONValue]) async throws -> NativeExecutionResource
-    func finishExecution(context: NativeToolContext) async throws
+    func finishExecution(context: NativeToolContext, outcome: NativeToolOutcome) async throws
     /// `_meta` fields for the result of `name`, which completed with `output`.
     func resultMetadata(for name: String, output: JSONValue?, context: NativeToolContext) async -> [String: JSONValue]
     /// A failure that leaves this process unable to serve further requests.
@@ -48,7 +53,7 @@ extension NativeToolBackend {
     package func executionResource(for name: String, arguments: [String: JSONValue]) async throws -> NativeExecutionResource {
         NativeExecutionResource()
     }
-    package func finishExecution(context: NativeToolContext) async throws {}
+    package func finishExecution(context: NativeToolContext, outcome: NativeToolOutcome) async throws {}
     package func resultMetadata(for name: String, output: JSONValue?,
                                 context: NativeToolContext) async -> [String: JSONValue] { [:] }
 }
@@ -321,7 +326,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
         previewCorrection.cancelPendingOperations()
     }
 
-    package func finishExecution(context: NativeToolContext) async throws {
+    package func finishExecution(context: NativeToolContext, outcome: NativeToolOutcome) async throws {
         defer {
             workspaces.endExecution(request: context.artifactsDirectory)
             if let request = requestWorkspaces.removeValue(forKey: context.artifactsDirectory), !request.finished {
@@ -334,7 +339,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
         await crashCorrection.finishExecution(request: context.artifactsDirectory)
         await bridge.finishExecution(request: context.artifactsDirectory)
         var failures: [String] = []
-        do { try await context.executionScope.finish() }
+        let launchedPID = requestWorkspaces[context.artifactsDirectory]?.tool == "RunProject"
+            ? NativeApplicationLaunch.processIdentifier(in: outcome) : nil
+        do { try await context.executionScope.finish(continuingLaunchPID: launchedPID) }
         catch { failures.append(String(describing: error)) }
         do { try executionOperations?.checkFailure() }
         catch { failures.append(String(describing: error)) }

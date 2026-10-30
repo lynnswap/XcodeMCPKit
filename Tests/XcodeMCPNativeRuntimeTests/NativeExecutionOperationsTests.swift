@@ -3,8 +3,108 @@ import Synchronization
 import Testing
 @testable import XcodeMCPNativeRuntime
 
-@Suite
+@Suite(.timeLimit(.minutes(1)))
 struct NativeExecutionOperationsTests {
+    @Test @MainActor func onlyTheCompletedLaunchMayOutliveTheRequest() async throws {
+        let scope = NativeExecutionOperations.Scope()
+        let launchGate = DispatchSemaphore(value: 0)
+        let workGate = DispatchSemaphore(value: 0)
+        defer { launchGate.signal(); workGate.signal() }
+        let started = AsyncStream<Void>.makeStream()
+        let launch = BlockOperation { started.continuation.yield(()); launchGate.wait() }
+        let work = BlockOperation { started.continuation.yield(()); workGate.wait() }
+        scope.register(launch, launch: { NativeApplicationLaunch(processIdentifier: 42) })
+        scope.register(work)
+        let queue = OperationQueue()
+        queue.addOperation(launch)
+        queue.addOperation(work)
+        var iterator = started.stream.makeAsyncIterator()
+        _ = await iterator.next(isolation: MainActor.shared)
+        _ = await iterator.next(isolation: MainActor.shared)
+
+        let drain = Task { try await scope.finish(continuingLaunchPID: 42) }
+        workGate.signal()
+        try await drain.value
+
+        #expect(work.isFinished)
+        #expect(!launch.isFinished)
+    }
+
+    @Test @MainActor func aDifferentLaunchStillFinishesBeforeTheRequest() async throws {
+        let scope = NativeExecutionOperations.Scope()
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        let started = AsyncStream<Void>.makeStream()
+        let operation = BlockOperation { started.continuation.yield(()); gate.wait() }
+        let resolving = AsyncStream<Void>.makeStream()
+        let returned = Mutex(false)
+        scope.register(operation, launch: {
+            resolving.continuation.yield(())
+            return NativeApplicationLaunch(processIdentifier: 7)
+        })
+        let queue = OperationQueue()
+        queue.addOperation(operation)
+        var iterator = started.stream.makeAsyncIterator()
+        _ = await iterator.next(isolation: MainActor.shared)
+        let drain = Task {
+            try await scope.finish(continuingLaunchPID: 42)
+            returned.withLock { $0 = true }
+            #expect(operation.isFinished)
+        }
+        var resolution = resolving.stream.makeAsyncIterator()
+        _ = await resolution.next(isolation: MainActor.shared)
+        #expect(!returned.withLock { $0 })
+        gate.signal()
+        try await drain.value
+    }
+
+    @Test @MainActor func aCancelledLaunchCannotOutliveTheRequest() async throws {
+        let scope = NativeExecutionOperations.Scope()
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        let started = AsyncStream<Void>.makeStream()
+        let operation = BlockOperation { started.continuation.yield(()); gate.wait() }
+        let resolving = AsyncStream<Void>.makeStream()
+        let returned = Mutex(false)
+        scope.register(operation, launch: {
+            resolving.continuation.yield(())
+            return NativeApplicationLaunch(processIdentifier: 42)
+        })
+        let queue = OperationQueue()
+        queue.addOperation(operation)
+        var iterator = started.stream.makeAsyncIterator()
+        _ = await iterator.next(isolation: MainActor.shared)
+        scope.cancel()
+        let drain = Task {
+            try await scope.finish(continuingLaunchPID: 42)
+            returned.withLock { $0 = true }
+            #expect(operation.isFinished)
+        }
+        var resolution = resolving.stream.makeAsyncIterator()
+        _ = await resolution.next(isolation: MainActor.shared)
+        #expect(!returned.withLock { $0 })
+        gate.signal()
+        try await drain.value
+    }
+
+    @Test @MainActor func aContinuingLaunchDoesNotHideRecordedFailures() async {
+        let scope = NativeExecutionOperations.Scope()
+        scope.register(BlockOperation {}, launch: { NativeApplicationLaunch(processIdentifier: 42) })
+        scope.recordFailure(NativeRuntimeError.invocation("tracker failed"))
+        await #expect(throws: (any Error).self) { try await scope.finish(continuingLaunchPID: 42) }
+    }
+
+    @Test @MainActor func cancellationAfterHandoffDoesNotStopTheWorkspaceLaunch() async throws {
+        let scope = NativeExecutionOperations.Scope()
+        let launch = BlockOperation {}
+        scope.register(launch, launch: { NativeApplicationLaunch(processIdentifier: 42) })
+        try await scope.finish(continuingLaunchPID: 42)
+
+        scope.cancel()
+
+        #expect(!launch.isCancelled)
+    }
+
     @Test func cancellationOnlyAffectsOperationsFromTheMatchingRequest() {
         let first = NativeExecutionOperations.Scope()
         let second = NativeExecutionOperations.Scope()
