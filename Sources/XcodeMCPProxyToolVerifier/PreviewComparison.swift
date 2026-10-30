@@ -90,7 +90,7 @@ struct PreviewComparison: Codable {
 
     private static func compareMetadata(_ native: [String: MCPJSONValue], _ headless: [String: MCPJSONValue]) -> [String: PreviewMetadataComparison] {
         Dictionary(uniqueKeysWithValues: ["displayName", "sourceLineNumber", "errors", "supportedLocalizations",
-            "supportedPreviewVariantOverrides", "supportedCanvasControlOverrides", "renderedDestination"].map {
+            "supportedPreviewVariantOverrides", "supportedCanvasControlOverrides", "supportedOverrides", "renderedDestination"].map {
                 ($0, PreviewMetadataComparison(native: native[$0], headless: headless[$0]))
             })
     }

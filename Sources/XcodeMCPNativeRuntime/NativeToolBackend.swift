@@ -225,8 +225,11 @@ package final class NativeXcodeBackend: NativeToolBackend {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
         if isPreview {
+            let outputSchema: JSONValue?
+            if case .object(let descriptor) = tools[name]?.descriptor { outputSchema = descriptor["outputSchema"] }
+            else { outputSchema = nil }
             return try unsafe await previewCorrection.execute(inputType: scope.inputType(for: action), input: input,
-                artifactsRoot: context.artifactsRoot, request: context.artifactsDirectory) { [self] in
+                artifactsRoot: context.artifactsRoot, request: context.artifactsDirectory, outputSchema: outputSchema) { [self] in
                 guard let action = unsafe actions[name] else {
                     throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
                 }

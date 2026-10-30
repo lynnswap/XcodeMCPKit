@@ -182,7 +182,7 @@ final class NativePreviewBuild {
             throw NativeRuntimeError.unsupportedContract("The native workspace has no referenced containers")
         }
         var updates: [(valid: NativeBoundObjCMethod<Bool>, edited: NativeBoundObjCMethod<Bool>,
-                       invalidate: NativeBoundObjCMethod<Void, Bool>, queue: OperationQueue)] = []
+                       invalidate: () throws -> Void, queue: OperationQueue)] = []
         var inputFiles: [(invalidate: NativeBoundObjCMethod<Void>, modificationDate: NativeBoundObjCMethod<AnyObject?>)] = []
         func addInputFile(_ filePath: AnyObject) throws {
             let path = runtime.object(filePath)
@@ -198,7 +198,14 @@ final class NativePreviewBuild {
             guard try unsafe valid.unsafeInvoke() else { continue }
             let edited = try native.resolveAndWait(.objc(.method("containerEditedByUserInUI", as: (() -> Bool).self)))
             guard try unsafe !edited.unsafeInvoke() else { continue }
-            let invalidate = try native.resolveAndWait(.objc(.method("_invalidateContainerToDiscardInMemoryRepresentation:", as: ((Bool) -> Void).self)))
+            let invalidate: () throws -> Void
+            if container.responds(to: NSSelectorFromString("_invalidateContainerToDiscardInMemoryRepresentation:")) {
+                let method = try native.resolveAndWait(.objc(.method("_invalidateContainerToDiscardInMemoryRepresentation:", as: ((Bool) -> Void).self)))
+                invalidate = { try unsafe method.unsafeInvoke(true) }
+            } else {
+                let method = try native.resolveAndWait(.objc(.method("_invalidateContainerToDiscardInMemoryRepresentation", as: (() -> Void).self)))
+                invalidate = { try unsafe method.unsafeInvoke() }
+            }
             guard let graph = try object(container, selector: "objectGraph"),
                   let queue = try object(graph, selector: "changeQueue") as? OperationQueue else {
                 throw NativeRuntimeError.unsupportedContract("A native project container has no model change queue")
@@ -245,7 +252,7 @@ final class NativePreviewBuild {
                 if seen.insert(ObjectIdentifier(update.queue)).inserted { queues.append(update.queue) }
                 // Invalidating one container can also replace another referenced container.
                 guard try unsafe update.valid.unsafeInvoke(), try unsafe !update.edited.unsafeInvoke() else { continue }
-                try unsafe update.invalidate.unsafeInvoke(true)
+                try update.invalidate()
             }
             for queue in queues {
                 await withCheckedContinuation { continuation in
@@ -1597,7 +1604,12 @@ extension NativePreviewBuild {
                     "(extension in PreviewsXcode):__C.IDEWorkspace.sceneHost(isNewProjectFromTemplate: Swift.Bool) -> PreviewsXcode.XcodeWorkspaceSceneHost",
                     as: ((Bool) -> AnyObject).self)))
         let host = try unsafe createHost.unsafeInvoke(false)
-        let resolutionType = try await runtime.resolve(.swift(.type("PreviewsXcode.RenderPreviewAction.DestinationResolution")), in: previews)
+        let resolutionType: NativeSwiftType
+        do {
+            resolutionType = try await runtime.resolve(.swift(.type("PreviewsXcode.RenderPreviewAction.DestinationResolution")), in: previews)
+        } catch is ABIResolutionError {
+            return try await currentDestinationResolution(host: host, input: input)
+        }
         let actionType = try await runtime.resolve(.swift(.type("PreviewsXcode.RenderPreviewAction")), in: previews)
         let resolve = try await actionType.resolve(
             .swift(
@@ -1624,6 +1636,97 @@ extension NativePreviewBuild {
         }
         return DestinationResolution(host: host, preferences: preferences,
             available: availableJSON == .null ? nil : availableJSON, errors: errors)
+    }
+
+    private func currentDestinationResolution(host: AnyObject, input: NativeSwiftValue) async throws -> DestinationResolution {
+        let image = ImageSelector.path(installation.framework("PreviewsXcode", in: "PlugIns"))
+        let resolver = try await runtime.resolve(.swift(.type("PreviewsXcode.RenderPreviewAction.RenderDestinationResolver")), in: image)
+        let recipe = try await runtime.resolve(.swift(.type("PreviewsPipeline.AnyRunDestinationRecipe")),
+            in: .path(installation.framework("PreviewsPipeline", in: "SharedFrameworks")))
+        let array = try await runtime.resolve(.swift(.type("Swift.Array", genericArguments: [.type(recipe)])))
+        // The catalog wrappers have only optimizer-specialized entry points.
+        // Keep their native feature gate and use the scene host's callable API.
+        let offersChoice = UserDefaults.standard.object(forKey: "UVRenderPreviewOffersRenderDestinationChoice") as? Bool ?? true
+        guard offersChoice else {
+            let preferences = try await runtime.resolve(.swift(.type("PreviewsPipeline.DestinationPreferences")),
+                in: .path(installation.framework("PreviewsPipeline", in: "SharedFrameworks")))
+            let empty = try await preferences.resolve(.swift(.staticGetter("empty",
+                as: (() -> NativeSwiftValue).self, valueABIs: [preferences: .opaque(named: preferences.name)])))
+            return DestinationResolution(host: host, preferences: try unsafe empty.unsafeInvoke(), available: nil, errors: [])
+        }
+        let timeoutType = try await runtime.resolve(.swift(.type("PreviewsFoundationHost.Timeout")),
+            in: .path(installation.framework("PreviewsFoundationHost", in: "SharedFrameworks")))
+        let makeTimeout = try await timeoutType.resolve(.swift(.staticMethod("seconds(_:)",
+            as: ((Double) -> NativeSwiftValue).self, valueABIs: [timeoutType: .opaque(named: timeoutType.name)])))
+        let timeout = try unsafe makeTimeout.unsafeInvoke(10)
+        let catalog = try await runtime.object(host).resolve(.swift(.method(
+            "(awaitAvailableRunDestinations in _8779CD8E26326606F5A569AC41E16EDA)(timeout: PreviewsFoundationHost.Timeout) async -> [PreviewsPipeline.AnyRunDestinationRecipe]",
+            as: (@concurrent (NativeSwiftValue) async -> NativeSwiftValue).self,
+            valueABIs: [timeoutType: .opaque(named: timeoutType.name), array: .pointer])))
+        let nativeCatalog = try unsafe await catalog.unsafeInvoke(timeout)
+        let prepared = try await prepareDestinationProperties()
+        let platform = try await runtime.resolve(.swift(.type("PreviewsPipeline.Platform")),
+            in: .path(installation.framework("PreviewsPipeline", in: "SharedFrameworks")))
+        let canonicalIdentifier = try await platform.resolve(.swift(.getter("canonicalIdentifier",
+            as: (() -> String).self, receiverABI: .opaque(named: platform.name))))
+        func catalogValues<Recipes: Collection>(_ values: Recipes) async throws -> (NativeSwiftValue, JSONValue) {
+            var filtered: [Recipes.Element] = []
+            var external: [JSONValue] = []
+            for value in values {
+                let native = try await nativePreviewOwnedValue(value)
+                let properties = try unsafe prepared.properties.unsafeInvoke(on: native)
+                let nativePlatform = try unsafe prepared.platform.unsafeInvoke(on: properties)
+                let identifier = try unsafe canonicalIdentifier.unsafeInvoke(on: nativePlatform)
+                guard !["xros", "xrsimulator"].contains(identifier) else { continue }
+                filtered.append(value)
+                let nativeIdentifier = try unsafe prepared.identifier.unsafeInvoke(on: properties)
+                let version = try unsafe prepared.version.unsafeInvoke(on: properties)
+                var item: [String: JSONValue] = try unsafe [
+                    "identifier": .string(prepared.identifierString.unsafeInvoke(on: nativeIdentifier)),
+                    "platformName": .string(prepared.platformName.unsafeInvoke(on: nativePlatform)),
+                    "systemVersion": .string(prepared.versionString.unsafeInvoke(on: version)),
+                ]
+                if let model = try unsafe prepared.model.unsafeInvoke(on: properties)
+                    ?? prepared.name.unsafeInvoke(on: properties) ?? prepared.specifier.unsafeInvoke(on: properties) {
+                    item["deviceModelName"] = .string(model)
+                }
+                external.append(.object(item))
+            }
+            return (try await nativePreviewOwnedValue(filtered), .array(external))
+        }
+        let values = try nativeCatalog.withCopy { value in
+            guard let values = value as? any Collection else {
+                throw NativeRuntimeError.unsupportedContract("Native preview destination catalog is not a collection")
+            }
+            return values
+        }
+        let (recipes, available) = try await _openExistential(values, do: catalogValues)
+        let preferred = try input.withCopy { value in
+            guard let field = Mirror(reflecting: value).children.first(where: { $0.label == "preferredRenderDestination" }) else {
+                throw NativeRuntimeError.unsupportedContract("Native preview input has no render destination selection")
+            }
+            return field.value
+        }
+        let selection = try await _openExistential(preferred, do: nativePreviewOwnedValue)
+        let resolutionType = try await runtime.resolve(.swift(.type("PreviewsXcode.RenderPreviewAction.RenderDestinationResolver.Resolution")), in: image)
+        let resolve = try await resolver.resolve(.swift(.staticMethod("resolve(selection:catalog:)",
+            as: ((NativeSwiftValue, NativeSwiftValue) -> NativeSwiftValue).self,
+            valueABIs: [selection.type: .opaque(named: selection.type.name), recipes.type: .pointer,
+                        resolutionType: .opaque(named: resolutionType.name)])))
+        let resolution = try unsafe resolve.unsafeInvoke(selection, recipes)
+        let fields = try resolution.withCopy { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap {
+            field in field.label.map { ($0, field.value) }
+        }) }
+        guard let rawPreferences = fields["selection"] else {
+            throw NativeRuntimeError.unsupportedContract("Native preview destination resolution has no preferences")
+        }
+        let preferences = try await _openExistential(rawPreferences, do: nativePreviewOwnedValue)
+        guard let nativeErrors = fields["errors"] as? any Encodable else {
+            throw NativeRuntimeError.unsupportedContract("Native preview destination resolution has no encodable errors")
+        }
+        struct Message: Decodable { var message: String }
+        let errors = try JSONDecoder().decode([Message].self, from: JSONEncoder().encode(nativeErrors)).map(\.message)
+        return DestinationResolution(host: host, preferences: preferences, available: available, errors: errors)
     }
 
     func destinationResolution(_ lhs: DestinationResolution, matches rhs: DestinationResolution) async throws -> Bool {
@@ -2078,7 +2181,7 @@ extension NativePreviewBuild {
         let optionalType = try await runtime.resolve(.swift(.type("Swift.Optional", genericArguments: [.type(plan.packRecordType)])))
         let lookup = try await setType.resolve(
             .swift(
-                .method(
+                .getter(
                     "PreviewsFoundationHost.OrderedIdentifiedSet.subscript.getter : (A.ID) -> A?", as: ((NativeSwiftValue) -> NativeSwiftValue).self,
                     valueABIs: [pack.type: .opaque(named: pack.type.name), optionalType: .opaque(named: optionalType.name)],
                     receiverABI: .opaque(named: setType.name))))

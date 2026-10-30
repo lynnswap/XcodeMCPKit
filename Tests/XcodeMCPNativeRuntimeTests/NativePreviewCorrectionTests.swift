@@ -1,10 +1,69 @@
 import Foundation
 import Testing
+import XcodeMCPWire
 @testable import XcodeMCPNativeRuntime
 
 @Suite
 @MainActor
 struct NativePreviewCorrectionTests {
+    @Test func previewResultMatchesTheAdvertisedOutputContract() {
+        let result: JSONValue = .object([
+            "previewSnapshotPath": .string("/preview.png"),
+            "displayName": .string("Preview"), "errors": .array([]),
+            "supportedLocalizations": .array([.string("en")]),
+            "availableRenderDestinations": .array([.object(["identifier": .string("mac")])]),
+            "supportedCanvasControlOverrides": .object(["groupItems": .array([])]),
+            "supportedPreviewVariantOverrides": .object(["Color Scheme": .array([.string("Dark")])]),
+        ])
+        let current: JSONValue = .object(["properties": .object(["snapshot": .object([:])])])
+        #expect(NativePreviewCorrection.formatResult(result, outputSchema: current) == .object([
+            "snapshot": .object(["path": .string("/preview.png")]),
+            "displayName": .string("Preview"), "errors": .array([]),
+            "supportedOverrides": .object([
+                "localizations": .array([.string("en")]),
+                "renderDestinations": .array([.object(["identifier": .string("mac")])]),
+                "canvasControls": .object(["groupItems": .array([])]),
+                "previewVariants": .object(["Color Scheme": .array([.string("Dark")])]),
+            ]),
+        ]))
+        #expect(NativePreviewCorrection.formatResult(result, outputSchema: .object([
+            "properties": .object(["previewSnapshotPath": .object([:])]),
+        ])) == result)
+        #expect(NativePreviewCorrection.formatResult(result, outputSchema: nil) == result)
+    }
+
+    @Test func decodedDefaultsAndExplicitValuesDoNotRequireNativeGetters() throws {
+        struct StoredDefault<Value> { var wrappedValue: Value }
+        let fields: [String: Any] = [
+            "_previewDefinitionIndexInFile": StoredDefault(wrappedValue: 7),
+            "_previewVariantOverrides": StoredDefault(wrappedValue: ["Orientation": "Landscape"]),
+            "_timeout": StoredDefault(wrappedValue: 123),
+        ]
+        let index: Int = try NativePreviewCorrection.decodedProperty("previewDefinitionIndexInFile", in: fields)
+        let variants: [String: String] = try NativePreviewCorrection.decodedProperty("previewVariantOverrides", in: fields)
+        let timeout: Int = try NativePreviewCorrection.decodedProperty("timeout", in: fields)
+        #expect(index == 7)
+        #expect(variants == ["Orientation": "Landscape"])
+        #expect(timeout == 123)
+        let defaults: [String: Any] = ["_index": StoredDefault(wrappedValue: 0),
+                                       "_variants": StoredDefault(wrappedValue: [String: String]())]
+        let first: Int = try NativePreviewCorrection.decodedProperty("index", in: defaults)
+        let empty: [String: String] = try NativePreviewCorrection.decodedProperty("variants", in: defaults)
+        #expect(first == 0)
+        #expect(empty.isEmpty)
+    }
+
+    @Test func unsupportedDecodedStorageFallsBackInsteadOfGuessingDefaults() throws {
+        #expect(throws: NativeRuntimeError.self) {
+            let _: Int = try NativePreviewCorrection.decodedProperty("timeout", in: [:])
+        }
+        #expect(throws: NativeRuntimeError.self) {
+            let _: Int = try NativePreviewCorrection.decodedProperty("timeout", in: ["_timeout": "invalid"])
+        }
+        let plain: Int = try NativePreviewCorrection.decodedProperty("timeout", in: ["timeout": 80])
+        #expect(plain == 80)
+    }
+
     @Test(arguments: [NativePreviewPlatform.iOS, .catalyst])
     func sharedSourceUsesTheSelectedDestinationPlatform(platform: NativePreviewPlatform) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

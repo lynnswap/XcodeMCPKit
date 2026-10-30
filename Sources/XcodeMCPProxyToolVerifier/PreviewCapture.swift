@@ -197,7 +197,7 @@ func previewStructuredContent(_ raw: MCPJSONValue) -> [String: MCPJSONValue]? {
 }
 
 func savePreviewSnapshot(raw: MCPJSONValue, metadata: [String: MCPJSONValue], to output: URL) throws {
-    if let path = metadata["previewSnapshotPath"]?.stringValue {
+    if let path = metadata["snapshot"]?["path"]?.stringValue ?? metadata["previewSnapshotPath"]?.stringValue {
         try FileManager.default.copyItem(at: URL(filePath: path), to: output)
         return
     }
