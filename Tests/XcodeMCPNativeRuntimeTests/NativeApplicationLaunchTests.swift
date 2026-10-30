@@ -6,6 +6,42 @@ import XcodeMCPWire
 
 @Suite
 struct NativeApplicationLaunchTests {
+    @Test(arguments: [false, true])
+    func onlyAnActiveTestRequestResumesItsStoppedHost(cancelled: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let device = UUID()
+        let directory = root.appendingPathComponent("\(device)/data/Containers/Bundle/Application/\(UUID())/Fixture.app")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("Fixture")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: executable)
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["60"]
+        defer {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            try? FileManager.default.removeItem(at: root)
+        }
+        try process.run()
+        #expect(kill(process.processIdentifier, SIGSTOP) == 0)
+        let launch = NativeApplicationLaunch(processIdentifier: process.processIdentifier, simulatorIdentifier: device)
+        for _ in 0..<100 where launch.captureSuspendedProcess() == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        _ = try #require(launch.captureSuspendedProcess())
+        let scope = NativeExecutionOperations.Scope()
+        try scope.resumeTestHostIfNeeded(launch)
+        #expect(launch.captureSuspendedProcess() != nil)
+        scope.prepareTestHosts()
+        if cancelled { scope.cancel() }
+        try scope.resumeTestHostIfNeeded(launch)
+        if !cancelled {
+            for _ in 0..<100 where launch.captureSuspendedProcess() != nil {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        #expect((launch.captureSuspendedProcess() != nil) == cancelled)
+    }
+
     @Test(arguments: [nil, "Xcode.DebuggerFoundation.Debugger.LLDB"] as [String?])
     func cancellationReapsOnlyTheOwnedSuspendedProcess(debuggerIdentifier: String?) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -8,22 +8,36 @@ final class NativeExecutionOperations {
 
     private let callback: Callback
     private let hook: NativeObjCMethodHook
+    private let launchSessionHook: NativeObjCMethodHook
     private let simulatorLaunchCorrection: NativeSimulatorLaunchCorrection
 
     @MainActor init() throws {
-        simulatorLaunchCorrection = try NativeSimulatorLaunchCorrection()
+        let ownership = NativeLaunchOwnership()
         guard let trackerClass = NSClassFromString("IDEExecutionOperationTracker") else {
             throw NativeRuntimeError.unsupportedContract("Xcode's execution-operation tracker is unavailable")
         }
         let runtime = ABIRuntime.shared
         let callback = Callback(operation: try runtime.resolveAndWait(.objc(.method("operation", as: (() -> AnyObject?).self)), on: trackerClass))
         self.callback = callback
+        simulatorLaunchCorrection = try NativeSimulatorLaunchCorrection(ownership: ownership,
+            onFailure: { callback.recordFailure($0) })
+        launchSessionHook = try unsafe runtime.hookCalls(
+            .objc(.method("setLaunchSession:", as: ((AnyObject?) -> Void).self)), on: trackerClass,
+            onFailure: { callback.recordFailure($0) }
+        ) { call, session in
+            let tracker = try call.receiver
+            if let session, let scope = Self.scope ?? ownership.scope(for: tracker) {
+                ownership.register(session, scope: scope)
+            }
+            try call.proceed(session)
+        }
         hook = try unsafe runtime.hookInitializer(
             .objc(.method("initWithOperation:serviceTier:", as: ((AnyObject, Int32) -> AnyObject?).self)), on: trackerClass,
             onFailure: { callback.recordFailure($0) },
             after: { tracker in
                 guard let tracker else { return }
                 guard let scope = Self.scope else { return }
+                ownership.register(tracker, scope: scope)
                 if let operation = try unsafe callback.operation.unsafeInvoke(on: tracker) as? Operation {
                     let tracker = NativeExecutionTracker(tracker)
                     scope.register(operation, launch: { try tracker.launch() }, cancel: { try tracker.cancel() })
@@ -52,14 +66,29 @@ final class NativeExecutionOperations {
             var failure: (any Error)?
             var cancellations: [Task<Void, Never>] = []
             var launches: [NativeApplicationLaunch.CapturedProcess] = []
-            var launchHooks: [NativeObjCMethodHook] = []
             var launchesFinished = false
+            var resumesTestHosts = false
         }
 
         private let state = Mutex(State())
 
-        func retainLaunchHook(_ hook: NativeObjCMethodHook) {
-            state.withLock { $0.launchHooks.append(hook) }
+        var launchesFinished: Bool { state.withLock { $0.launchesFinished } }
+
+        func prepareTestHosts() {
+            state.withLock { $0.resumesTestHosts = true }
+        }
+
+        func resumeTestHostIfNeeded(_ launch: NativeApplicationLaunch) throws {
+            do {
+                try state.withLock {
+                    guard $0.resumesTestHosts, !$0.cancelled, !$0.launchesFinished else { return }
+                    try launch.resumeIfStopped()
+                }
+            } catch {
+                recordFailure(error)
+                cancel()
+                throw error
+            }
         }
 
         func recordLaunch(_ launch: NativeApplicationLaunch) {
@@ -153,15 +182,12 @@ final class NativeExecutionOperations {
                 for operation in continuing.values { await Self.waitForCompletion(of: operation) }
             }
             await finishCancellation()
-            let (launches, hooks) = state.withLock { state in
+            let launches = state.withLock { state in
                 let launches = state.cancelled ? state.launches : []
-                let hooks = state.launchHooks
                 state.launches = []
-                state.launchHooks = []
                 state.launchesFinished = true
-                return (launches, hooks)
+                return launches
             }
-            for hook in hooks { hook.invalidate() }
             if !launches.isEmpty {
                 // Cleanup must finish even though the requesting Task is cancelled.
                 let cleanup = Task { @concurrent in

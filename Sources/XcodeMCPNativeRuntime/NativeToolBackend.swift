@@ -163,6 +163,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
         if ["BuildProject", "RunProject", "RunAllTests", "RunSomeTests"].contains(name), executionOperations == nil {
             executionOperations = try NativeExecutionOperations()
         }
+        if ["RunAllTests", "RunSomeTests"].contains(name) {
+            context.executionScope.prepareTestHosts()
+        }
         try await NativeErrorPresentation.$capture.withValue(nil) {
             do {
                 try await workspaces.closeRemovedWorkspaces(request: context.artifactsDirectory)
