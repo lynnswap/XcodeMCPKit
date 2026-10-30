@@ -122,7 +122,8 @@ struct NativePreviewBuildTests {
         #expect(try !afterRemoval.matchesCurrentFiles())
     }
 
-    @Test func projectSynchronizationSkipsSourceChangesButRefreshesSavedProjects() async throws {
+    @Test(arguments: [false, true])
+    func projectSynchronizationSkipsSourceChangesButRefreshesSavedProjects(legacy: Bool) async throws {
         let (builder, root) = try sourceSelectionBuilder()
         defer { try? FileManager.default.removeItem(at: root) }
         let projectFile = root.appendingPathComponent("Fixture.xcodeproj/project.pbxproj")
@@ -131,7 +132,9 @@ struct NativePreviewBuildTests {
         try FileManager.default.createDirectory(at: projectFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("first project".utf8).write(to: projectFile)
         try Data("first view".utf8).write(to: source)
-        let container = PreviewBuildProjectContainer(dataFiles: [projectFile, alternate].map(PreviewBuildFilePath.init(url:)))
+        let files = [projectFile, alternate].map(PreviewBuildFilePath.init(url:))
+        let container: PreviewBuildProjectContainer = legacy
+            ? LegacyPreviewBuildProjectContainer(dataFiles: files) : PreviewBuildProjectContainer(dataFiles: files)
         let workspace = PreviewBuildWorkspace(url: root.appendingPathComponent("Fixture.xcworkspace"), containers: [container])
 
         try await builder.synchronizeProjectContainers(in: workspace)
@@ -324,7 +327,7 @@ private final class PreviewBuildWorkspace: NSObject {
     func cancelOngoingBuild(_ completion: (@convention(block) () -> Void)?) -> Bool { false }
 }
 
-private final class PreviewBuildProjectContainer: NSObject {
+private class PreviewBuildProjectContainer: NSObject {
     @objc let pbxProject = PreviewBuildProject()
     @objc let isValid = true
     @objc let containerEditedByUserInUI = false
@@ -333,8 +336,13 @@ private final class PreviewBuildProjectContainer: NSObject {
     private let dataFiles: NSArray
     init(dataFiles: [PreviewBuildFilePath]) { self.dataFiles = dataFiles as NSArray }
     @objc func _containerDataFilePaths() -> NSArray { dataFiles }
+    @objc(_invalidateContainerToDiscardInMemoryRepresentation)
+    func invalidateContainer() { synchronizationCount += 1 }
+}
+
+private final class LegacyPreviewBuildProjectContainer: PreviewBuildProjectContainer {
     @objc(_invalidateContainerToDiscardInMemoryRepresentation:)
-    func invalidateContainer(_ discard: Bool) { synchronizationCount += 1 }
+    func invalidateContainer(_ discard: Bool) { invalidateContainer() }
 }
 
 private final class PreviewBuildObjectGraph: NSObject {

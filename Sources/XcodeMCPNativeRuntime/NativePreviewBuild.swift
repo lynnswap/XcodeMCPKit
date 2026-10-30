@@ -182,7 +182,7 @@ final class NativePreviewBuild {
             throw NativeRuntimeError.unsupportedContract("The native workspace has no referenced containers")
         }
         var updates: [(valid: NativeBoundObjCMethod<Bool>, edited: NativeBoundObjCMethod<Bool>,
-                       invalidate: NativeBoundObjCMethod<Void, Bool>, queue: OperationQueue)] = []
+                       invalidate: () throws -> Void, queue: OperationQueue)] = []
         var inputFiles: [(invalidate: NativeBoundObjCMethod<Void>, modificationDate: NativeBoundObjCMethod<AnyObject?>)] = []
         func addInputFile(_ filePath: AnyObject) throws {
             let path = runtime.object(filePath)
@@ -198,7 +198,14 @@ final class NativePreviewBuild {
             guard try unsafe valid.unsafeInvoke() else { continue }
             let edited = try native.resolveAndWait(.objc(.method("containerEditedByUserInUI", as: (() -> Bool).self)))
             guard try unsafe !edited.unsafeInvoke() else { continue }
-            let invalidate = try native.resolveAndWait(.objc(.method("_invalidateContainerToDiscardInMemoryRepresentation:", as: ((Bool) -> Void).self)))
+            let invalidate: () throws -> Void
+            if container.responds(to: NSSelectorFromString("_invalidateContainerToDiscardInMemoryRepresentation:")) {
+                let method = try native.resolveAndWait(.objc(.method("_invalidateContainerToDiscardInMemoryRepresentation:", as: ((Bool) -> Void).self)))
+                invalidate = { try unsafe method.unsafeInvoke(true) }
+            } else {
+                let method = try native.resolveAndWait(.objc(.method("_invalidateContainerToDiscardInMemoryRepresentation", as: (() -> Void).self)))
+                invalidate = { try unsafe method.unsafeInvoke() }
+            }
             guard let graph = try object(container, selector: "objectGraph"),
                   let queue = try object(graph, selector: "changeQueue") as? OperationQueue else {
                 throw NativeRuntimeError.unsupportedContract("A native project container has no model change queue")
@@ -245,7 +252,7 @@ final class NativePreviewBuild {
                 if seen.insert(ObjectIdentifier(update.queue)).inserted { queues.append(update.queue) }
                 // Invalidating one container can also replace another referenced container.
                 guard try unsafe update.valid.unsafeInvoke(), try unsafe !update.edited.unsafeInvoke() else { continue }
-                try unsafe update.invalidate.unsafeInvoke(true)
+                try update.invalidate()
             }
             for queue in queues {
                 await withCheckedContinuation { continuation in

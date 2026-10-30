@@ -1300,6 +1300,19 @@ final class NativePreviewCorrection {
     }
 
     private func sourceURL(_ path: String, workspace: AnyObject) async throws -> URL {
+        do {
+            let action = try await ABIRuntime.shared.resolve(
+                .swift(.type("PreviewsXcode.AgenticAction")), in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
+            let resolve = try await action.resolve(.swift(.staticMethod(
+                "projectRelativeSourceFileURL(at: Swift.String, in: __C.IDEWorkspace) async throws -> Foundation.URL",
+                as: (@concurrent (String, AnyObject) async throws -> PreviewURL).self)))
+            return try unsafe await resolve.unsafeInvoke(path, workspace).value
+        } catch is ABIResolutionError {
+            return try await legacySourceURL(path, workspace: workspace)
+        }
+    }
+
+    private func legacySourceURL(_ path: String, workspace: AnyObject) async throws -> URL {
         let type = try await ABIRuntime.shared.resolve(
             .swift(.type("PreviewsXcode.RenderPreviewAction")), in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
         let resolve = try await type.resolve(
@@ -1396,12 +1409,18 @@ final class NativePreviewCorrection {
             .swift(.type("PreviewsXcode.RenderPreviewAction")), in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
         let unit = try await runtime.resolve(
             .swift(.type("PreviewsPipeline.PreviewTranslationUnit")), in: .path(installation.framework("PreviewsPipeline", in: "SharedFrameworks")))
-        let parse = try await action.resolve(
-            .swift(
-                .staticMethod(
-                    "(parseTranslationUnit in _FEA7E13ECD12FBA8521281D73C9764CE)(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.(RenderPreviewType in _FEA7E13ECD12FBA8521281D73C9764CE)])",
-                    as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])))
-        let parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
+        let parsed: NativeSwiftValue
+        do {
+            let parse = try await action.resolve(.swift(.staticMethod(
+                "parseTranslationUnit(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.RenderPreviewType])",
+                as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])))
+            parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
+        } catch is ABIResolutionError {
+            let parse = try await action.resolve(.swift(.staticMethod(
+                "(parseTranslationUnit in _FEA7E13ECD12FBA8521281D73C9764CE)(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.(RenderPreviewType in _FEA7E13ECD12FBA8521281D73C9764CE)])",
+                as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])))
+            parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
+        }
         let translationUnit = try parsed.copyTupleElement(at: 0)
         let array = try parsed.copyTupleElement(at: 1)
         let previews = try array.withCopy { value -> [Any] in
@@ -2439,18 +2458,9 @@ final class NativePreviewCorrection {
               let path = fields["sourceFilePath"] as? String else {
             throw NativeRuntimeError.unsupportedContract("Native preview input fields have changed")
         }
-        // These native properties use Default wrappers. Call their getters so
-        // the action's decoded defaults are preserved without unwrapping storage.
-        let nativeType = try ABIRuntime.shared.resolveAndWait(
-            .swift(.type("PreviewsXcode.RenderPreviewAction.Input", as: type)), in: .path(installation.framework("PreviewsXcode", in: "PlugIns")))
-        let receiverABI = try NativeType.opaque(named: nativeType.name)
-        let indexGetter = try nativeType.resolveAndWait(.swift(.getter("previewDefinitionIndexInFile", as: (() -> Int).self, receiverABI: receiverABI)))
-        let variantsGetter = try nativeType.resolveAndWait(
-            .swift(.getter("previewVariantOverrides.getter : [Swift.String : Swift.String]", as: (() -> PreviewVariants).self, receiverABI: receiverABI)))
-        let timeoutGetter = try nativeType.resolveAndWait(.swift(.getter("timeout", as: (() -> Int).self, receiverABI: receiverABI)))
-        let index = try unsafe indexGetter.unsafeInvoke(on: value)
-        let variants = try unsafe variantsGetter.unsafeInvoke(on: value).value
-        let timeout = try unsafe timeoutGetter.unsafeInvoke(on: value)
+        let index: Int = try Self.decodedProperty("previewDefinitionIndexInFile", in: fields)
+        let variants: [String: String] = try Self.decodedProperty("previewVariantOverrides", in: fields)
+        let timeout: Int = try Self.decodedProperty("timeout", in: fields)
         let controls = fields["previewCanvasControlOverrides"].flatMap { Mirror(reflecting: $0).children.first?.value }
         let controlFields = controls.map { Dictionary(uniqueKeysWithValues: Mirror(reflecting: $0).children.compactMap { field in field.label.map { ($0, field.value) } }) } ?? [:]
         let options = Self.directOptions(variants: variants, controls: controlFields)
@@ -2463,6 +2473,17 @@ final class NativePreviewCorrection {
             displayVariants: options.displayVariants, activityViewStyle: options.activityViewStyle,
             activityViewContext: options.activityViewContext, activityToggleState: options.activityToggleState,
             requiresNativePipeline: options.requiresNativePipeline, variantOverrides: variants)
+    }
+
+    static func decodedProperty<Value>(_ name: String, in fields: [String: Any]) throws -> Value {
+        if let value = fields[name] as? Value { return value }
+        // Xcode can inline Default's accessors. Its decoded storage still contains
+        // the provider's defaults, which the request JSON need not include.
+        if let wrapper = fields["_" + name],
+           let value = Mirror(reflecting: wrapper).children.first(where: { $0.label == "wrappedValue" })?.value as? Value {
+            return value
+        }
+        throw NativeRuntimeError.unsupportedContract("Native preview input field '\(name)' has changed")
     }
 
     static func directOptions(variants: [String: String], controls: [String: Any]) ->
@@ -2508,9 +2529,4 @@ package func nativePreviewValue<T>(_ value: T) -> T { value }
 private struct PreviewURL: ABIBridgeSwiftValue {
     let value: URL
     static let swiftABIType: NativeType = try! .opaque(named: "Foundation.URL")
-}
-
-private struct PreviewVariants: ABIBridgeSwiftValue {
-    let value: [String: String]
-    static let swiftABIType: NativeType = .pointer
 }

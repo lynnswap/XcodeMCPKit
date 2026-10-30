@@ -5,6 +5,38 @@ import Testing
 @Suite
 @MainActor
 struct NativePreviewCorrectionTests {
+    @Test func decodedDefaultsAndExplicitValuesDoNotRequireNativeGetters() throws {
+        struct StoredDefault<Value> { var wrappedValue: Value }
+        let fields: [String: Any] = [
+            "_previewDefinitionIndexInFile": StoredDefault(wrappedValue: 7),
+            "_previewVariantOverrides": StoredDefault(wrappedValue: ["Orientation": "Landscape"]),
+            "_timeout": StoredDefault(wrappedValue: 123),
+        ]
+        let index: Int = try NativePreviewCorrection.decodedProperty("previewDefinitionIndexInFile", in: fields)
+        let variants: [String: String] = try NativePreviewCorrection.decodedProperty("previewVariantOverrides", in: fields)
+        let timeout: Int = try NativePreviewCorrection.decodedProperty("timeout", in: fields)
+        #expect(index == 7)
+        #expect(variants == ["Orientation": "Landscape"])
+        #expect(timeout == 123)
+        let defaults: [String: Any] = ["_index": StoredDefault(wrappedValue: 0),
+                                       "_variants": StoredDefault(wrappedValue: [String: String]())]
+        let first: Int = try NativePreviewCorrection.decodedProperty("index", in: defaults)
+        let empty: [String: String] = try NativePreviewCorrection.decodedProperty("variants", in: defaults)
+        #expect(first == 0)
+        #expect(empty.isEmpty)
+    }
+
+    @Test func unsupportedDecodedStorageFallsBackInsteadOfGuessingDefaults() throws {
+        #expect(throws: NativeRuntimeError.self) {
+            let _: Int = try NativePreviewCorrection.decodedProperty("timeout", in: [:])
+        }
+        #expect(throws: NativeRuntimeError.self) {
+            let _: Int = try NativePreviewCorrection.decodedProperty("timeout", in: ["_timeout": "invalid"])
+        }
+        let plain: Int = try NativePreviewCorrection.decodedProperty("timeout", in: ["timeout": 80])
+        #expect(plain == 80)
+    }
+
     @Test(arguments: [NativePreviewPlatform.iOS, .catalyst])
     func sharedSourceUsesTheSelectedDestinationPlatform(platform: NativePreviewPlatform) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
