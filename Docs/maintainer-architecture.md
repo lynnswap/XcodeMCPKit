@@ -38,6 +38,12 @@ bridge owns the relay consuming the original native stream. Cancelling the
 request-facing iterator cancels observed Operations and their native execution
 trackers, including child trackers. The request scope owns and drains the
 main-actor tasks that deliver native cancellation. It does not abandon the relay.
+Simulator launchers created by a request report their app PID through an
+object-scoped callback before the native launch session records it. The request
+captures the stopped process's executable and start time at that boundary.
+After a cancelled producer drains, cleanup terminates only that still-stopped,
+untraced simulator process and waits for it to exit before releasing the permit.
+Successful requests discard these captures when the app passes to the workspace.
 The next request for the same workspace waits for this boundary. An action
 with no cancellable Operation can take until natural completion; opaque native
 Swift Task handles are not joined by this mechanism.
