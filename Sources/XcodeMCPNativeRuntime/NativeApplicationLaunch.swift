@@ -27,12 +27,43 @@ struct NativeApplicationLaunch: Sendable {
         }
     }
 
+    func captureSuspendedProcess() -> CapturedProcess? {
+        guard processIdentifier > 0, debuggerIdentifier?.isEmpty != false, let simulatorIdentifier,
+              let process = Self.process(processIdentifier), process.canResume(in: simulatorIdentifier) else { return nil }
+        return CapturedProcess(launch: self, process: process)
+    }
+
+    struct CapturedProcess: Sendable {
+        var launch: NativeApplicationLaunch
+        var process: ProcessSnapshot
+
+        func terminateIfStillSuspended() async throws {
+            guard let captured = launch.captureSuspendedProcess(), captured.process == process else { return }
+            // A suspended app cannot handle SIGTERM. Its native launch session
+            // may already be invalidated without ever receiving the app's PID.
+            if kill(launch.processIdentifier, SIGKILL) != 0, errno != ESRCH {
+                throw NativeRuntimeError.invocation("Stopping the cancelled simulator app (pid \(launch.processIdentifier)) failed: errno \(errno)")
+            }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while let current = NativeApplicationLaunch.process(launch.processIdentifier), current.isSameProcess(as: process) {
+                guard ContinuousClock.now < deadline else {
+                    throw NativeRuntimeError.invocation("The cancelled simulator app (pid \(launch.processIdentifier)) did not terminate")
+                }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+    }
+
     struct ProcessSnapshot: Equatable, Sendable {
         var executable: String
         var startedSeconds: Int64
         var startedMicroseconds: Int32
         var stopped: Bool
         var traced: Bool
+
+        func isSameProcess(as other: Self) -> Bool {
+            executable == other.executable && startedSeconds == other.startedSeconds && startedMicroseconds == other.startedMicroseconds
+        }
 
         func canResume(in simulator: UUID) -> Bool {
             guard stopped, !traced else { return false }
@@ -54,6 +85,26 @@ struct NativeApplicationLaunch: Sendable {
             startedMicroseconds: info.kp_proc.p_starttime.tv_usec,
             stopped: Int32(info.kp_proc.p_stat) == SSTOP, traced: info.kp_proc.p_flag & P_TRACED != 0)
     }
+
+    @MainActor static func read(session: AnyObject, processIdentifier: Int32) throws -> Self {
+        let parameters = try object(session, "launchParameters")
+        let debugger = try parameters.flatMap { try object($0, "selectedDebuggerIdentifier") as? String }
+        var simulator: UUID?
+        if let destination = try object(session, "runDestination"),
+           let sdk = try object(destination, "targetSDK"),
+           let name = try object(sdk, "canonicalName") as? String,
+           ["iphonesimulator", "appletvsimulator", "watchsimulator", "xrsimulator"].contains(where: name.hasPrefix),
+           let device = try object(destination, "targetDevice"),
+           let identifier = try object(device, "identifier") as? String {
+            simulator = UUID(uuidString: identifier)
+        }
+        return Self(processIdentifier: processIdentifier, debuggerIdentifier: debugger, simulatorIdentifier: simulator)
+    }
+
+    @MainActor static func object(_ receiver: AnyObject, _ selector: String) throws -> AnyObject? {
+        let get = try ABIRuntime.shared.object(receiver).resolveAndWait(.objc(.method(selector, as: (() -> AnyObject?).self)))
+        return try unsafe get.unsafeInvoke()
+    }
 }
 
 // Xcode assigns the launch session after creating its tracker. Read it only
@@ -70,27 +121,10 @@ final class NativeExecutionTracker: @unchecked Sendable {
     }
 
     @MainActor func launch() throws -> NativeApplicationLaunch? {
-        guard let session = try Self.object(tracker, "launchSession") else { return nil }
+        guard let session = try NativeApplicationLaunch.object(tracker, "launchSession") else { return nil }
         let pid = try ABIRuntime.shared.object(session).resolveAndWait(.objc(.method("runnablePID", as: (() -> Int32).self)))
         let processIdentifier = try unsafe pid.unsafeInvoke()
         guard processIdentifier > 0 else { return nil }
-        let parameters = try Self.object(session, "launchParameters")
-        let debugger = try parameters.flatMap { try Self.object($0, "selectedDebuggerIdentifier") as? String }
-        var simulator: UUID?
-        if let destination = try Self.object(session, "runDestination"),
-           let sdk = try Self.object(destination, "targetSDK"),
-           let name = try Self.object(sdk, "canonicalName") as? String,
-           ["iphonesimulator", "appletvsimulator", "watchsimulator", "xrsimulator"].contains(where: name.hasPrefix),
-           let device = try Self.object(destination, "targetDevice"),
-           let identifier = try Self.object(device, "identifier") as? String {
-            simulator = UUID(uuidString: identifier)
-        }
-        return NativeApplicationLaunch(processIdentifier: processIdentifier,
-            debuggerIdentifier: debugger, simulatorIdentifier: simulator)
-    }
-
-    @MainActor private static func object(_ receiver: AnyObject, _ selector: String) throws -> AnyObject? {
-        let get = try ABIRuntime.shared.object(receiver).resolveAndWait(.objc(.method(selector, as: (() -> AnyObject?).self)))
-        return try unsafe get.unsafeInvoke()
+        return try NativeApplicationLaunch.read(session: session, processIdentifier: processIdentifier)
     }
 }
