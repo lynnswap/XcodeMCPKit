@@ -24,7 +24,7 @@ final class NativeExecutionOperations {
                 guard let scope = Self.scope else { return }
                 if let operation = try unsafe callback.operation.unsafeInvoke(on: tracker) as? Operation {
                     let tracker = NativeExecutionTracker(tracker)
-                    scope.register(operation, launch: { try tracker.launch() })
+                    scope.register(operation, launch: { try tracker.launch() }, cancel: { try tracker.cancel() })
                 } else {
                     scope.recordFailure(NativeRuntimeError.unsupportedContract("Xcode's execution tracker does not contain an Operation"))
                 }
@@ -41,36 +41,64 @@ final class NativeExecutionOperations {
         private struct TrackedOperation: Sendable {
             var operation: Operation
             var launch: @MainActor @Sendable () throws -> NativeApplicationLaunch?
+            var cancel: (@MainActor @Sendable () throws -> Void)?
         }
 
         private struct State {
             var operations: [ObjectIdentifier: TrackedOperation] = [:]
             var cancelled = false
             var failure: (any Error)?
+            var cancellations: [Task<Void, Never>] = []
         }
 
         private let state = Mutex(State())
 
-        func register(_ operation: Operation, launch: @escaping @MainActor @Sendable () throws -> NativeApplicationLaunch? = { nil }) {
+        func register(_ operation: Operation, launch: @escaping @MainActor @Sendable () throws -> NativeApplicationLaunch? = { nil },
+                      cancel: (@MainActor @Sendable () throws -> Void)? = nil) {
+            let tracked = TrackedOperation(operation: operation, launch: launch, cancel: cancel)
             let cancelled = state.withLock { state in
-                state.operations[ObjectIdentifier(operation)] = TrackedOperation(operation: operation, launch: launch)
+                state.operations[ObjectIdentifier(operation)] = tracked
+                if state.cancelled { enqueueCancellation(tracked, in: &state) }
                 return state.cancelled
             }
             if cancelled { operation.cancel() }
         }
 
         func cancel() {
-            let operations = state.withLock { state -> [Operation] in
+            let operations = state.withLock { state -> [TrackedOperation] in
                 guard !state.cancelled else { return [] }
                 state.cancelled = true
-                return state.operations.values.map(\.operation)
+                for tracked in state.operations.values { enqueueCancellation(tracked, in: &state) }
+                return Array(state.operations.values)
             }
-            for operation in operations { operation.cancel() }
+            for tracked in operations { tracked.operation.cancel() }
+        }
+
+        private func enqueueCancellation(_ tracked: TrackedOperation, in state: inout State) {
+            guard !tracked.operation.isFinished, let cancel = tracked.cancel else { return }
+            // The tracker also cancels Xcode's child trackers. Cancelling only
+            // its Foundation Operation leaves the native producer waiting.
+            let task = Task { @MainActor in
+                do { try cancel() }
+                catch { recordFailure(error) }
+            }
+            state.cancellations.append(task)
+        }
+
+        nonisolated(nonsending) func finishCancellation() async {
+            var count = 0
+            while true {
+                let pending = state.withLock { Array($0.cancellations.dropFirst(count)) }
+                guard !pending.isEmpty else { return }
+                for task in pending { await task.value }
+                count += pending.count
+            }
         }
 
         // Joining the observed operations does not expose or join private Swift
         // producer Tasks retained inside a native AsyncStream.
         nonisolated(nonsending) func finish(continuingLaunchPID: Int32? = nil) async throws {
+            await finishCancellation()
             var finished: Set<ObjectIdentifier> = []
             var continuing: [ObjectIdentifier: Operation] = [:]
             while true {
@@ -110,6 +138,7 @@ final class NativeExecutionOperations {
             if cancelled {
                 for operation in continuing.values { await Self.waitForCompletion(of: operation) }
             }
+            await finishCancellation()
             try checkFailure()
         }
 

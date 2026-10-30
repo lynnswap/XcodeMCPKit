@@ -35,8 +35,10 @@ catalog cache belongs to one generation and is discarded on a catalog change.
 A headless request holds its workspace execution permit through preparation,
 native stream drain, observed Operation completion, and cleanup. The action
 bridge owns the relay consuming the original native stream. Cancelling the
-request-facing iterator signals observed Operations but does not abandon that
-relay. The next request for the same workspace waits for this boundary. An action
+request-facing iterator cancels observed Operations and their native execution
+trackers, including child trackers. The request scope owns and drains the
+main-actor tasks that deliver native cancellation. It does not abandon the relay.
+The next request for the same workspace waits for this boundary. An action
 with no cancellable Operation can take until natural completion; opaque native
 Swift Task handles are not joined by this mechanism.
 

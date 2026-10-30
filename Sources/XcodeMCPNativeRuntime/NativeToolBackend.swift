@@ -335,6 +335,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
             }
         }
         if Task.isCancelled { context.executionScope.cancel() }
+        await context.executionScope.finishCancellation()
         await previewCorrection.finishExecution(request: context.artifactsDirectory)
         await crashCorrection.finishExecution(request: context.artifactsDirectory)
         await bridge.finishExecution(request: context.artifactsDirectory)
