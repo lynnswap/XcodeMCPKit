@@ -97,6 +97,9 @@ Native device, debugger, signing, and account permissions still apply.
 
 ## Collect crash reports
 
+To save a dated report for a selected period with a local button or CLI, see
+[Generate a crash report](crash-reports.md).
+
 Use `SyncCrashReports` to acquire data, then `ReadCrashChanges` to read saved
 changes in bounded pages. Sync never marks anything consumed. Read uses only
 the durable local cache and does not start Xcode or contact Apple.

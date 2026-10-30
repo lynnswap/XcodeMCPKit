@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>クラッシュレポート</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,sans-serif;background:light-dark(#f5f6f8,#16191e);color:light-dark(#182132,#e6ebf2)}
+body{max-width:860px;margin:48px auto;padding:0 22px;line-height:1.65}h1{font-size:1.8rem;letter-spacing:-.04em;margin-bottom:4px}h2{font-size:1.1rem;margin:0 0 12px}.muted{color:light-dark(#55647a,#a9b6ca)}.card{background:light-dark(#fff,#20252d);border:1px solid light-dark(#dce2eb,#394452);border-radius:14px;padding:22px;margin:22px 0}.actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center}input,select{box-sizing:border-box;max-width:100%;padding:9px;font:inherit;border:1px solid #8a96a8;border-radius:7px;background:transparent;color:inherit}label{display:block;margin-bottom:16px}label span{display:block;margin-bottom:5px}#output-root{width:100%}button,.link{border-radius:8px;padding:10px 16px;font:inherit}button{border:1px solid #426adc;background:#426adc;color:#fff;cursor:pointer}button.secondary{background:transparent;color:inherit;border-color:light-dark(#c4cfdd,#64748c)}button:disabled{opacity:.5;cursor:default}.link{color:light-dark(#244bb6,#a9c2ff);padding-left:0}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 ui-monospace,monospace}#error{color:light-dark(#ae2637,#ffa7b2)}#path{font-size:13px;overflow-wrap:anywhere}[hidden]{display:none!important}footer{font-size:13px;margin:36px 0}
+</style>
+<body>
+<header><h1>クラッシュレポート</h1><p class="muted">期間と保存先を選び、Apple の集計とサンプルログを日付別のフォルダに保存します。</p><p id="target" class="muted"></p></header>
+<section class="card"><label><span>取得期間</span><select id="period"><option value="last24Hours">Last Day</option><option value="last14Days">2週間</option><option value="last365Days">1年</option></select></label><label><span>保存先フォルダ</span><input id="output-root" type="text" autocomplete="off" aria-label="保存先フォルダ"></label><div class="actions"><button id="start">レポートを作成</button><button id="cancel" class="secondary" hidden>停止</button><span id="status" role="status" aria-live="polite">状態を確認しています…</span></div><p id="error" role="alert" hidden></p><pre id="progress" class="muted"></pre></section>
+<section id="result" class="card" hidden><h2>レポート</h2><p id="outcome"></p><p id="summary"></p><ul id="diagnostics"></ul><p id="path" class="muted"></p><div id="files" class="actions"></div></section>
+<footer class="muted">取得結果には、未取得の issue やサンプルの制約が含まれることがあります。レポートの取得状況を確認してから判断してください。</footer>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+let pending = false;
+let timer;
+let current;
+let actionError='';
+let settingsLoaded=false;
+const labels = {idle:'作成できます',running:'作成中',cancelling:'停止処理中',complete:'作成完了',partial:'一部を取得して作成',failed:'作成に失敗',cancelled:'停止しました'};
+const phases = {issues:'一覧を取得',logs:'サンプルログを取得',finished:'終了',waitingForOrganizer:'Xcode の待機',acquiring:'Xcode から取得',importing:'取得結果を保存',queued:'取得の開始待ち',recovering:'保存済みデータを確認'};
+const jobStates = {queued:'開始待ち',running:'取得中',cancelling:'停止処理中',completed:'取得完了',complete:'完了',partial:'一部を取得',failed:'取得に失敗',cancelled:'停止済み',interrupted:'中断しました'};
+function render(state){
+  current=state;
+  if(!settingsLoaded){$('period').value=state.timePeriod||'last24Hours';$('output-root').value=state.outputRoot||'';settingsLoaded=true;}
+  $('period').disabled=Boolean(state.running)||pending;
+  $('output-root').disabled=Boolean(state.running)||pending;
+  $('target').textContent=[state.bundleId,state.platform].filter(Boolean).join(' · ');
+  $('status').textContent=labels[state.status]||state.status;
+  $('start').disabled=Boolean(state.running)||pending;
+  $('start').textContent=state.result?'もう一度作成':'レポートを作成';
+  $('cancel').hidden=!state.running;
+  $('cancel').disabled=pending||state.status==='cancelling';
+  const p=state.progress||{};
+  const lines=[];
+  if(p.phase)lines.push('処理: '+(phases[p.phase]||'取得状況を確認'));
+  if(p.totalIssues!=null)lines.push('issue: '+(p.completedIssues||0)+' / '+p.totalIssues);
+  if(p.state)lines.push('取得状態: '+(jobStates[p.state]||'状態を確認中'));
+  $('progress').textContent=lines.join('\n');
+  $('error').hidden=!(state.lastError||actionError);
+  $('error').textContent=state.lastError||actionError;
+  const report=state.result;
+  $('result').hidden=!report;
+  if(report){
+    $('outcome').textContent=labels[state.status]||state.status;
+    const s=report.summary||{};
+    $('summary').textContent='一覧 '+(s.issueCount||0)+' issue · ログ '+(s.logCount||0)+' サンプル。期間内 '+(s.insideWindow||0)+' / 期間外 '+(s.outsideWindow||0)+' / 期間不明 '+(s.unknownWindow||0)+'。ログなし '+(s.issuesWithoutLogs||0)+' issue。';
+    $('diagnostics').replaceChildren();
+    for(const error of report.errors||[]){const li=document.createElement('li');li.textContent=(error.scope?error.scope+': ':'')+error.message;$('diagnostics').append(li);}
+    $('path').textContent=report.reportPath||report.outputDirectory||'';
+    $('files').replaceChildren();
+    for(const [name,url] of Object.entries(state.files||{})){
+      const a=document.createElement('a');a.className='link';a.textContent=name==='report.md'?'Markdown を開く':'JSON を開く';a.href=url;a.target='_blank';a.rel='noopener';$('files').append(a);
+    }
+  }
+}
+async function load(){
+  clearTimeout(timer);
+  try{const response=await fetch('/api/crash-report/status',{cache:'no-store'});if(!response.ok)throw new Error('状態を取得できませんでした。');render(await response.json());}
+  catch(error){$('error').hidden=false;$('error').textContent=error.message;}
+  timer=setTimeout(load,current&&current.running?1000:4000);
+}
+async function action(name){
+  if(pending)return;pending=true;actionError='';if(current)render(current);
+  try{const response=await fetch('/api/crash-report/'+name,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(name==='start'?{timePeriod:$('period').value,outputRoot:$('output-root').value}:{})});const state=await response.json();if(!response.ok)throw new Error(state.error||'操作に失敗しました。');render(state);}
+  catch(error){actionError=error.message;$('error').hidden=false;$('error').textContent=actionError;}
+  finally{pending=false;if(current){$('start').disabled=Boolean(current.running);$('cancel').disabled=current.status==='cancelling';$('period').disabled=Boolean(current.running);$('output-root').disabled=Boolean(current.running);}clearTimeout(timer);timer=setTimeout(load,1000);}
+}
+$('start').addEventListener('click',()=>action('start'));
+$('cancel').addEventListener('click',()=>action('cancel'));
+load();
+</script>
+</body>
+</html>

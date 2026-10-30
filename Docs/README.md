@@ -4,6 +4,7 @@
 
 - [Quick start](../README.md#quick-start): install, start, and connect an MCP client.
 - [Workspace and tool usage](usage.md): find a workspace, run tools, and manage sessions.
+- [Crash reports](crash-reports.md): save dated reports for a selected period with a local button or CLI.
 - [Configuration](configuration.md): Xcode selection, CLI options, and environment settings.
 - [Troubleshooting](troubleshooting.md): connection, workspace, helper, and timeout errors.
 - [Migration](migrations/native-backend.md): update older tool calls, Swift APIs, and startup scripts.
