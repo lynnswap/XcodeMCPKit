@@ -26,7 +26,9 @@ final class NativeExecutionOperations {
                 guard let scope = Self.scope else { return }
                 if let operation = try unsafe callback.operation.unsafeInvoke(on: tracker) as? Operation {
                     let tracker = NativeExecutionTracker(tracker)
-                    scope.register(operation, launch: { try tracker.launch() }, cancel: { try tracker.cancel() })
+                    scope.register(operation, launch: { try tracker.launch() },
+                        waitForLaunchReadiness: { try await tracker.waitForDebugger(processIdentifier: $0) },
+                        cancel: { try tracker.cancel() })
                 } else {
                     scope.recordFailure(NativeRuntimeError.unsupportedContract("Xcode's execution tracker does not contain an Operation"))
                 }
@@ -43,6 +45,7 @@ final class NativeExecutionOperations {
         private struct TrackedOperation: Sendable {
             var operation: Operation
             var launch: @MainActor @Sendable () throws -> NativeApplicationLaunch?
+            var waitForLaunchReadiness: @MainActor @Sendable (Int32) async throws -> Void
             var cancel: (@MainActor @Sendable () throws -> Void)?
         }
 
@@ -68,8 +71,9 @@ final class NativeExecutionOperations {
         }
 
         func register(_ operation: Operation, launch: @escaping @MainActor @Sendable () throws -> NativeApplicationLaunch? = { nil },
+                      waitForLaunchReadiness: @escaping @MainActor @Sendable (Int32) async throws -> Void = { _ in },
                       cancel: (@MainActor @Sendable () throws -> Void)? = nil) {
-            let tracked = TrackedOperation(operation: operation, launch: launch, cancel: cancel)
+            let tracked = TrackedOperation(operation: operation, launch: launch, waitForLaunchReadiness: waitForLaunchReadiness, cancel: cancel)
             let cancelled = state.withLock { state in
                 state.operations[ObjectIdentifier(operation)] = tracked
                 if state.cancelled { enqueueCancellation(tracked, in: &state) }
@@ -130,7 +134,10 @@ final class NativeExecutionOperations {
                     }
                     if let continuingLaunchPID, let launch, launch.processIdentifier == continuingLaunchPID,
                        !state.withLock({ $0.cancelled }) {
-                        do { try launch.resumeIfStopped() }
+                        do {
+                            try await tracked.waitForLaunchReadiness(continuingLaunchPID)
+                            try launch.resumeIfStopped()
+                        }
                         catch {
                             cancel()
                             recordFailure(error)

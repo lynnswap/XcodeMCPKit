@@ -5,6 +5,21 @@ import Testing
 
 @Suite(.timeLimit(.minutes(1)))
 struct NativeExecutionOperationsTests {
+    @Test @MainActor func aLaunchBecomesReadyBeforeOwnershipTransfersToTheWorkspace() async throws {
+        let scope = NativeExecutionOperations.Scope()
+        let operation = BlockOperation {}
+        var ready = false
+        scope.register(operation, launch: { NativeApplicationLaunch(processIdentifier: 42) }, waitForLaunchReadiness: { pid in
+            #expect(pid == 42)
+            await Task.yield()
+            ready = true
+        })
+        try await scope.finish(continuingLaunchPID: 42)
+        #expect(ready)
+        scope.cancel()
+        #expect(!operation.isCancelled)
+    }
+
     @Test @MainActor func completedTrackersDoNotReceiveLateNativeCancellation() async throws {
         let scope = NativeExecutionOperations.Scope()
         let cancelled = Mutex(false)

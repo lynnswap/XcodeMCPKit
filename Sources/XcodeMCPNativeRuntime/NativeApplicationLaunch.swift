@@ -122,9 +122,43 @@ final class NativeExecutionTracker: @unchecked Sendable {
 
     @MainActor func launch() throws -> NativeApplicationLaunch? {
         guard let session = try NativeApplicationLaunch.object(tracker, "launchSession") else { return nil }
-        let pid = try ABIRuntime.shared.object(session).resolveAndWait(.objc(.method("runnablePID", as: (() -> Int32).self)))
-        let processIdentifier = try unsafe pid.unsafeInvoke()
+        let processIdentifier = try pid(in: session)
         guard processIdentifier > 0 else { return nil }
         return try NativeApplicationLaunch.read(session: session, processIdentifier: processIdentifier)
+    }
+
+    @MainActor func waitForDebugger(processIdentifier: Int32) async throws {
+        guard let session = try NativeApplicationLaunch.object(tracker, "launchSession") else {
+            throw NativeRuntimeError.invocation("The launch session disappeared before debugger preparation")
+        }
+        let launch = try NativeApplicationLaunch.read(session: session, processIdentifier: processIdentifier)
+        guard launch.debuggerIdentifier?.isEmpty == false else { return }
+        guard let operation = try NativeApplicationLaunch.object(tracker, "operation") as? Operation,
+              let environment = try NativeApplicationLaunch.object(session, "executionEnvironment") else {
+            throw NativeRuntimeError.unsupportedContract("The debugger launch has no execution operation or environment")
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(60))
+        while true {
+            try Task.checkCancellation()
+            if operation.isCancelled { throw CancellationError() }
+            if let current = try NativeApplicationLaunch.object(environment, "currentLaunchSession"),
+               try pid(in: current) == processIdentifier,
+               let debugger = try NativeApplicationLaunch.object(current, "currentDebugSession"),
+               try NativeApplicationLaunch.object(debugger, "debuggerConsoleAdaptor") != nil {
+                return
+            }
+            guard !operation.isFinished else {
+                throw NativeRuntimeError.invocation("The launch ended before the debugger became ready")
+            }
+            guard ContinuousClock.now < deadline else {
+                throw NativeRuntimeError.invocation("The debugger did not become ready for pid \(processIdentifier) within 60 seconds")
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    @MainActor private func pid(in session: AnyObject) throws -> Int32 {
+        let pid = try ABIRuntime.shared.object(session).resolveAndWait(.objc(.method("runnablePID", as: (() -> Int32).self)))
+        return try unsafe pid.unsafeInvoke()
     }
 }
