@@ -85,7 +85,7 @@ final class NativeExecutionOperations {
             do {
                 try state.withLock {
                     guard $0.resumesTestHosts, !$0.cancelled, !$0.launchesFinished else { return }
-                    try launch.resumeIfStopped()
+                    try launch.resumeIfStopped(allowTestAgent: true)
                 }
             } catch {
                 recordFailure(error)
@@ -95,7 +95,8 @@ final class NativeExecutionOperations {
         }
 
         func recordLaunch(_ launch: NativeApplicationLaunch) {
-            guard let captured = launch.captureSuspendedProcess() else { return }
+            let allowTestAgent = state.withLock { $0.resumesTestHosts }
+            guard let captured = launch.captureSuspendedProcess(allowTestAgent: allowTestAgent) else { return }
             state.withLock { if !$0.launchesFinished { $0.launches.append(captured) } }
         }
 

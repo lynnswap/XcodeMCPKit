@@ -17,28 +17,30 @@ struct NativeApplicationLaunch: Sendable {
         return pid
     }
 
-    func resumeIfStopped() throws {
+    func resumeIfStopped(allowTestAgent: Bool = false) throws {
         guard debuggerIdentifier?.isEmpty != false, let simulatorIdentifier,
               let process = Self.process(processIdentifier),
-              process.canResume(in: simulatorIdentifier),
+              process.canResume(in: simulatorIdentifier, allowTestAgent: allowTestAgent),
               let current = Self.process(processIdentifier), current == process else { return }
         if kill(processIdentifier, SIGCONT) != 0, errno != ESRCH {
             throw NativeRuntimeError.invocation("Resuming the simulator app (pid \(processIdentifier)) failed: errno \(errno)")
         }
     }
 
-    func captureSuspendedProcess() -> CapturedProcess? {
+    func captureSuspendedProcess(allowTestAgent: Bool = false) -> CapturedProcess? {
         guard processIdentifier > 0, let simulatorIdentifier,
-              let process = Self.process(processIdentifier), process.canResume(in: simulatorIdentifier) else { return nil }
-        return CapturedProcess(launch: self, process: process)
+              let process = Self.process(processIdentifier),
+              process.canResume(in: simulatorIdentifier, allowTestAgent: allowTestAgent) else { return nil }
+        return CapturedProcess(launch: self, process: process, allowsTestAgent: allowTestAgent)
     }
 
     struct CapturedProcess: Sendable {
         var launch: NativeApplicationLaunch
         var process: ProcessSnapshot
+        var allowsTestAgent = false
 
         func terminateIfStillSuspended() async throws {
-            guard let captured = launch.captureSuspendedProcess(), captured.process == process else { return }
+            guard let captured = launch.captureSuspendedProcess(allowTestAgent: allowsTestAgent), captured.process == process else { return }
             // A suspended app cannot handle SIGTERM. Its native launch session
             // may already be invalidated without ever receiving the app's PID.
             if kill(launch.processIdentifier, SIGKILL) != 0, errno != ESRCH {
@@ -60,16 +62,24 @@ struct NativeApplicationLaunch: Sendable {
         var startedMicroseconds: Int32
         var stopped: Bool
         var traced: Bool
+        var workingDirectory: String? = nil
 
         func isSameProcess(as other: Self) -> Bool {
             executable == other.executable && startedSeconds == other.startedSeconds && startedMicroseconds == other.startedMicroseconds
         }
 
-        func canResume(in simulator: UUID) -> Bool {
+        func canResume(in simulator: UUID, allowTestAgent: Bool = false) -> Bool {
             guard stopped, !traced else { return false }
             let parts = URL(fileURLWithPath: executable).standardizedFileURL.pathComponents
-            guard let index = parts.firstIndex(where: { UUID(uuidString: $0) == simulator }) else { return false }
-            return Array(parts.dropFirst(index + 1).prefix(4)) == ["data", "Containers", "Bundle", "Application"]
+            if let index = parts.firstIndex(where: { UUID(uuidString: $0) == simulator }),
+               Array(parts.dropFirst(index + 1).prefix(4)) == ["data", "Containers", "Bundle", "Application"] { return true }
+            guard allowTestAgent, let workingDirectory,
+                  ["iPhoneSimulator", "AppleTVSimulator", "WatchSimulator", "XRSimulator"].contains(where: {
+                      executable.hasSuffix("/Contents/Developer/Platforms/\($0).platform/Developer/Library/Xcode/Agents/xctest")
+                  }) else { return false }
+            let directory = URL(fileURLWithPath: workingDirectory).standardizedFileURL
+            return directory.lastPathComponent == "data"
+                && UUID(uuidString: directory.deletingLastPathComponent().lastPathComponent) == simulator
         }
     }
 
@@ -80,10 +90,19 @@ struct NativeApplicationLaunch: Sendable {
         guard unsafe sysctl(&name, UInt32(name.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
         var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         guard unsafe proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
+        var paths = unsafe proc_vnodepathinfo()
+        let pathSize = MemoryLayout<proc_vnodepathinfo>.stride
+        let workingDirectory: String?
+        if unsafe proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &paths, Int32(pathSize)) == pathSize {
+            workingDirectory = unsafe withUnsafeBytes(of: paths.pvi_cdir.vip_path) {
+                String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self)
+            }
+        } else { workingDirectory = nil }
         return unsafe ProcessSnapshot(executable: String(cString: path),
             startedSeconds: Int64(info.kp_proc.p_starttime.tv_sec),
             startedMicroseconds: info.kp_proc.p_starttime.tv_usec,
-            stopped: Int32(info.kp_proc.p_stat) == SSTOP, traced: info.kp_proc.p_flag & P_TRACED != 0)
+            stopped: Int32(info.kp_proc.p_stat) == SSTOP, traced: info.kp_proc.p_flag & P_TRACED != 0,
+            workingDirectory: workingDirectory)
     }
 
     @MainActor static func read(session: AnyObject, processIdentifier: Int32) throws -> Self {
