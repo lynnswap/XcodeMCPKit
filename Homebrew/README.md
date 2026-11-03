@@ -30,12 +30,17 @@ python3 scripts/release.py start vX.Y.Z --repo lynnswap/XcodeMCPKit \
   --target FULL_COMMIT_SHA --notes-file /path/to/notes.md
 ```
 
-The script creates or reuses the matching Draft and dispatches `release.yml`
-from the default branch. CI tests the approved source, creates its public source
-tag, verifies GitHub's tag archive against that commit, and prepares the source
+The script creates or reuses the matching Draft and approved source tag before
+dispatching `release.yml` from the default branch. The version is available to
+package consumers immediately. CI tests the approved source, verifies GitHub's
+tag archive against that commit, and prepares the source
 archive, `xcode-mcpkit.rb`, stable `install.sh`, and `SHA256SUMS.txt`. The Release remains a Draft.
 The generated Formula uses the public tag archive, so tap CI can build it before
 the Release is published.
+
+Tag creation uses the caller's GitHub CLI credentials. If GitHub rejects it,
+check tag rules and the caller's Contents and Workflows write permissions, then
+repeat the same start command. The matching Draft is reused.
 
 Review the version, target, notes, Formula artifact, and trusted workflow commit
 in the Actions summary. Approve the `release-publish` deployment to allow the job
@@ -71,7 +76,8 @@ replace the latest stable release.
 The existing `lynnswap-homebrew-release-dispatch` App can be reused. Its
 installation must include `homebrew-tap` with `Actions: write`. Adding this source
 repository to the installation is unnecessary for dispatching to the tap; the
-source workflow uses its own `GITHUB_TOKEN` for source tags and releases.
+source workflow uses its own `GITHUB_TOKEN` for releases. The local start command
+uses the caller's GitHub CLI credentials to create the approved source tag.
 
 In XcodeMCPKit's `release-publish` Environment:
 
