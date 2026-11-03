@@ -106,10 +106,15 @@ def ensure_tag(github, tag, sha):
         except APIError as error:
             if error.status != 422 or check_tag(github, tag, sha) is None:
                 raise ReleaseError(
-                    f"{error}\nGITHUB_TOKEN could not create the tested tag. Inspect tag rules "
-                    "and workflow-file differences from the default branch before retrying. "
+                    f"{error}\nCould not create the approved tag. Inspect tag rules "
+                    "and the caller's Contents and Workflows write permissions before retrying start. "
                     "Publication stopped; do not change the approved target without a new approval."
                 ) from error
+
+
+def require_tag(github, tag, sha):
+    if check_tag(github, tag, sha) is None:
+        raise ReleaseError(f"Tag {tag} is missing. Run the same start command before continuing.")
 
 
 def prepare_source(github, release_id, sha, digest):
@@ -117,7 +122,7 @@ def prepare_source(github, release_id, sha, digest):
     if not release["draft"] and tag_commit(github, release["tag_name"]) != sha:
         raise ReleaseError("The published release no longer has its approved tag.")
     try:
-        ensure_tag(github, release["tag_name"], sha)
+        require_tag(github, release["tag_name"], sha)
         release = verify(github, release_id, sha, digest)
     except ReleaseError as error:
         raise ReleaseError(
@@ -182,14 +187,24 @@ def start(github, tag, sha, title, notes):
     else:
         release = github.api("releases", "POST", dict(requested, draft=True))
     print(f"Draft: {release['html_url']}", flush=True)
+    digest = fingerprint(release)
+    try:
+        ensure_tag(github, tag, sha)
+        verify(github, release["id"], sha, digest)
+    except ReleaseError as error:
+        raise ReleaseError(
+            f"{error}\nDraft {release['id']} and any created tag remain. "
+            "No validation was dispatched."
+        ) from error
+    print(f"Tag: {tag} at {sha}", flush=True)
     inputs = dict(release_id=str(release["id"]), target_sha=sha,
-                  content_digest=fingerprint(release))
+                  content_digest=digest)
     try:
         github.api("actions/workflows/release.yml/dispatches", "POST",
                    dict(ref=branch, inputs=inputs))
     except ReleaseError as error:
         raise ReleaseError(
-            f"{error}\nDraft {release['id']} remains. Dispatch acceptance may be uncertain; "
+            f"{error}\nDraft {release['id']} and tag {tag} remain. Dispatch acceptance may be uncertain; "
             "inspect Actions before retrying the same command."
         ) from error
     print(f"Target: {sha}")
@@ -312,6 +327,7 @@ def verify_homebrew_ready(github, tag, release_dir):
 def publish(github, release_id, sha, digest, release_dir, tested_delivery=None):
     release = verify(github, release_id, sha, digest)
     tag = release["tag_name"]
+    require_tag(github, tag, sha)
     names = asset_names(tag)
     paths = [release_dir / name for name in names]
     expected = {path.name: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
@@ -333,8 +349,7 @@ def publish(github, release_id, sha, digest, release_dir, tested_delivery=None):
         github.upload(tag, paths)
         release = verify(github, release_id, sha, digest)
         verify_uploaded_assets(release, expected)
-        ensure_tag(github, tag, sha)
-        # Tag creation and asset uploads are separate from publication on GitHub.
+        require_tag(github, tag, sha)
         release = verify(github, release_id, sha, digest)
         verify_uploaded_assets(release, expected)
         if not release["prerelease"]:
@@ -363,7 +378,7 @@ def publish(github, release_id, sha, digest, release_dir, tested_delivery=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    launch = commands.add_parser("start", help="Create/reuse a draft and start automatic publication")
+    launch = commands.add_parser("start", help="Create/reuse an approved tag and draft, then start validation")
     launch.add_argument("version")
     launch.add_argument("--target", required=True, help="Approved full commit SHA")
     launch.add_argument("--notes-file", required=True, type=Path)

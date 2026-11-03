@@ -354,8 +354,9 @@ discovery file for tests. Match verification claims to the operations actually r
 ## Release
 
 [Homebrew distribution](../Homebrew/README.md) owns approval, publication, bottle
-verification, and recovery. Approved releases use `scripts/release.py start`;
-source CI pins the commit and content, prepares the draft and Formula, and waits
+verification, and recovery. Approved releases use `scripts/release.py start` to
+create the approved tag and Draft before CI; source CI pins the commit and
+content, prepares the Formula, and waits
 for publication approval before tap dispatch. Both source and Homebrew installs
 keep the signed helper beside the commands. Release orchestration tests use:
 
