@@ -37,6 +37,7 @@ class FakeCore:
                  "Test approved source / Package Checks", sync.RECEIPT_JOB, sync.PROBE_JOB, sync.TAP_APPROVAL_JOB)
         self.jobs = [dict(name=name, id=100 + n, run_attempt=1, status="completed", conclusion="success")
                      for n, name in enumerate(names)]
+        self.previous_jobs = []
         self.calls = []
         digest = hashlib.sha256(b"prepared source").hexdigest()
         self.formula = package_release.render_formula("v1.2.3", self.repository, digest)
@@ -63,7 +64,9 @@ class FakeCore:
         if path == "actions/workflows/release.yml": return dict(id=11)
         if path.startswith("releases?"): return [copy.deepcopy(self.draft)]
         if path.startswith("actions/workflows/11/runs?"): return dict(workflow_runs=[copy.deepcopy(self.run)])
-        if path.startswith("actions/runs/99/jobs?"): return dict(jobs=copy.deepcopy(self.jobs))
+        if path.startswith("actions/runs/99/jobs?"):
+            jobs = self.previous_jobs + self.jobs if "filter=all" in path else self.jobs
+            return dict(jobs=copy.deepcopy(jobs))
         if path.startswith("actions/runs/99/artifacts?"): return dict(artifacts=copy.deepcopy(self.artifacts))
         if path == "releases/42": return copy.deepcopy(self.draft)
         if path == "git/ref/tags/v1.2.3": return dict(object=dict(type="commit", sha="a" * 40))
@@ -95,6 +98,8 @@ class ReleaseResumptionTests(unittest.TestCase):
         self.assertTrue(all(method == "GET" for _, method in self.core.calls))
 
     def test_ready_receipt_resumes_only_the_original_probe_and_dependents(self):
+        self.core.run["run_attempt"] = 2
+        next(job for job in self.core.jobs if job["name"] == sync.PROBE_JOB)["run_attempt"] = 2
         value = self.result()
         self.assertEqual(value["status"], "resumed")
         self.assertEqual(value["job_id"], 105)
@@ -151,11 +156,23 @@ class ReleaseResumptionTests(unittest.TestCase):
         self.assert_no_writes()
 
     def test_latest_attempt_failure_is_not_hidden_by_an_older_success(self):
-        job = copy.deepcopy(self.core.jobs[0])
-        job.update(id=200, run_attempt=2, conclusion="failure")
-        self.core.jobs.append(job)
+        self.core.previous_jobs.append(copy.deepcopy(self.core.jobs[0]))
+        self.core.run["run_attempt"] = 2
+        self.core.jobs[0].update(id=200, run_attempt=2, conclusion="failure")
         self.assertEqual(self.result()["status"], "blocked")
         self.assert_no_writes()
+
+    def test_cancelled_matrix_placeholder_does_not_block_successful_rerun(self):
+        self.core.run["run_attempt"] = 2
+        self.core.previous_jobs.append(dict(
+            name="Test approved source / Package Tests (macOS, ${{ matrix.shard }})",
+            id=200, run_attempt=1, status="completed", conclusion="cancelled"))
+        self.core.jobs.append(dict(
+            name="Test approved source / Package Tests (macOS, remaining)",
+            id=201, run_attempt=2, status="completed", conclusion="success"))
+        self.assertEqual(self.result()["status"], "resumed")
+        self.assertEqual([call for call in self.core.calls if call[1] == "POST"],
+                         [("actions/jobs/105/rerun", "POST")])
 
     def test_prereleases_published_releases_and_running_runs_do_not_restart(self):
         self.core.draft["prerelease"] = True
@@ -178,14 +195,14 @@ class ReleaseResumptionTests(unittest.TestCase):
         self.assert_no_writes()
 
     def test_new_preparations_require_successful_tap_key_approval(self):
-        self.core.jobs.append(dict(name=sync.TAP_APPROVAL_JOB, id=110, run_attempt=1,
-                                   status="completed", conclusion="skipped"))
+        job = next(job for job in self.core.jobs if job["name"] == sync.TAP_APPROVAL_JOB)
+        job["conclusion"] = "skipped"
         self.assertEqual(self.result()["status"], "waiting")
         self.assert_no_writes()
-        self.core.jobs[-1]["conclusion"] = "failure"
+        job["conclusion"] = "failure"
         self.assertEqual(self.result()["status"], "blocked")
         self.assert_no_writes()
-        self.core.jobs[-1]["conclusion"] = "success"
+        job["conclusion"] = "success"
         self.assertEqual(self.result(dry_run=True)["status"], "ready")
         self.assert_no_writes()
 

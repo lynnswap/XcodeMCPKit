@@ -55,12 +55,9 @@ def artifact_files(github, artifact, names):
 
 
 def latest_jobs(github, run_id):
-    latest = {}
-    for job in pages(github, f"actions/runs/{run_id}/jobs?filter=all", "jobs"):
-        old = latest.get(job["name"])
-        if old is None or (job["run_attempt"], job["id"]) > (old["run_attempt"], old["id"]):
-            latest[job["name"]] = job
-    return latest
+    # GitHub excludes superseded matrix placeholders while retaining reused jobs.
+    return {job["name"]: job for job in
+            pages(github, f"actions/runs/{run_id}/jobs?filter=latest", "jobs")}
 
 
 def prepared_candidate(github, draft, run):
