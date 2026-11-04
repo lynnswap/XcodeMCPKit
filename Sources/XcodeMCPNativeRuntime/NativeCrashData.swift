@@ -58,6 +58,7 @@ struct NativeCrashSyncRequest: Decodable, Sendable {
     let cursor: String?
     let maxRecords: Int
     let maxBytes: Int
+    let refreshTimeoutSeconds: Double
     let specifiedFields: Set<String>
 
     var source: NativeCrashRequest.Source { query.source }
@@ -65,6 +66,7 @@ struct NativeCrashSyncRequest: Decodable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case collection, cursor
         case maxRecords = "max_records", maxBytes = "max_bytes"
+        case refreshTimeoutSeconds = "refresh_timeout_seconds"
     }
 
     init(from decoder: any Decoder) throws {
@@ -75,6 +77,10 @@ struct NativeCrashSyncRequest: Decodable, Sendable {
         cursor = try values.decodeIfPresent(String.self, forKey: .cursor)
         maxRecords = try values.decodeIfPresent(Int.self, forKey: .maxRecords) ?? 100
         maxBytes = try values.decodeIfPresent(Int.self, forKey: .maxBytes) ?? 64 * 1024 * 1024
+        refreshTimeoutSeconds = try values.decodeIfPresent(Double.self, forKey: .refreshTimeoutSeconds) ?? 90
+        guard refreshTimeoutSeconds.isFinite, refreshTimeoutSeconds >= 0 else {
+            throw NativeRuntimeError.invalidRequest("refresh_timeout_seconds must be finite and nonnegative; 0 means unlimited")
+        }
         guard maxRecords > 0, maxBytes > 0 else {
             throw NativeRuntimeError.invalidRequest("max_records and max_bytes must be positive")
         }
@@ -200,6 +206,9 @@ enum NativeCrashContract {
                 inputs["cursor"] = property("string", "Local import continuation returned by SyncCrashReports; does not fetch from the network again. Its budgets are retained, and any explicitly repeated budgets must match. Read cursors and checkpoints belong to ReadCrashChanges.")
             }
             inputs["max_records"] = positiveInteger(100, "Maximum records to import in this acquisition batch.")
+            inputs["refresh_timeout_seconds"] = .object(["type": .string("number"),
+                "minimum": .number(.int(0)), "default": .number(.int(90)),
+                "description": .string("Maximum unlocked seconds to wait for each Organizer view, issue refresh, or list page. Defaults to 90; 0 waits indefinitely until ready or cancelled. A locked or switched-away Mac session pauses this budget and reports waitingForUnlock. Independent of WaitForCrashSync's wait_seconds. Ignored for cache imports and local import continuations.")])
             inputs["max_bytes"] = positiveInteger(64 * 1024 * 1024, "Import byte budget. One oversized log file may be streamed alone so acquisition can advance; this is not the response JSON budget.")
         case .read:
             inputs["checkpoint"] = property("string", "Completed ReadCrashChanges checkpoint used as the baseline for a new fixed change window. Omit on the initial read.")
@@ -268,7 +277,7 @@ enum NativeCrashContract {
             "startedAt": .object(["type": .array([.string("string"), .string("null")])]),
             "finishedAt": .object(["type": .array([.string("string"), .string("null")])]),
             "progress": .object(["type": .string("object"),
-                "description": .string("Latest phase, capturedPages, capturedRecords, resolved query, import cacheInfo, and recoveredImports with saved response paths, and recoveryErrors for unavailable saved acquisition snapshots. Phases include queued, recovering, waitingForOrganizer, acquiring, and importing.")]),
+                "description": .string("Latest phase, capturedPages, capturedRecords, resolved query, import cacheInfo, and recoveredImports with saved response paths, and recoveryErrors for unavailable saved acquisition snapshots. Phases include queued, recovering, waitingForOrganizer, waitingForUnlock, acquiring, and importing.")]),
             "result": .object(["type": .array([.string("object"), .string("null")]),
                 "description": .string("Latest SyncCrashReports response, including cumulative cacheInfo, responsePath, and metadataPath. Record import failures stop automatic processing and retain nextCursor for an explicit retry. Source-only errors still allow importing acquired data. Null while no result has been committed.")]),
             "errors": .object(["type": .string("array"), "items": .object(["type": .string("object")]),

@@ -31,14 +31,21 @@ python3 scripts/crash_report.py \
 Open the printed local URL, choose the period and output folder, then press
 **レポートを作成**. Available periods are Last Day (`last24Hours`), two weeks
 (`last14Days`), and one year (`last365Days`). Last Day is the initial selection.
-The page shows progress, a stop button, the saved path, and Markdown and JSON
-links.
+The page shows progress, stop and current-issue skip buttons, the saved path,
+and Markdown and JSON links. Update waits default to unlimited (`0` seconds);
+enter a positive number to limit each Organizer refresh. A locked or switched-away
+Mac session shows a waiting state and resumes after unlock without consuming
+that limit. Explicit Organizer errors remain acquisition failures.
 
 The page listens on `127.0.0.1:8767`; change it with `--port`. It accepts only
 local requests and serves files within the chosen report output directory.
 Reports can contain private diagnostic data, so choose a suitable location
 outside the source checkout. Closing the browser does not stop collection.
 Use the stop button to request cancellation and wait for Organizer cleanup.
+To continue past a stalled individual issue, press **このissueをスキップ**.
+The collector cancels that issue's host job, waits for its cleanup, preserves
+saved samples, and then starts the next issue. Its status is `skipped`, and the
+report remains partial. The issue-list acquisition can be stopped but not skipped.
 
 ## Run without the page
 
@@ -51,7 +58,13 @@ python3 scripts/crash_report.py \
 ```
 
 Use `--time-period last14Days` or `--time-period last365Days` to change the
-period. Each invocation saves its files in `OUTPUT/YYYY-MM-DD/HHMMSS-runID/`,
+period. Use `--refresh-timeout-seconds 300` to bound refresh waits or `0` (the
+reporter's default) for unlimited waits. This also sets the page's initial value
+when used with `--serve`. Direct MCP acquisition retains its 90-second default;
+the reporter explicitly sends `refresh_timeout_seconds: 0`. The short
+`WaitForCrashSync` observation limit is independent of the acquisition limit.
+
+Each invocation saves its files in `OUTPUT/YYYY-MM-DD/HHMMSS-runID/`,
 using the Mac's local date. Multiple runs on the same day remain together in
 that date's folder without overwriting previous reports. Standard output contains
 JSON progress lines followed by the Markdown path. Exit status is `0` when the

@@ -28,9 +28,19 @@ struct NativeCrashDataTests {
         #expect(request.collection == nil)
         #expect(request.maxRecords == 100)
         #expect(request.maxBytes == 64 * 1024 * 1024)
+        #expect(request.refreshTimeoutSeconds == 90)
         #expect(request.source == .network)
         #expect(request.query.appVersion == nil)
         #expect(request.query.isBeta == nil)
+    }
+
+    @Test(arguments: [0.0, 0.5, 300.0, 1e300])
+    func refreshWaitAcceptsUnlimitedAndCustomDurations(seconds: Double) throws {
+        let input = Data("{\"refresh_timeout_seconds\":\(seconds)}".utf8)
+        #expect(try JSONDecoder().decode(NativeCrashSyncRequest.self, from: input).refreshTimeoutSeconds == seconds)
+        #expect(throws: NativeRuntimeError.self) {
+            try JSONDecoder().decode(NativeCrashSyncRequest.self, from: Data(#"{"refresh_timeout_seconds":-1}"#.utf8))
+        }
     }
 
     @Test func readContinuationsKeepTokenScopeAndRejectConflictingTokensOrInvalidBudgets() throws {

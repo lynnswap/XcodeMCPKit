@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import signal
 from threading import Event
@@ -53,24 +54,28 @@ def _diagnostic(report, scope, message):
     report["errors"].append({"scope": scope, "message": str(message)})
 
 
-def _acquire(client, query, folder, label, progress, cancel):
+def _acquire(client, query, folder, label, progress, cancel, skip=None):
     try:
         job = client.call_tool("StartCrashSync", {**query, "source": "network", "max_records": 200, "max_bytes": 2097152})
     except MCPError as error:
         raise HostJobUnobserved(f"Could not confirm StartCrashSync's result; a host job may have been accepted. No further acquisition was started. {error}") from error
     cancellation_sent = False
     write_json(folder / f"{label}-job.json", job)
-    while job["state"] not in TERMINAL:
-        progress({"jobId": job["jobId"], "state": job["state"], "phase": job.get("progress", {}).get("phase", "acquiring")})
-        try:
-            if cancel.is_set() and not cancellation_sent:
-                client.call_tool("CancelCrashSync", {"job_id": job["jobId"]})
-                cancellation_sent = True
-            job = client.call_tool("WaitForCrashSync", {"job_id": job["jobId"],
-                "after_revision": job["revision"], "wait_seconds": 30})
-        except MCPError as error:
-            raise HostJobUnobserved(f"Host job {job['jobId']} may still be running. Observe it with WaitForCrashSync; last state is saved in {label}-job.json. {error}") from error
-        write_json(folder / f"{label}-job.json", job)
+    try:
+        while job["state"] not in TERMINAL:
+            progress({"jobId": job["jobId"], "state": job["state"], "phase": job.get("progress", {}).get("phase", "acquiring"),
+                      "skipAllowed": skip is not None and not cancellation_sent})
+            try:
+                if (cancel.is_set() or (skip is not None and skip.is_set())) and not cancellation_sent:
+                    client.call_tool("CancelCrashSync", {"job_id": job["jobId"]})
+                    cancellation_sent = True
+                job = client.call_tool("WaitForCrashSync", {"job_id": job["jobId"],
+                    "after_revision": job["revision"], "wait_seconds": 1})
+            except MCPError as error:
+                raise HostJobUnobserved(f"Host job {job['jobId']} may still be running. Observe it with WaitForCrashSync; last state is saved in {label}-job.json. {error}") from error
+            write_json(folder / f"{label}-job.json", job)
+    finally:
+        progress({"skipAllowed": False})
     return job
 
 
@@ -225,11 +230,15 @@ def _save_report(report, folder):
     temporary.replace(folder / "report.md")
 
 
-def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, cancel_event=None, client=None, time_period="last24Hours"):
+def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, cancel_event=None, client=None,
+                    time_period="last24Hours", refresh_timeout_seconds=0, skip_event=None):
     if time_period not in PERIOD_LABELS:
         raise ValueError(f"Unsupported crash aggregation period: {time_period}")
+    if isinstance(refresh_timeout_seconds, bool) or not isinstance(refresh_timeout_seconds, (int, float)) or not math.isfinite(refresh_timeout_seconds) or refresh_timeout_seconds < 0:
+        raise ValueError("refresh_timeout_seconds must be finite and nonnegative; 0 means unlimited")
     progress = progress or (lambda value: None)
     cancel = cancel_event or Event()
+    skip = skip_event or Event()
     local_time = datetime.now().astimezone()
     report_date = local_time.strftime("%Y-%m-%d")
     folder = Path(output_root).expanduser().resolve() / report_date / (local_time.strftime("%H%M%S") + "-" + uuid4().hex[:8])
@@ -239,13 +248,14 @@ def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, ca
     report = {"schemaVersion": 1, "bundleId": bundle_id, "platform": platform, "timePeriod": time_period, "reportDate": report_date,
         "startedAt": now(), "finishedAt": None, "status": "running", "reportPath": str(folder / "report.md"),
         "outputDirectory": str(folder), "issues": [], "errors": [], "limitations": LIMITATIONS,
-        "listAcquisition": None}
+        "listAcquisition": None, "refreshTimeoutSeconds": refresh_timeout_seconds}
     _save_report(report, folder)
     query = {"bundle_id": bundle_id, "platform": platform, "time_period": time_period}
+    acquisition_options = {"refresh_timeout_seconds": refresh_timeout_seconds}
     try:
         client = client or XcodeMCPClient(mcp_url)
         progress({"phase": "issues", "completedIssues": 0, "totalIssues": 0})
-        job = _acquire(client, {**query, "collection": "issues"}, artifacts, "issues", progress, cancel)
+        job = _acquire(client, {**query, **acquisition_options, "collection": "issues"}, artifacts, "issues", progress, cancel)
         report["listAcquisition"] = {"jobId": job["jobId"], "complete": _job_complete(job), "artifact": "artifacts/issues-job.json"}
         for error in _job_errors(job):
             _diagnostic(report, "issues", error.get("message", str(error)))
@@ -266,11 +276,13 @@ def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, ca
             if cancel.is_set():
                 break
             label = f"issue-{index + 1}"
-            progress({"phase": "logs", "completedIssues": index, "totalIssues": len(report["issues"]), "issueId": issue["issueId"]})
+            skip.clear()
+            progress({"phase": "logs", "completedIssues": index, "totalIssues": len(report["issues"]),
+                      "issueId": issue["issueId"], "skipAllowed": False, "skipRequested": False})
             try:
                 issue_error_count = len(report["errors"])
                 logs_query = {**query, "collection": "logs", "issue_id": issue["issueId"]}
-                job = _acquire(client, logs_query, artifacts, label, progress, cancel)
+                job = _acquire(client, {**logs_query, **acquisition_options}, artifacts, label, progress, cancel, skip)
                 issue["acquisition"] = {"jobId": job["jobId"], "complete": _job_complete(job), "artifact": f"artifacts/{label}-job.json"}
                 for error in _job_errors(job):
                     _diagnostic(report, issue["issueId"], error.get("message", str(error)))
@@ -299,7 +311,11 @@ def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, ca
                         issue["logs"].append(parsed)
                     except (OSError, ValueError, UnicodeError, KeyError) as error:
                         _diagnostic(report, issue["issueId"], f"Could not preserve/parse saved log {record.get('logId')}: {error}")
-                issue["status"] = "complete" if _job_complete(job) and len(report["errors"]) == issue_error_count else "partial"
+                if skip.is_set():
+                    issue["status"] = "skipped"
+                    _diagnostic(report, issue["issueId"], "利用者がこのissueの取得をスキップしました。保存済みログの取得範囲は未完了です。")
+                else:
+                    issue["status"] = "complete" if _job_complete(job) and len(report["errors"]) == issue_error_count else "partial"
             except ReadCancelled as error:
                 issue["status"] = "cancelled"
                 _diagnostic(report, issue["issueId"], error)
@@ -328,18 +344,22 @@ def main():
     parser.add_argument("--platform", default="iOS", choices=("iOS", "macOS", "watchOS", "tvOS", "visionOS"))
     parser.add_argument("--mcp-url", default="http://localhost:8765/mcp")
     parser.add_argument("--time-period", choices=tuple(PERIOD_LABELS), default="last24Hours")
+    parser.add_argument("--refresh-timeout-seconds", type=float, default=0,
+                        help="Unlocked seconds per Organizer refresh; 0 (default) waits until ready or cancelled.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--serve", action="store_true", help="Show the local report button in a browser.")
     parser.add_argument("--port", type=int, default=8767)
     args = parser.parse_args()
     if args.serve:
         from crash_report_web import serve_reports
-        serve_reports(args.bundle_id, args.platform, args.mcp_url, args.output, args.port, time_period=args.time_period)
+        serve_reports(args.bundle_id, args.platform, args.mcp_url, args.output, args.port, time_period=args.time_period,
+                      refresh_timeout_seconds=args.refresh_timeout_seconds)
         return 0
     cancel = Event()
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
     report = generate_report(args.bundle_id, args.platform, args.mcp_url, args.output,
-        progress=lambda value: print(json.dumps(value, ensure_ascii=False), flush=True), cancel_event=cancel, time_period=args.time_period)
+        progress=lambda value: print(json.dumps(value, ensure_ascii=False), flush=True), cancel_event=cancel, time_period=args.time_period,
+        refresh_timeout_seconds=args.refresh_timeout_seconds)
     print(report["reportPath"])
     return 0 if report["status"] == "complete" else 130 if report["status"] == "cancelled" else 1
 

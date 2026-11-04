@@ -59,6 +59,7 @@ class FakeMCP:
     def call_tool(self, name, arguments):
         self.calls.append((name, copy.deepcopy(arguments)))
         if name == "StartCrashSync":
+            self.cancelled = False
             if self.running or (self.unobserved_detail and arguments["collection"] == "logs"):
                 return {"jobId": arguments["collection"], "state": "running", "revision": 1, "result": None}
             return self.job(arguments["collection"])
@@ -110,6 +111,31 @@ class CrashReportTests(unittest.TestCase):
         self.assertTrue((folder / "artifacts/issues-source.json").is_file())
         self.assertTrue(all(args.get("time_period") == "last24Hours" and args["source"] == "network"
                             for name, args in self.client.calls if name == "StartCrashSync"))
+        self.assertTrue(all(args["refresh_timeout_seconds"] == 0
+                            for name, args in self.client.calls if name == "StartCrashSync"))
+
+    def test_skip_waits_for_host_cleanup_preserves_saved_logs_and_continues_next_issue(self):
+        self.client.running = True
+        self.client.points.append({"analyticsPointIdentifier": "next", "analyticsPointName": "Next issue"})
+        skip = Event()
+        issue_id = None
+        def progress(value):
+            nonlocal issue_id
+            issue_id = value.get("issueId", issue_id)
+            if value.get("skipAllowed") and issue_id == "current":
+                skip.set()
+        result = self.generate(progress=progress, skip_event=skip, refresh_timeout_seconds=300)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual([issue["status"] for issue in result["issues"]], ["skipped", "complete"])
+        self.assertEqual(len(result["issues"][0]["logs"]), 2)
+        self.assertFalse(result["issues"][0]["acquisition"]["complete"])
+        names = [name for name, _ in self.client.calls]
+        cancellation = names.index("CancelCrashSync")
+        self.assertEqual(names[cancellation + 1], "WaitForCrashSync")
+        self.assertIn("StartCrashSync", names[cancellation + 2:])
+        self.assertTrue(all(args["refresh_timeout_seconds"] == 300
+                            for name, args in self.client.calls if name == "StartCrashSync"))
+        self.assertIn("スキップ", Path(result["reportPath"]).read_text())
 
     def test_detail_failure_keeps_saved_logs_with_unknown_window_and_visible_error(self):
         self.client.partial_detail = True

@@ -124,6 +124,15 @@ same source, filters, and import budgets as Sync, with required `bundle_id` and
 `platform`; it accepts neither `workspaceIdentifier` nor a cursor. A job follows
 all local import continuations automatically.
 
+`StartCrashSync` and `SyncCrashReports` accept `refresh_timeout_seconds`:
+omit it for the existing 90-second limit, or set `0` to wait until each Organizer
+view, issue refresh, or list page is ready or the operation is cancelled.
+Positive values set a custom limit in seconds. A locked or switched-away Mac
+session pauses the limit; progress reports `phase: "waitingForUnlock"` until the
+session is available again. This setting is saved for `ResumeCrashSync` and does
+not change the query scope, cache imports, or local import continuations.
+Explicit Organizer failures still end acquisition with their diagnostics.
+
 Pass the returned ID to `WaitForCrashSync`:
 
 ```json
@@ -158,6 +167,9 @@ It returns promptly with `cancelling` while active work and Organizer cleanup
 finish. Continue using Wait until a terminal state and inspect any cleanup
 errors. Saved imports remain available through Read. Job records survive a restart;
 unfinished jobs without a live owner become `interrupted` when next observed.
+When acquiring individual issues as separate jobs, cancel the current job and
+wait for its terminal state before starting the next issue to skip a stalled
+refresh. Skipping does not establish complete coverage for that issue.
 
 To retry an `interrupted`, `failed`, or `cancelled` job, call `ResumeCrashSync`:
 
