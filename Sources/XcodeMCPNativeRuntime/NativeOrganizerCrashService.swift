@@ -99,14 +99,14 @@ final class NativeOrganizerCrashService {
                     lastErrors = read.errors
                     if let issue = read.snapshot, let fetchedAt = issue.fetchedAt,
                        fetchedAt >= Self.second(began) {
-                        let ui = try await self.withStableAccessibility(until: deadline) { try driver.snapshot() }
+                        let ui = try await self.withStableAccessibility(until: deadline) { try driver.snapshot(for: .logs) }
                         try self.checkFailure(ui)
                         if ui.busyMessages.isEmpty {
                             return NativeCrashData.Fetched(value: .object(Self.issueValue(issue)),
                                 fetchedAt: Self.date(fetchedAt), errors: read.errors, isComplete: read.errors.isEmpty)
                         }
                     }
-                    let ui = try await self.withStableAccessibility(until: deadline) { try driver.snapshot() }
+                    let ui = try await self.withStableAccessibility(until: deadline) { try driver.snapshot(for: .logs) }
                     try self.checkFailure(ui)
                     try await Task.sleep(for: .milliseconds(250))
                 } while clock.now < deadline
@@ -259,7 +259,7 @@ final class NativeOrganizerCrashService {
             try Task.checkCancellation()
             let read = cache.readPage(request)
             lastErrors = read.errors
-            let ui = try await withStableAccessibility(until: deadline) { try driver.snapshot() }
+            let ui = try await withStableAccessibility(until: deadline) { try driver.snapshot(for: .issues) }
             try checkFailure(ui)
             if let page = read.snapshot, Self.isReady(page, since: began, snapshot: ui) { return page }
             if request.query.pageIndex > 0, ui.busyMessages.isEmpty {
@@ -279,7 +279,7 @@ final class NativeOrganizerCrashService {
         page.fetchedAt >= second(began) && snapshot.busyMessages.isEmpty
     }
 
-    private func waitForList(_ driver: NativeOrganizerAccessibility, prepare: Bool = true,
+    private func waitForView(_ driver: NativeOrganizerAccessibility, collection: NativeCrashCollection, prepare: Bool = true,
                              allowingPreviousFailure: Bool = false) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
@@ -287,7 +287,7 @@ final class NativeOrganizerCrashService {
         repeat {
             try Task.checkCancellation()
             do {
-                let snapshot = try driver.snapshot()
+                let snapshot = try driver.snapshot(for: collection)
                 if !allowingPreviousFailure { try checkFailure(snapshot) }
                 if snapshot.busyMessages.isEmpty {
                     if prepare { try driver.prepareList() }
@@ -414,10 +414,11 @@ final class NativeOrganizerCrashService {
             borrowed = application
             try observe?(["phase": .string("acquiring"), "borrowedOrganizer": Self.identity(application)])
             let driver = try NativeOrganizerAccessibility(installation: installation, application: application.application)
-            try await waitForList(driver, prepare: false, allowingPreviousFailure: true)
+            let collection: NativeCrashCollection = issueID == nil ? .issues : .logs
+            try await waitForView(driver, collection: collection, prepare: false, allowingPreviousFailure: true)
             let began = try await Self.refreshBoundary()
             try driver.reload()
-            try await waitForList(driver, prepare: issueID == nil)
+            try await waitForView(driver, collection: collection, prepare: issueID == nil)
             outcome = .success(try await operation(driver, began))
         } catch { outcome = .failure(error) }
         var cleanup: [NSError] = []
