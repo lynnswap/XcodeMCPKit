@@ -35,17 +35,20 @@ final class NativeOrganizerCrashService {
 
     func fetchIssues(_ request: NativeCrashServiceQuery, store: NativeCrashStore,
                      observe: Observer? = nil) async throws -> NativeCrashData.Fetched {
-        try await withOrganizerAccess(request, issueID: nil, observe: observe) { driver, began in
+        try await withOrganizerAccess(request, issueID: nil, observe: observe) { driver, began, capture in
+            guard let capture else { throw NativeRuntimeError.unavailable("Organizer page capture was not started") }
             var errors: [JSONValue] = []
             var points: [JSONValue] = []
             var pages: [JSONValue] = []
             var copiedPages: [JSONValue] = []
+            var scrolledRowCounts: Set<Int> = []
             var fetchedAt = Self.date(began)
             var index = 0
             while true {
                 let pageQuery = request.withPage(index)
                 do {
-                    let page = try await self.waitForPage(pageQuery, began: began, driver: driver)
+                    let page = try await self.waitForPage(pageQuery, began: began, driver: driver, capture: capture,
+                                                         scrolledRowCounts: &scrolledRowCounts)
                     fetchedAt = Self.date(page.fetchedAt)
                     var descriptor: [String: JSONValue] = ["query": pageQuery.query.json(issueID: nil),
                         "status": .string("complete"), "source": .string("organizer"), "fetchedAt": .string(fetchedAt),
@@ -89,7 +92,7 @@ final class NativeOrganizerCrashService {
     func fetchIssue(_ request: NativeCrashServiceQuery, issueID: String,
                     observe: Observer? = nil) async throws -> NativeCrashData.Fetched {
         do {
-            return try await withOrganizerAccess(request, issueID: issueID, observe: observe) { driver, began in
+            return try await withOrganizerAccess(request, issueID: issueID, observe: observe) { driver, began, _ in
                 let clock = ContinuousClock()
                 let deadline = clock.now.advanced(by: self.timeout)
                 var lastErrors: [JSONValue] = []
@@ -251,25 +254,33 @@ final class NativeOrganizerCrashService {
     }
 
     private func waitForPage(_ request: NativeCrashServiceQuery, began: Date,
-                             driver: NativeOrganizerAccessibility) async throws -> NativeOrganizerCrashCache.PageSnapshot {
+                             driver: NativeOrganizerAccessibility, capture: NativeOrganizerCrashCache.PageCapture,
+                             scrolledRowCounts: inout Set<Int>) async throws -> NativeOrganizerCrashCache.PageSnapshot {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         var lastErrors: [JSONValue] = []
         repeat {
             try Task.checkCancellation()
-            let read = cache.readPage(request)
+            let read = capture.readPage(request.query.pageIndex)
             lastErrors = read.errors
             let ui = try await withStableAccessibility(until: deadline) { try driver.snapshot(for: .issues) }
             try checkFailure(ui)
             if let page = read.snapshot, Self.isReady(page, since: began, snapshot: ui) { return page }
-            if request.query.pageIndex > 0, ui.busyMessages.isEmpty {
-                // Cache writes can precede the table's layout. Re-resolve the
-                // scrollbar as appended rows make the next page scrollable.
+            if request.query.pageIndex > 0, Self.shouldRequestNextPage(ui, scrolledRowCounts: scrolledRowCounts) {
+                // Cache writes can precede layout. Request again when rows change,
+                // rather than repeatedly scrolling an unchanged, exhausted list.
                 try await withStableAccessibility(until: deadline) { try await driver.scrollToBottom() }
+                if let count = ui.listRowCount { scrolledRowCounts.insert(count) }
             }
             try await Task.sleep(for: .milliseconds(250))
         } while clock.now < deadline
         throw Self.timeoutError("Organizer did not refresh the requested crash page \(request.query.pageIndex)", errors: lastErrors)
+    }
+
+    static func shouldRequestNextPage(_ snapshot: NativeOrganizerAccessibility.Snapshot,
+                                      scrolledRowCounts: Set<Int>) -> Bool {
+        guard snapshot.busyMessages.isEmpty, let count = snapshot.listRowCount else { return false }
+        return !scrolledRowCounts.contains(count)
     }
 
     static func isReady(_ page: NativeOrganizerCrashCache.PageSnapshot, since began: Date,
@@ -403,10 +414,11 @@ final class NativeOrganizerCrashService {
     }
 
     private func withOrganizerAccess(_ request: NativeCrashServiceQuery, issueID: String?, observe: Observer? = nil,
-        _ operation: (NativeOrganizerAccessibility, Date) async throws -> NativeCrashData.Fetched) async throws -> NativeCrashData.Fetched {
+        _ operation: (NativeOrganizerAccessibility, Date, NativeOrganizerCrashCache.PageCapture?) async throws -> NativeCrashData.Fetched) async throws -> NativeCrashData.Fetched {
         try observe?(["phase": .string("waitingForOrganizer")])
         let file = try await productsLock()
         var borrowed: NativeOrganizerApplication?
+        var capture: NativeOrganizerCrashCache.PageCapture?
         let outcome: Result<NativeCrashData.Fetched, any Error>
         do {
             try Task.checkCancellation()
@@ -417,11 +429,12 @@ final class NativeOrganizerCrashService {
             let collection: NativeCrashCollection = issueID == nil ? .issues : .logs
             try await waitForView(driver, collection: collection, prepare: false, allowingPreviousFailure: true)
             let began = try await Self.refreshBoundary()
+            if issueID == nil { capture = try NativeOrganizerCrashCache.PageCapture(cache: cache, request: request, since: began) }
             try driver.reload()
             try await waitForView(driver, collection: collection, prepare: issueID == nil)
-            outcome = .success(try await operation(driver, began))
+            outcome = .success(try await operation(driver, began, capture))
         } catch { outcome = .failure(error) }
-        var cleanup: [NSError] = []
+        var cleanup: [NSError] = await capture?.finish() ?? []
         if let borrowed {
             do { try observe?(["borrowedOrganizer": Self.identity(borrowed)]) }
             catch { cleanup.append(error as NSError) }

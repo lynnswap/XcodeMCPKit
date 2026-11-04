@@ -11,6 +11,7 @@ final class NativeOrganizerAccessibility {
     struct Snapshot: Sendable {
         let busyMessages: [String]
         let listStatusMessages: [String]
+        let listRowCount: Int?
     }
 
     let processIdentifier: pid_t
@@ -53,15 +54,16 @@ final class NativeOrganizerAccessibility {
             // A downloadPoint route can replace the source-list table while
             // its exact issue cache and sample downloads continue updating.
             let location = try locateSourceList()
-            return Snapshot(busyMessages: try busyMessages(in: location.window), listStatusMessages: [])
+            return Snapshot(busyMessages: try busyMessages(in: location.window), listStatusMessages: [], listRowCount: nil)
         }
         let location = try locateList()
+        let allRows = try elements(kAXRowsAttribute, from: location.table)
         let nativeRows: [AXUIElement]
         // Only loading/status rows need inspection. Reading every accumulated
         // issue through AX makes each successive page more expensive.
         if let rows = try elements(kAXVisibleRowsAttribute, from: location.table) {
             nativeRows = rows
-        } else if let rows = try elements(kAXRowsAttribute, from: location.table) {
+        } else if let rows = allRows {
             nativeRows = rows
         } else {
             nativeRows = try children(of: location.table).filter { try role(of: $0) == kAXRowRole as String }
@@ -99,7 +101,7 @@ final class NativeOrganizerAccessibility {
             if ["loading", "downloading", "読み込み", "ダウンロード中"].contains(where: value.hasPrefix) { busy.append(text) }
         }
         return Snapshot(busyMessages: Array(Set(busy)).sorted(),
-                        listStatusMessages: listStatusMessages)
+                        listStatusMessages: listStatusMessages, listRowCount: allRows?.count ?? nativeRows.count)
     }
 
     private func busyMessages(in window: AXUIElement) throws -> [String] {
@@ -147,11 +149,16 @@ final class NativeOrganizerAccessibility {
     func scrollToBottom() async throws {
         let location = try locateList()
         if let scrollbar = try verticalScrollBar(in: location.scrollArea) {
-            // Reload can retain the previous bottom position. Paging observes
-            // downward movement, so setting an already-maximal value is a no-op.
+            // Re-arm downward movement at the bottom without jumping to the top.
             if (try attribute(kAXValueAttribute, from: scrollbar) as? NSNumber)?.doubleValue == 1.0 {
-                let reset = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 0.0))
-                guard reset == .success else { throw failure("Reset the Organizer crash scrollbar AXValue", reset) }
+                let arrows = try find(in: [scrollbar]) {
+                    try self.string(kAXSubroleAttribute, from: $0) == kAXDecrementArrowSubrole as String
+                }
+                guard arrows.count == 1, let arrow = arrows.first else {
+                    throw NativeRuntimeError.unsupportedContract("The Organizer crash scrollbar has no unique decrement arrow")
+                }
+                let reset = AXUIElementPerformAction(arrow, kAXPressAction as CFString)
+                guard reset == .success else { throw failure("Step the Organizer crash scrollbar upward", reset) }
             }
             let result = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 1.0))
             guard result == .success else { throw failure("Set the Organizer crash scrollbar AXValue", result) }
