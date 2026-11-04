@@ -112,12 +112,29 @@ struct NativeOrganizerCrashServiceTests {
                 "analyticsPointIdentifier": .string("same-issue"),
                 "analyticsPointName": .string("UIKitCore: 0x180000000 + 1234"),
             ])], pageIndex: 0, pageSize: 25, key: .null)
-        let idle = NativeOrganizerAccessibility.Snapshot(busyMessages: [], listStatusMessages: [])
+        let idle = NativeOrganizerAccessibility.Snapshot(busyMessages: [], listStatusMessages: [], listRowCount: 1)
 
         #expect(NativeOrganizerCrashService.isReady(page, since: began, snapshot: idle))
         #expect(!NativeOrganizerCrashService.isReady(page, since: began.addingTimeInterval(1), snapshot: idle))
-        let loading = NativeOrganizerAccessibility.Snapshot(busyMessages: ["Loading"], listStatusMessages: [])
+        let loading = NativeOrganizerAccessibility.Snapshot(busyMessages: ["Loading"], listStatusMessages: [], listRowCount: 1)
         #expect(!NativeOrganizerCrashService.isReady(page, since: began, snapshot: loading))
+    }
+
+    @Test func unchangedOrReturningRowsDoNotRepeatTheNextPageRequest() {
+        var scrolledRowCounts: Set<Int> = []
+        var requested: [Int] = []
+        for count in [1_000, 1_000, 1_025, 1_000, 1_025] {
+            let snapshot = NativeOrganizerAccessibility.Snapshot(busyMessages: [], listStatusMessages: [], listRowCount: count)
+            if NativeOrganizerCrashService.shouldRequestNextPage(snapshot, scrolledRowCounts: scrolledRowCounts) {
+                requested.append(count)
+                scrolledRowCounts.insert(count)
+            }
+        }
+        #expect(requested == [1_000, 1_025])
+        let loading = NativeOrganizerAccessibility.Snapshot(busyMessages: ["Loading"], listStatusMessages: [], listRowCount: 1_050)
+        #expect(!NativeOrganizerCrashService.shouldRequestNextPage(loading, scrolledRowCounts: scrolledRowCounts))
+        let idle = NativeOrganizerAccessibility.Snapshot(busyMessages: [], listStatusMessages: [], listRowCount: 1_050)
+        #expect(NativeOrganizerCrashService.shouldRequestNextPage(idle, scrolledRowCounts: scrolledRowCounts))
     }
 
     @Test func listURLKeepsStoreAndExecutionPlatformsDistinctAndEscapesFilters() throws {

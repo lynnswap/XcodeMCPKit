@@ -32,6 +32,48 @@ struct NativeOrganizerCrashCacheTests {
         #expect(snapshot.pageIndex == 0)
         #expect(snapshot.pageSize == 25)
         #expect(snapshot.key == pageKey(requested))
+        let pages = cache.readPages(requested)
+        #expect(pages.errors.isEmpty)
+        #expect(Set(pages.snapshot?.keys ?? [:].keys) == [0, 1])
+    }
+
+    @Test func refreshedPagesSurviveLRUEvictionAndFileReplacement() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = NativeOrganizerCrashCache(productsRoot: root)
+        let requested = query()
+        let url = listURL(root)
+        let stale = "2024-01-01T00:00:00Z"
+        let fresh = "2024-01-02T00:00:00Z"
+        func page(_ index: Int, refreshed: String) -> JSONValue {
+            .object(["recentItems": .array([pageKey(query(page: index)), datedPage(requested, count: 4, refreshed: refreshed)])])
+        }
+        try write(page(0, refreshed: stale), to: url)
+        let capture = try NativeOrganizerCrashCache.PageCapture(cache: cache, request: requested,
+            since: #require(ISO8601DateFormatter().date(from: fresh)))
+        #expect(capture.readPage(0).snapshot == nil)
+
+        // Xcode writes in place; replacement also occurs when a cache is rebuilt.
+        try NativeCrashStore.encode(page(0, refreshed: fresh)).write(to: url)
+        try await captured(0, by: capture)
+        try write(page(1, refreshed: fresh), to: url)
+        try await captured(1, by: capture)
+        try NativeCrashStore.encode(page(2, refreshed: fresh)).write(to: url)
+        try await captured(2, by: capture)
+
+        #expect(cache.readPage(requested).snapshot == nil)
+        #expect(capture.readPage(0).snapshot?.key == pageKey(requested))
+        #expect(capture.readPage(1).snapshot?.key == pageKey(query(page: 1)))
+        #expect(await capture.finish().isEmpty)
+    }
+
+    private func captured(_ index: Int, by capture: NativeOrganizerCrashCache.PageCapture) async throws {
+        let deadline = ContinuousClock().now.advanced(by: .seconds(3))
+        while capture.readPage(index).snapshot == nil, ContinuousClock().now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(capture.readPage(index).errors.isEmpty)
+        try #require(capture.readPage(index).snapshot != nil)
     }
 
     @Test func selectedVersionChannelAndUploadPlatformCannotSelectAnotherCachedRequest() throws {

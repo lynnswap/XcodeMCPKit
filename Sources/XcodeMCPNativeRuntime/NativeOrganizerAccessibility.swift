@@ -11,6 +11,7 @@ final class NativeOrganizerAccessibility {
     struct Snapshot: Sendable {
         let busyMessages: [String]
         let listStatusMessages: [String]
+        let listRowCount: Int?
     }
 
     let processIdentifier: pid_t
@@ -48,14 +49,21 @@ final class NativeOrganizerAccessibility {
         guard result == .success else { throw failure("Reload Xcode Organizer", result) }
     }
 
-    func snapshot() throws -> Snapshot {
+    func snapshot(for collection: NativeCrashCollection) throws -> Snapshot {
+        if collection == .logs {
+            // A downloadPoint route can replace the source-list table while
+            // its exact issue cache and sample downloads continue updating.
+            let location = try locateSourceList()
+            return Snapshot(busyMessages: try busyMessages(in: location.window), listStatusMessages: [], listRowCount: nil)
+        }
         let location = try locateList()
+        let allRows = try elements(kAXRowsAttribute, from: location.table)
         let nativeRows: [AXUIElement]
         // Only loading/status rows need inspection. Reading every accumulated
         // issue through AX makes each successive page more expensive.
         if let rows = try elements(kAXVisibleRowsAttribute, from: location.table) {
             nativeRows = rows
-        } else if let rows = try elements(kAXRowsAttribute, from: location.table) {
+        } else if let rows = allRows {
             nativeRows = rows
         } else {
             nativeRows = try children(of: location.table).filter { try role(of: $0) == kAXRowRole as String }
@@ -72,7 +80,7 @@ final class NativeOrganizerAccessibility {
             // no crash signature and belong to the status, not the issue list.
             rowStatus += try texts.compactMap { try string(kAXValueAttribute, from: $0) ?? string(kAXTitleAttribute, from: $0) }
         }
-        var busy: [String] = []
+        var busy = try busyMessages(in: location.window)
         let listFrame = try frame(of: location.scrollArea)
         // The initial-page placeholder is a sibling of the scroll view.
         // Restrict status text to that pane; signatures and exception reasons
@@ -88,20 +96,24 @@ final class NativeOrganizerAccessibility {
             }
             return texts
         })
-        _ = try find(in: [location.window], skipTables: true) { element in
-            let role = try self.role(of: element)
-            if role == kAXProgressIndicatorRole as String {
-                busy.append(try self.string(kAXDescriptionAttribute, from: element)
-                    ?? self.string(kAXTitleAttribute, from: element) ?? "AXProgressIndicator")
-            }
-            return false
-        }
         for text in listStatusMessages {
             let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if ["loading", "downloading", "読み込み", "ダウンロード中"].contains(where: value.hasPrefix) { busy.append(text) }
         }
         return Snapshot(busyMessages: Array(Set(busy)).sorted(),
-                        listStatusMessages: listStatusMessages)
+                        listStatusMessages: listStatusMessages, listRowCount: allRows?.count ?? nativeRows.count)
+    }
+
+    private func busyMessages(in window: AXUIElement) throws -> [String] {
+        var messages: [String] = []
+        _ = try find(in: [window], skipTables: true) { element in
+            if try self.role(of: element) == kAXProgressIndicatorRole as String {
+                messages.append(try self.string(kAXDescriptionAttribute, from: element)
+                    ?? self.string(kAXTitleAttribute, from: element) ?? "AXProgressIndicator")
+            }
+            return false
+        }
+        return Array(Set(messages)).sorted()
     }
 
     func prepareList() throws {
@@ -137,11 +149,16 @@ final class NativeOrganizerAccessibility {
     func scrollToBottom() async throws {
         let location = try locateList()
         if let scrollbar = try verticalScrollBar(in: location.scrollArea) {
-            // Reload can retain the previous bottom position. Paging observes
-            // downward movement, so setting an already-maximal value is a no-op.
+            // Re-arm downward movement at the bottom without jumping to the top.
             if (try attribute(kAXValueAttribute, from: scrollbar) as? NSNumber)?.doubleValue == 1.0 {
-                let reset = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 0.0))
-                guard reset == .success else { throw failure("Reset the Organizer crash scrollbar AXValue", reset) }
+                let arrows = try find(in: [scrollbar]) {
+                    try self.string(kAXSubroleAttribute, from: $0) == kAXDecrementArrowSubrole as String
+                }
+                guard arrows.count == 1, let arrow = arrows.first else {
+                    throw NativeRuntimeError.unsupportedContract("The Organizer crash scrollbar has no unique decrement arrow")
+                }
+                let reset = AXUIElementPerformAction(arrow, kAXPressAction as CFString)
+                guard reset == .success else { throw failure("Step the Organizer crash scrollbar upward", reset) }
             }
             let result = AXUIElementSetAttributeValue(scrollbar, kAXValueAttribute as CFString, NSNumber(value: 1.0))
             guard result == .success else { throw failure("Set the Organizer crash scrollbar AXValue", result) }
@@ -248,7 +265,7 @@ final class NativeOrganizerAccessibility {
         return AXUIElementCreateApplication(processIdentifier)
     }
 
-    private func locateList() throws -> (window: AXUIElement, group: AXUIElement, table: AXUIElement, scrollArea: AXUIElement) {
+    private func locateSourceList() throws -> (window: AXUIElement, group: AXUIElement) {
         let app = try applicationElement()
         let windows = try elements(kAXWindowsAttribute, from: app, allowUnsupported: false) ?? []
         var lists: [(AXUIElement, AXUIElement)] = []
@@ -264,6 +281,11 @@ final class NativeOrganizerAccessibility {
         guard lists.count == 1, let (window, group) = lists.first else {
             throw NativeRuntimeError.unavailable("Several Organizer crash lists are open in the selected Xcode process")
         }
+        return (window, group)
+    }
+
+    private func locateList() throws -> (window: AXUIElement, group: AXUIElement, table: AXUIElement, scrollArea: AXUIElement) {
+        let (window, group) = try locateSourceList()
         let tables = try find(in: [group]) { try self.role(of: $0) == kAXTableRole as String }
         guard tables.count == 1, let table = tables.first else {
             throw NativeRuntimeError.unsupportedContract("The Organizer Analytics Points Source List does not expose one crash table")
