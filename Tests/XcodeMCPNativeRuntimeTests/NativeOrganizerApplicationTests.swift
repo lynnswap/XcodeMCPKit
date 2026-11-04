@@ -124,14 +124,14 @@ struct NativeOrganizerApplicationTests {
         }
     }
 
-    @Test func foregroundEditingDefersOrganizerRoutesAndWaitingCanBeCancelled() async throws {
-        let application = Application(active: true)
+    @Test func unlockingIntoForegroundEditingDefersOrganizerRoutesAndWaitingCanBeCancelled() async throws {
+        let application = Application()
         var delivered = false
         let borrowed = NativeOrganizerApplication(application: application,
             appURL: URL(filePath: "/example/Xcode.app"), launchDate: application.launchDate,
             sendEvent: { _, _ in delivered = true })
         let task = Task { @MainActor in
-            try await borrowed.waitUntilInactive()
+            try await borrowed.waitUntilInactive { application.simulatedActive = true }
             try borrowed.open(URL(string: "xcode://organizer/crashes/listPoints")!)
         }
         await Task.yield()
@@ -183,6 +183,7 @@ struct NativeOrganizerApplicationTests {
                 delivered.append(try #require(event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue))
             })
         let service = NativeOrganizerCrashService(installation: installation, organizerRoot: organizer,
+                                                 sessionAvailable: { true },
                                                  runningOrganizer: { _ in borrowed })
         let firstURL = URL(string: "xcode://organizer/crashes/downloadPoint?analyticsPointId=first")!
         let secondURL = URL(string: "xcode://organizer/crashes/downloadPoint?analyticsPointId=second")!
@@ -218,6 +219,7 @@ struct NativeOrganizerApplicationTests {
             launchDate: current.launchDate, sendEvent: { _, _ in })
         var reclaimed: [JSONValue] = []
         let service = NativeOrganizerCrashService(installation: installation, organizerRoot: organizer,
+            sessionAvailable: { true },
             runningOrganizer: { _ in borrowed }, recoverApplication: { saved, preserved in
                 reclaimed.append(saved)
                 #expect(preserved == [current.processIdentifier])
@@ -271,6 +273,7 @@ struct NativeOrganizerApplicationTests {
         let products = root.appending(component: "Products")
         let service = NativeOrganizerCrashService(installation: installation,
             cache: NativeOrganizerCrashCache(productsRoot: products), organizerRoot: root.appending(component: "Organizer"),
+            sessionAvailable: { true },
             runningOrganizer: { _ in
                 NativeOrganizerApplication(application: application, appURL: appURL,
                     launchDate: application.launchDate, sendEvent: { _, _ in throw failure })
@@ -336,7 +339,7 @@ struct NativeOrganizerApplicationTests {
         private let path: String
         private let launchSeconds: Double
         private var finished: Bool
-        private let simulatedActive: Bool
+        var simulatedActive: Bool
         var permitsTermination = true
         private(set) var terminationRequests = 0
 

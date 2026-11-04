@@ -41,16 +41,16 @@ final class NativeOrganizerApplication {
         return NativeOrganizerApplication(application: application, appURL: appURL, launchDate: application.launchDate)
     }
 
-    func waitUntilInactive() async throws {
+    func waitUntilInactive(beforeCheck: (() async throws -> Void)? = nil) async throws {
         // Opening an Organizer route may make that window key within Xcode.
         // Leave the user's foreground editing session alone.
-        while application.isActive {
+        while true {
             try Task.checkCancellation()
             try validateIdentity()
+            try await beforeCheck?()
+            if !application.isActive { return }
             try await Task.sleep(for: .milliseconds(250))
         }
-        try Task.checkCancellation()
-        try validateIdentity()
     }
 
     func open(_ url: URL) throws {

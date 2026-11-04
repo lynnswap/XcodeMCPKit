@@ -11,13 +11,14 @@ import XcodeMCPWire
 final class NativeOrganizerCrashService {
     private let installation: NativeXcodeInstallation
     private let cache: NativeOrganizerCrashCache
-    private let timeout: Duration = .seconds(90)
+    private let sessionAvailable: () throws -> Bool
     private let organizerRoot: URL?
     private let runningOrganizer: (NativeXcodeInstallation) throws -> NativeOrganizerApplication
     private let recoverApplication: (JSONValue, Set<pid_t>) async throws -> Void
 
     init(installation: NativeXcodeInstallation, cache: NativeOrganizerCrashCache = .init(),
          organizerRoot: URL? = nil,
+         sessionAvailable: @escaping () throws -> Bool = { try sessionIsAvailable() },
          runningOrganizer: @escaping (NativeXcodeInstallation) throws -> NativeOrganizerApplication = {
              try NativeOrganizerApplication.running(installation: $0)
          },
@@ -27,15 +28,89 @@ final class NativeOrganizerCrashService {
         self.installation = installation
         self.cache = cache
         self.organizerRoot = organizerRoot
+        self.sessionAvailable = sessionAvailable
         self.runningOrganizer = runningOrganizer
         self.recoverApplication = recoverApplication
     }
 
     typealias Observer = @MainActor ([String: JSONValue]) throws -> Void
 
+    static func sessionIsAvailable() throws -> Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else {
+            throw NativeRuntimeError.unavailable("Organizer requires a Window Server GUI session")
+        }
+        // Window Server exposes the lock flag without a public SDK constant.
+        // It is absent while unlocked; on-console alone also stays true while locked.
+        return session["CGSSessionScreenIsLocked"] as? Bool != true
+            && session[kCGSessionOnConsoleKey as String] as? Bool == true
+    }
+
+    @MainActor
+    final class RefreshWait {
+        private var remainingSeconds: Double?
+        private var checkedAt: ContinuousClock.Instant
+        private let sessionAvailable: () throws -> Bool
+        private let observe: Observer?
+        private let now: () -> ContinuousClock.Instant
+
+        init(seconds: Double, sessionAvailable: @escaping () throws -> Bool, observe: Observer? = nil,
+             now: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now }) {
+            self.now = now
+            remainingSeconds = seconds == 0 ? nil : seconds
+            checkedAt = now()
+            self.sessionAvailable = sessionAvailable
+            self.observe = observe
+        }
+
+        func canContinue() async throws -> Bool {
+            try Task.checkCancellation()
+            let began = now()
+            var paused = false
+            while try !sessionAvailable() {
+                if !paused {
+                    try observe?(["phase": .string("waitingForUnlock")])
+                    paused = true
+                }
+                try await Task.sleep(for: .milliseconds(250))
+                try Task.checkCancellation()
+            }
+            if paused {
+                try observe?(["phase": .string("acquiring")])
+            } else if let remainingSeconds {
+                let elapsed = checkedAt.duration(to: began).components
+                self.remainingSeconds = remainingSeconds - Double(elapsed.seconds) - Double(elapsed.attoseconds) / 1e18
+            }
+            checkedAt = now()
+            return remainingSeconds.map { $0 > 0 } ?? true
+        }
+
+        func untilViewReady(read: () throws -> NativeOrganizerAccessibility.Snapshot,
+                            prepare: () throws -> Void, checkFailure: (NativeOrganizerAccessibility.Snapshot) throws -> Void) async throws {
+            var failure: (any Error)?
+            while try await canContinue() {
+                var snapshot: NativeOrganizerAccessibility.Snapshot?
+                do { snapshot = try read() }
+                catch where NativeOrganizerCrashService.isIncompleteView(error) { failure = error }
+                if let snapshot {
+                    // Report source/status failures outside the hierarchy-read retry.
+                    try checkFailure(snapshot)
+                    if snapshot.busyMessages.isEmpty {
+                        do {
+                            try prepare()
+                            return
+                        } catch where NativeOrganizerCrashService.isIncompleteView(error) { failure = error }
+                    }
+                }
+                try await Task.sleep(for: .milliseconds(250))
+            }
+            throw failure ?? NativeRuntimeError.unavailable("Organizer did not open its crash list")
+        }
+    }
+
     func fetchIssues(_ request: NativeCrashServiceQuery, store: NativeCrashStore,
+                     timeoutSeconds: Double = 90,
                      observe: Observer? = nil) async throws -> NativeCrashData.Fetched {
-        try await withOrganizerAccess(request, issueID: nil, observe: observe) { driver, began, capture in
+        try await withOrganizerAccess(request, issueID: nil, timeoutSeconds: timeoutSeconds, observe: observe) { driver, began, capture in
             guard let capture else { throw NativeRuntimeError.unavailable("Organizer page capture was not started") }
             var errors: [JSONValue] = []
             var points: [JSONValue] = []
@@ -48,6 +123,7 @@ final class NativeOrganizerCrashService {
                 let pageQuery = request.withPage(index)
                 do {
                     let page = try await self.waitForPage(pageQuery, began: began, driver: driver, capture: capture,
+                                                         timeoutSeconds: timeoutSeconds, observe: observe,
                                                          scrolledRowCounts: &scrolledRowCounts)
                     fetchedAt = Self.date(page.fetchedAt)
                     var descriptor: [String: JSONValue] = ["query": pageQuery.query.json(issueID: nil),
@@ -90,29 +166,28 @@ final class NativeOrganizerCrashService {
     }
 
     func fetchIssue(_ request: NativeCrashServiceQuery, issueID: String,
+                    timeoutSeconds: Double = 90,
                     observe: Observer? = nil) async throws -> NativeCrashData.Fetched {
         do {
-            return try await withOrganizerAccess(request, issueID: issueID, observe: observe) { driver, began, _ in
-                let clock = ContinuousClock()
-                let deadline = clock.now.advanced(by: self.timeout)
+            return try await withOrganizerAccess(request, issueID: issueID, timeoutSeconds: timeoutSeconds, observe: observe) { driver, began, _ in
+                let wait = RefreshWait(seconds: timeoutSeconds, sessionAvailable: self.sessionAvailable, observe: observe)
                 var lastErrors: [JSONValue] = []
-                repeat {
-                    try Task.checkCancellation()
+                while try await wait.canContinue() {
                     let read = self.cache.readIssue(request, issueID: issueID)
                     lastErrors = read.errors
                     if let issue = read.snapshot, let fetchedAt = issue.fetchedAt,
                        fetchedAt >= Self.second(began) {
-                        let ui = try await self.withStableAccessibility(until: deadline) { try driver.snapshot(for: .logs) }
+                        let ui = try await self.withStableAccessibility(wait: wait) { try driver.snapshot(for: .logs) }
                         try self.checkFailure(ui)
                         if ui.busyMessages.isEmpty {
                             return NativeCrashData.Fetched(value: .object(Self.issueValue(issue)),
                                 fetchedAt: Self.date(fetchedAt), errors: read.errors, isComplete: read.errors.isEmpty)
                         }
                     }
-                    let ui = try await self.withStableAccessibility(until: deadline) { try driver.snapshot(for: .logs) }
+                    let ui = try await self.withStableAccessibility(wait: wait) { try driver.snapshot(for: .logs) }
                     try self.checkFailure(ui)
                     try await Task.sleep(for: .milliseconds(250))
-                } while clock.now < deadline
+                }
                 throw Self.timeoutError("Organizer did not refresh crash issue \(issueID)", errors: lastErrors)
             }
         } catch {
@@ -255,25 +330,24 @@ final class NativeOrganizerCrashService {
 
     private func waitForPage(_ request: NativeCrashServiceQuery, began: Date,
                              driver: NativeOrganizerAccessibility, capture: NativeOrganizerCrashCache.PageCapture,
+                             timeoutSeconds: Double, observe: Observer?,
                              scrolledRowCounts: inout Set<Int>) async throws -> NativeOrganizerCrashCache.PageSnapshot {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
+        let wait = RefreshWait(seconds: timeoutSeconds, sessionAvailable: sessionAvailable, observe: observe)
         var lastErrors: [JSONValue] = []
-        repeat {
-            try Task.checkCancellation()
+        while try await wait.canContinue() {
             let read = capture.readPage(request.query.pageIndex)
             lastErrors = read.errors
-            let ui = try await withStableAccessibility(until: deadline) { try driver.snapshot(for: .issues) }
+            let ui = try await withStableAccessibility(wait: wait) { try driver.snapshot(for: .issues) }
             try checkFailure(ui)
             if let page = read.snapshot, Self.isReady(page, since: began, snapshot: ui) { return page }
             if request.query.pageIndex > 0, Self.shouldRequestNextPage(ui, scrolledRowCounts: scrolledRowCounts) {
                 // Cache writes can precede layout. Request again when rows change,
                 // rather than repeatedly scrolling an unchanged, exhausted list.
-                try await withStableAccessibility(until: deadline) { try await driver.scrollToBottom() }
+                try await withStableAccessibility(wait: wait) { try await driver.scrollToBottom() }
                 if let count = ui.listRowCount { scrolledRowCounts.insert(count) }
             }
             try await Task.sleep(for: .milliseconds(250))
-        } while clock.now < deadline
+        }
         throw Self.timeoutError("Organizer did not refresh the requested crash page \(request.query.pageIndex)", errors: lastErrors)
     }
 
@@ -291,33 +365,27 @@ final class NativeOrganizerCrashService {
     }
 
     private func waitForView(_ driver: NativeOrganizerAccessibility, collection: NativeCrashCollection, prepare: Bool = true,
+                             wait: RefreshWait,
                              allowingPreviousFailure: Bool = false) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        var failure: (any Error)?
-        repeat {
-            try Task.checkCancellation()
-            do {
-                let snapshot = try driver.snapshot(for: collection)
-                if !allowingPreviousFailure { try checkFailure(snapshot) }
-                if snapshot.busyMessages.isEmpty {
-                    if prepare { try driver.prepareList() }
-                    return
-                }
-            }
-            catch { failure = error }
-            try await Task.sleep(for: .milliseconds(250))
-        } while clock.now < deadline
-        throw failure ?? NativeRuntimeError.unavailable("Organizer did not open its crash list")
+        try await wait.untilViewReady(read: { try driver.snapshot(for: collection) },
+            prepare: { if prepare { try driver.prepareList() } },
+            checkFailure: { if !allowingPreviousFailure { try self.checkFailure($0) } })
     }
 
-    private func withStableAccessibility<Value>(until deadline: ContinuousClock.Instant,
+    private static func isIncompleteView(_ error: any Error) -> Bool {
+        // During navigation, missing tables, ancestors and filter controls use
+        // unsupportedContract too. Retry those only while preparing the view.
+        if case NativeRuntimeError.unsupportedContract = error { return true }
+        return isTransientAccessibility(error)
+    }
+
+    private func withStableAccessibility<Value>(wait: RefreshWait,
                                                  _ operation: () async throws -> Value) async throws -> Value {
         repeat {
-            try Task.checkCancellation()
+            _ = try await wait.canContinue()
             do { return try await operation() }
             catch where Self.isTransientAccessibility(error) {
-                guard ContinuousClock().now < deadline else { throw error }
+                guard try await wait.canContinue() else { throw error }
                 try await Task.sleep(for: .milliseconds(250))
             }
         } while true
@@ -329,7 +397,7 @@ final class NativeOrganizerCrashService {
         guard error.domain == "XcodeMCPKit.OrganizerAccessibility" else { return false }
         // Xcode also reports illegalArgument for previously valid AX elements
         // while replacing its SwiftUI rows. Re-resolve the entire read snapshot;
-        // a repeated failure still reaches the operation's deadline.
+        // bounded requests still reach their refresh limit.
         if error.code == Int(ApplicationServices.AXError.illegalArgument.rawValue) {
             return error.userInfo["AXAttribute"] is String
         }
@@ -340,10 +408,11 @@ final class NativeOrganizerCrashService {
     func shutdown() async throws {}
 
     // The caller holds the shared Products lock while opening a route.
-    func organizerApplication(for url: URL) async throws -> NativeOrganizerApplication {
+    func organizerApplication(for url: URL, observe: Observer? = nil) async throws -> NativeOrganizerApplication {
         let application = try runningOrganizer(installation)
         try await recoverAbandonedOwners(preserving: application.processIdentifier)
-        try await application.waitUntilInactive()
+        let wait = RefreshWait(seconds: 0, sessionAvailable: sessionAvailable, observe: observe)
+        try await application.waitUntilInactive { _ = try await wait.canContinue() }
         try application.open(url)
         return application
     }
@@ -413,7 +482,7 @@ final class NativeOrganizerCrashService {
         return try FileHandle(forUpdating: url)
     }
 
-    private func withOrganizerAccess(_ request: NativeCrashServiceQuery, issueID: String?, observe: Observer? = nil,
+    private func withOrganizerAccess(_ request: NativeCrashServiceQuery, issueID: String?, timeoutSeconds: Double, observe: Observer? = nil,
         _ operation: (NativeOrganizerAccessibility, Date, NativeOrganizerCrashCache.PageCapture?) async throws -> NativeCrashData.Fetched) async throws -> NativeCrashData.Fetched {
         try observe?(["phase": .string("waitingForOrganizer")])
         let file = try await productsLock()
@@ -422,16 +491,20 @@ final class NativeOrganizerCrashService {
         let outcome: Result<NativeCrashData.Fetched, any Error>
         do {
             try Task.checkCancellation()
-            let application = try await organizerApplication(for: Self.url(request, issueID: issueID))
+            let application = try await organizerApplication(for: Self.url(request, issueID: issueID), observe: observe)
             borrowed = application
             try observe?(["phase": .string("acquiring"), "borrowedOrganizer": Self.identity(application)])
             let driver = try NativeOrganizerAccessibility(installation: installation, application: application.application)
             let collection: NativeCrashCollection = issueID == nil ? .issues : .logs
-            try await waitForView(driver, collection: collection, prepare: false, allowingPreviousFailure: true)
+            try await waitForView(driver, collection: collection, prepare: false,
+                wait: RefreshWait(seconds: timeoutSeconds, sessionAvailable: sessionAvailable, observe: observe),
+                allowingPreviousFailure: true)
             let began = try await Self.refreshBoundary()
             if issueID == nil { capture = try NativeOrganizerCrashCache.PageCapture(cache: cache, request: request, since: began) }
-            try driver.reload()
-            try await waitForView(driver, collection: collection, prepare: issueID == nil)
+            let wait = RefreshWait(seconds: timeoutSeconds, sessionAvailable: sessionAvailable, observe: observe)
+            try await withStableAccessibility(wait: wait) { try driver.reload() }
+            try await waitForView(driver, collection: collection, prepare: issueID == nil,
+                wait: RefreshWait(seconds: timeoutSeconds, sessionAvailable: sessionAvailable, observe: observe))
             outcome = .success(try await operation(driver, began, capture))
         } catch { outcome = .failure(error) }
         var cleanup: [NSError] = await capture?.finish() ?? []

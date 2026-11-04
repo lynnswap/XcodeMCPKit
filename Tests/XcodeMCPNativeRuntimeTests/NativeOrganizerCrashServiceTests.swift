@@ -7,6 +7,72 @@ import XcodeMCPWire
 @Suite
 @MainActor
 struct NativeOrganizerCrashServiceTests {
+    @Test func replacingViewControlsAreRetriedButOrganizerFailuresArePropagated() async throws {
+        let wait = NativeOrganizerCrashService.RefreshWait(seconds: 0, sessionAvailable: { true })
+        var missingTable = true
+        var missingFilter = true
+        var prepared = false
+        let snapshot = NativeOrganizerAccessibility.Snapshot(busyMessages: [], listStatusMessages: [], listRowCount: 0)
+        try await wait.untilViewReady(read: {
+            if missingTable {
+                missingTable = false
+                throw NativeRuntimeError.unsupportedContract("The crash table is being replaced")
+            }
+            return snapshot
+        }, prepare: {
+            if missingFilter {
+                missingFilter = false
+                throw NativeRuntimeError.unsupportedContract("The filter is being replaced")
+            }
+            prepared = true
+        }, checkFailure: { _ in })
+        #expect(prepared)
+
+        let failure = NativeRuntimeError.unavailable("Organizer could not load crashes")
+        await #expect(throws: NativeRuntimeError.self) {
+            try await wait.untilViewReady(read: { snapshot }, prepare: {
+                Issue.record("A failed source must not prepare or accept the view")
+            }, checkFailure: { _ in throw failure })
+        }
+    }
+
+    @Test func lockingPausesTheRefreshBudgetAndReportsUnlockBeforeResuming() async throws {
+        var now = ContinuousClock().now
+        var available = false
+        var phases: [JSONValue] = []
+        let wait = NativeOrganizerCrashService.RefreshWait(seconds: 1, sessionAvailable: {
+            if !available {
+                available = true
+                return false
+            }
+            return true
+        }, observe: { fields in
+            if let phase = fields["phase"] { phases.append(phase) }
+        }, now: { now })
+
+        now = now.advanced(by: .seconds(120))
+        #expect(try await wait.canContinue())
+        #expect(phases == [.string("waitingForUnlock"), .string("acquiring")])
+        now = now.advanced(by: .seconds(2))
+        #expect(try await !wait.canContinue())
+    }
+
+    @Test(arguments: [0.0, 1e300])
+    func longRefreshWaitRemainsCancellableWhileLocked(seconds: Double) async throws {
+        var now = ContinuousClock().now
+        var available = true
+        var waitingForUnlock = false
+        let wait = NativeOrganizerCrashService.RefreshWait(seconds: seconds, sessionAvailable: { available },
+            observe: { fields in waitingForUnlock = fields["phase"] == .string("waitingForUnlock") }, now: { now })
+        now = now.advanced(by: .seconds(86_400))
+        #expect(try await wait.canContinue())
+        available = false
+        let task = Task { try await wait.canContinue() }
+        while !waitingForUnlock { await Task.yield() }
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+    }
+
     @Test func missingSavedSamplesPermitARefreshWhileReadFailuresKeepBothDiagnostics() throws {
         let root = FileManager.default.temporaryDirectory.appending(component: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

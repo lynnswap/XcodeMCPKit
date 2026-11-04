@@ -103,8 +103,12 @@ final class NativeCrashToolCorrection {
                         let loaded = try await NativeCrashData.load(key: query.json(issueID: collection == .logs ? request.query.issueID : nil),
                             source: request.source, store: sourceStore) { [self] in
                             let prepared = try await serviceQuery(query)
-                            if collection == .issues { return try await service.fetchIssues(prepared, store: sourceStore) }
-                            return try await service.fetchIssue(prepared, issueID: request.query.issueID!)
+                            if collection == .issues {
+                                return try await service.fetchIssues(prepared, store: sourceStore,
+                                    timeoutSeconds: request.refreshTimeoutSeconds)
+                            }
+                            return try await service.fetchIssue(prepared, issueID: request.query.issueID!,
+                                timeoutSeconds: request.refreshTimeoutSeconds)
                         }
                         let snapshot = try Self.snapshot(collection: collection, query: query,
                             issueID: request.query.issueID, loaded: loaded)
@@ -218,6 +222,7 @@ final class NativeCrashToolCorrection {
             "issue_id": request.query.issueID.map(JSONValue.string) ?? .null,
             "collection": .string(collection.rawValue), "time_period": .string(query.timePeriod),
             "source": .string(request.source.rawValue),
+            "refresh_timeout_seconds": .number(.double(request.refreshTimeoutSeconds)),
             "max_records": .number(.int(Int64(request.maxRecords))),
             "max_bytes": .number(.int(Int64(request.maxBytes))),
         ]))
@@ -235,9 +240,11 @@ final class NativeCrashToolCorrection {
                 prepared = serviceRequest
                 try job.updateProgress(["adamIdentifier": .string(serviceRequest.adamIdentifier)])
                 if collection == .issues {
-                    return try await service.fetchIssues(serviceRequest, store: pageStore, observe: observe)
+                    return try await service.fetchIssues(serviceRequest, store: pageStore,
+                        timeoutSeconds: request.refreshTimeoutSeconds, observe: observe)
                 }
-                return try await service.fetchIssue(serviceRequest, issueID: request.query.issueID!, observe: observe)
+                return try await service.fetchIssue(serviceRequest, issueID: request.query.issueID!,
+                    timeoutSeconds: request.refreshTimeoutSeconds, observe: observe)
             }
         } catch {
             let original = error

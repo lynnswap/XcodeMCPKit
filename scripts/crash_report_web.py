@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 from pathlib import Path
 import threading
 from urllib.parse import quote, unquote, urlsplit
@@ -15,16 +16,18 @@ class ReportBusy(RuntimeError):
 
 class ReportController:
     def __init__(self, bundle_id, platform, mcp_url, output_root, generator=None, work_lock=None,
-                 time_period="last24Hours"):
+                 time_period="last24Hours", refresh_timeout_seconds=0):
         self.bundle_id = bundle_id
         self.platform = platform
         self.mcp_url = mcp_url
         self.output_root = Path(output_root).expanduser().resolve()
         self.time_period = time_period
+        self.refresh_timeout_seconds = self._timeout(refresh_timeout_seconds)
         self.generator = generator
         self.work_lock = work_lock or threading.Lock()
         self._lock = threading.RLock()
         self._cancel = threading.Event()
+        self._skip = threading.Event()
         self._worker = None
         self._published = {}
         self._state = self._initial_state()
@@ -33,13 +36,14 @@ class ReportController:
         return {"status": "idle", "running": False, "bundleId": self.bundle_id,
                 "platform": self.platform, "startedAt": None, "finishedAt": None,
                 "timePeriod": self.time_period, "outputRoot": str(self.output_root),
+                "refreshTimeoutSeconds": self.refresh_timeout_seconds,
                 "progress": {}, "result": None, "files": {}, "lastError": None}
 
     def status(self):
         with self._lock:
             return deepcopy(self._state)
 
-    def start(self, time_period=None, output_root=None):
+    def start(self, time_period=None, output_root=None, refresh_timeout_seconds=None):
         with self._lock:
             if self._state["running"]:
                 raise ReportBusy("レポートを作成中です。完了するか、停止してから再実行してください。")
@@ -50,12 +54,16 @@ class ReportController:
             if not isinstance(output_root, (str, Path)) or not str(output_root).strip():
                 raise ValueError("保存先フォルダを指定してください。")
             output_root = Path(output_root).expanduser().resolve()
+            refresh_timeout_seconds = self._timeout(refresh_timeout_seconds if refresh_timeout_seconds is not None
+                                                   else self._state["refreshTimeoutSeconds"])
             if not self.work_lock.acquire(blocking=False):
                 raise ReportBusy("別の取得処理が実行中です。その処理を停止してからレポートを作成してください。")
             self._cancel = threading.Event()
+            self._skip = threading.Event()
             self._state = {**self._initial_state(), "status": "running", "running": True,
-                           "startedAt": self._now(), "timePeriod": time_period, "outputRoot": str(output_root)}
-            self._worker = threading.Thread(target=self._run, args=(time_period, output_root),
+                           "startedAt": self._now(), "timePeriod": time_period, "outputRoot": str(output_root),
+                           "refreshTimeoutSeconds": refresh_timeout_seconds}
+            self._worker = threading.Thread(target=self._run, args=(time_period, output_root, refresh_timeout_seconds),
                                             name="CrashReport", daemon=True)
             try:
                 self._worker.start()
@@ -76,7 +84,17 @@ class ReportController:
         with self._lock:
             self._state["progress"].update(deepcopy(value))
 
-    def _run(self, time_period, output_root):
+    def skip(self, issue_id):
+        with self._lock:
+            progress = self._state["progress"]
+            if (not self._state["running"] or self._cancel.is_set() or not progress.get("skipAllowed")
+                    or not issue_id or issue_id != progress.get("issueId") or progress.get("skipRequested")):
+                raise ReportBusy("現在スキップできるissueはありません。取得状況を確認してください。")
+            self._skip.set()
+            progress.update(skipRequested=True, skipAllowed=False)
+            return self.status()
+
+    def _run(self, time_period, output_root, refresh_timeout_seconds):
         try:
             generator = self.generator
             if generator is None:
@@ -84,7 +102,8 @@ class ReportController:
                 generator = generate_report
             result = generator(bundle_id=self.bundle_id, platform=self.platform, mcp_url=self.mcp_url,
                                output_root=output_root, time_period=time_period,
-                               progress=self._progress, cancel_event=self._cancel)
+                               refresh_timeout_seconds=refresh_timeout_seconds,
+                               progress=self._progress, cancel_event=self._cancel, skip_event=self._skip)
             files = self._publish(result, output_root)
             with self._lock:
                 self._state.update(status=result["status"], result=deepcopy(result), files=files)
@@ -127,6 +146,12 @@ class ReportController:
         self.cancel()
         if self._worker:
             self._worker.join()
+
+    @staticmethod
+    def _timeout(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("更新待ち上限には0以上の秒数を指定してください。0は制限なしです。")
+        return value
 
     @staticmethod
     def _now():
@@ -173,7 +198,7 @@ def route_report_request(handler, controller, method, path):
         else:
             content_type = "application/json; charset=utf-8" if file.suffix == ".json" else "text/plain; charset=utf-8"
             _send(handler, file.read_bytes(), content_type=content_type)
-    elif method == "POST" and path in ("/api/crash-report/start", "/api/crash-report/cancel"):
+    elif method == "POST" and path in ("/api/crash-report/start", "/api/crash-report/cancel", "/api/crash-report/skip"):
         if handler.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             _send(handler, {"error": "application/json で送信してください。"}, 415)
             return True
@@ -189,10 +214,14 @@ def route_report_request(handler, controller, method, path):
             _send(handler, {"error": "リクエスト JSON を解釈できません。"}, 400)
             return True
         try:
-            _send(handler, controller.start(time_period=parameters.get("timePeriod"),
-                                           output_root=parameters.get("outputRoot"))
-                  if path.endswith("/start") else controller.cancel(),
-                  202 if path.endswith("/start") else 200)
+            if path.endswith("/start"):
+                state = controller.start(time_period=parameters.get("timePeriod"), output_root=parameters.get("outputRoot"),
+                                         refresh_timeout_seconds=parameters.get("refreshTimeoutSeconds"))
+            elif path.endswith("/skip"):
+                state = controller.skip(parameters.get("issueId"))
+            else:
+                state = controller.cancel()
+            _send(handler, state, 202 if path.endswith("/start") else 200)
         except ReportBusy as error:
             _send(handler, {"error": str(error), **controller.status()}, 409)
         except ValueError as error:
@@ -202,8 +231,9 @@ def route_report_request(handler, controller, method, path):
     return True
 
 
-def serve_reports(bundle_id, platform, mcp_url, output_root, port, time_period="last24Hours"):
-    controller = ReportController(bundle_id, platform, mcp_url, output_root, time_period=time_period)
+def serve_reports(bundle_id, platform, mcp_url, output_root, port, time_period="last24Hours", refresh_timeout_seconds=0):
+    controller = ReportController(bundle_id, platform, mcp_url, output_root, time_period=time_period,
+                                  refresh_timeout_seconds=refresh_timeout_seconds)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):

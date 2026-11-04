@@ -128,10 +128,11 @@ class CrashReportWebTests(unittest.TestCase):
         with report_server(controller) as port:
             first_root = self.root / "first-output"
             self.assertEqual(self.request(port, "POST", "/api/crash-report/start", parameters={
-                "timePeriod": "last14Days", "outputRoot": str(first_root)})[0], 202)
+                "timePeriod": "last14Days", "outputRoot": str(first_root), "refreshTimeoutSeconds": 300})[0], 202)
             first = self.finish(controller)
             first_url = first["files"]["report.md"]
             self.assertEqual(calls[0]["time_period"], "last14Days")
+            self.assertEqual(calls[0]["refresh_timeout_seconds"], 300)
             self.assertEqual(calls[0]["output_root"], first_root.resolve())
             self.assertEqual(first["timePeriod"], "last14Days")
             self.assertEqual(self.request(port, "POST", "/api/crash-report/start", parameters={
@@ -142,6 +143,41 @@ class CrashReportWebTests(unittest.TestCase):
             self.assertEqual(self.request(port, "POST", "/api/crash-report/start", parameters={
                 "timePeriod": "invalid"})[0], 400)
             self.assertEqual(len(calls), 2)
+
+    def test_skip_targets_only_the_current_issue_and_keeps_the_report_running(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        def generate(**arguments):
+            calls.append(arguments)
+            arguments["progress"]({"issueId": "current", "skipAllowed": True, "phase": "waitingForUnlock"})
+            entered.set()
+            release.wait(timeout=2)
+            return saved_report(self.root, status="partial")
+        controller = self.controller(generate)
+        self.addCleanup(release.set)
+        with report_server(controller) as port:
+            self.assertEqual(self.request(port, "POST", "/api/crash-report/start")[0], 202)
+            self.assertTrue(entered.wait(timeout=1))
+            self.assertEqual(calls[0]["refresh_timeout_seconds"], 0)
+            self.assertEqual(self.request(port, "POST", "/api/crash-report/skip", {"issueId": "previous"})[0], 409)
+            self.assertFalse(calls[0]["skip_event"].is_set())
+            code, _, body = self.request(port, "POST", "/api/crash-report/skip", {"issueId": "current"})
+            self.assertEqual(code, 200)
+            self.assertTrue(json.loads(body)["running"])
+            self.assertTrue(calls[0]["skip_event"].is_set())
+            self.assertFalse(calls[0]["cancel_event"].is_set())
+            self.assertEqual(self.request(port, "POST", "/api/crash-report/skip", {"issueId": "current"})[0], 409)
+            release.set()
+            self.finish(controller)
+
+    def test_invalid_refresh_timeout_does_not_start_a_worker(self):
+        calls = []
+        controller = self.controller(lambda **arguments: calls.append(arguments))
+        with report_server(controller) as port:
+            for value in [-1, "forever", True]:
+                self.assertEqual(self.request(port, "POST", "/api/crash-report/start",
+                    {"refreshTimeoutSeconds": value})[0], 400)
+        self.assertEqual(calls, [])
 
     def test_cancellation_waits_for_generator_cleanup_before_releasing_shared_work(self):
         entered, cleanup = threading.Event(), threading.Event()
