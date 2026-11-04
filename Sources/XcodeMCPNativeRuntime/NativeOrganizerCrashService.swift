@@ -83,6 +83,28 @@ final class NativeOrganizerCrashService {
             checkedAt = now()
             return remainingSeconds.map { $0 > 0 } ?? true
         }
+
+        func untilViewReady(read: () throws -> NativeOrganizerAccessibility.Snapshot,
+                            prepare: () throws -> Void, checkFailure: (NativeOrganizerAccessibility.Snapshot) throws -> Void) async throws {
+            var failure: (any Error)?
+            while try await canContinue() {
+                var snapshot: NativeOrganizerAccessibility.Snapshot?
+                do { snapshot = try read() }
+                catch where NativeOrganizerCrashService.isIncompleteView(error) { failure = error }
+                if let snapshot {
+                    // Report source/status failures outside the hierarchy-read retry.
+                    try checkFailure(snapshot)
+                    if snapshot.busyMessages.isEmpty {
+                        do {
+                            try prepare()
+                            return
+                        } catch where NativeOrganizerCrashService.isIncompleteView(error) { failure = error }
+                    }
+                }
+                try await Task.sleep(for: .milliseconds(250))
+            }
+            throw failure ?? NativeRuntimeError.unavailable("Organizer did not open its crash list")
+        }
     }
 
     func fetchIssues(_ request: NativeCrashServiceQuery, store: NativeCrashStore,
@@ -345,20 +367,16 @@ final class NativeOrganizerCrashService {
     private func waitForView(_ driver: NativeOrganizerAccessibility, collection: NativeCrashCollection, prepare: Bool = true,
                              wait: RefreshWait,
                              allowingPreviousFailure: Bool = false) async throws {
-        var failure: (any Error)?
-        while try await wait.canContinue() {
-            do {
-                let snapshot = try driver.snapshot(for: collection)
-                if !allowingPreviousFailure { try checkFailure(snapshot) }
-                if snapshot.busyMessages.isEmpty {
-                    if prepare { try driver.prepareList() }
-                    return
-                }
-            }
-            catch where Self.isTransientAccessibility(error) { failure = error }
-            try await Task.sleep(for: .milliseconds(250))
-        }
-        throw failure ?? NativeRuntimeError.unavailable("Organizer did not open its crash list")
+        try await wait.untilViewReady(read: { try driver.snapshot(for: collection) },
+            prepare: { if prepare { try driver.prepareList() } },
+            checkFailure: { if !allowingPreviousFailure { try self.checkFailure($0) } })
+    }
+
+    private static func isIncompleteView(_ error: any Error) -> Bool {
+        // During navigation, missing tables, ancestors and filter controls use
+        // unsupportedContract too. Retry those only while preparing the view.
+        if case NativeRuntimeError.unsupportedContract = error { return true }
+        return isTransientAccessibility(error)
     }
 
     private func withStableAccessibility<Value>(wait: RefreshWait,

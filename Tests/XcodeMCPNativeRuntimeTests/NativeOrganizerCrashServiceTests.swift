@@ -7,6 +7,35 @@ import XcodeMCPWire
 @Suite
 @MainActor
 struct NativeOrganizerCrashServiceTests {
+    @Test func replacingViewControlsAreRetriedButOrganizerFailuresArePropagated() async throws {
+        let wait = NativeOrganizerCrashService.RefreshWait(seconds: 0, sessionAvailable: { true })
+        var missingTable = true
+        var missingFilter = true
+        var prepared = false
+        let snapshot = NativeOrganizerAccessibility.Snapshot(busyMessages: [], listStatusMessages: [], listRowCount: 0)
+        try await wait.untilViewReady(read: {
+            if missingTable {
+                missingTable = false
+                throw NativeRuntimeError.unsupportedContract("The crash table is being replaced")
+            }
+            return snapshot
+        }, prepare: {
+            if missingFilter {
+                missingFilter = false
+                throw NativeRuntimeError.unsupportedContract("The filter is being replaced")
+            }
+            prepared = true
+        }, checkFailure: { _ in })
+        #expect(prepared)
+
+        let failure = NativeRuntimeError.unavailable("Organizer could not load crashes")
+        await #expect(throws: NativeRuntimeError.self) {
+            try await wait.untilViewReady(read: { snapshot }, prepare: {
+                Issue.record("A failed source must not prepare or accept the view")
+            }, checkFailure: { _ in throw failure })
+        }
+    }
+
     @Test func lockingPausesTheRefreshBudgetAndReportsUnlockBeforeResuming() async throws {
         var now = ContinuousClock().now
         var available = false
