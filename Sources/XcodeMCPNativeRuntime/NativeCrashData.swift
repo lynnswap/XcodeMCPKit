@@ -162,13 +162,13 @@ enum NativeCrashContract {
                 "default": .number(.int(defaultValue)), "description": .string(description)])
         }
         if kind == .wait || kind == .cancel || kind == .resume {
-            var inputs = ["job_id": property("string", "Job identifier returned by StartCrashSync or ResumeCrashSync.")]
+            var inputs = ["job_id": property("string", "Job identifier returned by StartOrganizerCrashSync or ResumeOrganizerCrashSync.")]
             if kind == .wait {
                 inputs["wait_seconds"] = .object(["type": .string("number"),
                     "minimum": .number(.int(0)), "maximum": .number(.int(30)), "default": .number(.int(1)),
                     "description": .string("Maximum seconds to wait for a job update or terminal state. Defaults to 1; 0 returns immediately. Reaching this limit or disconnecting does not cancel the job.")])
                 inputs["after_revision"] = .object(["type": .string("integer"), "minimum": .number(.int(0)),
-                    "description": .string("Revision from the previous StartCrashSync, ResumeCrashSync, or WaitForCrashSync response. Return when the job has a newer revision, reaches a terminal state, or the wait limit expires. Omit to use the revision at the start of this wait.")])
+                    "description": .string("Revision from the previous StartOrganizerCrashSync, ResumeOrganizerCrashSync, or WaitForOrganizerCrashSync response. Return when the job has a newer revision, reaches a terminal state, or the wait limit expires. Omit to use the revision at the start of this wait.")])
             }
             let description: String
             if kind == .wait {
@@ -176,7 +176,7 @@ enum NativeCrashContract {
             } else if kind == .resume {
                 description = "Resume an interrupted, failed, or cancelled crash sync as a new job with the saved conditions. Recover saved pages and pending imports, then rescan network sources from the first page. Active and completed jobs cannot be resumed."
             } else {
-                description = "Request cancellation of a crash sync job and return promptly. Use WaitForCrashSync to confirm cancellation and Organizer cleanup have finished."
+                description = "Request cancellation of a crash sync job and return promptly. Use WaitForOrganizerCrashSync to confirm cancellation and Organizer cleanup have finished."
             }
             return describeJob(kind, description: description, inputs: inputs, required: ["job_id"])
         }
@@ -203,16 +203,16 @@ enum NativeCrashContract {
                 "default": .string("network"),
                 "description": .string("Applies when starting acquisition. Network uses Organizer in an already running instance of the selected Xcode with account access and Accessibility permission. Open that Xcode first; acquisition waits while it is foreground and leaves it running. Cache imports exact saved data without GUI; explicit bundle_id and platform also bypass product inventory. Fallback preserves failures and the cached data's original provenance.")])
             if kind == .sync {
-                inputs["cursor"] = property("string", "Local import continuation returned by SyncCrashReports; does not fetch from the network again. Its budgets are retained, and any explicitly repeated budgets must match. Read cursors and checkpoints belong to ReadCrashChanges.")
+                inputs["cursor"] = property("string", "Local import continuation returned by SyncOrganizerCrashReports; does not fetch from the network again. Its budgets are retained, and any explicitly repeated budgets must match. Read cursors and checkpoints belong to ReadOrganizerCrashChanges.")
             }
             inputs["max_records"] = positiveInteger(100, "Maximum records to import in this acquisition batch.")
             inputs["refresh_timeout_seconds"] = .object(["type": .string("number"),
                 "minimum": .number(.int(0)), "default": .number(.int(90)),
-                "description": .string("Maximum unlocked seconds to wait for each Organizer view, issue refresh, or list page. Defaults to 90; 0 waits indefinitely until ready or cancelled. A locked or switched-away Mac session pauses this budget and reports waitingForUnlock. Independent of WaitForCrashSync's wait_seconds. Ignored for cache imports and local import continuations.")])
+                "description": .string("Maximum unlocked seconds to wait for each Organizer view, issue refresh, or list page. Defaults to 90; 0 waits indefinitely until ready or cancelled. A locked or switched-away Mac session pauses this budget and reports waitingForUnlock. Independent of WaitForOrganizerCrashSync's wait_seconds. Ignored for cache imports and local import continuations.")])
             inputs["max_bytes"] = positiveInteger(64 * 1024 * 1024, "Import byte budget. One oversized log file may be streamed alone so acquisition can advance; this is not the response JSON budget.")
         case .read:
-            inputs["checkpoint"] = property("string", "Completed ReadCrashChanges checkpoint used as the baseline for a new fixed change window. Omit on the initial read.")
-            inputs["cursor"] = property("string", "ReadCrashChanges cursor for the next page of the same fixed window. Retrying the same cursor is stable, including after restart. Do not combine with checkpoint.")
+            inputs["checkpoint"] = property("string", "Completed ReadOrganizerCrashChanges checkpoint used as the baseline for a new fixed change window. Omit on the initial read.")
+            inputs["cursor"] = property("string", "ReadOrganizerCrashChanges cursor for the next page of the same fixed window. Retrying the same cursor is stable, including after restart. Do not combine with checkpoint.")
             inputs["limit"] = positiveInteger(25, "Maximum changed records in this response.")
             inputs["max_bytes"] = positiveInteger(256 * 1024, "Maximum encoded structured result bytes, including result metadata and cursors, before MCP/JSON-RPC wrapping. Log bodies are referenced by saved blob paths. A budget smaller than the minimum result fails with the required size. A continuation that has not returned a successful page can increase this budget; saved pages retain their original budget.")
             inputs["order"] = .object(["type": .string("string"),
@@ -223,7 +223,7 @@ enum NativeCrashContract {
         if kind == .start {
             inputs["bundle_id"] = property("string", "App bundle identifier. Required for a new job.")
             return describeJob(kind,
-                description: "Start crash acquisition and local import as a host-owned job and return promptly. Supply bundle_id and platform explicitly, then use WaitForCrashSync to observe progress and ReadCrashChanges to read committed records.",
+                description: "Start crash acquisition and local import as a host-owned job and return promptly. Supply bundle_id and platform explicitly, then use WaitForOrganizerCrashSync to observe progress and ReadOrganizerCrashChanges to read committed records.",
                 inputs: inputs, required: ["bundle_id", "platform"])
         }
         func token(_ description: String) -> JSONValue {
@@ -253,7 +253,7 @@ enum NativeCrashContract {
         return NativeTool(name: kind.toolName, descriptor: .object([
             "name": .string(kind.toolName),
             "description": .string(kind == .sync
-                ? "Import crash issues or saved crash logs into persistent snapshots and reusable content blobs, in bounded acquisition batches. Use ReadCrashChanges to read new or changed records."
+                ? "Import crash issues or saved crash logs into persistent snapshots and reusable content blobs, in bounded acquisition batches. Use ReadOrganizerCrashChanges to read new or changed records."
                 : "Read only new or changed crash records from a fixed local change window, with restart-safe cursors, checkpoints, and a bounded JSON response. Does not operate Xcode or access the network."),
             "annotations": .object(["readOnlyHint": .bool(true)]),
             "inputSchema": .object(["type": .string("object"), "properties": .object(inputs), "required": .array([])]),
@@ -267,7 +267,7 @@ enum NativeCrashContract {
         let outputs: [String: JSONValue] = [
             "jobId": .object(["type": .string("string"), "description": .string("Persistent crash sync job identifier.")]),
             "previousJobId": .object(["type": .array([.string("string"), .string("null")]),
-                "description": .string("Job whose saved conditions and partial results were used to create this resumed job. Null for a new StartCrashSync job; the earlier job and its result remain unchanged.")]),
+                "description": .string("Job whose saved conditions and partial results were used to create this resumed job. Null for a new StartOrganizerCrashSync job; the earlier job and its result remain unchanged.")]),
             "state": .object(["type": .string("string"), "enum": .array([
                 "queued", "running", "cancelling", "completed", "failed", "cancelled", "interrupted",
             ].map(JSONValue.string))]),
@@ -279,7 +279,7 @@ enum NativeCrashContract {
             "progress": .object(["type": .string("object"),
                 "description": .string("Latest phase, capturedPages, capturedRecords, resolved query, import cacheInfo, and recoveredImports with saved response paths, and recoveryErrors for unavailable saved acquisition snapshots. Phases include queued, recovering, waitingForOrganizer, waitingForUnlock, acquiring, and importing.")]),
             "result": .object(["type": .array([.string("object"), .string("null")]),
-                "description": .string("Latest SyncCrashReports response, including cumulative cacheInfo, responsePath, and metadataPath. Record import failures stop automatic processing and retain nextCursor for an explicit retry. Source-only errors still allow importing acquired data. Null while no result has been committed.")]),
+                "description": .string("Latest SyncOrganizerCrashReports response, including cumulative cacheInfo, responsePath, and metadataPath. Record import failures stop automatic processing and retain nextCursor for an explicit retry. Source-only errors still allow importing acquired data. Null while no result has been committed.")]),
             "errors": .object(["type": .string("array"), "items": .object(["type": .string("object")]),
                 "description": .string("Job failures and cleanup diagnostics. A failed job state does not make a successful status query an MCP error.")]),
         ]

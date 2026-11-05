@@ -3,6 +3,14 @@ import Testing
 @testable import XcodeMCPProxyRuntime
 
 struct StableToolCatalogTests {
+    @Test(arguments: ["XcodeListWindows", "GetTopCrashIssues", "GetCrashIssueLogs"])
+    func appleCrashToolsPreserveGUIContextAndNativeSchemas(name: String) throws {
+        let native = tool(name, properties: ["tabIdentifier": string, "bundle_id": string],
+            required: [], extra: ["description": .string("Native GUI contract.")])
+        let result = try XcodeToolCatalog.publicResult(from: catalog([native]), managementTools: [])
+        #expect(find(name, in: result) == native)
+    }
+
     @Test func workspaceContractPreservesNativePayloadSchemasAndAnnotations() throws {
         let annotations: JSONValue = .object(["readOnlyHint": .bool(true), "openWorldHint": .bool(false)])
         let output: JSONValue = .object(["type": .string("object"), "properties": .object([
@@ -134,8 +142,8 @@ struct StableToolCatalogTests {
     }
 
     @Test func ownerReferencesAndExplicitAppIdentityDoNotRequireAnotherWorkspaceSelector() throws {
-        let names = ["DeviceInteractionInstallAndRun", "GetConsoleOutput", "SyncCrashReports",
-                     "ReadCrashChanges", "GetTopFieldPerformanceIssues", "GetFieldPerformanceIssueLogs"]
+        let names = ["DeviceInteractionInstallAndRun", "GetConsoleOutput", "SyncOrganizerCrashReports",
+                     "ReadOrganizerCrashChanges", "GetTopFieldPerformanceIssues", "GetFieldPerformanceIssueLogs"]
         let native = catalog(names.map { name in
             tool(name, properties: ["workspaceIdentifier": string], required: [])
         })
@@ -149,8 +157,8 @@ struct StableToolCatalogTests {
 
     @Test func crashQueriesPreserveDurableTokensAndBoundsWithOptionalWorkspace() throws {
         let integer: JSONValue = .object(["type": .string("integer")])
-        for name in ["SyncCrashReports", "ReadCrashChanges"] {
-            let sync = name == "SyncCrashReports"
+        for name in ["SyncOrganizerCrashReports", "ReadOrganizerCrashChanges"] {
+            let sync = name == "SyncOrganizerCrashReports"
             var properties: [String: JSONValue] = ["workspaceIdentifier": string, "bundle_id": string,
                 "platform": string, "collection": string, "issue_id": string, "cursor": string,
                 "max_bytes": integer]
@@ -188,11 +196,11 @@ struct StableToolCatalogTests {
     }
 
     @Test func crashJobsKeepExplicitIdentityAndJobControlsWithoutWorkspaceRouting() throws {
-        for name in ["StartCrashSync", "WaitForCrashSync", "CancelCrashSync", "ResumeCrashSync"] {
-            let start = name == "StartCrashSync"
+        for name in ["StartOrganizerCrashSync", "WaitForOrganizerCrashSync", "CancelOrganizerCrashSync", "ResumeOrganizerCrashSync"] {
+            let start = name == "StartOrganizerCrashSync"
             let required = start ? ["bundle_id", "platform"] : ["job_id"]
             let properties = Dictionary(uniqueKeysWithValues: required.map { ($0, string) })
-            let annotations: JSONValue = .object(["readOnlyHint": .bool(name == "WaitForCrashSync")])
+            let annotations: JSONValue = .object(["readOnlyHint": .bool(name == "WaitForOrganizerCrashSync")])
             let native = catalog([tool(name, properties: properties, required: required,
                 extra: ["annotations": annotations])])
             let result = try XcodeToolCatalog.publicResult(from: native, managementTools: [])
@@ -219,7 +227,7 @@ struct StableToolCatalogTests {
         ])
         let open = tool("XcodeOpenWorkspace", properties: ["path": string, "hostIdentifier": string], required: ["path"])
         let result = try XcodeToolCatalog.publicResult(from: native, managementTools: [open])
-        #expect(find("XcodeListWindows", in: result) == nil)
+        #expect(find("XcodeListWindows", in: result) != nil)
         #expect(find("XcodeOpenWorkspace", in: result) == open)
         #expect(find("XcodeGetCurrentFile", in: result) == nil)
         #expect(find("XcodeListNavigatorIssues", in: result) == nil)

@@ -109,16 +109,17 @@ package final class NativeXcodeBackend: NativeToolBackend {
         let registered = try bridge.registeredActions()
         var nextActions: [String: NativeActionClass] = unsafe [:]
         var nextTools: [String: NativeTool] = [:]
-        for name in names.sorted() {
-            if ["GetTopCrashIssues", "GetCrashIssueLogs"].contains(name) { continue }
+        for name in names.union(GUIXcodeTools.names).sorted() {
             guard let metadata = registered[name] else {
                 throw NativeRuntimeError.unsupportedContract("Public native tool '\(name)' is not registered")
             }
             let action = try unsafe await bridge.actionClass(for: metadata)
-            let workspaceScoped = try unsafe await scope.isWorkspaceScoped(action)
+            let gui = GUIXcodeTools.names.contains(name)
+            let workspaceScoped = gui ? false : try unsafe await scope.isWorkspaceScoped(action)
             let schema = try unsafe await bridge.schema(action: action)
             let tool = try NativeSchemaConverter.tool(from: schema, workspaceScoped: workspaceScoped)
-            unsafe (nextActions[name] = action)
+            // The broker executes GUI tools through Apple's bridge; the host supplies only their schemas.
+            if !gui { unsafe (nextActions[name] = action) }
             nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
         }
         for kind in NativeCrashToolCorrection.Kind.allCases {

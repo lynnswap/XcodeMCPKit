@@ -22,6 +22,7 @@ class FakeMCP:
         self.unobserved_detail = False
         self.partial_list = False
         self.window_period = "last24Hours"
+        self.native_signatures = {"Current": {"deviceCount": 2, "sourceFileName": ""}}
         self.points = [{"analyticsPointIdentifier": "current", "analyticsPointName": "Example startup",
                         "uniqueDeviceCountFilteredWithTimePeriod": 2}]
         self.raw = root / "sample.crash"
@@ -58,22 +59,31 @@ class FakeMCP:
 
     def call_tool(self, name, arguments):
         self.calls.append((name, copy.deepcopy(arguments)))
-        if name == "StartCrashSync":
+        if name == "XcodeListWindows":
+            return {"message": "* tabIdentifier: gui-tab, workspacePath: /Example.xcworkspace\n"}
+        if name == "GetTopCrashIssues":
+            return {"success": not self.partial_list, "data": json.dumps({"signatures": self.native_signatures}),
+                    "message": "native list failed" if self.partial_list else "ok"}
+        if name == "GetCrashIssueLogs":
+            payload = {"signatureId": arguments["signature_name"] + "-id", "crashLogs": [self.raw.read_text()]}
+            return {"success": not self.partial_detail, "data": "# Diagnostic Data\n## Performance Data\n" + json.dumps(payload) + "\nExpert instructions",
+                    "message": "native detail failed" if self.partial_detail else "ok"}
+        if name == "StartOrganizerCrashSync":
             self.cancelled = False
             if self.running or (self.unobserved_detail and arguments["collection"] == "logs"):
                 return {"jobId": arguments["collection"], "state": "running", "revision": 1, "result": None}
             return self.job(arguments["collection"])
-        if name == "CancelCrashSync":
+        if name == "CancelOrganizerCrashSync":
             self.cancelled = True
             return {"state": "cancelling"}
-        if name == "WaitForCrashSync":
+        if name == "WaitForOrganizerCrashSync":
             if self.unobserved_detail and arguments["job_id"] == "logs":
                 raise MCPError("Disconnected")
             job = self.job(arguments["job_id"])
             if self.cancelled:
                 job["state"] = "cancelled"
             return job
-        if name == "ReadCrashChanges":
+        if name == "ReadOrganizerCrashChanges":
             if "cursor" in arguments:
                 if self.fail_second_page:
                     raise MCPError("Second saved page unavailable")
@@ -92,7 +102,42 @@ class CrashReportTests(unittest.TestCase):
         self.client = FakeMCP(self.root)
 
     def generate(self, **kwargs):
-        return generate_report("com.example.app", "iOS", "http://localhost:8765/mcp", self.root / "reports", client=self.client, **kwargs)
+        return generate_report("com.example.app", "iOS", "http://localhost:8765/mcp", self.root / "reports", client=self.client, backend="organizer", **kwargs)
+
+    def test_default_uses_native_top100_and_preserves_returned_logs_and_scope(self):
+        self.client.native_signatures = {"Less": {"deviceCount": 1}, "More": {"deviceCount": 5}}
+        result = generate_report("com.example.app", "iOS", "http://localhost:8765/mcp", self.root / "reports", client=self.client)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["backend"], "mcpbridge")
+        self.assertEqual(result["timePeriod"], "last14Days")
+        self.assertEqual([i["name"] for i in result["issues"]], ["More", "Less"])
+        self.assertEqual([i["issueId"] for i in result["issues"]], ["More-id", "Less-id"])
+        self.assertEqual(result["listAcquisition"]["requestedCount"], 100)
+        self.assertEqual(result["listAcquisition"]["returnedCount"], 2)
+        top = next(args for name, args in self.client.calls if name == "GetTopCrashIssues")
+        self.assertEqual(top, dict(bundle_id="com.example.app", platform="iOS", tabIdentifier="gui-tab", count=100))
+        self.assertFalse(any("Organizer" in name for name, _ in self.client.calls))
+        for issue in result["issues"]:
+            log = issue["logs"][0]
+            self.assertEqual((Path(result["outputDirectory"]) / log["rawPath"]).read_bytes(), self.client.raw.read_bytes())
+            self.assertEqual(log["elapsedSeconds"], 0.5)
+            self.assertEqual(log["windowMembership"], "unknown")
+        markdown = Path(result["reportPath"]).read_text()
+        self.assertIn("要求 100件 / 取得 2件", markdown)
+        self.assertNotIn("Expert instructions", markdown)
+
+    def test_native_failures_remain_failures_without_organizer_fallback(self):
+        for scope in ("list", "detail"):
+            with self.subTest(scope=scope):
+                self.client.calls.clear()
+                self.client.partial_list = scope == "list"
+                self.client.partial_detail = scope == "detail"
+                result = generate_report("com.example.app", "iOS", "http://localhost:8765/mcp", self.root / "reports", client=self.client)
+                self.assertEqual(result["status"], "failed" if scope == "list" else "partial")
+                self.assertIn("native", result["errors"][0]["message"])
+                self.assertFalse(any("Organizer" in name for name, _ in self.client.calls))
+        with self.assertRaises(ValueError):
+            generate_report("com.example.app", "iOS", "http://localhost:8765/mcp", self.root, time_period="last24Hours", client=self.client)
 
     def test_report_uses_current_scan_and_preserves_all_raw_evidence_and_unknowns(self):
         result = self.generate()
@@ -110,9 +155,9 @@ class CrashReportTests(unittest.TestCase):
         self.assertNotIn("AIエージェントへの依頼", markdown)
         self.assertTrue((folder / "artifacts/issues-source.json").is_file())
         self.assertTrue(all(args.get("time_period") == "last24Hours" and args["source"] == "network"
-                            for name, args in self.client.calls if name == "StartCrashSync"))
+                            for name, args in self.client.calls if name == "StartOrganizerCrashSync"))
         self.assertTrue(all(args["refresh_timeout_seconds"] == 0
-                            for name, args in self.client.calls if name == "StartCrashSync"))
+                            for name, args in self.client.calls if name == "StartOrganizerCrashSync"))
 
     def test_skip_waits_for_host_cleanup_preserves_saved_logs_and_continues_next_issue(self):
         self.client.running = True
@@ -130,11 +175,11 @@ class CrashReportTests(unittest.TestCase):
         self.assertEqual(len(result["issues"][0]["logs"]), 2)
         self.assertFalse(result["issues"][0]["acquisition"]["complete"])
         names = [name for name, _ in self.client.calls]
-        cancellation = names.index("CancelCrashSync")
-        self.assertEqual(names[cancellation + 1], "WaitForCrashSync")
-        self.assertIn("StartCrashSync", names[cancellation + 2:])
+        cancellation = names.index("CancelOrganizerCrashSync")
+        self.assertEqual(names[cancellation + 1], "WaitForOrganizerCrashSync")
+        self.assertIn("StartOrganizerCrashSync", names[cancellation + 2:])
         self.assertTrue(all(args["refresh_timeout_seconds"] == 300
-                            for name, args in self.client.calls if name == "StartCrashSync"))
+                            for name, args in self.client.calls if name == "StartOrganizerCrashSync"))
         self.assertIn("スキップ", Path(result["reportPath"]).read_text())
 
     def test_detail_failure_keeps_saved_logs_with_unknown_window_and_visible_error(self):
@@ -164,7 +209,7 @@ class CrashReportTests(unittest.TestCase):
         self.assertEqual(result["status"], "cancelled")
         self.assertTrue(self.client.cancelled)
         names = [name for name, _ in self.client.calls]
-        self.assertLess(names.index("CancelCrashSync"), names.index("WaitForCrashSync"))
+        self.assertLess(names.index("CancelOrganizerCrashSync"), names.index("WaitForOrganizerCrashSync"))
         self.assertTrue(Path(result["reportPath"]).is_file())
 
     def test_cancelling_between_read_pages_keeps_samples_without_claiming_issue_completion(self):
@@ -172,7 +217,7 @@ class CrashReportTests(unittest.TestCase):
         original = self.client.call_tool
         def cancel_after_first_page(name, arguments):
             result = original(name, arguments)
-            if name == "ReadCrashChanges" and result.get("nextCursor"):
+            if name == "ReadOrganizerCrashChanges" and result.get("nextCursor"):
                 cancel.set()
             return result
         self.client.call_tool = cancel_after_first_page
@@ -188,7 +233,7 @@ class CrashReportTests(unittest.TestCase):
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["summary"]["issueCount"], 0)
         self.assertIn("全発生ログ", Path(result["reportPath"]).read_text())
-        self.assertFalse(any(name == "ReadCrashChanges" for name, _ in self.client.calls))
+        self.assertFalse(any(name == "ReadOrganizerCrashChanges" for name, _ in self.client.calls))
 
     def test_runs_do_not_overwrite_previous_reports(self):
         first = self.generate()
@@ -202,7 +247,7 @@ class CrashReportTests(unittest.TestCase):
         self.client.window_period = "last14Days"
         result = self.generate(time_period="last14Days")
         self.assertEqual(result["timePeriod"], "last14Days")
-        starts = [args for name, args in self.client.calls if name == "StartCrashSync"]
+        starts = [args for name, args in self.client.calls if name == "StartOrganizerCrashSync"]
         self.assertTrue(all(args["time_period"] == "last14Days" for args in starts))
         self.assertEqual(result["summary"]["insideWindow"], 1)
         self.assertEqual(result["issues"][0]["window"]["source"], "nativeDistribution")
@@ -230,7 +275,7 @@ class CrashReportTests(unittest.TestCase):
         result = self.generate()
         self.assertEqual(result["status"], "partial")
         self.assertEqual([issue["status"] for issue in result["issues"]], ["failed", "pending"])
-        starts = [args for name, args in self.client.calls if name == "StartCrashSync"]
+        starts = [args for name, args in self.client.calls if name == "StartOrganizerCrashSync"]
         self.assertEqual(len(starts), 2)
         self.assertIn("Host job logs may still be running", result["errors"][-1]["message"])
 

@@ -59,7 +59,7 @@ class CrashReportWebTests(unittest.TestCase):
 
     def controller(self, generator, work_lock=None):
         controller = ReportController("example.App", "iOS", "http://localhost:8765/mcp", self.root,
-                                      generator=generator, work_lock=work_lock)
+                                      generator=generator, work_lock=work_lock, backend="organizer", time_period="last24Hours")
         self.addCleanup(controller.close)
         return controller
 
@@ -77,6 +77,21 @@ class CrashReportWebTests(unittest.TestCase):
             return response.status, response.getheader("Content-Type"), response.read()
         finally:
             connection.close()
+
+    def test_default_native_button_uses_top100_and_rejects_other_periods(self):
+        calls = []
+        def generate(**arguments):
+            calls.append(arguments)
+            return saved_report(self.root)
+        controller = ReportController("example.App", "iOS", "http://localhost:8765/mcp", self.root, generator=generate)
+        self.addCleanup(controller.close)
+        with report_server(controller) as port:
+            self.assertEqual(self.request(port, "POST", "/api/crash-report/start", {"timePeriod": "last24Hours"})[0], 400)
+            self.assertEqual(self.request(port, "POST", "/api/crash-report/start")[0], 202)
+            self.finish(controller)
+        self.assertEqual(calls[0]["backend"], "mcpbridge")
+        self.assertEqual(calls[0]["count"], 100)
+        self.assertEqual(calls[0]["time_period"], "last14Days")
 
     def test_background_execution_preserves_result_progress_and_report_files(self):
         entered, release = threading.Event(), threading.Event()

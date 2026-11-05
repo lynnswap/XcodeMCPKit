@@ -62,6 +62,10 @@ Use `xcode-mcp-proxy-server --help` for CLI usage.
 
 ## Crash data storage
 
+This persistent store belongs to the `Organizer` tools. The standard crash
+tools forward Apple's MCP results without importing them into this store.
+The reporter saves either route's evidence in its selected output directory.
+
 Crash source metadata, shared log blobs, acquisition progress, and reader tokens
 are stored in `~/Library/Application Support/XcodeMCPKit/CrashCache`. This
 location is independent of temporary request artifacts and survives host and
@@ -124,8 +128,8 @@ level, and native-host NSLog diagnostics remain errors.
 
 `--auto-approve` monitors running Xcode permission-dialog processes and presses
 `Allow` on MCP connection dialogs for agents connecting directly to Xcode
-outside the proxy. Proxy workspace operations run headlessly and do not create
-these dialogs. Grant macOS Accessibility access to the process hosting
+through the proxy's Apple bridge or from external clients. Proxy workspace
+operations run headlessly and do not create these dialogs. Grant macOS Accessibility access to the process hosting
 the server when prompted; otherwise dialogs remain for manual approval.
 
 The monitor runs until the server shuts down. It recognizes the English

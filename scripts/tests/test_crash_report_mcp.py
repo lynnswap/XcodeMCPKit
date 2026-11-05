@@ -35,7 +35,7 @@ class MCPTransportTests(unittest.TestCase):
         client.initialized = True
         client.opener = Opener([TruncatedResponse(b"")])
         with self.assertRaisesRegex(MCPError, "IncompleteRead"):
-            client.call_tool("WaitForCrashSync", {"job_id": "active"})
+            client.call_tool("WaitForOrganizerCrashSync", {"job_id": "active"})
 
     def test_initialization_session_and_sse_response_with_unrelated_notification(self):
         client = XcodeMCPClient("http://localhost:8765/mcp")
@@ -45,7 +45,7 @@ class MCPTransportTests(unittest.TestCase):
             Response(b'data: {"method":"notifications/progress"}\n\n'
                      b'data: {"id":2,"result":{"structuredContent":{"state":"completed"}}}\n\n', "text/event-stream"),
         ])
-        self.assertEqual(client.call_tool("WaitForCrashSync", {"job_id": "abc"}), {"state": "completed"})
+        self.assertEqual(client.call_tool("WaitForOrganizerCrashSync", {"job_id": "abc"}), {"state": "completed"})
         requests = client.opener.requests
         self.assertEqual(json.loads(requests[1].data)["method"], "notifications/initialized")
         self.assertEqual(requests[2].get_header("Mcp-session-id"), "session")
@@ -57,7 +57,7 @@ class MCPTransportTests(unittest.TestCase):
         client.opener = Opener([Response(json.dumps({"id": 1, "result": {"isError": True,
             "structuredContent": {"status": "failed"}, "content": [{"type": "text", "text": "cache unavailable"}]}}).encode())])
         with self.assertRaisesRegex(MCPError, "cache unavailable"):
-            client.call_tool("ReadCrashChanges", {})
+            client.call_tool("ReadOrganizerCrashChanges", {})
 
     def test_text_json_fallback_and_incomplete_stream(self):
         client = XcodeMCPClient("http://localhost:8765/mcp")
@@ -66,9 +66,9 @@ class MCPTransportTests(unittest.TestCase):
             Response(json.dumps({"id": 1, "result": {"content": [{"type": "text", "text": '{"state":"running"}'}]}}).encode()),
             Response(b'data: {"method":"notifications/progress"}\n\n', "text/event-stream"),
         ])
-        self.assertEqual(client.call_tool("StartCrashSync", {}), {"state": "running"})
+        self.assertEqual(client.call_tool("StartOrganizerCrashSync", {}), {"state": "running"})
         with self.assertRaisesRegex(MCPError, "ended"):
-            client.call_tool("WaitForCrashSync", {})
+            client.call_tool("WaitForOrganizerCrashSync", {})
 
 
 if __name__ == "__main__":

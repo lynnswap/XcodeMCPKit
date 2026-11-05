@@ -359,7 +359,7 @@ struct NativeCrashDataTests {
             if let value = try nativeTestObject(descriptor)["default"] { arguments[name] = value }
         }
         #expect(Set(arguments.keys).isSubset(of: Set(properties.keys)))
-        #expect(tool.name == (read ? "ReadCrashChanges" : "SyncCrashReports"))
+        #expect(tool.name == (read ? "ReadOrganizerCrashChanges" : "SyncOrganizerCrashReports"))
         #expect(try nativeTestField(tool.descriptor, "inputSchema", "required") == .array([]))
         let data = try NativeCrashStore.encode(.object(arguments))
         if read {

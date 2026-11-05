@@ -1,5 +1,6 @@
 import Foundation
 import XcodeMCPCore
+import XcodeMCPWire
 
 /// The client contract is independent of the native host chosen for a workspace.
 enum XcodeToolCatalog {
@@ -12,7 +13,7 @@ enum XcodeToolCatalog {
         var tools: [String: JSONValue] = [:]
         let workspaceSession = nativeTools.first { toolName($0) == "DeviceInteractionStartWorkspaceSession" }
         for native in nativeTools {
-            guard let name = toolName(native), name != "XcodeListWindows",
+            guard let name = toolName(native),
                   name != "XcodeMCPKitSelectHost", name != "DeviceInteractionStartWorkspaceSession",
                   !managedNames.contains(name) else { continue }
             let source: JSONValue
@@ -36,7 +37,7 @@ enum XcodeToolCatalog {
     /// Scope and interaction handle values have already been resolved by the broker.
     static func nativeCall(name: String, arguments: [String: JSONValue],
                            nativeCatalog: JSONValue) throws -> (name: String, arguments: [String: JSONValue]) {
-        guard !["DeviceInteractionStartWorkspaceSession", "XcodeListWindows", "XcodeMCPKitSelectHost"].contains(name) else {
+        guard !["DeviceInteractionStartWorkspaceSession", "XcodeMCPKitSelectHost"].contains(name) else {
             throw NativeHostBrokerError("Unknown public tool: \(name)")
         }
         guard case .object(let catalog) = nativeCatalog,
@@ -131,6 +132,7 @@ enum XcodeToolCatalog {
     }
 
     private static func normalized(_ value: JSONValue, name: String) -> JSONValue {
+        if GUIXcodeTools.names.contains(name) { return value }
         guard case .object(var tool) = value else { return value }
         tool["name"] = .string(name)
         if let description = descriptions[name] { tool["description"] = .string(description) }
@@ -205,8 +207,8 @@ enum XcodeToolCatalog {
 
     private static let workspaceOptionalTools: Set<String> = [
         "DeviceInteractionStartSession", "DeviceInteractionInstallAndRun", "GetConsoleOutput",
-        "ReadCrashChanges", "GetFieldPerformanceIssueLogs",
-        "SyncCrashReports", "GetTopFieldPerformanceIssues",
+        "ReadOrganizerCrashChanges", "GetFieldPerformanceIssueLogs",
+        "SyncOrganizerCrashReports", "GetTopFieldPerformanceIssues",
     ]
 
     private static let hostSelectableTools: Set<String> = [

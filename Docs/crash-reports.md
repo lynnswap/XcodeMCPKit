@@ -1,78 +1,81 @@
 # Generate a crash report
 
-Use the local report button or CLI to collect Xcode's issue list for a selected
-period and acquire each issue's saved samples. Reports, raw logs, and acquisition
-metadata are saved together under a dated output directory.
+The report button and CLI save an issue list, sample logs, and acquisition
+metadata together under a dated output directory. Daily checks use Apple's
+`mcpbridge` by default: the last 14 days, requesting the top 100 issues by
+affected-device count. The requested and returned counts are recorded separately.
+This is a top-issues report, without a guarantee of exhaustive issue or sample
+coverage. Native results do not identify network versus cache provenance.
 
-The report UI and generated Markdown are in Japanese. JSON field names are
-stable English identifiers.
+The report UI and Markdown are in Japanese. JSON field names are stable English
+identifiers. Keep GUI Xcode running with an open workspace and App Store Connect
+account access. `--auto-approve` on the proxy can approve its bridge connection.
+Standard acquisition does not operate Organizer.
 
 ## Start the report page
 
-Use a checkout of this repository and Python 3.10+. These standalone scripts
-have no third-party Python dependencies and are not installed by Homebrew.
-Start XcodeMCPKit as described in the [quick start](../README.md#quick-start).
-Keep the selected Xcode running with App Store Connect access and the native
-host's Accessibility permission. Network collection operates its Organizer;
-it waits while Xcode is the foreground application. A scheduled invocation
-needs the same usable macOS login session.
-
-From the checkout, run:
-
-```bash
-python3 scripts/crash_report.py \
-  --bundle-id com.example.app \
-  --platform iOS \
-  --mcp-url http://localhost:8765/mcp \
-  --output "$HOME/Documents/XcodeCrashReports" \
-  --serve
-```
-
-Open the printed local URL, choose the period and output folder, then press
-**レポートを作成**. Available periods are Last Day (`last24Hours`), two weeks
-(`last14Days`), and one year (`last365Days`). Last Day is the initial selection.
-The page shows progress, stop and current-issue skip buttons, the saved path,
-and Markdown and JSON links. Update waits default to unlimited (`0` seconds);
-enter a positive number to limit each Organizer refresh. A locked or switched-away
-Mac session shows a waiting state and resumes after unlock without consuming
-that limit. Explicit Organizer errors remain acquisition failures.
-
-The page listens on `127.0.0.1:8767`; change it with `--port`. It accepts only
-local requests and serves files within the chosen report output directory.
-Reports can contain private diagnostic data, so choose a suitable location
-outside the source checkout. Closing the browser does not stop collection.
-Use the stop button to request cancellation and wait for Organizer cleanup.
-To continue past a stalled individual issue, press **このissueをスキップ**.
-The collector cancels that issue's host job, waits for its cleanup, preserves
-saved samples, and then starts the next issue. Its status is `skipped`, and the
-report remains partial. The issue-list acquisition can be stopped but not skipped.
-
-## Run without the page
-
-Use the same command without `--serve` for a manual terminal run or a scheduler:
+Use a checkout and Python 3.10+. These scripts have no third-party dependencies
+and are not installed by Homebrew. Start XcodeMCPKit using the
+[quick start](../README.md#quick-start), then run:
 
 ```bash
 python3 scripts/crash_report.py \
   --bundle-id com.example.app --platform iOS \
+  --mcp-url http://localhost:8765/mcp \
+  --output "$HOME/Documents/XcodeCrashReports" --serve
+```
+
+Open the printed local URL, choose the output folder, and press
+**レポートを作成**. Standard mode fixes the aggregation period to two weeks
+and starts with 100 requested issues. Its native `GetTopCrashIssues` and
+`GetCrashIssueLogs` calls use a tab returned by `XcodeListWindows`; the bundle
+and platform are supplied explicitly. A native failure is saved as a report
+failure or partial result, without switching to Organizer.
+
+Select **Organizer（画面操作）** to use the extended sync tools. That mode offers
+Last Day (`last24Hours`), two weeks (`last14Days`), and one year (`last365Days`).
+It requires Accessibility access for the native host and a usable GUI session.
+It waits while Xcode is foreground or the Mac is locked. Refresh waits default
+to unlimited (`0`); a positive value bounds each refresh while unlocked.
+Explicit Organizer errors remain failures. Use **このissueをスキップ** to cancel
+and drain a stalled detail acquisition before continuing; the report stays
+partial. Issue-list acquisition can be stopped but not skipped.
+
+The page listens on `127.0.0.1:8767`; use `--port` to change it. It serves report
+files only within the selected output directory. Closing the browser does not
+stop collection. Standard-mode cancellation stops after the current native
+request returns; Organizer cancellation waits for its host job's cleanup.
+
+## Run without the page
+
+Omit `--serve` to save a standard report directly. Use `--count` to change the
+requested number of top issues. Direct MCP callers retain Apple's default of 5
+when they omit `count`; the reporter explicitly requests 100.
+
+For extended Organizer acquisition:
+
+```bash
+python3 scripts/crash_report.py \
+  --bundle-id com.example.app --platform iOS \
+  --backend organizer --time-period last24Hours \
   --output "$HOME/Documents/XcodeCrashReports"
 ```
 
-Use `--time-period last14Days` or `--time-period last365Days` to change the
-period. Use `--refresh-timeout-seconds 300` to bound refresh waits or `0` (the
-reporter's default) for unlimited waits. This also sets the page's initial value
-when used with `--serve`. Direct MCP acquisition retains its 90-second default;
-the reporter explicitly sends `refresh_timeout_seconds: 0`. The short
-`WaitForCrashSync` observation limit is independent of the acquisition limit.
+Organizer mode also accepts `--time-period last14Days` or `last365Days` and
+`--refresh-timeout-seconds`. Standard mode accepts only `last14Days`.
+Direct Organizer MCP acquisition retains a 90-second refresh default; the
+reporter sends `refresh_timeout_seconds: 0`. `WaitForOrganizerCrashSync` has a
+separate observation limit.
 
 Each invocation saves its files in `OUTPUT/YYYY-MM-DD/HHMMSS-runID/`,
 using the Mac's local date. Multiple runs on the same day remain together in
 that date's folder without overwriting previous reports. Standard output contains
 JSON progress lines followed by the Markdown path. Exit status is `0` when the
 requested acquisitions and reads completed, `1` for a failed or partial report,
-and `130` after cancellation. `Ctrl-C` requests cancellation and waits for the
-active host job to stop before saving the report. Reports from earlier runs
-remain unchanged. Coordinate scheduled runs with interactive collection to
-avoid overlapping Organizer work.
+and `130` after cancellation. `Ctrl-C` requests cancellation, then waits for the current native response or
+Organizer host cleanup before saving the report. Reports from earlier runs
+remain unchanged. Coordinate Organizer runs with interactive collection to avoid overlapping
+Organizer work.
 
 ## Saved files
 
@@ -81,25 +84,29 @@ Each run contains:
 - `report.md`: issue and sample overview, acquisition failures, and evidence.
 - `report.json`: the same evidence with structured timestamps, native windows,
   elapsed seconds, faulting thread frames, and raw log references.
-- `raw/`: byte-for-byte copies of the saved sample logs, named by SHA-256.
+- `raw/`: sample text returned by standard MCP encoded as UTF-8, or byte-for-byte
+  copies of Organizer samples, named by SHA-256.
 - `artifacts/`: host job results, acquisition metadata, source snapshots, and
   reader responses used for this run. Paths within those source artifacts can
   still refer to the original Mac's cache; `raw/` copies travel with the report.
 
-The current issue source snapshot, or its saved pages after a partial scan,
-defines which issues this run includes.
+In standard mode, the native top-issues response defines report membership.
+In Organizer mode, the current issue source snapshot, or its saved pages after
+a partial scan, defines which issues this run includes.
 Historic issues retained by the local change store are not added to the list.
-Every selected issue's log stream is read through its terminal checkpoint,
-including unchanged samples already saved on this Mac. The original persistent
+Organizer mode reads every selected issue's log stream through its terminal
+checkpoint, including unchanged samples already saved on this Mac. The original persistent
 [MCP cache](configuration.md#crash-data-storage) is retained separately.
 
-`complete` means the requested source acquisitions and local imports/reads
-completed. It does not mean Apple returned every crash occurrence. The native
+`complete` means the selected native tool calls, or Organizer source
+acquisitions and local imports/reads, completed. It does not mean Apple returned every crash occurrence. The native
 source supplies samples and affected-device counts, not an exhaustive event
 stream. A failed detail refresh can still produce a partial report with saved
 logs and explicit unknown freshness.
 
-The selected period controls issue acquisition and the returned distribution.
+In Organizer mode, the selected period controls issue acquisition and the
+returned distribution. Standard mode supplies no native distribution window,
+so sample window membership remains unknown.
 Last Day uses `last24Hours`, rather than an assumed local calendar date. Native
 per-issue distribution start/end timestamps are retained when available; sample
 timestamps use the half-open interval `[start, end)`. Missing dates or windows
@@ -114,9 +121,9 @@ does not prove a crash was captured or uploaded; its absence does not prove the
 crash preceded Firebase initialization. Unknown timestamps and incomplete
 acquisitions remain explicit in the report.
 
-If a transport failure interrupts observation of a host job, its last known ID
+In Organizer mode, if a transport failure interrupts observation of a host job, its last known ID
 and state remain in `artifacts/*-job.json`. The report error identifies the job;
-use `WaitForCrashSync` or `CancelCrashSync` to resolve it before starting another
+use `WaitForOrganizerCrashSync` or `CancelOrganizerCrashSync` to resolve it before starting another
 collection. A failed HTTP request does not stop a host-owned job.
 
 ## Verify changes to the reporter

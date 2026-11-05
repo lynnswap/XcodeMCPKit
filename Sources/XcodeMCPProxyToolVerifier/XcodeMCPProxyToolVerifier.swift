@@ -795,7 +795,7 @@ private struct VerificationState {
                 "outputType": .string("all"),
                 "tailLimit": .integer(100),
             ])
-        case "ReadCrashChanges":
+        case "ReadOrganizerCrashChanges":
             return [
                 "collection": .string("issues"),
                 "bundle_id": .string("dev.xcodemcp.ProxyToolVerifierFixture"),
@@ -820,7 +820,7 @@ private struct VerificationState {
             ])
         case "GetTestList":
             return try withWorkspaceScope(toolName)
-        case "SyncCrashReports":
+        case "SyncOrganizerCrashReports":
             return try withWorkspaceScope(toolName, [
                 "collection": .string("issues"),
                 "max_records": .integer(25),
@@ -1240,7 +1240,7 @@ private func verificationStatus(
 
 private func isExternalPrerequisiteResult(toolName: String, detail: String) -> Bool {
     let appStoreConnectTools: Set<String> = [
-        "SyncCrashReports",
+        "SyncOrganizerCrashReports",
         "GetTopFieldPerformanceIssues",
         "GetFieldPerformanceIssueLogs",
     ]
@@ -1386,8 +1386,8 @@ private func runtimeToolNames() -> [String] {
 
 private func fieldReportToolNames() -> [String] {
     [
-        "SyncCrashReports",
-        "ReadCrashChanges",
+        "SyncOrganizerCrashReports",
+        "ReadOrganizerCrashChanges",
         "GetTopFieldPerformanceIssues",
         "GetFieldPerformanceIssueLogs",
     ]

@@ -100,13 +100,30 @@ Native device, debugger, signing, and account permissions still apply.
 To save a dated report for a selected period with a local button or CLI, see
 [Generate a crash report](crash-reports.md).
 
-Use `SyncCrashReports` to acquire data, then `ReadCrashChanges` to read saved
+For daily checks, call `XcodeListWindows` and use its native `tabIdentifier`
+with `GetTopCrashIssues` and `GetCrashIssueLogs`. These three tools use Apple's
+`mcpbridge` against the running GUI Xcode. They retain Apple's input and result
+schemas, independently of headless `workspaceIdentifier` values.
+
+`GetTopCrashIssues` selects the last 14 days by affected-device count. Pass
+`count: 100` for the daily report; omitting `count` keeps Apple's default of 5.
+Pass a returned signature name as `signature_name` to `GetCrashIssueLogs`, with
+the same bundle/platform, version/channel filters, and `tabIdentifier`.
+The bridge targets a running GUI copy of the selected Xcode installation.
+To select a specific instance, set `MCP_XCODE_PID` before starting the proxy.
+The native response does not establish complete issue/sample coverage or
+whether a result came from the network or Apple's caches. Failure never starts
+Organizer as a fallback. `--auto-approve` can approve the bridge connection.
+
+### Organizer collection
+
+Use `SyncOrganizerCrashReports` to acquire data, then `ReadOrganizerCrashChanges` to read saved
 changes in bounded pages. Sync never marks anything consumed. Read uses only
 the durable local cache and does not start Xcode or contact Apple.
 Crash data and progress survive restarts in the
 [persistent crash cache](configuration.md#crash-data-storage).
 
-For network acquisition that can outlive an MCP request, call `StartCrashSync`
+For network acquisition that can outlive an MCP request, call `StartOrganizerCrashSync`
 with an explicit bundle and platform:
 
 ```json
@@ -124,16 +141,16 @@ same source, filters, and import budgets as Sync, with required `bundle_id` and
 `platform`; it accepts neither `workspaceIdentifier` nor a cursor. A job follows
 all local import continuations automatically.
 
-`StartCrashSync` and `SyncCrashReports` accept `refresh_timeout_seconds`:
+`StartOrganizerCrashSync` and `SyncOrganizerCrashReports` accept `refresh_timeout_seconds`:
 omit it for the existing 90-second limit, or set `0` to wait until each Organizer
 view, issue refresh, or list page is ready or the operation is cancelled.
 Positive values set a custom limit in seconds. A locked or switched-away Mac
 session pauses the limit; progress reports `phase: "waitingForUnlock"` until the
-session is available again. This setting is saved for `ResumeCrashSync` and does
+session is available again. This setting is saved for `ResumeOrganizerCrashSync` and does
 not change the query scope, cache imports, or local import continuations.
 Explicit Organizer failures still end acquisition with their diagnostics.
 
-Pass the returned ID to `WaitForCrashSync`:
+Pass the returned ID to `WaitForOrganizerCrashSync`:
 
 ```json
 {
@@ -156,13 +173,13 @@ Job states are `queued`, `running`, `cancelling`, `completed`, `failed`,
 `cancelled`, and `interrupted`. A job's `result` retains its latest Sync response,
 including cumulative import counts, source completeness, and saved artifact
 paths. A record import failure ends automatic processing with a partial result
-and a saved `nextCursor` for an explicit retry through `SyncCrashReports`.
+and a saved `nextCursor` for an explicit retry through `SyncOrganizerCrashReports`.
 Source errors alone still allow the job to import acquired data. Check the
 result's diagnostics and coverage as with a direct Sync call. A failed job is
 returned as job state and errors; a successful status query remains a successful
 MCP call.
 
-Call `CancelCrashSync` with `{"job_id":"job-id-from-start"}` to request a stop.
+Call `CancelOrganizerCrashSync` with `{"job_id":"job-id-from-start"}` to request a stop.
 It returns promptly with `cancelling` while active work and Organizer cleanup
 finish. Continue using Wait until a terminal state and inspect any cleanup
 errors. Saved imports remain available through Read. Job records survive a restart;
@@ -171,7 +188,7 @@ When acquiring individual issues as separate jobs, cancel the current job and
 wait for its terminal state before starting the next issue to skip a stalled
 refresh. Skipping does not establish complete coverage for that issue.
 
-To retry an `interrupted`, `failed`, or `cancelled` job, call `ResumeCrashSync`:
+To retry an `interrupted`, `failed`, or `cancelled` job, call `ResumeOrganizerCrashSync`:
 
 ```json
 {
@@ -188,10 +205,10 @@ if the new acquisition fails. Recovery failures are reported in
 and Cancel. Existing Read checkpoints continue to identify the same consumer
 position. Jobs with a live owner and
 completed jobs cannot be resumed. A saved Sync continuation also remains usable
-for resuming only local import through `SyncCrashReports`.
+for resuming only local import through `SyncOrganizerCrashReports`.
 
 For acquisition and one bounded import batch within a single MCP call, use
-`SyncCrashReports`. For example, synchronize issue metadata with:
+`SyncOrganizerCrashReports`. For example, synchronize issue metadata with:
 
 ```json
 {
@@ -217,7 +234,7 @@ with `{"cursor":"returned-sync-cursor"}` to finish pending local imports.
 Sync cursor retries replay their saved results. `cacheInfo` retains sync and
 pending-work information across sessions, including the next sync cursor.
 
-Read issue changes with `ReadCrashChanges`:
+Read issue changes with `ReadOrganizerCrashChanges`:
 
 ```json
 {
@@ -271,7 +288,7 @@ Pass a saved issue's stable `issueId` to Sync to acquire its samples:
 }
 ```
 
-Then read the same `logs` collection with `ReadCrashChanges`, saving its cursor
+Then read the same `logs` collection with `ReadOrganizerCrashChanges`, saving its cursor
 and checkpoint independently of the issue-metadata stream. Query fields and the
 collection can be omitted when a token identifies the scope. Tokens for another
 scope or cache are rejected; unavailable tokens do not become empty successful

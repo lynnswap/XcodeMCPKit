@@ -19,7 +19,7 @@ package struct NativeTool: Equatable, Sendable {
     // classification to preserve reusable builds without changing advertised schemas.
     private static let knownQueries: Set<String> = [
         "DocumentationSearch", "GetBuildLog", "GetConsoleOutput", "GetFileCompilerFlags",
-        "GetTargetBuildSettings", "GetTestList", "SyncCrashReports", "ReadCrashChanges", "WaitForCrashSync",
+        "GetTargetBuildSettings", "GetTestList", "SyncOrganizerCrashReports", "ReadOrganizerCrashChanges", "WaitForOrganizerCrashSync",
         "GetTopFieldPerformanceIssues", "GetFieldPerformanceIssueLogs",
         "StringCatalogContext", "StringCatalogRead", "XcodeGlob", "XcodeGrep", "XcodeLS",
         "XcodeRead", "XcodeListRunDestinations", "XcodeListSchemes", "XcodeListTargets",
@@ -46,7 +46,16 @@ package enum NativeSchemaConverter {
               let input = fields["inputSchema"] else {
             throw NativeRuntimeError.unsupportedContract("Native tool schema has no name or input schema")
         }
-        var inputSchema = try schema(input, excluding: internalArguments)
+        let gui = GUIXcodeTools.names.contains(name)
+        var inputSchema = try schema(input, excluding: gui ? internalArguments.subtracting(["tabIdentifier"]) : internalArguments)
+        if gui, name != "XcodeListWindows", case .object(var inputFields) = inputSchema,
+           case .object(var properties) = inputFields["properties"], properties["tabIdentifier"] == nil {
+            // Apple's GUI server adds this context selector to the action's own schema.
+            properties["tabIdentifier"] = .object(["type": .string("string"),
+                "description": .string("The workspace tab identifier.")])
+            inputFields["properties"] = .object(properties)
+            inputSchema = .object(inputFields)
+        }
         if workspaceScoped, case .object(var inputFields) = inputSchema,
            case .object(var properties) = inputFields["properties"] {
             properties["workspaceIdentifier"] = .object([

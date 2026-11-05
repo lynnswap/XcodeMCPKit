@@ -7,12 +7,12 @@ import XcodeMCPWire
 @MainActor
 final class NativeCrashToolCorrection {
     enum Kind: String, CaseIterable {
-        case sync = "SyncCrashReports"
-        case read = "ReadCrashChanges"
-        case start = "StartCrashSync"
-        case wait = "WaitForCrashSync"
-        case cancel = "CancelCrashSync"
-        case resume = "ResumeCrashSync"
+        case sync = "SyncOrganizerCrashReports"
+        case read = "ReadOrganizerCrashChanges"
+        case start = "StartOrganizerCrashSync"
+        case wait = "WaitForOrganizerCrashSync"
+        case cancel = "CancelOrganizerCrashSync"
+        case resume = "ResumeOrganizerCrashSync"
 
         var toolName: String { rawValue }
     }
@@ -37,7 +37,7 @@ final class NativeCrashToolCorrection {
             case .start:
                 let request = try JSONDecoder().decode(NativeCrashSyncRequest.self, from: input)
                 guard request.cursor == nil else {
-                    throw NativeRuntimeError.invalidRequest("Use SyncCrashReports to continue a local import cursor")
+                    throw NativeRuntimeError.invalidRequest("Use SyncOrganizerCrashReports to continue a local import cursor")
                 }
                 _ = try Self.explicitQuery(request.query)
                 _ = try Self.collection(request.collection, input: request.query)
@@ -445,7 +445,7 @@ final class NativeCrashToolCorrection {
     static func explicitQuery(_ input: NativeCrashRequest) throws -> NativeCrashQuery {
         guard let bundle = input.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines), !bundle.isEmpty,
               let platform = input.platform else {
-            throw NativeRuntimeError.invalidRequest("ReadCrashChanges requires bundle_id and platform, or a saved cursor/checkpoint")
+            throw NativeRuntimeError.invalidRequest("ReadOrganizerCrashChanges requires bundle_id and platform, or a saved cursor/checkpoint")
         }
         let execution = try NativeCrashQuery.platformIdentifier(for: platform)
         let upload = try input.uploadPlatform.map(NativeCrashQuery.platformIdentifier(for:)) ?? execution

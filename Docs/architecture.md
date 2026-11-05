@@ -12,12 +12,16 @@ flowchart LR
   proxy --> handles["Workspace and session handles"]
   handles --> headless["Owned native host"]
   headless --> saved["Saved workspace models"]
+  proxy -->|"Native crash tools / GUI tab IDs"| bridge["Apple mcpbridge"]
+  bridge --> gui["Running GUI Xcode"]
+  headless -->|"Explicit Organizer tools"| gui
 ```
 
 `XcodeListWorkspaces` returns proxy identifiers for loaded headless models.
 A handle binds one native workspace to its host. The public input is
 `workspaceIdentifier`; adapters supply the owning backend's selector.
-Running GUI Xcode processes are not discovered or connected by proxy requests.
+Workspace and device operations use owned headless hosts. The standard crash
+tools connect to running GUI Xcode through Apple's bridge, using native tab IDs.
 
 `XcodeOpenWorkspace` uses the default headless host unless the caller explicitly
 requests another installation. Installation selection happens when a handle is
@@ -120,6 +124,7 @@ values, and workspace resources. Apple's frameworks remain in the installed
 Xcode and are not redistributed.
 
 The optional Accessibility permission monitor approves other agents' direct
-connections to GUI Xcode. It is composed separately and has no role in tool
+connections to GUI Xcode, including the proxy's Apple bridge. It is composed
+separately and has no role in tool
 routing. See the [maintainer guide](maintainer-architecture.md) for
 module boundaries, native corrections, signing, and verification.
