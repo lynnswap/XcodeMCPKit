@@ -120,8 +120,10 @@ global-store initialization assertions.
 resolution, or Products inventory. Their names distinguish them from the
 standard `GetTopCrashIssues` and `GetCrashIssueLogs` tools.
 
-The headless host describes the three GUI tools, including `XcodeListWindows`,
-from installed Xcode schemas without executing their actions. The broker keeps
+The broker starts its headless host with `--gui-tool-schemas` to describe the
+three GUI tools, including `XcodeListWindows`, from installed Xcode schemas
+without executing their actions. Standalone native-host transports omit this
+flag and advertise only executable tools. The broker keeps
 their native tab selectors and results, and lazily starts Apple's `mcpbridge`
 through the existing upstream connection transport. That connection shares
 request-ID/progress mapping, cancellation, restart, and shutdown handling with

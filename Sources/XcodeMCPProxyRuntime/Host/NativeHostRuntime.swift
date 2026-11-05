@@ -59,7 +59,7 @@ enum NativeHostRuntime {
         let messageLimit = maxQueuedWriteBytes(for: config)
         return UpstreamProcess.Config(
             command: invocation.command,
-            args: invocation.arguments + ["--max-message-bytes", String(messageLimit)],
+            args: invocation.arguments + ["--gui-tool-schemas", "--max-message-bytes", String(messageLimit)],
             environment: environment,
             maxQueuedWriteBytes: messageLimit)
     }
