@@ -30,7 +30,11 @@ Open the printed local URL, choose the output folder, and press
 and starts with 100 requested issues. Its native `GetTopCrashIssues` and
 `GetCrashIssueLogs` calls use a tab returned by `XcodeListWindows`; the bundle
 and platform are supplied explicitly. A native failure is saved as a report
-failure or partial result, without switching to Organizer.
+failure or partial result, without switching to Organizer. If native detail
+lookup reports `Signature name not found`, the reporter repeats the same top
+query and retries those failed details once after the initial pass. It keeps
+the original issue list, failed responses, and attempt history; summaries count
+retries and recoveries. Other failures are not retried automatically.
 
 Select **Organizer（画面操作）** to use the extended sync tools. That mode offers
 Last Day (`last24Hours`), two weeks (`last14Days`), and one year (`last365Days`).

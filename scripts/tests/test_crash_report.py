@@ -16,6 +16,7 @@ class FakeMCP:
         self.root = root
         self.calls = []
         self.cancelled = False
+        self.native_lookup_failures = 0
         self.partial_detail = False
         self.fail_second_page = False
         self.running = False
@@ -65,6 +66,9 @@ class FakeMCP:
             return {"success": not self.partial_list, "data": json.dumps({"signatures": self.native_signatures}),
                     "message": "native list failed" if self.partial_list else "ok"}
         if name == "GetCrashIssueLogs":
+            if self.native_lookup_failures:
+                self.native_lookup_failures -= 1
+                return {"success": False, "data": "", "message": "Signature name not found: " + arguments["signature_name"]}
             payload = {"signatureId": arguments["signature_name"] + "-id", "crashLogs": [self.raw.read_text()]}
             return {"success": not self.partial_detail, "data": "# Diagnostic Data\n## Performance Data\n" + json.dumps(payload) + "\nExpert instructions",
                     "message": "native detail failed" if self.partial_detail else "ok"}
@@ -125,6 +129,22 @@ class CrashReportTests(unittest.TestCase):
         markdown = Path(result["reportPath"]).read_text()
         self.assertIn("要求 100件 / 取得 2件", markdown)
         self.assertNotIn("Expert instructions", markdown)
+
+    def test_native_signature_lookup_is_retried_once_with_original_evidence_retained(self):
+        for failures in (1, 2):
+            with self.subTest(failures=failures):
+                self.client.calls.clear()
+                self.client.native_lookup_failures = failures
+                result = generate_report("com.example.app", "iOS", "http://localhost:8765/mcp", self.root / "reports", client=self.client)
+                self.assertEqual(result["status"], "complete" if failures == 1 else "partial")
+                self.assertEqual(result["summary"]["retriedIssueCount"], 1)
+                self.assertEqual(result["summary"]["recoveredIssueCount"], 1 if failures == 1 else 0)
+                self.assertEqual(sum(name == "GetCrashIssueLogs" for name, _ in self.client.calls), 2)
+                attempts = result["issues"][0]["acquisition"]["attempts"]
+                self.assertIn("Signature name not found", attempts[0]["error"])
+                original = Path(result["outputDirectory"]) / attempts[0]["artifact"]
+                self.assertFalse(json.loads(original.read_text())["success"])
+                self.assertFalse(any("Organizer" in name for name, _ in self.client.calls))
 
     def test_native_failures_remain_failures_without_organizer_fallback(self):
         for scope in ("list", "detail"):

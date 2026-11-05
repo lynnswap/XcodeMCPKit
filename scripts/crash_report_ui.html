@@ -21,7 +21,7 @@ let current;
 let actionError='';
 let settingsLoaded=false;
 const labels = {idle:'作成できます',running:'作成中',cancelling:'停止処理中',complete:'作成完了',partial:'一部を取得して作成',failed:'作成に失敗',cancelled:'停止しました'};
-const phases = {issues:'一覧を取得',logs:'サンプルログを取得',finished:'終了',waitingForOrganizer:'Xcode の待機',waitingForUnlock:'Mac のロック解除待ち',acquiring:'Xcode から取得',importing:'取得結果を保存',queued:'取得の開始待ち',recovering:'保存済みデータを確認'};
+const phases = {retrying:'取得できなかったログを再取得',issues:'一覧を取得',logs:'サンプルログを取得',finished:'終了',waitingForOrganizer:'Xcode の待機',waitingForUnlock:'Mac のロック解除待ち',acquiring:'Xcode から取得',importing:'取得結果を保存',queued:'取得の開始待ち',recovering:'保存済みデータを確認'};
 const jobStates = {queued:'開始待ち',running:'取得中',cancelling:'停止処理中',completed:'取得完了',complete:'完了',partial:'一部を取得',failed:'取得に失敗',cancelled:'停止済み',interrupted:'中断しました'};
 function updateBackendControls(){
   const native=$('backend').value==='mcpbridge';

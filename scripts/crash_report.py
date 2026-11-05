@@ -250,6 +250,8 @@ def render_markdown(report):
     if report.get("backend") == "mcpbridge":
         acquisition = report.get("listAcquisition") or {}
         lines.extend([f"取得元: 本家MCP / 要求 {acquisition.get('requestedCount', '不明')}件 / 取得 {acquisition.get('returnedCount', 0)}件。", ""])
+        if summary.get("retriedIssueCount"):
+            lines.extend([f"署名の再問い合わせ: {summary['retriedIssueCount']}件 / 回復 {summary['recoveredIssueCount']}件。最初の失敗は取得記録に保持しています。", ""])
     lines.extend(f"- {text}" for text in report["limitations"])
     lines.extend(["", "## issueとサンプル", ""])
     for issue in report["issues"]:
@@ -290,6 +292,10 @@ def _save_report(report, folder):
     report["summary"] = {"issueCount": len(report["issues"]), "logCount": len(logs),
         "insideWindow": counts["inside"], "outsideWindow": counts["outside"], "unknownWindow": counts["unknown"],
         "issuesWithoutLogs": sum(not issue["logs"] for issue in report["issues"])}
+    if report.get("backend") == "mcpbridge":
+        retried = [issue for issue in report["issues"] if (issue.get("acquisition") or {}).get("attempts")]
+        report["summary"].update(retriedIssueCount=len(retried),
+            recoveredIssueCount=sum(issue["status"] == "complete" for issue in retried))
     write_json(folder / "report.json", report)
     temporary = folder / "report.md.tmp"
     temporary.write_text(render_markdown(report), encoding="utf-8")
@@ -349,6 +355,7 @@ def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, ca
                     "uniqueDeviceCount": point.get("uniqueDeviceCountFilteredWithTimePeriod"), "source": point,
                     "status": "pending", "window": _window({}, time_period), "referenceWindow": None, "acquisition": None, "logs": []})
         _save_report(report, folder)
+        retry = []
         for index, issue in enumerate(report["issues"]):
             if cancel.is_set():
                 break
@@ -389,12 +396,40 @@ def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, ca
                 _diagnostic(report, issue["issueId"] or issue["name"], error)
                 break
             except (MCPError, OSError, ValueError, KeyError, TypeError) as error:
-                issue["status"] = "failed"
-                _diagnostic(report, issue["issueId"] or issue["name"], error)
+                if backend == "mcpbridge" and isinstance(error, MCPError) and "Signature name not found" in str(error):
+                    issue["status"] = "retryPending"
+                    issue["acquisition"] = {"backend": "mcpbridge", "complete": False,
+                        "artifact": f"artifacts/{label}-mcp.json", "error": str(error)}
+                    retry.append((label, issue, str(error)))
+                else:
+                    issue["status"] = "failed"
+                    _diagnostic(report, issue["issueId"] or issue["name"], error)
                 if isinstance(error, HostJobUnobserved):
                     break
             _save_report(report, folder)
             progress({"phase": "logs", "completedIssues": index + 1, "totalIssues": len(report["issues"])})
+        if retry and not cancel.is_set():
+            # A repeated top query can restore native signature resolution. Keep original list membership.
+            try:
+                _native_result(client, "GetTopCrashIssues", {**query, "count": count}, artifacts / "issues-retry-mcp.json")
+                report["retryListRequest"] = {"success": True, "artifact": "artifacts/issues-retry-mcp.json"}
+            except (MCPError, OSError, ValueError, KeyError, TypeError) as error:
+                report["retryListRequest"] = {"success": False, "error": str(error)}
+            for index, (label, issue, original_error) in enumerate(retry):
+                if cancel.is_set():
+                    break
+                progress({"phase": "retrying", "completedIssues": index, "totalIssues": len(retry), "skipAllowed": False})
+                attempts = [dict(issue["acquisition"])]
+                try:
+                    _native_logs(client, query, issue, folder, artifacts, label + "-retry")
+                    issue["status"] = "complete"
+                    attempts.append(dict(issue["acquisition"]))
+                except (MCPError, OSError, ValueError, KeyError, TypeError) as error:
+                    issue["status"] = "failed"
+                    attempts.append({"artifact": f"artifacts/{label}-retry-mcp.json", "error": str(error)})
+                    _diagnostic(report, issue["issueId"] or issue["name"], f"{original_error}; retry: {error}")
+                issue["acquisition"]["attempts"] = attempts
+                _save_report(report, folder)
         report["status"] = "cancelled" if cancel.is_set() else ("partial" if report["errors"] else "complete")
     except (MCPError, OSError, ValueError, KeyError, TypeError) as error:
         _diagnostic(report, "report", error)
