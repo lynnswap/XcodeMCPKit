@@ -8,7 +8,9 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 
 class MCPError(RuntimeError):
-    pass
+    def __init__(self, *args, response=None):
+        super().__init__(*args)
+        self.response = response
 
 
 class XcodeMCPClient:
@@ -58,7 +60,7 @@ class XcodeMCPClient:
         if not isinstance(response, dict) or response.get("id") != self.next_id:
             raise MCPError("The MCP response has no matching request ID.")
         if "error" in response:
-            raise MCPError(str(response["error"].get("message", response["error"])))
+            raise MCPError(str(response["error"].get("message", response["error"])), response=response)
         return response.get("result")
 
     def initialize(self):
@@ -77,7 +79,7 @@ class XcodeMCPClient:
             raise MCPError(f"{name} returned no tool result.")
         if result.get("isError"):
             message = "\n".join(c.get("text", "") for c in result.get("content", []) if c.get("type") == "text")
-            raise MCPError(message or f"{name} failed.")
+            raise MCPError(message or f"{name} failed.", response=result)
         if isinstance(result.get("structuredContent"), dict):
             return result["structuredContent"]
         for content in result.get("content", []):

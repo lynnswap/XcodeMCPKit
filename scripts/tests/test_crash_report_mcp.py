@@ -54,10 +54,12 @@ class MCPTransportTests(unittest.TestCase):
     def test_tool_error_is_not_mistaken_for_successful_structured_data(self):
         client = XcodeMCPClient("http://127.0.0.1:8765/mcp")
         client.initialized = True
-        client.opener = Opener([Response(json.dumps({"id": 1, "result": {"isError": True,
-            "structuredContent": {"status": "failed"}, "content": [{"type": "text", "text": "cache unavailable"}]}}).encode())])
-        with self.assertRaisesRegex(MCPError, "cache unavailable"):
+        result = {"isError": True, "structuredContent": {"status": "failed"},
+                  "content": [{"type": "text", "text": "cache unavailable"}]}
+        client.opener = Opener([Response(json.dumps({"id": 1, "result": result}).encode())])
+        with self.assertRaisesRegex(MCPError, "cache unavailable") as failure:
             client.call_tool("ReadOrganizerCrashChanges", {})
+        self.assertEqual(failure.exception.response, result)
 
     def test_text_json_fallback_and_incomplete_stream(self):
         client = XcodeMCPClient("http://localhost:8765/mcp")

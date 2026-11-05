@@ -78,16 +78,20 @@ def _preserve_log(issue, raw, folder, **identity):
 
 
 def _native_result(client, name, arguments, artifact):
-    result = client.call_tool(name, arguments)
+    try:
+        result = client.call_tool(name, arguments)
+    except MCPError as error:
+        write_json(artifact, error.response if error.response is not None else
+                   {"transportError": str(error), "response": None})
+        raise
     write_json(artifact, result)
-    if result.get("success") is not True:
+    if name != "XcodeListWindows" and result.get("success") is not True:
         raise MCPError(result.get("message") or f"{name} did not succeed")
     return result
 
 
 def _native_issues(client, query, report, artifacts, count):
-    windows = client.call_tool("XcodeListWindows", {})
-    write_json(artifacts / "windows-mcp.json", windows)
+    windows = _native_result(client, "XcodeListWindows", {}, artifacts / "windows-mcp.json")
     tabs = re.findall(r"\btabIdentifier:\s*([^,\s]+)", windows.get("message", ""))
     if not tabs:
         raise MCPError("本家MCP用のXcodeタブがありません。Xcodeでワークスペースを開いてください。")

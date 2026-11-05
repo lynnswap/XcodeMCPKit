@@ -17,6 +17,7 @@ class FakeMCP:
         self.calls = []
         self.cancelled = False
         self.native_lookup_failures = 0
+        self.native_tool_error = False
         self.partial_detail = False
         self.fail_second_page = False
         self.running = False
@@ -68,7 +69,11 @@ class FakeMCP:
         if name == "GetCrashIssueLogs":
             if self.native_lookup_failures:
                 self.native_lookup_failures -= 1
-                return {"success": False, "data": "", "message": "Signature name not found: " + arguments["signature_name"]}
+                failure = {"success": False, "data": "", "message": "Signature name not found: " + arguments["signature_name"]}
+                if self.native_tool_error:
+                    raise MCPError(failure["message"], response={"isError": True, "structuredContent": failure,
+                        "content": [{"type": "text", "text": failure["message"]}], "_meta": {"trace": "native-error"}})
+                return failure
             payload = {"signatureId": arguments["signature_name"] + "-id", "crashLogs": [self.raw.read_text()]}
             return {"success": not self.partial_detail, "data": "# Diagnostic Data\n## Performance Data\n" + json.dumps(payload) + "\nExpert instructions",
                     "message": "native detail failed" if self.partial_detail else "ok"}
@@ -131,10 +136,11 @@ class CrashReportTests(unittest.TestCase):
         self.assertNotIn("Expert instructions", markdown)
 
     def test_native_signature_lookup_is_retried_once_with_original_evidence_retained(self):
-        for failures in (1, 2):
-            with self.subTest(failures=failures):
+        for failures, tool_error in ((1, False), (2, False), (1, True), (2, True)):
+            with self.subTest(failures=failures, tool_error=tool_error):
                 self.client.calls.clear()
                 self.client.native_lookup_failures = failures
+                self.client.native_tool_error = tool_error
                 result = generate_report("com.example.app", "iOS", "http://localhost:8765/mcp", self.root / "reports", client=self.client)
                 self.assertEqual(result["status"], "complete" if failures == 1 else "partial")
                 self.assertEqual(result["summary"]["retriedIssueCount"], 1)
@@ -143,7 +149,13 @@ class CrashReportTests(unittest.TestCase):
                 attempts = result["issues"][0]["acquisition"]["attempts"]
                 self.assertIn("Signature name not found", attempts[0]["error"])
                 original = Path(result["outputDirectory"]) / attempts[0]["artifact"]
-                self.assertFalse(json.loads(original.read_text())["success"])
+                evidence = json.loads(original.read_text())
+                if tool_error:
+                    self.assertTrue(evidence["isError"])
+                    self.assertFalse(evidence["structuredContent"]["success"])
+                    self.assertEqual(evidence["_meta"], {"trace": "native-error"})
+                else:
+                    self.assertFalse(evidence["success"])
                 self.assertFalse(any("Organizer" in name for name, _ in self.client.calls))
 
     def test_native_failures_remain_failures_without_organizer_fallback(self):
