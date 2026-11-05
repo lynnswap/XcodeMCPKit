@@ -66,7 +66,9 @@ struct NativeHostLiveTests {
             #expect(!workspaces.isError)
             let documents = try await client.callTool("DocumentationSearch", arguments: ["query": "SwiftUI NavigationStack"])
             #expect(!documents.isError)
-            #expect(!tools.contains { $0.name == "XcodeListWindows" })
+            for name in ["XcodeListWindows", "GetTopCrashIssues", "GetCrashIssueLogs"] {
+                #expect(!tools.contains { $0.name == name })
+            }
             await client.close()
         } catch {
             await client.close()
@@ -83,7 +85,9 @@ struct NativeHostLiveTests {
             do {
                 let tools = try await client.listTools()
                 #expect(tools.contains { $0.name == "XcodeOpenWorkspace" })
-                #expect(!tools.contains { $0.name == "XcodeListWindows" })
+                for name in ["XcodeListWindows", "GetTopCrashIssues", "GetCrashIssueLogs"] {
+                    #expect(tools.contains { $0.name == name })
+                }
                 #expect(tools.contains { $0.name == "DocumentationSearch" })
                 let documents = try await client.callTool("DocumentationSearch", arguments: ["query": "SwiftUI NavigationStack"])
                 #expect(!documents.isError)

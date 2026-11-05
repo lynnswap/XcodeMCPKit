@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 import signal
 from threading import Event
@@ -25,6 +26,12 @@ LIMITATIONS = [
     "端末数は発生件数ではありません。欠けた時系列の区間を0として補いません。",
     "起動後経過時間は、原文にある発生日時と起動日時の差です。時刻が不明な場合はunknownです。",
     "Crashlyticsハンドラの有無だけでは、初期化・送信の成否を確定できません。",
+]
+MCP_LIMITATIONS = [
+    "一覧は本家MCPが返す直近14日間の影響端末数上位です。全issueを取得した一覧ではありません。",
+    "本家MCPは応答がネット取得かキャッシュ由来かを示しません。取得時刻だけではデータの鮮度を確定できません。",
+    "個別ログは本家MCPが返したサンプルです。全発生ログや、各issueの全サンプルを取得した保証はありません。",
+    *LIMITATIONS[2:],
 ]
 
 
@@ -54,11 +61,71 @@ def _diagnostic(report, scope, message):
     report["errors"].append({"scope": scope, "message": str(message)})
 
 
+def _preserve_log(issue, raw, folder, **identity):
+    digest = hashlib.sha256(raw).hexdigest()
+    relative = f"raw/{digest}.crash"
+    (folder / relative).write_bytes(raw)
+    try:
+        parsed = parse_log(raw.decode("utf-8"))
+    except UnicodeError:
+        parsed = parse_log(raw.decode("utf-8", errors="replace"))
+        parsed["parseWarnings"].append("Invalid UTF-8 was replaced for parsing; the raw file preserves the original bytes.")
+    parsed.update(identity, contentId=digest, rawPath=relative,
+        windowMembership=in_window(parsed.get("crashedAt"), issue["window"]["startDate"], issue["window"]["endDate"]))
+    reference = issue.get("referenceWindow") or {}
+    parsed["referenceWindowMembership"] = in_window(parsed.get("crashedAt"), reference.get("startDate"), reference.get("endDate"))
+    issue["logs"].append(parsed)
+
+
+def _native_result(client, name, arguments, artifact):
+    try:
+        result = client.call_tool(name, arguments)
+    except MCPError as error:
+        write_json(artifact, error.response if error.response is not None else
+                   {"transportError": str(error), "response": None})
+        raise
+    write_json(artifact, result)
+    if name != "XcodeListWindows" and result.get("success") is not True:
+        raise MCPError(result.get("message") or f"{name} did not succeed")
+    return result
+
+
+def _native_issues(client, query, report, artifacts, count):
+    windows = _native_result(client, "XcodeListWindows", {}, artifacts / "windows-mcp.json")
+    tabs = re.findall(r"\btabIdentifier:\s*([^,\s]+)", windows.get("message", ""))
+    if not tabs:
+        raise MCPError("本家MCP用のXcodeタブがありません。Xcodeでワークスペースを開いてください。")
+    # The bundle and platform are explicit; the tab supplies the native tool's GUI context only.
+    query = {"bundle_id": query["bundle_id"], "platform": query["platform"], "tabIdentifier": tabs[0]}
+    result = _native_result(client, "GetTopCrashIssues", {**query, "count": count}, artifacts / "issues-mcp.json")
+    signatures = json.loads(result["data"])["signatures"]
+    report["listAcquisition"] = {"backend": "mcpbridge", "complete": True, "selection": "topIssues",
+        "requestedCount": count, "returnedCount": len(signatures), "freshness": "unknown",
+        "artifact": "artifacts/issues-mcp.json", "tabIdentifier": tabs[0]}
+    for name, point in sorted(signatures.items(), key=lambda item: (-item[1]["deviceCount"], item[0])):
+        report["issues"].append({"issueId": None, "name": name, "uniqueDeviceCount": point["deviceCount"],
+            "source": point, "status": "pending", "window": _window({}, "last14Days"),
+            "referenceWindow": None, "acquisition": None, "logs": []})
+    return query
+
+
+def _native_logs(client, query, issue, folder, artifacts, label):
+    result = _native_result(client, "GetCrashIssueLogs", {**query, "signature_name": issue["name"]},
+                            artifacts / f"{label}-mcp.json")
+    section = result["data"].split("## Performance Data", 1)[-1]
+    payload, _ = json.JSONDecoder().raw_decode(section[section.index("{"):])
+    issue["issueId"] = payload.get("signatureId")
+    issue["acquisition"] = {"backend": "mcpbridge", "complete": True, "freshness": "unknown",
+        "artifact": f"artifacts/{label}-mcp.json"}
+    for raw in payload["crashLogs"]:
+        _preserve_log(issue, raw.encode("utf-8"), folder, logId=None, observedAt=now())
+
+
 def _acquire(client, query, folder, label, progress, cancel, skip=None):
     try:
-        job = client.call_tool("StartCrashSync", {**query, "source": "network", "max_records": 200, "max_bytes": 2097152})
+        job = client.call_tool("StartOrganizerCrashSync", {**query, "source": "network", "max_records": 200, "max_bytes": 2097152})
     except MCPError as error:
-        raise HostJobUnobserved(f"Could not confirm StartCrashSync's result; a host job may have been accepted. No further acquisition was started. {error}") from error
+        raise HostJobUnobserved(f"Could not confirm StartOrganizerCrashSync's result; a host job may have been accepted. No further acquisition was started. {error}") from error
     cancellation_sent = False
     write_json(folder / f"{label}-job.json", job)
     try:
@@ -67,12 +134,12 @@ def _acquire(client, query, folder, label, progress, cancel, skip=None):
                       "skipAllowed": skip is not None and not cancellation_sent})
             try:
                 if (cancel.is_set() or (skip is not None and skip.is_set())) and not cancellation_sent:
-                    client.call_tool("CancelCrashSync", {"job_id": job["jobId"]})
+                    client.call_tool("CancelOrganizerCrashSync", {"job_id": job["jobId"]})
                     cancellation_sent = True
-                job = client.call_tool("WaitForCrashSync", {"job_id": job["jobId"],
+                job = client.call_tool("WaitForOrganizerCrashSync", {"job_id": job["jobId"],
                     "after_revision": job["revision"], "wait_seconds": 1})
             except MCPError as error:
-                raise HostJobUnobserved(f"Host job {job['jobId']} may still be running. Observe it with WaitForCrashSync; last state is saved in {label}-job.json. {error}") from error
+                raise HostJobUnobserved(f"Host job {job['jobId']} may still be running. Observe it with WaitForOrganizerCrashSync; last state is saved in {label}-job.json. {error}") from error
             write_json(folder / f"{label}-job.json", job)
     finally:
         progress({"skipAllowed": False})
@@ -157,7 +224,7 @@ def _read_logs(client, query, folder, label, cancel):
     while True:
         if cancel.is_set():
             raise ReadCancelled("Saved log read was cancelled before its terminal checkpoint.")
-        page = client.call_tool("ReadCrashChanges", arguments)
+        page = client.call_tool("ReadOrganizerCrashChanges", arguments)
         write_json(folder / f"{label}-read-{page_number}.json", page)
         if page.get("status") != "complete":
             raise MCPError(f"Saved log read was {page.get('status')}: {page.get('errors')}")
@@ -184,11 +251,16 @@ def render_markdown(report):
         f"一覧: {summary['issueCount']} issue / ログ: {summary['logCount']}サンプル。",
         f"native期間内 {summary['insideWindow']} / 期間外 {summary['outsideWindow']} / 期間判定不明 {summary['unknownWindow']}。", "",
         "## 取得範囲", ""]
+    if report.get("backend") == "mcpbridge":
+        acquisition = report.get("listAcquisition") or {}
+        lines.extend([f"取得元: 本家MCP / 要求 {acquisition.get('requestedCount', '不明')}件 / 取得 {acquisition.get('returnedCount', 0)}件。", ""])
+        if summary.get("retriedIssueCount"):
+            lines.extend([f"署名の再問い合わせ: {summary['retriedIssueCount']}件 / 回復 {summary['recoveredIssueCount']}件。最初の失敗は取得記録に保持しています。", ""])
     lines.extend(f"- {text}" for text in report["limitations"])
     lines.extend(["", "## issueとサンプル", ""])
     for issue in report["issues"]:
         window = issue["window"]
-        lines.extend([f"### {_markdown_text(issue['name'])}", "", f"ID: `{issue['issueId']}` / 端末数: {_markdown_text(issue['uniqueDeviceCount'])} / ログ取得: {issue['status']}", "",
+        lines.extend([f"### {_markdown_text(issue['name'])}", "", f"ID: `{issue['issueId'] or '不明'}` / 端末数: {_markdown_text(issue['uniqueDeviceCount'])} / ログ取得: {issue['status']}", "",
             f"native期間: {_markdown_text(window['startDate'])} ≤ 発生日時 < {_markdown_text(window['endDate'])}", ""])
         reference = issue.get("referenceWindow")
         if reference:
@@ -224,6 +296,10 @@ def _save_report(report, folder):
     report["summary"] = {"issueCount": len(report["issues"]), "logCount": len(logs),
         "insideWindow": counts["inside"], "outsideWindow": counts["outside"], "unknownWindow": counts["unknown"],
         "issuesWithoutLogs": sum(not issue["logs"] for issue in report["issues"])}
+    if report.get("backend") == "mcpbridge":
+        retried = [issue for issue in report["issues"] if (issue.get("acquisition") or {}).get("attempts")]
+        report["summary"].update(retriedIssueCount=len(retried),
+            recoveredIssueCount=sum(issue["status"] == "complete" for issue in retried))
     write_json(folder / "report.json", report)
     temporary = folder / "report.md.tmp"
     temporary.write_text(render_markdown(report), encoding="utf-8")
@@ -231,7 +307,14 @@ def _save_report(report, folder):
 
 
 def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, cancel_event=None, client=None,
-                    time_period="last24Hours", refresh_timeout_seconds=0, skip_event=None):
+                    time_period=None, refresh_timeout_seconds=0, skip_event=None, backend="mcpbridge", count=100):
+    if backend not in ("mcpbridge", "organizer"):
+        raise ValueError(f"Unsupported crash backend: {backend}")
+    time_period = time_period or ("last14Days" if backend == "mcpbridge" else "last24Hours")
+    if backend == "mcpbridge" and time_period != "last14Days":
+        raise ValueError("本家MCPの一覧は直近14日間固定です。別の期間はOrganizer版を選択してください。")
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ValueError("count must be a positive integer")
     if time_period not in PERIOD_LABELS:
         raise ValueError(f"Unsupported crash aggregation period: {time_period}")
     if isinstance(refresh_timeout_seconds, bool) or not isinstance(refresh_timeout_seconds, (int, float)) or not math.isfinite(refresh_timeout_seconds) or refresh_timeout_seconds < 0:
@@ -247,31 +330,36 @@ def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, ca
     (folder / "raw").mkdir()
     report = {"schemaVersion": 1, "bundleId": bundle_id, "platform": platform, "timePeriod": time_period, "reportDate": report_date,
         "startedAt": now(), "finishedAt": None, "status": "running", "reportPath": str(folder / "report.md"),
-        "outputDirectory": str(folder), "issues": [], "errors": [], "limitations": LIMITATIONS,
-        "listAcquisition": None, "refreshTimeoutSeconds": refresh_timeout_seconds}
+        "outputDirectory": str(folder), "issues": [], "errors": [], "backend": backend,
+        "limitations": MCP_LIMITATIONS if backend == "mcpbridge" else LIMITATIONS,
+        "listAcquisition": None, "refreshTimeoutSeconds": refresh_timeout_seconds if backend == "organizer" else None}
     _save_report(report, folder)
     query = {"bundle_id": bundle_id, "platform": platform, "time_period": time_period}
     acquisition_options = {"refresh_timeout_seconds": refresh_timeout_seconds}
     try:
         client = client or XcodeMCPClient(mcp_url)
         progress({"phase": "issues", "completedIssues": 0, "totalIssues": 0})
-        job = _acquire(client, {**query, **acquisition_options, "collection": "issues"}, artifacts, "issues", progress, cancel)
-        report["listAcquisition"] = {"jobId": job["jobId"], "complete": _job_complete(job), "artifact": "artifacts/issues-job.json"}
-        for error in _job_errors(job):
-            _diagnostic(report, "issues", error.get("message", str(error)))
-        metadata, source = _save_acquisition(job, artifacts, "issues")
-        points = _issue_points(metadata, source, artifacts, report)
-        # ReadCrashChanges retains absent issues. Only this scan's source points define membership.
-        seen = set()
-        for point in points:
-            issue_id = point["analyticsPointIdentifier"]
-            if issue_id in seen:
-                continue
-            seen.add(issue_id)
-            report["issues"].append({"issueId": issue_id, "name": point["analyticsPointName"],
-                "uniqueDeviceCount": point.get("uniqueDeviceCountFilteredWithTimePeriod"), "source": point,
-                "status": "pending", "window": _window({}, time_period), "referenceWindow": None, "acquisition": None, "logs": []})
+        if backend == "mcpbridge":
+            query = _native_issues(client, query, report, artifacts, count)
+        else:
+            job = _acquire(client, {**query, **acquisition_options, "collection": "issues"}, artifacts, "issues", progress, cancel)
+            report["listAcquisition"] = {"jobId": job["jobId"], "complete": _job_complete(job), "artifact": "artifacts/issues-job.json"}
+            for error in _job_errors(job):
+                _diagnostic(report, "issues", error.get("message", str(error)))
+            metadata, source = _save_acquisition(job, artifacts, "issues")
+            points = _issue_points(metadata, source, artifacts, report)
+            # ReadOrganizerCrashChanges retains absent issues. Only this scan's source points define membership.
+            seen = set()
+            for point in points:
+                issue_id = point["analyticsPointIdentifier"]
+                if issue_id in seen:
+                    continue
+                seen.add(issue_id)
+                report["issues"].append({"issueId": issue_id, "name": point["analyticsPointName"],
+                    "uniqueDeviceCount": point.get("uniqueDeviceCountFilteredWithTimePeriod"), "source": point,
+                    "status": "pending", "window": _window({}, time_period), "referenceWindow": None, "acquisition": None, "logs": []})
         _save_report(report, folder)
+        retry = []
         for index, issue in enumerate(report["issues"]):
             if cancel.is_set():
                 break
@@ -280,53 +368,72 @@ def generate_report(bundle_id, platform, mcp_url, output_root, progress=None, ca
             progress({"phase": "logs", "completedIssues": index, "totalIssues": len(report["issues"]),
                       "issueId": issue["issueId"], "skipAllowed": False, "skipRequested": False})
             try:
-                issue_error_count = len(report["errors"])
-                logs_query = {**query, "collection": "logs", "issue_id": issue["issueId"]}
-                job = _acquire(client, {**logs_query, **acquisition_options}, artifacts, label, progress, cancel, skip)
-                issue["acquisition"] = {"jobId": job["jobId"], "complete": _job_complete(job), "artifact": f"artifacts/{label}-job.json"}
-                for error in _job_errors(job):
-                    _diagnostic(report, issue["issueId"], error.get("message", str(error)))
-                try:
-                    metadata, _ = _save_acquisition(job, artifacts, label)
-                    issue["window"] = _window(metadata, time_period)
-                    issue["referenceWindow"] = _reference_window(metadata, time_period)
-                except (OSError, ValueError, KeyError, TypeError) as error:
-                    _diagnostic(report, issue["issueId"], f"Could not preserve acquisition metadata: {error}")
-                for record in _read_logs(client, logs_query, artifacts, label, cancel):
-                    try:
-                        raw = Path(record["path"]).read_bytes()
-                        digest = hashlib.sha256(raw).hexdigest()
-                        relative = f"raw/{digest}.crash"
-                        (folder / relative).write_bytes(raw)
-                        try:
-                            parsed = parse_log(raw.decode("utf-8"))
-                        except UnicodeError:
-                            parsed = parse_log(raw.decode("utf-8", errors="replace"))
-                            parsed["parseWarnings"].append("Invalid UTF-8 was replaced for parsing; the raw file preserves the original bytes.")
-                        parsed.update(logId=record["logId"], contentId=digest, rawPath=relative,
-                            observedAt=record.get("observedAt"), nativeOccurredAt=record.get("occurredAt"),
-                            windowMembership=in_window(parsed.get("crashedAt"), issue["window"]["startDate"], issue["window"]["endDate"]))
-                        reference = issue["referenceWindow"] or {}
-                        parsed["referenceWindowMembership"] = in_window(parsed.get("crashedAt"), reference.get("startDate"), reference.get("endDate"))
-                        issue["logs"].append(parsed)
-                    except (OSError, ValueError, UnicodeError, KeyError) as error:
-                        _diagnostic(report, issue["issueId"], f"Could not preserve/parse saved log {record.get('logId')}: {error}")
-                if skip.is_set():
-                    issue["status"] = "skipped"
-                    _diagnostic(report, issue["issueId"], "利用者がこのissueの取得をスキップしました。保存済みログの取得範囲は未完了です。")
+                if backend == "mcpbridge":
+                    _native_logs(client, query, issue, folder, artifacts, label)
+                    issue["status"] = "complete"
                 else:
-                    issue["status"] = "complete" if _job_complete(job) and len(report["errors"]) == issue_error_count else "partial"
+                    issue_error_count = len(report["errors"])
+                    logs_query = {**query, "collection": "logs", "issue_id": issue["issueId"]}
+                    job = _acquire(client, {**logs_query, **acquisition_options}, artifacts, label, progress, cancel, skip)
+                    issue["acquisition"] = {"jobId": job["jobId"], "complete": _job_complete(job), "artifact": f"artifacts/{label}-job.json"}
+                    for error in _job_errors(job):
+                        _diagnostic(report, issue["issueId"] or issue["name"], error.get("message", str(error)))
+                    try:
+                        metadata, _ = _save_acquisition(job, artifacts, label)
+                        issue["window"] = _window(metadata, time_period)
+                        issue["referenceWindow"] = _reference_window(metadata, time_period)
+                    except (OSError, ValueError, KeyError, TypeError) as error:
+                        _diagnostic(report, issue["issueId"] or issue["name"], f"Could not preserve acquisition metadata: {error}")
+                    for record in _read_logs(client, logs_query, artifacts, label, cancel):
+                        try:
+                            _preserve_log(issue, Path(record["path"]).read_bytes(), folder,
+                                logId=record["logId"], observedAt=record.get("observedAt"), nativeOccurredAt=record.get("occurredAt"))
+                        except (OSError, ValueError, UnicodeError, KeyError) as error:
+                            _diagnostic(report, issue["issueId"] or issue["name"], f"Could not preserve/parse saved log {record.get('logId')}: {error}")
+                    if skip.is_set():
+                        issue["status"] = "skipped"
+                        _diagnostic(report, issue["issueId"] or issue["name"], "利用者がこのissueの取得をスキップしました。保存済みログの取得範囲は未完了です。")
+                    else:
+                        issue["status"] = "complete" if _job_complete(job) and len(report["errors"]) == issue_error_count else "partial"
             except ReadCancelled as error:
                 issue["status"] = "cancelled"
-                _diagnostic(report, issue["issueId"], error)
+                _diagnostic(report, issue["issueId"] or issue["name"], error)
                 break
             except (MCPError, OSError, ValueError, KeyError, TypeError) as error:
-                issue["status"] = "failed"
-                _diagnostic(report, issue["issueId"], error)
+                if backend == "mcpbridge" and isinstance(error, MCPError) and "Signature name not found" in str(error):
+                    issue["status"] = "retryPending"
+                    issue["acquisition"] = {"backend": "mcpbridge", "complete": False,
+                        "artifact": f"artifacts/{label}-mcp.json", "error": str(error)}
+                    retry.append((label, issue, str(error)))
+                else:
+                    issue["status"] = "failed"
+                    _diagnostic(report, issue["issueId"] or issue["name"], error)
                 if isinstance(error, HostJobUnobserved):
                     break
             _save_report(report, folder)
             progress({"phase": "logs", "completedIssues": index + 1, "totalIssues": len(report["issues"])})
+        if retry and not cancel.is_set():
+            # A repeated top query can restore native signature resolution. Keep original list membership.
+            try:
+                _native_result(client, "GetTopCrashIssues", {**query, "count": count}, artifacts / "issues-retry-mcp.json")
+                report["retryListRequest"] = {"success": True, "artifact": "artifacts/issues-retry-mcp.json"}
+            except (MCPError, OSError, ValueError, KeyError, TypeError) as error:
+                report["retryListRequest"] = {"success": False, "error": str(error)}
+            for index, (label, issue, original_error) in enumerate(retry):
+                if cancel.is_set():
+                    break
+                progress({"phase": "retrying", "completedIssues": index, "totalIssues": len(retry), "skipAllowed": False})
+                attempts = [dict(issue["acquisition"])]
+                try:
+                    _native_logs(client, query, issue, folder, artifacts, label + "-retry")
+                    issue["status"] = "complete"
+                    attempts.append(dict(issue["acquisition"]))
+                except (MCPError, OSError, ValueError, KeyError, TypeError) as error:
+                    issue["status"] = "failed"
+                    attempts.append({"artifact": f"artifacts/{label}-retry-mcp.json", "error": str(error)})
+                    _diagnostic(report, issue["issueId"] or issue["name"], f"{original_error}; retry: {error}")
+                issue["acquisition"]["attempts"] = attempts
+                _save_report(report, folder)
         report["status"] = "cancelled" if cancel.is_set() else ("partial" if report["errors"] else "complete")
     except (MCPError, OSError, ValueError, KeyError, TypeError) as error:
         _diagnostic(report, "report", error)
@@ -343,7 +450,9 @@ def main():
     parser.add_argument("--bundle-id", required=True)
     parser.add_argument("--platform", default="iOS", choices=("iOS", "macOS", "watchOS", "tvOS", "visionOS"))
     parser.add_argument("--mcp-url", default="http://localhost:8765/mcp")
-    parser.add_argument("--time-period", choices=tuple(PERIOD_LABELS), default="last24Hours")
+    parser.add_argument("--backend", choices=("mcpbridge", "organizer"), default="mcpbridge")
+    parser.add_argument("--count", type=int, default=100, help="Requested top issue count for the standard MCP route.")
+    parser.add_argument("--time-period", choices=tuple(PERIOD_LABELS))
     parser.add_argument("--refresh-timeout-seconds", type=float, default=0,
                         help="Unlocked seconds per Organizer refresh; 0 (default) waits until ready or cancelled.")
     parser.add_argument("--output", type=Path, required=True)
@@ -353,13 +462,13 @@ def main():
     if args.serve:
         from crash_report_web import serve_reports
         serve_reports(args.bundle_id, args.platform, args.mcp_url, args.output, args.port, time_period=args.time_period,
-                      refresh_timeout_seconds=args.refresh_timeout_seconds)
+                      refresh_timeout_seconds=args.refresh_timeout_seconds, backend=args.backend, count=args.count)
         return 0
     cancel = Event()
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
     report = generate_report(args.bundle_id, args.platform, args.mcp_url, args.output,
         progress=lambda value: print(json.dumps(value, ensure_ascii=False), flush=True), cancel_event=cancel, time_period=args.time_period,
-        refresh_timeout_seconds=args.refresh_timeout_seconds)
+        refresh_timeout_seconds=args.refresh_timeout_seconds, backend=args.backend, count=args.count)
     print(report["reportPath"])
     return 0 if report["status"] == "complete" else 130 if report["status"] == "cancelled" else 1
 

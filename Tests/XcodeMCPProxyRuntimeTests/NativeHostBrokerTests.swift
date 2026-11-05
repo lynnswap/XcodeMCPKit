@@ -10,6 +10,40 @@ import XcodeMCPProxyTestSupport
 
 @Suite(.serialized, .timeLimit(.minutes(1)), .asyncTestCleanup)
 struct NativeHostBrokerTests {
+    @Test(arguments: [false, true])
+    func appleCrashToolsUseTheBridgeAndPreserveNativeResults(failed: Bool) async throws {
+        let fixture = try BrokerFixture()
+        let session = try await fixture.initialize("gui-crashes")
+        _ = try await fixture.reply(session, method: "tools/list")
+        #expect(fixture.guiFactory.transports.withLockedValue { $0.isEmpty })
+        _ = try await fixture.toolResult(session, name: "XcodeListWindows")
+        let gui = try #require(fixture.guiFactory.transports.withLockedValue { $0.first })
+        let result: JSONValue = .object([
+            "content": .array([.object(["type": .string("text"), "text": .string("native text")])]),
+            "structuredContent": .object(["success": .bool(!failed), "data": .string("native data")]),
+            "isError": .bool(failed), "_meta": .object(["native": .bool(true)]),
+        ])
+        gui.toolResults.withLockedValue { $0["GetTopCrashIssues"] = result }
+        let arguments: [String: JSONValue] = ["tabIdentifier": .string("gui-tab"),
+            "bundle_id": .string("com.example.app"), "platform": .string("iOS"), "count": .number(.int(100))]
+        #expect(try await fixture.toolResult(session, name: "GetTopCrashIssues", arguments: arguments) == result)
+        #expect(gui.calls.withLockedValue { $0.last?.arguments } == arguments)
+        #expect(fixture.factory.transports.withLockedValue { $0 }.allSatisfy {
+            $0.calls.withLockedValue { $0.isEmpty }
+        })
+    }
+
+    @Test func aBridgeStartupFailureDoesNotDispatchToTheHeadlessHostOrOrganizer() async throws {
+        let fixture = try BrokerFixture()
+        fixture.guiFactory.failNewHosts.withLockedValue { $0 = true }
+        let session = try await fixture.initialize("gui-unavailable")
+        await #expect(throws: NativeHostBrokerReplyError.self) {
+            try await fixture.toolResult(session, name: "GetCrashIssueLogs", arguments: [
+                "signature_name": .string("signature"), "tabIdentifier": .string("gui-tab")])
+        }
+        #expect(fixture.factory.transports.withLockedValue { $0.isEmpty })
+    }
+
     @Test(arguments: ["XcodeOpenWorkspace", "XcodeNewProject"])
     func nonStringHostDoesNotDispatchAnOperationOnTheDefaultHost(operation: String) async throws {
         let fixture = try BrokerFixture()
@@ -862,6 +896,7 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                                            _ requested: JSONValue?) -> JSONValue?
     let calls = NIOLockedValueBox<[Call]>([])
     let toolFailures = NIOLockedValueBox<Set<String>>([])
+    let toolResults = NIOLockedValueBox<[String: JSONValue]>([:])
     /// Tools whose replies wait for `releaseWait()`.
     let heldTools = NIOLockedValueBox<Set<String>>(["BuildProject"])
     let returnsProtocolError = NIOLockedValueBox(false)
@@ -944,6 +979,9 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                     descriptor("DeviceInteractionSynthesize", properties: [interactionKeyProperty.withLockedValue { $0 }: .object(["type": .string("string")])]),
                     descriptor("DeviceInteractionEndSession", properties: ["interactionSessionKey": .object(["type": .string("string")])]),
                 ])
+                for name in ["XcodeListWindows", "GetTopCrashIssues", "GetCrashIssueLogs"] {
+                    tools.append(descriptor(name, properties: ["tabIdentifier": .object(["type": .string("string")])]))
+                }
                 tools.append(descriptor("DeviceInteractionStartWorkspaceSession", properties: [
                     "workspaceIdentifier": .object(["type": .string("string")]),
                     "sessionIdentifier": .object(["type": .string("string")]),
@@ -970,7 +1008,9 @@ private final class BrokerTransport: UpstreamSession, Sendable {
                         message: "native protocol failure", data: .object(["reason": .string("fixture")]))))
                     return .accepted
                 }
-                if toolFailures.withLockedValue({ $0.contains(name) }) {
+                if let supplied = toolResults.withLockedValue({ $0[name] }) {
+                    result = supplied
+                } else if toolFailures.withLockedValue({ $0.contains(name) }) {
                     result = try NativeHostBroker.toolResult(.object(["message": .string("native failure")]), isError: true)
                 } else if heldTools.withLockedValue({ $0.contains(name) }) {
                     pending.withLockedValue { $0.append((id, Call(name: name, arguments: arguments, metadata: metadata))) }
@@ -1124,6 +1164,7 @@ private final class BrokerHostProcesses: UpstreamSessionFactory, Sendable {
 private final class BrokerFixture: Sendable {
     let broker: NativeHostBroker
     let factory = BrokerRuntimeFactory()
+    let guiFactory = BrokerRuntimeFactory()
     let sessions = NIOLockedValueBox<[ProxySessionID: any ProxyRuntimeSession]>([:])
     /// Host notifications that reached each session.
     let notifications = NIOLockedValueBox<[(session: ProxySessionID, data: Data)]>([])
@@ -1141,7 +1182,7 @@ private final class BrokerFixture: Sendable {
         var configuration = makeConfig(requestTimeout: requestTimeout)
         configuration.prewarmToolsList = prewarmToolsList
         broker = try NativeHostBroker(configuration: configuration, inventory: inventory, clock: clock,
-                                      logger: logger, sessionFactory: factory.make)
+                                      logger: logger, guiSessionFactory: BrokerHostProcesses(owner: guiFactory), sessionFactory: factory.make)
         let broker = broker
         #expect(registerAsyncTestCleanup(description: "broker shutdown") { await broker.shutdown() })
     }

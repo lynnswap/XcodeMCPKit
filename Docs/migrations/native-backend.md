@@ -10,13 +10,14 @@ Open a saved project with `XcodeOpenWorkspace`, then pass its returned
 `workspaceIdentifier` to an operation. The identifier retains its native
 headless workspace and host. `XcodeListWorkspaces` lists loaded headless models;
 workspace operations use these headless models. Network crash collection uses
-Organizer in an already running Xcode as described below.
+Apple's bridge by default; the separately named Organizer tools use screen
+operations as described below.
 
 | Previous call or value | Replacement |
 | --- | --- |
 | `XcodeMCPKitSelectHost({hostIdentifier})` followed by `tools/list` | Use the workspace identifier directly. For another installation, pass `hostIdentifier` to `XcodeOpenWorkspace`. |
 | `XcodeMCPKitSelectHost({hostIdentifier,createsNewHost:true})` or `XcodeOpenWorkspace({path,createsNewHost:true})` | `XcodeOpenWorkspace({path,hostIdentifier})`. Each installation has one shared headless host; use a separate checkout when settings must differ. |
-| `XcodeListWindows` and its native tab ID | Open the saved project with `XcodeOpenWorkspace`; use `XcodeListWorkspaces` to list loaded headless models. |
+| GUI tab IDs for workspace operations | Use `XcodeOpenWorkspace` / `XcodeListWorkspaces` for headless workspace IDs. `XcodeListWindows` now supplies native tab IDs for the standard crash tools only. |
 | `GetBuildLog({tabIdentifier: ...})` or other GUI workspace inputs | `GetBuildLog({workspaceIdentifier: ...})` using the identifier from List/Open. |
 | A native workspace ID retained across host selection | A new proxy identifier from List/Open. Do not reuse an old native ID. |
 | `DeviceInteractionStartWorkspaceSession` | `DeviceInteractionStartSession` with `workspaceIdentifier`; omit that field for standalone device interaction. |
@@ -45,8 +46,28 @@ identifiers. See [workspace usage](../usage.md) for normal operations.
 
 ## Crash collection
 
-Replace `GetTopCrashIssues` / `ListCrashIssues` and `GetCrashIssueLogs` /
-`GetCrashIssue` with `SyncCrashReports` and `ReadCrashChanges`.
+`GetTopCrashIssues` and `GetCrashIssueLogs` now forward to Apple's `mcpbridge`.
+Use `XcodeListWindows` for their native `tabIdentifier`. Daily reporting defaults
+to this route, requesting the top 100 issues for the last 14 days. Apple's default
+when `count` is omitted remains 5. A native failure never switches to Organizer.
+
+Existing extended crash tools are renamed:
+
+| Previous name | Replacement |
+| --- | --- |
+| `SyncCrashReports` | `SyncOrganizerCrashReports` |
+| `StartCrashSync` | `StartOrganizerCrashSync` |
+| `WaitForCrashSync` | `WaitForOrganizerCrashSync` |
+| `CancelCrashSync` | `CancelOrganizerCrashSync` |
+| `ResumeCrashSync` | `ResumeOrganizerCrashSync` |
+| `ReadCrashChanges` | `ReadOrganizerCrashChanges` |
+
+Update external MCP callers and reload the tool catalog. Old names are no longer
+published. The bundled report CLI/UI use the new names in Organizer mode, selected
+with `--backend organizer` or the page's acquisition-method selector. Its saved
+job/input and change-store formats retain their meaning.
+
+For Organizer collection:
 
 1. Call Sync with `collection: "issues"` and the bundle/platform query. Remove
    `count`, `page`, and `page_size`; provider paging is internal.
@@ -115,7 +136,8 @@ new tool definitions.
 Install `XcodeMCPNativeHost.app` beside the proxy commands. Reinstall the complete
 package if it is missing. The default helper executes headlessly through the
 selected Xcode's frameworks without Xcode Service setup. Workspace operations
-work without an open GUI window; network crash collection uses Organizer in an
+work without an open GUI window; the standard crash tools use Apple's bridge.
+Explicit Organizer crash collection uses Organizer in an
 already running Xcode and leaves that application running.
 
 Remove these older settings from startup scripts and embedding configuration:

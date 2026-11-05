@@ -189,6 +189,10 @@ let symbols = try await xcode.request(
 - `requestTimeout: Duration?` is the default logical deadline (600 seconds). `nil` disables
   the default timeout; nonpositive durations are rejected.
 
+The standard `XcodeListWindows`, `GetTopCrashIssues`, and `GetCrashIssueLogs`
+tools require the HTTP proxy, which routes them through Apple's GUI bridge.
+Direct native-host transports omit these GUI-only tools from their catalogs.
+
 Each request can override the default with `XcodeMCPRequestOptions.Timeout`:
 
 ```swift

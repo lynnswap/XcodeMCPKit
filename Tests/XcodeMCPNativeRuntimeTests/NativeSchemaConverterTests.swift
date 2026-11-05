@@ -5,6 +5,15 @@ import XcodeMCPWire
 
 @Suite
 struct NativeSchemaConverterTests {
+    @Test func appleCrashSchemasExposeTheGUITabSelector() throws {
+        let native = #"{"name":"GetTopCrashIssues","inputSchema":{"properties":[{"name":"bundle_id","type":{"string":{}},"isRequired":false}]}}"#
+        let tool = try NativeSchemaConverter.tool(from: Data(native.utf8), workspaceScoped: false)
+        let properties = try nativeTestObject(nativeTestField(tool.descriptor, "inputSchema", "properties"))
+        #expect(properties["tabIdentifier"] != nil)
+        #expect(properties["workspaceIdentifier"] == nil)
+        #expect(try nativeTestField(tool.descriptor, "inputSchema", "required") == .array([]))
+    }
+
     @Test func explicitWorkspaceOpeningAdvertisesSwiftPackagePaths() throws {
         let native = #"{"name":"XcodeOpenWorkspace","inputSchema":{"properties":[{"name":"path","type":{"string":{}},"isRequired":true}]}}"#
         let tool = try NativeSchemaConverter.tool(from: Data(native.utf8), workspaceScoped: false)

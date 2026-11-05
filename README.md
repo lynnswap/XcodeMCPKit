@@ -38,9 +38,11 @@ xcode-mcp-proxy-server
 ```
 
 Keep this terminal open while using MCP. Workspace operations work with Xcode
-closed. Network crash sync uses Organizer in an already running Xcode.
+closed. Daily crash checks use Apple's `mcpbridge` and require a running GUI
+Xcode with App Store Connect access. The separately named Organizer crash tools
+provide screen-driven collection when explicitly requested.
 
-To automatically allow other agents' MCP connections directly to the Xcode app,
+To automatically allow the bridge's and other agents' MCP connections to Xcode,
 start the server with `--auto-approve`:
 
 ```bash

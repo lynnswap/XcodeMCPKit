@@ -12,6 +12,7 @@ private struct HostArguments {
     var crashCacheDirectory: String?
     var maxMessageBytes = 32 * 1024 * 1024
     var sharesCompilationCache = false
+    var includesGUIBridgeTools = false
     var help = false
 
     init(_ values: [String]) throws {
@@ -21,6 +22,7 @@ private struct HostArguments {
             index += 1
             if argument == "--help" || argument == "-h" { help = true; continue }
             if argument == "--share-compilation-cache" { sharesCompilationCache = true; continue }
+            if argument == "--gui-tool-schemas" { includesGUIBridgeTools = true; continue }
             guard index < values.count else { throw NativeRuntimeError.invalidRequest("Missing value for \(argument)") }
             let value = values[index]
             index += 1
@@ -46,6 +48,7 @@ private enum NativeHostMain {
                 print("""
                     Usage: xcode-mcp-native-host [--developer-dir path] [--artifacts-root path] [--crash-cache-root path] [--max-message-bytes bytes] [--share-compilation-cache]
                     Run from the packaged native host application to provide headless Xcode MCP over STDIO.
+                    --gui-tool-schemas is reserved for the HTTP broker, which routes GUI tool execution separately.
                     Crash data defaults to ~/Library/Application Support/XcodeMCPKit/CrashCache, independently of temporary request artifacts.
                     """)
                 return
@@ -76,7 +79,8 @@ private enum NativeHostMain {
                 let session: NativeMCPSession
                 do {
                     try await bootstrap.initialize(installation: installation)
-                    let backend = try await NativeXcodeBackend(installation: installation)
+                    let backend = try await NativeXcodeBackend(installation: installation,
+                        includesGUIBridgeTools: arguments.includesGUIBridgeTools)
                     session = NativeMCPSession(backend: backend, artifactsRoot: artifacts, crashCacheRoot: crashCache) { data in
                         try output.write(contentsOf: data + Data([0x0A]))
                     }

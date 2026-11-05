@@ -16,12 +16,14 @@ class ReportBusy(RuntimeError):
 
 class ReportController:
     def __init__(self, bundle_id, platform, mcp_url, output_root, generator=None, work_lock=None,
-                 time_period="last24Hours", refresh_timeout_seconds=0):
+                 time_period=None, refresh_timeout_seconds=0, backend="mcpbridge", count=100):
         self.bundle_id = bundle_id
         self.platform = platform
         self.mcp_url = mcp_url
         self.output_root = Path(output_root).expanduser().resolve()
-        self.time_period = time_period
+        self.backend = backend
+        self.count = count
+        self.time_period = time_period or ("last14Days" if backend == "mcpbridge" else "last24Hours")
         self.refresh_timeout_seconds = self._timeout(refresh_timeout_seconds)
         self.generator = generator
         self.work_lock = work_lock or threading.Lock()
@@ -35,7 +37,7 @@ class ReportController:
     def _initial_state(self):
         return {"status": "idle", "running": False, "bundleId": self.bundle_id,
                 "platform": self.platform, "startedAt": None, "finishedAt": None,
-                "timePeriod": self.time_period, "outputRoot": str(self.output_root),
+                "timePeriod": self.time_period, "backend": self.backend, "count": self.count, "outputRoot": str(self.output_root),
                 "refreshTimeoutSeconds": self.refresh_timeout_seconds,
                 "progress": {}, "result": None, "files": {}, "lastError": None}
 
@@ -43,11 +45,20 @@ class ReportController:
         with self._lock:
             return deepcopy(self._state)
 
-    def start(self, time_period=None, output_root=None, refresh_timeout_seconds=None):
+    def start(self, time_period=None, output_root=None, refresh_timeout_seconds=None, backend=None, count=None):
         with self._lock:
             if self._state["running"]:
                 raise ReportBusy("レポートを作成中です。完了するか、停止してから再実行してください。")
-            time_period = time_period if time_period is not None else self._state["timePeriod"]
+            backend = backend if backend is not None else self._state["backend"]
+            if backend not in ("mcpbridge", "organizer"):
+                raise ValueError("取得方法を選択してください。")
+            count = count if count is not None else self._state["count"]
+            if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+                raise ValueError("取得件数は1以上の整数にしてください。")
+            if time_period is None:
+                time_period = self._state["timePeriod"] if backend == self._state["backend"] else ("last14Days" if backend == "mcpbridge" else "last24Hours")
+            if backend == "mcpbridge" and time_period != "last14Days":
+                raise ValueError("標準の取得期間は直近14日間です。別の期間はOrganizer版を選択してください。")
             if time_period not in ("last24Hours", "last14Days", "last365Days"):
                 raise ValueError("取得期間を選択してください。")
             output_root = output_root if output_root is not None else self._state["outputRoot"]
@@ -61,9 +72,9 @@ class ReportController:
             self._cancel = threading.Event()
             self._skip = threading.Event()
             self._state = {**self._initial_state(), "status": "running", "running": True,
-                           "startedAt": self._now(), "timePeriod": time_period, "outputRoot": str(output_root),
+                           "startedAt": self._now(), "timePeriod": time_period, "backend": backend, "count": count, "outputRoot": str(output_root),
                            "refreshTimeoutSeconds": refresh_timeout_seconds}
-            self._worker = threading.Thread(target=self._run, args=(time_period, output_root, refresh_timeout_seconds),
+            self._worker = threading.Thread(target=self._run, args=(time_period, output_root, refresh_timeout_seconds, backend, count),
                                             name="CrashReport", daemon=True)
             try:
                 self._worker.start()
@@ -94,7 +105,7 @@ class ReportController:
             progress.update(skipRequested=True, skipAllowed=False)
             return self.status()
 
-    def _run(self, time_period, output_root, refresh_timeout_seconds):
+    def _run(self, time_period, output_root, refresh_timeout_seconds, backend, count):
         try:
             generator = self.generator
             if generator is None:
@@ -102,7 +113,7 @@ class ReportController:
                 generator = generate_report
             result = generator(bundle_id=self.bundle_id, platform=self.platform, mcp_url=self.mcp_url,
                                output_root=output_root, time_period=time_period,
-                               refresh_timeout_seconds=refresh_timeout_seconds,
+                               refresh_timeout_seconds=refresh_timeout_seconds, backend=backend, count=count,
                                progress=self._progress, cancel_event=self._cancel, skip_event=self._skip)
             files = self._publish(result, output_root)
             with self._lock:
@@ -216,7 +227,8 @@ def route_report_request(handler, controller, method, path):
         try:
             if path.endswith("/start"):
                 state = controller.start(time_period=parameters.get("timePeriod"), output_root=parameters.get("outputRoot"),
-                                         refresh_timeout_seconds=parameters.get("refreshTimeoutSeconds"))
+                                         refresh_timeout_seconds=parameters.get("refreshTimeoutSeconds"),
+                                         backend=parameters.get("backend"), count=parameters.get("count"))
             elif path.endswith("/skip"):
                 state = controller.skip(parameters.get("issueId"))
             else:
@@ -231,9 +243,9 @@ def route_report_request(handler, controller, method, path):
     return True
 
 
-def serve_reports(bundle_id, platform, mcp_url, output_root, port, time_period="last24Hours", refresh_timeout_seconds=0):
+def serve_reports(bundle_id, platform, mcp_url, output_root, port, time_period=None, refresh_timeout_seconds=0, backend="mcpbridge", count=100):
     controller = ReportController(bundle_id, platform, mcp_url, output_root, time_period=time_period,
-                                  refresh_timeout_seconds=refresh_timeout_seconds)
+                                  refresh_timeout_seconds=refresh_timeout_seconds, backend=backend, count=count)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):

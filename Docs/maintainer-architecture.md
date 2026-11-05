@@ -115,16 +115,27 @@ global-store initialization assertions.
 
 ### Crash acquisition and change reading
 
-`SyncCrashReports` owns acquisition and bounded local import.
-`ReadCrashChanges` reads committed changes without network access, workspace
-resolution, or Products inventory. They replace the native crash actions in the
-catalog; the native action input/output schemas are not decoded or invoked.
+`SyncOrganizerCrashReports` owns acquisition and bounded local import.
+`ReadOrganizerCrashChanges` reads committed changes without network access, workspace
+resolution, or Products inventory. Their names distinguish them from the
+standard `GetTopCrashIssues` and `GetCrashIssueLogs` tools.
 
-`StartCrashSync` saves an explicit bundle/platform request and starts a
+The broker starts its headless host with `--gui-tool-schemas` to describe the
+three GUI tools, including `XcodeListWindows`, from installed Xcode schemas
+without executing their actions. Standalone native-host transports omit this
+flag and advertise only executable tools. The broker keeps
+their native tab selectors and results, and lazily starts Apple's `mcpbridge`
+through the existing upstream connection transport. That connection shares
+request-ID/progress mapping, cancellation, restart, and shutdown handling with
+headless connections. Bridge failures never enter Organizer collection.
+Stopping the bridge terminates only the owned bridge process, leaving Xcode
+running.
+
+`StartOrganizerCrashSync` saves an explicit bundle/platform request and starts a
 host-owned job that follows all local import continuations. It returns before
-product lookup or Organizer work. `WaitForCrashSync` observes saved state and
+product lookup or Organizer work. `WaitForOrganizerCrashSync` observes saved state and
 progress with a bounded wait; ending a wait or disconnecting its client leaves
-the job running. `CancelCrashSync` requests cancellation and returns while
+the job running. `CancelOrganizerCrashSync` requests cancellation and returns while
 cleanup continues. Terminal state is published after the operation drains.
 Job records and revisions persist in the crash cache. An owner lease prevents
 another host from marking a live job interrupted; observing unfinished work
@@ -133,7 +144,7 @@ Automatic import stops on a record failure and keeps the partial result's Sync
 continuation for an explicit retry. Source-only errors still permit importing
 the data that acquisition returned.
 
-`ResumeCrashSync` creates a job with a new ID and `previousJobId` from saved
+`ResumeOrganizerCrashSync` creates a job with a new ID and `previousJobId` from saved
 conditions of interrupted, failed, or cancelled work. It retains the original
 job and its results, recovers saved pages and pending imports, and starts network
 scans at the first page. Recovery selects the newest saved continuation for
@@ -290,7 +301,7 @@ do not grant Apple privileges.
 Only the public dynamic-loader entitlement is used for loading the selected
 Xcode's frameworks under hardened runtime. Apple-restricted Service entitlements
 and BoardServices registration are not copied. Workspace operations use owned
-models, and crash downloads operate GUI Organizer without changing agent
+models, and explicit Organizer crash downloads operate GUI Organizer without changing agent
 permissions. The separate opt-in Accessibility monitor
 presses recognized connection dialogs' Allow button.
 

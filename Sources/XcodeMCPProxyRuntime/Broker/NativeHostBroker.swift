@@ -4,6 +4,7 @@ import NIOCore
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProxyRuntimeContract
+import XcodeMCPWire
 
 package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     typealias SessionFactory = @Sendable (NativeHostRuntime.Configuration) -> any UpstreamSessionFactory
@@ -18,6 +19,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         var stopped = false
         var resetsInProgress = 0
         var publicCatalog: JSONValue?
+        var guiConnection: NativeHostConnection?
         /// Counts resets, so a catalog loaded before one is not stored after it.
         var catalogEpoch: UInt64 = 0
     }
@@ -28,6 +30,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private let configuration: ProxyRuntimeConfiguration
     private let inventory: XcodeHostInventory
     private let sessionFactory: SessionFactory
+    private let guiSessionFactory: any UpstreamSessionFactory
     private let clock: ClockClient
     private let logger: Logger
     static let defaultHostIdentifier = "host-default"
@@ -38,6 +41,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     static let listWorkspacesTool = "XcodeListWorkspaces"
     static let openWorkspaceTool = "XcodeOpenWorkspace"
     static let closeWorkspaceTool = "XcodeCloseWorkspace"
+    private static let guiHostIdentifier = "gui-xcode"
     /// Bounds a cleanup close while client requests have no timeout, so a host that never answers
     /// does not keep the model from being bound again.
     static let cleanupFallbackTimeout: TimeInterval = 60
@@ -62,10 +66,14 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
 
     init(configuration: ProxyRuntimeConfiguration, inventory: XcodeHostInventory,
          clock: ClockClient = .liveValue, logger: Logger = ProxyLogging.make("broker"),
+         guiSessionFactory: (any UpstreamSessionFactory)? = nil,
          sessionFactory: @escaping SessionFactory) throws {
         self.configuration = configuration
         self.inventory = inventory
         self.sessionFactory = sessionFactory
+        self.guiSessionFactory = guiSessionFactory ?? GUIXcodeSessionFactory(configuration: .init(
+            developerDirectoryURL: inventory.defaultInstallation.developerDirectory,
+            maxBodyBytes: configuration.maxMessageBytes), environment: ProcessInfo.processInfo.environment)
         self.clock = clock
         self.logger = logger
         _ = try register(installation: inventory.defaultInstallation, identifier: Self.defaultHostIdentifier)
@@ -103,6 +111,23 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     private static func duration(_ amount: TimeAmount) -> Duration { .nanoseconds(amount.nanoseconds) }
+
+    private func guiConnection() throws -> NativeHostConnection {
+        try state.withLockedValue { storage in
+            guard !storage.stopped, storage.resetsInProgress == 0 else { throw CancellationError() }
+            if let connection = storage.guiConnection { return connection }
+            let timeout = configuration.requestTimeout
+            let connection = NativeHostConnection(factory: guiSessionFactory,
+                handshake: .object(InitializeHandshakeJSON.resolved(
+                    initializeParamsOverride: configuration.initializeParamsOverride)),
+                handshakeTimeout: MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: timeout).map(Self.duration),
+                catalogTimeout: MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: timeout).map(Self.duration),
+                prewarmsCatalog: false, clock: clock, logger: ProxyLogging.make("mcpbridge"),
+                onEvent: { [weak self] event in self?.receive(event, from: Self.guiHostIdentifier) })
+            storage.guiConnection = connection
+            return connection
+        }
+    }
 
     package func start() {
         guard let host = state.withLockedValue({ $0.hosts[Self.defaultHostIdentifier] }) else { return }
@@ -170,6 +195,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 let device = (arguments["interactionSessionKey"] as? String).flatMap { storage.deviceSessions[$0] }
                 let launch = (arguments["launchSessionReference"] as? String).flatMap { storage.launchSessions[$0] }
                 let name = (object?["params"] as? [String: Any])?["name"] as? String
+                if let name, GUIXcodeTools.names.contains(name) {
+                    storage.hostRequests[Self.guiHostIdentifier, default: 0] += 1
+                    return Admission(hostIdentifier: Self.guiHostIdentifier, workspace: nil,
+                        deviceSession: nil, launchSession: nil, error: nil, retainsWorkspace: false)
+                }
                 let selector = arguments["workspaceIdentifier"] as? String
                 let workspace: NativeBrokerWorkspace?
                 if let selector, !selector.hasPrefix("/") {
@@ -616,21 +646,23 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     package func cancelForDeinit() {
         let resources = state.withLockedValue { storage in
             storage.stopped = true
-            return (Array(storage.sessions.values), Array(storage.hosts.values))
+            return (Array(storage.sessions.values), Array(storage.hosts.values), storage.guiConnection)
         }
         for session in resources.0 { closeSession(session) }
         for host in resources.1 { host.connection.cancelForDeinit() }
+        resources.2?.cancelForDeinit()
     }
     package func shutdown() async {
         let resources = state.withLockedValue { storage in
             storage.stopped = true
-            return (Array(storage.sessions.values), Array(storage.hosts.values))
+            return (Array(storage.sessions.values), Array(storage.hosts.values), storage.guiConnection)
         }
         for session in resources.0 { closeSession(session) }
         cancelPendingCleanup()
         await waitForClosingResources()
         await withTaskGroup(of: Void.self) { group in
             for host in resources.1 { group.addTask { await host.connection.shutdown() } }
+            if let gui = resources.2 { group.addTask { await gui.shutdown() } }
         }
     }
     package func snapshot() -> ProxyRuntimeSnapshot {
@@ -674,6 +706,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         cancelPendingCleanup()
         await waitForClosingResources()
         for host in hosts() { await host.connection.stopProcess() }
+        if let gui = state.withLockedValue({ $0.guiConnection }) { await gui.stopProcess() }
         state.withLockedValue { storage in
             storage.publicCatalog = nil
             storage.resetsInProgress -= 1
@@ -693,6 +726,16 @@ private extension NativeHostBroker {
         let arguments: [String: JSONValue]
         if case .object(let values)? = parameters["arguments"] { arguments = values }
         else { arguments = [:] }
+        if GUIXcodeTools.names.contains(name) {
+            let connection = try guiConnection()
+            let catalog = try await communicate { try await connection.nativeCatalog() }
+            let native = try XcodeToolCatalog.nativeCall(name: name, arguments: arguments, nativeCatalog: catalog.result)
+            let forwarded = try Self.toolRequest(request, name: native.name, arguments: native.arguments)
+            let reply = try await communicate {
+                try await connection.send(forwarded, owner: session.identifier, generation: catalog.generation)
+            }
+            return try Self.externalReply(.response(reply))
+        }
         let result: JSONValue
         switch name {
         case Self.listTool:

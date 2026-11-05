@@ -62,6 +62,7 @@ extension NativeToolBackend {
 @MainActor
 package final class NativeXcodeBackend: NativeToolBackend {
     private let installation: NativeXcodeInstallation
+    private let includesGUIBridgeTools: Bool
     private let testableStateCorrection: NativeTestableStateCorrection
     private var executionOperations: NativeExecutionOperations?
     private let bridge: NativeActionBridge
@@ -78,7 +79,8 @@ package final class NativeXcodeBackend: NativeToolBackend {
     private var previewBuildInvalidations: [URL: String?] = [:]
     private var catalogTask: Task<[NativeTool], any Error>?
 
-    package init(installation: NativeXcodeInstallation) async throws {
+    package init(installation: NativeXcodeInstallation, includesGUIBridgeTools: Bool = false) async throws {
+        self.includesGUIBridgeTools = includesGUIBridgeTools
         testableStateCorrection = try NativeTestableStateCorrection()
         self.installation = installation
         bridge = NativeActionBridge(installation: installation)
@@ -109,16 +111,18 @@ package final class NativeXcodeBackend: NativeToolBackend {
         let registered = try bridge.registeredActions()
         var nextActions: [String: NativeActionClass] = unsafe [:]
         var nextTools: [String: NativeTool] = [:]
-        for name in names.sorted() {
-            if ["GetTopCrashIssues", "GetCrashIssueLogs"].contains(name) { continue }
+        let published = includesGUIBridgeTools ? names.union(GUIXcodeTools.names) : names.subtracting(GUIXcodeTools.names)
+        for name in published.sorted() {
             guard let metadata = registered[name] else {
                 throw NativeRuntimeError.unsupportedContract("Public native tool '\(name)' is not registered")
             }
             let action = try unsafe await bridge.actionClass(for: metadata)
-            let workspaceScoped = try unsafe await scope.isWorkspaceScoped(action)
+            let gui = GUIXcodeTools.names.contains(name)
+            let workspaceScoped = gui ? false : try unsafe await scope.isWorkspaceScoped(action)
             let schema = try unsafe await bridge.schema(action: action)
             let tool = try NativeSchemaConverter.tool(from: schema, workspaceScoped: workspaceScoped)
-            unsafe (nextActions[name] = action)
+            // The broker executes GUI tools through Apple's bridge; the host supplies only their schemas.
+            if !gui { unsafe (nextActions[name] = action) }
             nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
         }
         for kind in NativeCrashToolCorrection.Kind.allCases {

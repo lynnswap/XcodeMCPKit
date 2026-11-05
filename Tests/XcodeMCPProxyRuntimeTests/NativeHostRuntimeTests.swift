@@ -39,6 +39,7 @@ struct NativeHostRuntimeTests {
             baseEnvironment: ["MCP_XCODE_PID": "9876", "MCP_XCODE_SESSION_ID": "parent-session",
                 "XCODE_PID": "legacy", "DEVELOPER_DIR": "/Parent/Developer", "PATH": "/usr/bin"])
         #expect(configuration.command.hasSuffix("/xcode-mcp-native-host"))
+        #expect(configuration.args.contains("--gui-tool-schemas"))
         #expect(configuration.environment["MCP_XCODE_PID"] == nil)
         #expect(configuration.environment["MCP_XCODE_SESSION_ID"] == nil)
         #expect(configuration.environment["XCODE_PID"] == nil)
