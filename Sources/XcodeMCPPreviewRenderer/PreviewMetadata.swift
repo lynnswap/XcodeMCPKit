@@ -61,16 +61,27 @@ func makeNativePreviewMetadata(domain: NativeSwiftValue, category: NativeSwiftVa
     displayName: String?) async throws -> NativeSwiftValue {
     let metadataType = try await ABIRuntime.shared.resolve(
         .swift(.type("PreviewsMessagingOS.PreviewMetadata")), in: .framework(named: "PreviewsMessagingOS"))
-    let makeMetadata = try await metadataType.resolve(
-        .swift(
-            .initializer(
-                "init(contentDomain: PreviewsMessagingOS.PreviewContentDomain, contentCategory: PreviewsMessagingOS.ContentCategory, supportsOnDevice: Swift.Bool, supportsInteractive: Swift.Bool, requestedTraits: PreviewsMessagingOS.PreviewTraits, isPreviewGroup: Swift.Bool, displayName: Swift.String?) -> PreviewsMessagingOS.PreviewMetadata",
-                as: ((NativeSwiftValue, NativeSwiftValue, Bool, Bool, NativeSwiftValue, Bool, String?) -> NativeSwiftValue).self,
-                valueABIs: [
-                    domain.type: .opaque(named: domain.type.name), category.type: .opaque(named: category.type.name),
-                    traits.type: .opaque(named: traits.type.name), metadataType: .opaque(named: metadataType.name),
-                ])))
-    return try unsafe makeMetadata.unsafeInvoke(domain, category, onDevice, interactive, traits, group, displayName)
+    let valueABIs: [NativeSwiftType: NativeType] = try [
+        domain.type: .opaque(named: domain.type.name), category.type: .opaque(named: category.type.name),
+        traits.type: .opaque(named: traits.type.name), metadataType: .opaque(named: metadataType.name),
+    ]
+    do {
+        let makeMetadata = try await metadataType.resolve(
+            .swift(
+                .initializer(
+                    "init(contentDomain: PreviewsMessagingOS.PreviewContentDomain, contentCategory: PreviewsMessagingOS.ContentCategory, supportsOnDevice: Swift.Bool, supportsInteractive: Swift.Bool, requestedTraits: PreviewsMessagingOS.PreviewTraits, isPreviewGroup: Swift.Bool, displayName: Swift.String?, supportsViewHierarchyTextualDescription: Swift.Bool, supportsAccessibilityTree: Swift.Bool) -> PreviewsMessagingOS.PreviewMetadata",
+                    as: ((NativeSwiftValue, NativeSwiftValue, Bool, Bool, NativeSwiftValue, Bool, String?, Bool, Bool) -> NativeSwiftValue).self,
+                    valueABIs: valueABIs)))
+        return try unsafe makeMetadata.unsafeInvoke(domain, category, onDevice, interactive, traits, group, displayName, false, false)
+    } catch is ABIResolutionError {
+        let makeMetadata = try await metadataType.resolve(
+            .swift(
+                .initializer(
+                    "init(contentDomain: PreviewsMessagingOS.PreviewContentDomain, contentCategory: PreviewsMessagingOS.ContentCategory, supportsOnDevice: Swift.Bool, supportsInteractive: Swift.Bool, requestedTraits: PreviewsMessagingOS.PreviewTraits, isPreviewGroup: Swift.Bool, displayName: Swift.String?) -> PreviewsMessagingOS.PreviewMetadata",
+                    as: ((NativeSwiftValue, NativeSwiftValue, Bool, Bool, NativeSwiftValue, Bool, String?) -> NativeSwiftValue).self,
+                    valueABIs: valueABIs)))
+        return try unsafe makeMetadata.unsafeInvoke(domain, category, onDevice, interactive, traits, group, displayName)
+    }
 }
 
 @MainActor
