@@ -1434,14 +1434,21 @@ final class NativePreviewCorrection {
         let parsed: NativeSwiftValue
         do {
             let parse = try await action.resolve(.swift(.staticMethod(
-                "parseTranslationUnit(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.RenderPreviewType])",
-                as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])))
-            parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
+                "parseTranslationUnit(sourceFileURL: Foundation.URL) async throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.RenderPreviewType])",
+                as: (@concurrent (PreviewURL) async throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])))
+            parsed = try unsafe await parse.unsafeInvoke(PreviewURL(value: source))
         } catch is ABIResolutionError {
-            let parse = try await action.resolve(.swift(.staticMethod(
-                "(parseTranslationUnit in _FEA7E13ECD12FBA8521281D73C9764CE)(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.(RenderPreviewType in _FEA7E13ECD12FBA8521281D73C9764CE)])",
-                as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])))
-            parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
+            do {
+                let parse = try await action.resolve(.swift(.staticMethod(
+                    "parseTranslationUnit(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.RenderPreviewType])",
+                    as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])))
+                parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
+            } catch is ABIResolutionError {
+                let parse = try await action.resolve(.swift(.staticMethod(
+                    "(parseTranslationUnit in _FEA7E13ECD12FBA8521281D73C9764CE)(sourceFileURL: Foundation.URL) throws -> (translationUnit: PreviewsPipeline.PreviewTranslationUnit, previews: [PreviewsXcode.RenderPreviewAction.(RenderPreviewType in _FEA7E13ECD12FBA8521281D73C9764CE)])",
+                    as: ((PreviewURL) throws -> NativeSwiftValue).self, valueABIs: [unit: .opaque(named: unit.name)])))
+                parsed = try unsafe parse.unsafeInvoke(PreviewURL(value: source))
+            }
         }
         let translationUnit = try parsed.copyTupleElement(at: 0)
         let array = try parsed.copyTupleElement(at: 1)
