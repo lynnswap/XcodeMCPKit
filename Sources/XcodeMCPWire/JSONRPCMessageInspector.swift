@@ -19,30 +19,6 @@ extension JSONRPC {
                 return id
             }
 
-            package var malformedID: JSONRPC.ID? {
-                guard case .malformed(let id) = self else { return nil }
-                return id
-            }
-
-            package var responseCorrelationID: JSONRPC.ID? {
-                switch self {
-                case .response(let id):
-                    return id
-                case .malformed(let id):
-                    return id
-                case .request, .notification, .other:
-                    return nil
-                }
-            }
-
-            package var isServerInitiated: Bool {
-                switch self {
-                case .request, .notification:
-                    return true
-                case .response, .malformed, .other:
-                    return false
-                }
-            }
         }
 
         package enum Inspector {
@@ -89,18 +65,6 @@ extension JSONRPC {
 
             package static func responseID(from object: [String: Any]) -> JSONRPC.ID? {
                 kind(of: object).responseID
-            }
-
-            package static func responseCorrelationID(from object: [String: Any]) -> JSONRPC.ID? {
-                kind(of: object).responseCorrelationID
-            }
-
-            package static func invalidMessageID(from object: [String: Any]) -> JSONRPC.ID? {
-                kind(of: object).malformedID
-            }
-
-            package static func isResponse(_ object: [String: Any]) -> Bool {
-                responseID(from: object) != nil
             }
         }
     }

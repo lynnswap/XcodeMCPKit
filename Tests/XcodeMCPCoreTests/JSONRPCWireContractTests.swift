@@ -83,16 +83,8 @@ struct JSONRPCWireContractTests {
         #expect((error["code"] as? NSNumber)?.intValue == -32002)
         #expect(error["message"] as? String == "upstream overloaded")
 
-        let rewrittenData = try JSONRPC.Wire.dataByReplacingID(
-            in: response,
-            with: numberID
-        )
-        let rewritten = try #require(
-            JSONSerialization.jsonObject(with: rewrittenData) as? [String: Any]
-        )
-        let parsedError = try #require(JSONRPC.Wire.errorPayload(inResponseObject: rewritten))
+        let parsedError = try #require(JSONRPC.Wire.errorPayload(inResponseObject: response))
 
-        #expect((rewritten["id"] as? NSNumber)?.intValue == 7)
         #expect(parsedError.code == -32002)
         #expect(parsedError.message == "upstream overloaded")
 

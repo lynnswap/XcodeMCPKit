@@ -61,6 +61,11 @@ actor NativeHostConnection {
         }
     }
 
+    private struct ProgressTokenMapping {
+        let clientToken: JSONValue
+        let upstreamToken: String
+    }
+
     private struct Pending {
         let generation: UInt64
         let owner: ProxySessionID?

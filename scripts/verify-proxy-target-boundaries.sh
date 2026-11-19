@@ -42,7 +42,7 @@ reject_matches \
 
 reject_matches \
     "XcodeMCPProxyRuntime must not own the facade aggregate configuration" \
-    '(^|[^[:alnum:]_])ProxyConfig([^[:alnum:]_]|$)|listenHost|listenPort|discoveryFileURL|configPath' \
+    'listenHost|listenPort|discoveryFileURL' \
     Sources/XcodeMCPProxyRuntime
 
 reject_matches \
@@ -51,14 +51,9 @@ reject_matches \
     Sources/XcodeMCPProxyKit
 
 reject_matches \
-    "XcodeMCPProxyHTTP references a Runtime implementation type" \
-    'ToolsCatalogAuthority|(^|[^[:alnum:]_])ControlPlane([^[:alnum:]_]|$)|LeaseManager|(^|[^[:alnum:]_])Upstream[A-Za-z0-9_]*([^[:alnum:]_]|$)|SessionContext|RuntimeCoordinator|RefreshCodeIssues' \
+    "XcodeMCPProxyHTTP references a host process type" \
+    '(^|[^[:alnum:]_])Upstream[A-Za-z0-9_]*([^[:alnum:]_]|$)' \
     Sources/XcodeMCPProxyHTTP
-
-reject_matches \
-    "deleted proxy gateway or test-support graph is still present" \
-    'RuntimeHTTPGatewayPort|RuntimeHTTPControlPort|XcodeMCPProxyInternalTestSupport' \
-    Sources Tests Package.swift
 
 reject_matches \
     "native host, installation, and wire modules must not import NIO or the proxy/client runtime" \

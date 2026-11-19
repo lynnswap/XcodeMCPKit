@@ -211,22 +211,6 @@ extension JSONRPC {
             return try data(from: object)
         }
 
-        package static func objectByReplacingID(
-            in object: [String: Any],
-            with id: JSONRPC.ID
-        ) -> [String: Any] {
-            var rewritten = object
-            rewritten["id"] = id.value.foundationObject
-            return rewritten
-        }
-
-        package static func dataByReplacingID(
-            in object: [String: Any],
-            with id: JSONRPC.ID
-        ) throws -> Data {
-            try data(from: objectByReplacingID(in: object, with: id))
-        }
-
         package static func resultValue(inResponseObject object: [String: Any]) -> JSONValue? {
             guard let resultAny = object["result"] else {
                 return nil

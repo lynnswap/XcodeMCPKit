@@ -455,10 +455,6 @@ public final class XcodeMCPProxyServer: Sendable {
         try await lifecycle.shutdown()
     }
 
-    static func listeningLogLine(displayHost: String, port: Int) -> String {
-        "Xcode MCP proxy listening on http://\(displayHost):\(port) (version \(productMetadata.version))"
-    }
-
     static func startupSummary(displayHost: String, port: Int) -> String {
         [
             "\(productMetadata.name) \(productMetadata.version)",
@@ -524,13 +520,5 @@ private extension ProxyRuntimeConfiguration.JSONValue {
         case .bool(let bool): self = .bool(bool)
         case .null: self = .null
         }
-    }
-}
-
-extension NSLock {
-    func withLock<T>(_ body: () throws -> T) rethrows -> T {
-        lock()
-        defer { unlock() }
-        return try body()
     }
 }
