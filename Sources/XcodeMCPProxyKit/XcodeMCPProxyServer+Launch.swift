@@ -1,4 +1,6 @@
 import Foundation
+import XcodeMCPCore
+import XcodeMCPProxyRuntime
 
 package struct XcodeMCPProxyProductMetadata: Equatable, Sendable {
     package let name: String
@@ -18,7 +20,7 @@ extension XcodeMCPProxyServer {
     }
 
     package static var productMetadata: XcodeMCPProxyProductMetadata {
-        XcodeMCPProxyProductMetadata(version: ProxyBuildInfo.version)
+        XcodeMCPProxyProductMetadata(version: ProxyBuildGeneratedInfo.version)
     }
 
     package static var serverUsage: String {
@@ -49,7 +51,7 @@ extension XcodeMCPProxyServer {
     }
 
     package static func bootstrapLogging(environment: [String: String]) {
-        XcodeMCPProxyLogging.bootstrap(environment: environment)
+        ProxyLogging.bootstrap(environment: environment)
     }
 }
 
@@ -66,7 +68,7 @@ private extension ProxyServerCommand {
             maxBodyBytes: maxBodyBytes ?? 1_048_576,
             requestTimeout: requestTimeout.map { $0.duration }
                 ?? XcodeMCPProxyServerConfiguration().requestTimeout,
-            discovery: .file(ProxyFilesystemLocations.discoveryFileURL(environment: environment)),
+            discovery: .file(Discovery.defaultFileURL(environment: environment)),
             approvalPolicy: autoApprove ? .automatic : .manual,
             enablesDebugEndpoints: debugEndpoints
         )

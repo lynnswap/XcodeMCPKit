@@ -1,5 +1,6 @@
 import Logging
 import XcodeMCPPermissionAutomation
+import XcodeMCPProxyRuntime
 
 protocol ProxyServerPermissionDialogAutoApprover: Sendable {
     func start()
@@ -20,7 +21,7 @@ extension XcodePermissionDialogAutomation.AutoApprover: ProxyServerPermissionDia
                 agentProcessIDCandidates: { descendantProcessIDCandidates() },
                 agentScope: .allAgents
             ),
-            logger: XcodeMCPProxyLogging.make("xcode.permission")
+            logger: ProxyLogging.make("xcode.permission")
         )
     }
 }

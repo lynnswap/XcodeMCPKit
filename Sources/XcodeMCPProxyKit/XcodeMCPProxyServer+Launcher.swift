@@ -40,7 +40,7 @@ extension XcodeMCPProxyServer {
             }
 
             package static var live: Self {
-                let existingServerController = XcodeMCPProxyServer.ExistingServerController.liveValue
+                let existingServerController = ExistingProxyServerProcessController.liveValue
                 return Self(
                     makeServer: { configuration in
                         XcodeMCPProxyServer(configuration: configuration)
