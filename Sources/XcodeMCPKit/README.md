@@ -200,7 +200,9 @@ let tools = try await xcode.listTools(timeout: .after(.seconds(30)))
 The same absolute deadline covers the initial send, session recovery, one
 replay, and all pagination requests. `.unlimited` is the explicit per-operation
 opt-out. A request that the HTTP server rejected before processing is replayed
-once; delivery-unknown failures are never replayed.
+once; delivery-unknown failures are never replayed. The client takes HTTP 404
+for a request that carried a session ID as that rejection, which is how the MCP
+specification reports an ended session.
 
 Capabilities that require server-to-client handlers are filtered because this
 v1 API does not expose those handlers. For Streamable HTTP, the transport
