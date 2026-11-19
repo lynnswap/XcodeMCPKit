@@ -1,6 +1,5 @@
 import XcodeMCPCore
 import Foundation
-import XcodeMCPKit
 
 struct ExistingProxyServerProcessController: DependencyClient {
     var terminateExistingServer:

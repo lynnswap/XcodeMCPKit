@@ -100,11 +100,6 @@ package struct MCPManagedInitializeContext: Sendable {
     }
 }
 
-package enum MCPClientInitializationMode: Sendable {
-    case managed(MCPManagedInitializeContext)
-    case forwarded
-}
-
 package struct MCPTransportRecipe: Sendable {
     package let makeTransport: @Sendable () async throws -> any XcodeMCPTransport
 
@@ -367,13 +362,6 @@ package actor MCPClientSessionAuthority {
         }
     }
 
-    private struct ForwardedInitializeRecipe: Sendable {
-        let requestData: Data
-        let originalIDKey: String
-        var responseValidated: Bool
-        var initializedObserved: Bool
-    }
-
     private enum RecoveryPhase {
         case active
         case finishing
@@ -427,19 +415,13 @@ package actor MCPClientSessionAuthority {
     private struct RecoveryPlan: Sendable {
         let oldConnection: Connection?
         let oldHeaders: MCPConnectionHeaders
-        let handshake: RecoveryHandshake
+        let initialize: MCPManagedInitializeContext
         let recipe: MCPTransportRecipe
-    }
-
-    private enum RecoveryHandshake: Sendable {
-        case managed(MCPManagedInitializeContext)
-        case forwarded(ForwardedInitializeRecipe)
     }
 
     private struct HiddenHandshake: Sendable {
         let request: MCPClientEnvelope
         let responseIDKey: String
-        let sendsInitialized: Bool
     }
 
     private enum RecoveryConnectionInstallation {
@@ -456,7 +438,7 @@ package actor MCPClientSessionAuthority {
 
     private let eventContinuation: AsyncStream<MCPClientSessionEvent>.Continuation
     private let recipe: MCPTransportRecipe
-    private let initializationMode: MCPClientInitializationMode
+    private let initialize: MCPManagedInitializeContext
     private let clock: ClockClient
     private let backgroundRecoveryTimeout: Duration
     private let subscribers = MCPConnectionSubscriberRegistry()
@@ -474,10 +456,6 @@ package actor MCPClientSessionAuthority {
     private var closeCompleted = false
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var hiddenResponses: [String: AsyncThrowingStream<MCPClientEnvelope, Error>.Continuation] = [:]
-    private var forwardedInitialize: ForwardedInitializeRecipe?
-    private var forwardedInitializeFailure: MCPBridgeRuntimeError?
-    private var forwardedResponseWaiters: [UUID: AsyncThrowingStream<Void, Error>.Continuation] = [:]
-    private var forwardedReadyWaiters: [UUID: AsyncThrowingStream<Void, Error>.Continuation] = [:]
     private var recovery: RecoveryState?
     private var retiredRecoveries: [UUID: RetiredRecovery] = [:]
     private var freshConnectionAttempt: FreshConnectionAttempt?
@@ -486,7 +464,7 @@ package actor MCPClientSessionAuthority {
 
     private init(
         recipe: MCPTransportRecipe,
-        mode: MCPClientInitializationMode,
+        initialize: MCPManagedInitializeContext,
         defaultTimeout: Duration?,
         clock: ClockClient
     ) {
@@ -494,7 +472,7 @@ package actor MCPClientSessionAuthority {
         self.events = pair.stream
         self.eventContinuation = pair.continuation
         self.recipe = recipe
-        self.initializationMode = mode
+        self.initialize = initialize
         self.clock = clock
         self.backgroundRecoveryTimeout = defaultTimeout ?? .seconds(30)
     }
@@ -507,7 +485,7 @@ package actor MCPClientSessionAuthority {
     ) async throws -> MCPClientSessionAuthority {
         let authority = MCPClientSessionAuthority(
             recipe: recipe,
-            mode: .managed(initialize),
+            initialize: initialize,
             defaultTimeout: defaultTimeout,
             clock: clock
         )
@@ -522,79 +500,10 @@ package actor MCPClientSessionAuthority {
         }
     }
 
-    package static func makeForwarded(
-        recipe: MCPTransportRecipe,
-        defaultTimeout: Duration? = nil,
-        clock: ClockClient = .liveValue
-    ) -> MCPClientSessionAuthority {
-        MCPClientSessionAuthority(
-            recipe: recipe,
-            mode: .forwarded,
-            defaultTimeout: defaultTimeout,
-            clock: clock
-        )
-    }
-
     package func send(_ operation: MCPClientOperation) async throws {
         try ensureOpen()
         try checkDeadline(operation.deadline, method: operation.envelope.method ?? "response")
-        var pendingForwardedInitializeID: String?
-        if case .forwarded = initializationMode,
-           forwardedInitialize == nil
-        {
-            guard case .request(_, let method) = operation.envelope.kind,
-                  method == "initialize" else {
-                throw MCPBridgeRuntimeError.invalidRequest(
-                    "forwarded MCP session requires initialize before other messages"
-                )
-            }
-        }
-        if case .forwarded = initializationMode,
-           case .request(let id, let method) = operation.envelope.kind,
-           method == "initialize"
-        {
-            guard forwardedInitialize == nil else {
-                throw MCPBridgeRuntimeError.invalidRequest(
-                    "forwarded MCP session accepts initialize only once"
-                )
-            }
-            forwardedInitialize = ForwardedInitializeRecipe(
-                requestData: operation.envelope.data,
-                originalIDKey: id.key,
-                responseValidated: false,
-                initializedObserved: false
-            )
-            pendingForwardedInitializeID = id.key
-        }
-        if case .forwarded = initializationMode,
-           forwardedInitialize != nil
-        {
-            switch operation.envelope.kind {
-            case .request(_, let method) where method == "initialize":
-                break
-            case .notification(let method) where method == "notifications/initialized":
-                try await waitForForwardedResponse(deadline: operation.deadline)
-            case .response:
-                try await waitForForwardedResponse(deadline: operation.deadline)
-            case .request, .notification:
-                try await waitForForwardedReady(deadline: operation.deadline)
-            }
-        }
-        let connection: Connection
-        do {
-            connection = try await connectionForOperation(
-                operation.envelope,
-                deadline: operation.deadline
-            )
-        } catch {
-            if let pendingForwardedInitializeID {
-                rollbackPendingForwardedInitialize(
-                    idKey: pendingForwardedInitializeID,
-                    error: error
-                )
-            }
-            throw error
-        }
+        let connection = try await connectionForOperation(deadline: operation.deadline)
         do {
             try await sendOnce(operation.envelope, on: connection, deadline: operation.deadline)
         } catch let failure as MCPTransportFailure {
@@ -616,14 +525,6 @@ package actor MCPClientSessionAuthority {
                 }
                 throw secondFailure
             }
-        }
-        if case .forwarded = initializationMode,
-           case .notification(let method) = operation.envelope.kind,
-           method == "notifications/initialized"
-        {
-            guard let current else { throw MCPBridgeRuntimeError.closed }
-            try await startEventStreamOnce(on: current, headers: currentHeaders)
-            markForwardedInitialized()
         }
     }
 
@@ -704,13 +605,6 @@ package actor MCPClientSessionAuthority {
             continuation.finish(throwing: MCPBridgeRuntimeError.closed)
         }
         hiddenResponses.removeAll()
-        let forwardedWaiters = Array(forwardedResponseWaiters.values)
-            + Array(forwardedReadyWaiters.values)
-        forwardedResponseWaiters.removeAll()
-        forwardedReadyWaiters.removeAll()
-        for waiter in forwardedWaiters {
-            waiter.finish(throwing: MCPBridgeRuntimeError.closed)
-        }
         let cancellationTasks = Array(cancellationNotificationTasks.values)
         cancellationNotificationTasks.removeAll()
         for task in cancellationTasks { task.cancel() }
@@ -756,8 +650,6 @@ package actor MCPClientSessionAuthority {
         for continuation in hiddenResponses.values {
             continuation.finish(throwing: MCPBridgeRuntimeError.closed)
         }
-        for continuation in forwardedResponseWaiters.values { continuation.finish() }
-        for continuation in forwardedReadyWaiters.values { continuation.finish() }
         subscribers.finish()
         eventContinuation.finish()
         for waiter in closeWaiters { waiter.resume() }
@@ -779,36 +671,24 @@ private extension MCPClientSessionAuthority {
     }
 
     private nonisolated static func makeHiddenRecoveryHandshake(
-        _ handshake: RecoveryHandshake
+        _ context: MCPManagedInitializeContext
     ) throws -> HiddenHandshake {
         let id = JSONRPC.ID(any: "xcode-mcp-recovery-\(UUID().uuidString)")!
-        let payload: Data
-        let sendsInitialized: Bool
-        switch handshake {
-        case .managed(let context):
-            payload = try JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
-                id: id,
-                method: "initialize",
-                params: .object([
-                    "protocolVersion": .string(MCPProtocolVersion.current),
-                    "clientInfo": .object([
-                        "name": .string(context.clientName),
-                        "version": .string(context.clientVersion),
-                    ]),
-                    "capabilities": .object(Self.filteredCapabilities(context.capabilities)),
-                ])
-            ))
-            sendsInitialized = true
-        case .forwarded(let forwarded):
-            var object = try JSONRPC.Wire.object(fromData: forwarded.requestData)
-            object["id"] = id.value.foundationObject
-            payload = try JSONRPC.Wire.data(from: object)
-            sendsInitialized = forwarded.initializedObserved
-        }
+        let payload = try JSONRPC.Wire.data(from: JSONRPC.Wire.requestObject(
+            id: id,
+            method: "initialize",
+            params: .object([
+                "protocolVersion": .string(MCPProtocolVersion.current),
+                "clientInfo": .object([
+                    "name": .string(context.clientName),
+                    "version": .string(context.clientVersion),
+                ]),
+                "capabilities": .object(Self.filteredCapabilities(context.capabilities)),
+            ])
+        ))
         return HiddenHandshake(
             request: try MCPClientEnvelope(data: payload),
-            responseIDKey: id.key,
-            sendsInitialized: sendsInitialized
+            responseIDKey: id.key
         )
     }
 
@@ -883,39 +763,18 @@ private extension MCPClientSessionAuthority {
 
     private func openManaged(deadline: Deadline?) async throws {
         let connection = try await installFreshConnection(phase: .initializing)
-        guard case .managed(let context) = initializationMode else {
-            preconditionFailure("managed open requires managed initialization mode")
-        }
-        try await performManagedHandshake(context, on: connection, deadline: deadline)
+        try await performManagedHandshake(initialize, on: connection, deadline: deadline)
         publish(.ready)
     }
 
-    private func connectionForOperation(
-        _ envelope: MCPClientEnvelope,
-        deadline: Deadline?
-    ) async throws -> Connection {
+    private func connectionForOperation(deadline: Deadline?) async throws -> Connection {
         if recovery != nil {
             try await joinRecovery(failedConnection: nil, deadline: deadline)
         }
-        if let current {
-            return current
-        }
-        guard case .forwarded = initializationMode else {
+        guard let current else {
             throw MCPBridgeRuntimeError.transportUnavailable("MCP connection is unavailable")
         }
-        let connection = try await installFreshConnection(phase: .initializing)
-        if forwardedInitialize == nil,
-           case .request(let id, let method) = envelope.kind,
-           method == "initialize"
-        {
-            forwardedInitialize = ForwardedInitializeRecipe(
-                requestData: envelope.data,
-                originalIDKey: id.key,
-                responseValidated: false,
-                initializedObserved: false
-            )
-        }
-        return connection
+        return current
     }
 
     private func installFreshConnection(
@@ -1025,21 +884,6 @@ private extension MCPClientSessionAuthority {
         guard let attempt = freshConnectionAttempt, attempt.id == id else { return }
         attempt.resultContinuation.finish()
         freshConnectionAttempt = nil
-    }
-
-    private func rollbackPendingForwardedInitialize(
-        idKey: String,
-        error: any Error
-    ) {
-        guard current == nil,
-              let forwardedInitialize,
-              forwardedInitialize.originalIDKey == idKey,
-              forwardedInitialize.responseValidated == false,
-              forwardedInitialize.initializedObserved == false else { return }
-        self.forwardedInitialize = nil
-        forwardedInitializeFailure = nil
-        finishForwardedWaiters(&forwardedResponseWaiters, result: .failure(error))
-        finishForwardedWaiters(&forwardedReadyWaiters, result: .failure(error))
     }
 
     private func installConnection(
@@ -1356,7 +1200,7 @@ private extension MCPClientSessionAuthority {
                     await transport.close(headers: MCPConnectionHeaders())
                     throw CancellationError()
                 }
-                let handshake = try Self.makeHiddenRecoveryHandshake(plan.handshake)
+                let handshake = try Self.makeHiddenRecoveryHandshake(plan.initialize)
                 guard let responseStream = try await self?.registerHiddenResponse(
                     idKey: handshake.responseIDKey,
                     connectionID: connection.id,
@@ -1415,44 +1259,41 @@ private extension MCPClientSessionAuthority {
                     await Self.closeConnection(connection, headers: MCPConnectionHeaders())
                     return
                 }
-                if handshake.sendsInitialized {
-                    let initialized = try Self.initializedNotificationEnvelope()
-                    guard let initializedSend = try await self?.admitRecoverySend(
-                        initialized,
-                        connectionID: connection.id,
-                        recoveryID: id
-                    ) else {
-                        await Self.closeConnection(connection, headers: headers)
-                        return
-                    }
-                    try await Self.awaitConnectionCommand(initializedSend.task)
-                    guard try await self?.authorizeRecoveryConnection(
-                        connection.id,
-                        recoveryID: id
-                    ) != nil else {
-                        await Self.closeConnection(connection, headers: initializedSend.headers)
-                        return
-                    }
-                    guard let eventStream = try await self?.admitRecoveryEventStreamStart(
-                        connectionID: connection.id,
-                        recoveryID: id
-                    ) else {
-                        await Self.closeConnection(connection, headers: initializedSend.headers)
-                        return
-                    }
-                    try await Self.awaitConnectionCommand(eventStream.task)
-                    guard try await self?.authorizeRecoveryConnection(
-                        connection.id,
-                        recoveryID: id
-                    ) != nil else {
-                        await Self.closeConnection(connection, headers: eventStream.headers)
-                        return
-                    }
+                let initialized = try Self.initializedNotificationEnvelope()
+                guard let initializedSend = try await self?.admitRecoverySend(
+                    initialized,
+                    connectionID: connection.id,
+                    recoveryID: id
+                ) else {
+                    await Self.closeConnection(connection, headers: headers)
+                    return
+                }
+                try await Self.awaitConnectionCommand(initializedSend.task)
+                guard try await self?.authorizeRecoveryConnection(
+                    connection.id,
+                    recoveryID: id
+                ) != nil else {
+                    await Self.closeConnection(connection, headers: initializedSend.headers)
+                    return
+                }
+                guard let eventStream = try await self?.admitRecoveryEventStreamStart(
+                    connectionID: connection.id,
+                    recoveryID: id
+                ) else {
+                    await Self.closeConnection(connection, headers: initializedSend.headers)
+                    return
+                }
+                try await Self.awaitConnectionCommand(eventStream.task)
+                guard try await self?.authorizeRecoveryConnection(
+                    connection.id,
+                    recoveryID: id
+                ) != nil else {
+                    await Self.closeConnection(connection, headers: eventStream.headers)
+                    return
                 }
                 let completion = await self?.completeRecoveryConnection(
                     connection.id,
-                    recoveryID: id,
-                    isReady: handshake.sendsInitialized
+                    recoveryID: id
                 )
                 guard completion != nil else {
                     await Self.closeConnection(connection, headers: headers)
@@ -1735,18 +1576,6 @@ private extension MCPClientSessionAuthority {
         if let failedConnection, current?.id != failedConnection {
             throw MCPTransportFailure.unavailable("connection was replaced before recovery")
         }
-        let handshake: RecoveryHandshake
-        switch initializationMode {
-        case .managed(let context):
-            handshake = .managed(context)
-        case .forwarded:
-            guard let forwardedInitialize, forwardedInitialize.responseValidated else {
-                throw MCPBridgeRuntimeError.invalidResponse(
-                    "cannot recover a forwarded session before initialize succeeds"
-                )
-            }
-            handshake = .forwarded(forwardedInitialize)
-        }
         let old = current
         let oldHeaders = currentHeaders
         current = nil
@@ -1756,7 +1585,7 @@ private extension MCPClientSessionAuthority {
         return RecoveryPlan(
             oldConnection: old,
             oldHeaders: oldHeaders,
-            handshake: handshake,
+            initialize: initialize,
             recipe: recipe
         )
     }
@@ -1807,8 +1636,7 @@ private extension MCPClientSessionAuthority {
 
     func completeRecoveryConnection(
         _ connectionID: MCPConnectionID,
-        recoveryID: UUID,
-        isReady: Bool
+        recoveryID: UUID
     ) -> Bool {
         guard var state = recovery,
               state.id == recoveryID,
@@ -1819,7 +1647,7 @@ private extension MCPClientSessionAuthority {
               isClosed == false else { return false }
         state.phase = .finishing
         recovery = state
-        publish(isReady ? .ready : .initializing)
+        publish(.ready)
         return true
     }
 
@@ -1859,7 +1687,7 @@ private extension MCPClientSessionAuthority {
             do {
                 let envelope = try MCPClientEnvelope(data: data)
                 if case .response(let id) = envelope.kind,
-                   hiddenResponses[id.key] != nil || id.key == forwardedInitialize?.originalIDKey,
+                   hiddenResponses[id.key] != nil,
                    let sessionID = responseHeaders.sessionID,
                    sessionID.isEmpty == false
                 {
@@ -1872,7 +1700,6 @@ private extension MCPClientSessionAuthority {
                     continuation.finish()
                     return
                 }
-                observeForwardedHandshake(envelope)
                 eventContinuation.yield(.message(connection: connectionID, envelope: envelope))
             } catch {
                 publish(.unavailable(.protocolViolation(error.localizedDescription)))
@@ -1886,95 +1713,6 @@ private extension MCPClientSessionAuthority {
             waiter: nil,
             requestsBackgroundLease: true
         )
-    }
-
-    func observeForwardedHandshake(_ envelope: MCPClientEnvelope) {
-        guard var forwardedInitialize else { return }
-        switch envelope.kind {
-        case .response(let id) where id.key == forwardedInitialize.originalIDKey:
-            do {
-                let protocolVersion = try Self.validateInitializeResponse(envelope)
-                currentHeaders.protocolVersion = protocolVersion
-                forwardedInitialize.responseValidated = true
-                forwardedInitializeFailure = nil
-                finishForwardedWaiters(&forwardedResponseWaiters, result: .success(()))
-            } catch let error as MCPBridgeRuntimeError {
-                forwardedInitializeFailure = error
-                finishForwardedWaiters(&forwardedResponseWaiters, result: .failure(error))
-                finishForwardedWaiters(&forwardedReadyWaiters, result: .failure(error))
-            } catch {
-                let runtimeError = MCPBridgeRuntimeError.invalidResponse(error.localizedDescription)
-                forwardedInitializeFailure = runtimeError
-                finishForwardedWaiters(&forwardedResponseWaiters, result: .failure(runtimeError))
-                finishForwardedWaiters(&forwardedReadyWaiters, result: .failure(runtimeError))
-            }
-            self.forwardedInitialize = forwardedInitialize
-            if forwardedInitialize.responseValidated, forwardedInitialize.initializedObserved {
-                publish(.ready)
-                finishForwardedWaiters(&forwardedReadyWaiters, result: .success(()))
-            }
-        default:
-            break
-        }
-    }
-
-    func markForwardedInitialized() {
-        guard var forwardedInitialize else { return }
-        forwardedInitialize.initializedObserved = true
-        self.forwardedInitialize = forwardedInitialize
-        if forwardedInitialize.responseValidated {
-            publish(.ready)
-            finishForwardedWaiters(&forwardedReadyWaiters, result: .success(()))
-        }
-    }
-
-    func waitForForwardedResponse(deadline: Deadline?) async throws {
-        if let failure = forwardedInitializeFailure { throw failure }
-        if forwardedInitialize?.responseValidated == true { return }
-        let id = UUID()
-        let pair = AsyncThrowingStream.makeStream(of: Void.self, throwing: Error.self)
-        forwardedResponseWaiters[id] = pair.continuation
-        defer { forwardedResponseWaiters.removeValue(forKey: id)?.finish() }
-        try await waitForForwardedState(pair.stream, deadline: deadline)
-    }
-
-    func waitForForwardedReady(deadline: Deadline?) async throws {
-        if let failure = forwardedInitializeFailure { throw failure }
-        if forwardedInitialize?.responseValidated == true,
-           forwardedInitialize?.initializedObserved == true { return }
-        let id = UUID()
-        let pair = AsyncThrowingStream.makeStream(of: Void.self, throwing: Error.self)
-        forwardedReadyWaiters[id] = pair.continuation
-        defer { forwardedReadyWaiters.removeValue(forKey: id)?.finish() }
-        try await waitForForwardedState(pair.stream, deadline: deadline)
-    }
-
-    func waitForForwardedState(
-        _ stream: AsyncThrowingStream<Void, Error>,
-        deadline: Deadline?
-    ) async throws {
-        try await raceDeadline(deadline, method: "initialize") {
-            for try await _ in stream { return }
-            try Task.checkCancellation()
-            throw MCPBridgeRuntimeError.transportUnavailable("forwarded initialize wait ended")
-        }
-    }
-
-    func finishForwardedWaiters(
-        _ waiters: inout [UUID: AsyncThrowingStream<Void, Error>.Continuation],
-        result: Result<Void, Error>
-    ) {
-        let current = Array(waiters.values)
-        waiters.removeAll()
-        for waiter in current {
-            switch result {
-            case .success:
-                waiter.yield(())
-                waiter.finish()
-            case .failure(let error):
-                waiter.finish(throwing: error)
-            }
-        }
     }
 
     nonisolated static func validateInitializeResponse(_ envelope: MCPClientEnvelope) throws -> String {

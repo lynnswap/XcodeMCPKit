@@ -8,7 +8,3 @@ package func makeRequestTimeout(_ seconds: TimeInterval) -> TimeAmount? {
     let nanos = Int64((fractional * 1_000_000_000).rounded())
     return .seconds(whole) + .nanoseconds(nanos)
 }
-
-package struct TimeoutError: Error {
-    package init() {}
-}

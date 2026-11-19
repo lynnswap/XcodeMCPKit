@@ -1,7 +1,5 @@
 import XcodeMCPCore
 
-import XcodeMCPKit
-
 extension XcodeMCPProxyServer {
     /// High-level launcher dependency adapter.
     ///

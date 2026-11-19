@@ -1,6 +1,5 @@
 import XcodeMCPCore
 import Foundation
-import XcodeMCPKit
 
 struct DiscoveryClient: DependencyClient {
     var defaultFileURL: @Sendable () -> URL

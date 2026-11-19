@@ -1389,132 +1389,44 @@ struct XcodeMCPTests {
         }
     }
 
-    @Test func forwardedAuthorityRejectsPreInitializeIOAndSecondInitialize() async throws {
-        let transport = LifecycleContractTransport(name: "forwarded")
-        let factory = LifecycleTransportFactory([transport])
-        let authority = MCPClientSessionAuthority.makeForwarded(
-            recipe: MCPTransportRecipe { try await factory.make() }
-        )
-
-        await #expect(throws: MCPBridgeRuntimeError.invalidRequest(
-            "forwarded MCP session requires initialize before other messages"
-        )) {
-            try await authority.send(try lifecycleOperation(method: "tools/list"))
-        }
-        #expect(await factory.makeCount() == 0)
-        #expect(await transport.sentMessages().isEmpty)
-
-        let initialize = try lifecycleOperation(method: "initialize", id: 9)
-        try await authority.send(initialize)
-        await #expect(throws: MCPBridgeRuntimeError.invalidRequest(
-            "forwarded MCP session accepts initialize only once"
-        )) {
-            try await authority.send(initialize)
-        }
-        #expect(await transport.sentMessages().filter { $0.method == "initialize" }.count == 1)
-        await authority.close()
-        #expect(await transport.closeCount() == 1)
-    }
-
-    @Test func forwardedCloseJoinsGatedInitialConnectionAttemptBeforeClosing() async throws {
-        let candidate = LifecycleContractTransport(name: "forwarded-close-first-candidate")
-        let factory = GatedForwardedTransportFactory(candidate: candidate)
-        let authority = MCPClientSessionAuthority.makeForwarded(
-            recipe: MCPTransportRecipe { try await factory.make() }
-        )
-        let initialize = Task {
-            try await authority.send(try lifecycleOperation(
-                method: "initialize",
-                id: 9,
-                deadline: nil
-            ))
+    @Test func cancelledStartJoinsItsConnectionAttemptAndClosesTheCandidate() async throws {
+        let candidate = LifecycleContractTransport(name: "cancelled-start-candidate")
+        let factory = GatedTransportFactory(candidate: candidate)
+        let completions = RecordedValues<Void>()
+        let start = Task {
+            do {
+                let authority = try await MCPClientSessionAuthority.startManaged(
+                    recipe: MCPTransportRecipe { try await factory.make() },
+                    initialize: MCPManagedInitializeContext(
+                        clientName: "UnitTestClient",
+                        clientVersion: "test",
+                        capabilities: [:]
+                    ),
+                    defaultTimeout: nil
+                )
+                await authority.close()
+            } catch {
+                await completions.append(())
+                throw error
+            }
         }
         try await factory.waitUntilStarted()
 
-        let closeCompletions = RecordedValues<Void>()
-        let close = Task {
-            await authority.close()
-            await closeCompletions.append(())
-        }
+        start.cancel()
         try await factory.waitUntilCancelled()
-        #expect(await closeCompletions.count() == 0)
-        #expect(await candidate.sentMessages().isEmpty)
+        #expect(await completions.count() == 0)
+        #expect(await candidate.closeCount() == 0)
 
         await factory.release()
-        await close.value
         do {
-            try await initialize.value
-            Issue.record("expected cancelled forwarded initialize")
+            try await start.value
+            Issue.record("expected cancelled start")
         } catch is CancellationError {
         }
 
-        #expect(await closeCompletions.count() == 1)
         #expect(await candidate.closeCount() == 1)
         #expect(await candidate.sentMessages().isEmpty)
         #expect(await candidate.eventStreamStartCount() == 0)
-        #expect(await authority.connectionState().phase == .closed(.requested))
-    }
-
-    @Test func cancelledForwardedInitialAttemptClosesCandidateAndAllowsRetry() async throws {
-        let cancelledCandidate = LifecycleContractTransport(
-            name: "forwarded-cancelled-candidate"
-        )
-        let retryCandidate = LifecycleContractTransport(name: "forwarded-retry-candidate")
-        let factory = GatedForwardedTransportFactory(
-            gatedCandidate: cancelledCandidate,
-            retryCandidate: retryCandidate
-        )
-        let authority = MCPClientSessionAuthority.makeForwarded(
-            recipe: MCPTransportRecipe { try await factory.make() }
-        )
-        let firstInitialize = Task {
-            try await authority.send(try lifecycleOperation(
-                method: "initialize",
-                id: 9,
-                deadline: nil
-            ))
-        }
-        try await factory.waitUntilStarted()
-
-        firstInitialize.cancel()
-        try await factory.waitUntilCancelled()
-        do {
-            try await waitWithTimeout(
-                "cancelled forwarded initialize did not leave its active attempt"
-            ) {
-                try await firstInitialize.value
-            }
-            Issue.record("expected cancelled forwarded initialize")
-        } catch is CancellationError {
-        }
-        #expect(await cancelledCandidate.closeCount() == 0)
-        #expect(await cancelledCandidate.sentMessages().isEmpty)
-        #expect(await cancelledCandidate.eventStreamStartCount() == 0)
-
-        try await authority.send(try lifecycleOperation(
-            method: "initialize",
-            id: 10,
-            deadline: nil
-        ))
-        #expect(
-            await retryCandidate.sentMessages().filter { $0.method == "initialize" }.count == 1
-        )
-
-        let closeCompletions = RecordedValues<Void>()
-        let close = Task {
-            await authority.close()
-            await closeCompletions.append(())
-        }
-        _ = try await retryCandidate.nextCloseCount()
-        #expect(await closeCompletions.count() == 0)
-
-        await factory.release()
-        await close.value
-        #expect(await closeCompletions.count() == 1)
-        #expect(await cancelledCandidate.closeCount() == 1)
-        #expect(await cancelledCandidate.sentMessages().isEmpty)
-        #expect(await cancelledCandidate.eventStreamStartCount() == 0)
-        #expect(await retryCandidate.closeCount() == 1)
     }
 
     @Test func connectionStateSubscribersAreIndependentAndCloseIsTerminal() async throws {
@@ -2395,31 +2307,17 @@ private actor LifecycleTransportFactory {
     }
 }
 
-private actor GatedForwardedTransportFactory {
-    private let candidates: [LifecycleContractTransport]
+private actor GatedTransportFactory {
+    private let candidate: LifecycleContractTransport
     private let gate = NonCooperativeSendGate()
     private let starts = RecordedValues<Void>()
     private let cancellations = RecordedValues<Void>()
-    private var callCount = 0
 
     init(candidate: LifecycleContractTransport) {
-        self.candidates = [candidate]
-    }
-
-    init(
-        gatedCandidate: LifecycleContractTransport,
-        retryCandidate: LifecycleContractTransport
-    ) {
-        self.candidates = [gatedCandidate, retryCandidate]
+        self.candidate = candidate
     }
 
     func make() async throws -> any XcodeMCPTransport {
-        guard candidates.indices.contains(callCount) else {
-            throw MCPBridgeRuntimeError.transportUnavailable("test factory exhausted")
-        }
-        let index = callCount
-        callCount += 1
-        guard index == 0 else { return candidates[index] }
         await starts.append(())
         let cancellations = cancellations
         await withTaskCancellationHandler {
@@ -2427,7 +2325,7 @@ private actor GatedForwardedTransportFactory {
         } onCancel: {
             Task { await cancellations.append(()) }
         }
-        return candidates[index]
+        return candidate
     }
 
     func waitUntilStarted() async throws {
