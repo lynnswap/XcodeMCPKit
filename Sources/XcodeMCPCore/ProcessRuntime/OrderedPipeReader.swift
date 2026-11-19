@@ -1,6 +1,6 @@
 import Dispatch
 import Foundation
-import NIOConcurrencyHelpers
+import Synchronization
 
 package final class AsyncTerminalSignal: @unchecked Sendable {
     private struct State {
@@ -8,12 +8,12 @@ package final class AsyncTerminalSignal: @unchecked Sendable {
         var waiters: [CheckedContinuation<Void, Never>] = []
     }
 
-    private let state = NIOLockedValueBox(State())
+    private let state = Mutex(State())
 
     package init() {}
 
     package func signal() {
-        let waiters = state.withLockedValue { state -> [CheckedContinuation<Void, Never>] in
+        let waiters = state.withLock { state -> [CheckedContinuation<Void, Never>] in
             guard state.isTerminal == false else { return [] }
             state.isTerminal = true
             let waiters = state.waiters
@@ -25,7 +25,7 @@ package final class AsyncTerminalSignal: @unchecked Sendable {
 
     package func wait() async {
         await withCheckedContinuation { continuation in
-            let shouldResume = state.withLockedValue { state in
+            let shouldResume = state.withLock { state in
                 guard state.isTerminal == false else { return true }
                 state.waiters.append(continuation)
                 return false
@@ -40,7 +40,7 @@ package final class OrderedPipeReader: @unchecked Sendable {
     private let continuation: AsyncStream<Data>.Continuation
     private let fileHandle: FileHandle
     private let queue: DispatchQueue
-    private let state = NIOLockedValueBox(State())
+    private let state = Mutex(State())
     private let terminal = AsyncTerminalSignal()
 
     private struct State: Sendable {
@@ -64,7 +64,7 @@ package final class OrderedPipeReader: @unchecked Sendable {
     }
 
     package func start() {
-        let source = state.withLockedValue { state -> DispatchSourceRead? in
+        let source = state.withLock { state -> DispatchSourceRead? in
             guard !state.isStarted, !state.isFinished else {
                 return nil
             }
@@ -98,7 +98,7 @@ package final class OrderedPipeReader: @unchecked Sendable {
     }
 
     private func consumeAvailableData() {
-        guard state.withLockedValue({ !$0.isFinished }) else {
+        guard state.withLock({ !$0.isFinished }) else {
             return
         }
 
@@ -108,14 +108,14 @@ package final class OrderedPipeReader: @unchecked Sendable {
             return
         }
 
-        guard state.withLockedValue({ !$0.isFinished }) else {
+        guard state.withLock({ !$0.isFinished }) else {
             return
         }
         continuation.yield(chunk)
     }
 
     private func finish() {
-        let result = state.withLockedValue { state -> (shouldFinish: Bool, source: DispatchSourceRead?) in
+        let result = state.withLock { state -> (shouldFinish: Bool, source: DispatchSourceRead?) in
             guard !state.isFinished else {
                 return (false, nil)
             }

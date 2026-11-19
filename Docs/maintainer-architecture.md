@@ -4,7 +4,7 @@
 
 | Module | Responsibility |
 | --- | --- |
-| `XcodeMCPCore` | Package-internal JSON-RPC, framing, clocks, wire I/O, and subprocess primitives. No dependency on SDK or proxy consumers. |
+| `XcodeMCPCore` | Code that the SDK and the server share: clocks, endpoint discovery, native host lookup, SSE framing, and subprocess primitives. Depends only on `XcodeMCPWire`, so the SDK product builds without swift-nio or swift-log. |
 | `XcodeMCPInstallation` | Installation discovery and path normalization shared by proxy and native host. |
 | `XcodeMCPKit` | Public Swift client and MCP values. `MCPClientSessionAuthority` owns transport identity/recovery; `InitializedMCPClientSession` owns request correlation and progress lanes. |
 | `XcodeMCPNativeRuntime` / `XcodeMCPNativeHost` | Xcode framework integration, native actions, headless workspace models, execution queues, and owned preview resources. |
@@ -320,7 +320,7 @@ xcodebuild test -workspace XcodeMCPKit.xcworkspace -scheme XcodeMCPProxyRuntimeT
 
 | Test target | Boundary |
 | --- | --- |
-| `XcodeMCPCoreTests` | Wire/framing and low-level HTTP transport. |
+| `XcodeMCPCoreTests` | Wire/framing, SSE codec, discovery, and native host lookup. |
 | `XcodeMCPProcessRuntimeTests` | Process I/O and termination with fake drivers and opt-in live cases. |
 | `XcodeMCPNativeRuntimeTests` | Native schemas, workspace/execution lifetime, previews, and documentation assets. |
 | `XcodeMCPProxyRuntimeTests` | Public/backend contracts, handle routing, scheduling, and recovery. |

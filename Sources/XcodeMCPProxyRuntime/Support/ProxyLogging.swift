@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import NIOConcurrencyHelpers
+import XcodeMCPCore
 
 package enum ProxyLogging {
     private static let bootstrapState = NIOLockedValueBox(false)
@@ -66,6 +67,22 @@ enum LogLevelParser {
             return .critical
         default:
             return nil
+        }
+    }
+}
+
+extension Upstream.Diagnostics {
+    /// Forwards a host process session's diagnostics to the server log.
+    static var serverLog: Self {
+        let logger = Logger(label: "XcodeMCPRuntime.upstream")
+        return Self { severity, message, metadata in
+            let metadata = metadata.mapValues { Logger.MetadataValue.string($0) }
+            switch severity {
+            case .warning:
+                logger.warning("\(message)", metadata: metadata, source: "XcodeMCPCore")
+            case .error:
+                logger.error("\(message)", metadata: metadata, source: "XcodeMCPCore")
+            }
         }
     }
 }

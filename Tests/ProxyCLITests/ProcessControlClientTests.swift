@@ -1,4 +1,5 @@
-@testable import XcodeMCPCore
+import XcodeMCPCore
+@testable import XcodeMCPProxyKit
 import Darwin
 import Foundation
 import Testing

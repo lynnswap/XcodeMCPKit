@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import NIOCore
+import XcodeMCPCore
 
 package struct ProcessSignalResult: Sendable {
     package let result: Int32
@@ -195,7 +196,7 @@ package struct ProcessControlClient: Sendable {
     }
 
     private static func defaultResolveHostAddress(_ host: String, _ port: Int) -> String? {
-        // Match ServerBootstrap.bind(host:port:), which selects one resolved address.
+        // Match the HTTP listener, whose bind selects one resolved address.
         try? SocketAddress.makeAddressResolvingHost(host, port: port).ipAddress
     }
 

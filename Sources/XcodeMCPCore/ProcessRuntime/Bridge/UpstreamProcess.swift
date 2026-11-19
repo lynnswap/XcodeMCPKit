@@ -1,7 +1,6 @@
 import Foundation
 import Darwin
 import Dispatch
-import Logging
 import Synchronization
 
 private final class StdinWriter: @unchecked Sendable {
@@ -113,10 +112,14 @@ package protocol UpstreamProcessDriverMaking: Sendable {
 }
 
 package struct LiveUpstreamProcessDriverFactory: UpstreamProcessDriverMaking {
-    package init() {}
+    private let diagnostics: Upstream.Diagnostics
+
+    package init(diagnostics: Upstream.Diagnostics = .unifiedLog) {
+        self.diagnostics = diagnostics
+    }
 
     package func makeDriver() -> any UpstreamProcessDriving {
-        LiveUpstreamProcessDriver()
+        LiveUpstreamProcessDriver(diagnostics: diagnostics)
     }
 }
 
@@ -131,9 +134,13 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         var stderrReader: OrderedPipeReader?
     }
 
-    private let logger: Logger = XcodeMCPRuntimeLogging.make("upstream")
+    private let diagnostics: Upstream.Diagnostics
     private let lock = NSLock()
     private var state = State()
+
+    init(diagnostics: Upstream.Diagnostics) {
+        self.diagnostics = diagnostics
+    }
 
     func start(
         command: String,
@@ -242,7 +249,7 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         }
         let result = kill(process.processIdentifier, SIGKILL)
         if result != 0, errno != ESRCH {
-            logger.error(
+            diagnostics.error(
                 "Failed to force-terminate upstream process",
                 metadata: [
                     "pid": "\(process.processIdentifier)",
@@ -283,7 +290,7 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         let stdinWriter = lock.withLock { state.stdinWriter }
         stdinWriter?.completeWrite(bytes: bytes)
         if let error {
-            logger.warning("Upstream async write failed", metadata: ["error": "\(error)"])
+            diagnostics.warning("Upstream async write failed", metadata: ["error": "\(error)"])
         }
     }
 
@@ -305,7 +312,7 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         let fd = handle.fileDescriptor
         let result = fcntl(fd, F_SETNOSIGPIPE, 1)
         if result == -1 {
-            logger.warning(
+            diagnostics.warning(
                 "Failed to disable SIGPIPE on upstream stdin pipe",
                 metadata: ["errno": "\(errno)"]
             )
@@ -484,6 +491,7 @@ package struct UpstreamProcess: UpstreamSessionFactory {
         package var terminationSignalGrace: Duration
         package var terminationDelayScheduler: any UpstreamTerminationDelayScheduling
         package var clock: ClockClient
+        package var diagnostics: Upstream.Diagnostics
         package var driverFactory: any UpstreamProcessDriverMaking
 
         package init(
@@ -496,7 +504,8 @@ package struct UpstreamProcess: UpstreamSessionFactory {
             terminationDelayScheduler: any UpstreamTerminationDelayScheduling =
                 LiveUpstreamTerminationDelayScheduler(),
             clock: ClockClient = .liveValue,
-            driverFactory: any UpstreamProcessDriverMaking = LiveUpstreamProcessDriverFactory()
+            diagnostics: Upstream.Diagnostics = .unifiedLog,
+            driverFactory: (any UpstreamProcessDriverMaking)? = nil
         ) {
             self.command = command
             self.args = args
@@ -506,7 +515,8 @@ package struct UpstreamProcess: UpstreamSessionFactory {
             self.terminationSignalGrace = terminationSignalGrace
             self.terminationDelayScheduler = terminationDelayScheduler
             self.clock = clock
-            self.driverFactory = driverFactory
+            self.diagnostics = diagnostics
+            self.driverFactory = driverFactory ?? LiveUpstreamProcessDriverFactory(diagnostics: diagnostics)
         }
     }
 
@@ -526,7 +536,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private let continuation: AsyncStream<Upstream.Event>.Continuation
 
     private let config: UpstreamProcess.Config
-    private let logger: Logger = XcodeMCPRuntimeLogging.make("upstream")
+    private var diagnostics: Upstream.Diagnostics { config.diagnostics }
     private let maxBufferedStderrBytes = 16 * 1024
     private nonisolated let cancellation = UpstreamProcessCancellation()
 
@@ -572,15 +582,15 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
 
     package func send(_ data: Data) async -> Upstream.SendResult {
         if didFinishEvents || terminationObserved {
-            logger.warning("Upstream send skipped because session has terminated")
+            diagnostics.warning("Upstream send skipped because session has terminated")
             return .unavailable(.terminated)
         }
         if isStopping {
-            logger.warning("Upstream send skipped because session is stopping")
+            diagnostics.warning("Upstream send skipped because session is stopping")
             return .unavailable(.shuttingDown)
         }
         guard let driver else {
-            logger.warning("Upstream send skipped because session never started")
+            diagnostics.warning("Upstream send skipped because session never started")
             return .unavailable(.notStarted)
         }
 
@@ -591,7 +601,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
 
         let result = driver.sendStdin(payload)
         if result == .backpressure {
-            logger.warning(
+            diagnostics.warning(
                 "Upstream write queue overloaded",
                 metadata: [
                     "payload_bytes": "\(payload.count)",
@@ -685,10 +695,10 @@ private extension ProcessBackedUpstreamSession {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
                         let preview = String(trimmed.prefix(200))
-                        logger.warning("Dropping non-JSON upstream stdout", metadata: ["preview": "\(preview)"])
+                        diagnostics.warning("Dropping non-JSON upstream stdout", metadata: ["preview": "\(preview)"])
                     }
                 } else {
-                    logger.warning("Dropping non-UTF8 upstream stdout", metadata: ["bytes": "\(message.count)"])
+                    diagnostics.warning("Dropping non-UTF8 upstream stdout", metadata: ["bytes": "\(message.count)"])
                 }
                 continue
             }
@@ -704,14 +714,14 @@ private extension ProcessBackedUpstreamSession {
             return
         }
 
-        logger.error(
+        diagnostics.error(
             "Fatal upstream stdout protocol violation",
             metadata: [
-                "reason": .string(protocolViolation.reason.rawValue),
-                "buffered_bytes": .string("\(protocolViolation.bufferedByteCount)"),
-                "preview": .string(protocolViolation.preview),
-                "preview_hex": .string(protocolViolation.previewHex),
-                "leading_byte_hex": .string(protocolViolation.leadingByteHex ?? ""),
+                "reason": protocolViolation.reason.rawValue,
+                "buffered_bytes": "\(protocolViolation.bufferedByteCount)",
+                "preview": protocolViolation.preview,
+                "preview_hex": protocolViolation.previewHex,
+                "leading_byte_hex": protocolViolation.leadingByteHex ?? "",
             ]
         )
         continuation.yield(.stdoutProtocolViolation(protocolViolation))
@@ -747,7 +757,7 @@ private extension ProcessBackedUpstreamSession {
             }
             flushBufferedStderrChunkIfNeeded()
         } else {
-            logger.error("Upstream stderr (binary)", metadata: ["bytes": "\(data.count)"])
+            diagnostics.error("Upstream stderr (binary)", metadata: ["bytes": "\(data.count)"])
         }
     }
 

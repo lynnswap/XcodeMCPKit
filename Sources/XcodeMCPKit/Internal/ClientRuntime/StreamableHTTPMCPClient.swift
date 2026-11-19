@@ -1,5 +1,6 @@
 import Foundation
 import Synchronization
+import XcodeMCPCore
 
 package struct StreamableHTTPMCPClientSendResult: Sendable {
     package let messageCount: Int

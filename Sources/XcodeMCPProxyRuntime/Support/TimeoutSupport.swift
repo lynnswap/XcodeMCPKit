@@ -1,7 +1,7 @@
 import Foundation
 import NIOCore
 
-package func makeRequestTimeout(_ seconds: TimeInterval) -> TimeAmount? {
+func makeRequestTimeout(_ seconds: TimeInterval) -> TimeAmount? {
     guard seconds > 0 else { return nil }
     let whole = Int64(seconds)
     let fractional = seconds - Double(whole)

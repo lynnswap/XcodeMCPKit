@@ -511,7 +511,7 @@ struct LiveUpstreamProcessSmokeTests {
                 #expect(!FileManager.default.fileExists(atPath: marker.path))
             }
             let pid = try #require(Int(String(contentsOf: pidFile, encoding: .utf8)))
-            #expect(!ProcessControlClient.liveValue.isProcessAlive(pid))
+            #expect(kill(pid_t(pid), 0) == -1)
         }
     }
 
