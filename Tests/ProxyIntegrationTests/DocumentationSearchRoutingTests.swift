@@ -13,7 +13,7 @@ import XcodeMCPProxyTestSupport
 
 extension HTTPHandlerTests {
     @Test func httpDocumentationSearchIsForwardedToNativeHost() async throws {
-        let config = makeHTTPConfig(requestTimeout: 2)
+        let config = makeHTTPConfig(requestTimeout: .seconds(2))
         let runtime = try HTTPTestRuntime(config: config) { method, params in
             #expect(method == "tools/call")
             #expect(params["name"] == .string("DocumentationSearch"))
@@ -53,7 +53,7 @@ extension HTTPHandlerTests {
     }
 
     @Test func httpBatchDocumentationSearchIsForwardedToNativeHost() async throws {
-        let config = makeHTTPConfig(requestTimeout: 2)
+        let config = makeHTTPConfig(requestTimeout: .seconds(2))
         let runtime = try HTTPTestRuntime(config: config)
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
 
@@ -87,7 +87,7 @@ extension HTTPHandlerTests {
     }
 
     @Test func httpBatchToolsListUsesLocalToolSurfaceAndForwardsOtherCalls() async throws {
-        let config = makeHTTPConfig(requestTimeout: 2)
+        let config = makeHTTPConfig(requestTimeout: .seconds(2))
         let runtime = try HTTPTestRuntime(config: config)
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
 

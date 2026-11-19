@@ -299,12 +299,12 @@ struct NativeHostBrokerTests {
         try await waitWithTimeout("shutdown finished", timeout: .seconds(5)) { await fixture.broker.shutdown() }
     }
 
-    /// A disabled request timeout (0) still bounds the cleanup close.
-    @Test(arguments: [5, 0] as [TimeInterval])
-    func anUnansweredCleanupCloseExpiresSoTheModelCanBeReopened(requestTimeout: TimeInterval) async throws {
+    /// A disabled request timeout still bounds the cleanup close.
+    @Test(arguments: [.seconds(5), nil] as [Duration?])
+    func anUnansweredCleanupCloseExpiresSoTheModelCanBeReopened(requestTimeout: Duration?) async throws {
         let clocks = makeDeterministicClocks()
         let fixture = try BrokerFixture(clock: clocks.clock, requestTimeout: requestTimeout)
-        let bound = Duration.seconds(requestTimeout > 0 ? requestTimeout : NativeHostBroker.cleanupFallbackTimeout)
+        let bound = requestTimeout ?? NativeHostBroker.cleanupFallbackTimeout
         let first = try await fixture.initialize("expiring-cleanup")
         _ = try await fixture.open(first)
         let native = try #require(fixture.factory.transports.withLockedValue { $0.first })
@@ -1170,7 +1170,7 @@ private final class BrokerFixture: Sendable {
     let notifications = NIOLockedValueBox<[(session: ProxySessionID, data: Data)]>([])
     let defaultInstallation = XcodeHostInstallation(developerDirectory: URL(fileURLWithPath: "/Fixture/Default.app"))
 
-    init(clock: ClockClient = .liveValue, requestTimeout: TimeInterval = 5, holdsInitialization: Bool = false,
+    init(clock: ClockClient = .liveValue, requestTimeout: Duration? = .seconds(5), holdsInitialization: Bool = false,
          prewarmToolsList: Bool = false,
          logger: Logger = ProxyLogging.make("broker")) throws {
         let factory = factory

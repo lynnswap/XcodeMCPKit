@@ -478,22 +478,15 @@ extension XcodeMCPProxyServerConfiguration {
         guard maxBodyBytes > 0 else {
             throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration("maxBodyBytes must be greater than zero")
         }
-        let timeout: TimeInterval
-        if let requestTimeout {
-            let components = requestTimeout.components
-            timeout = Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
-            guard timeout > 0 else {
-                throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration("requestTimeout must be positive; use nil to disable it")
-            }
-        } else {
-            timeout = 0
+        if let requestTimeout, requestTimeout <= .zero {
+            throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration("requestTimeout must be positive; use nil to disable it")
         }
         let configuration = ProxyRuntimeConfiguration(
             nativeHostBundleURL: nativeHostBundleURL,
             developerDirectoryURL: developerDirectoryURL,
             sharesCompilationCache: sharesCompilationCache,
             maxMessageBytes: maxBodyBytes,
-            requestTimeout: timeout,
+            requestTimeout: requestTimeout,
             prewarmToolsList: prewarmToolsList,
             initializeParamsOverride: initializeHandshake.map { handshake in
                 .init(

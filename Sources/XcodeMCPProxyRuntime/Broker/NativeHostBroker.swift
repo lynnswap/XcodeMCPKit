@@ -1,6 +1,5 @@
 import Foundation
 import Logging
-import NIOCore
 import NIOConcurrencyHelpers
 import XcodeMCPCore
 import XcodeMCPProxyRuntimeContract
@@ -44,7 +43,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private static let guiHostIdentifier = "gui-xcode"
     /// Bounds a cleanup close while client requests have no timeout, so a host that never answers
     /// does not keep the model from being bound again.
-    static let cleanupFallbackTimeout: TimeInterval = 60
+    static let cleanupFallbackTimeout: Duration = .seconds(60)
+    /// Bounds a host's initialize handshake even when client requests have no timeout.
+    private static let handshakeTimeoutLimit: Duration = .seconds(60)
+    /// Bounds an internal catalog load even when client requests have no timeout.
+    private static let catalogTimeoutLimit: Duration = .seconds(10)
 
     private struct Admission: Sendable {
         let hostIdentifier: String
@@ -91,14 +94,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 developerDirectoryURL: installation.developerDirectory,
                 sharesCompilationCache: configuration.sharesCompilationCache,
                 maxBodyBytes: configuration.maxMessageBytes)
-            let timeout = configuration.requestTimeout
             let connection = NativeHostConnection(
                 factory: sessionFactory(processConfiguration),
                 handshake: .object(InitializeHandshakeJSON.resolved(
                     initializeParamsOverride: configuration.initializeParamsOverride)),
-                handshakeTimeout: MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: timeout).map(Self.duration),
-                // An internal catalog load stays bounded even when client request timeouts are disabled.
-                catalogTimeout: MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: timeout).map(Self.duration),
+                handshakeTimeout: handshakeTimeout, catalogTimeout: catalogTimeout,
                 prewarmsCatalog: configuration.prewarmToolsList, clock: clock,
                 logger: ProxyLogging.make("native-host"),
                 onEvent: { [weak self] event in self?.receive(event, from: id) })
@@ -110,18 +110,22 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         }
     }
 
-    private static func duration(_ amount: TimeAmount) -> Duration { .nanoseconds(amount.nanoseconds) }
+    private var handshakeTimeout: Duration {
+        min(configuration.requestTimeout ?? Self.handshakeTimeoutLimit, Self.handshakeTimeoutLimit)
+    }
+
+    private var catalogTimeout: Duration {
+        min(configuration.requestTimeout ?? Self.catalogTimeoutLimit, Self.catalogTimeoutLimit)
+    }
 
     private func guiConnection() throws -> NativeHostConnection {
         try state.withLockedValue { storage in
             guard !storage.stopped, storage.resetsInProgress == 0 else { throw CancellationError() }
             if let connection = storage.guiConnection { return connection }
-            let timeout = configuration.requestTimeout
             let connection = NativeHostConnection(factory: guiSessionFactory,
                 handshake: .object(InitializeHandshakeJSON.resolved(
                     initializeParamsOverride: configuration.initializeParamsOverride)),
-                handshakeTimeout: MCP.MethodDispatcher.timeoutForInitialize(defaultSeconds: timeout).map(Self.duration),
-                catalogTimeout: MCP.MethodDispatcher.timeoutForControlPlane(defaultSeconds: timeout).map(Self.duration),
+                handshakeTimeout: handshakeTimeout, catalogTimeout: catalogTimeout,
                 prewarmsCatalog: false, clock: clock, logger: ProxyLogging.make("mcpbridge"),
                 onEvent: { [weak self] event in self?.receive(event, from: Self.guiHostIdentifier) })
             storage.guiConnection = connection
@@ -182,8 +186,8 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         let cancelled = NativeBrokerReply.error(id: requestID, code: -32800, message: "request cancelled").clientReply
         var deadline: Date?
         if let object, case .request = JSONRPC.Message.Inspector.kind(of: object),
-           let timeout = makeRequestTimeout(configuration.requestTimeout) {
-            deadline = clock.now().addingTimeInterval(Double(timeout.nanoseconds) / 1_000_000_000)
+           let timeout = configuration.requestTimeout {
+            deadline = clock.now().addingTimeInterval(timeout / .seconds(1))
         }
         // Admission pins the host under the broker lock, which the unused-host scan also holds,
         // so a host is kept for this request before idle retirement can stop its process.
@@ -565,8 +569,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                         "workspaceIdentifier": .string(workspace.nativeIdentifier),
                     ])]),
                 ])
-                let timeout = makeRequestTimeout(
-                    configuration.requestTimeout > 0 ? configuration.requestTimeout : Self.cleanupFallbackTimeout)
+                let timeout = configuration.requestTimeout ?? Self.cleanupFallbackTimeout
                 do {
                     let reply = try await withDeadline(timeout) {
                         try await host.connection.sendToRunningProcess(request, generation: workspace.generation)
@@ -587,14 +590,13 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     }
 
     /// Runs `operation`, failing it with `CancellationError` once `timeout` elapses.
-    private func withDeadline<T: Sendable>(_ timeout: TimeAmount?,
+    private func withDeadline<T: Sendable>(_ timeout: Duration,
                                            _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        guard let timeout else { return try await operation() }
         let clock = clock
         return try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask { try await operation() }
             group.addTask {
-                await clock.sleep(.nanoseconds(timeout.nanoseconds))
+                await clock.sleep(timeout)
                 throw CancellationError()
             }
             defer { group.cancelAll() }

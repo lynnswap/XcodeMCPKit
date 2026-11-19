@@ -15,7 +15,7 @@ import XcodeMCPProxyTestSupport
 struct HTTPConcurrencyTests {
     @Test(arguments: ["BuildProject", "FutureNativeTool"])
     func nativeToolCallsResolveWorkspacePathsAndPreserveProviderErrors(toolName: String) async throws {
-        let config = makeHTTPConfig(requestTimeout: 5)
+        let config = makeHTTPConfig(requestTimeout: .seconds(5))
         let tools = JSONValue.object(["tools": .array([.object([
             "name": .string("BuildProject"),
             "inputSchema": .object([
@@ -74,7 +74,7 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpAndSwiftClientExposeTheCompleteCatalog() async throws {
-        var config = makeHTTPConfig(requestTimeout: 5)
+        var config = makeHTTPConfig(requestTimeout: .seconds(5))
         config.prewarmToolsList = false
         let runtime = try HTTPTestRuntime(config: config)
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
@@ -111,7 +111,7 @@ struct HTTPConcurrencyTests {
 
     @Test(arguments: ["DocumentationSearch", "XcodeListWorkspaces"])
     func httpCancellationDoesNotWaitBehindTheRequest(toolName: String) async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
         do {
@@ -153,7 +153,7 @@ struct HTTPConcurrencyTests {
     /// A request's progress opens its own POST response as an event stream that ends with the
     /// reply; a request that reports no progress still gets JSON.
     @Test func progressStreamsOnlyOnItsRequestsResponse() async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
         do {
@@ -209,7 +209,7 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func multiplexedCancellationPreservesOtherSessionsAndIDScalarTypes() async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
         do {
@@ -269,7 +269,7 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpConcurrentInitializeRequests() async throws {
-        let config = makeHTTPConfig(requestTimeout: 5)
+        let config = makeHTTPConfig(requestTimeout: .seconds(5))
         let runtime = try HTTPTestRuntime(config: config)
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
         let url = server.url
@@ -289,7 +289,7 @@ struct HTTPConcurrencyTests {
 
     @Test func httpConcurrentInitializeStress() async throws {
         let count = 10
-        let config = makeHTTPConfig(requestTimeout: 5)
+        let config = makeHTTPConfig(requestTimeout: .seconds(5))
         let runtime = try HTTPTestRuntime(config: config)
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
         let url = server.url
@@ -307,7 +307,7 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpConcurrentRequestsShareSession() async throws {
-        var config = makeHTTPConfig(requestTimeout: 5)
+        var config = makeHTTPConfig(requestTimeout: .seconds(5))
         config.prewarmToolsList = false
         let runtime = try HTTPTestRuntime(config: config)
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
@@ -354,7 +354,7 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpConcurrentRequestsCanOverlapAcrossSessions() async throws {
-        var config = makeHTTPConfig(requestTimeout: 5)
+        var config = makeHTTPConfig(requestTimeout: .seconds(5))
         config.prewarmToolsList = false
         let runtime = try HTTPTestRuntime(config: config)
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
@@ -403,7 +403,7 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpRequestTimeoutDoesNotCancelAnotherRequestOnTheSameNativeConnection() async throws {
-        let config = makeHTTPConfig(requestTimeout: 10)
+        let config = makeHTTPConfig(requestTimeout: .seconds(10))
         let clock = TestClock()
         let runtime = try HTTPTestRuntime(config: config, clock: makeHTTPTestClock(clock)) { _, _ in .hold }
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
@@ -453,7 +453,7 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpNotificationIsAcceptedWithoutWaitingForAnotherRequestResult() async throws {
-        let config = makeHTTPConfig(requestTimeout: 10)
+        let config = makeHTTPConfig(requestTimeout: .seconds(10))
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
         let url = server.url
@@ -491,7 +491,7 @@ struct HTTPConcurrencyTests {
     }
 
     @Test func httpToolCallNotificationIsAcceptedWithoutReachingTheHost() async throws {
-        let config = makeHTTPConfig(requestTimeout: 5)
+        let config = makeHTTPConfig(requestTimeout: .seconds(5))
         let runtime = try HTTPTestRuntime(config: config)
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
         let url = server.url
@@ -521,7 +521,7 @@ struct HTTPConcurrencyTests {
 
     /// Host notifications reach the session's GET stream; progress reaches only its request's response.
     @Test func httpServerNotificationsReachActiveSSESessions() async throws {
-        let config = makeHTTPConfig(requestTimeout: 10)
+        let config = makeHTTPConfig(requestTimeout: .seconds(10))
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
         let url = server.url
