@@ -4,7 +4,7 @@ import XcodeMCPCore
 import XcodeMCPProxyTestSupport
 @testable import XcodeMCPProxyRuntime
 
-func makeConfig(requestTimeout: TimeInterval) -> ProxyRuntimeConfiguration {
+func makeConfig(requestTimeout: Duration?) -> ProxyRuntimeConfiguration {
     ProxyRuntimeConfiguration(
         maxMessageBytes: 1024,
         requestTimeout: requestTimeout,

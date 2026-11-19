@@ -405,7 +405,7 @@ struct HTTPHandlerTests {
 
     /// A client that disconnects gives up its request: the host learns of it, and the session can expire.
     @Test func aClientDisconnectCancelsItsRequestAndReleasesTheSession() async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         try await addHTTPHandler(to: channel, config: config, runtime: runtime)
@@ -431,7 +431,7 @@ struct HTTPHandlerTests {
     /// The server keeps reading a connection whose response has not started, so it notices a
     /// client that leaves a running request.
     @Test func aClientThatLeavesARunningRequestIsNoticedOverTheNetwork() async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         let server = try TestHTTPHandlerServer.start(config: config, runtime: runtime)
         let clientGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -466,7 +466,7 @@ struct HTTPHandlerTests {
     /// A reply slower than clients wait for a response to start comes on an event stream that
     /// opens early and carries keepalives until the reply.
     @Test func aSlowReplyComesOnAnEventStreamThatOpensEarly() async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         try await addHTTPHandler(to: channel, config: config, runtime: runtime)
@@ -503,7 +503,7 @@ struct HTTPHandlerTests {
     /// Responses go out in request order, so a request sent before the previous response ended
     /// closes the connection instead of being answered out of order.
     @Test func aRequestBeforeThePreviousResponseEndsClosesTheConnection() async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         try await addHTTPHandler(to: channel, config: config, runtime: runtime)
@@ -524,7 +524,7 @@ struct HTTPHandlerTests {
 
     /// A cancellation sent right after a request, on another connection, finds that request.
     @Test func aCancellationFindsTheRequestSentBeforeIt() async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let requestChannel = makeHTTPTestChannel()
         let cancelChannel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
@@ -546,7 +546,7 @@ struct HTTPHandlerTests {
 
     /// A client that stops reading skips later progress but still gets the reply.
     @Test func progressIsSkippedWhileTheClientFallsBehind() async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
         try await addHTTPHandler(to: channel, config: config, runtime: runtime)
@@ -590,7 +590,7 @@ struct HTTPHandlerTests {
 
     /// A request that started is answered when its session is deleted; only later requests get a 404.
     @Test func deletingASessionAnswersItsRunningRequestAndRefusesLaterOnes() async throws {
-        let config = makeHTTPConfig(requestTimeout: 60)
+        let config = makeHTTPConfig(requestTimeout: .seconds(60))
         let requestChannel = makeHTTPTestChannel()
         let deleteChannel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { _, _ in .hold }
@@ -1082,7 +1082,7 @@ struct HTTPHandlerTests {
     }
 
     @Test func httpInitializedSessionSurvivesHostProcessLoss() async throws {
-        let config = makeHTTPConfig(requestTimeout: 5)
+        let config = makeHTTPConfig(requestTimeout: .seconds(5))
         let channel = makeHTTPTestChannel()
         let toolCalls = NIOLockedValueBox(0)
         let runtime = try HTTPTestRuntime(config: config) { _, _ in
@@ -1316,7 +1316,7 @@ struct HTTPHandlerTests {
     }
 
     @Test func httpTimeoutReturnsMCPErrorAndCancelsTheHostRequest() async throws {
-        let config = makeHTTPConfig(requestTimeout: 1)
+        let config = makeHTTPConfig(requestTimeout: .seconds(1))
         let clock = TestClock()
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config, clock: makeHTTPTestClock(clock)) { _, _ in .hold }
@@ -1638,7 +1638,7 @@ struct HTTPHandlerTests {
 
     @Test(arguments: HostFailureCase.allCases)
     func httpToolCallFailuresKeepTheirClassification(failure: HostFailureCase) async throws {
-        let config = makeHTTPConfig(requestTimeout: 1)
+        let config = makeHTTPConfig(requestTimeout: .seconds(1))
         let clock = TestClock()
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config, clock: makeHTTPTestClock(clock)) { _, _ in

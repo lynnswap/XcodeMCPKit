@@ -35,7 +35,7 @@ struct NativeHostRuntimeTests {
 
     @Test func nativeHostIgnoresInheritedGUIRoutingConfiguration() throws {
         let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
-            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)),
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: .seconds(5))),
             baseEnvironment: ["MCP_XCODE_PID": "9876", "MCP_XCODE_SESSION_ID": "parent-session",
                 "XCODE_PID": "legacy", "DEVELOPER_DIR": "/Parent/Developer", "PATH": "/usr/bin"])
         #expect(configuration.command.hasSuffix("/xcode-mcp-native-host"))
@@ -50,7 +50,7 @@ struct NativeHostRuntimeTests {
 
     @Test(arguments: [false, true])
     func compilationCacheSharingReachesTheOwnedHost(sharesCompilationCache: Bool) throws {
-        var config = makeConfig(requestTimeout: 5)
+        var config = makeConfig(requestTimeout: .seconds(5))
         config.sharesCompilationCache = sharesCompilationCache
         let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
             config: makeBridgeRuntimeConfig(config), baseEnvironment: [:])
@@ -70,7 +70,7 @@ struct NativeHostRuntimeTests {
             baseEnvironment: ["PATH": "/usr/bin", "MCP_XCODE_PID": "9876"],
             processRunner: runner)
         let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
-            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 5)),
+            config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: .seconds(5))),
             baseEnvironment: environment)
 
         #expect(configuration.environment["XCBBUILDSERVICE_PATH"] == path)
@@ -181,7 +181,7 @@ struct NativeHostRuntimeTests {
 
     @Test func nativeHostSessionUsesConfiguredHelper() throws {
         let factory = try NativeHostSessionFactory(
-            configuration: makeBridgeRuntimeConfig(makeConfig(requestTimeout: 0)), environment: [:])
+            configuration: makeBridgeRuntimeConfig(makeConfig(requestTimeout: nil)), environment: [:])
         #expect(try upstreamCommand(from: factory).hasSuffix("/xcode-mcp-native-host"))
     }
 

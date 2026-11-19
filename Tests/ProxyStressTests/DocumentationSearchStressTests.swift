@@ -151,7 +151,7 @@ private struct StressHTTPServer {
         let maxBodyBytes = 1_048_576
         let config = ProxyRuntimeConfiguration(
                 maxMessageBytes: maxBodyBytes,
-                requestTimeout: 60,
+                requestTimeout: .seconds(60),
                 prewarmToolsList: false
             )
         let installation = XcodeHostInstallation(developerDirectory: URL(filePath: "/Fixture/Default.app"))

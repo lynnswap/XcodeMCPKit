@@ -59,7 +59,8 @@ package struct ProxyRuntimeConfiguration: Sendable {
     package var developerDirectoryURL: URL?
     package var sharesCompilationCache: Bool
     package var maxMessageBytes: Int
-    package var requestTimeout: TimeInterval
+    /// The limit for one client request, or `nil` for none.
+    package var requestTimeout: Duration?
     package var prewarmToolsList: Bool
     package var initializeParamsOverride: InitializeHandshakeOverride?
 
@@ -68,7 +69,7 @@ package struct ProxyRuntimeConfiguration: Sendable {
         developerDirectoryURL: URL? = nil,
         sharesCompilationCache: Bool = false,
         maxMessageBytes: Int,
-        requestTimeout: TimeInterval,
+        requestTimeout: Duration?,
         prewarmToolsList: Bool = true,
         initializeParamsOverride: InitializeHandshakeOverride? = nil
     ) {

@@ -23,7 +23,7 @@ struct HTTPTestConfiguration: Sendable {
     var maxBodyBytes: Int
     var enablesDebugEndpoints = false
 
-    var requestTimeout: TimeInterval {
+    var requestTimeout: Duration? {
         get { runtime.requestTimeout }
         set { runtime.requestTimeout = newValue }
     }
@@ -126,7 +126,7 @@ final class HTTPTestRuntime: Sendable {
 
 func makeHTTPConfig(
     maxBodyBytes: Int = 1024,
-    requestTimeout: TimeInterval = 1
+    requestTimeout: Duration? = .seconds(1)
 ) -> HTTPTestConfiguration {
     HTTPTestConfiguration(
         runtime: ProxyRuntimeConfiguration(
