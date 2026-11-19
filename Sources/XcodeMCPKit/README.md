@@ -135,6 +135,8 @@ await standalone.close()
 ```
 
 This transport exposes the host's native tools and owns its process lifecycle.
+Conditions that the transport handles itself, such as process output that is not
+MCP JSON, are reported to unified logging under the `XcodeMCPKit` subsystem.
 Its native catalog and identifiers are outside the proxy's stable tool/handle
 contract. Discover its capabilities with `listTools()` and keep native identifiers
 within that standalone session.

@@ -1,6 +1,6 @@
 import Foundation
 import Darwin
-import NIOConcurrencyHelpers
+import Synchronization
 
 package enum ProcessRunnerScheduledDelayKind: Sendable {
     case timeout
@@ -70,7 +70,7 @@ private final class ProcessTimeoutController: @unchecked Sendable {
     }
 
     private let scheduler: any ProcessRunnerDelayScheduling
-    private let state = NIOLockedValueBox(State())
+    private let state = Mutex(State())
 
     init(scheduler: any ProcessRunnerDelayScheduling) {
         self.scheduler = scheduler
@@ -80,14 +80,14 @@ private final class ProcessTimeoutController: @unchecked Sendable {
         guard let timeoutNanoseconds, timeoutNanoseconds > 0 else {
             return
         }
-        state.withLockedValue { state in
+        state.withLock { state in
             state.timeoutNanoseconds = timeoutNanoseconds
             state.action = action
         }
     }
 
     func schedule() {
-        let timeoutNanoseconds = state.withLockedValue { state -> Int64? in
+        let timeoutNanoseconds = state.withLock { state -> Int64? in
             guard
                 state.scheduled == false,
                 let timeoutNanoseconds = state.timeoutNanoseconds,
@@ -107,7 +107,7 @@ private final class ProcessTimeoutController: @unchecked Sendable {
         ) { [self] in
             fire()
         }
-        let shouldCancel = state.withLockedValue { state in
+        let shouldCancel = state.withLock { state in
             guard state.action != nil else {
                 return true
             }
@@ -120,7 +120,7 @@ private final class ProcessTimeoutController: @unchecked Sendable {
     }
 
     func cancel() {
-        let scheduledDelay = state.withLockedValue { state -> ProcessRunnerScheduledDelay? in
+        let scheduledDelay = state.withLock { state -> ProcessRunnerScheduledDelay? in
             let scheduledDelay = state.scheduledDelay
             state.scheduledDelay = nil
             state.timeoutNanoseconds = nil
@@ -131,7 +131,7 @@ private final class ProcessTimeoutController: @unchecked Sendable {
     }
 
     private func fire() {
-        let action = state.withLockedValue { state -> Action? in
+        let action = state.withLock { state -> Action? in
             guard let action = state.action else {
                 return nil
             }
@@ -156,13 +156,13 @@ private final class ProcessCancellationState: @unchecked Sendable {
         var completed = false
     }
 
-    private let state = NIOLockedValueBox(State())
+    private let state = Mutex(State())
 
     func install(
         cleanup: @escaping @Sendable () -> Void,
         resume: @escaping @Sendable (Result<ProcessOutput, Error>) -> Void
     ) -> Bool {
-        state.withLockedValue { state in
+        state.withLock { state in
             guard state.completed == false, state.cancelled == false else {
                 return false
             }
@@ -172,20 +172,20 @@ private final class ProcessCancellationState: @unchecked Sendable {
     }
 
     func complete() {
-        state.withLockedValue { state in
+        state.withLock { state in
             state.completed = true
             state.registered = nil
         }
     }
 
     func isCancelled() -> Bool {
-        state.withLockedValue { state in
+        state.withLock { state in
             state.cancelled
         }
     }
 
     func cancel() {
-        let registered = state.withLockedValue { state -> Registered? in
+        let registered = state.withLock { state -> Registered? in
             guard state.completed == false else {
                 return nil
             }
@@ -422,43 +422,43 @@ private final class ProcessRunnerRunState: @unchecked Sendable {
         var didResume = false
     }
 
-    private let state = NIOLockedValueBox(State())
+    private let state = Mutex(State())
 
     func appendStdout(_ data: Data) {
-        state.withLockedValue { state in
+        state.withLock { state in
             state.stdout.append(data)
         }
     }
 
     func appendStderr(_ data: Data) {
-        state.withLockedValue { state in
+        state.withLock { state in
             state.stderr.append(data)
         }
     }
 
     func markStdoutDrained() -> ProcessOutput? {
-        state.withLockedValue { state in
+        state.withLock { state in
             state.stdoutDrained = true
             return completeOutputIfReady(state: &state)
         }
     }
 
     func markStderrDrained() -> ProcessOutput? {
-        state.withLockedValue { state in
+        state.withLock { state in
             state.stderrDrained = true
             return completeOutputIfReady(state: &state)
         }
     }
 
     func markTerminated(status: Int32) -> ProcessOutput? {
-        state.withLockedValue { state in
+        state.withLock { state in
             state.terminationStatus = status
             return completeOutputIfReady(state: &state)
         }
     }
 
     func reserveResume() -> Bool {
-        state.withLockedValue { state in
+        state.withLock { state in
             guard state.didResume == false else {
                 return false
             }
@@ -486,10 +486,10 @@ private final class ProcessRunnerRunState: @unchecked Sendable {
 }
 
 private final class ProcessRunnerCleanupState: @unchecked Sendable {
-    private let didCleanup = NIOLockedValueBox(false)
+    private let didCleanup = Mutex(false)
 
     func cleanupOnce(_ cleanup: () -> Void) {
-        let shouldCleanup = didCleanup.withLockedValue { didCleanup in
+        let shouldCleanup = didCleanup.withLock { didCleanup in
             guard didCleanup == false else {
                 return false
             }

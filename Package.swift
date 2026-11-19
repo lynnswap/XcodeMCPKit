@@ -91,12 +91,7 @@ let package = Package(
         ),
         .target(
             name: "XcodeMCPCore",
-            dependencies: [
-                "XcodeMCPWire",
-                .product(name: "Logging", package: "swift-log"),
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
-            ],
+            dependencies: ["XcodeMCPWire"],
             swiftSettings: strictSwiftSettings
         ),
         .target(
@@ -173,6 +168,7 @@ let package = Package(
                 "XcodeMCPPermissionAutomation",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOCore", package: "swift-nio"),
             ],
             exclude: ["README.md"],
             swiftSettings: strictSwiftSettings,

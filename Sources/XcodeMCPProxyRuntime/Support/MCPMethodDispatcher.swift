@@ -1,17 +1,18 @@
 import Foundation
 import NIOCore
+import XcodeMCPWire
 
 extension MCP {
-    package enum MethodDispatcher {
+    enum MethodDispatcher {
         private static let initializeFallbackTimeoutSeconds: TimeInterval = 60
         private static let controlPlaneFallbackTimeoutSeconds: TimeInterval = 10
 
-        package static func timeoutForInitialize(defaultSeconds: TimeInterval) -> TimeAmount? {
+        static func timeoutForInitialize(defaultSeconds: TimeInterval) -> TimeAmount? {
             let effectiveDefault = defaultSeconds > 0 ? defaultSeconds : initializeFallbackTimeoutSeconds
             return timeout(defaultSeconds: effectiveDefault, capSeconds: initializeFallbackTimeoutSeconds)
         }
 
-        package static func timeoutForControlPlane(
+        static func timeoutForControlPlane(
             defaultSeconds: TimeInterval
         ) -> TimeAmount? {
             let effectiveDefault = defaultSeconds > 0

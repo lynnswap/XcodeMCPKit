@@ -61,7 +61,8 @@ enum NativeHostRuntime {
             command: invocation.command,
             args: invocation.arguments + ["--gui-tool-schemas", "--max-message-bytes", String(messageLimit)],
             environment: environment,
-            maxQueuedWriteBytes: messageLimit)
+            maxQueuedWriteBytes: messageLimit,
+            diagnostics: .serverLog)
     }
 
     static func buildServiceEnvironment(
@@ -145,7 +146,8 @@ struct GUIXcodeSessionFactory: UpstreamSessionFactory {
         return try await UpstreamProcess(configuration: .init(
             command: developerDirectory.appendingPathComponent("usr/bin/mcpbridge").path,
             args: [], environment: environment,
-            maxQueuedWriteBytes: NativeHostRuntime.maxQueuedWriteBytes(for: configuration))).startSession()
+            maxQueuedWriteBytes: NativeHostRuntime.maxQueuedWriteBytes(for: configuration),
+            diagnostics: .serverLog)).startSession()
     }
 }
 

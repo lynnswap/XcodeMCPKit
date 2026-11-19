@@ -85,9 +85,9 @@ if ! jq -e '
     directlyUses("XcodeMCPNativeHost"; "XcodeMCPWire") and
     directlyUses("XcodeMCPNativeRuntime"; "XcodeMCPWire") and
     directlyUses("XcodeMCPNativeRuntime"; "ABIBridge") and
-    directlyUses("XcodeMCPCore"; "XcodeMCPWire") and
-    excludes("XcodeMCPCore"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
-    excludes("XcodeMCPKit"; ["XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
+    ($graph["XcodeMCPCore"] == ["XcodeMCPWire"]) and
+    (dependencies("XcodeMCPKit") == ["XcodeMCPCore", "XcodeMCPWire"]) and
+    (dependencies("XcodeMCPKitTesting") == ["XcodeMCPCore", "XcodeMCPKit", "XcodeMCPWire"]) and
     excludes("XcodeMCPProxyRuntime"; ["XcodeMCPKit", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyHTTP"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyRuntimeContract"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
@@ -97,7 +97,6 @@ if ! jq -e '
     excludes("XcodeMCPProxyRuntimeTestSupport"; ["XcodeMCPKit", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyTestSupport"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyHTTPTests"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyKit"]) and
-    directlyUses("XcodeMCPKit"; "XcodeMCPCore") and
     directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPCore") and
     directlyUses("XcodeMCPProxyHTTP"; "XcodeMCPCore") and
     directlyUses("XcodeMCPProxyHTTP"; "XcodeMCPProxyRuntimeContract") and
