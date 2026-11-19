@@ -357,7 +357,7 @@ struct XcodeMCPTests {
         #expect(await callbackStarts.count() == 1)
         #expect(try await closeCompletions.nextValue() == "callback")
         #expect(try await closeCompletions.nextValue(startingAt: 1) == "second-close")
-        #expect(await xcode.connectionState.phase == .closed(.requested))
+        #expect(await xcode.connectionState.phase == .closed)
     }
 
     @Test func runtimeSessionRoutesProgressAndAnswersUnsupportedServerRequests() async throws {
@@ -1443,7 +1443,7 @@ struct XcodeMCPTests {
         await xcode.close()
         let firstClosed = try #require(await first.next())
         let secondClosed = try #require(await second.next())
-        #expect(firstClosed.phase == .closed(.requested))
+        #expect(firstClosed.phase == .closed)
         #expect(secondClosed == firstClosed)
         #expect(await first.next() == nil)
         #expect(await second.next() == nil)
@@ -2003,7 +2003,7 @@ struct XcodeMCPTests {
         #expect(try await recoveryClock.nextRequestedSleep(at: sleepBaseline) == .seconds(30))
 
         await authority.close()
-        #expect(await authority.connectionState().phase == .closed(.requested))
+        #expect(await authority.connectionState().phase == .closed)
         #expect(await stalled.closeCount() == 1)
     }
 
@@ -2107,6 +2107,18 @@ struct XcodeMCPTests {
         await #expect(throws: XcodeMCPError.invalidResponse("tools/list returned an invalid cursor")) {
             _ = try await client.listTools()
         }
+        await client.close()
+    }
+
+    @Test func listToolsRejectsAnInvalidPageBeforeFollowingItsCursor() async throws {
+        let transport = LifecycleContractTransport(name: "invalid-page") { _, _ in
+            .object(["nextCursor": "next"])
+        }
+        let client = try await XcodeMCP(transport: transport)
+        await #expect(throws: XcodeMCPError.invalidResponse("tools/list result is missing tools")) {
+            _ = try await client.listTools()
+        }
+        #expect(await transport.sentMessages().filter { $0.method == "tools/list" }.count == 1)
         await client.close()
     }
 

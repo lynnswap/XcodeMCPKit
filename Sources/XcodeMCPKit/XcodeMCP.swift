@@ -292,49 +292,15 @@ public actor XcodeMCP {
         timeout: XcodeMCPTimeout = .default
     ) async throws -> [MCPTool] {
         let deadline = try operationDeadline(timeout)
-        var expectedGeneration = await session.connectionState().generation
-        var restartedAfterGenerationChange = false
-        var replayAvailable = true
-        var cursor: String?
-        var seenCursors: Set<String> = []
-        var tools: [MCPTool] = []
-
-        while true {
-            let params = cursor.map { MCPJSONValue.object(["cursor": .string($0)]) }
-            let result = try await request(
-                "tools/list",
-                params: params,
-                deadline: deadline,
-                replayPolicy: replayAvailable ? .onceWhenRejectedBeforeProcessing : .never,
-                onProgress: nil
-            )
-            let generation = await session.connectionState().generation
-            if generation != expectedGeneration {
-                guard restartedAfterGenerationChange == false else {
-                    throw XcodeMCPError.sessionRecoveryFailed(
-                        "connection changed more than once while loading the tool catalog"
-                    )
+        do {
+            return try await session.requestAllPages("tools/list", deadline: deadline) { page in
+                guard let tools = MCPJSONValue(page)["tools"]?.arrayValue else {
+                    throw XcodeMCPError.invalidResponse("tools/list result is missing tools")
                 }
-                restartedAfterGenerationChange = true
-                replayAvailable = false
-                expectedGeneration = generation
-                cursor = nil
-                seenCursors.removeAll()
-                tools.removeAll()
-                continue
+                return try tools.map { try MCPTool(json: $0) }
             }
-            guard let page = result["tools"]?.arrayValue else {
-                throw XcodeMCPError.invalidResponse("tools/list result is missing tools")
-            }
-            tools.append(contentsOf: try page.map { try MCPTool(json: $0) })
-            guard let rawCursor = result["nextCursor"] else { return tools }
-            guard let nextCursor = rawCursor.stringValue else {
-                throw XcodeMCPError.invalidResponse("tools/list returned an invalid cursor")
-            }
-            guard seenCursors.insert(nextCursor).inserted else {
-                throw XcodeMCPError.invalidResponse("tools/list returned a cursor cycle")
-            }
-            cursor = nextCursor
+        } catch {
+            throw Self.publicError(from: error)
         }
     }
 
@@ -385,7 +351,6 @@ public actor XcodeMCP {
             "tools/call",
             params: .object(params),
             deadline: deadline,
-            replayPolicy: .onceWhenRejectedBeforeProcessing,
             onProgress: progressHandler
         )
         return try MCPToolResult(json: result)
@@ -416,19 +381,18 @@ public actor XcodeMCP {
             method,
             params: params,
             deadline: try operationDeadline(timeout),
-            replayPolicy: .onceWhenRejectedBeforeProcessing,
             onProgress: nil
         )
     }
 
     /// The current connection snapshot.
-    public var connectionState: XcodeMCPConnectionSnapshot {
+    public var connectionState: XcodeMCPConnectionState {
         get async { await session.connectionState() }
     }
 
     /// A new stream of connection snapshots that starts with the current one
     /// and finishes after ``close()``. Each access returns an independent stream.
-    public var connectionStates: AsyncStream<XcodeMCPConnectionSnapshot> {
+    public var connectionStates: AsyncStream<XcodeMCPConnectionState> {
         get async { await session.connectionStates() }
     }
 
@@ -458,7 +422,6 @@ extension XcodeMCP {
         _ method: String,
         params: MCPJSONValue? = nil,
         deadline: Deadline?,
-        replayPolicy: MCPReplayPolicy,
         onProgress: InitializedMCPClientSession.ProgressHandler?
     ) async throws -> MCPJSONValue {
         do {
@@ -466,7 +429,6 @@ extension XcodeMCP {
                 method,
                 params: params?.jsonValue,
                 deadline: deadline,
-                replayPolicy: replayPolicy,
                 onProgress: onProgress
             )
             return MCPJSONValue(result)

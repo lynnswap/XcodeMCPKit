@@ -13,36 +13,32 @@ public enum XcodeMCPTimeout: Equatable, Sendable {
     case after(Duration)
 }
 
-/// A connection failure that changes the action available to the consumer.
-public enum XcodeMCPConnectionFailure: Equatable, Sendable {
-    case transportUnavailable(String)
-    case sessionRecoveryFailed(String)
-    case protocolViolation(String)
-}
-
-public enum XcodeMCPCloseReason: Equatable, Sendable {
-    case requested
-}
-
-/// Atomic state of the client connection.
+/// State of the client connection.
 ///
-/// `sequence` increases for every published state. `generation` increases only
-/// when a fresh transport connection becomes current.
-public struct XcodeMCPConnectionSnapshot: Equatable, Sendable {
+/// `generation` increases when a fresh transport connection becomes current.
+/// Identifiers that a server issued for an earlier generation may no longer be
+/// valid.
+public struct XcodeMCPConnectionState: Equatable, Sendable {
     public enum Phase: Equatable, Sendable {
         case initializing
         case ready
         case recovering
-        case unavailable(XcodeMCPConnectionFailure)
-        case closed(XcodeMCPCloseReason)
+
+        /// Requests fail with the error while the connection stays in this
+        /// phase. ``XcodeMCP/reconnect(timeout:)`` creates a fresh connection.
+        /// The error is ``XcodeMCPError/transportUnavailable(_:)``,
+        /// ``XcodeMCPError/sessionRecoveryFailed(_:)``, or
+        /// ``XcodeMCPError/invalidResponse(_:)``.
+        case unavailable(XcodeMCPError)
+
+        /// ``XcodeMCP/close()`` was called.
+        case closed
     }
 
-    public let sequence: UInt64
     public let generation: UInt64
     public let phase: Phase
 
-    package init(sequence: UInt64, generation: UInt64, phase: Phase) {
-        self.sequence = sequence
+    package init(generation: UInt64, phase: Phase) {
         self.generation = generation
         self.phase = phase
     }

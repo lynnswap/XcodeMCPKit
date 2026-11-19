@@ -188,6 +188,9 @@ For consumers upgrading from v0.29.0 or earlier native-backend releases:
 | `connectionState()`, `connectionStates()` | The `connectionState` and `connectionStates` properties. |
 | `options: XcodeMCPRequestOptions(timeout:)` | `timeout:` with `XcodeMCPTimeout`. `.configurationDefault` is `.default` and `.disabled` is `.unlimited`. |
 | `XcodeMCPRequestOptions.ReplayPolicy` | Removed. A request rejected before processing is always replayed once. |
+| `XcodeMCPConnectionSnapshot` | `XcodeMCPConnectionState`, without `sequence`. |
+| `.unavailable(XcodeMCPConnectionFailure)` | `.unavailable(XcodeMCPError)`. `.protocolViolation` is `.invalidResponse`. |
+| `.closed(XcodeMCPCloseReason)` | `.closed` |
 
 Call `close()` explicitly for graceful completion. Deinitialization only requests
 cancellation. Test clients use `XcodeMCPTestRuntime.makeClient(configuration:)`

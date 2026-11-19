@@ -430,16 +430,69 @@ package actor InitializedMCPClientSession {
         }
     }
 
+    /// Requests every page of a cursor-paginated result from one connection and returns
+    /// the items that `items` reads from each page.
+    ///
+    /// A cursor belongs to the session that issued it, so pages from different connections
+    /// are never combined. If the connection changes while pages load, loading starts over
+    /// once on the new connection. A page is read before its cursor is followed, so an
+    /// invalid page ends loading.
+    package func requestAllPages<Item: Sendable>(
+        _ method: String,
+        deadline: Deadline?,
+        items: @Sendable (JSONValue) throws -> [Item]
+    ) async throws -> [Item] {
+        var expectedGeneration = await authority.connectionState().generation
+        var hasRestarted = false
+        var cursor: String?
+        var seenCursors: Set<String> = []
+        var loaded: [Item] = []
+
+        while true {
+            let page = try await request(
+                method,
+                params: cursor.map { .object(["cursor": .string($0)]) },
+                deadline: deadline,
+                replayPolicy: hasRestarted ? .never : .onceWhenRejectedBeforeProcessing
+            )
+            let generation = await authority.connectionState().generation
+            if generation != expectedGeneration {
+                guard hasRestarted == false else {
+                    throw MCPClientSessionFailure.sessionRecoveryFailed(
+                        "connection changed more than once while loading \(method)"
+                    )
+                }
+                hasRestarted = true
+                expectedGeneration = generation
+                cursor = nil
+                seenCursors.removeAll()
+                loaded.removeAll()
+                continue
+            }
+            loaded.append(contentsOf: try items(page))
+            guard case .object(let object) = page, let rawCursor = object["nextCursor"] else {
+                return loaded
+            }
+            guard case .string(let nextCursor) = rawCursor else {
+                throw MCPBridgeRuntimeError.invalidResponse("\(method) returned an invalid cursor")
+            }
+            guard seenCursors.insert(nextCursor).inserted else {
+                throw MCPBridgeRuntimeError.invalidResponse("\(method) returned a cursor cycle")
+            }
+            cursor = nextCursor
+        }
+    }
+
     package func reconnect(deadline: Deadline?) async throws {
         try ensureOpen()
         try await authority.reconnect(deadline: deadline)
     }
 
-    package func connectionState() async -> XcodeMCPConnectionSnapshot {
+    package func connectionState() async -> XcodeMCPConnectionState {
         await authority.connectionState()
     }
 
-    package func connectionStates() async -> AsyncStream<XcodeMCPConnectionSnapshot> {
+    package func connectionStates() async -> AsyncStream<XcodeMCPConnectionState> {
         await authority.connectionStates()
     }
 
@@ -565,19 +618,8 @@ private extension InitializedMCPClientSession {
         case .connectionState(let snapshot):
             if case .closed = snapshot.phase {
                 pendingRequests.failAll(error: MCPBridgeRuntimeError.closed)
-            } else if case .unavailable(let failure) = snapshot.phase {
-                switch failure {
-                case .transportUnavailable(let reason):
-                    pendingRequests.failAll(
-                        error: MCPBridgeRuntimeError.transportUnavailable(reason)
-                    )
-                case .sessionRecoveryFailed(let reason):
-                    pendingRequests.failAll(
-                        error: MCPClientSessionFailure.sessionRecoveryFailed(reason)
-                    )
-                case .protocolViolation(let reason):
-                    pendingRequests.failAll(error: MCPBridgeRuntimeError.invalidResponse(reason))
-                }
+            } else if case .unavailable(let error) = snapshot.phase {
+                pendingRequests.failAll(error: error.sessionError)
             }
         }
     }

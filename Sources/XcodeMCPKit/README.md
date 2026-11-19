@@ -14,7 +14,7 @@ The public API is intentionally small:
 - `XcodeMCP`, the top-level async client
 - `XcodeMCPConfiguration`, for transport and initialize settings
 - `XcodeMCPTimeout`, for per-operation deadlines
-- `XcodeMCPConnectionSnapshot`, for atomic lifecycle observation
+- `XcodeMCPConnectionState`, for lifecycle observation
 - `MCPJSONValue`, for dynamic MCP payloads
 - `MCPTool`, `MCPToolResult`, `MCPContent`, and `MCPProgress`
 - `XcodeMCPError`
@@ -217,11 +217,11 @@ expiry starts one shared recovery handshake; concurrent callers join it and a
 safe operation is replayed at most once. After recovery fails, normal requests
 remain unavailable until `reconnect(timeout:)` succeeds.
 
-Use `connectionState` for one atomic snapshot or `connectionStates` for an
-independent stream. Every stream starts with the current snapshot, uses
-`bufferingNewest(1)`, and finishes after the terminal `closed` state. A gap in
-`sequence` means an intermediate state was coalesced; `generation` changes when
-a fresh transport becomes current.
+Use `connectionState` for the current state or `connectionStates` for an
+independent stream. Every stream starts with the current state, keeps only the
+newest unread state, and finishes after the terminal `closed` state.
+`generation` changes when a fresh transport becomes current. An unavailable
+connection carries the `XcodeMCPError` that requests fail with.
 
 `callTool` drains accepted progress callbacks before returning, so a callback
 never runs after the result is delivered and may safely make another request
