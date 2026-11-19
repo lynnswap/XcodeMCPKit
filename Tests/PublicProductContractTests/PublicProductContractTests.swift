@@ -817,7 +817,7 @@ func compileOnlyClientDomainSurface() throws {
     ]
 
     let config = XcodeMCPConfiguration(
-        transport: .localBridge(),
+        transport: .nativeHost(),
         clientName: "PublicContractClient",
         clientVersion: "1.0",
         capabilities: [
@@ -827,26 +827,26 @@ func compileOnlyClientDomainSurface() throws {
         ],
         requestTimeout: .seconds(1)
     )
-    let customBridgeConfig = XcodeMCPConfiguration(
-        transport: .localBridge(.custom(
+    let processConfig = XcodeMCPConfiguration(
+        transport: .process(
             command: "/usr/bin/env",
             arguments: ["printf"],
             environment: ["PUBLIC_CONTRACT": "1"]
-        ))
+        )
     )
 
     let endpoint = URL(string: "http://127.0.0.1:8765/mcp")!
     let httpConfig = XcodeMCPConfiguration(
-        transport: .streamableHTTP(endpoint: endpoint),
+        transport: .server(at: endpoint),
         clientName: "PublicHTTPContractClient",
         clientVersion: "1.0",
         requestTimeout: .seconds(1)
     )
     let discoveryConfig = XcodeMCPConfiguration(
-        transport: .streamableHTTP(discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json"))
+        transport: .server(discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json"))
     )
-    let proxyDiscoveryConfig = XcodeMCPConfiguration(
-        transport: .streamableHTTPProxyDiscovery(
+    let standardDiscoveryConfig = XcodeMCPConfiguration(
+        transport: .server(
             environment: [
                 "XCODE_MCP_PROXY_DISCOVERY_FILE": "/tmp/xcode-mcp/proxy-endpoint.json",
             ]
@@ -942,10 +942,10 @@ func compileOnlyClientDomainSurface() throws {
     _ = (
         arguments,
         config,
-        customBridgeConfig,
+        processConfig,
         httpConfig,
         discoveryConfig,
-        proxyDiscoveryConfig,
+        standardDiscoveryConfig,
         tags,
         query,
         includeBeta,
@@ -967,17 +967,15 @@ func compileOnlyClientDomainSurface() throws {
 
 func compileOnlyClientLifecycleSurface(config: XcodeMCPConfiguration) async throws {
     let client = try await XcodeMCP(configuration: config)
-    _ = await client.connectionState()
-    _ = await client.connectionStates()
-    _ = try await client.listTools(
-        options: .init(timeout: .after(.seconds(30)))
-    )
+    _ = await client.connectionState
+    _ = await client.connectionStates
+    _ = try await client.listTools(timeout: .after(.seconds(30)))
     _ = try await client.callTool(
         "DocumentationSearch",
         arguments: [
             "query": "NavigationStack",
         ],
-        options: .init(replayPolicy: .onceWhenRejectedBeforeProcessing)
+        timeout: .default
     ) { progress in
         _ = progress.message
     }
@@ -987,7 +985,7 @@ func compileOnlyClientLifecycleSurface(config: XcodeMCPConfiguration) async thro
             "query": "NavigationStack",
         ]
     )
-    try await client.reconnect(options: .init(timeout: .disabled))
+    try await client.reconnect(timeout: .unlimited)
     await client.close()
 }
 """

@@ -3,98 +3,83 @@ import Foundation
 
 /// Settings used to connect to and initialize an MCP endpoint.
 ///
-/// The default configuration discovers the running XcodeMCPKit proxy, which
+/// The default configuration connects to the running XcodeMCPKit server, which
 /// loads saved workspace models in its owned headless host. Use
-/// ``XcodeMCPConfiguration/Transport/localBridge(_:)`` for a standalone native
-/// host or a custom MCP process.
+/// ``XcodeMCPConfiguration/Transport/nativeHost(bundleURL:developerDirectoryURL:)``
+/// for a standalone native host, or
+/// ``XcodeMCPConfiguration/Transport/process(command:arguments:environment:)``
+/// for another MCP process.
 public struct XcodeMCPConfiguration: Equatable, Sendable {
-    /// Upstream bridge process policy.
-    public enum Bridge: Equatable, Sendable {
-        /// Launch an owned windowless native host.
-        ///
-        /// Supply a helper application location when embedding the client.
-        case nativeHost(bundleURL: URL? = nil, developerDirectoryURL: URL? = nil)
-
-        /// Use an explicit upstream bridge command.
-        case custom(
-            command: String,
-            arguments: [String],
-            environment: [String: String]
-        )
-
-        package func invocation() throws -> MCPBridgeInvocation {
-            switch self {
-            case .nativeHost(let bundleURL, let developerDirectoryURL):
-                return try NativeHostInvocation.resolve(bundleURL: bundleURL, developerDirectoryURL: developerDirectoryURL)
-            case .custom(let command, let arguments, _):
-                return MCPBridgeInvocation(command: command, arguments: arguments)
-            }
-        }
-
-        package var environment: [String: String] {
-            switch self {
-            case .nativeHost:
-                return ProcessInfo.processInfo.environment
-            case .custom(_, _, let environment):
-                return environment
-            }
-        }
-
-        package var maxQueuedWriteBytes: Int {
-            4 * 1024 * 1024
-        }
-    }
-
-    /// Transport used to reach the Xcode MCP server.
+    /// What the client connects to.
     public struct Transport: Equatable, Sendable {
         package enum Storage: Equatable, Sendable {
-            case localBridge(Bridge)
-            case streamableHTTP(endpoint: URL)
-            case streamableHTTPDiscoveryFile(URL)
+            case endpoint(URL)
+            case discoveryFile(URL)
+            case nativeHost(bundleURL: URL?, developerDirectoryURL: URL?)
+            case process(command: String, arguments: [String], environment: [String: String])
         }
 
         package let storage: Storage
 
-        package init(storage: Storage) {
-            self.storage = storage
-        }
-
-        /// Launch and talk to a local bridge process over stdio.
-        public static func localBridge(_ bridge: Bridge = .nativeHost()) -> Self {
-            Self(storage: .localBridge(bridge))
-        }
-
-        /// Connect to a concrete Streamable HTTP MCP endpoint.
-        public static func streamableHTTP(endpoint: URL) -> Self {
-            Self(storage: .streamableHTTP(endpoint: endpoint))
-        }
-
-        /// Connect to the Streamable HTTP endpoint recorded in a proxy
-        /// discovery file.
-        ///
-        /// The discovery file uses the same shape written by a proxy server
-        /// configured with discovery enabled.
-        public static func streamableHTTP(discoveryFile: URL) -> Self {
-            Self(storage: .streamableHTTPDiscoveryFile(discoveryFile))
-        }
-
-        /// Connect to the Streamable HTTP proxy endpoint discovered from the
-        /// standard proxy discovery file location.
+        /// The running server, found through its discovery file in the standard
+        /// location.
         ///
         /// The file path honors `XCODE_MCP_PROXY_DISCOVERY_FILE` first, then
         /// `XCODE_MCP_PROXY_CACHE_ROOT`, and otherwise uses the default user
         /// caches location used by `xcode-mcp-proxy-server`.
         ///
-        /// - Parameter environment: Environment used to resolve proxy discovery
-        ///   overrides.
-        public static func streamableHTTPProxyDiscovery(
+        /// - Parameter environment: Environment used to resolve the discovery
+        ///   file location.
+        public static func server(
             environment: [String: String] = ProcessInfo.processInfo.environment
         ) -> Self {
-            .streamableHTTP(discoveryFile: Discovery.defaultFileURL(environment: environment))
+            .server(discoveryFile: Discovery.defaultFileURL(environment: environment))
+        }
+
+        /// The running server recorded in a discovery file.
+        ///
+        /// The file uses the shape written by a server configured with
+        /// discovery enabled.
+        public static func server(discoveryFile: URL) -> Self {
+            Self(storage: .discoveryFile(discoveryFile))
+        }
+
+        /// A Streamable HTTP MCP endpoint.
+        public static func server(at endpoint: URL) -> Self {
+            Self(storage: .endpoint(endpoint))
+        }
+
+        /// A windowless native host that the client launches and owns.
+        ///
+        /// - Parameters:
+        ///   - bundleURL: The helper application, or `nil` to find the installed one.
+        ///   - developerDirectoryURL: The Xcode developer directory, or `nil` to
+        ///     use Xcode discovery.
+        public static func nativeHost(
+            bundleURL: URL? = nil,
+            developerDirectoryURL: URL? = nil
+        ) -> Self {
+            Self(storage: .nativeHost(
+                bundleURL: bundleURL,
+                developerDirectoryURL: developerDirectoryURL
+            ))
+        }
+
+        /// An MCP process that the client launches and talks to over stdio.
+        public static func process(
+            command: String,
+            arguments: [String] = [],
+            environment: [String: String] = ProcessInfo.processInfo.environment
+        ) -> Self {
+            Self(storage: .process(
+                command: command,
+                arguments: arguments,
+                environment: environment
+            ))
         }
     }
 
-    /// Transport used to reach the Xcode MCP server.
+    /// What the client connects to.
     public var transport: Transport
 
     /// Client name sent in the MCP `initialize` request.
@@ -118,7 +103,7 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
     /// Creates a configuration for the selected transport.
     ///
     /// - Parameters:
-    ///   - transport: Transport used to reach the Xcode MCP server.
+    ///   - transport: What the client connects to.
     ///   - clientName: Client name sent in the MCP `initialize` request.
     ///   - clientVersion: Client version sent in the MCP `initialize` request.
     ///   - capabilities: Additional MCP client capabilities encoded as raw MCP
@@ -126,7 +111,7 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
     ///   - requestTimeout: Maximum duration to wait for each request, or `nil`
     ///     to disable client-side request timeouts.
     public init(
-        transport: Transport = .streamableHTTPProxyDiscovery(),
+        transport: Transport = .server(),
         clientName: String = "XcodeMCPKit",
         clientVersion: String = "dev",
         capabilities: [String: MCPJSONValue] = [:],
@@ -144,9 +129,9 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
 ///
 /// `XcodeMCP` connects through the configured transport, performs the MCP
 /// initialize handshake, and exposes the dynamic Xcode tool catalog through
-/// ``listTools()`` and ``callTool(_:arguments:onProgress:)``. The default
-/// transport discovers a running proxy endpoint. Local transport can start an
-/// owned windowless host or a custom MCP process.
+/// ``listTools(timeout:)`` and ``callTool(_:arguments:timeout:onProgress:)``.
+/// The default transport connects to the running server. Other transports
+/// start an owned windowless host or another MCP process.
 ///
 /// The tool catalog is discovered at runtime. This package intentionally does
 /// not promise tool-specific Swift methods or typed request/response models for
@@ -155,7 +140,7 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
 ///
 /// Server-to-client handlers such as roots, sampling, and elicitation are not
 /// exposed by this v1 API. Progress notifications are delivered only through
-/// the callback supplied to ``callTool(_:arguments:onProgress:)``; the streaming
+/// the callback supplied to ``callTool(_:arguments:timeout:onProgress:)``; the streaming
 /// transport itself is an implementation detail.
 ///
 /// ```swift
@@ -183,9 +168,9 @@ public actor XcodeMCP {
     /// Connects to the configured MCP transport and returns an initialized
     /// client.
     ///
-    /// For local bridge transport the initializer launches the configured
-    /// process. For Streamable HTTP transport it connects to the configured
-    /// endpoint. In both cases it sends MCP `initialize`, then sends
+    /// For a process transport the initializer launches the process. For a
+    /// server transport it connects to the endpoint. In both cases it sends
+    /// MCP `initialize`, then sends
     /// `notifications/initialized`. If initialization fails, the transport is
     /// closed before the error is rethrown.
     ///
@@ -204,24 +189,34 @@ public actor XcodeMCP {
         do {
             let recipe: MCPTransportRecipe
             switch configuration.transport.storage {
-            case .localBridge(let bridge):
+            case .nativeHost(let bundleURL, let developerDirectoryURL):
                 recipe = MCPTransportRecipe {
-                    let invocation = try bridge.invocation()
+                    let invocation = try NativeHostInvocation.resolve(
+                        bundleURL: bundleURL,
+                        developerDirectoryURL: developerDirectoryURL
+                    )
                     return try await UpstreamProcessXcodeMCPTransport.start(
                         command: invocation.command,
                         arguments: invocation.arguments,
-                        environment: bridge.environment,
-                        maxQueuedWriteBytes: bridge.maxQueuedWriteBytes
+                        environment: ProcessInfo.processInfo.environment
                     )
                 }
-            case .streamableHTTP(let endpoint):
+            case .process(let command, let arguments, let environment):
+                recipe = MCPTransportRecipe {
+                    try await UpstreamProcessXcodeMCPTransport.start(
+                        command: command,
+                        arguments: arguments,
+                        environment: environment
+                    )
+                }
+            case .endpoint(let endpoint):
                 recipe = MCPTransportRecipe {
                     try await StreamableHTTPXcodeMCPTransport.start(
                         endpoint: endpoint,
                         requestTimeout: configuration.requestTimeout
                     )
                 }
-            case .streamableHTTPDiscoveryFile(let discoveryFile):
+            case .discoveryFile(let discoveryFile):
                 recipe = MCPTransportRecipe {
                     try await StreamableHTTPXcodeMCPTransport.start(
                         discoveryFile: discoveryFile,
@@ -288,30 +283,29 @@ public actor XcodeMCP {
     /// Returns the currently available Xcode MCP tools.
     ///
     /// The returned catalog is dynamic and comes from the running Xcode MCP
-    /// server. Use the tool `name` with ``callTool(_:arguments:onProgress:)``
-    /// and treat `inputSchema` and `raw` as MCP JSON supplied by the server.
+    /// server. Use the tool `name` with
+    /// ``callTool(_:arguments:timeout:onProgress:)`` and treat `inputSchema`
+    /// and `raw` as MCP JSON supplied by the server.
+    ///
+    /// - Parameter timeout: The limit for loading every page of the catalog.
     public func listTools(
-        options: XcodeMCPRequestOptions = .init()
+        timeout: XcodeMCPTimeout = .default
     ) async throws -> [MCPTool] {
-        let deadline = try operationDeadline(options.timeout)
+        let deadline = try operationDeadline(timeout)
         var expectedGeneration = await session.connectionState().generation
         var restartedAfterGenerationChange = false
-        var replayAvailable = options.replayPolicy == .onceWhenRejectedBeforeProcessing
+        var replayAvailable = true
         var cursor: String?
         var seenCursors: Set<String> = []
         var tools: [MCPTool] = []
 
         while true {
             let params = cursor.map { MCPJSONValue.object(["cursor": .string($0)]) }
-            var pageOptions = options
-            pageOptions.replayPolicy = replayAvailable
-                ? .onceWhenRejectedBeforeProcessing
-                : .never
             let result = try await request(
                 "tools/list",
                 params: params,
-                options: pageOptions,
-                resolvedDeadline: deadline,
+                deadline: deadline,
+                replayPolicy: replayAvailable ? .onceWhenRejectedBeforeProcessing : .never,
                 onProgress: nil
             )
             let generation = await session.connectionState().generation
@@ -353,8 +347,9 @@ public actor XcodeMCP {
     /// `onProgress` when the server emits them.
     ///
     /// - Parameters:
-    ///   - name: Tool name from ``listTools()``.
+    ///   - name: Tool name from ``listTools(timeout:)``.
     ///   - arguments: Tool arguments encoded as MCP JSON.
+    ///   - timeout: The limit for this call.
     ///   - onProgress: Optional callback for MCP progress notifications
     ///     associated with this call.
     /// - Returns: The final tool result, including content, structured content,
@@ -362,13 +357,13 @@ public actor XcodeMCP {
     public func callTool(
         _ name: String,
         arguments: [String: MCPJSONValue] = [:],
-        options: XcodeMCPRequestOptions = .init(),
+        timeout: XcodeMCPTimeout = .default,
         onProgress: (@Sendable (MCPProgress) async -> Void)? = nil
     ) async throws -> MCPToolResult {
         guard name.isEmpty == false else {
             throw XcodeMCPError.invalidRequest("tool name must not be empty")
         }
-        let resolvedDeadline = try operationDeadline(options.timeout)
+        let deadline = try operationDeadline(timeout)
 
         let params: [String: MCPJSONValue] = [
             "name": .string(name),
@@ -389,8 +384,8 @@ public actor XcodeMCP {
         let result = try await request(
             "tools/call",
             params: .object(params),
-            options: options,
-            resolvedDeadline: resolvedDeadline,
+            deadline: deadline,
+            replayPolicy: .onceWhenRejectedBeforeProcessing,
             onProgress: progressHandler
         )
         return try MCPToolResult(json: result)
@@ -409,37 +404,40 @@ public actor XcodeMCP {
     /// - Parameters:
     ///   - method: MCP method name to send.
     ///   - params: Optional raw MCP params.
+    ///   - timeout: The limit for this request.
     /// - Returns: The raw MCP result value, or ``MCPJSONValue/null`` when the
     ///   server response omits `result`.
     public func request(
         _ method: String,
         params: MCPJSONValue? = nil,
-        options: XcodeMCPRequestOptions = .init()
+        timeout: XcodeMCPTimeout = .default
     ) async throws -> MCPJSONValue {
         try await request(
             method,
             params: params,
-            options: options,
-            resolvedDeadline: try operationDeadline(options.timeout),
+            deadline: try operationDeadline(timeout),
+            replayPolicy: .onceWhenRejectedBeforeProcessing,
             onProgress: nil
         )
     }
 
-    /// Returns the current atomic connection snapshot.
-    public func connectionState() async -> XcodeMCPConnectionSnapshot {
-        await session.connectionState()
+    /// The current connection snapshot.
+    public var connectionState: XcodeMCPConnectionSnapshot {
+        get async { await session.connectionState() }
     }
 
-    /// Returns an independent state stream whose first element is the current
-    /// snapshot. The stream finishes after ``close()``.
-    public func connectionStates() async -> AsyncStream<XcodeMCPConnectionSnapshot> {
-        await session.connectionStates()
+    /// A new stream of connection snapshots that starts with the current one
+    /// and finishes after ``close()``. Each access returns an independent stream.
+    public var connectionStates: AsyncStream<XcodeMCPConnectionSnapshot> {
+        get async { await session.connectionStates() }
     }
 
     /// Explicitly creates and initializes a fresh transport connection.
-    public func reconnect(options: XcodeMCPRequestOptions = .init()) async throws {
+    ///
+    /// - Parameter timeout: The limit for connecting and initializing.
+    public func reconnect(timeout: XcodeMCPTimeout = .default) async throws {
         do {
-            try await session.reconnect(deadline: try operationDeadline(options.timeout))
+            try await session.reconnect(deadline: try operationDeadline(timeout))
         } catch {
             throw Self.publicError(from: error)
         }
@@ -459,18 +457,16 @@ extension XcodeMCP {
     package func request(
         _ method: String,
         params: MCPJSONValue? = nil,
-        options: XcodeMCPRequestOptions = .init(),
-        resolvedDeadline: Deadline?,
+        deadline: Deadline?,
+        replayPolicy: MCPReplayPolicy,
         onProgress: InitializedMCPClientSession.ProgressHandler?
     ) async throws -> MCPJSONValue {
         do {
             let result = try await session.request(
                 method,
                 params: params?.jsonValue,
-                deadline: resolvedDeadline,
-                replayPolicy: options.replayPolicy == .never
-                    ? .never
-                    : .onceWhenRejectedBeforeProcessing,
+                deadline: deadline,
+                replayPolicy: replayPolicy,
                 onProgress: onProgress
             )
             return MCPJSONValue(result)
@@ -481,16 +477,16 @@ extension XcodeMCP {
 }
 
 private extension XcodeMCP {
-    func operationDeadline(_ timeout: XcodeMCPRequestOptions.Timeout) throws -> Deadline? {
+    func operationDeadline(_ timeout: XcodeMCPTimeout) throws -> Deadline? {
         switch timeout {
-        case .configurationDefault:
+        case .default:
             return Deadline.fromNow(defaultRequestTimeout, clock: clock)
-        case .disabled:
+        case .unlimited:
             return nil
         case .after(let duration):
             guard duration > .zero else {
                 throw XcodeMCPError.invalidRequest(
-                    "request timeout must be greater than zero; use .disabled to disable it"
+                    "timeout must be greater than zero; use .unlimited for no limit"
                 )
             }
             return Deadline.fromNow(duration, clock: clock)

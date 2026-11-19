@@ -158,24 +158,36 @@ that monitor. See [configuration](../configuration.md).
 
 ## Swift client
 
-`XcodeMCPConfiguration` defaults to `.streamableHTTPProxyDiscovery()`. Start the
+`XcodeMCPConfiguration` defaults to `.server()`. Start the
 proxy before constructing the client. `.defaultMCPBridge` is removed. For a
-standalone headless process, use `.localBridge(.nativeHost())`; generic processes
-use `.localBridge(.custom(command:arguments:environment:))`. Standalone transports
+standalone headless process, use `.nativeHost()`; generic processes
+use `.process(command:arguments:environment:)`. Standalone transports
 expose their own native catalog, outside proxy handle routing.
 
 For consumers upgrading across v0.14.0:
 
 | Previous API | Current API |
 | --- | --- |
-| Fixed timeout per client only | `XcodeMCPRequestOptions.Timeout`: `.configurationDefault`, `.disabled`, `.after(Duration)`. |
-| No replay choice | `XcodeMCPRequestOptions.ReplayPolicy`; only a proven rejection before processing can be replayed once. |
-| No connection observation/reconnect | `connectionState()`, `connectionStates()`, `reconnect(options:)`. Obtain snapshots from the client rather than constructing them. |
-| First-page `listTools()` | `listTools(options:)` loads all pages within one deadline or fails without returning a partial catalog. |
-| `callTool` without progress | `callTool(_:arguments:options:onProgress:)`. |
-| `notify(_:params:)` | Typed operations or `request(_:params:options:)` for non-tool requests. |
+| Fixed timeout per client only | `XcodeMCPTimeout`: `.default`, `.unlimited`, `.after(Duration)`. |
+| No connection observation/reconnect | `connectionState`, `connectionStates`, `reconnect(timeout:)`. Obtain snapshots from the client rather than constructing them. |
+| First-page `listTools()` | `listTools(timeout:)` loads all pages within one deadline or fails without returning a partial catalog. |
+| `callTool` without progress | `callTool(_:arguments:timeout:onProgress:)`. |
+| `notify(_:params:)` | Typed operations or `request(_:params:timeout:)` for non-tool requests. |
 | `MCPJSONValue.init(encoding:)`, `intValue` | `MCPJSONValue.init(_:)`, `integerValue`. |
 | Manual text extraction | `MCPToolResult.text`; create text with `MCPContent.text(_:)`. |
+
+For consumers upgrading from v0.29.0 or earlier native-backend releases:
+
+| Previous API | Current API |
+| --- | --- |
+| `.streamableHTTPProxyDiscovery(environment:)` | `.server(environment:)` |
+| `.streamableHTTP(discoveryFile:)` | `.server(discoveryFile:)` |
+| `.streamableHTTP(endpoint:)` | `.server(at:)` |
+| `.localBridge(.nativeHost(bundleURL:developerDirectoryURL:))` | `.nativeHost(bundleURL:developerDirectoryURL:)` |
+| `.localBridge(.custom(command:arguments:environment:))` | `.process(command:arguments:environment:)` |
+| `connectionState()`, `connectionStates()` | The `connectionState` and `connectionStates` properties. |
+| `options: XcodeMCPRequestOptions(timeout:)` | `timeout:` with `XcodeMCPTimeout`. `.configurationDefault` is `.default` and `.disabled` is `.unlimited`. |
+| `XcodeMCPRequestOptions.ReplayPolicy` | Removed. A request rejected before processing is always replayed once. |
 
 Call `close()` explicitly for graceful completion. Deinitialization only requests
 cancellation. Test clients use `XcodeMCPTestRuntime.makeClient(configuration:)`

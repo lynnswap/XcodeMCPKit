@@ -357,7 +357,7 @@ struct XcodeMCPTests {
         #expect(await callbackStarts.count() == 1)
         #expect(try await closeCompletions.nextValue() == "callback")
         #expect(try await closeCompletions.nextValue(startingAt: 1) == "second-close")
-        #expect(await xcode.connectionState().phase == .closed(.requested))
+        #expect(await xcode.connectionState.phase == .closed(.requested))
     }
 
     @Test func runtimeSessionRoutesProgressAndAnswersUnsupportedServerRequests() async throws {
@@ -855,26 +855,26 @@ struct XcodeMCPTests {
         }
     }
 
-    @Test func streamableHTTPProxyDiscoveryUsesStandardProxyDiscoveryEnvironment() throws {
-        let explicitDiscovery = XcodeMCPConfiguration.Transport.streamableHTTPProxyDiscovery(
+    @Test func serverTransportUsesTheStandardDiscoveryEnvironment() throws {
+        let explicitDiscovery = XcodeMCPConfiguration.Transport.server(
             environment: [
                 "XCODE_MCP_PROXY_DISCOVERY_FILE": "/tmp/public-contract/endpoint.json",
                 "XCODE_MCP_PROXY_CACHE_ROOT": "/tmp/ignored-cache-root",
             ]
         )
         #expect(
-            explicitDiscovery == .streamableHTTP(
+            explicitDiscovery == .server(
                 discoveryFile: URL(fileURLWithPath: "/tmp/public-contract/endpoint.json")
             )
         )
 
-        let cacheRootDiscovery = XcodeMCPConfiguration.Transport.streamableHTTPProxyDiscovery(
+        let cacheRootDiscovery = XcodeMCPConfiguration.Transport.server(
             environment: [
                 "XCODE_MCP_PROXY_CACHE_ROOT": "/tmp/public-contract-cache",
             ]
         )
         #expect(
-            cacheRootDiscovery == .streamableHTTP(
+            cacheRootDiscovery == .server(
                 discoveryFile: URL(fileURLWithPath: "/tmp/public-contract-cache")
                     .appendingPathComponent("XcodeMCPProxy", isDirectory: true)
                     .appendingPathComponent("endpoint.json")
@@ -909,7 +909,7 @@ struct XcodeMCPTests {
             "Streamable HTTP discovery file is missing, stale, or invalid: \(fileURL.path)"
         )) {
             _ = try await XcodeMCP(
-                configuration: .init(transport: .streamableHTTP(discoveryFile: fileURL)),
+                configuration: .init(transport: .server(discoveryFile: fileURL)),
                 streamableHTTPDiscoveryResolver: resolver
             )
         }
@@ -977,7 +977,7 @@ struct XcodeMCPTests {
         )
         let xcode = try await XcodeMCP(
                 configuration: .init(
-                transport: .streamableHTTP(endpoint: endpoint),
+                transport: .server(at: endpoint),
                 clientName: "HTTPContractClient",
                 requestTimeout: .seconds(2)
             ),
@@ -1036,7 +1036,7 @@ struct XcodeMCPTests {
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
-                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .server(at: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
 
@@ -1085,7 +1085,7 @@ struct XcodeMCPTests {
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
-                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .server(at: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
 
@@ -1125,7 +1125,7 @@ struct XcodeMCPTests {
         )
         let xcode = try await waitWithTimeout("SSE initialize response was not delivered") {
             try await XcodeMCP(
-                    configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                    configuration: .init(transport: .server(at: endpoint), requestTimeout: .seconds(2)),
                 transport: transport
             )
         }
@@ -1156,7 +1156,7 @@ struct XcodeMCPTests {
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
-                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .server(at: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
 
@@ -1213,7 +1213,7 @@ struct XcodeMCPTests {
             requestTimeout: .seconds(2)
         )
         let xcode = try await XcodeMCP(
-                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .server(at: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
 
@@ -1263,7 +1263,7 @@ struct XcodeMCPTests {
             }
         )
         let xcode = try await XcodeMCP(
-                configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                configuration: .init(transport: .server(at: endpoint), requestTimeout: .seconds(2)),
             transport: transport
         )
         defer { closeAfterTest(xcode) }
@@ -1309,7 +1309,7 @@ struct XcodeMCPTests {
             data: nil
         )) {
             _ = try await XcodeMCP(
-                    configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                    configuration: .init(transport: .server(at: endpoint), requestTimeout: .seconds(2)),
                 transport: transport
             )
         }
@@ -1340,7 +1340,7 @@ struct XcodeMCPTests {
             data: nil
         )) {
             _ = try await XcodeMCP(
-                    configuration: .init(transport: .streamableHTTP(endpoint: endpoint), requestTimeout: .seconds(2)),
+                    configuration: .init(transport: .server(at: endpoint), requestTimeout: .seconds(2)),
                 transport: transport
             )
         }
@@ -1364,9 +1364,9 @@ struct XcodeMCPTests {
         let xcode = try await XcodeMCP(transport: transport)
         for timeout in [Duration.zero, .seconds(-1)] {
             await #expect(throws: XcodeMCPError.invalidRequest(
-                "request timeout must be greater than zero; use .disabled to disable it"
+                "timeout must be greater than zero; use .unlimited for no limit"
             )) {
-                _ = try await xcode.listTools(options: .init(timeout: .after(timeout)))
+                _ = try await xcode.listTools(timeout: .after(timeout))
             }
         }
         #expect(await transport.sentMessages().contains { $0.method == "tools/list" } == false)
@@ -1432,8 +1432,8 @@ struct XcodeMCPTests {
     @Test func connectionStateSubscribersAreIndependentAndCloseIsTerminal() async throws {
         let transport = LifecycleContractTransport(name: "states")
         let xcode = try await XcodeMCP(transport: transport)
-        var first = await xcode.connectionStates().makeAsyncIterator()
-        var second = await xcode.connectionStates().makeAsyncIterator()
+        var first = await xcode.connectionStates.makeAsyncIterator()
+        var second = await xcode.connectionStates.makeAsyncIterator()
 
         let firstInitial = try #require(await first.next())
         let secondInitial = try #require(await second.next())
@@ -1447,9 +1447,9 @@ struct XcodeMCPTests {
         #expect(secondClosed == firstClosed)
         #expect(await first.next() == nil)
         #expect(await second.next() == nil)
-        #expect(await xcode.connectionState() == firstClosed)
+        #expect(await xcode.connectionState == firstClosed)
 
-        var postClose = await xcode.connectionStates().makeAsyncIterator()
+        var postClose = await xcode.connectionStates.makeAsyncIterator()
         #expect(await postClose.next() == firstClosed)
         #expect(await postClose.next() == nil)
     }
@@ -2032,7 +2032,7 @@ struct XcodeMCPTests {
                 return
             }
         }
-        let unavailable = await xcode.connectionState()
+        let unavailable = await xcode.connectionState
         guard case .unavailable(.sessionRecoveryFailed) = unavailable.phase else {
             Issue.record("expected unavailable recovery state")
             return
@@ -2048,7 +2048,7 @@ struct XcodeMCPTests {
 
         try await xcode.reconnect()
         #expect(await factory.makeCount() == 3)
-        #expect(await xcode.connectionState().phase == .ready)
+        #expect(await xcode.connectionState.phase == .ready)
         #expect(try await xcode.listTools().map(\.name) == ["Tool-third"])
         await xcode.close()
     }

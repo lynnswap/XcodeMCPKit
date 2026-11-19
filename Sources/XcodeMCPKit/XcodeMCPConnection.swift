@@ -1,28 +1,16 @@
 import Foundation
 
-/// Per-operation timeout and replay policy.
-public struct XcodeMCPRequestOptions: Equatable, Sendable {
-    public enum Timeout: Equatable, Sendable {
-        case configurationDefault
-        case disabled
-        case after(Duration)
-    }
+/// How long one operation may take, including session recovery, a replay,
+/// and every page of a paginated request.
+public enum XcodeMCPTimeout: Equatable, Sendable {
+    /// ``XcodeMCPConfiguration/requestTimeout``.
+    case `default`
 
-    public enum ReplayPolicy: Equatable, Sendable {
-        case never
-        case onceWhenRejectedBeforeProcessing
-    }
+    /// No client-side limit.
+    case unlimited
 
-    public var timeout: Timeout
-    public var replayPolicy: ReplayPolicy
-
-    public init(
-        timeout: Timeout = .configurationDefault,
-        replayPolicy: ReplayPolicy = .onceWhenRejectedBeforeProcessing
-    ) {
-        self.timeout = timeout
-        self.replayPolicy = replayPolicy
-    }
+    /// A limit for this operation. The duration must be greater than zero.
+    case after(Duration)
 }
 
 /// A connection failure that changes the action available to the consumer.

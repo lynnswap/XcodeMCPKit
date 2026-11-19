@@ -110,7 +110,7 @@ enum PreviewVerifierCommand {
             runner.report.executable = executable.path
             runner.report.executableSHA256 = try previewSHA256(executable)
             let connection = try await XcodeMCP(configuration: XcodeMCPConfiguration(
-                transport: .localBridge(.custom(command: executable.path, arguments: arguments, environment: environment)),
+                transport: .process(command: executable.path, arguments: arguments, environment: environment),
                 clientName: "PreviewToolVerifier", clientVersion: "1", requestTimeout: .seconds(timeout + 60)))
             client = connection
             let sequenceEdit = try options.url("sequence-edit").map {

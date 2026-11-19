@@ -84,10 +84,9 @@ The server binds `localhost:8765` by default. `--listen`, `--host`, `--port`, an
 `LISTEN` / `HOST` / `PORT` select another address. Endpoint discovery uses
 `~/Library/Caches/XcodeMCPProxy/endpoint.json` unless overridden.
 
-The Swift client's default
-`.streamableHTTPProxyDiscovery()` reads the proxy discovery record and requires
-a running server. Explicit standalone `.localBridge(.nativeHost(...))` starts
-an owned headless host.
+The Swift client's default `.server()` transport reads the discovery record and
+requires a running server. Explicit standalone `.nativeHost(...)` starts an owned
+headless host.
 
 A discovery record is a URL hint. Only a connection and standard MCP initialize
 handshake establish reachability. Discovery publication is part of server

@@ -47,7 +47,7 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
         command: String,
         arguments: [String],
         environment: [String: String],
-        maxQueuedWriteBytes: Int
+        maxQueuedWriteBytes: Int = 4 * 1024 * 1024
     ) async throws -> UpstreamProcessXcodeMCPTransport {
         try await start(
             config: UpstreamProcess.Config(
