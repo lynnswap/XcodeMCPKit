@@ -83,7 +83,7 @@ struct HTTPConcurrencyTests {
         )))
         do {
             let client = try await XcodeMCP(configuration: .init(
-                transport: .streamableHTTP(endpoint: server.url), requestTimeout: .seconds(5)
+                transport: .server(at: server.url), requestTimeout: .seconds(5)
             ))
             do {
                 let tools = try await client.listTools()

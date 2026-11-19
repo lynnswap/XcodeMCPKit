@@ -36,7 +36,7 @@ struct NativeHostLiveTests {
         """.write(to: manifest, atomically: true, encoding: .utf8)
         try "public let value = 1".write(to: source, atomically: true, encoding: .utf8)
 
-        let client = try await XcodeMCP(configuration: .init(transport: .localBridge(.nativeHost()), requestTimeout: .seconds(120)))
+        let client = try await XcodeMCP(configuration: .init(transport: .nativeHost(), requestTimeout: .seconds(120)))
         do {
             let fromManifest = try await client.callTool("XcodeOpenWorkspace", arguments: ["path": .string(manifest.path)])
             #expect(!fromManifest.isError)
@@ -57,7 +57,7 @@ struct NativeHostLiveTests {
     }
 
     @Test func standaloneHostProvidesTheDynamicCatalogAndClosesCleanly() async throws {
-        let client = try await XcodeMCP(configuration: .init(transport: .localBridge(.nativeHost()), requestTimeout: .seconds(120)))
+        let client = try await XcodeMCP(configuration: .init(transport: .nativeHost(), requestTimeout: .seconds(120)))
         do {
             let tools = try await client.listTools()
             #expect(tools.contains { $0.name == "DocumentationSearch" })
@@ -81,7 +81,7 @@ struct NativeHostLiveTests {
             discovery: .disabled))
         let endpoint = try await server.start()
         do {
-            let client = try await XcodeMCP(configuration: .init(transport: .streamableHTTP(endpoint: endpoint.url), requestTimeout: .seconds(120)))
+            let client = try await XcodeMCP(configuration: .init(transport: .server(at: endpoint.url), requestTimeout: .seconds(120)))
             do {
                 let tools = try await client.listTools()
                 #expect(tools.contains { $0.name == "XcodeOpenWorkspace" })

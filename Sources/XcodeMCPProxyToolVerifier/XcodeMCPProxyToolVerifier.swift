@@ -315,7 +315,7 @@ struct ProxyToolVerifier {
             do {
                 return try await XcodeMCP(
                     configuration: .init(
-                        transport: .streamableHTTP(endpoint: options.endpoint),
+                        transport: .server(at: options.endpoint),
                         clientName: "XcodeMCPProxyToolVerifier",
                         clientVersion: "dev",
                         requestTimeout: .seconds(options.requestTimeoutSeconds)

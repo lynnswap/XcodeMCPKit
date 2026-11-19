@@ -78,7 +78,7 @@ permission store.
 
 Inherited `MCP_XCODE_PID` and `MCP_XCODE_SESSION_ID` do not select a proxy backend.
 For a standalone headless or generic MCP process, use `XcodeMCPKit`'s explicit
-`.localBridge(.nativeHost(...))` or `.localBridge(.custom(...))` transport.
+`.nativeHost(...)` or `.process(...)` transport.
 See [native routing migration](../../Docs/migrations/native-backend.md).
 
 ```swift

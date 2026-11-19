@@ -13,7 +13,7 @@ The public API is intentionally small:
 
 - `XcodeMCP`, the top-level async client
 - `XcodeMCPConfiguration`, for transport and initialize settings
-- `XcodeMCPRequestOptions`, for per-operation deadlines and safe replay policy
+- `XcodeMCPTimeout`, for per-operation deadlines
 - `XcodeMCPConnectionSnapshot`, for atomic lifecycle observation
 - `MCPJSONValue`, for dynamic MCP payloads
 - `MCPTool`, `MCPToolResult`, `MCPContent`, and `MCPProgress`
@@ -61,12 +61,12 @@ if tools.contains(where: { $0.name == "DocumentationSearch" }) {
 await xcode.close()
 ```
 
-To choose an explicit running proxy endpoint, configure Streamable HTTP:
+To choose an explicit running server endpoint, pass its URL:
 
 ```swift
 let config = XcodeMCPConfiguration(
-    transport: .streamableHTTP(
-        endpoint: URL(string: "http://127.0.0.1:8765/mcp")!
+    transport: .server(
+        at: URL(string: "http://127.0.0.1:8765/mcp")!
     ),
     clientName: "MyApp",
     clientVersion: "1.0"
@@ -75,24 +75,19 @@ let config = XcodeMCPConfiguration(
 let xcode = try await XcodeMCP(configuration: config)
 ```
 
-Discovery files written by the proxy are supported as well:
+Discovery files written by the server are supported as well:
 
 ```swift
 let config = XcodeMCPConfiguration(
-    transport: .streamableHTTP(
+    transport: .server(
         discoveryFile: URL(fileURLWithPath: "/tmp/xcode-mcp/endpoint.json")
     )
 )
 ```
 
-For the standard proxy discovery location, including
-`XCODE_MCP_PROXY_DISCOVERY_FILE` and `XCODE_MCP_PROXY_CACHE_ROOT` overrides, use:
-
-```swift
-let config = XcodeMCPConfiguration(
-    transport: .streamableHTTPProxyDiscovery()
-)
-```
+The default transport, `.server()`, reads the standard discovery location,
+including `XCODE_MCP_PROXY_DISCOVERY_FILE` and `XCODE_MCP_PROXY_CACHE_ROOT`
+overrides.
 
 ### Workspace routing
 
@@ -124,10 +119,10 @@ A standalone client starts its own headless native host. It needs the signed
 
 ```swift
 let config = XcodeMCPConfiguration(
-    transport: .localBridge(.nativeHost(
+    transport: .nativeHost(
         bundleURL: URL(fileURLWithPath: "/opt/xcode-mcp/XcodeMCPNativeHost.app"),
         developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer")
-    ))
+    )
 )
 let standalone = try await XcodeMCP(configuration: config)
 let tools = try await standalone.listTools()
@@ -144,8 +139,8 @@ within that standalone session.
 ## Tool discovery and JSON values
 
 Call
-`listTools(options:)` to load every page of the catalog, then pass the selected
-tool name to `callTool(_:arguments:options:onProgress:)`. A pagination failure
+`listTools(timeout:)` to load every page of the catalog, then pass the selected
+tool name to `callTool(_:arguments:timeout:onProgress:)`. A pagination failure
 never returns a partial catalog, and a cursor cycle is treated as an invalid
 response.
 
@@ -179,14 +174,15 @@ let symbols = try await xcode.request(
 
 `XcodeMCPConfiguration` controls transport selection and MCP initialization:
 
-- `transport` chooses `.localBridge(...)`, `.streamableHTTP(endpoint:)`,
-  `.streamableHTTP(discoveryFile:)`, or `.streamableHTTPProxyDiscovery()`.
-- The default transport is `.streamableHTTPProxyDiscovery()` and requires a
-  running proxy with a discovery record.
-- `.localBridge(.nativeHost(bundleURL:developerDirectoryURL:))` launches an owned
-  standalone headless host. `nil` URLs use helper and Xcode discovery.
-- `.localBridge(.custom(command:arguments:environment:))` supports an explicit
-  generic MCP process.
+- `transport` chooses `.server()`, `.server(discoveryFile:)`, `.server(at:)`,
+  `.nativeHost(bundleURL:developerDirectoryURL:)`, or
+  `.process(command:arguments:environment:)`.
+- The default transport is `.server()` and requires a running server with a
+  discovery record.
+- `.nativeHost(bundleURL:developerDirectoryURL:)` launches an owned standalone
+  headless host. `nil` URLs use helper and Xcode discovery.
+- `.process(command:arguments:environment:)` launches another MCP process and
+  talks to it over stdio. It inherits the current environment unless one is given.
 - `clientName`, `clientVersion`, and `capabilities` are sent in `initialize`.
 - `requestTimeout: Duration?` is the default logical deadline (600 seconds). `nil` disables
   the default timeout; nonpositive durations are rejected.
@@ -195,18 +191,16 @@ The standard `XcodeListWindows`, `GetTopCrashIssues`, and `GetCrashIssueLogs`
 tools require the HTTP proxy, which routes them through Apple's GUI bridge.
 Direct native-host transports omit these GUI-only tools from their catalogs.
 
-Each request can override the default with `XcodeMCPRequestOptions.Timeout`:
+Each operation can override the default with `XcodeMCPTimeout`:
 
 ```swift
-let tools = try await xcode.listTools(
-    options: .init(timeout: .after(.seconds(30)))
-)
+let tools = try await xcode.listTools(timeout: .after(.seconds(30)))
 ```
 
-The same absolute deadline covers the initial send, session recovery, one safe
-replay, and all pagination requests. `.disabled` is the explicit per-operation
-opt-out. Replay is limited to a request that the HTTP server rejected before
-processing; delivery-unknown failures are never replayed.
+The same absolute deadline covers the initial send, session recovery, one
+replay, and all pagination requests. `.unlimited` is the explicit per-operation
+opt-out. A request that the HTTP server rejected before processing is replayed
+once; delivery-unknown failures are never replayed.
 
 Capabilities that require server-to-client handlers are filtered because this
 v1 API does not expose those handlers. For Streamable HTTP, the transport
@@ -219,9 +213,9 @@ Create one `XcodeMCP` per MCP session. The async initializer connects the
 transport and completes initialization before returning. A typed HTTP session
 expiry starts one shared recovery handshake; concurrent callers join it and a
 safe operation is replayed at most once. After recovery fails, normal requests
-remain unavailable until `reconnect(options:)` succeeds.
+remain unavailable until `reconnect(timeout:)` succeeds.
 
-Use `connectionState()` for one atomic snapshot or `connectionStates()` for an
+Use `connectionState` for one atomic snapshot or `connectionStates` for an
 independent stream. Every stream starts with the current snapshot, uses
 `bufferingNewest(1)`, and finishes after the terminal `closed` state. A gap in
 `sequence` means an intermediate state was coalesced; `generation` changes when
