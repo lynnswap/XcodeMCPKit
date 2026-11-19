@@ -357,7 +357,7 @@ struct XcodeMCPTests {
         #expect(await callbackStarts.count() == 1)
         #expect(try await closeCompletions.nextValue() == "callback")
         #expect(try await closeCompletions.nextValue(startingAt: 1) == "second-close")
-        #expect(await xcode.connectionState.phase == .closed(.requested))
+        #expect(await xcode.connectionState.phase == .closed)
     }
 
     @Test func runtimeSessionRoutesProgressAndAnswersUnsupportedServerRequests() async throws {
@@ -1443,7 +1443,7 @@ struct XcodeMCPTests {
         await xcode.close()
         let firstClosed = try #require(await first.next())
         let secondClosed = try #require(await second.next())
-        #expect(firstClosed.phase == .closed(.requested))
+        #expect(firstClosed.phase == .closed)
         #expect(secondClosed == firstClosed)
         #expect(await first.next() == nil)
         #expect(await second.next() == nil)
@@ -2003,7 +2003,7 @@ struct XcodeMCPTests {
         #expect(try await recoveryClock.nextRequestedSleep(at: sleepBaseline) == .seconds(30))
 
         await authority.close()
-        #expect(await authority.connectionState().phase == .closed(.requested))
+        #expect(await authority.connectionState().phase == .closed)
         #expect(await stalled.closeCount() == 1)
     }
 

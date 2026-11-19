@@ -684,8 +684,7 @@ private let removedSurfaceChecks: [(
         import XcodeMCPKit
 
         func compileOnlySnapshotInitializerShouldNotBePublic() {
-            _ = XcodeMCPConnectionSnapshot(
-                sequence: 0,
+            _ = XcodeMCPConnectionState(
                 generation: 0,
                 phase: .initializing
             )
@@ -693,7 +692,7 @@ private let removedSurfaceChecks: [(
         """,
         [
             "initializer is inaccessible",
-            "'XcodeMCPConnectionSnapshot' initializer is inaccessible",
+            "'XcodeMCPConnectionState' initializer is inaccessible",
         ]
     ),
     (
