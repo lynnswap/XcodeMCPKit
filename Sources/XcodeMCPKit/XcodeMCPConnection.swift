@@ -24,8 +24,9 @@ public struct XcodeMCPConnectionState: Equatable, Sendable {
         case ready
         case recovering
 
-        /// Requests fail until ``XcodeMCP/reconnect(timeout:)`` succeeds. The
-        /// error is ``XcodeMCPError/transportUnavailable(_:)``,
+        /// Requests fail with the error while the connection stays in this
+        /// phase. ``XcodeMCP/reconnect(timeout:)`` creates a fresh connection.
+        /// The error is ``XcodeMCPError/transportUnavailable(_:)``,
         /// ``XcodeMCPError/sessionRecoveryFailed(_:)``, or
         /// ``XcodeMCPError/invalidResponse(_:)``.
         case unavailable(XcodeMCPError)

@@ -293,8 +293,7 @@ public actor XcodeMCP {
     ) async throws -> [MCPTool] {
         let deadline = try operationDeadline(timeout)
         do {
-            let pages = try await session.requestAllPages("tools/list", deadline: deadline)
-            return try pages.flatMap { page in
+            return try await session.requestAllPages("tools/list", deadline: deadline) { page in
                 guard let tools = MCPJSONValue(page)["tools"]?.arrayValue else {
                     throw XcodeMCPError.invalidResponse("tools/list result is missing tools")
                 }

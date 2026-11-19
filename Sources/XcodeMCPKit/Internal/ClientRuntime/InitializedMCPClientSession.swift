@@ -430,17 +430,23 @@ package actor InitializedMCPClientSession {
         }
     }
 
-    /// Requests every page of a cursor-paginated result from one connection.
+    /// Requests every page of a cursor-paginated result from one connection and returns
+    /// the items that `items` reads from each page.
     ///
     /// A cursor belongs to the session that issued it, so pages from different connections
     /// are never combined. If the connection changes while pages load, loading starts over
-    /// once on the new connection.
-    package func requestAllPages(_ method: String, deadline: Deadline?) async throws -> [JSONValue] {
+    /// once on the new connection. A page is read before its cursor is followed, so an
+    /// invalid page ends loading.
+    package func requestAllPages<Item: Sendable>(
+        _ method: String,
+        deadline: Deadline?,
+        items: @Sendable (JSONValue) throws -> [Item]
+    ) async throws -> [Item] {
         var expectedGeneration = await authority.connectionState().generation
         var hasRestarted = false
         var cursor: String?
         var seenCursors: Set<String> = []
-        var pages: [JSONValue] = []
+        var loaded: [Item] = []
 
         while true {
             let page = try await request(
@@ -460,12 +466,12 @@ package actor InitializedMCPClientSession {
                 expectedGeneration = generation
                 cursor = nil
                 seenCursors.removeAll()
-                pages.removeAll()
+                loaded.removeAll()
                 continue
             }
-            pages.append(page)
+            loaded.append(contentsOf: try items(page))
             guard case .object(let object) = page, let rawCursor = object["nextCursor"] else {
-                return pages
+                return loaded
             }
             guard case .string(let nextCursor) = rawCursor else {
                 throw MCPBridgeRuntimeError.invalidResponse("\(method) returned an invalid cursor")

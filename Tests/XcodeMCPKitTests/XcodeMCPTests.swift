@@ -2110,6 +2110,18 @@ struct XcodeMCPTests {
         await client.close()
     }
 
+    @Test func listToolsRejectsAnInvalidPageBeforeFollowingItsCursor() async throws {
+        let transport = LifecycleContractTransport(name: "invalid-page") { _, _ in
+            .object(["nextCursor": "next"])
+        }
+        let client = try await XcodeMCP(transport: transport)
+        await #expect(throws: XcodeMCPError.invalidResponse("tools/list result is missing tools")) {
+            _ = try await client.listTools()
+        }
+        #expect(await transport.sentMessages().filter { $0.method == "tools/list" }.count == 1)
+        await client.close()
+    }
+
     @Test func listToolsRestartsPageOneAfterRecoveryWithinOneReplayBudget() async throws {
         let first = LifecycleContractTransport(
             name: "old",
