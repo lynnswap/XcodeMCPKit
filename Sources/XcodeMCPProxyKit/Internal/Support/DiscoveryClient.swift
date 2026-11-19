@@ -43,7 +43,7 @@ struct DiscoveryClient: DependencyClient {
 
     static func live(
         defaultFileURL: @escaping @Sendable () -> URL = {
-            ProxyFilesystemLocations.discoveryFileURL()
+            Discovery.defaultFileURL(environment: ProcessInfo.processInfo.environment)
         },
         loadRecord: @escaping @Sendable (_ url: URL) throws -> DiscoveryRecord = {
             try Discovery.loadRecord(from: $0)
