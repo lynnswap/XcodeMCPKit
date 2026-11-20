@@ -63,14 +63,14 @@ extension NativeToolBackend {
 package final class NativeXcodeBackend: NativeToolBackend {
     private let installation: NativeXcodeInstallation
     private let includesGUIBridgeTools: Bool
-    private let testableStateCorrection: NativeTestableStateCorrection
+    private let testableStateNoticeGuard: NativeTestableStateNoticeGuard
     private var executionOperations: NativeExecutionOperations?
     private let bridge: NativeActionBridge
     private let selection: NativeToolSelection
     private let scope: NativeWorkspaceScope
     private let workspaces: NativeWorkspaceRegistry
-    private let crashCorrection: NativeCrashToolCorrection
-    private let previewCorrection: NativePreviewCorrection
+    private let crashTools: NativeCrashTools
+    private let previewTool: NativePreviewTool
     private let selections = NativeWorkspaceSelections()
     /// The headless workspace of each running request, by its artifacts directory.
     private var requestWorkspaces: [URL: (identifier: String, tool: String, reportsSelection: Bool, finished: Bool)] = [:]
@@ -81,22 +81,22 @@ package final class NativeXcodeBackend: NativeToolBackend {
 
     package init(installation: NativeXcodeInstallation, includesGUIBridgeTools: Bool = false) async throws {
         self.includesGUIBridgeTools = includesGUIBridgeTools
-        testableStateCorrection = try NativeTestableStateCorrection()
+        testableStateNoticeGuard = try NativeTestableStateNoticeGuard()
         self.installation = installation
         bridge = NativeActionBridge(installation: installation)
         selection = try await NativeToolSelection(installation: installation)
         scope = try await NativeWorkspaceScope(installation: installation)
         workspaces = try await NativeWorkspaceRegistry(installation: installation)
-        crashCorrection = NativeCrashToolCorrection(installation: installation)
-        previewCorrection = NativePreviewCorrection(installation: installation)
-        try testableStateCorrection.checkFailure()
+        crashTools = NativeCrashTools(installation: installation)
+        previewTool = NativePreviewTool(installation: installation)
+        try testableStateNoticeGuard.checkFailure()
     }
 
     package var origin: [String: JSONValue]? {
         installation.origin(kind: "nativeHost", processID: getpid(), toolCancellation: "task")
     }
 
-    package var processFailure: (any Error)? { testableStateCorrection.failure }
+    package var processFailure: (any Error)? { testableStateNoticeGuard.failure }
 
     package func listTools() async throws -> [NativeTool] {
         if let catalogTask { return try await catalogTask.value }
@@ -123,9 +123,9 @@ package final class NativeXcodeBackend: NativeToolBackend {
             let tool = try NativeSchemaConverter.tool(from: schema, workspaceScoped: workspaceScoped)
             // The broker executes GUI tools through Apple's bridge; the host supplies only their schemas.
             if !gui { unsafe (nextActions[name] = action) }
-            nextTools[name] = unsafe NativePreviewCorrection.handles(action) ? NativePreviewCorrection.describe(tool) : tool
+            nextTools[name] = unsafe NativePreviewTool.handles(action) ? NativePreviewTool.describe(tool) : tool
         }
-        for kind in NativeCrashToolCorrection.Kind.allCases {
+        for kind in NativeCrashTools.Kind.allCases {
             nextTools[kind.toolName] = NativeCrashContract.describe(kind)
         }
         unsafe (actions = nextActions)
@@ -153,16 +153,16 @@ package final class NativeXcodeBackend: NativeToolBackend {
 
     package func execute(_ name: String, arguments: [String: JSONValue], context: NativeToolContext) async throws -> AsyncStream<Data> {
         try workspaces.beginExecution(request: context.artifactsDirectory, workspace: context.executionResource.workspace)
-        try testableStateCorrection.checkFailure()
+        try testableStateNoticeGuard.checkFailure()
         if tools[name] == nil { _ = try await listTools() }
         try Task.checkCancellation()
         guard let tool = tools[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
         }
         if Self.bypassesCrashWorkspace(name, arguments: arguments),
-           let kind = NativeCrashToolCorrection.Kind(rawValue: name) {
+           let kind = NativeCrashTools.Kind(rawValue: name) {
             let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
-            return try crashCorrection.execute(kind, input: input, context: context)
+            return try crashTools.execute(kind, input: input, context: context)
         }
         if ["BuildProject", "RunProject", "RunAllTests", "RunSomeTests"].contains(name), executionOperations == nil {
             executionOperations = try NativeExecutionOperations()
@@ -174,7 +174,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
             do {
                 try await workspaces.closeRemovedWorkspaces(request: context.artifactsDirectory)
                 let registered = try workspaces.registeredIdentifiers()
-                try await previewCorrection.retainWorkspaces(registered)
+                try await previewTool.retainWorkspaces(registered)
                 selections.retain(registered)
             }
             catch { NativeErrorPresentation.reportBackground("Native workspace cleanup failed: \(error)") }
@@ -182,12 +182,12 @@ package final class NativeXcodeBackend: NativeToolBackend {
         }
         var arguments = arguments
         let isPreview: Bool
-        if let action = unsafe actions[name] { isPreview = unsafe NativePreviewCorrection.handles(action) }
+        if let action = unsafe actions[name] { isPreview = unsafe NativePreviewTool.handles(action) }
         else { isPreview = false }
         let invalidatesPreviewBuild = !isPreview && tool.requiresPreviewBuildInvalidation
         if invalidatesPreviewBuild, !tool.workspaceScoped {
             previewBuildInvalidations.updateValue(nil, forKey: context.artifactsDirectory)
-            previewCorrection.invalidateReusableBuild(workspaceIdentifier: nil)
+            previewTool.invalidateReusableBuild(workspaceIdentifier: nil)
         }
         if name == "XcodeOpenWorkspace", case .string(let path) = arguments["path"] {
             arguments["path"] = .string(NativeWorkspaceRegistry.workspacePath(for: path))
@@ -203,7 +203,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
             if case .string(let value) = arguments["workspaceIdentifier"] { identifier = value }
             else { identifier = nil }
             previewBuildInvalidations.updateValue(identifier, forKey: context.artifactsDirectory)
-            previewCorrection.invalidateReusableBuild(workspaceIdentifier: identifier)
+            previewTool.invalidateReusableBuild(workspaceIdentifier: identifier)
         }
         if tool.workspaceScoped, case .string(let identifier) = arguments["workspaceIdentifier"] {
             try await workspaces.prepareDebugger(for: identifier)
@@ -220,10 +220,10 @@ package final class NativeXcodeBackend: NativeToolBackend {
         try Task.checkCancellation()
         arguments["temporaryArtifactsPath"] = .string(context.artifactsDirectory.path)
         arguments["conversationID"] = .string(context.conversationID)
-        if isPreview { arguments = NativePreviewCorrection.prepareArguments(arguments) }
+        if isPreview { arguments = NativePreviewTool.prepareArguments(arguments) }
         let input = try JSONSerialization.data(withJSONObject: arguments.mapValues(\.foundationObject))
-        if let kind = NativeCrashToolCorrection.Kind(rawValue: name) {
-            return try crashCorrection.execute(kind, input: input, context: context)
+        if let kind = NativeCrashTools.Kind(rawValue: name) {
+            return try crashTools.execute(kind, input: input, context: context)
         }
         guard let action = unsafe actions[name] else {
             throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
@@ -232,7 +232,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
             let outputSchema: JSONValue?
             if case .object(let descriptor) = tools[name]?.descriptor { outputSchema = descriptor["outputSchema"] }
             else { outputSchema = nil }
-            return try unsafe await previewCorrection.execute(inputType: scope.inputType(for: action), input: input,
+            return try unsafe await previewTool.execute(inputType: scope.inputType(for: action), input: input,
                 artifactsRoot: context.artifactsRoot, request: context.artifactsDirectory, outputSchema: outputSchema) { [self] in
                 guard let action = unsafe actions[name] else {
                     throw NativeRuntimeError.invalidRequest("Unknown native tool '\(name)'")
@@ -244,7 +244,7 @@ package final class NativeXcodeBackend: NativeToolBackend {
     }
 
     private static func bypassesCrashWorkspace(_ name: String, arguments: [String: JSONValue]) -> Bool {
-        guard let kind = NativeCrashToolCorrection.Kind(rawValue: name) else { return false }
+        guard let kind = NativeCrashTools.Kind(rawValue: name) else { return false }
         switch kind {
         case .read, .start, .wait, .cancel, .resume:
             return true
@@ -332,8 +332,8 @@ package final class NativeXcodeBackend: NativeToolBackend {
 
     package func beginShutdown() {
         catalogTask?.cancel()
-        crashCorrection.cancelPendingOperations()
-        previewCorrection.cancelPendingOperations()
+        crashTools.cancelPendingOperations()
+        previewTool.cancelPendingOperations()
     }
 
     package func finishExecution(context: NativeToolContext, outcome: NativeToolOutcome) async throws {
@@ -346,8 +346,8 @@ package final class NativeXcodeBackend: NativeToolBackend {
         }
         if Task.isCancelled { context.executionScope.cancel() }
         await context.executionScope.finishCancellation()
-        await previewCorrection.finishExecution(request: context.artifactsDirectory)
-        await crashCorrection.finishExecution(request: context.artifactsDirectory)
+        await previewTool.finishExecution(request: context.artifactsDirectory)
+        await crashTools.finishExecution(request: context.artifactsDirectory)
         await bridge.finishExecution(request: context.artifactsDirectory)
         var failures: [String] = []
         let launchedPID = requestWorkspaces[context.artifactsDirectory]?.tool == "RunProject"
@@ -358,13 +358,13 @@ package final class NativeXcodeBackend: NativeToolBackend {
         catch { failures.append(String(describing: error)) }
         if let identifier = previewBuildInvalidations.removeValue(forKey: context.artifactsDirectory) {
             // A native action's stream can overlap rendering before its mutation finishes.
-            previewCorrection.invalidateReusableBuild(workspaceIdentifier: identifier)
+            previewTool.invalidateReusableBuild(workspaceIdentifier: identifier)
         }
         do {
             try workspaces.finishOpen(request: context.artifactsDirectory)
-            try await previewCorrection.retainWorkspaces(workspaces.registeredIdentifiers())
+            try await previewTool.retainWorkspaces(workspaces.registeredIdentifiers())
         } catch { failures.append(String(describing: error)) }
-        do { try testableStateCorrection.checkFailure() }
+        do { try testableStateNoticeGuard.checkFailure() }
         catch { failures.append(String(describing: error)) }
         if !failures.isEmpty { throw NativeRuntimeError.invocation(failures.joined(separator: "; ")) }
     }
@@ -373,11 +373,11 @@ package final class NativeXcodeBackend: NativeToolBackend {
         catalogTask?.cancel()
         if let catalogTask { _ = try? await catalogTask.value }
         var failures: [String] = []
-        do { try await crashCorrection.shutdown() } catch { failures.append(String(describing: error)) }
-        do { try await previewCorrection.shutdown() } catch { failures.append(String(describing: error)) }
+        do { try await crashTools.shutdown() } catch { failures.append(String(describing: error)) }
+        do { try await previewTool.shutdown() } catch { failures.append(String(describing: error)) }
         await bridge.shutdown()
         do { try await workspaces.closeAllWorkspaces() } catch { failures.append(String(describing: error)) }
-        do { try testableStateCorrection.checkFailure() } catch { failures.append(String(describing: error)) }
+        do { try testableStateNoticeGuard.checkFailure() } catch { failures.append(String(describing: error)) }
         if !failures.isEmpty { throw NativeRuntimeError.invocation(failures.joined(separator: "; ")) }
     }
 }

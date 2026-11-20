@@ -2,7 +2,7 @@ import ABIBridge
 import Foundation
 
 @safe
-final class NativeSimulatorLaunchCorrection {
+final class NativeSimulatorLaunchTracker {
     private let initialization: NativeObjCMethodHook?
     private let completion: NativeObjCMethodHook?
 

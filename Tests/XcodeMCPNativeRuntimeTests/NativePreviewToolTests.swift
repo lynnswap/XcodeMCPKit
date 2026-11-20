@@ -5,7 +5,7 @@ import XcodeMCPWire
 
 @Suite
 @MainActor
-struct NativePreviewCorrectionTests {
+struct NativePreviewToolTests {
     @Test func previewResultMatchesTheAdvertisedOutputContract() {
         let result: JSONValue = .object([
             "previewSnapshotPath": .string("/preview.png"),
@@ -16,7 +16,7 @@ struct NativePreviewCorrectionTests {
             "supportedPreviewVariantOverrides": .object(["Color Scheme": .array([.string("Dark")])]),
         ])
         let current: JSONValue = .object(["properties": .object(["snapshot": .object([:])])])
-        #expect(NativePreviewCorrection.formatResult(result, outputSchema: current) == .object([
+        #expect(NativePreviewTool.formatResult(result, outputSchema: current) == .object([
             "snapshot": .object(["path": .string("/preview.png")]),
             "displayName": .string("Preview"), "errors": .array([]),
             "supportedOverrides": .object([
@@ -26,10 +26,10 @@ struct NativePreviewCorrectionTests {
                 "previewVariants": .object(["Color Scheme": .array([.string("Dark")])]),
             ]),
         ]))
-        #expect(NativePreviewCorrection.formatResult(result, outputSchema: .object([
+        #expect(NativePreviewTool.formatResult(result, outputSchema: .object([
             "properties": .object(["previewSnapshotPath": .object([:])]),
         ])) == result)
-        #expect(NativePreviewCorrection.formatResult(result, outputSchema: nil) == result)
+        #expect(NativePreviewTool.formatResult(result, outputSchema: nil) == result)
     }
 
     @Test func decodedDefaultsAndExplicitValuesDoNotRequireNativeGetters() throws {
@@ -39,28 +39,28 @@ struct NativePreviewCorrectionTests {
             "_previewVariantOverrides": StoredDefault(wrappedValue: ["Orientation": "Landscape"]),
             "_timeout": StoredDefault(wrappedValue: 123),
         ]
-        let index: Int = try NativePreviewCorrection.decodedProperty("previewDefinitionIndexInFile", in: fields)
-        let variants: [String: String] = try NativePreviewCorrection.decodedProperty("previewVariantOverrides", in: fields)
-        let timeout: Int = try NativePreviewCorrection.decodedProperty("timeout", in: fields)
+        let index: Int = try NativePreviewTool.decodedProperty("previewDefinitionIndexInFile", in: fields)
+        let variants: [String: String] = try NativePreviewTool.decodedProperty("previewVariantOverrides", in: fields)
+        let timeout: Int = try NativePreviewTool.decodedProperty("timeout", in: fields)
         #expect(index == 7)
         #expect(variants == ["Orientation": "Landscape"])
         #expect(timeout == 123)
         let defaults: [String: Any] = ["_index": StoredDefault(wrappedValue: 0),
                                        "_variants": StoredDefault(wrappedValue: [String: String]())]
-        let first: Int = try NativePreviewCorrection.decodedProperty("index", in: defaults)
-        let empty: [String: String] = try NativePreviewCorrection.decodedProperty("variants", in: defaults)
+        let first: Int = try NativePreviewTool.decodedProperty("index", in: defaults)
+        let empty: [String: String] = try NativePreviewTool.decodedProperty("variants", in: defaults)
         #expect(first == 0)
         #expect(empty.isEmpty)
     }
 
     @Test func unsupportedDecodedStorageFallsBackInsteadOfGuessingDefaults() throws {
         #expect(throws: NativeRuntimeError.self) {
-            let _: Int = try NativePreviewCorrection.decodedProperty("timeout", in: [:])
+            let _: Int = try NativePreviewTool.decodedProperty("timeout", in: [:])
         }
         #expect(throws: NativeRuntimeError.self) {
-            let _: Int = try NativePreviewCorrection.decodedProperty("timeout", in: ["_timeout": "invalid"])
+            let _: Int = try NativePreviewTool.decodedProperty("timeout", in: ["_timeout": "invalid"])
         }
-        let plain: Int = try NativePreviewCorrection.decodedProperty("timeout", in: ["timeout": 80])
+        let plain: Int = try NativePreviewTool.decodedProperty("timeout", in: ["timeout": 80])
         #expect(plain == 80)
     }
 
@@ -78,7 +78,7 @@ struct NativePreviewCorrectionTests {
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: true,
                 isRunnable: isRunnable)
         }
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: platform)
+        let selected = try NativePreviewTool.selectTarget(targets, source: source, platform: platform)
         #expect(selected.source.moduleName == platform.rawValue)
         #expect(selected.host.moduleName == platform.rawValue)
     }
@@ -90,7 +90,7 @@ struct NativePreviewCorrectionTests {
             sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", root.appendingPathComponent("Watch.app/Watch.debug.dylib").path],
             linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source], debugDylibEnabled: true, isRunnable: true)
         #expect(throws: NativePipelineRequired.self) {
-            try NativePreviewCorrection.selectTarget([watch], source: source, platform: .iOS)
+            try NativePreviewTool.selectTarget([watch], source: source, platform: .iOS)
         }
     }
 
@@ -111,7 +111,7 @@ struct NativePreviewCorrectionTests {
             buildableName: "SharedPreview.o", sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
             linkCommandLine: ["-o", library.path], linkerWorkingDirectory: nil, objectFiles: [],
             sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)] : [])
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
+        let selected = try NativePreviewTool.selectTarget(targets, source: source, platform: .iOS)
         #expect(selected.host.moduleName == "RunnableApp")
         #expect(selected.source.moduleName == (sharedLibrary ? "SharedPreview" : "RunnableApp"))
     }
@@ -134,7 +134,7 @@ struct NativePreviewCorrectionTests {
         try Data("resource".utf8).write(to: product.appendingPathComponent("Contents/Resources/Marker.txt"))
         try Data("renderer".utf8).write(to: helper.appendingPathComponent("XcodeMCPPreviewRenderer"))
         try Data("library".utf8).write(to: helper.appendingPathComponent("Frameworks/libPreview.dylib"))
-        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app, platform: .macOS)
+        try NativePreviewTool.prepareApp(product: product, helper: helper, app: app, platform: .macOS)
         let info = try #require(Bundle(url: app)?.infoDictionary)
         #expect(info["CFBundleIdentifier"] as? String == "dev.lynnswap.MacFixture")
         #expect(info["NSMainStoryboardFile"] == nil)
@@ -148,7 +148,7 @@ struct NativePreviewCorrectionTests {
     @Test func watchRendererRunsWithoutACompanionApp() {
         let original: [String: Any] = ["CFBundleIdentifier": "dev.lynnswap.WatchFixture",
             "WKCompanionAppBundleIdentifier": "dev.lynnswap.Companion", "WKRunsIndependentlyOfCompanionApp": true]
-        let info = NativePreviewCorrection.rendererInfo(original, platform: .watchOS)
+        let info = NativePreviewTool.rendererInfo(original, platform: .watchOS)
         #expect(info["WKApplication"] as? Bool == true)
         #expect(info["WKWatchOnly"] as? Bool == true)
         #expect(info["WKCompanionAppBundleIdentifier"] == nil)
@@ -167,7 +167,7 @@ struct NativePreviewCorrectionTests {
                 debugDylibEnabled: true, isRunnable: false)
         }
         #expect(throws: NativePipelineRequired.self) {
-            try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
+            try NativePreviewTool.selectTarget(targets, source: source, platform: .iOS)
         }
     }
 
@@ -185,11 +185,11 @@ struct NativePreviewCorrectionTests {
                 linkCommandLine: ["-o", root.appendingPathComponent("FixtureHost.app/FixtureHost.debug.dylib").path, product.path],
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)]
         }
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
+        let selected = try NativePreviewTool.selectTarget(targets, source: source, platform: .iOS)
         #expect(selected.source.architecture == "arm64")
         #expect(selected.host.architecture == "arm64")
         #expect(throws: NativePipelineRequired.self) {
-            try NativePreviewCorrection.selectTarget(targets.filter { $0.architecture == "x86_64" }, source: source, platform: .iOS)
+            try NativePreviewTool.selectTarget(targets.filter { $0.architecture == "x86_64" }, source: source, platform: .iOS)
         }
     }
 
@@ -216,7 +216,7 @@ struct NativePreviewCorrectionTests {
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: dylib, to: binary)
         }
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [feature], source: source, platform: .iOS)
+        let selected = try NativePreviewTool.selectTarget(hosts + [feature], source: source, platform: .iOS)
         #expect(selected.host.outputURL == hosts[1].outputURL)
         #expect(selected.source.outputURL == feature.outputURL)
         #expect(selected.source.moduleName == feature.moduleName)
@@ -245,7 +245,7 @@ struct NativePreviewCorrectionTests {
             try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: frameworkBinary, to: binary)
         }
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [framework], source: source, platform: .iOS)
+        let selected = try NativePreviewTool.selectTarget(hosts + [framework], source: source, platform: .iOS)
         #expect(selected.host.outputURL == (embedded ? hosts[1].outputURL : framework.outputURL))
         #expect(selected.source.outputURL == framework.outputURL)
         #expect(selected.source.moduleName == framework.moduleName)
@@ -269,7 +269,7 @@ struct NativePreviewCorrectionTests {
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64",
             linkCommandLine: ["-o", archive.path],
             linkerWorkingDirectory: nil, objectFiles: [object], sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source, platform: .iOS)
+        let selected = try NativePreviewTool.selectTarget(hosts + [package], source: source, platform: .iOS)
         #expect(selected.host.outputURL == hosts[1].outputURL)
         #expect(selected.source.outputURL == package.outputURL)
         #expect(selected.source.moduleName == package.moduleName)
@@ -294,7 +294,7 @@ struct NativePreviewCorrectionTests {
             sdkRoot: "iphonesimulator", sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", product.path],
             linkerWorkingDirectory: nil, objectFiles: [root.appendingPathComponent("PackageContent.o")],
             sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)
-        let selected = try NativePreviewCorrection.selectTarget(hosts + [package], source: source, platform: .iOS)
+        let selected = try NativePreviewTool.selectTarget(hosts + [package], source: source, platform: .iOS)
         #expect(selected.host.outputURL == hosts[1].outputURL)
         #expect(selected.source.outputURL == package.outputURL)
         #expect(selected.source.moduleName == package.moduleName)
@@ -311,7 +311,7 @@ struct NativePreviewCorrectionTests {
         try Data("diagnostic".utf8).write(to: log)
         var stagedApp: URL?
         do {
-            let value = try await NativePreviewCorrection.withStagedDirectory(in: root) { directory in
+            let value = try await NativePreviewTool.withStagedDirectory(in: root) { directory in
                 let app = directory.appendingPathComponent("PreviewAgent.app")
                 stagedApp = app
                 try FileManager.default.createDirectory(at: app, withIntermediateDirectories: false)
@@ -354,7 +354,7 @@ struct NativePreviewCorrectionTests {
                 sdkVariant: nil, architecture: "arm64", linkCommandLine: ["-o", platform.executableDirectory(in: app).appendingPathComponent("Host.debug.dylib").path],
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true))
         }
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: platform)
+        let selected = try NativePreviewTool.selectTarget(targets, source: source, platform: platform)
         #expect(selected.source.moduleName == "FixtureKit")
         #expect(selected.host.moduleName == (embedded ? "Host" : "FixtureKit"))
     }
@@ -372,7 +372,7 @@ struct NativePreviewCorrectionTests {
         let app = NativePreviewBuild.Target(moduleName: "Host", buildableName: "Host.app", sdkRoot: "macosx",
             sdkVariant: nil, architecture: "arm64", linkCommandLine: [binary.path, "-o", appImage.path],
             linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
-        let selected = try NativePreviewCorrection.selectTarget([framework, app], source: source, platform: .macOS)
+        let selected = try NativePreviewTool.selectTarget([framework, app], source: source, platform: .macOS)
         #expect(selected.source.moduleName == "FixtureKit")
         #expect(selected.host.moduleName == "FixtureKit")
     }
@@ -434,7 +434,7 @@ struct NativePreviewCorrectionTests {
             sdkRoot: "macosx", sdkVariant: nil, architecture: "arm64", linkCommandLine: archiveCommand,
             linkerWorkingDirectory: nil, objectFiles: [core, object, previewObject], sourceFiles: [source, coreSource, previewCode], debugDylibEnabled: false,
             isRunnable: false, compileCommandLine: compileCommand)
-        let standalone = try NativePreviewCorrection.selectTarget([target], source: source, platform: .macOS)
+        let standalone = try NativePreviewTool.selectTarget([target], source: source, platform: .macOS)
         #expect(standalone.host.moduleName == "FixtureKit")
         let appURL = root.appendingPathComponent("Host.app")
         let appImage = appURL.appendingPathComponent("Contents/MacOS/Host.debug.dylib")
@@ -505,13 +505,13 @@ struct NativePreviewCorrectionTests {
         try await previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", appImage.path])
         let appSymbols = try await previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", appImage.path])
         #expect(appSymbols.contains("_static_preview_value") == forceLoad)
-        #expect(!NativePreviewCorrection.registryNames(in: appSymbols).isEmpty == forceLoad)
+        #expect(!NativePreviewTool.registryNames(in: appSymbols).isEmpty == forceLoad)
         let protectedFiles = [binary, support, appImage, fileList, dependencyInfo, mergedArchive]
         let originals = try protectedFiles.map { try Data(contentsOf: $0) }
         let app = NativePreviewBuild.Target(moduleName: "Host", buildableName: "Host.app", sdkRoot: "macosx",
             sdkVariant: nil, architecture: "arm64", linkCommandLine: appCommand,
             linkerWorkingDirectory: root.path, objectFiles: [appObject, packageObject], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
-        let hosted = try NativePreviewCorrection.selectTarget([target, app], source: source, platform: .macOS)
+        let hosted = try NativePreviewTool.selectTarget([target, app], source: source, platform: .macOS)
         #expect(hosted.host.moduleName == "Host")
         #expect(hosted.source.moduleName == "FixtureKit")
         let helper = root.appendingPathComponent("Helper")
@@ -555,19 +555,19 @@ struct NativePreviewCorrectionTests {
             environment: ["DYLD_LIBRARY_PATH": support.deletingLastPathComponent().path])
         #expect(baseline == "dev.lynnswap.StaticHost\nhost resource\n\(appURL.resolvingSymlinksInPath().path)\n")
         let staged = root.appendingPathComponent("Preview.app")
-        let products = try NativePreviewCorrection.prepareApp(product: appURL, helper: helper, app: staged, platform: .macOS,
+        let products = try NativePreviewTool.prepareApp(product: appURL, helper: helper, app: staged, platform: .macOS,
             staticProduct: true)
-        let linked = try await NativePreviewCorrection.linkStaticProduct(hosted.source, host: hosted.host, in: staged, products: products, platform: .macOS, process: process)
-        let dependencies = try NativePreviewCorrection.frameworkDependencies(for: [hosted.source], targets: [target, app],
+        let linked = try await NativePreviewTool.linkStaticProduct(hosted.source, host: hosted.host, in: staged, products: products, platform: .macOS, process: process)
+        let dependencies = try NativePreviewTool.frameworkDependencies(for: [hosted.source], targets: [target, app],
             platform: .macOS, in: products, linkedImages: [try #require(hosted.source.outputURL).resolvingSymlinksInPath(): linked])
-        try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: products)
-        try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: products, process: process)
-        let libraries = try NativePreviewCorrection.registryLibraries(in: staged, previewLibraries: [linked.url])
-        let paths = try NativePreviewCorrection.libraryPaths(in: staged, previewLibraries: [linked.url], registryLibraries: libraries,
+        try NativePreviewTool.copyFrameworkDependencies(dependencies, into: products)
+        try await NativePreviewTool.relocateFrameworkDependencies(dependencies, in: products, process: process)
+        let libraries = try NativePreviewTool.registryLibraries(in: staged, previewLibraries: [linked.url])
+        let paths = try NativePreviewTool.libraryPaths(in: staged, previewLibraries: [linked.url], registryLibraries: libraries,
             sourceOutput: linked.url)
         #expect(paths == ["Contents/Frameworks/XcodeMCPPreviewSource.dylib"])
         let symbols = try await previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", linked.url.path])
-        #expect(!NativePreviewCorrection.registryNames(in: symbols).isEmpty)
+        #expect(!NativePreviewTool.registryNames(in: symbols).isEmpty)
         _ = try await process.run("/usr/bin/codesign", ["--force", "--sign", "-", staged.path])
         _ = try await process.run("/usr/bin/codesign", ["--verify", "--strict", "--deep", staged.path])
         let executable = staged.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer")
@@ -719,13 +719,13 @@ struct NativePreviewCorrectionTests {
         }
         let originalSymbols = try await previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", image.path])
         #expect(!originalSymbols.contains("_static_preview_value"))
-        #expect(NativePreviewCorrection.registryNames(in: originalSymbols).isEmpty)
+        #expect(NativePreviewTool.registryNames(in: originalSymbols).isEmpty)
         let baseline = try await process.run(executable.path, [])
         let files = try #require(FileManager.default.enumerator(at: parent, includingPropertiesForKeys: [.isRegularFileKey]))
         let protectedFiles = try files.compactMap { $0 as? URL }.filter { try $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true }
             + [archive, dependency, leaf]
         let originalBytes = try protectedFiles.map { try Data(contentsOf: $0) }
-        let staged = try await NativePreviewCorrection.prepareNativeExtension(source: sourceTarget, host: host, containingApp: parent,
+        let staged = try await NativePreviewTool.prepareNativeExtension(source: sourceTarget, host: host, containingApp: parent,
             in: root.appendingPathComponent("NativePreview"), targets: [sourceTarget, host], platform: .macOS, process: process)
         let stagedProduct = staged.appendingPathComponent("Contents/PlugIns/Widget.appex")
         let stagedImage = stagedProduct.appendingPathComponent("Contents/MacOS/Widget.debug.dylib")
@@ -758,7 +758,7 @@ struct NativePreviewCorrectionTests {
         }
         let symbols = try await previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", stagedImage.path])
         #expect(symbols.contains("_static_preview_value"))
-        #expect(!NativePreviewCorrection.registryNames(in: symbols).isEmpty)
+        #expect(!NativePreviewTool.registryNames(in: symbols).isEmpty)
         #expect(try NativePreviewBinary.dynamicLibrary(at: stagedImage)?.identifier == "@rpath/Widget.debug.dylib")
         #expect(try NativePreviewBinary.matches(executable, stagedProduct.appendingPathComponent("Contents/MacOS/Widget")))
         for bundle in [stagedProduct, staged] {
@@ -905,11 +905,11 @@ struct NativePreviewCorrectionTests {
         let app = root.appendingPathComponent("Staged/Preview.app")
         let agent = try previewAgent(in: root, helper: helper)
         try FileManager.default.createDirectory(at: app.deletingLastPathComponent(), withIntermediateDirectories: false)
-        let products = try NativePreviewCorrection.prepareApp(product: agent, sourceProduct: framework, helper: helper, app: app, platform: .macOS,
+        let products = try NativePreviewTool.prepareApp(product: agent, sourceProduct: framework, helper: helper, app: app, platform: .macOS,
             staticProduct: true)
         let developer = try await previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
-        let linked = try await NativePreviewCorrection.linkStaticProduct(target, in: app, products: products, platform: .macOS, process: process)
+        let linked = try await NativePreviewTool.linkStaticProduct(target, in: app, products: products, platform: .macOS, process: process)
         let image = linked.url
         let runtime = try await previewBinaryOutput("/usr/bin/xcrun", ["--sdk", "macosx", "clang",
             "-print-file-name=libclang_rt.asan_osx_dynamic.dylib"]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -917,18 +917,18 @@ struct NativePreviewCorrectionTests {
             "ASAN_OPTIONS": "color=never:external_symbolizer_path='':abort_on_error=1",
             "DYLD_INSERT_LIBRARIES": runtime,
         ]
-        let dependencies = try NativePreviewCorrection.frameworkDependencies(for: [target], targets: [target], platform: .macOS,
+        let dependencies = try NativePreviewTool.frameworkDependencies(for: [target], targets: [target], platform: .macOS,
             in: products, linkedImages: [try #require(target.outputURL).resolvingSymlinksInPath(): linked], environment: nativeEnvironment)
-        try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: products)
-        let libraries = try NativePreviewCorrection.registryLibraries(in: app, previewLibraries: [image], products: products)
-        let paths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [image], registryLibraries: libraries,
+        try NativePreviewTool.copyFrameworkDependencies(dependencies, into: products)
+        let libraries = try NativePreviewTool.registryLibraries(in: app, previewLibraries: [image], products: products)
+        let paths = try NativePreviewTool.libraryPaths(in: app, previewLibraries: [image], registryLibraries: libraries,
             sourceOutput: image, products: products)
         #expect(paths == ["../Products/" + products.lastPathComponent + "/XcodeMCPPreviewSource.dylib"])
-        #expect(try NativePreviewCorrection.programLibraries(previewLibraries: libraries, output: image) == [image.resolvingSymlinksInPath()])
+        #expect(try NativePreviewTool.programLibraries(previewLibraries: libraries, output: image) == [image.resolvingSymlinksInPath()])
         let symbols = try await previewBinaryOutput("/usr/bin/xcrun", ["nm", "-j", image.path]).split(whereSeparator: \.isNewline)
         #expect(symbols.contains("_static_preview_value"))
         #expect(symbols.contains("_main"))
-        try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: products, process: process)
+        try await NativePreviewTool.relocateFrameworkDependencies(dependencies, in: products, process: process)
         let stagedExecutable = NativePreviewPlatform.macOS.executableDirectory(in: app).appendingPathComponent(executable.lastPathComponent)
         let helperIdentifier = try #require(Bundle(url: agent)?.bundleIdentifier)
         let text = try await process.run(stagedExecutable.path, [app.appendingPathComponent(paths[0]).path], environment: nativeEnvironment)
@@ -961,7 +961,7 @@ struct NativePreviewCorrectionTests {
         try FileManager.default.copyItem(at: app, to: installedApp)
         try FileManager.default.copyItem(at: products.deletingLastPathComponent(),
             to: installedApp.deletingLastPathComponent().appendingPathComponent("Products"))
-        try NativePreviewCorrection.removeStagedApp(app)
+        try NativePreviewTool.removeStagedApp(app)
         let installedExecutable = NativePreviewPlatform.macOS.executableDirectory(in: installedApp).appendingPathComponent(executable.lastPathComponent)
         let installedText = try await process.run(installedExecutable.path,
             [installedApp.appendingPathComponent(paths[0]).path], environment: nativeEnvironment)
@@ -976,7 +976,7 @@ struct NativePreviewCorrectionTests {
         let rebuiltFramework = root.appendingPathComponent("OtherDestination/FixtureKit.framework")
         try FileManager.default.createDirectory(at: rebuiltFramework.deletingLastPathComponent(), withIntermediateDirectories: false)
         try FileManager.default.copyItem(at: framework, to: rebuiltFramework)
-        let refreshedProducts = try NativePreviewCorrection.prepareApp(product: agent, sourceProduct: rebuiltFramework, helper: helper, app: app, platform: .macOS,
+        let refreshedProducts = try NativePreviewTool.prepareApp(product: agent, sourceProduct: rebuiltFramework, helper: helper, app: app, platform: .macOS,
             staticProduct: true)
         #expect(!FileManager.default.fileExists(atPath: image.path))
         #expect(try Data(contentsOf: refreshedProducts.appendingPathComponent("FixtureKit.framework/FixtureKit")) == original)
@@ -1048,7 +1048,7 @@ struct NativePreviewCorrectionTests {
             let host = NativePreviewBuild.Target(moduleName: "Host", buildableName: "Host.app", sdkRoot: "macosx",
                 sdkVariant: nil, architecture: "arm64", linkCommandLine: command, linkerWorkingDirectory: root.path,
                 objectFiles: [sourceObject], sourceFiles: [], debugDylibEnabled: true, isRunnable: true)
-            let selection = try NativePreviewCorrection.selectTarget([dependency, host], source: dependencyObject.appendingPathExtension("c"), platform: .macOS)
+            let selection = try NativePreviewTool.selectTarget([dependency, host], source: dependencyObject.appendingPathExtension("c"), platform: .macOS)
             #expect(selection.source.outputURL == dependencyOutput)
             #expect(selection.host.outputURL == hostOutput)
             selectedSource = selection.source
@@ -1057,7 +1057,7 @@ struct NativePreviewCorrectionTests {
             selectedSource = source
             selectedHost = nil
         }
-        let image = try await NativePreviewCorrection.linkStaticProduct(selectedSource, host: selectedHost,
+        let image = try await NativePreviewTool.linkStaticProduct(selectedSource, host: selectedHost,
             in: root.appendingPathComponent("Staged/Preview.app"),
             products: products, platform: .macOS, process: process)
         let symbols = try await previewBinaryOutput("/usr/bin/xcrun", ["nm", "-jU", image.url.path]).split(whereSeparator: \.isNewline)
@@ -1175,7 +1175,7 @@ struct NativePreviewCorrectionTests {
         }
         roots[0].containsPreviewSource = true
         let source = root.appendingPathComponent("Source.swift")
-        let selection = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .macOS)
+        let selection = try NativePreviewTool.selectTarget(targets, source: source, platform: .macOS)
         #expect(selection.source.outputURL == selection.host.outputURL)
         let originalFiles = try targets.map { try #require($0.outputURL) } + (frameworkSupport ? [privateSupport] : [])
         let original = try originalFiles.map { try Data(contentsOf: $0) }
@@ -1221,17 +1221,17 @@ struct NativePreviewCorrectionTests {
         let agent = try previewAgent(in: root, helper: helper)
         let app = root.appendingPathComponent("Staged").appendingPathComponent(agent.lastPathComponent)
         try FileManager.default.createDirectory(at: app.deletingLastPathComponent(), withIntermediateDirectories: false)
-        let products = try NativePreviewCorrection.prepareApp(product: agent, sourceProduct: selection.source.outputURL,
+        let products = try NativePreviewTool.prepareApp(product: agent, sourceProduct: selection.source.outputURL,
             helper: helper, app: app, platform: .macOS, staticProduct: true, resourceURLs: selection.source.resourceURLs)
         let developer = try await previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
-        let images = try await NativePreviewCorrection.linkStaticProducts(for: roots, in: app, products: products,
+        let images = try await NativePreviewTool.linkStaticProducts(for: roots, in: app, products: products,
             platform: .macOS, process: process)
-        let dependencies = try NativePreviewCorrection.frameworkDependencies(for: roots, targets: targets, platform: .macOS,
+        let dependencies = try NativePreviewTool.frameworkDependencies(for: roots, targets: targets, platform: .macOS,
             in: products, agentApp: app, linkedImages: images)
-        try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: products)
+        try NativePreviewTool.copyFrameworkDependencies(dependencies, into: products)
         let libraries = dependencies.rootLibraries.map { products.appendingPathComponent($0) }
-        try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies, in: products, process: process)
+        try await NativePreviewTool.relocateFrameworkDependencies(dependencies, in: products, process: process)
         try await previewBinaryOutput("/usr/bin/codesign", ["--force", "--sign", "-", app.path])
         try await previewBinaryOutput("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
         let executable = NativePreviewPlatform.macOS.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer")
@@ -1319,7 +1319,7 @@ struct NativePreviewCorrectionTests {
         try FileManager.default.copyItem(at: framework, to: products.appendingPathComponent(framework.lastPathComponent))
         let developer = try await previewBinaryOutput("/usr/bin/xcode-select", ["-p"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developer)), artifacts: root)
-        let image = try await NativePreviewCorrection.linkStaticProduct(target, in: root.appendingPathComponent("Staged/Preview.app"),
+        let image = try await NativePreviewTool.linkStaticProduct(target, in: root.appendingPathComponent("Staged/Preview.app"),
             products: products, platform: platform, process: process).url
         let linked = try #require(try NativePreviewBinary.dynamicLibrary(at: image))
         #expect(linked.dependencies.contains { $0.contains("/iOSSupport/") && $0.contains("/SwiftUI.framework/") })
@@ -1359,7 +1359,7 @@ struct NativePreviewCorrectionTests {
         try Data("renderer".utf8).write(to: helper.appendingPathComponent("XcodeMCPPreviewRenderer"))
 
         let agent = try previewAgent(in: root, helper: helper, platform: platform)
-        try NativePreviewCorrection.prepareApp(product: agent, sourceProduct: framework, helper: helper, app: app, platform: platform)
+        try NativePreviewTool.prepareApp(product: agent, sourceProduct: framework, helper: helper, app: app, platform: platform)
 
         let staged = platform.frameworksDirectory(in: app).appendingPathComponent("FixtureKit.framework")
         let bundle = try #require(Bundle(url: staged))
@@ -1370,10 +1370,10 @@ struct NativePreviewCorrectionTests {
         let expectedFamilies: [Int]? = platform == .iOS ? [1, 2] : nil
         #expect(Bundle(url: app)?.infoDictionary?["UIDeviceFamily"] as? [Int] == expectedFamilies)
         #expect(Bundle(url: app)?.url(forResource: "Marker", withExtension: "txt") == nil)
-        #expect(try NativePreviewCorrection.appName(product: framework, containingApp: nil, localization: "ja-JP") == "Framework JA")
+        #expect(try NativePreviewTool.appName(product: framework, containingApp: nil, localization: "ja-JP") == "Framework JA")
         #expect(try Data(contentsOf: platform.executableDirectory(in: app).appendingPathComponent("XcodeMCPPreviewRenderer")) == Data("renderer".utf8))
-        let libraries = try NativePreviewCorrection.registryLibraries(in: app, previewLibraries: [])
-        let paths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [], registryLibraries: libraries, sourceOutput: binary)
+        let libraries = try NativePreviewTool.registryLibraries(in: app, previewLibraries: [])
+        let paths = try NativePreviewTool.libraryPaths(in: app, previewLibraries: [], registryLibraries: libraries, sourceOutput: binary)
         #expect(paths == [String(staged.appendingPathComponent(relativeBinary).path.dropFirst(app.path.count + 1))])
         #expect(try String(contentsOf: resources.appendingPathComponent("Marker.txt"), encoding: .utf8) == "framework resource")
     }
@@ -1466,7 +1466,7 @@ struct NativePreviewCorrectionTests {
         if kind == .absoluteBuilt { targets.append(target(library)) }
         let helper = root.appendingPathComponent("Helper")
         let app = root.appendingPathComponent("Preview.app")
-        let dependencies = try NativePreviewCorrection.frameworkDependencies(for: [sourceTarget], targets: targets, platform: .macOS,
+        let dependencies = try NativePreviewTool.frameworkDependencies(for: [sourceTarget], targets: targets, platform: .macOS,
             in: NativePreviewPlatform.macOS.frameworksDirectory(in: app), sourceProduct: source.deletingLastPathComponent())
         try FileManager.default.createDirectory(at: helper.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
         let loaderSource = root.appendingPathComponent("Loader.c")
@@ -1478,26 +1478,26 @@ struct NativePreviewCorrectionTests {
             try await previewBinaryOutput(helper.appendingPathComponent("XcodeMCPPreviewRenderer").path, [source.path])
         }
         let agent = try previewAgent(in: root, helper: helper)
-        try NativePreviewCorrection.prepareApp(product: agent, sourceProduct: source.deletingLastPathComponent(), helper: helper, app: app,
+        try NativePreviewTool.prepareApp(product: agent, sourceProduct: source.deletingLastPathComponent(), helper: helper, app: app,
             platform: .macOS)
-        try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: NativePreviewPlatform.macOS.frameworksDirectory(in: app))
+        try NativePreviewTool.copyFrameworkDependencies(dependencies, into: NativePreviewPlatform.macOS.frameworksDirectory(in: app))
         let developerDirectory = try await previewBinaryOutput("/usr/bin/xcode-select", ["-p"])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developerDirectory)), artifacts: root)
         let frameworks = app.appendingPathComponent("Contents/Frameworks")
-        let stagedLibraries = try NativePreviewCorrection.registryLibraries(in: app, previewLibraries: [])
+        let stagedLibraries = try NativePreviewTool.registryLibraries(in: app, previewLibraries: [])
         for binary in originalBinaries {
             #expect(try stagedLibraries.contains { try NativePreviewBinary.matches(binary, $0) })
         }
         #expect(try !stagedLibraries.contains { try NativePreviewBinary.matches(unrelated, $0) })
-        let paths = try NativePreviewCorrection.libraryPaths(in: app, previewLibraries: [],
+        let paths = try NativePreviewTool.libraryPaths(in: app, previewLibraries: [],
             registryLibraries: stagedLibraries, sourceOutput: source)
         #expect(paths == ["Contents/Frameworks/Feature.framework/Feature"])
         let dependencyPath = try #require(dependencies.products[dependencyAlias.deletingLastPathComponent().resolvingSymlinksInPath()])
         let stagedDependency = try #require(Bundle(url: frameworks.appendingPathComponent(dependencyPath)))
         let stagedMarker = try #require(stagedDependency.url(forResource: "Marker", withExtension: "txt"))
         #expect(try String(contentsOf: stagedMarker, encoding: .utf8) == "dependency resource")
-        try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies,
+        try await NativePreviewTool.relocateFrameworkDependencies(dependencies,
             in: NativePreviewPlatform.macOS.frameworksDirectory(in: app), process: process)
         try await previewBinaryOutput(app.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer").path,
             [frameworks.appendingPathComponent("Feature.framework/Feature").path])
@@ -1530,7 +1530,7 @@ struct NativePreviewCorrectionTests {
             linkerWorkingDirectory: root.path, objectFiles: [], sourceFiles: [], debugDylibEnabled: false, isRunnable: false)
         let helper = root.appendingPathComponent("Helper")
         let app = root.appendingPathComponent("Preview.app")
-        let dependencies = try NativePreviewCorrection.frameworkDependencies(for: [target], targets: [target], platform: .macOS,
+        let dependencies = try NativePreviewTool.frameworkDependencies(for: [target], targets: [target], platform: .macOS,
             in: NativePreviewPlatform.macOS.frameworksDirectory(in: app), sourceProduct: framework)
         try FileManager.default.createDirectory(at: helper.appendingPathComponent("Frameworks"), withIntermediateDirectories: true)
         let loaderSource = root.appendingPathComponent("Loader.c")
@@ -1543,13 +1543,13 @@ struct NativePreviewCorrectionTests {
         try await previewBinaryOutput(helper.appendingPathComponent("XcodeMCPPreviewRenderer").path, [source.path])
 
         let agent = try previewAgent(in: root, helper: helper)
-        try NativePreviewCorrection.prepareApp(product: agent, sourceProduct: framework, helper: helper, app: app, platform: .macOS)
-        try NativePreviewCorrection.copyFrameworkDependencies(dependencies, into: NativePreviewPlatform.macOS.frameworksDirectory(in: app))
+        try NativePreviewTool.prepareApp(product: agent, sourceProduct: framework, helper: helper, app: app, platform: .macOS)
+        try NativePreviewTool.copyFrameworkDependencies(dependencies, into: NativePreviewPlatform.macOS.frameworksDirectory(in: app))
 
         let developerDirectory = try await previewBinaryOutput("/usr/bin/xcode-select", ["-p"])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let process = NativePreviewProcess(installation: try NativeXcodeInstallation(developerDirectory: URL(filePath: developerDirectory)), artifacts: root)
-        try await NativePreviewCorrection.relocateFrameworkDependencies(dependencies,
+        try await NativePreviewTool.relocateFrameworkDependencies(dependencies,
             in: NativePreviewPlatform.macOS.frameworksDirectory(in: app), process: process)
 
         try await previewBinaryOutput(app.appendingPathComponent("Contents/MacOS/XcodeMCPPreviewRenderer").path,
@@ -1577,7 +1577,7 @@ struct NativePreviewCorrectionTests {
             linkCommandLine: ["-o", library.path], linkerWorkingDirectory: nil, objectFiles: [],
             sourceFiles: [source], debugDylibEnabled: false, isRunnable: false)] : [])
 
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
+        let selected = try NativePreviewTool.selectTarget(targets, source: source, platform: .iOS)
         #expect(selected.host.outputURL == target.outputURL)
         #expect(selected.source.moduleName == (linkedLibrary ? "ExtensionPreview" : "Extension"))
     }
@@ -1592,7 +1592,7 @@ struct NativePreviewCorrectionTests {
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [source],
                 debugDylibEnabled: true, isRunnable: product == "Host.app")
         }
-        let selected = try NativePreviewCorrection.selectTarget(targets, source: source, platform: .iOS)
+        let selected = try NativePreviewTool.selectTarget(targets, source: source, platform: .iOS)
         #expect(selected.host.outputURL == targets[1].outputURL)
         #expect(selected.source.outputURL == targets[1].outputURL)
     }
@@ -1617,9 +1617,9 @@ struct NativePreviewCorrectionTests {
                 linkerWorkingDirectory: nil, objectFiles: [], sourceFiles: [],
                 debugDylibEnabled: true, isRunnable: name != "Unselected")
         }
-        #expect(try NativePreviewCorrection.containingApp(for: output, targets: hosts)?.path
+        #expect(try NativePreviewTool.containingApp(for: output, targets: hosts)?.path
             == root.appendingPathComponent("Matching.app").path)
-        #expect(try NativePreviewCorrection.containingApp(for: output, targets: [hosts[0]]) == nil)
+        #expect(try NativePreviewTool.containingApp(for: output, targets: [hosts[0]]) == nil)
     }
 
     @Test(arguments: [false, true])
@@ -1649,7 +1649,7 @@ struct NativePreviewCorrectionTests {
         try originalInfo.write(to: product.appendingPathComponent("Info.plist"))
 
         let clientIdentifier = nativeClient ? "dev.lynnswap.PreviewClient" : nil
-        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app, containingApp: containing,
+        try NativePreviewTool.prepareApp(product: product, helper: helper, app: app, containingApp: containing,
             clientIdentifier: clientIdentifier)
 
         #expect(try Data(contentsOf: app.appendingPathComponent("Assets.car")) == resource)
@@ -1690,7 +1690,7 @@ struct NativePreviewCorrectionTests {
                 .write(to: localization.appendingPathComponent("InfoPlist.strings"))
         }
 
-        let name = try NativePreviewCorrection.appName(product: product, containingApp: hasContainingApp ? parent : nil,
+        let name = try NativePreviewTool.appName(product: product, containingApp: hasContainingApp ? parent : nil,
             localization: "ja-JP")
         #expect(name == (hasContainingApp ? "Parent JA" : "Extension JA"))
     }
@@ -1718,7 +1718,7 @@ struct NativePreviewCorrectionTests {
         try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
             .write(to: product.appendingPathComponent("Info.plist"))
 
-        try NativePreviewCorrection.prepareApp(product: product, helper: helper, app: app)
+        try NativePreviewTool.prepareApp(product: product, helper: helper, app: app)
 
         #expect(try Data(contentsOf: app.appendingPathComponent("XcodeMCPPreviewRenderer")) == rendererExecutable)
         #expect(try Data(contentsOf: app.appendingPathComponent("Frameworks/libPreviewRuntime.dylib")) == rendererFramework)
@@ -1753,7 +1753,7 @@ struct NativePreviewCorrectionTests {
             "UIAppFonts": ["FixtureFont.otf"],
             "FixtureCustom": ["environment": "staging"],
         ]
-        let output = NativePreviewCorrection.rendererInfo(input)
+        let output = NativePreviewTool.rendererInfo(input)
 
         #expect(output["CFBundleExecutable"] as? String == "XcodeMCPPreviewRenderer")
         #expect(output["CFBundlePackageType"] as? String == "APPL")
@@ -1780,7 +1780,7 @@ struct NativePreviewCorrectionTests {
     @Test func timeoutPreservesCleanupFailure() async {
         let identifier = UUID().uuidString
         do {
-            try await NativePreviewCorrection.withTimeout(seconds: 0) {
+            try await NativePreviewTool.withTimeout(seconds: 0) {
                 do {
                     try await Task.sleep(for: .seconds(60))
                 } catch is CancellationError {
@@ -1802,10 +1802,10 @@ struct NativePreviewCorrectionTests {
         try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"),
                                                 withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let correction = NativePreviewCorrection(installation: try NativeXcodeInstallation(developerDirectory: app))
+        let tool = NativePreviewTool(installation: try NativeXcodeInstallation(developerDirectory: app))
         let input = try JSONEncoder().encode(PreviewInput(temporaryArtifactsPath: root.path, sourceFilePath: "ContentView.swift"))
         let nativeEvent = Data(#"{"type":"completed","data":{"native":true}}"#.utf8)
-        let stream = try await correction.execute(inputType: PreviewInput.self, input: input, artifactsRoot: root) {
+        let stream = try await tool.execute(inputType: PreviewInput.self, input: input, artifactsRoot: root) {
             AsyncStream { continuation in
                 continuation.yield(nativeEvent)
                 continuation.finish()

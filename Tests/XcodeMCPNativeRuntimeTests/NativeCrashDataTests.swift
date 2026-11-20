@@ -132,7 +132,7 @@ struct NativeCrashDataTests {
         let query = NativeCrashQuery(bundleIdentifier: "com.example.app", platformIdentifier: "com.apple.platform.iphoneos",
             uploadPlatformIdentifier: "com.apple.platform.iphoneos", appVersion: nil, isBeta: nil,
             timePeriod: "last14Days", pageIndex: 0, pageSize: 25, collectsAllPages: true)
-        let snapshot = try NativeCrashToolCorrection.snapshot(collection: .issues, query: query,
+        let snapshot = try NativeCrashTools.snapshot(collection: .issues, query: query,
             issueID: nil, loaded: uncachedPage)
         #expect(!snapshot.sourceAvailable)
         #expect(!snapshot.isComplete)
@@ -400,7 +400,7 @@ struct NativeCrashDataTests {
         #expect(request.cursor == nil)
         #expect(request.source == .network)
 
-        for kind in [NativeCrashToolCorrection.Kind.start, .wait, .cancel, .resume] {
+        for kind in [NativeCrashTools.Kind.start, .wait, .cancel, .resume] {
             let tool = NativeCrashContract.describe(kind)
             #expect(!tool.workspaceScoped)
             #expect(try nativeTestField(tool.descriptor, "annotations", "readOnlyHint") == .bool(kind == .wait))

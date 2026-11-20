@@ -80,7 +80,7 @@ struct NativePreviewProcessTests {
         try await previewBinaryOutput("/usr/bin/xcrun",
                                       ["--sdk", "macosx", "clang", "-framework", "Foundation", source.path, "-o", executable.path])
         for (locale, greeting) in [("ja_JP", "こんにちは"), ("en_US", "Hello")] {
-            let output = try await fixture.process.run(executable.path, NativePreviewCorrection.rendererArguments(localization: locale))
+            let output = try await fixture.process.run(executable.path, NativePreviewTool.rendererArguments(localization: locale))
             #expect(output == "\(greeting)\n\(locale)\n")
         }
     }

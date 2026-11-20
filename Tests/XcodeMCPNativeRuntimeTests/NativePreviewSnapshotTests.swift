@@ -8,12 +8,12 @@ import Testing
 struct NativePreviewSnapshotTests {
     @Test func thumbnailCapsTheLongestSideWithoutUpscaling() throws {
         let large = try image(width: 2622, height: 1206)
-        let thumbnail = try #require(NativePreviewCorrection.thumbnail(from: large, maximumDimension: 1500,
+        let thumbnail = try #require(NativePreviewTool.thumbnail(from: large, maximumDimension: 1500,
             framebufferMask: nil, rotationDegrees: nil, swapsAxes: false))
         #expect(thumbnail.width == 1500)
         #expect(thumbnail.height == 689)
         let small = try image(width: 180, height: 90)
-        let unchanged = try #require(NativePreviewCorrection.thumbnail(from: small, maximumDimension: 1500,
+        let unchanged = try #require(NativePreviewTool.thumbnail(from: small, maximumDimension: 1500,
             framebufferMask: nil, rotationDegrees: nil, swapsAxes: false))
         #expect(unchanged.width == 180)
         #expect(unchanged.height == 90)
@@ -26,7 +26,7 @@ struct NativePreviewSnapshotTests {
             return true
         }
         let source = try image(width: 80, height: 40)
-        let images = NativePreviewCorrection.SnapshotImages()
+        let images = NativePreviewTool.SnapshotImages()
         func bitmap(_ image: CGImage, degrees: Double) throws -> NSBitmapImageRep {
             let png = try images.png(from: pngData(image), image: image, framebufferMask: mask,
                 rotationDegrees: degrees, swapsAxes: true, exclusion: nil, exclusionImage: nil)
@@ -50,9 +50,9 @@ struct NativePreviewSnapshotTests {
         context.fill(CGRect(x: 10, y: 70, width: 20, height: 10))
         let overlay = try #require(context.makeImage())
         let source = try image(width: 80, height: 40)
-        let left = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
+        let left = try #require(NativePreviewTool.thumbnail(from: source, maximumDimension: 1500,
             framebufferMask: nil, rotationDegrees: 90, swapsAxes: true, exclusionImage: overlay))
-        let right = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
+        let right = try #require(NativePreviewTool.thumbnail(from: source, maximumDimension: 1500,
             framebufferMask: nil, rotationDegrees: 270, swapsAxes: true, exclusionImage: overlay))
         let leftBitmap = NSBitmapImageRep(cgImage: left)
         let rightBitmap = NSBitmapImageRep(cgImage: right)
@@ -65,7 +65,7 @@ struct NativePreviewSnapshotTests {
 
     @Test func thinPreviewRetainsADrawableThumbnail() throws {
         let source = try image(width: 1, height: 6000)
-        let thumbnail = try #require(NativePreviewCorrection.thumbnail(from: source, maximumDimension: 1500,
+        let thumbnail = try #require(NativePreviewTool.thumbnail(from: source, maximumDimension: 1500,
             framebufferMask: nil, rotationDegrees: nil, swapsAxes: false))
         #expect(thumbnail.width == 1)
         #expect(thumbnail.height == 1500)
@@ -82,7 +82,7 @@ struct NativePreviewSnapshotTests {
         try profile.write(to: resources.appendingPathComponent("profile.plist"))
         let resource = resources.appendingPathComponent("Mask.png")
         try pngData(image(width: 40, height: 80)).write(to: resource)
-        let images = NativePreviewCorrection.SnapshotImages()
+        let images = NativePreviewTool.SnapshotImages()
         let source = try image(width: 40, height: 80)
         let sourcePNG = try pngData(source)
         func thumbnail() throws -> NSBitmapImageRep {
@@ -100,7 +100,7 @@ struct NativePreviewSnapshotTests {
     }
 
     @Test func displayExclusionChangesWithItsEncodedPixels() throws {
-        let images = NativePreviewCorrection.SnapshotImages()
+        let images = NativePreviewTool.SnapshotImages()
         let source = try image(width: 20, height: 20)
         let sourcePNG = try pngData(source)
         let white = try pngData(image(width: 20, height: 20))
