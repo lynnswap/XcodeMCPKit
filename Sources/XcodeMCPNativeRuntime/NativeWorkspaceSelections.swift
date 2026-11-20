@@ -3,7 +3,7 @@ import XcodeMCPWire
 
 /// The scheme, run destination, and test plan that one MCP session uses in a headless workspace.
 package struct NativeWorkspaceSelection: Equatable, Sendable {
-    /// The `_meta` key of a selection in requests and results between the proxy and the host.
+    /// The `_meta` key of a selection in requests and results between the server and the host.
     package static let metadataKey = "com.lynnswap.xcode-mcpkit/selection"
 
     /// The scheme's name, with its container when several schemes share the name.
@@ -27,7 +27,7 @@ package struct NativeWorkspaceSelection: Equatable, Sendable {
         return selection
     }
 
-    /// Reads the selection that the proxy sends in a request's `_meta`.
+    /// Reads the selection that the server sends in a request's `_meta`.
     package init?(json: JSONValue?) {
         guard case .object(let fields)? = json else { return nil }
         self.init(scheme: Self.string(fields["scheme"]), destination: Self.string(fields["destination"]),

@@ -36,7 +36,7 @@ a failure after selection does not switch a running host to another installation
 The standard `DEVELOPER_DIR` environment variable can prefer an installation:
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode_27.0.app/Contents/Developer xcode-mcp-proxy-server
+DEVELOPER_DIR=/Applications/Xcode_27.0.app/Contents/Developer xcode-mcp-server
 ```
 
 To use another installation for a workspace, pass a `hostIdentifier` from
@@ -46,7 +46,7 @@ retains that host for subsequent operations. See
 
 ## Server options
 
-Use `xcode-mcp-proxy-server --help` for CLI usage.
+Use `xcode-mcp-server --help` for CLI usage.
 
 | Option | Description |
 | --- | --- |
@@ -57,7 +57,7 @@ Use `xcode-mcp-proxy-server --help` for CLI usage.
 | `--share-compilation-cache` | Enable shared compilation caching and Swift/Clang prefix mapping in native hosts. Off by default; see [compilation caching](#compilation-caching). |
 | `--auto-approve` | Automatically allow MCP connection dialogs for agents connecting directly to GUI Xcode. Off by default; requires macOS Accessibility access. |
 | `--debug-endpoints` | Serve `/debug/hosts` and `/debug/reset` when the listener is loopback. Off by default. |
-| `--force-restart` | Terminate an existing `xcode-mcp-proxy-server` on the listen port before starting. |
+| `--force-restart` | Terminate an existing `xcode-mcp-server` on the listen port before starting. |
 | `--dry-run` | Print the resolved server command without starting it. |
 
 ## Crash data storage
@@ -75,7 +75,7 @@ new content versions are acquired.
 
 When launching the packaged native host directly, use `--crash-cache-root path`
 to select a different location. This is a native-host option, not an
-`xcode-mcp-proxy-server` option. Its `--artifacts-root` controls request artifacts
+`xcode-mcp-server` option. Its `--artifacts-root` controls request artifacts
 and does not change the persistent crash cache. See
 [crash collection](usage.md#collect-crash-reports) for acquisition and reading.
 
@@ -105,8 +105,8 @@ for admission and completion boundaries.
 | `XCODE_MCP_NATIVE_HOST_BUNDLE` | Helper bundle override for custom embedded/install layouts. |
 | `DEVELOPER_DIR` | Xcode selection for the native host. |
 | `MCP_LOG_LEVEL` | `trace`, `debug`, `info`, `notice`, `warning`, `error`, or `critical`. Defaults to `info`; `debug` includes native console output, HTTP access, and routing telemetry. |
-| `XCODE_MCP_PROXY_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
-| `XCODE_MCP_PROXY_CACHE_ROOT` | Cache root for the discovery path when `XCODE_MCP_PROXY_DISCOVERY_FILE` is unset. |
+| `XCODE_MCP_SERVER_DISCOVERY_FILE` | Discovery file override for isolated local/live test runs. |
+| `XCODE_MCP_SERVER_CACHE_ROOT` | Cache root for the discovery path when `XCODE_MCP_SERVER_DISCOVERY_FILE` is unset. |
 
 ### Logging
 
@@ -115,7 +115,7 @@ matches a recognized diagnostic format. The default `info` level hides these
 lines. To inspect them, start the server with:
 
 ```bash
-MCP_LOG_LEVEL=debug xcode-mcp-proxy-server
+MCP_LOG_LEVEL=debug xcode-mcp-server
 ```
 
 The helper marks each line of its own diagnostics with
@@ -128,7 +128,7 @@ level, and native-host NSLog diagnostics remain errors.
 
 `--auto-approve` monitors running Xcode permission-dialog processes and presses
 `Allow` on MCP connection dialogs for agents connecting directly to Xcode
-through the proxy's Apple bridge or from external clients. Proxy workspace
+through the server's Apple bridge or from external clients. Server workspace
 operations run headlessly and do not create these dialogs. Grant macOS Accessibility access to the process hosting
 the server when prompted; otherwise dialogs remain for manual approval.
 
@@ -145,7 +145,7 @@ Start the server with `--share-compilation-cache` to reuse compatible
 compilation results across worktrees:
 
 ```bash
-xcode-mcp-proxy-server --share-compilation-cache
+xcode-mcp-server --share-compilation-cache
 ```
 
 This opt-in enables compilation caching and Swift/Clang prefix mapping in native
@@ -223,7 +223,7 @@ to apply a changed setting to an already running native host.
 For an explicit override, start the server with the service executable path:
 
 ```sh
-XCBBUILDSERVICE_PATH=/path/to/SWBBuildServiceBundle xcode-mcp-proxy-server
+XCBBUILDSERVICE_PATH=/path/to/SWBBuildServiceBundle xcode-mcp-server
 ```
 
 When neither environment specifies a service, Swift Build uses the selected

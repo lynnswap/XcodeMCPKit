@@ -12,12 +12,12 @@
 ## Use the Swift libraries
 
 - [XcodeMCPKit](../Sources/XcodeMCPKit/README.md): discover and call MCP tools.
-- [XcodeMCPProxyKit](../Sources/XcodeMCPProxyKit/README.md): embed the server.
+- [XcodeMCPServerKit](../Sources/XcodeMCPServerKit/README.md): embed the server.
 - [XcodeMCPKitTesting](../Sources/XcodeMCPKitTesting/README.md): use the client API with an in-memory runtime.
 
 ## Maintain the project
 
 - [Architecture](architecture.md): public contracts, routing, sessions, and HTTP delivery.
 - [Maintainer guide](maintainer-architecture.md): module ownership, native integration constraints, and verification.
-- [Live tool verifier](../Sources/XcodeMCPProxyToolVerifier/README.md): disposable fixtures and preview comparisons.
+- [Live tool verifier](../Sources/XcodeMCPToolVerifier/README.md): disposable fixtures and preview comparisons.
 - [Homebrew distribution](../Homebrew/README.md): release approval, publication, and recovery.

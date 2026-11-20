@@ -5,14 +5,14 @@
 | Module | Responsibility |
 | --- | --- |
 | `XcodeMCPCore` | Code that the SDK and the server share: clocks, endpoint discovery, native host lookup, SSE framing, and subprocess primitives. Depends only on `XcodeMCPWire`, so the SDK product builds without swift-nio or swift-log. |
-| `XcodeMCPInstallation` | Installation discovery and path normalization shared by proxy and native host. |
+| `XcodeMCPInstallation` | Installation discovery and path normalization shared by server and native host. |
 | `XcodeMCPKit` | Public Swift client and MCP values. `MCPClientSessionAuthority` owns transport identity/recovery; `InitializedMCPClientSession` owns request correlation and progress lanes. |
 | `XcodeMCPNativeRuntime` / `XcodeMCPNativeHost` | Xcode framework integration, native actions, headless workspace models, execution queues, and owned preview resources. |
-| `XcodeMCPProxyRuntimeContract` | Package request/reply/session values and serving protocols. No execution or I/O state. |
-| `XcodeMCPProxyRuntime` | Public tool contract and handle routing (`Broker/`), and one connection per host process with its catalog, request correlation, and recovery (`Host/`). |
-| `XcodeMCPProxyHTTP` | Listener, protocol validation, MCP session lifetime (`HTTPSessionStore`), responses, and SSE delivery, including each request's progress on its POST response. Depends on the runtime contract rather than concrete Runtime. |
+| `XcodeMCPServerRuntimeContract` | Package request/reply/session values and serving protocols. No execution or I/O state. |
+| `XcodeMCPServerRuntime` | Public tool contract and handle routing (`Broker/`), and one connection per host process with its catalog, request correlation, and recovery (`Host/`). |
+| `XcodeMCPServerHTTP` | Listener, protocol validation, MCP session lifetime (`HTTPSessionStore`), responses, and SSE delivery, including each request's progress on its POST response. Depends on the runtime contract rather than concrete Runtime. |
 | `XcodeMCPPermissionAutomation` | Accessibility dialog recognition and opt-in approval monitor. Independent of native execution and routing. |
-| `XcodeMCPProxyKit` | Public server facade, runtime/HTTP composition, discovery, CLI hosting, and installation. |
+| `XcodeMCPServerKit` | Public server facade, runtime/HTTP composition, discovery, CLI hosting, and installation. |
 
 Runtime and HTTP use Core rather than importing the public SDK. Internal targets
 remain package implementation, not library products. The SDK keeps transport
@@ -60,7 +60,7 @@ Shutdown stops admission and awaits owned tasks before closing workspace and
 transport resources. In the native host, the main task owns shutdown and runs it
 once, for whichever comes first: input end, input or output failure, or a failure
 that leaves Xcode's state in the process unreliable (such as a failed testable-state
-hook). The failing request still gets its reply; the proxy then fails in-flight
+hook). The failing request still gets its reply; the server then fails in-flight
 requests and starts a new process on the next use. Input framing and preview
 product digests run off the main actor, which Xcode's models use. `deinit` is a synchronous cancellation backstop and must not
 spawn an unowned task or promise graceful shutdown. Report cleanup failure
@@ -68,7 +68,7 @@ alongside the original failure. Do not replay mutations with unknown delivery.
 
 The native host retains a dedicated stdout descriptor for MCP messages and
 redirects ordinary stdout to stderr, keeping framework output out of the protocol
-stream. The proxy logs stderr lines without a recognized diagnostic format at
+stream. The server logs stderr lines without a recognized diagnostic format at
 `debug`, including test progress and other console output. The default `info`
 level hides them; `MCP_LOG_LEVEL=debug` makes them available for diagnosis.
 Each line of the helper's own diagnostics carries
@@ -315,7 +315,7 @@ and account operations require their own checks.
 Run the relevant existing suite with an explicit macOS destination, for example:
 
 ```sh
-xcodebuild test -workspace XcodeMCPKit.xcworkspace -scheme XcodeMCPProxyRuntimeTests -destination 'platform=macOS'
+xcodebuild test -workspace XcodeMCPKit.xcworkspace -scheme XcodeMCPServerRuntimeTests -destination 'platform=macOS'
 ```
 
 | Test target | Boundary |
@@ -323,18 +323,18 @@ xcodebuild test -workspace XcodeMCPKit.xcworkspace -scheme XcodeMCPProxyRuntimeT
 | `XcodeMCPCoreTests` | Wire/framing, SSE codec, discovery, and native host lookup. |
 | `XcodeMCPProcessRuntimeTests` | Process I/O and termination with fake drivers and opt-in live cases. |
 | `XcodeMCPNativeRuntimeTests` | Native schemas, workspace/execution lifetime, previews, and documentation assets. |
-| `XcodeMCPProxyRuntimeTests` | Public/backend contracts, handle routing, scheduling, and recovery. |
-| `XcodeMCPProxyHTTPTests` | HTTP/SSE gateway with a runtime-contract fake. |
-| `ProxyIntegrationTests` | Actual HTTP/runtime and configuration composition. |
+| `XcodeMCPServerRuntimeTests` | Public/backend contracts, handle routing, scheduling, and recovery. |
+| `XcodeMCPServerHTTPTests` | HTTP/SSE gateway with a runtime-contract fake. |
+| `ServerIntegrationTests` | Actual HTTP/runtime and configuration composition. |
 | `PublicProductContractTests` | Supported library consumers compiled from an external package. |
 
-Core fixtures live in `XcodeMCPCoreTestSupport`, shared proxy fixtures in
-`XcodeMCPProxyTestSupport`, and scripted host processes (`FakeHostSession`) in
-`XcodeMCPProxyRuntimeTestSupport`. A fixture used by one suite stays with that
+Core fixtures live in `XcodeMCPCoreTestSupport`, shared server fixtures in
+`XcodeMCPServerTestSupport`, and scripted host processes (`FakeHostSession`) in
+`XcodeMCPServerRuntimeTestSupport`. A fixture used by one suite stays with that
 suite. Keep deterministic observations at owner boundaries instead of adding
 production test hooks or reproducing internal branch order in assertions.
 
-`scripts/verify-proxy-target-boundaries.sh` checks dependency direction;
+`scripts/verify-server-target-boundaries.sh` checks dependency direction;
 `scripts/check.sh` runs the full local maintainer checks. Package test schemes
 can include several targets. Filtering execution does not prove compilation
 isolation; inspect `swift build --target <target> -v` when that boundary matters.
@@ -352,9 +352,9 @@ python3 scripts/benchmark-live-server.py --agents 4 --requests-per-agent 100
 It uses persistent sessions against a running server and deletes those sessions
 on exit. Non-loopback endpoints require `--allow-non-loopback`.
 
-For live checks, use the [tool verifier](../Sources/XcodeMCPProxyToolVerifier/README.md)
+For live checks, use the [tool verifier](../Sources/XcodeMCPToolVerifier/README.md)
 and disposable saved projects with an explicit scheme, destination, and test plan.
-The legacy `ProxyLiveMCPBridgeTests` suite name remains a test identifier for
+The legacy `LiveMCPBridgeTests` suite name remains a test identifier for
 owned-host smoke cases. Verify workspace listing and operations with GUI Xcode
 both closed and running; neither case may connect to the GUI process or require
 its MCP connection approval.

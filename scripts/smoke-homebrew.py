@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise installed proxy and native-host MCP sessions using a disposable fixture."""
+"""Exercise installed server and native-host MCP sessions using a disposable fixture."""
 
 import argparse
 import asyncio
@@ -81,7 +81,7 @@ async def exercise(request, fixture):
         raise RuntimeError(f"Installed native backend could not list headless workspaces: {listed}")
     workspaces = listed.get("structuredContent", {}).get("workspaces", [])
     if any(workspace.get("kind") == "gui" for workspace in workspaces):
-        raise RuntimeError("Installed proxy exposed GUI workspaces during headless discovery")
+        raise RuntimeError("Installed server exposed GUI workspaces during headless discovery")
     result = await request(4, "tools/call", dict(name="XcodeRead", arguments=dict(
         workspaceIdentifier=str(fixture / "ProxyToolVerifierFixture.xcodeproj"),
         filePath="ProxyToolVerifierFixture/VerifierCore.swift", limit=40)))
@@ -117,7 +117,7 @@ def verify_closed_pipes(executable, artifacts, environment):
 
 
 async def verify(prefix, version, fixture_source):
-    server = prefix / "bin/xcode-mcp-proxy-server"
+    server = prefix / "bin/xcode-mcp-server"
     bundle = prefix / "libexec/XcodeMCPNativeHost.app"
     actual = subprocess.check_output([str(server), "--version"], text=True).strip()
     if actual != version:
@@ -128,10 +128,10 @@ async def verify(prefix, version, fixture_source):
         fixture = root / "Fixture"
         shutil.copytree(fixture_source, fixture)
         discovery = root / "endpoint.json"
-        environment = dict(os.environ, XCODE_MCP_PROXY_DISCOVERY_FILE=str(discovery),
-                           XCODE_MCP_PROXY_CACHE_ROOT=str(root / "cache"))
+        environment = dict(os.environ, XCODE_MCP_SERVER_DISCOVERY_FILE=str(discovery),
+                           XCODE_MCP_SERVER_CACHE_ROOT=str(root / "cache"))
         environment.pop("XCODE_MCP_NATIVE_HOST_BUNDLE", None)
-        environment.pop("XCODE_MCP_PROXY_ENDPOINT", None)
+        environment.pop("XCODE_MCP_SERVER_ENDPOINT", None)
         await asyncio.to_thread(verify_closed_pipes,
                                 bundle / "Contents/MacOS/xcode-mcp-native-host",
                                 root / "disconnect-artifacts", environment)
@@ -153,11 +153,11 @@ async def verify(prefix, version, fixture_source):
                 await asyncio.wait_for(native.wait(), timeout=30)
                 if native.returncode:
                     raise RuntimeError(f"Native helper exited with {native.returncode}")
-                proxy = await launch(server, "--host", "127.0.0.1", "--port", "0")
+                server_process = await launch(server, "--host", "127.0.0.1", "--port", "0")
                 async with asyncio.timeout(60):
                     while not discovery.exists():
-                        if proxy.returncode is not None:
-                            raise RuntimeError(f"Proxy exited with {proxy.returncode}")
+                        if server_process.returncode is not None:
+                            raise RuntimeError(f"Server exited with {server_process.returncode}")
                         await asyncio.sleep(0.05)
                 endpoint = json.loads(discovery.read_text())["url"]
                 await exercise(http_client(endpoint), fixture)
@@ -174,7 +174,7 @@ async def verify(prefix, version, fixture_source):
                         except TimeoutError:
                             os.killpg(process.pid, signal.SIGKILL)
                             await process.wait()
-    print("Installed CLI version, native signature, early disconnect, direct MCP, and proxy MCP passed.")
+    print("Installed CLI version, native signature, early disconnect, direct MCP, and server MCP passed.")
 
 
 def main():

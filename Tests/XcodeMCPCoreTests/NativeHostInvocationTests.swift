@@ -15,9 +15,9 @@ struct NativeHostInvocationTests {
         try manager.createDirectory(at: helper.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data().write(to: helper)
         try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
-        let server = libexec.appendingPathComponent("xcode-mcp-proxy-server")
+        let server = libexec.appendingPathComponent("xcode-mcp-server")
         try Data().write(to: server)
-        try manager.createSymbolicLink(at: bin.appendingPathComponent("xcode-mcp-proxy-server"), withDestinationURL: server)
+        try manager.createSymbolicLink(at: bin.appendingPathComponent("xcode-mcp-server"), withDestinationURL: server)
 
         let invocation = try NativeHostInvocation.resolve(
             environment: ["PATH": bin.path], executableURL: nil)
@@ -63,7 +63,7 @@ struct NativeHostInvocationTests {
         fileSystem.isExecutableFile = { $0 == "/installed/XcodeMCPNativeHost.app/Contents/MacOS/xcode-mcp-native-host" }
         let invocation = try NativeHostInvocation.resolve(
             environment: adjacent ? [:] : ["PATH": "/missing:/installed"],
-            executableURL: adjacent ? URL(fileURLWithPath: "/installed/xcode-mcp-proxy-server") : nil,
+            executableURL: adjacent ? URL(fileURLWithPath: "/installed/xcode-mcp-server") : nil,
             fileSystem: fileSystem)
         #expect(invocation.command == "/installed/XcodeMCPNativeHost.app/Contents/MacOS/xcode-mcp-native-host")
     }

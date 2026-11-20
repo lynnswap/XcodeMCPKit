@@ -14,9 +14,9 @@ from typing import Any
 
 
 DEFAULT_ENDPOINT = "http://localhost:8765/mcp"
-ENDPOINT_ENV = "XCODE_MCP_PROXY_ENDPOINT"
-DISCOVERY_FILE_ENV = "XCODE_MCP_PROXY_DISCOVERY_FILE"
-CACHE_ROOT_ENV = "XCODE_MCP_PROXY_CACHE_ROOT"
+ENDPOINT_ENV = "XCODE_MCP_SERVER_ENDPOINT"
+DISCOVERY_FILE_ENV = "XCODE_MCP_SERVER_DISCOVERY_FILE"
+CACHE_ROOT_ENV = "XCODE_MCP_SERVER_CACHE_ROOT"
 SESSION_HEADER = "Mcp-Session-Id"
 PROTOCOL_HEADER = "MCP-Protocol-Version"
 PROTOCOL_VERSION = "2025-06-18"
@@ -209,7 +209,7 @@ class HTTPConnection:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark an already-running xcode-mcp-proxy-server. Each agent "
+            "Benchmark an already-running xcode-mcp-server. Each agent "
             "opens one MCP session, sends DocumentationSearch requests in a "
             "closed loop, then reports throughput and per-request latency "
             "percentiles."
@@ -218,7 +218,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--endpoint",
         help=(
-            "Proxy endpoint URL. Defaults to XCODE_MCP_PROXY_ENDPOINT, then the "
+            "Server endpoint URL. Defaults to XCODE_MCP_SERVER_ENDPOINT, then the "
             "discovery file, then http://localhost:8765/mcp."
         ),
     )
@@ -297,7 +297,7 @@ def discovery_file_path() -> str:
         root = os.path.expanduser(cache_root)
     else:
         root = os.path.expanduser("~/Library/Caches")
-    return os.path.join(root, "XcodeMCPProxy", "endpoint.json")
+    return os.path.join(root, "XcodeMCPServer", "endpoint.json")
 
 
 def read_discovery_endpoint(

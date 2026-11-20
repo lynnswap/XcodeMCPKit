@@ -294,7 +294,7 @@ jobs:
           python3 scripts/package_release.py verify --version "$VERSION" \
             --release-dir release --checksums-sha256 "$CHECKSUMS_SHA256"
 
-      - name: Build, bottle, reinstall and exercise the native helper and proxy
+      - name: Build, bottle, reinstall and exercise the native helper and server
         run: scripts/test-homebrew.sh release
 
   tap-status:
@@ -399,7 +399,7 @@ jobs:
           if not installed["poured_from_bottle"]:
               sys.exit("Published tap verification expected a bottle installation.")
           '
-          installed_binary="$(brew --prefix "$formula")/bin/xcode-mcp-proxy-server"
+          installed_binary="$(brew --prefix "$formula")/bin/xcode-mcp-server"
           test "$("$installed_binary" --version)" = "$VERSION"
           brew test "$formula"
           "$(brew --prefix python@3.14)/bin/python3.14" \

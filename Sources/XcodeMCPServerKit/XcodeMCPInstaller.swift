@@ -1,0 +1,421 @@
+import Darwin
+import Foundation
+import XcodeMCPCore
+
+/// Destination and mode settings for a source install.
+package struct XcodeMCPInstallerConfiguration: Equatable, Sendable {
+    /// Install prefix used when ``binaryDirectory`` is not set.
+    package var prefix: String?
+
+    /// Explicit binary directory. This takes precedence over ``prefix``.
+    package var binaryDirectory: String?
+
+    /// Whether to only compute and print the install plan.
+    package var dryRun: Bool
+
+    /// Creates installer configuration.
+    package init(
+        prefix: String? = nil,
+        binaryDirectory: String? = nil,
+        dryRun: Bool = false
+    ) {
+        self.prefix = prefix
+        self.binaryDirectory = binaryDirectory
+        self.dryRun = dryRun
+    }
+}
+
+/// Installer facade for Xcode MCP server executables.
+package struct XcodeMCPInstaller: Sendable {
+    /// Top-level action for an installer invocation.
+    package enum LaunchAction: Equatable, Sendable {
+        case display(String)
+        case install(XcodeMCPInstallerConfiguration)
+    }
+
+    /// One server executable that will be copied by an install plan.
+    package struct Binary: Equatable, Sendable {
+        /// Executable file name.
+        package let name: String
+
+        /// Source executable path.
+        package let sourceURL: URL
+
+        /// Destination executable path.
+        package let destinationURL: URL
+
+        /// Creates a binary copy entry.
+        package init(name: String, sourceURL: URL, destinationURL: URL) {
+            self.name = name
+            self.sourceURL = sourceURL
+            self.destinationURL = destinationURL
+        }
+    }
+
+    /// Signed native helper application included in the install.
+    package struct ApplicationBundle: Equatable, Sendable {
+        package let sourceURL: URL
+        package let destinationURL: URL
+    }
+
+    /// Fully resolved install plan.
+    package struct InstallPlan: Equatable, Sendable {
+        /// Directory where executables will be installed.
+        package let binDirectory: URL
+
+        /// Executables included in the install.
+        package let binaries: [Binary]
+
+        /// Native helper application installed beside the executables.
+        package let nativeHostBundle: ApplicationBundle
+
+        /// Whether the plan should be displayed without copying files.
+        package let dryRun: Bool
+
+        /// Creates an install plan.
+        package init(binDirectory: URL, binaries: [Binary], nativeHostBundle: ApplicationBundle, dryRun: Bool) {
+            self.binDirectory = binDirectory
+            self.binaries = binaries
+            self.nativeHostBundle = nativeHostBundle
+            self.dryRun = dryRun
+        }
+
+        /// Human-readable lines printed for a dry run.
+        package var dryRunLines: [String] {
+            var lines = ["Would create: \(binDirectory.path)"]
+            lines.append(contentsOf: binaries.map { "Would install: \($0.destinationURL.path)" })
+            lines.append("Would install: \(nativeHostBundle.destinationURL.path)")
+            return lines
+        }
+    }
+
+    /// Errors raised while planning or executing an install.
+    package enum Error: Swift.Error, CustomStringConvertible, Equatable {
+        /// A user-facing install failure message.
+        case message(String)
+
+        /// User-facing error description.
+        package var description: String {
+            switch self {
+            case .message(let text):
+                return text
+            }
+        }
+    }
+
+    /// Executable product names installed by the source installer.
+    package static let binaryNames = [
+        "xcode-mcp-server",
+    ]
+
+    package static let nativeHostBundleName = NativeHostInvocation.bundleName
+
+    /// Installer configuration.
+    package var configuration: XcodeMCPInstallerConfiguration
+
+    /// Creates an installer facade.
+    package init(
+        configuration: XcodeMCPInstallerConfiguration =
+            XcodeMCPInstallerConfiguration()
+    ) {
+        self.configuration = configuration
+    }
+
+    /// CLI usage for `xcode-mcp-install`.
+    package static var installUsage: String {
+        InstallCommand.helpMessage()
+    }
+
+    package static func resolveLaunchAction(
+        arguments: [String],
+        environment: [String: String]
+    ) throws -> LaunchAction {
+        switch try CLICommandParser.parse(InstallCommand.self, arguments: arguments) {
+        case .cleanExit(let message):
+            return .display(message)
+        case .command(let command):
+            return .install(
+                XcodeMCPInstallerConfiguration(
+                    prefix: command.prefix ?? environment["PREFIX"],
+                    binaryDirectory: command.bindir ?? environment["BINDIR"],
+                    dryRun: command.dryRun
+                )
+            )
+        }
+    }
+
+    /// Resolves the file operations that would be performed for an install.
+    ///
+    /// - Parameter executableURL: Path to the running installer executable.
+    /// - Returns: A plan containing source and destination executable paths.
+    package func plan(executableURL: URL) -> InstallPlan {
+        let sourceDirectory = executableURL.deletingLastPathComponent()
+        let binDirectory = Self.resolveBinDirectory(
+            prefix: configuration.prefix,
+            binaryDirectory: configuration.binaryDirectory
+        )
+        let binaries = Self.binaryNames.map { name in
+            Binary(
+                name: name,
+                sourceURL: sourceDirectory.appendingPathComponent(name),
+                destinationURL: binDirectory.appendingPathComponent(name)
+            )
+        }
+        return InstallPlan(
+            binDirectory: binDirectory,
+            binaries: binaries,
+            nativeHostBundle: ApplicationBundle(
+                sourceURL: sourceDirectory.appendingPathComponent(Self.nativeHostBundleName),
+                destinationURL: binDirectory.appendingPathComponent(Self.nativeHostBundleName)
+            ),
+            dryRun: configuration.dryRun
+        )
+    }
+
+    /// Builds release products when needed and installs the server executables.
+    ///
+    /// When ``XcodeMCPInstallerConfiguration/dryRun`` is true this method
+    /// prints the dry-run plan and does not create directories or copy files.
+    package func install(
+        executableURL: URL,
+        stdout: (String) -> Void = { print($0) }
+    ) throws {
+        try install(
+            executableURL: executableURL,
+            fileManager: .default,
+            buildProducts: Self.buildProducts,
+            stdout: stdout
+        )
+    }
+
+    package func install(
+        executableURL: URL,
+        fileManager: FileManager = .default,
+        buildProducts: ([String], URL, URL) throws -> Void,
+        verifyNativeHostBundle: (URL) throws -> Void = Self.verifyNativeHostBundle,
+        replaceNativeHostBundle: (URL, URL) throws -> Void = Self.replaceNativeHostBundle,
+        stdout: (String) -> Void
+    ) throws {
+        let plan = plan(executableURL: executableURL)
+        if plan.dryRun {
+            for line in plan.dryRunLines {
+                stdout(line)
+            }
+            return
+        }
+
+        try fileManager.createDirectory(
+            at: plan.binDirectory,
+            withIntermediateDirectories: true
+        )
+        // Staging on the destination filesystem lets rename replace each executable atomically.
+        let stagingDirectory = plan.binDirectory.appendingPathComponent(
+            ".xcode-mcp-install-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: stagingDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        var installedPaths: [String] = []
+        var activeName: String?
+        let stagedBundle = stagingDirectory.appendingPathComponent(Self.nativeHostBundleName)
+        var failures: [String] = []
+        do {
+            activeName = Self.nativeHostBundleName
+            if let repoRoot = Self.repositoryRoot(from: executableURL),
+               fileManager.fileExists(atPath: repoRoot.appendingPathComponent("Package.swift").path) {
+                try buildProducts(Self.binaryNames, repoRoot, stagedBundle)
+            } else {
+                try fileManager.copyItem(at: plan.nativeHostBundle.sourceURL.resolvingSymlinksInPath(), to: stagedBundle)
+            }
+            try verifyNativeHostBundle(stagedBundle)
+            for binary in plan.binaries {
+                activeName = binary.name
+                let stagedURL = stagingDirectory.appendingPathComponent(binary.name)
+                try fileManager.copyItem(
+                    at: binary.sourceURL.resolvingSymlinksInPath(),
+                    to: stagedURL
+                )
+                try fileManager.setAttributes(
+                    [.posixPermissions: 0o755],
+                    ofItemAtPath: stagedURL.path
+                )
+            }
+
+            for binary in plan.binaries {
+                activeName = binary.name
+                let stagedURL = stagingDirectory.appendingPathComponent(binary.name)
+                guard unsafe rename(stagedURL.path, binary.destinationURL.path) == 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                installedPaths.append(binary.destinationURL.path)
+                stdout("Installed \(binary.name) to \(binary.destinationURL.path)")
+            }
+            activeName = Self.nativeHostBundleName
+            let destination = plan.nativeHostBundle.destinationURL
+            try replaceNativeHostBundle(stagedBundle, destination)
+            installedPaths.append(destination.path)
+            stdout("Installed \(Self.nativeHostBundleName) to \(destination.path)")
+        } catch {
+            failures.append("Failed to install \(activeName ?? "products"): \(error)")
+        }
+
+        do {
+            try fileManager.removeItem(at: stagingDirectory)
+        } catch {
+            failures.append("Failed to remove staging directory \(stagingDirectory.path): \(error)")
+        }
+
+        if !failures.isEmpty {
+            let paths = plan.binaries.map(\.destinationURL.path) + [plan.nativeHostBundle.destinationURL.path]
+            let remainingPaths = paths.filter { !installedPaths.contains($0) }
+            failures.append("Installed: \(installedPaths.isEmpty ? "none" : installedPaths.joined(separator: ", "))")
+            failures.append("Not installed: \(remainingPaths.isEmpty ? "none" : remainingPaths.joined(separator: ", "))")
+            throw Error.message(failures.joined(separator: "\n"))
+        }
+    }
+
+    /// Resolves the destination binary directory.
+    ///
+    /// `binaryDirectory` takes precedence over `prefix`; otherwise this returns
+    /// `~/.local/bin`.
+    package static func resolveBinDirectory(prefix: String?, binaryDirectory: String?) -> URL {
+        if let binaryDirectory {
+            return URL(fileURLWithPath: expandPath(binaryDirectory), isDirectory: true)
+        }
+
+        let defaultPrefix = prefix ?? "\(NSHomeDirectory())/.local"
+        let expandedPrefix = expandPath(defaultPrefix)
+        return URL(fileURLWithPath: expandedPrefix, isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+    }
+
+    /// Expands a leading tilde in a filesystem path.
+    package static func expandPath(_ path: String) -> String {
+        if path.hasPrefix("~") {
+            return (path as NSString).expandingTildeInPath
+        }
+        return path
+    }
+
+    package static func repositoryRoot(from executableURL: URL) -> URL? {
+        var current = executableURL
+        while current.path != "/" {
+            if current.lastPathComponent == ".build" {
+                return current.deletingLastPathComponent()
+            }
+            current = current.deletingLastPathComponent()
+        }
+        return nil
+    }
+
+    package static func buildProducts(_ products: [String], in directory: URL, nativeHostBundleURL: URL) throws {
+        do {
+            try ServerProductBuilder.buildReleaseProducts(products, in: directory, nativeHostBundleURL: nativeHostBundleURL)
+        } catch let error as ServerProductBuilder.Error {
+            throw Error.message(error.description)
+        }
+    }
+
+    private static func verifyNativeHostBundle(_ bundleURL: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        process.arguments = ["--verify", "--strict", bundleURL.path]
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw Error.message("Native helper signature verification failed for \(bundleURL.path) (status \(process.terminationStatus))")
+        }
+    }
+
+    private static func replaceNativeHostBundle(_ staged: URL, _ destination: URL) throws {
+        let flags = FileManager.default.fileExists(atPath: destination.path) ? UInt32(RENAME_SWAP) : UInt32(RENAME_EXCL)
+        guard unsafe renamex_np(staged.path, destination.path, flags) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+}
+
+extension XcodeMCPInstaller {
+    package struct Launcher {
+        package struct Dependencies {
+            package var executableURL: () -> URL?
+            package var install: (XcodeMCPInstallerConfiguration, URL, (String) -> Void) throws -> Void
+
+            package init(
+                executableURL: @escaping () -> URL?,
+                install:
+                    @escaping (
+                        XcodeMCPInstallerConfiguration,
+                        URL,
+                        (String) -> Void
+                    ) throws -> Void
+            ) {
+                self.executableURL = executableURL
+                self.install = install
+            }
+
+            package static var live: Self {
+                Self(
+                    executableURL: { Bundle.main.executableURL },
+                    install: { configuration, executableURL, stdout in
+                        try XcodeMCPInstaller(configuration: configuration).install(
+                            executableURL: executableURL,
+                            stdout: stdout
+                        )
+                    }
+                )
+            }
+        }
+
+        private let dependencies: Dependencies
+
+        package init(dependencies: Dependencies = .live) {
+            self.dependencies = dependencies
+        }
+
+        package func run(
+            arguments: [String],
+            environment: [String: String],
+            stdout: (String) -> Void,
+            stderr: (String) -> Void
+        ) -> Int32 {
+            do {
+                let action = try XcodeMCPInstaller.resolveLaunchAction(
+                    arguments: arguments,
+                    environment: environment
+                )
+
+                switch action {
+                case .display(let message):
+                    stdout(message)
+                    return 0
+                case .install(let configuration):
+                    guard let executableURL = dependencies.executableURL() else {
+                        throw XcodeMCPInstaller.Error.message(
+                            "failed to locate installer executable"
+                        )
+                    }
+                    try dependencies.install(configuration, executableURL, stdout)
+                    return 0
+                }
+            } catch let error as CLICommandError {
+                stderr(error.description)
+                return error.exitCode
+            } catch let error as XcodeMCPInstaller.Error {
+                stderr("error: \(error.description)")
+                stderr("run with --help for usage")
+                return 1
+            } catch {
+                stderr("error: \(error)")
+                return 1
+            }
+        }
+    }
+}

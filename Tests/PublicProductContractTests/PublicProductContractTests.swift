@@ -22,7 +22,7 @@ struct PublicProductContractTests {
 
         try makeFixturePackage(at: fixtureURL, repositoryRoot: repositoryRoot)
 
-        for target in ["XcodeMCPKitClient", "XcodeMCPKitTestingClient", "XcodeMCPProxyKitClient", "XcodeMCPProxyKitOnlyClient"] {
+        for target in ["XcodeMCPKitClient", "XcodeMCPKitTestingClient", "XcodeMCPServerKitClient", "XcodeMCPServerKitOnlyClient"] {
             let result = try runSwiftBuild(
                 packageURL: fixtureURL,
                 logURL: fixtureURL.appendingPathComponent("\(target)-swift-build.log"),
@@ -61,8 +61,8 @@ struct PublicProductContractTests {
     private func makeFixturePackage(at packageURL: URL, repositoryRoot: URL) throws {
         let fixtureTargets = [
             "XcodeMCPKitClient",
-            "XcodeMCPProxyKitClient",
-            "XcodeMCPProxyKitOnlyClient",
+            "XcodeMCPServerKitClient",
+            "XcodeMCPServerKitOnlyClient",
             "XcodeMCPKitTestingClient",
         ] + lowLevelImportChecks.map(\.targetName)
             + removedSurfaceChecks.map(\.targetName)
@@ -83,12 +83,12 @@ struct PublicProductContractTests {
             to: packageURL.appendingPathComponent("Sources/XcodeMCPKitClient/Contract.swift")
         )
         try writeIfChanged(
-            xcodeMCPProxyKitClientSource,
-            to: packageURL.appendingPathComponent("Sources/XcodeMCPProxyKitClient/Contract.swift")
+            xcodeMCPServerKitClientSource,
+            to: packageURL.appendingPathComponent("Sources/XcodeMCPServerKitClient/Contract.swift")
         )
         try writeIfChanged(
-            xcodeMCPProxyKitOnlyClientSource,
-            to: packageURL.appendingPathComponent("Sources/XcodeMCPProxyKitOnlyClient/Contract.swift")
+            xcodeMCPServerKitOnlyClientSource,
+            to: packageURL.appendingPathComponent("Sources/XcodeMCPServerKitOnlyClient/Contract.swift")
         )
         try writeIfChanged(
             xcodeMCPKitTestingClientSource,
@@ -151,10 +151,10 @@ struct PublicProductContractTests {
                     ]
                 ),
                 .target(
-                    name: "XcodeMCPProxyKitClient",
+                    name: "XcodeMCPServerKitClient",
                     dependencies: [
                         .product(name: "XcodeMCPKit", package: "XcodeMCPKit"),
-                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
+                        .product(name: "XcodeMCPServerKit", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
                         .swiftLanguageMode(.v6),
@@ -162,9 +162,9 @@ struct PublicProductContractTests {
                     ]
                 ),
                 .target(
-                    name: "XcodeMCPProxyKitOnlyClient",
+                    name: "XcodeMCPServerKitOnlyClient",
                     dependencies: [
-                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
+                        .product(name: "XcodeMCPServerKit", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
                         .swiftLanguageMode(.v6),
@@ -172,9 +172,9 @@ struct PublicProductContractTests {
                     ]
                 ),
                 .target(
-                    name: "XcodeMCPProxyKitClientImportsTestSupport",
+                    name: "XcodeMCPServerKitClientImportsTestSupport",
                     dependencies: [
-                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
+                        .product(name: "XcodeMCPServerKit", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
                         .swiftLanguageMode(.v6),
@@ -212,9 +212,9 @@ struct PublicProductContractTests {
                     ]
                 ),
                 .target(
-                    name: "XcodeMCPProxyKitClientUsesRemovedAdapterEndpointFamily",
+                    name: "XcodeMCPServerKitClientUsesRemovedAdapterEndpointFamily",
                     dependencies: [
-                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
+                        .product(name: "XcodeMCPServerKit", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
                         .swiftLanguageMode(.v6),
@@ -222,9 +222,9 @@ struct PublicProductContractTests {
                     ]
                 ),
                 .target(
-                    name: "XcodeMCPProxyKitClientUsesRemovedAdapterLaunchPlanFamily",
+                    name: "XcodeMCPServerKitClientUsesRemovedAdapterLaunchPlanFamily",
                     dependencies: [
-                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
+                        .product(name: "XcodeMCPServerKit", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
                         .swiftLanguageMode(.v6),
@@ -232,9 +232,9 @@ struct PublicProductContractTests {
                     ]
                 ),
                 .target(
-                    name: "XcodeMCPProxyKitClientUsesRemovedServerSurface",
+                    name: "XcodeMCPServerKitClientUsesRemovedServerSurface",
                     dependencies: [
-                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
+                        .product(name: "XcodeMCPServerKit", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
                         .swiftLanguageMode(.v6),
@@ -242,9 +242,9 @@ struct PublicProductContractTests {
                     ]
                 ),
                 .target(
-                    name: "XcodeMCPProxyKitClientUsesRemovedInstallerSurface",
+                    name: "XcodeMCPServerKitClientUsesRemovedInstallerSurface",
                     dependencies: [
-                        .product(name: "XcodeMCPProxyKit", package: "XcodeMCPKit")
+                        .product(name: "XcodeMCPServerKit", package: "XcodeMCPKit")
                     ],
                     swiftSettings: [
                         .swiftLanguageMode(.v6),
@@ -644,7 +644,7 @@ private struct POSIXCommandError: Error, CustomStringConvertible {
 }
 
 private let lowLevelImportChecks: [(targetName: String, moduleName: String)] = [
-    ("XcodeMCPProxyKitClientImportsTestSupport", "XcodeMCPProxyTestSupport"),
+    ("XcodeMCPServerKitClientImportsTestSupport", "XcodeMCPServerTestSupport"),
 ]
 
 private let removedSurfaceChecks: [(
@@ -696,10 +696,10 @@ private let removedSurfaceChecks: [(
         ]
     ),
     (
-        "XcodeMCPProxyKitClientUsesRemovedAdapterEndpointFamily",
+        "XcodeMCPServerKitClientUsesRemovedAdapterEndpointFamily",
         """
         import Foundation
-        import XcodeMCPProxyKit
+        import XcodeMCPServerKit
 
         func compileOnlyRemovedAdapterEndpointFamily() throws {
             let options = XcodeMCPProxyAdapterEndpointResolutionOptions()
@@ -719,9 +719,9 @@ private let removedSurfaceChecks: [(
         ]
     ),
     (
-        "XcodeMCPProxyKitClientUsesRemovedAdapterLaunchPlanFamily",
+        "XcodeMCPServerKitClientUsesRemovedAdapterLaunchPlanFamily",
         """
-        import XcodeMCPProxyKit
+        import XcodeMCPServerKit
 
         func compileOnlyRemovedAdapterLaunchPlanFamily() throws {
             _ = XcodeMCPProxyStdioAdapter.LaunchAction.start
@@ -740,12 +740,12 @@ private let removedSurfaceChecks: [(
         ]
     ),
     (
-        "XcodeMCPProxyKitClientUsesRemovedServerSurface",
+        "XcodeMCPServerKitClientUsesRemovedServerSurface",
         """
-        import XcodeMCPProxyKit
+        import XcodeMCPServerKit
 
-        func compileOnlyRemovedServerSurface(_ server: XcodeMCPProxyServer) async throws {
-            _ = XcodeMCPProxyServer.productMetadata
+        func compileOnlyRemovedServerSurface(_ server: XcodeMCPServer) async throws {
+            _ = XcodeMCPServer.productMetadata
             _ = try await server.startAndWriteDiscovery()
         }
         """,
@@ -756,18 +756,18 @@ private let removedSurfaceChecks: [(
         ]
     ),
     (
-        "XcodeMCPProxyKitClientUsesRemovedInstallerSurface",
+        "XcodeMCPServerKitClientUsesRemovedInstallerSurface",
         """
-        import XcodeMCPProxyKit
+        import XcodeMCPServerKit
 
         func compileOnlyRemovedInstallerSurface() {
-            _ = XcodeMCPProxyInstaller()
-            _ = XcodeMCPProxyInstallerConfiguration()
+            _ = XcodeMCPInstaller()
+            _ = XcodeMCPInstallerConfiguration()
         }
         """,
         [
-            "cannot find 'XcodeMCPProxyInstaller' in scope",
-            "cannot find 'XcodeMCPProxyInstallerConfiguration' in scope",
+            "cannot find 'XcodeMCPInstaller' in scope",
+            "cannot find 'XcodeMCPInstallerConfiguration' in scope",
         ]
     ),
 ]
@@ -847,7 +847,7 @@ func compileOnlyClientDomainSurface() throws {
     let standardDiscoveryConfig = XcodeMCPConfiguration(
         transport: .server(
             environment: [
-                "XCODE_MCP_PROXY_DISCOVERY_FILE": "/tmp/xcode-mcp/proxy-endpoint.json",
+                "XCODE_MCP_SERVER_DISCOVERY_FILE": "/tmp/xcode-mcp/server-endpoint.json",
             ]
         )
     )
@@ -1051,12 +1051,12 @@ struct ClientSmoke {
 }
 """
 
-private let xcodeMCPProxyKitOnlyClientSource = """
-import XcodeMCPProxyKit
+private let xcodeMCPServerKitOnlyClientSource = """
+import XcodeMCPServerKit
 
-func compileOnlyProxyProductOnlySurface() {
-    let config = XcodeMCPProxyServerConfiguration()
-    let server = XcodeMCPProxyServer(configuration: config)
+func compileOnlyServerProductOnlySurface() {
+    let config = XcodeMCPServerConfiguration()
+    let server = XcodeMCPServer(configuration: config)
 
     _ = (
         config,
@@ -1065,13 +1065,13 @@ func compileOnlyProxyProductOnlySurface() {
 }
 """
 
-private let xcodeMCPProxyKitClientSource = """
+private let xcodeMCPServerKitClientSource = """
 import Foundation
 import XcodeMCPKit
-import XcodeMCPProxyKit
+import XcodeMCPServerKit
 
-func compileOnlyProxyConfigurationSurface() {
-    let config = XcodeMCPProxyServerConfiguration(
+func compileOnlyServerConfigurationSurface() {
+    let config = XcodeMCPServerConfiguration(
         bindAddress: .init(host: "127.0.0.1", port: 0),
         nativeHostBundleURL: URL(fileURLWithPath: "/tmp/XcodeMCPNativeHost.app"),
         developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer"),
@@ -1081,17 +1081,17 @@ func compileOnlyProxyConfigurationSurface() {
         approvalPolicy: .automatic,
         prewarmToolsList: false
     )
-    let server = XcodeMCPProxyServer(configuration: config)
+    let server = XcodeMCPServer(configuration: config)
 
     _ = (config, server)
 }
 
-func compileOnlyProxyLaunchSurface() async throws {
+func compileOnlyServerLaunchSurface() async throws {
     let runnerStdout: @Sendable (String) -> Void = { _ in }
     let runnerStderr: @Sendable (String) -> Void = { _ in }
-    let serverExitCode = await XcodeMCPProxyServer.run(
+    let serverExitCode = await XcodeMCPServer.run(
         arguments: [
-            "xcode-mcp-proxy-server",
+            "xcode-mcp-server",
             "--version",
         ],
         environment: [:],
@@ -1101,7 +1101,7 @@ func compileOnlyProxyLaunchSurface() async throws {
     _ = serverExitCode
 }
 
-func compileOnlyProxyLifecycleSurface(server: XcodeMCPProxyServer) async throws {
+func compileOnlyServerLifecycleSurface(server: XcodeMCPServer) async throws {
     let address = try await server.start()
     let status = await server.snapshot()
     try await server.waitUntilShutdown()

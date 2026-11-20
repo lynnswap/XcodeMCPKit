@@ -1,7 +1,7 @@
 # XcodeMCPKitTesting
 
 `XcodeMCPKitTesting` provides an in-memory MCP runtime for tests that should use
-the real `XcodeMCP` public API without launching Xcode, a native helper, or a proxy server.
+the real `XcodeMCP` public API without launching Xcode, a native helper, or a server.
 
 Use it from app or SDK tests when the production code accepts an `XcodeMCP`
 client and you want deterministic tool catalogs, progress notifications, and

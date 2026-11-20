@@ -1,6 +1,6 @@
 # Architecture
 
-`xcode-mcp-proxy-server` exposes one public MCP tool contract over Streamable
+`xcode-mcp-server` exposes one public MCP tool contract over Streamable
 HTTP. Workspace and device-session handles retain their owned headless execution
 context across requests.
 
@@ -8,16 +8,16 @@ context across requests.
 
 ```mermaid
 flowchart LR
-  client["MCP client"] -->|"Streamable HTTP"| proxy["Public tool contract"]
-  proxy --> handles["Workspace and session handles"]
+  client["MCP client"] -->|"Streamable HTTP"| server["Public tool contract"]
+  server --> handles["Workspace and session handles"]
   handles --> headless["Owned native host"]
   headless --> saved["Saved workspace models"]
-  proxy -->|"Native crash tools / GUI tab IDs"| bridge["Apple mcpbridge"]
+  server -->|"Native crash tools / GUI tab IDs"| bridge["Apple mcpbridge"]
   bridge --> gui["Running GUI Xcode"]
   headless -->|"Explicit Organizer tools"| gui
 ```
 
-`XcodeListWorkspaces` returns proxy identifiers for loaded headless models.
+`XcodeListWorkspaces` returns server identifiers for loaded headless models.
 A handle binds one native workspace to its host. The public input is
 `workspaceIdentifier`; adapters supply the owning backend's selector.
 Workspace and device operations use owned headless hosts. The standard crash
@@ -36,7 +36,7 @@ of replaying an operation against another host.
 
 ## Public and native catalogs
 
-The proxy owns public tool names and schemas. Its adapters translate arguments
+The server owns public tool names and schemas. Its adapters translate arguments
 and results at the native boundary, including workspace selectors and device-key
 spellings. Public tools remain callable without relying on a client to process
 `notifications/tools/list_changed` after a routing change. An unavailable backend
@@ -82,7 +82,7 @@ deinitialization requests cancellation only.
 
 The server binds `localhost:8765` by default. `--listen`, `--host`, `--port`, and
 `LISTEN` / `HOST` / `PORT` select another address. Endpoint discovery uses
-`~/Library/Caches/XcodeMCPProxy/endpoint.json` unless overridden.
+`~/Library/Caches/XcodeMCPServer/endpoint.json` unless overridden.
 
 The Swift client's default `.server()` transport reads the discovery record and
 requires a running server. Explicit standalone `.nativeHost(...)` starts an owned
@@ -123,7 +123,7 @@ values, and workspace resources. Apple's frameworks remain in the installed
 Xcode and are not redistributed.
 
 The optional Accessibility permission monitor approves other agents' direct
-connections to GUI Xcode, including the proxy's Apple bridge. It is composed
+connections to GUI Xcode, including the server's Apple bridge. It is composed
 separately and has no role in tool
 routing. See the [maintainer guide](maintainer-architecture.md) for
 module boundaries, native corrections, signing, and verification.

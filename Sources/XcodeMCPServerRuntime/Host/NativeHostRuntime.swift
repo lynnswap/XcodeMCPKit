@@ -1,0 +1,167 @@
+import XcodeMCPCore
+import Foundation
+import AppKit
+import Logging
+
+enum NativeHostRuntime {
+    static func diagnostic(in message: String) -> Substring? {
+        guard let hostFrame = message.range(
+            of: #" xcode-mcp-native-host\[[0-9]+:[0-9]+\] "#,
+            options: .regularExpression
+        ) else { return nil }
+        return message[hostFrame.upperBound...]
+    }
+
+    static func isTerminalCoreSimulatorDiagnostic(_ message: String) -> Bool {
+        guard let diagnostic = diagnostic(in: message) else { return false }
+        // CoreSimulator logs these fixed reasons when it invalidates its context.
+        // Unknown diagnostics remain logs; their wording is not a public API contract.
+        return diagnostic.hasPrefix(
+            "Loaded CoreSimulatorService is no longer valid for this process.  "
+                + "Simulator services will no longer be available.  Error="
+        ) || diagnostic == "CoreSimulatorService connection became invalid.  Simulator services will no longer be available."
+    }
+
+    struct Configuration: Sendable {
+        let nativeHostBundleURL: URL?
+        let developerDirectoryURL: URL?
+        let sharesCompilationCache: Bool
+        let maxBodyBytes: Int
+
+        init(
+            nativeHostBundleURL: URL? = nil,
+            developerDirectoryURL: URL? = nil,
+            sharesCompilationCache: Bool = false,
+            maxBodyBytes: Int
+        ) {
+            self.nativeHostBundleURL = nativeHostBundleURL
+            self.developerDirectoryURL = developerDirectoryURL
+            self.sharesCompilationCache = sharesCompilationCache
+            self.maxBodyBytes = maxBodyBytes
+        }
+    }
+
+    static func makeDefaultProcessConfig(
+        config: Configuration,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> MCPProcessLauncher.Config {
+        var environment = baseEnvironment
+        environment.removeValue(forKey: "XCODE_PID")
+        environment.removeValue(forKey: "MCP_XCODE_PID")
+        environment.removeValue(forKey: "MCP_XCODE_SESSION_ID")
+        let developerDirectoryURL = config.developerDirectoryURL
+        let invocation = try NativeHostInvocation.resolve(
+            bundleURL: config.nativeHostBundleURL,
+            developerDirectoryURL: developerDirectoryURL,
+            sharesCompilationCache: config.sharesCompilationCache,
+            environment: environment)
+        if let developerDirectoryURL { environment["DEVELOPER_DIR"] = developerDirectoryURL.path }
+        let messageLimit = maxQueuedWriteBytes(for: config)
+        return MCPProcessLauncher.Config(
+            command: invocation.command,
+            args: invocation.arguments + ["--gui-tool-schemas", "--max-message-bytes", String(messageLimit)],
+            environment: environment,
+            maxQueuedWriteBytes: messageLimit,
+            diagnostics: .serverLog)
+    }
+
+    static func buildServiceEnvironment(
+        baseEnvironment: [String: String],
+        processRunner: any ProcessRunning = ProcessRunner(),
+        logger: Logger = ServerLogging.make("native-host")
+    ) async throws -> [String: String] {
+        let keys = [
+            "SWBBUILDSERVICE_PATH", "XCBBUILDSERVICE_PATH",
+            "SWBBUILDSERVICE_BUNDLE_PATH", "XCBBUILDSERVICE_BUNDLE_PATH",
+        ]
+        // Keep the caller's service selection ahead of launchd's, including across aliases.
+        guard !keys.contains(where: { !(baseEnvironment[$0] ?? "").isEmpty }) else {
+            return baseEnvironment
+        }
+        for key in keys {
+            let output: ProcessOutput
+            do {
+                output = try await processRunner.run(ProcessRequest(
+                    label: "launchctl getenv \(key)", executablePath: "/bin/launchctl",
+                    arguments: ["getenv", key], input: nil,
+                    timeoutNanoseconds: 5_000_000_000))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                logger.warning("Cannot read launchd build service setting \(key): \(error); using inherited environment")
+                return baseEnvironment
+            }
+            guard output.terminationStatus == 0 else {
+                logger.warning("Cannot read launchd build service setting \(key): exit \(output.terminationStatus), \(output.stderr); using inherited environment")
+                return baseEnvironment
+            }
+            var value = output.stdout
+            if value.hasSuffix("\n") { value.removeLast() }
+            guard !value.isEmpty else { continue }
+            var environment = baseEnvironment
+            environment[key] = value
+            return environment
+        }
+        return baseEnvironment
+    }
+
+    static func maxQueuedWriteBytes(for config: Configuration) -> Int {
+        let minimum = 1_048_576
+        guard config.maxBodyBytes > 0 else { return minimum }
+        let multiplied = config.maxBodyBytes.multipliedReportingOverflow(by: 4)
+        if multiplied.overflow {
+            return Int.max
+        }
+        return max(minimum, multiplied.partialValue)
+    }
+
+}
+
+/// Launches Apple's bridge lazily; ending it leaves the user's Xcode running.
+struct GUIXcodeSessionFactory: MCPProcessSessionFactory {
+    let configuration: NativeHostRuntime.Configuration
+    let environment: [String: String]
+
+    func startSession() async throws -> any MCPProcessSession {
+        guard let developerDirectory = configuration.developerDirectoryURL else {
+            throw MCPRuntimeError.transportUnavailable("The GUI bridge requires an Xcode installation")
+        }
+        var environment = environment
+        environment["DEVELOPER_DIR"] = developerDirectory.path
+        environment["MCP_XCODE_SESSION_ID"] = UUID().uuidString
+        if environment["MCP_XCODE_PID"] == nil {
+            let applicationURL = developerDirectory.deletingLastPathComponent().deletingLastPathComponent().resolvingSymlinksInPath()
+            let processID = await MainActor.run {
+                NSWorkspace.shared.runningApplications.first {
+                    $0.bundleIdentifier == "com.apple.dt.Xcode"
+                        && $0.bundleURL?.resolvingSymlinksInPath() == applicationURL
+                }?.processIdentifier
+            }
+            guard let processID else {
+                throw MCPRuntimeError.transportUnavailable("Open \(applicationURL.path) before using the standard crash tools")
+            }
+            // The native helper also advertises MCP. Never let Apple's bridge auto-select it.
+            environment["MCP_XCODE_PID"] = String(processID)
+        }
+        return try await MCPProcessLauncher(configuration: .init(
+            command: developerDirectory.appendingPathComponent("usr/bin/mcpbridge").path,
+            args: [], environment: environment,
+            maxQueuedWriteBytes: NativeHostRuntime.maxQueuedWriteBytes(for: configuration),
+            diagnostics: .serverLog)).startSession()
+    }
+}
+
+struct NativeHostSessionFactory: MCPProcessSessionFactory {
+    let configuration: NativeHostRuntime.Configuration
+    let environment: [String: String]
+
+    func processConfiguration(environment: [String: String]) throws -> MCPProcessLauncher.Config {
+        try NativeHostRuntime.makeDefaultProcessConfig(
+            config: configuration, baseEnvironment: environment)
+    }
+
+    func startSession() async throws -> any MCPProcessSession {
+        let environment = try await NativeHostRuntime.buildServiceEnvironment(baseEnvironment: environment)
+        return try await MCPProcessLauncher(configuration: processConfiguration(environment: environment)).startSession()
+    }
+}

@@ -185,7 +185,7 @@ package actor NativeMCPSession {
                              resource: NativeExecutionResource) async throws -> JSONValue {
         let directory = artifactsRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        // The proxy identifies the calling MCP session and its selection for a headless workspace.
+        // The server identifies the calling MCP session and its selection for a headless workspace.
         var metadata: [String: JSONValue] = [:]
         if case .object(let fields)? = fieldsForMetadata(params) { metadata = fields }
         // Results can name files in the directory, so only a directory nothing was written to is removed.

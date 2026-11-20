@@ -9,6 +9,6 @@ DerivedData/
 .codex/tmp/
 /dist
 /release
-/ProxyToolVerifierOutput/
+/ToolVerifierOutput/
 __pycache__/
 .vscode/

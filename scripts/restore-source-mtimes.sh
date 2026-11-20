@@ -35,5 +35,5 @@ done < <(
 # retain the version string from the commit that produced the cache.
 find .build \
   -type f \
-  -path '*/ProxyBuildInfoPlugin/BuildInfo.generated.swift' \
+  -path '*/ServerBuildInfoPlugin/BuildInfo.generated.swift' \
   -delete 2> /dev/null || true

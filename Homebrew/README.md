@@ -1,6 +1,6 @@
 # Homebrew distribution
 
-`lynnswap/tap/xcode-mcpkit` installs the two proxy commands and
+`lynnswap/tap/xcode-mcpkit` installs the server commands and
 `XcodeMCPNativeHost.app` together in `libexec`. Only the commands are linked into
 Homebrew's `bin`. A Swift client can discover the helper through the server link
 on `PATH`, or supply its bundle explicitly.
@@ -16,7 +16,7 @@ The tap builds Apple Silicon bottles on the GitHub-hosted `xcode-27` image and
 registers them as `arm64_tahoe` for macOS 26 and later. The bottle receipt retains
 the actual build environment. Before publication, the tap verifies ordinary
 bottle installation, CLI startup, and signing on macOS 26 and the Xcode 27 runner.
-Native and proxy MCP integration tests run on the Xcode 27 runner. The source
+Native and server MCP integration tests run on the Xcode 27 runner. The source
 release also verifies the public bottle on that image without forcing selection.
 A host without a matching bottle can build from source with Xcode 27. The
 package's macOS 15.4 deployment target is separate from bottle availability.
@@ -56,11 +56,11 @@ Approve its `release-signing` deployment to allow Developer ID signing and
 notarization. The signing job handles the bottle as data and does not build or
 execute its payload. A separate job installs the signed bottle, checks the Team
 ID and stable helper signing identifier, validates its notarization ticket, and
-runs the native/proxy smoke tests. The tap then uploads that exact signed bottle
+runs the native/server smoke tests. The tap then uploads that exact signed bottle
 and merges the Formula PR automatically using its own `GITHUB_TOKEN`.
 
 The source workflow installs the public bottle, checks its CLI versions and
-signature, and exercises native and proxy MCP sessions against a disposable
+signature, and exercises native and server MCP sessions against a disposable
 project. The Formula test covers CLI options and signatures; Xcode integration
 runs outside Homebrew's test sandbox in both tap CI and source-release CI.
 The source publisher rechecks the tested delivery before publishing the approved Draft.

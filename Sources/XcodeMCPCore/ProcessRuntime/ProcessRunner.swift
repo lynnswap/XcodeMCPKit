@@ -311,11 +311,11 @@ private final class LiveProcessRunnerProcessDriver: ProcessRunnerProcessDriving,
         let stdinPipe = Pipe()
         let stdoutReader = OrderedPipeReader(
             fileHandle: stdoutPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.ProcessRunner.stdout"
+            label: "XcodeMCPServer.ProcessRunner.stdout"
         )
         let stderrReader = OrderedPipeReader(
             fileHandle: stderrPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.ProcessRunner.stderr"
+            label: "XcodeMCPServer.ProcessRunner.stderr"
         )
 
         process.executableURL = URL(fileURLWithPath: request.executablePath)

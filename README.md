@@ -34,7 +34,7 @@ With Homebrew set up, no additional `PATH` setting is needed.
 ### Start the server
 
 ```bash
-xcode-mcp-proxy-server
+xcode-mcp-server
 ```
 
 Keep this terminal open while using MCP. Workspace operations work with Xcode
@@ -46,7 +46,7 @@ To automatically allow the bridge's and other agents' MCP connections to Xcode,
 start the server with `--auto-approve`:
 
 ```bash
-xcode-mcp-proxy-server --auto-approve
+xcode-mcp-server --auto-approve
 ```
 
 Grant macOS Accessibility access to the server's host process when prompted.
@@ -97,13 +97,13 @@ directory:
 ```bash
 git clone https://github.com/lynnswap/XcodeMCPKit.git
 cd XcodeMCPKit
-swift run -c release xcode-mcp-proxy-install --bindir "$HOME/.local/opt/xcode-mcpkit-dev/bin"
+swift run -c release xcode-mcp-install --bindir "$HOME/.local/opt/xcode-mcpkit-dev/bin"
 ```
 
-Stop any running proxy server, then start this build by its full path:
+Stop any running server, then start this build by its full path:
 
 ```bash
-"$HOME/.local/opt/xcode-mcpkit-dev/bin/xcode-mcp-proxy-server"
+"$HOME/.local/opt/xcode-mcpkit-dev/bin/xcode-mcp-server"
 ```
 
 Connect your client using the HTTP commands in Quick start. No `PATH` change is
@@ -115,7 +115,7 @@ existing commands there, including links created by the Homebrew migration.
 Using a separate directory keeps development builds independent of that installation.
 
 The installer also accepts `--prefix directory` to install into its `bin`
-subdirectory. Run `swift run -c release xcode-mcp-proxy-install --help` for details.
+subdirectory. Run `swift run -c release xcode-mcp-install --help` for details.
 
 </details>
 
@@ -140,7 +140,7 @@ Stop the server before updating, then start it again:
 ```bash
 brew update
 brew upgrade lynnswap/tap/xcode-mcpkit
-xcode-mcp-proxy-server
+xcode-mcp-server
 ```
 
 To uninstall, stop the server and run `brew uninstall xcode-mcpkit`.

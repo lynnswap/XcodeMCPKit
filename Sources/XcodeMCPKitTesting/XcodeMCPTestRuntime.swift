@@ -3,7 +3,7 @@ import Foundation
 import XcodeMCPKit
 
 /// An in-memory MCP runtime for tests that need an ``XcodeMCP`` client without
-/// launching a native host or connecting to a proxy.
+/// launching a native host or connecting to a server.
 ///
 /// Use this target from app or SDK tests when the code under test should talk
 /// to the real ``XcodeMCP`` public API, while tool catalogs, tool responses,

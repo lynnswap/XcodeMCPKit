@@ -11,7 +11,7 @@ package enum NativeHostDiagnostic {
     }
 
     static func formattedMessage(_ message: String, level: Level) -> String {
-        // The proxy classifies stderr one line at a time, including multiline errors.
+        // The server classifies stderr one line at a time, including multiline errors.
         message.split(separator: "\n", omittingEmptySubsequences: false)
             .map { "[xcode-mcp-native-host] \(level.rawValue) : \($0)" }
             .joined(separator: "\n")

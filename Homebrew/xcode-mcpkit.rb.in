@@ -14,7 +14,7 @@ __EXPLICIT_VERSION__
   def install
     system "scripts/build-release.sh", "--version", "v#{version}", "--dist-root", buildpath/"products"
     libexec.install Dir["products/arm64/bin/*"]
-    bin.install_symlink libexec/"xcode-mcp-proxy-server"
+    bin.install_symlink libexec/"xcode-mcp-server"
     pkgshare.install "scripts/smoke-homebrew.py"
     pkgshare.install "Fixtures/ProxyToolVerifierFixture"
   end
@@ -22,18 +22,18 @@ __EXPLICIT_VERSION__
   def caveats
     <<~EOS
       Start the server before connecting MCP clients:
-        xcode-mcp-proxy-server
+        xcode-mcp-server
 
       Xcode is required at runtime. Headless tools require Xcode's native service contracts.
       Restart the server after upgrading. If an older standalone installation is on PATH,
-      use the Homebrew executable at #{opt_bin}/xcode-mcp-proxy-server.
+      use the Homebrew executable at #{opt_bin}/xcode-mcp-server.
     EOS
   end
 
   test do
-    assert_equal "v#{version}", shell_output("#{bin}/xcode-mcp-proxy-server --version").strip
-    assert_equal "xcode-mcp-proxy-server --listen 127.0.0.1:0",
-                 shell_output("#{bin}/xcode-mcp-proxy-server --host 127.0.0.1 --port 0 --dry-run").strip
+    assert_equal "v#{version}", shell_output("#{bin}/xcode-mcp-server --version").strip
+    assert_equal "xcode-mcp-server --listen 127.0.0.1:0",
+                 shell_output("#{bin}/xcode-mcp-server --host 127.0.0.1 --port 0 --dry-run").strip
     system "codesign", "--verify", "--deep", "--strict", libexec/"XcodeMCPNativeHost.app"
   end
 end
