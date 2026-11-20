@@ -227,3 +227,8 @@ after initialize and send individual JSON-RPC messages instead of batch arrays.
 An explicit `MCP-Protocol-Version` must match negotiation. The SDK handles
 these details. See the [HTTP contract](../architecture.md#streamable-http-contract)
 for expiry, recovery, and header errors.
+
+The debug snapshot moved from `/debug/upstreams` to `/debug/hosts`. Host error
+messages say `host` instead of `upstream`: `host unavailable`, `host overloaded`,
+`host timeout`, and `invalid host response`. The JSON-RPC error codes are
+unchanged.
