@@ -6,6 +6,12 @@ import Foundation
 struct NativePreviewDefinitions {
     let installation: NativeXcodeInstallation
 
+    /// A parsed preview definition and the translation unit it came from.
+    struct Source {
+        let translationUnit: NativeSwiftValue
+        let definition: NativeSwiftValue
+    }
+
     func sourceURL(_ path: String, workspace: AnyObject) async throws -> URL {
         do {
             let action = try await ABIRuntime.shared.resolve(
@@ -36,7 +42,7 @@ struct NativePreviewDefinitions {
         let displayName: String
         let providerPath: NativeSwiftValue?
         let registry: NativeSwiftValue?
-        let source: NativePreviewBuild.Source
+        let source: NativePreviewDefinitions.Source
     }
 
     func definition(in source: URL, at index: Int) async throws -> Definition {
