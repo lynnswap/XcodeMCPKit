@@ -275,7 +275,7 @@ final class NativePreviewDestinations {
         let host = try unsafe createHost.unsafeInvoke(false)
         let resolutionType: NativeSwiftType
         do {
-            resolutionType = try await runtime.resolve(.swift(.type("PreviewsXcode.RenderPreviewAction.Resolution")), in: previews)
+            resolutionType = try await runtime.resolve(.swift(.type("PreviewsXcode.RenderPreviewAction.DestinationResolution")), in: previews)
         } catch is ABIResolutionError {
             return try await currentDestinationResolution(host: host, input: input)
         }
@@ -283,7 +283,7 @@ final class NativePreviewDestinations {
         let resolve = try await actionType.resolve(
             .swift(
                 .staticMethod(
-                    "static PreviewsXcode.RenderPreviewAction.resolveDestination(input: PreviewsXcode.RenderPreviewAction.Input, sceneHost: PreviewsXcode.XcodeWorkspaceSceneHost) async -> PreviewsXcode.RenderPreviewAction.Resolution",
+                    "static PreviewsXcode.RenderPreviewAction.resolveDestination(input: PreviewsXcode.RenderPreviewAction.Input, sceneHost: PreviewsXcode.XcodeWorkspaceSceneHost) async -> PreviewsXcode.RenderPreviewAction.DestinationResolution",
                     as: (@concurrent (NativeSwiftValue, AnyObject) async -> NativeSwiftValue).self,
                     valueABIs: [input.type: .opaque(named: input.type.name), resolutionType: .opaque(named: resolutionType.name)])))
         let resolution = try unsafe await resolve.unsafeInvoke(input, host)
