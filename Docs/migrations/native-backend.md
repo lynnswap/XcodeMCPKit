@@ -19,6 +19,7 @@ server, and package dependencies:
 | `XcodeMCPProxyServer`, `XcodeMCPProxyServerConfiguration` | `XcodeMCPServer`, `XcodeMCPServerConfiguration` |
 | `XCODE_MCP_PROXY_DISCOVERY_FILE`, `XCODE_MCP_PROXY_CACHE_ROOT` | `XCODE_MCP_SERVER_DISCOVERY_FILE`, `XCODE_MCP_SERVER_CACHE_ROOT` |
 | Discovery directory `XcodeMCPProxy` under the cache root | `XcodeMCPServer` |
+| `XCODE_MCP_PROXY_ENDPOINT` for `scripts/benchmark-live-server.py` | `XCODE_MCP_SERVER_ENDPOINT` |
 
 The Homebrew formula is still `xcode-mcpkit`; upgrading it replaces the
 `xcode-mcp-proxy-server` command with `xcode-mcp-server`. Upgrade the server and
