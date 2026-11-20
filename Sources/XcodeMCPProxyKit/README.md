@@ -57,7 +57,6 @@ may be incomplete, even though the server lifecycle has stopped.
 - `approvalPolicy`: `.manual` by default. `.automatic` approves MCP connection dialogs for agents connecting directly to GUI Xcode, using macOS Accessibility access.
 - `maxBodyBytes`: positive maximum HTTP request body size.
 - `requestTimeout`: a positive `Duration`, or `nil` for no timeout, the default. A client that gives up cancels its request or disconnects, which also ends the work; starting a host stays bounded either way.
-- `initializeHandshake`: typed upstream initialization for embedding.
 - `discovery`: `.disabled`, `.defaultLocation`, or `.file(URL)`.
 - `prewarmToolsList`: whether discovery begins during startup.
 
@@ -81,22 +80,10 @@ For a standalone headless or generic MCP process, use `XcodeMCPKit`'s explicit
 `.nativeHost(...)` or `.process(...)` transport.
 See [native routing migration](../../Docs/migrations/native-backend.md).
 
-```swift
-import Foundation
-import XcodeMCPKit
-import XcodeMCPProxyKit
-
-let configuration = XcodeMCPProxyServerConfiguration(
-    initializeHandshake: .init(
-        clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
-        capabilities: ["experimental": ["embedding": true]]
-    )
-)
-```
-
-The handshake omits `roots`, `sampling`, and `elicitation`: every client
-session shares an Xcode host, so no client can answer the host requests those
-capabilities allow.
+Every host receives the same `initialize` request: the client name
+`XcodeMCPKit` and no client capabilities. Initialize parameters from connected
+clients do not reach a host. Every client session shares a host, so no client
+can answer the host requests that `roots`, `sampling`, or `elicitation` allow.
 
 `snapshot()` returns a sanitized read model: lifecycle phase, endpoint, and one
 entry per owned headless host with its identifier, kind, state, and active

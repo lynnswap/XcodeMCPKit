@@ -97,6 +97,7 @@ if ! jq -e '
     excludes("XcodeMCPProxyRuntimeTestSupport"; ["XcodeMCPKit", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyTestSupport"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyHTTP", "XcodeMCPProxyKit"]) and
     excludes("XcodeMCPProxyHTTPTests"; ["XcodeMCPKit", "XcodeMCPProxyRuntime", "XcodeMCPProxyKit"]) and
+    excludes("XcodeMCPProxyKit"; ["XcodeMCPKit"]) and
     directlyUses("XcodeMCPProxyRuntime"; "XcodeMCPCore") and
     directlyUses("XcodeMCPProxyHTTP"; "XcodeMCPCore") and
     directlyUses("XcodeMCPProxyHTTP"; "XcodeMCPProxyRuntimeContract") and

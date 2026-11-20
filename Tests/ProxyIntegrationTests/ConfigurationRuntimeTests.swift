@@ -34,59 +34,14 @@ struct ConfigurationRuntimeTests {
         return try #require(params.foundationObject as? [String: Any])
     }
 
-    @Test func hostReceivesTheTypedInitializeHandshake() async throws {
+    @Test func hostReceivesTheProxyHandshakeRatherThanTheClientParameters() async throws {
         let params = try await hostInitializeParameters(XcodeMCPProxyServerConfiguration(
-            requestTimeout: .seconds(5),
-            initializeHandshake: .init(clientInfo: .init(name: "custom-proxy"),
-                                       capabilities: ["roots": true, "sampling": [:], "elicitation": [:], "experimental": [:]]),
-            prewarmToolsList: false))
-        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
-        let capabilities = try #require(params["capabilities"] as? [String: Any])
-        #expect(params["protocolVersion"] as? String == "2025-06-18")
-        #expect(clientInfo["name"] as? String == "custom-proxy")
-        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
-        // A shared host has no single client to answer its requests.
-        #expect(capabilities.keys.sorted() == ["experimental"])
-    }
-
-    @Test func hostReceivesTypedHandshakeValuesUnchanged() async throws {
-        let params = try await hostInitializeParameters(XcodeMCPProxyServerConfiguration(
-            initializeHandshake: .init(
-                protocolVersion: "2025-06-18",
-                clientInfo: .init(name: "EmbeddingClient", version: "1.2.3"),
-                capabilities: ["experimental": [
-                    "enabled": true, "limit": 3, "score": 0.5, "tags": ["swift", "xcode"], "optional": .null,
-                ]]),
-            prewarmToolsList: false))
-        let client = try #require(params["clientInfo"] as? [String: Any])
-        let capabilities = try #require(params["capabilities"] as? [String: Any])
-        let experimental = try #require(capabilities["experimental"] as? [String: Any])
-        #expect(client["name"] as? String == "EmbeddingClient")
-        #expect(client["version"] as? String == "1.2.3")
-        #expect(experimental["enabled"] as? Bool == true)
-        #expect(experimental["limit"] as? Int == 3)
-        #expect(experimental["score"] as? Double == 0.5)
-        #expect(experimental["tags"] as? [String] == ["swift", "xcode"])
-        #expect(experimental["optional"] is NSNull)
-    }
-
-    @Test func hostHandshakeResolvesTheVersionForAConfiguredClientName() async throws {
-        let params = try await hostInitializeParameters(XcodeMCPProxyServerConfiguration(
-            requestTimeout: .seconds(5), initializeHandshake: .init(clientInfo: .init(name: "Claude")),
-            prewarmToolsList: false))
-        let clientInfo = try #require(params["clientInfo"] as? [String: Any])
-        #expect(clientInfo["name"] as? String == "Claude")
-        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultClientVersion(for: "Claude"))
-    }
-
-    @Test func clientInitializeParametersDoNotReachTheHost() async throws {
-        let params = try await hostInitializeParameters(XcodeMCPProxyServerConfiguration(
-            requestTimeout: .seconds(5), initializeHandshake: .init(clientInfo: .init(name: "configured-proxy")),
-            prewarmToolsList: false)) { broker in
+            requestTimeout: .seconds(5), prewarmToolsList: false)) { broker in
             let request = try ProxyRuntimeRequest(json: .object([
                 "jsonrpc": .string("2.0"), "id": .number(.int(1)), "method": .string("initialize"),
                 "params": .object([
-                    "protocolVersion": .string("2099-01-01"), "capabilities": .object([:]),
+                    "protocolVersion": .string("2099-01-01"),
+                    "capabilities": .object(["roots": .object([:]), "sampling": .object([:])]),
                     "clientInfo": .object(["name": .string("downstream-client"), "version": .string("9.9")]),
                 ]),
             ]))
@@ -95,8 +50,11 @@ struct ConfigurationRuntimeTests {
             session.close()
         }
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
+        let capabilities = try #require(params["capabilities"] as? [String: Any])
         #expect(params["protocolVersion"] as? String == "2025-06-18")
-        #expect(clientInfo["name"] as? String == "configured-proxy")
-        #expect(clientInfo["version"] as? String == InitializeHandshakeParams.defaultProxyClientVersion())
+        // Approval automation matches GUI Xcode connection dialogs by this name.
+        #expect(clientInfo["name"] as? String == "XcodeMCPKit")
+        // A shared host has no single client to answer its requests.
+        #expect(capabilities.isEmpty)
     }
 }

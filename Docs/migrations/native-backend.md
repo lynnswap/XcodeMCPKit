@@ -212,6 +212,7 @@ The current server API is documented in
 | Public launch-plan/parser/product-metadata types | `XcodeMCPProxyServer.run(...)` for CLI hosting. |
 | Public installer library APIs | `xcode-mcp-proxy-install` executable; `--dry-run` remains supported. |
 | `XcodeMCPProxyStdioAdapter` and its configuration | Removed. Connect clients over Streamable HTTP; Swift clients use the [SDK](../../Sources/XcodeMCPKit/README.md). |
+| `initializeHandshake` and `XcodeMCPProxyServerConfiguration.InitializeHandshake` | Removed. Hosts always receive the client name `XcodeMCPKit` and no client capabilities. `XcodeMCPProxyKit` no longer depends on the `XcodeMCPKit` product; add that product separately to use `MCPJSONValue` or the client. |
 | `TimeInterval` request timeout | Positive `Duration?`; `nil` disables it. CLI `--request-timeout 0` also disables it. |
 | `Status.upstreams`, `Status.Upstream.Health`, `queuedRequestCount`, `proxyInitialized`, `catalogAvailable` | `Status.hosts`: one `Status.Host` per Xcode installation, with its `identifier` (the `hostIdentifier` from `XcodeMCPKitListHosts`), `kind`, `state` (`stopped`, `starting`, `running`), and `activeRequestCount`. Requests queue inside each host, and the catalog is available whenever the server runs. |
 

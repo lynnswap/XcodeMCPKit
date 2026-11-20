@@ -2,7 +2,6 @@ import XcodeMCPProxyRuntimeContract
 import XcodeMCPCore
 import Foundation
 import Logging
-import XcodeMCPKit
 import XcodeMCPProxyHTTP
 import XcodeMCPProxyRuntime
 import XcodeMCPPermissionAutomation
@@ -59,49 +58,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         case automatic
     }
 
-    /// Initialize handshake values sent from the proxy to native helpers.
-    ///
-    /// Properties left as `nil` use the built-in defaults.
-    public struct InitializeHandshake: Equatable, Sendable {
-        /// Upstream client information for the initialize handshake.
-        public struct ClientInfo: Equatable, Sendable {
-            /// Client name to advertise to the native helper.
-            public var name: String?
-
-            /// Client version to advertise to the native helper.
-            public var version: String?
-
-            /// Creates upstream client information.
-            public init(name: String? = nil, version: String? = nil) {
-                self.name = name
-                self.version = version
-            }
-        }
-
-        /// Protocol version to send in initialize params.
-        public var protocolVersion: String?
-
-        /// Client info to send in initialize params.
-        public var clientInfo: ClientInfo?
-
-        /// Capability object to send in initialize params.
-        ///
-        /// `roots`, `sampling`, and `elicitation` are not sent: every client session shares an Xcode
-        /// host, so no client can answer the host requests those capabilities allow.
-        public var capabilities: [String: MCPJSONValue]?
-
-        /// Creates initialize handshake overrides.
-        public init(
-            protocolVersion: String? = nil,
-            clientInfo: ClientInfo? = nil,
-            capabilities: [String: MCPJSONValue]? = nil
-        ) {
-            self.protocolVersion = protocolVersion
-            self.clientInfo = clientInfo
-            self.capabilities = capabilities
-        }
-    }
-
     /// HTTP bind address.
     public var bindAddress: BindAddress
 
@@ -123,9 +79,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Request timeout, or `nil` for none, the default. A client that gives up cancels its request
     /// or disconnects, which also ends the work. Starting a host stays bounded either way.
     public var requestTimeout: Duration?
-
-    /// Initialize handshake overrides. `nil` uses the built-in defaults.
-    public var initializeHandshake: InitializeHandshake?
 
     /// Endpoint discovery policy.
     public var discovery: Discovery
@@ -150,7 +103,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     ///   - discovery: Endpoint discovery policy.
     ///   - approvalPolicy: Xcode MCP connection dialog automation policy. Defaults to `.manual`.
     ///   - prewarmToolsList: Whether to fetch native tool catalogs during startup.
-    ///   - initializeHandshake: Explicit upstream initialize handshake override.
     ///   - enablesDebugEndpoints: Whether to serve the debug endpoints on a loopback listener. Defaults to `false`.
     public init(
         bindAddress: BindAddress = .localhost(),
@@ -159,7 +111,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         sharesCompilationCache: Bool = false,
         maxBodyBytes: Int = 1_048_576,
         requestTimeout: Duration? = nil,
-        initializeHandshake: InitializeHandshake? = nil,
         discovery: Discovery = .defaultLocation,
         approvalPolicy: ApprovalPolicy = .manual,
         prewarmToolsList: Bool = true,
@@ -172,7 +123,6 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
         self.approvalPolicy = approvalPolicy
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeout = requestTimeout
-        self.initializeHandshake = initializeHandshake
         self.discovery = discovery
         self.prewarmToolsList = prewarmToolsList
         self.enablesDebugEndpoints = enablesDebugEndpoints
@@ -344,7 +294,7 @@ public final class XcodeMCPProxyServer: Sendable {
         var discoveryClient: DiscoveryClient
         var processID: @Sendable () -> Int
         var makeRuntime: @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing
-        var makeAutoApprover: @Sendable (XcodeMCPProxyServerConfiguration) -> any ProxyServerPermissionDialogAutoApprover
+        var makeAutoApprover: @Sendable () -> any ProxyServerPermissionDialogAutoApprover
         var makeHTTPGateway:
             @Sendable (
                 ProxyHTTPConfiguration,
@@ -358,10 +308,8 @@ public final class XcodeMCPProxyServer: Sendable {
                 Int(ProcessInfo.processInfo.processIdentifier)
             },
             makeRuntime: @escaping @Sendable (ProxyRuntimeConfiguration) throws -> any ProxyRuntimeServing,
-            makeAutoApprover: @escaping @Sendable (XcodeMCPProxyServerConfiguration) -> any ProxyServerPermissionDialogAutoApprover = { configuration in
-                XcodePermissionDialogAutomation.AutoApprover.liveForAllAgents(
-                    assistantName: configuration.initializeHandshake?.clientInfo?.name
-                )
+            makeAutoApprover: @escaping @Sendable () -> any ProxyServerPermissionDialogAutoApprover = {
+                XcodePermissionDialogAutomation.AutoApprover.liveForAllAgents()
             },
             makeHTTPGateway: @escaping @Sendable (
                 ProxyHTTPConfiguration,
@@ -481,37 +429,13 @@ extension XcodeMCPProxyServerConfiguration {
         if let requestTimeout, requestTimeout <= .zero {
             throw XcodeMCPProxyServer.LifecycleError.invalidConfiguration("requestTimeout must be positive; use nil to disable it")
         }
-        let configuration = ProxyRuntimeConfiguration(
+        return ProxyRuntimeConfiguration(
             nativeHostBundleURL: nativeHostBundleURL,
             developerDirectoryURL: developerDirectoryURL,
             sharesCompilationCache: sharesCompilationCache,
             maxMessageBytes: maxBodyBytes,
             requestTimeout: requestTimeout,
-            prewarmToolsList: prewarmToolsList,
-            initializeParamsOverride: initializeHandshake.map { handshake in
-                .init(
-                    protocolVersion: handshake.protocolVersion,
-                    clientName: handshake.clientInfo?.name,
-                    clientVersion: handshake.clientInfo?.version,
-                    capabilities: handshake.capabilities?.mapValues(ProxyRuntimeConfiguration.JSONValue.init)
-                )
-            }
+            prewarmToolsList: prewarmToolsList
         )
-        try configuration.validateModernProtocolConfiguration()
-        return configuration
-    }
-}
-
-private extension ProxyRuntimeConfiguration.JSONValue {
-    init(_ value: MCPJSONValue) {
-        switch value {
-        case .object(let object): self = .object(object.mapValues(Self.init))
-        case .array(let array): self = .array(array.map(Self.init))
-        case .string(let string): self = .string(string)
-        case .integer(let integer): self = .number(.integer(integer))
-        case .double(let double): self = .number(.double(double))
-        case .bool(let bool): self = .bool(bool)
-        case .null: self = .null
-        }
     }
 }
