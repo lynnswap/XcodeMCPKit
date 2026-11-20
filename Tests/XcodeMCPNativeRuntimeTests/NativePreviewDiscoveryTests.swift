@@ -8,7 +8,7 @@ struct NativePreviewDiscoveryTests {
     @Test func recognizesRegistryNamesWithMangledWordSubstitutions() {
         let symbol = "_$s15EmbeddedPreview04$s15a89Preview0024FrameworkViewswift_ynAHffMX12_0_33_11075570A56CB59BAD1AB26CEC639C6ELl0B0fMf_15B12RegistryfMu_VMn"
         let name = "15EmbeddedPreview04$s15a89Preview0024FrameworkViewswift_ynAHffMX12_0_33_11075570A56CB59BAD1AB26CEC639C6ELl0B0fMf_15B12RegistryfMu_V"
-        #expect(NativePreviewTool.registryNames(in: symbol) == [name])
+        #expect(NativePreviewStaging.registryNames(in: symbol) == [name])
     }
 
     @Test func discoversProgramRootsFromCompilerMainSymbols() {
@@ -22,8 +22,8 @@ struct NativePreviewDiscoveryTests {
             "_$s\(widgetRoot)VMn",
             "_main",
         ].joined(separator: "\n")
-        #expect(NativePreviewTool.programRootNames(in: symbols) == [appRoot, widgetRoot])
-        #expect(NativePreviewTool.programRootNames(in: "_$s\(widgetRoot)VMn") == [])
+        #expect(NativePreviewStaging.programRootNames(in: symbols) == [appRoot, widgetRoot])
+        #expect(NativePreviewStaging.programRootNames(in: "_$s\(widgetRoot)VMn") == [])
     }
 
     @Test func programLibrariesMatchTheBuiltHostImage() async throws {
@@ -41,8 +41,8 @@ struct NativePreviewDiscoveryTests {
         try FileManager.default.copyItem(at: output, to: stagedHost)
         try FileManager.default.copyItem(at: otherOutput, to: otherLibrary)
 
-        #expect(try NativePreviewTool.programLibraries(previewLibraries: [otherLibrary, stagedHost], output: output) == [stagedHost])
-        #expect(try NativePreviewTool.programLibraries(previewLibraries: [otherLibrary], output: output) == [])
+        #expect(try NativePreviewStaging.programLibraries(previewLibraries: [otherLibrary, stagedHost], output: output) == [stagedHost])
+        #expect(try NativePreviewStaging.programLibraries(previewLibraries: [otherLibrary], output: output) == [])
     }
 
     @Test func includesEmbeddedFrameworkExecutablesAndDebugLibraries() async throws {
@@ -74,16 +74,16 @@ struct NativePreviewDiscoveryTests {
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: wrongFramework.appendingPathComponent("Info.plist"))
 
-        let libraries = try NativePreviewTool.registryLibraries(in: app, previewLibraries: [preview])
+        let libraries = try NativePreviewStaging.registryLibraries(in: app, previewLibraries: [preview])
         let expected = [preview, rootDylib, executable, frameworkPreview, dylib, nestedDylib, wrongExecutable]
             .map { $0.resolvingSymlinksInPath().path }
         #expect(Set(libraries.map(\.path)) == Set(expected))
 
-        let frameworkPaths = try NativePreviewTool.libraryPaths(in: app, previewLibraries: [preview],
+        let frameworkPaths = try NativePreviewStaging.libraryPaths(in: app, previewLibraries: [preview],
             registryLibraries: libraries, sourceOutput: sourceOutput)
         #expect(frameworkPaths == ["FixtureApp.debug.dylib", "Frameworks/FixtureKit.framework/FixtureImplementation"])
 
-        let staticPaths = try NativePreviewTool.libraryPaths(in: app, previewLibraries: [preview],
+        let staticPaths = try NativePreviewStaging.libraryPaths(in: app, previewLibraries: [preview],
             registryLibraries: libraries, sourceOutput: app.deletingLastPathComponent().appendingPathComponent("FixturePackage.o"))
         #expect(staticPaths == ["FixtureApp.debug.dylib"])
     }
