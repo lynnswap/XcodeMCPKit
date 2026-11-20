@@ -9,7 +9,7 @@ final class NativeExecutionOperations {
     private let callback: Callback
     private let hook: NativeObjCMethodHook
     private let launchSessionHook: NativeObjCMethodHook
-    private let simulatorLaunchCorrection: NativeSimulatorLaunchCorrection
+    private let simulatorLaunchTracker: NativeSimulatorLaunchTracker
 
     @MainActor init() throws {
         let ownership = NativeLaunchOwnership()
@@ -19,7 +19,7 @@ final class NativeExecutionOperations {
         let runtime = ABIRuntime.shared
         let callback = Callback(operation: try runtime.resolveAndWait(.objc(.method("operation", as: (() -> AnyObject?).self)), on: trackerClass))
         self.callback = callback
-        simulatorLaunchCorrection = try NativeSimulatorLaunchCorrection(ownership: ownership,
+        simulatorLaunchTracker = try NativeSimulatorLaunchTracker(ownership: ownership,
             onFailure: { callback.recordFailure($0) })
         launchSessionHook = try unsafe runtime.hookCalls(
             .objc(.method("setLaunchSession:", as: ((AnyObject?) -> Void).self)), on: trackerClass,

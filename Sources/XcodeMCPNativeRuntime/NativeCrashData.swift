@@ -153,7 +153,7 @@ struct NativeCrashReadRequest: Decodable, Sendable {
 }
 
 enum NativeCrashContract {
-    static func describe(_ kind: NativeCrashToolCorrection.Kind) -> NativeTool {
+    static func describe(_ kind: NativeCrashTools.Kind) -> NativeTool {
         func property(_ type: String, _ description: String) -> JSONValue {
             .object(["type": .string(type), "description": .string(description)])
         }
@@ -262,7 +262,7 @@ enum NativeCrashContract {
         ]), workspaceScoped: kind == .sync)
     }
 
-    private static func describeJob(_ kind: NativeCrashToolCorrection.Kind, description: String, inputs: [String: JSONValue],
+    private static func describeJob(_ kind: NativeCrashTools.Kind, description: String, inputs: [String: JSONValue],
                                     required: [String]) -> NativeTool {
         let outputs: [String: JSONValue] = [
             "jobId": .object(["type": .string("string"), "description": .string("Persistent crash sync job identifier.")]),

@@ -5,7 +5,7 @@ import XcodeMCPWire
 
 @safe
 @MainActor
-final class NativeCrashToolCorrection {
+final class NativeCrashTools {
     enum Kind: String, CaseIterable {
         case sync = "SyncOrganizerCrashReports"
         case read = "ReadOrganizerCrashChanges"

@@ -9,7 +9,7 @@ struct NativePreviewOptionsTests {
     @Test func advertisesFiveMinutePreviewTimeout() throws {
         let native = #"{"name":"RenderPreview","inputSchema":{"properties":[{"name":"timeout","isRequired":false,"description":"Defaults to 120 seconds.","type":{"integer":{}}}]}}"#
         let tool = try NativeSchemaConverter.tool(from: Data(native.utf8), workspaceScoped: true)
-        let corrected = NativePreviewCorrection.describe(tool)
+        let corrected = NativePreviewTool.describe(tool)
         let timeout = try nativeTestField(corrected.descriptor, "inputSchema", "properties", "timeout")
         #expect(try nativeTestField(timeout, "default") == .number(.int(300)))
         #expect(try nativeTestField(timeout, "description") == .string("The time in seconds to wait for the preview, including building and preparing its render destination. Defaults to 300 seconds."))
@@ -19,7 +19,7 @@ struct NativePreviewOptionsTests {
     func previewTimeoutDefaultsPreserveExplicitValues(_ timeout: Int?) throws {
         var arguments: [String: JSONValue] = ["sourceFilePath": .string("ContentView.swift")]
         if let timeout { arguments["timeout"] = .number(.int(Int64(timeout))) }
-        let prepared = NativePreviewCorrection.prepareArguments(arguments)
+        let prepared = NativePreviewTool.prepareArguments(arguments)
         let input = try JSONSerialization.data(withJSONObject: prepared.mapValues(\.foundationObject))
         let decoded = try JSONDecoder().decode(PreviewTimeoutInput.self, from: input)
         #expect(decoded.timeout == timeout ?? 300)
@@ -70,7 +70,7 @@ struct NativePreviewOptionsTests {
     }
 
     @Test func widgetFamilyPresentationAndTimelineUseDirectRenderer() {
-        let options = NativePreviewCorrection.directOptions(variants: [
+        let options = NativePreviewTool.directOptions(variants: [
             "Widget Family": "Large", "Presentation": "Placeholder", "Color Scheme": "Dark Appearance",
         ],
             controls: ["timelineIndex": Optional(1) as Any, "toggleState": Optional<Bool>.none as Any])
@@ -82,14 +82,14 @@ struct NativePreviewOptionsTests {
     }
 
     @Test func firstTimelineIndexIsPreserved() {
-        let options = NativePreviewCorrection.directOptions(variants: [:],
+        let options = NativePreviewTool.directOptions(variants: [:],
             controls: ["timelineIndex": Optional(0) as Any])
         #expect(options.timelineIndex == 0)
         #expect(!options.requiresNativePipeline)
     }
 
     @Test func groupItemSelectionUsesDirectRenderer() {
-        let options = NativePreviewCorrection.directOptions(variants: [:],
+        let options = NativePreviewTool.directOptions(variants: [:],
             controls: ["groupItemIndex": Optional(1) as Any, "timelineIndex": Optional<Int>.none as Any])
         #expect(options.groupItemIndex == 1)
         #expect(options.timelineIndex == nil)
@@ -97,7 +97,7 @@ struct NativePreviewOptionsTests {
     }
 
     @Test func activityControlsPreserveStaleSelectionAndDisabledToggle() {
-        let options = NativePreviewCorrection.directOptions(
+        let options = NativePreviewTool.directOptions(
             variants: ["View Style": "Content (Smart Stack)", "Activity View Context": "Stale",
                        "Color Scheme": "Dark Appearance"],
             controls: ["timelineIndex": Optional(1) as Any, "toggleState": Optional(false) as Any])
@@ -112,7 +112,7 @@ struct NativePreviewOptionsTests {
     @Test func advertisesGroupItemObjectsMatchingNativeOutput() throws {
         let native = #"{"name":"RenderPreview","inputSchema":{"properties":[]},"outputSchema":{"properties":[{"name":"previewSnapshotPath","isRequired":false,"type":{"string":{}}},{"name":"supportedCanvasControlOverrides","isRequired":false,"type":{"object":{"schema":{"properties":[{"name":"groupItems","isRequired":false,"type":{"array":{"itemType":{"integer":{}}}}}]}}}}]}}"#
         let tool = try NativeSchemaConverter.tool(from: Data(native.utf8), workspaceScoped: true)
-        let corrected = NativePreviewCorrection.describe(tool)
+        let corrected = NativePreviewTool.describe(tool)
         let item = try nativeTestField(corrected.descriptor, "outputSchema", "properties", "supportedCanvasControlOverrides", "properties", "groupItems", "items")
         #expect(try nativeTestField(item, "type") == .string("object"))
         #expect(try nativeTestField(item, "properties", "index", "type") == .string("integer"))
@@ -121,7 +121,7 @@ struct NativePreviewOptionsTests {
     }
 
     @Test func unknownVariantsReachRendererValidationAndUnknownControlsKeepNativeRendering() {
-        let options = NativePreviewCorrection.directOptions(variants: [
+        let options = NativePreviewTool.directOptions(variants: [
             "View Style": "Unknown Style", "Color Scheme": "Unknown Appearance",
             "Unknown Group": "Unknown Value", "Contrast": "Increased Contrast",
         ], controls: [:])
@@ -130,12 +130,12 @@ struct NativePreviewOptionsTests {
             "Color Scheme": "Unknown Appearance", "Unknown Group": "Unknown Value", "Contrast": "Increased Contrast",
         ])
         #expect(!options.requiresNativePipeline)
-        #expect(NativePreviewCorrection.directOptions(variants: [:],
+        #expect(NativePreviewTool.directOptions(variants: [:],
             controls: ["futureControl": Optional(1) as Any]).requiresNativePipeline)
     }
 
     @Test func displayVariantsUseDirectRenderer() {
-        let options = NativePreviewCorrection.directOptions(variants: [
+        let options = NativePreviewTool.directOptions(variants: [
             "Color Scheme": "Dark Appearance", "Contrast": "Increased Contrast",
             "Dynamic Type": "AX 1", "Control Borders": "Shown", "Orientation": "Landscape Left",
         ], controls: [:])
@@ -143,13 +143,13 @@ struct NativePreviewOptionsTests {
     }
 
     @Test func displayVariantsWithWidgetOptionsUseDirectRenderer() {
-        #expect(!NativePreviewCorrection.directOptions(variants: [
+        #expect(!NativePreviewTool.directOptions(variants: [
             "Widget Family": "Medium", "Color Scheme": "Dark Appearance", "Dynamic Type": "AX 1",
         ], controls: [:]).requiresNativePipeline)
     }
 
     @Test func activityDefaultStylePreservesTimelineAndAppearance() {
-        let options = NativePreviewCorrection.directOptions(variants: ["Color Scheme": "Dark Appearance"],
+        let options = NativePreviewTool.directOptions(variants: ["Color Scheme": "Dark Appearance"],
             controls: ["timelineIndex": Optional(1) as Any])
         #expect(options.timelineIndex == 1)
         #expect(options.displayVariants == ["Color Scheme": "Dark Appearance"])

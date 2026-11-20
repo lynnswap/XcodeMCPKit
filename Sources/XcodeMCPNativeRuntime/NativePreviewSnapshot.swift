@@ -4,7 +4,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-extension NativePreviewCorrection {
+extension NativePreviewTool {
     func writeSnapshot(from source: Data, to destination: URL, deviceType: URL?,
                        usesDeviceLayout: Bool, orientation: String?, exclusion: Data? = nil) async throws {
         guard let imageSource = CGImageSourceCreateWithData(source as CFData, nil),
@@ -44,7 +44,7 @@ extension NativePreviewCorrection {
                 return snapshot.png
             }
             let data = NSMutableData()
-            guard let thumbnail = NativePreviewCorrection.thumbnail(from: image, maximumDimension: 1500,
+            guard let thumbnail = NativePreviewTool.thumbnail(from: image, maximumDimension: 1500,
                 framebufferMask: framebufferMask, rotationDegrees: rotationDegrees, swapsAxes: swapsAxes,
                 exclusionImage: exclusionImage),
                   let output = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else {

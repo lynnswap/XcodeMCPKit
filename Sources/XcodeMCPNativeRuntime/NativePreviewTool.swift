@@ -5,7 +5,7 @@ import Foundation
 import XcodeMCPWire
 
 @MainActor
-final class NativePreviewCorrection {
+final class NativePreviewTool {
     private static let defaultTimeout: Int64 = 300
     private let installation: NativeXcodeInstallation
     private let builder: NativePreviewBuild

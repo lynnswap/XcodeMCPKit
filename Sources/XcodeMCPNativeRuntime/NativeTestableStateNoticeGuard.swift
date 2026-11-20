@@ -4,7 +4,7 @@ import Synchronization
 
 @safe
 @MainActor
-final class NativeTestableStateCorrection {
+final class NativeTestableStateNoticeGuard {
     private let callback: NativeTestableStateCallback
     private let hook: NativeObjCMethodHook
 

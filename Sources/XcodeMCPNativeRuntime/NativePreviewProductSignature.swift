@@ -91,8 +91,8 @@ struct NativePreviewProductSignature: Equatable, Sendable {
         var pending = build.targets + build.previewRoots
         while let target = pending.popLast() {
             if let output = target.outputURL {
-                products.insert(NativePreviewCorrection.productBundle(containing: output)
-                    ?? NativePreviewCorrection.frameworkBundle(containing: output) ?? output)
+                products.insert(NativePreviewTool.productBundle(containing: output)
+                    ?? NativePreviewTool.frameworkBundle(containing: output) ?? output)
             }
             products.formUnion(target.resourceURLs)
             pending += target.dependencies
