@@ -7,7 +7,7 @@ import XcodeMCPProxyTestSupport
 
 /// A scripted host process. It answers `initialize` and, unless `handlesCatalog` is set,
 /// `tools/list` itself, and asks `handle` for every other request.
-final class FakeHostSession: UpstreamSession, Sendable {
+final class FakeHostSession: MCPProcessSession, Sendable {
     enum Reply: Sendable {
         case result(JSONValue)
         case error(code: Int, message: String)
@@ -17,8 +17,8 @@ final class FakeHostSession: UpstreamSession, Sendable {
         case backpressure
     }
 
-    let events: AsyncStream<Upstream.Event>
-    private let continuation: AsyncStream<Upstream.Event>.Continuation
+    let events: AsyncStream<MCPProcess.Event>
+    private let continuation: AsyncStream<MCPProcess.Event>.Continuation
     private let handle: @Sendable (_ method: String, _ params: [String: JSONValue]) -> Reply
     private let tools: NIOLockedValueBox<JSONValue>
     private let initializeReply: Reply?
@@ -43,14 +43,14 @@ final class FakeHostSession: UpstreamSession, Sendable {
          handle: @escaping @Sendable (_ method: String, _ params: [String: JSONValue]) -> Reply = { _, _ in
              .result(.object([:]))
          }) {
-        (events, continuation) = AsyncStream<Upstream.Event>.makeStream()
+        (events, continuation) = AsyncStream<MCPProcess.Event>.makeStream()
         self.tools = NIOLockedValueBox(tools)
         self.initializeReply = initializeReply
         self.handlesCatalog = handlesCatalog
         self.handle = handle
     }
 
-    func send(_ data: Data) async -> Upstream.SendResult {
+    func send(_ data: Data) async -> MCPProcess.SendResult {
         guard let value = (try? JSONSerialization.jsonObject(with: data)).flatMap(JSONValue.init(any:)),
               case .object(let object) = value else {
             Issue.record("The host received a message that is not a JSON object")
@@ -144,7 +144,7 @@ final class FakeHostSession: UpstreamSession, Sendable {
 }
 
 /// Starts a new `FakeHostSession` for every process start.
-final class FakeHostSessionFactory: UpstreamSessionFactory, Sendable {
+final class FakeHostSessionFactory: MCPProcessSessionFactory, Sendable {
     let sessions = NIOLockedValueBox<[FakeHostSession]>([])
     let started = LockedRecordedValues<FakeHostSession>()
     private let make: @Sendable (_ start: Int) throws -> FakeHostSession
@@ -153,7 +153,7 @@ final class FakeHostSessionFactory: UpstreamSessionFactory, Sendable {
         self.make = make
     }
 
-    func startSession() async throws -> any UpstreamSession {
+    func startSession() async throws -> any MCPProcessSession {
         let session = try make(sessions.withLockedValue { $0.count })
         sessions.withLockedValue { $0.append(session) }
         started.append(session)

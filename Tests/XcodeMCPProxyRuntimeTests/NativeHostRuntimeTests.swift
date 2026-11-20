@@ -34,7 +34,7 @@ struct NativeHostRuntimeTests {
     }
 
     @Test func nativeHostIgnoresInheritedGUIRoutingConfiguration() throws {
-        let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
+        let configuration = try NativeHostRuntime.makeDefaultProcessConfig(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: .seconds(5))),
             baseEnvironment: ["MCP_XCODE_PID": "9876", "MCP_XCODE_SESSION_ID": "parent-session",
                 "XCODE_PID": "legacy", "DEVELOPER_DIR": "/Parent/Developer", "PATH": "/usr/bin"])
@@ -52,7 +52,7 @@ struct NativeHostRuntimeTests {
     func compilationCacheSharingReachesTheOwnedHost(sharesCompilationCache: Bool) throws {
         var config = makeConfig(requestTimeout: .seconds(5))
         config.sharesCompilationCache = sharesCompilationCache
-        let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
+        let configuration = try NativeHostRuntime.makeDefaultProcessConfig(
             config: makeBridgeRuntimeConfig(config), baseEnvironment: [:])
 
         #expect(configuration.args.contains("--share-compilation-cache") == sharesCompilationCache)
@@ -69,7 +69,7 @@ struct NativeHostRuntimeTests {
         let environment = try await NativeHostRuntime.buildServiceEnvironment(
             baseEnvironment: ["PATH": "/usr/bin", "MCP_XCODE_PID": "9876"],
             processRunner: runner)
-        let configuration = try NativeHostRuntime.makeDefaultUpstreamConfig(
+        let configuration = try NativeHostRuntime.makeDefaultProcessConfig(
             config: makeBridgeRuntimeConfig(makeConfig(requestTimeout: .seconds(5))),
             baseEnvironment: environment)
 
@@ -187,8 +187,8 @@ struct NativeHostRuntimeTests {
 
 
     @Test func upstreamStderrLogLimiterSuppressesRepeatedMessages() {
-        let limiter = UpstreamStderrLogLimiter(duplicateLogIntervalNanoseconds: 1_000_000_000)
-        let message = "some upstream stderr"
+        let limiter = HostStderrLogLimiter(duplicateLogIntervalNanoseconds: 1_000_000_000)
+        let message = "some host stderr"
         let first = limiter.decision(
             upstreamIndex: 0,
             message: message,

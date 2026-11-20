@@ -1,6 +1,6 @@
 import os
 
-extension Upstream {
+extension MCPProcess {
     /// Where an owned process session reports conditions that it handles itself, such as a
     /// dropped stdout line or a failed signal.
     package struct Diagnostics: Sendable {

@@ -1,4 +1,4 @@
-package enum MCPBridgeRuntimeError: Error, Equatable, Sendable {
+package enum MCPRuntimeError: Error, Equatable, Sendable {
     case closed
     case invalidRequest(String)
     case invalidResponse(String)

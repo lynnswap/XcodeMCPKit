@@ -930,7 +930,7 @@ func compileOnlyClientDomainSurface() throws {
         .invalidRequest("missing tool name"),
         .invalidResponse("missing result"),
         .requestTimedOut(method: "tools/list"),
-        .serverError(code: -32000, message: "upstream unavailable", data: ["reason": "disabled"]),
+        .serverError(code: -32000, message: "host unavailable", data: ["reason": "disabled"]),
         .transportUnavailable("mcpbridge closed"),
         .sessionRecoveryFailed("replacement initialize failed"),
     ]

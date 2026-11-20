@@ -11,7 +11,7 @@ package enum NativeHostInvocation {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         executableURL: URL? = Bundle.main.executableURL,
         fileSystem: FileSystemClient = .liveValue
-    ) throws -> MCPBridgeInvocation {
+    ) throws -> MCPProcessInvocation {
         let executable: URL
         if let bundleURL {
             executable = try resolveExecutable(in: bundleURL, fileSystem: fileSystem)
@@ -35,21 +35,21 @@ package enum NativeHostInvocation {
             guard let bundle = candidates.first(where: {
                 fileSystem.isExecutableFile($0.appendingPathComponent("Contents/MacOS/\(executableName)").path)
             }) else {
-                throw MCPBridgeRuntimeError.transportUnavailable("Cannot find \(bundleName). Install XcodeMCPKit or supply nativeHostBundleURL / XCODE_MCP_NATIVE_HOST_BUNDLE.")
+                throw MCPRuntimeError.transportUnavailable("Cannot find \(bundleName). Install XcodeMCPKit or supply nativeHostBundleURL / XCODE_MCP_NATIVE_HOST_BUNDLE.")
             }
             executable = try resolveExecutable(in: bundle, fileSystem: fileSystem)
         }
         var arguments: [String] = []
         if let developerDirectoryURL { arguments += ["--developer-dir", developerDirectoryURL.path] }
         if sharesCompilationCache { arguments.append("--share-compilation-cache") }
-        return MCPBridgeInvocation(command: executable.path, arguments: arguments)
+        return MCPProcessInvocation(command: executable.path, arguments: arguments)
     }
 
     private static func resolveExecutable(in bundleURL: URL, fileSystem: FileSystemClient) throws -> URL {
         let executable = bundleURL.standardizedFileURL.resolvingSymlinksInPath()
             .appendingPathComponent("Contents/MacOS/\(executableName)")
         guard fileSystem.isExecutableFile(executable.path) else {
-            throw MCPBridgeRuntimeError.transportUnavailable("Native helper executable is unavailable: \(executable.path)")
+            throw MCPRuntimeError.transportUnavailable("Native helper executable is unavailable: \(executable.path)")
         }
         return executable
     }

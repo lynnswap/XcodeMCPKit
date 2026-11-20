@@ -536,7 +536,7 @@ struct NativeHostBrokerTests {
             "name": .string(NativeHostBroker.openWorkspaceTool),
             "arguments": .object(["path": .string("/Fixture/App.xcodeproj"), "hostIdentifier": other]),
         ]))
-        guard let error = failed.jsonRPCError, error.code == -32001, error.message == "upstream unavailable" else {
+        guard let error = failed.jsonRPCError, error.code == -32001, error.message == "host unavailable" else {
             Issue.record("A host that cannot start did not report itself unavailable: \(failed)"); return
         }
         #expect(try await fixture.workspaces(session).isEmpty)
@@ -562,7 +562,7 @@ struct NativeHostBrokerTests {
         guard let error = reply.jsonRPCError, error.code == -32603 else {
             Issue.record("runtime transport failure became a tool result"); return
         }
-        #expect(error.message == "invalid upstream response")
+        #expect(error.message == "invalid host response")
     }
 
     @Test func nativeProtocolErrorsKeepTheirPayloadAndClientCorrelation() async throws {
@@ -867,9 +867,9 @@ struct NativeHostBrokerTests {
     }
 }
 
-private final class BrokerTransport: UpstreamSession, Sendable {
-    let events: AsyncStream<Upstream.Event>
-    private let continuation: AsyncStream<Upstream.Event>.Continuation
+private final class BrokerTransport: MCPProcessSession, Sendable {
+    let events: AsyncStream<MCPProcess.Event>
+    private let continuation: AsyncStream<MCPProcess.Event>.Continuation
     let waiting = TestSignal()
     let stopped = TestSignal()
     let holdsStop = NIOLockedValueBox(false)
@@ -917,7 +917,7 @@ private final class BrokerTransport: UpstreamSession, Sendable {
         self.processID = processID ?? 1000 + index
         self.manifestOpensDirectory = manifestOpensDirectory
         initialization.withLockedValue { $0.held = holdsInitialization }
-        let pair = AsyncStream<Upstream.Event>.makeStream()
+        let pair = AsyncStream<MCPProcess.Event>.makeStream()
         events = pair.stream
         continuation = pair.continuation
     }
@@ -932,7 +932,7 @@ private final class BrokerTransport: UpstreamSession, Sendable {
         continuation.finish()
     }
 
-    func send(_ data: Data) async -> Upstream.SendResult {
+    func send(_ data: Data) async -> MCPProcess.SendResult {
         do {
             let object = try JSONRPC.Wire.object(fromData: data)
             if case .response(let id) = JSONRPC.Message.Inspector.kind(of: object) {
@@ -1122,7 +1122,7 @@ private final class BrokerRuntimeFactory: Sendable {
     let invalidResponses = NIOLockedValueBox<Set<String>>([])
     let created = TestSignal()
 
-    func make(_ configuration: NativeHostRuntime.Configuration) -> any UpstreamSessionFactory {
+    func make(_ configuration: NativeHostRuntime.Configuration) -> any MCPProcessSessionFactory {
         BrokerHostProcesses(owner: self)
     }
 
@@ -1150,7 +1150,7 @@ private final class BrokerRuntimeFactory: Sendable {
 }
 
 /// The processes of one host; each start is a new transport that keeps the host's index.
-private final class BrokerHostProcesses: UpstreamSessionFactory, Sendable {
+private final class BrokerHostProcesses: MCPProcessSessionFactory, Sendable {
     let owner: BrokerRuntimeFactory
     let index = NIOLockedValueBox<Int64?>(nil)
 
@@ -1158,7 +1158,7 @@ private final class BrokerHostProcesses: UpstreamSessionFactory, Sendable {
         self.owner = owner
     }
 
-    func startSession() async throws -> any UpstreamSession { try owner.start(self) }
+    func startSession() async throws -> any MCPProcessSession { try owner.start(self) }
 }
 
 private final class BrokerFixture: Sendable {

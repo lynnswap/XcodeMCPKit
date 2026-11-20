@@ -3,7 +3,7 @@ import Foundation
 import Logging
 import NIOConcurrencyHelpers
 
-enum UpstreamStderrLogFilter {
+enum HostStderrLogFilter {
     static func level(for message: String) -> Logger.Level {
         let defaultLevel: Logger.Level = NativeHostRuntime.diagnostic(in: message) == nil ? .debug : .error
         guard message.hasPrefix("["),
@@ -17,12 +17,12 @@ enum UpstreamStderrLogFilter {
     }
 }
 
-struct UpstreamStderrLogDecision: Sendable {
+struct HostStderrLogDecision: Sendable {
     let shouldLog: Bool
     let suppressedDuplicateCount: Int
 }
 
-final class UpstreamStderrLogLimiter: Sendable {
+final class HostStderrLogLimiter: Sendable {
     private struct Record: Sendable {
         var lastLoggedUptimeNs: UInt64
         var suppressedDuplicateCount: Int
@@ -43,7 +43,7 @@ final class UpstreamStderrLogLimiter: Sendable {
         upstreamIndex: Int,
         message: String,
         nowUptimeNs: UInt64
-    ) -> UpstreamStderrLogDecision {
+    ) -> HostStderrLogDecision {
         let key = "\(upstreamIndex)|\(message)"
         return state.withLockedValue { state in
             guard var record = state.recordsByKey[key] else {
@@ -51,7 +51,7 @@ final class UpstreamStderrLogLimiter: Sendable {
                     lastLoggedUptimeNs: nowUptimeNs,
                     suppressedDuplicateCount: 0
                 )
-                return UpstreamStderrLogDecision(
+                return HostStderrLogDecision(
                     shouldLog: true,
                     suppressedDuplicateCount: 0
                 )
@@ -60,7 +60,7 @@ final class UpstreamStderrLogLimiter: Sendable {
             guard nowUptimeNs &- record.lastLoggedUptimeNs >= duplicateLogIntervalNanoseconds else {
                 record.suppressedDuplicateCount += 1
                 state.recordsByKey[key] = record
-                return UpstreamStderrLogDecision(
+                return HostStderrLogDecision(
                     shouldLog: false,
                     suppressedDuplicateCount: record.suppressedDuplicateCount
                 )
@@ -70,7 +70,7 @@ final class UpstreamStderrLogLimiter: Sendable {
             record.lastLoggedUptimeNs = nowUptimeNs
             record.suppressedDuplicateCount = 0
             state.recordsByKey[key] = record
-            return UpstreamStderrLogDecision(
+            return HostStderrLogDecision(
                 shouldLog: true,
                 suppressedDuplicateCount: suppressedCount
             )

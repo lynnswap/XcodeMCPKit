@@ -81,7 +81,7 @@ package final class StreamableHTTPMCPClient: Sendable {
     package static func validateEndpoint(_ endpoint: URL) throws {
         guard let scheme = endpoint.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
-            throw MCPBridgeRuntimeError.invalidRequest(
+            throw MCPRuntimeError.invalidRequest(
                 "Streamable HTTP endpoint must use http or https: \(endpoint.absoluteString)"
             )
         }
@@ -105,7 +105,7 @@ package final class StreamableHTTPMCPClient: Sendable {
         )
         let (responseBytes, response) = try await urlSession.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw MCPBridgeRuntimeError.transportUnavailable("Streamable HTTP response was not HTTP")
+            throw MCPRuntimeError.transportUnavailable("Streamable HTTP response was not HTTP")
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
             if httpResponse.statusCode == 404, let sessionID = headers.sessionID {
@@ -161,7 +161,7 @@ package final class StreamableHTTPMCPClient: Sendable {
                     )
                     let (bytes, response) = try await urlSession.bytes(for: request)
                     guard let httpResponse = response as? HTTPURLResponse else {
-                        throw MCPBridgeRuntimeError.transportUnavailable(
+                        throw MCPRuntimeError.transportUnavailable(
                             "Streamable HTTP event stream response was not HTTP"
                         )
                     }
@@ -172,7 +172,7 @@ package final class StreamableHTTPMCPClient: Sendable {
                         }
                         if Self.isTerminalEventStreamStatus(httpResponse.statusCode) { return }
                         _ = try? await Self.collect(bytes)
-                        throw MCPBridgeRuntimeError.transportUnavailable(
+                        throw MCPRuntimeError.transportUnavailable(
                             "Streamable HTTP event stream failed with status \(httpResponse.statusCode)"
                         )
                     }
@@ -473,7 +473,7 @@ package actor StreamableHTTPMCPConnectionState {
     private var closeWaiters: [CheckedContinuation<Task<Void, Never>?, Never>] = []
 
     package func ensureOpen() throws {
-        if closed { throw MCPBridgeRuntimeError.closed }
+        if closed { throw MCPRuntimeError.closed }
     }
 
     package func reserveEventStreamStart() -> Bool {

@@ -29,7 +29,7 @@ public enum XcodeMCPError: Error, Equatable, Sendable {
     /// includes one.
     case serverError(code: Int, message: String, data: MCPJSONValue?)
 
-    /// The underlying bridge process or transport was unavailable.
+    /// The underlying MCP process or transport was unavailable.
     ///
     /// The associated string describes the transport failure.
     case transportUnavailable(String)

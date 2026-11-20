@@ -41,10 +41,10 @@ enum NativeHostRuntime {
         }
     }
 
-    static func makeDefaultUpstreamConfig(
+    static func makeDefaultProcessConfig(
         config: Configuration,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
-    ) throws -> UpstreamProcess.Config {
+    ) throws -> MCPProcessLauncher.Config {
         var environment = baseEnvironment
         environment.removeValue(forKey: "XCODE_PID")
         environment.removeValue(forKey: "MCP_XCODE_PID")
@@ -57,7 +57,7 @@ enum NativeHostRuntime {
             environment: environment)
         if let developerDirectoryURL { environment["DEVELOPER_DIR"] = developerDirectoryURL.path }
         let messageLimit = maxQueuedWriteBytes(for: config)
-        return UpstreamProcess.Config(
+        return MCPProcessLauncher.Config(
             command: invocation.command,
             args: invocation.arguments + ["--gui-tool-schemas", "--max-message-bytes", String(messageLimit)],
             environment: environment,
@@ -118,13 +118,13 @@ enum NativeHostRuntime {
 }
 
 /// Launches Apple's bridge lazily; ending it leaves the user's Xcode running.
-struct GUIXcodeSessionFactory: UpstreamSessionFactory {
+struct GUIXcodeSessionFactory: MCPProcessSessionFactory {
     let configuration: NativeHostRuntime.Configuration
     let environment: [String: String]
 
-    func startSession() async throws -> any UpstreamSession {
+    func startSession() async throws -> any MCPProcessSession {
         guard let developerDirectory = configuration.developerDirectoryURL else {
-            throw MCPBridgeRuntimeError.transportUnavailable("The GUI bridge requires an Xcode installation")
+            throw MCPRuntimeError.transportUnavailable("The GUI bridge requires an Xcode installation")
         }
         var environment = environment
         environment["DEVELOPER_DIR"] = developerDirectory.path
@@ -138,12 +138,12 @@ struct GUIXcodeSessionFactory: UpstreamSessionFactory {
                 }?.processIdentifier
             }
             guard let processID else {
-                throw MCPBridgeRuntimeError.transportUnavailable("Open \(applicationURL.path) before using the standard crash tools")
+                throw MCPRuntimeError.transportUnavailable("Open \(applicationURL.path) before using the standard crash tools")
             }
             // The native helper also advertises MCP. Never let Apple's bridge auto-select it.
             environment["MCP_XCODE_PID"] = String(processID)
         }
-        return try await UpstreamProcess(configuration: .init(
+        return try await MCPProcessLauncher(configuration: .init(
             command: developerDirectory.appendingPathComponent("usr/bin/mcpbridge").path,
             args: [], environment: environment,
             maxQueuedWriteBytes: NativeHostRuntime.maxQueuedWriteBytes(for: configuration),
@@ -151,17 +151,17 @@ struct GUIXcodeSessionFactory: UpstreamSessionFactory {
     }
 }
 
-struct NativeHostSessionFactory: UpstreamSessionFactory {
+struct NativeHostSessionFactory: MCPProcessSessionFactory {
     let configuration: NativeHostRuntime.Configuration
     let environment: [String: String]
 
-    func processConfiguration(environment: [String: String]) throws -> UpstreamProcess.Config {
-        try NativeHostRuntime.makeDefaultUpstreamConfig(
+    func processConfiguration(environment: [String: String]) throws -> MCPProcessLauncher.Config {
+        try NativeHostRuntime.makeDefaultProcessConfig(
             config: configuration, baseEnvironment: environment)
     }
 
-    func startSession() async throws -> any UpstreamSession {
+    func startSession() async throws -> any MCPProcessSession {
         let environment = try await NativeHostRuntime.buildServiceEnvironment(baseEnvironment: environment)
-        return try await UpstreamProcess(configuration: processConfiguration(environment: environment)).startSession()
+        return try await MCPProcessLauncher(configuration: processConfiguration(environment: environment)).startSession()
     }
 }

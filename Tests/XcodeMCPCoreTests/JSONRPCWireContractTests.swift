@@ -71,7 +71,7 @@ struct JSONRPCWireContractTests {
         let errorData = try JSONRPC.Wire.errorResponseData(
             id: numberID,
             code: -32002,
-            message: "upstream overloaded"
+            message: "host overloaded"
         )
         let response = try #require(
             JSONSerialization.jsonObject(with: errorData) as? [String: Any]
@@ -81,12 +81,12 @@ struct JSONRPCWireContractTests {
         #expect(response["jsonrpc"] as? String == "2.0")
         #expect((response["id"] as? NSNumber)?.intValue == 7)
         #expect((error["code"] as? NSNumber)?.intValue == -32002)
-        #expect(error["message"] as? String == "upstream overloaded")
+        #expect(error["message"] as? String == "host overloaded")
 
         let parsedError = try #require(JSONRPC.Wire.errorPayload(inResponseObject: response))
 
         #expect(parsedError.code == -32002)
-        #expect(parsedError.message == "upstream overloaded")
+        #expect(parsedError.message == "host overloaded")
 
         let invalidRequestData = try JSONRPC.Wire.errorResponseData(
             id: nil,

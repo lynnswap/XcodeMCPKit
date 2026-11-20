@@ -25,7 +25,7 @@ private final class StdinWriter: @unchecked Sendable {
         self.onComplete = onComplete
     }
 
-    func send(_ payload: Data) -> Upstream.SendResult {
+    func send(_ payload: Data) -> MCPProcess.SendResult {
         state.lock()
         defer { state.unlock() }
 
@@ -77,7 +77,7 @@ private final class StdinWriter: @unchecked Sendable {
     }
 }
 
-package struct UpstreamProcessStartedIO: Sendable {
+package struct MCPProcessStartedIO: Sendable {
     package let stdoutChunks: AsyncStream<Data>
     package let stderrChunks: AsyncStream<Data>
 
@@ -90,15 +90,15 @@ package struct UpstreamProcessStartedIO: Sendable {
     }
 }
 
-package protocol UpstreamProcessDriving: AnyObject, Sendable {
+package protocol MCPProcessDriving: AnyObject, Sendable {
     func start(
         command: String,
         args: [String],
         environment: [String: String],
         maxQueuedWriteBytes: Int,
         onTermination: @escaping @Sendable (Int32) -> Void
-    ) throws -> UpstreamProcessStartedIO
-    func sendStdin(_ payload: Data) -> Upstream.SendResult
+    ) throws -> MCPProcessStartedIO
+    func sendStdin(_ payload: Data) -> MCPProcess.SendResult
     func closeStdin()
     func terminate() -> Bool
     func forceTerminate() -> Bool
@@ -107,23 +107,23 @@ package protocol UpstreamProcessDriving: AnyObject, Sendable {
     func waitForOutputStopped() async
 }
 
-package protocol UpstreamProcessDriverMaking: Sendable {
-    func makeDriver() -> any UpstreamProcessDriving
+package protocol MCPProcessDriverMaking: Sendable {
+    func makeDriver() -> any MCPProcessDriving
 }
 
-package struct LiveUpstreamProcessDriverFactory: UpstreamProcessDriverMaking {
-    private let diagnostics: Upstream.Diagnostics
+package struct LiveMCPProcessDriverFactory: MCPProcessDriverMaking {
+    private let diagnostics: MCPProcess.Diagnostics
 
-    package init(diagnostics: Upstream.Diagnostics = .unifiedLog) {
+    package init(diagnostics: MCPProcess.Diagnostics = .unifiedLog) {
         self.diagnostics = diagnostics
     }
 
-    package func makeDriver() -> any UpstreamProcessDriving {
-        LiveUpstreamProcessDriver(diagnostics: diagnostics)
+    package func makeDriver() -> any MCPProcessDriving {
+        LiveMCPProcessDriver(diagnostics: diagnostics)
     }
 }
 
-private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecked Sendable {
+private final class LiveMCPProcessDriver: MCPProcessDriving, @unchecked Sendable {
     private struct State {
         var process: Process?
         var stdinPipe: Pipe?
@@ -134,11 +134,11 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         var stderrReader: OrderedPipeReader?
     }
 
-    private let diagnostics: Upstream.Diagnostics
+    private let diagnostics: MCPProcess.Diagnostics
     private let lock = NSLock()
     private var state = State()
 
-    init(diagnostics: Upstream.Diagnostics) {
+    init(diagnostics: MCPProcess.Diagnostics) {
         self.diagnostics = diagnostics
     }
 
@@ -148,7 +148,7 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         environment: [String: String],
         maxQueuedWriteBytes: Int,
         onTermination: @escaping @Sendable (Int32) -> Void
-    ) throws -> UpstreamProcessStartedIO {
+    ) throws -> MCPProcessStartedIO {
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -169,11 +169,11 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
 
         let stdoutReader = OrderedPipeReader(
             fileHandle: stdoutPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.UpstreamSession.stdout"
+            label: "XcodeMCPProxy.MCPProcessSession.stdout"
         )
         let stderrReader = OrderedPipeReader(
             fileHandle: stderrPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.UpstreamSession.stderr"
+            label: "XcodeMCPProxy.MCPProcessSession.stderr"
         )
 
         do {
@@ -190,7 +190,7 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         let stdinWriter = StdinWriter(
             fileHandle: stdinPipe.fileHandleForWriting,
             maxQueuedWriteBytes: maxQueuedWriteBytes,
-            label: "XcodeMCPProxy.UpstreamSession.stdin",
+            label: "XcodeMCPProxy.MCPProcessSession.stdin",
             onComplete: { [weak self] bytes, error in
                 self?.completeStdinWrite(bytes: bytes, error: error)
             }
@@ -211,13 +211,13 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         try? stdoutPipe.fileHandleForWriting.close()
         try? stderrPipe.fileHandleForWriting.close()
 
-        return UpstreamProcessStartedIO(
+        return MCPProcessStartedIO(
             stdoutChunks: stdoutReader.chunks,
             stderrChunks: stderrReader.chunks
         )
     }
 
-    func sendStdin(_ payload: Data) -> Upstream.SendResult {
+    func sendStdin(_ payload: Data) -> MCPProcess.SendResult {
         guard let stdinWriter = lock.withLock({ state.stdinWriter }) else {
             return .unavailable(.notStarted)
         }
@@ -250,7 +250,7 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         let result = kill(process.processIdentifier, SIGKILL)
         if result != 0, errno != ESRCH {
             diagnostics.error(
-                "Failed to force-terminate upstream process",
+                "Failed to force-terminate MCP process",
                 metadata: [
                     "pid": "\(process.processIdentifier)",
                     "errno": "\(errno)",
@@ -290,7 +290,7 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         let stdinWriter = lock.withLock { state.stdinWriter }
         stdinWriter?.completeWrite(bytes: bytes)
         if let error {
-            diagnostics.warning("Upstream async write failed", metadata: ["error": "\(error)"])
+            diagnostics.warning("MCP process async write failed", metadata: ["error": "\(error)"])
         }
     }
 
@@ -313,16 +313,16 @@ private final class LiveUpstreamProcessDriver: UpstreamProcessDriving, @unchecke
         let result = fcntl(fd, F_SETNOSIGPIPE, 1)
         if result == -1 {
             diagnostics.warning(
-                "Failed to disable SIGPIPE on upstream stdin pipe",
+                "Failed to disable SIGPIPE on MCP process stdin pipe",
                 metadata: ["errno": "\(errno)"]
             )
         }
     }
 }
 
-private final class UpstreamProcessCancellation: @unchecked Sendable {
+private final class MCPProcessCancellation: @unchecked Sendable {
     private struct State {
-        var driver: (any UpstreamProcessDriving)?
+        var driver: (any MCPProcessDriving)?
         var isCancelled = false
         var stdinClosed = false
         var outputStopped = false
@@ -335,7 +335,7 @@ private final class UpstreamProcessCancellation: @unchecked Sendable {
         lock.withLock { state.isCancelled }
     }
 
-    func install(_ driver: any UpstreamProcessDriving) {
+    func install(_ driver: any MCPProcessDriving) {
         let shouldCancel = lock.withLock { () -> Bool in
             precondition(state.driver == nil)
             state.driver = driver
@@ -348,7 +348,7 @@ private final class UpstreamProcessCancellation: @unchecked Sendable {
     }
 
     func closeStdin() {
-        let driver = lock.withLock { () -> (any UpstreamProcessDriving)? in
+        let driver = lock.withLock { () -> (any MCPProcessDriving)? in
             guard !state.stdinClosed, let driver = state.driver else { return nil }
             state.stdinClosed = true
             return driver
@@ -357,7 +357,7 @@ private final class UpstreamProcessCancellation: @unchecked Sendable {
     }
 
     func stopOutput() {
-        let driver = lock.withLock { () -> (any UpstreamProcessDriving)? in
+        let driver = lock.withLock { () -> (any MCPProcessDriving)? in
             guard !state.outputStopped, let driver = state.driver else { return nil }
             state.outputStopped = true
             return driver
@@ -370,7 +370,7 @@ private final class UpstreamProcessCancellation: @unchecked Sendable {
     }
 
     func cancel() {
-        let driver = lock.withLock { () -> (any UpstreamProcessDriving)? in
+        let driver = lock.withLock { () -> (any MCPProcessDriving)? in
             guard state.isCancelled == false else { return nil }
             state.isCancelled = true
             return state.driver
@@ -380,13 +380,13 @@ private final class UpstreamProcessCancellation: @unchecked Sendable {
         cancelDriver(driver)
     }
 
-    private func cancelDriver(_ driver: any UpstreamProcessDriving) {
+    private func cancelDriver(_ driver: any MCPProcessDriving) {
         _ = driver.terminate()
         stopOutput()
     }
 }
 
-package final class UpstreamTerminationDelay: Sendable {
+package final class MCPProcessTerminationDelay: Sendable {
     private let cancelImpl: @Sendable () -> Void
     private let terminal: AsyncTerminalSignal
 
@@ -407,20 +407,20 @@ package final class UpstreamTerminationDelay: Sendable {
     }
 }
 
-package protocol UpstreamTerminationDelayScheduling: Sendable {
+package protocol MCPProcessTerminationDelayScheduling: Sendable {
     func schedule(
         after delay: Duration,
         operation: @escaping @Sendable () -> Void
-    ) -> UpstreamTerminationDelay
+    ) -> MCPProcessTerminationDelay
 }
 
-package struct LiveUpstreamTerminationDelayScheduler: UpstreamTerminationDelayScheduling {
+package struct LiveMCPProcessTerminationDelayScheduler: MCPProcessTerminationDelayScheduling {
     package init() {}
 
     package func schedule(
         after delay: Duration,
         operation: @escaping @Sendable () -> Void
-    ) -> UpstreamTerminationDelay {
+    ) -> MCPProcessTerminationDelay {
         let terminal = AsyncTerminalSignal()
         let source = DispatchSource.makeTimerSource(
             queue: DispatchQueue.global(qos: .utility)
@@ -429,7 +429,7 @@ package struct LiveUpstreamTerminationDelayScheduler: UpstreamTerminationDelaySc
         source.setCancelHandler(handler: terminal.signal)
         source.schedule(deadline: .now() + Self.dispatchInterval(delay))
         source.resume()
-        return UpstreamTerminationDelay(terminal: terminal) {
+        return MCPProcessTerminationDelay(terminal: terminal) {
             source.cancel()
         }
     }
@@ -450,7 +450,7 @@ package struct LiveUpstreamTerminationDelayScheduler: UpstreamTerminationDelaySc
     }
 }
 
-private final class UpstreamTerminationRace: Sendable {
+private final class MCPProcessTerminationRace: Sendable {
     private struct State {
         var result: Bool?
         var waiters: [CheckedContinuation<Bool, Never>] = []
@@ -481,7 +481,7 @@ private final class UpstreamTerminationRace: Sendable {
     }
 }
 
-package struct UpstreamProcess: UpstreamSessionFactory {
+package struct MCPProcessLauncher: MCPProcessSessionFactory {
     package struct Config: Sendable {
         package var command: String
         package var args: [String]
@@ -489,10 +489,10 @@ package struct UpstreamProcess: UpstreamSessionFactory {
         package var maxQueuedWriteBytes: Int
         package var terminationDrainGrace: Duration
         package var terminationSignalGrace: Duration
-        package var terminationDelayScheduler: any UpstreamTerminationDelayScheduling
+        package var terminationDelayScheduler: any MCPProcessTerminationDelayScheduling
         package var clock: ClockClient
-        package var diagnostics: Upstream.Diagnostics
-        package var driverFactory: any UpstreamProcessDriverMaking
+        package var diagnostics: MCPProcess.Diagnostics
+        package var driverFactory: any MCPProcessDriverMaking
 
         package init(
             command: String,
@@ -501,11 +501,11 @@ package struct UpstreamProcess: UpstreamSessionFactory {
             maxQueuedWriteBytes: Int,
             terminationDrainGrace: Duration = .milliseconds(250),
             terminationSignalGrace: Duration = .seconds(1),
-            terminationDelayScheduler: any UpstreamTerminationDelayScheduling =
-                LiveUpstreamTerminationDelayScheduler(),
+            terminationDelayScheduler: any MCPProcessTerminationDelayScheduling =
+                LiveMCPProcessTerminationDelayScheduler(),
             clock: ClockClient = .liveValue,
-            diagnostics: Upstream.Diagnostics = .unifiedLog,
-            driverFactory: (any UpstreamProcessDriverMaking)? = nil
+            diagnostics: MCPProcess.Diagnostics = .unifiedLog,
+            driverFactory: (any MCPProcessDriverMaking)? = nil
         ) {
             self.command = command
             self.args = args
@@ -516,7 +516,7 @@ package struct UpstreamProcess: UpstreamSessionFactory {
             self.terminationDelayScheduler = terminationDelayScheduler
             self.clock = clock
             self.diagnostics = diagnostics
-            self.driverFactory = driverFactory ?? LiveUpstreamProcessDriverFactory(diagnostics: diagnostics)
+            self.driverFactory = driverFactory ?? LiveMCPProcessDriverFactory(diagnostics: diagnostics)
         }
     }
 
@@ -526,21 +526,21 @@ package struct UpstreamProcess: UpstreamSessionFactory {
         self.config = configuration
     }
 
-    package func startSession() async throws -> any UpstreamSession {
-        try await ProcessBackedUpstreamSession.start(configuration: config)
+    package func startSession() async throws -> any MCPProcessSession {
+        try await LiveMCPProcessSession.start(configuration: config)
     }
 }
 
-package actor ProcessBackedUpstreamSession: UpstreamSession {
-    package nonisolated let events: AsyncStream<Upstream.Event>
-    private let continuation: AsyncStream<Upstream.Event>.Continuation
+package actor LiveMCPProcessSession: MCPProcessSession {
+    package nonisolated let events: AsyncStream<MCPProcess.Event>
+    private let continuation: AsyncStream<MCPProcess.Event>.Continuation
 
-    private let config: UpstreamProcess.Config
-    private var diagnostics: Upstream.Diagnostics { config.diagnostics }
+    private let config: MCPProcessLauncher.Config
+    private var diagnostics: MCPProcess.Diagnostics { config.diagnostics }
     private let maxBufferedStderrBytes = 16 * 1024
-    private nonisolated let cancellation = UpstreamProcessCancellation()
+    private nonisolated let cancellation = MCPProcessCancellation()
 
-    private var driver: (any UpstreamProcessDriving)?
+    private var driver: (any MCPProcessDriving)?
     private var stdoutTask: Task<Void, Never>?
     private var stderrTask: Task<Void, Never>?
     private var framer = StdioFramer()
@@ -552,24 +552,24 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     private var suppressExitEvent = false
     private var pendingExitStatus: Int32?
     private var terminationDrainTimeoutTask: Task<Void, Never>?
-    private var terminationRaces: [UUID: UpstreamTerminationRace] = [:]
+    private var terminationRaces: [UUID: MCPProcessTerminationRace] = [:]
     private var didFinishEvents = false
     private var isStopping = false
     private var stopCompleted = false
     private var stopTask: Task<Void, Never>?
 
     package static func start(
-        configuration: UpstreamProcess.Config
-    ) async throws -> ProcessBackedUpstreamSession {
-        let session = ProcessBackedUpstreamSession(configuration: configuration)
+        configuration: MCPProcessLauncher.Config
+    ) async throws -> LiveMCPProcessSession {
+        let session = LiveMCPProcessSession(configuration: configuration)
         try await session.runProcess()
         return session
     }
 
-    private init(configuration: UpstreamProcess.Config) {
+    private init(configuration: MCPProcessLauncher.Config) {
         self.config = configuration
 
-        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
+        var streamContinuation: AsyncStream<MCPProcess.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -580,17 +580,17 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
         cancellation.cancel()
     }
 
-    package func send(_ data: Data) async -> Upstream.SendResult {
+    package func send(_ data: Data) async -> MCPProcess.SendResult {
         if didFinishEvents || terminationObserved {
-            diagnostics.warning("Upstream send skipped because session has terminated")
+            diagnostics.warning("MCP process send skipped because session has terminated")
             return .unavailable(.terminated)
         }
         if isStopping {
-            diagnostics.warning("Upstream send skipped because session is stopping")
+            diagnostics.warning("MCP process send skipped because session is stopping")
             return .unavailable(.shuttingDown)
         }
         guard let driver else {
-            diagnostics.warning("Upstream send skipped because session never started")
+            diagnostics.warning("MCP process send skipped because session never started")
             return .unavailable(.notStarted)
         }
 
@@ -602,7 +602,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
         let result = driver.sendStdin(payload)
         if result == .backpressure {
             diagnostics.warning(
-                "Upstream write queue overloaded",
+                "MCP process write queue overloaded",
                 metadata: [
                     "payload_bytes": "\(payload.count)",
                     "limit_bytes": "\(config.maxQueuedWriteBytes)",
@@ -628,7 +628,7 @@ package actor ProcessBackedUpstreamSession: UpstreamSession {
     }
 }
 
-private extension ProcessBackedUpstreamSession {
+private extension LiveMCPProcessSession {
     func runProcess() async throws {
         framer = StdioFramer()
         stderrBuffer = ""
@@ -650,7 +650,7 @@ private extension ProcessBackedUpstreamSession {
         let driver = config.driverFactory.makeDriver()
         self.driver = driver
         cancellation.install(driver)
-        let io: UpstreamProcessStartedIO
+        let io: MCPProcessStartedIO
         do {
             io = try driver.start(
                 command: config.command,
@@ -695,10 +695,10 @@ private extension ProcessBackedUpstreamSession {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
                         let preview = String(trimmed.prefix(200))
-                        diagnostics.warning("Dropping non-JSON upstream stdout", metadata: ["preview": "\(preview)"])
+                        diagnostics.warning("Dropping non-JSON MCP process stdout", metadata: ["preview": "\(preview)"])
                     }
                 } else {
-                    diagnostics.warning("Dropping non-UTF8 upstream stdout", metadata: ["bytes": "\(message.count)"])
+                    diagnostics.warning("Dropping non-UTF8 MCP process stdout", metadata: ["bytes": "\(message.count)"])
                 }
                 continue
             }
@@ -715,7 +715,7 @@ private extension ProcessBackedUpstreamSession {
         }
 
         diagnostics.error(
-            "Fatal upstream stdout protocol violation",
+            "Fatal MCP process stdout protocol violation",
             metadata: [
                 "reason": protocolViolation.reason.rawValue,
                 "buffered_bytes": "\(protocolViolation.bufferedByteCount)",
@@ -757,7 +757,7 @@ private extension ProcessBackedUpstreamSession {
             }
             flushBufferedStderrChunkIfNeeded()
         } else {
-            diagnostics.error("Upstream stderr (binary)", metadata: ["bytes": "\(data.count)"])
+            diagnostics.error("MCP process stderr (binary)", metadata: ["bytes": "\(data.count)"])
         }
     }
 
@@ -840,7 +840,7 @@ private extension ProcessBackedUpstreamSession {
         let grace = config.terminationSignalGrace
         guard grace > .zero else { return false }
         let id = UUID()
-        let race = UpstreamTerminationRace()
+        let race = MCPProcessTerminationRace()
         terminationRaces[id] = race
         if terminationObserved { race.complete(true) }
         let delay = config.terminationDelayScheduler.schedule(after: grace) {
@@ -856,7 +856,7 @@ private extension ProcessBackedUpstreamSession {
     func waitUntilTerminationObserved() async {
         if terminationObserved { return }
         let id = UUID()
-        let race = UpstreamTerminationRace()
+        let race = MCPProcessTerminationRace()
         terminationRaces[id] = race
         if terminationObserved { race.complete(true) }
         _ = await race.value()

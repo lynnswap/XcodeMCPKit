@@ -13,8 +13,8 @@ struct DocumentationSearchStressTests {
     @Test func documentationSearchHandlesFourSessionsWithOneThousandParallelRequestsEach() async throws {
         let sessionCount = 4
         let requestsPerSession = 1_000
-        let upstream = DocumentationSearchStressUpstreamClient(sessionCount: sessionCount)
-        let server = try StressHTTPServer.start(upstream: upstream)
+        let host = DocumentationSearchStressHostSession(sessionCount: sessionCount)
+        let server = try StressHTTPServer.start(host: host)
         let urlSession = makeStressURLSession()
         defer {
             urlSession.invalidateAndCancel()
@@ -35,7 +35,7 @@ struct DocumentationSearchStressTests {
                 urlSession: urlSession
             )
 
-            let counts = await upstream.documentationSearchCountsBySessionIndex()
+            let counts = await host.documentationSearchCountsBySessionIndex()
             #expect(counts == Array(repeating: requestsPerSession, count: sessionCount))
         } catch {
             try? await server.shutdown()
@@ -142,7 +142,7 @@ private struct StressHTTPServer {
     let broker: NativeHostBroker
     let childChannelTracker: HTTPTestServerChannelTracker
 
-    static func start(upstream: DocumentationSearchStressUpstreamClient) throws -> StressHTTPServer {
+    static func start(host: DocumentationSearchStressHostSession) throws -> StressHTTPServer {
         ProxyLogging.bootstrap(environment: ["MCP_LOG_LEVEL": "critical"])
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 4)
         let childChannelTracker = HTTPTestServerChannelTracker()
@@ -158,7 +158,7 @@ private struct StressHTTPServer {
         let broker = try NativeHostBroker(
             configuration: config,
             inventory: XcodeHostInventory(defaultInstallation: installation) { [installation] },
-            sessionFactory: { _ in SingleProcessFactory(session: upstream) })
+            sessionFactory: { _ in SingleProcessFactory(session: host) })
         let controlService = HTTPControlService(runtime: broker)
 
         let bootstrap = ServerBootstrap(group: group)
@@ -207,18 +207,18 @@ private struct StressHTTPServer {
     }
 }
 
-private struct SingleProcessFactory: UpstreamSessionFactory {
-    let session: DocumentationSearchStressUpstreamClient
-    func startSession() async throws -> any UpstreamSession { session }
+private struct SingleProcessFactory: MCPProcessSessionFactory {
+    let session: DocumentationSearchStressHostSession
+    func startSession() async throws -> any MCPProcessSession { session }
 }
 
-private actor DocumentationSearchStressUpstreamClient: UpstreamSession {
-    nonisolated let events: AsyncStream<Upstream.Event>
-    private let continuation: AsyncStream<Upstream.Event>.Continuation
+private actor DocumentationSearchStressHostSession: MCPProcessSession {
+    nonisolated let events: AsyncStream<MCPProcess.Event>
+    private let continuation: AsyncStream<MCPProcess.Event>.Continuation
     private var countsBySessionIndex: [Int]
 
     init(sessionCount: Int) {
-        var streamContinuation: AsyncStream<Upstream.Event>.Continuation!
+        var streamContinuation: AsyncStream<MCPProcess.Event>.Continuation!
         self.events = AsyncStream { continuation in
             streamContinuation = continuation
         }
@@ -234,7 +234,7 @@ private actor DocumentationSearchStressUpstreamClient: UpstreamSession {
         continuation.finish()
     }
 
-    func send(_ data: Data) async -> Upstream.SendResult {
+    func send(_ data: Data) async -> MCPProcess.SendResult {
         guard let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
             return .accepted
         }

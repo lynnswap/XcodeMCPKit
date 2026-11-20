@@ -2,14 +2,14 @@ import Foundation
 import Testing
 @testable import XcodeMCPCore
 
-struct StaticUpstreamProcessDriverFactory: UpstreamProcessDriverMaking {
-    private let driver: FakeUpstreamProcessDriver
+struct StaticMCPProcessDriverFactory: MCPProcessDriverMaking {
+    private let driver: FakeMCPProcessDriver
 
-    init(_ driver: FakeUpstreamProcessDriver) {
+    init(_ driver: FakeMCPProcessDriver) {
         self.driver = driver
     }
 
-    func makeDriver() -> any UpstreamProcessDriving {
+    func makeDriver() -> any MCPProcessDriving {
         driver
     }
 }
@@ -28,8 +28,8 @@ final class ControlledTerminationDelay: @unchecked Sendable {
         self.operation = operation
     }
 
-    func makeDelay() -> UpstreamTerminationDelay {
-        UpstreamTerminationDelay(terminal: terminal) { [weak self] in
+    func makeDelay() -> MCPProcessTerminationDelay {
+        MCPProcessTerminationDelay(terminal: terminal) { [weak self] in
             self?.cancel()
         }
     }
@@ -58,7 +58,7 @@ final class ControlledTerminationDelay: @unchecked Sendable {
 }
 
 final class ControlledTerminationDelayScheduler:
-    UpstreamTerminationDelayScheduling,
+    MCPProcessTerminationDelayScheduling,
     @unchecked Sendable
 {
     private let scheduled = DeterministicRecorder<ControlledTerminationDelay>()
@@ -66,7 +66,7 @@ final class ControlledTerminationDelayScheduler:
     func schedule(
         after delay: Duration,
         operation: @escaping @Sendable () -> Void
-    ) -> UpstreamTerminationDelay {
+    ) -> MCPProcessTerminationDelay {
         _ = delay
         let controlled = ControlledTerminationDelay(operation: operation)
         scheduled.record(controlled)
@@ -78,7 +78,7 @@ final class ControlledTerminationDelayScheduler:
     }
 }
 
-final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecked Sendable {
+final class FakeMCPProcessDriver: MCPProcessDriving, @unchecked Sendable {
     struct Snapshot: Sendable {
         let closeStdinCount: Int
         let terminateCount: Int
@@ -146,7 +146,7 @@ final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecked Sendab
         environment: [String: String],
         maxQueuedWriteBytes: Int,
         onTermination: @escaping @Sendable (Int32) -> Void
-    ) throws -> UpstreamProcessStartedIO {
+    ) throws -> MCPProcessStartedIO {
         _ = command
         _ = args
         _ = environment
@@ -155,14 +155,14 @@ final class FakeUpstreamProcessDriver: UpstreamProcessDriving, @unchecked Sendab
             state.maxQueuedWriteBytes = maxQueuedWriteBytes
             state.onTermination = onTermination
         }
-        return UpstreamProcessStartedIO(
+        return MCPProcessStartedIO(
             stdoutChunks: stdoutChunks,
             stderrChunks: stderrChunks
         )
     }
 
-    func sendStdin(_ payload: Data) -> Upstream.SendResult {
-        let result: Upstream.SendResult = lock.withLock {
+    func sendStdin(_ payload: Data) -> MCPProcess.SendResult {
+        let result: MCPProcess.SendResult = lock.withLock {
             guard state.isRunning else {
                 return .unavailable(.terminated)
             }

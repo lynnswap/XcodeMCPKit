@@ -86,7 +86,7 @@ public struct XcodeMCPProxyServerConfiguration: Equatable, Sendable {
     /// Whether to fetch native tool catalogs during startup.
     public var prewarmToolsList: Bool
 
-    /// Whether to serve `/debug/upstreams` and `/debug/reset`. They are served only on a loopback
+    /// Whether to serve `/debug/hosts` and `/debug/reset`. They are served only on a loopback
     /// listener. Defaults to `false`.
     public var enablesDebugEndpoints: Bool
 

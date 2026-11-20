@@ -125,7 +125,7 @@ three GUI tools, including `XcodeListWindows`, from installed Xcode schemas
 without executing their actions. Standalone native-host transports omit this
 flag and advertise only executable tools. The broker keeps
 their native tab selectors and results, and lazily starts Apple's `mcpbridge`
-through the existing upstream connection transport. That connection shares
+through the existing host connection transport. That connection shares
 request-ID/progress mapping, cancellation, restart, and shutdown handling with
 headless connections. Bridge failures never enter Organizer collection.
 Stopping the bridge terminates only the owned bridge process, leaving Xcode
