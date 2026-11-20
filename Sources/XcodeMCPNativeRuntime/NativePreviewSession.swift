@@ -30,7 +30,7 @@ final class NativePreviewSession {
             systemVersion = build.systemVersion
         }
 
-        init(_ destination: NativePreviewBuild.Destination) {
+        init(_ destination: NativePreviewDestinations.Destination) {
             identifier = destination.identifier
             systemVersion = destination.systemVersion
         }
@@ -43,8 +43,8 @@ final class NativePreviewSession {
         let location: NativePreviewDefinitions.Definition
         let index: Int
         let localization: String?
-        let context: NativePreviewBuild.PlanningContext
-        let destination: NativePreviewBuild.DestinationSelection
+        let context: NativePreviewDestinations.PlanningContext
+        let destination: NativePreviewDestinations.Selection
         var certificate: BuildCertificate?
     }
 
@@ -234,7 +234,7 @@ final class NativePreviewSession {
         }
     }
 
-    func prepareSimulator(destination: NativePreviewBuild.Destination,
+    func prepareSimulator(destination: NativePreviewDestinations.Destination,
                                   process: NativePreviewProcess) async throws {
         guard destination.previewPlatform?.isSimulator == true else { return }
         try await prepareSimulator(destination: SimulatorDestination(destination),

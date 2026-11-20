@@ -6,7 +6,7 @@ import Testing
 @MainActor
 struct NativePreviewBuildTests {
     @Test func sourceSelectionsWaitForRestorationAndCancelQueuedOperations() async throws {
-        let (builder, root) = try sourceSelectionBuilder()
+        let (destinations, root) = try sourceSelectionDestinations()
         defer { try? FileManager.default.removeItem(at: root) }
         let workspace = NSObject()
         let entered = AsyncStream<Void>.makeStream()
@@ -15,7 +15,7 @@ struct NativePreviewBuildTests {
         var input = "original"
         var observed: [String] = []
         let first = Task { @MainActor in
-            try await builder.withSourceSelection(workspace: workspace) {
+            try await destinations.withSourceSelection(workspace: workspace) {
                 input = "first"
                 entered.continuation.yield(())
                 defer { input = "original"; observed.append("restored") }
@@ -27,7 +27,7 @@ struct NativePreviewBuildTests {
         _ = await ready.next()
         let second = Task { @MainActor in
             attempted.continuation.yield(())
-            return try await builder.withSourceSelection(workspace: workspace) {
+            return try await destinations.withSourceSelection(workspace: workspace) {
                 observed.append(input)
                 return input
             }
@@ -35,7 +35,7 @@ struct NativePreviewBuildTests {
         var pending = attempted.stream.makeAsyncIterator()
         _ = await pending.next()
         let cancelled = Task { @MainActor in
-            try await builder.withSourceSelection(workspace: workspace) {
+            try await destinations.withSourceSelection(workspace: workspace) {
                 observed.append("cancelled operation ran")
             }
         }
@@ -52,7 +52,7 @@ struct NativePreviewBuildTests {
     }
 
     @Test func sourceSelectionDoesNotBlockAnotherWorkspace() async throws {
-        let (builder, root) = try sourceSelectionBuilder()
+        let (destinations, root) = try sourceSelectionDestinations()
         defer { try? FileManager.default.removeItem(at: root) }
         let firstWorkspace = NSObject()
         let secondWorkspace = NSObject()
@@ -61,7 +61,7 @@ struct NativePreviewBuildTests {
         let attempted = AsyncStream<Void>.makeStream()
         var secondEntered = false
         let first = Task { @MainActor in
-            try await builder.withSourceSelection(workspace: firstWorkspace) {
+            try await destinations.withSourceSelection(workspace: firstWorkspace) {
                 entered.continuation.yield(())
                 for await _ in release.stream { break }
             }
@@ -70,7 +70,7 @@ struct NativePreviewBuildTests {
         _ = await ready.next()
         let second = Task { @MainActor in
             attempted.continuation.yield(())
-            try await builder.withSourceSelection(workspace: secondWorkspace) { secondEntered = true }
+            try await destinations.withSourceSelection(workspace: secondWorkspace) { secondEntered = true }
         }
         var pending = attempted.stream.makeAsyncIterator()
         _ = await pending.next()
@@ -81,16 +81,22 @@ struct NativePreviewBuildTests {
         try await second.value
     }
 
-    private func sourceSelectionBuilder() throws -> (NativePreviewBuild, URL) {
+    private func sourceSelectionDestinations() throws -> (NativePreviewDestinations, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let app = root.appendingPathComponent("Xcode.app")
         try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/IDEFoundation.framework"),
                                                 withIntermediateDirectories: true)
-        return (NativePreviewBuild(installation: try NativeXcodeInstallation(developerDirectory: app)), root)
+        return (NativePreviewDestinations(installation: try NativeXcodeInstallation(developerDirectory: app)), root)
+    }
+
+    private func projectInputs() throws -> (NativePreviewProjectInputs, URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return (NativePreviewProjectInputs(), root)
     }
 
     @Test func inputRootsDetectReferencedProjectConfigurationChangesOutsideWorkspace() throws {
-        let (builder, root) = try sourceSelectionBuilder()
+        let (inputs, root) = try projectInputs()
         defer { try? FileManager.default.removeItem(at: root) }
         let workspaceURL = root.appendingPathComponent("Workspace/Fixture.xcworkspace")
         let projectFile = root.appendingPathComponent("Project/Fixture.xcodeproj/project.pbxproj")
@@ -106,7 +112,7 @@ struct NativePreviewBuildTests {
         let build = NativePreviewBuild.Result(targets: [], previewRoots: [], destinationIdentifier: "destination",
             previewDestinationIdentifier: "preview", platformIdentifier: nil, previewPlatform: nil, platformName: nil,
             deviceModelName: nil, systemVersion: nil, declaredInputFiles: [])
-        let roots = try #require(try builder.inputRoots(workspace: workspace, build: build, source: source))
+        let roots = try #require(try inputs.inputRoots(workspace: workspace, build: build, source: source))
         #expect(roots.missing == [alternateProjectFile])
         let before = try NativePreviewInputSnapshot.capture(roots: roots.roots, missingInputs: roots.missing)
         #expect(try before.matchesCurrentFiles())
@@ -124,7 +130,7 @@ struct NativePreviewBuildTests {
 
     @Test(arguments: [false, true])
     func projectSynchronizationSkipsSourceChangesButRefreshesSavedProjects(legacy: Bool) async throws {
-        let (builder, root) = try sourceSelectionBuilder()
+        let (inputs, root) = try projectInputs()
         defer { try? FileManager.default.removeItem(at: root) }
         let projectFile = root.appendingPathComponent("Fixture.xcodeproj/project.pbxproj")
         let alternate = projectFile.deletingLastPathComponent().appendingPathComponent("project.xcproj")
@@ -137,27 +143,27 @@ struct NativePreviewBuildTests {
             ? LegacyPreviewBuildProjectContainer(dataFiles: files) : PreviewBuildProjectContainer(dataFiles: files)
         let workspace = PreviewBuildWorkspace(url: root.appendingPathComponent("Fixture.xcworkspace"), containers: [container])
 
-        try await builder.synchronizeProjectContainers(in: workspace)
+        try await inputs.synchronizeProjectContainers(in: workspace)
         #expect(container.synchronizationCount == 1)
         try Data("edited view".utf8).write(to: source)
-        try await builder.synchronizeProjectContainers(in: workspace)
+        try await inputs.synchronizeProjectContainers(in: workspace)
         #expect(container.synchronizationCount == 1)
 
         try Data("edited project".utf8).write(to: projectFile)
-        try await builder.synchronizeProjectContainers(in: workspace)
+        try await inputs.synchronizeProjectContainers(in: workspace)
         #expect(container.synchronizationCount == 2)
         try Data("alternate project".utf8).write(to: alternate)
-        try await builder.synchronizeProjectContainers(in: workspace)
+        try await inputs.synchronizeProjectContainers(in: workspace)
         #expect(container.synchronizationCount == 3)
 
         // A new workspace must refresh even when it opens the same files.
         let replacement = PreviewBuildWorkspace(url: workspace.representingFilePath.fileURL, containers: [container])
-        try await builder.synchronizeProjectContainers(in: replacement)
+        try await inputs.synchronizeProjectContainers(in: replacement)
         #expect(container.synchronizationCount == 4)
     }
 
     @Test func untrackableProjectSettingsContinueRefreshing() async throws {
-        let (builder, root) = try sourceSelectionBuilder()
+        let (inputs, root) = try projectInputs()
         defer { try? FileManager.default.removeItem(at: root) }
         let projectFile = root.appendingPathComponent("project.pbxproj")
         try Data("project".utf8).write(to: projectFile)
@@ -165,8 +171,8 @@ struct NativePreviewBuildTests {
         container.pbxProject.targets = nil
         let workspace = PreviewBuildWorkspace(url: root.appendingPathComponent("Fixture.xcworkspace"), containers: [container])
 
-        try await builder.synchronizeProjectContainers(in: workspace)
-        try await builder.synchronizeProjectContainers(in: workspace)
+        try await inputs.synchronizeProjectContainers(in: workspace)
+        try await inputs.synchronizeProjectContainers(in: workspace)
 
         #expect(container.synchronizationCount == 2)
     }

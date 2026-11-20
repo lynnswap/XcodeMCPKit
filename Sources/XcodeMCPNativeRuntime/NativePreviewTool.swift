@@ -10,6 +10,8 @@ final class NativePreviewTool {
     private let installation: NativeXcodeInstallation
     private let builder: NativePreviewBuild
     private let definitions: NativePreviewDefinitions
+    private let destinations: NativePreviewDestinations
+    private let projectInputs = NativePreviewProjectInputs()
     private var operations: [UUID: (request: URL?, task: Task<Void, Never>)] = [:]
     private var sessions: [String: NativePreviewSession] = [:]
     private let renderQueue = NativePreviewRenderQueue()
@@ -20,6 +22,7 @@ final class NativePreviewTool {
         self.installation = installation
         builder = NativePreviewBuild(installation: installation)
         definitions = NativePreviewDefinitions(installation: installation)
+        destinations = NativePreviewDestinations(installation: installation)
     }
 
     static func handles(_ action: NativeActionClass) -> Bool {
@@ -249,8 +252,8 @@ final class NativePreviewTool {
         let workspace: AnyObject
         let source: URL
         let location: NativePreviewDefinitions.Definition
-        let destination: NativePreviewBuild.DestinationSelection
-        let context: NativePreviewBuild.PlanningContext
+        let destination: NativePreviewDestinations.Selection
+        let context: NativePreviewDestinations.PlanningContext
         let retainedBuild: (build: NativePreviewBuild.Result, signature: NativePreviewProductSignature)?
         let reusesDestination: Bool
         let inputRevision: UInt64
@@ -262,12 +265,12 @@ final class NativePreviewTool {
         let inputRevision = session.inputRevision
         let workspace = try await workspace(input.workspaceIdentifier)
         try await NativeWorkspaceRegistry.waitForSourcePackages(in: workspace)
-        let currentContext = try builder.planningContext(workspace: workspace)
+        let currentContext = try destinations.planningContext(workspace: workspace)
         var inputsAreCurrent = false
         if let plan = session.plan, let certificate = plan.certificate,
-           plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
+           plan.context.matches(try destinations.planningContext(workspace: workspace, destination: plan.destination)) {
             do {
-                let currentBuilder = try await builder.workspaceBuilder(for: plan.destination)
+                let currentBuilder = try plan.destination.workspaceBuilder()
                 if currentBuilder === certificate.workspaceBuilder,
                    try await NativePreviewInputSnapshot.matchesCurrentFiles(
                        source: certificate.inputs, generated: certificate.generatedInputs),
@@ -275,11 +278,11 @@ final class NativePreviewTool {
                     inputsAreCurrent = true
                     if plan.requestKey == input.requestKey, plan.sourcePath == input.sourcePath,
                        certificate.build.previewPlatform != nil, let signature = session.signature {
-                        let resolution = try await builder.resolveDestination(workspace: workspace, input: input.nativeValue)
-                        if try await builder.destinationResolution(resolution, matches: plan.destination.resolution),
+                        let resolution = try await destinations.resolveDestination(workspace: workspace, input: input.nativeValue)
+                        if try await destinations.destinationResolution(resolution, matches: plan.destination.resolution),
                            try await signature.matchesCurrentFiles(digestCache: session.productDigests), inputRevision == session.inputRevision,
-                           plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
-                            let destination = NativePreviewBuild.DestinationSelection(selected: plan.destination.selected, resolution: resolution)
+                           plan.context.matches(try destinations.planningContext(workspace: workspace, destination: plan.destination)) {
+                            let destination = NativePreviewDestinations.Selection(selected: plan.destination.selected, resolution: resolution)
                             return Prepared(workspace: workspace, source: plan.source, location: plan.location,
                                 destination: destination, context: currentContext,
                                 retainedBuild: (certificate.build, signature), reusesDestination: true,
@@ -294,21 +297,21 @@ final class NativePreviewTool {
         }
         if !inputsAreCurrent {
             session.plan = nil
-            try await builder.synchronizeProjectContainers(in: workspace)
+            try await projectInputs.synchronizeProjectContainers(in: workspace)
             try await NativeWorkspaceRegistry.waitForSourcePackages(in: workspace)
         }
         session.plan?.certificate = nil
         let source = try await definitions.sourceURL(input.sourcePath, workspace: workspace)
         let location = try await definitions.definition(in: source, at: input.index)
-        let context = try builder.planningContext(workspace: workspace)
-        let resolution = try await builder.resolveDestination(workspace: workspace, input: input.nativeValue)
+        let context = try destinations.planningContext(workspace: workspace)
+        let resolution = try await destinations.resolveDestination(workspace: workspace, input: input.nativeValue)
         if let plan = session.plan, plan.source == source, plan.index == input.index,
            plan.localization == input.localization,
-           plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)),
-           try await builder.destinationResolution(resolution, matches: plan.destination.resolution) {
+           plan.context.matches(try destinations.planningContext(workspace: workspace, destination: plan.destination)),
+           try await destinations.destinationResolution(resolution, matches: plan.destination.resolution) {
             do {
                 // The current build certifies a retained plan; stale plans return to native selection below.
-                let destination = NativePreviewBuild.DestinationSelection(selected: plan.destination.selected, resolution: resolution)
+                let destination = NativePreviewDestinations.Selection(selected: plan.destination.selected, resolution: resolution)
                 let build = try await builder.build(workspace: workspace, destination: destination, source: source)
                 if let platform = build.previewPlatform {
                     let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
@@ -316,7 +319,7 @@ final class NativePreviewTool {
                         digestCache: session.productDigests,
                         additionalProducts: session.additionalProducts)
                     if signature == session.signature,
-                       plan.context.matches(try builder.planningContext(workspace: workspace, destination: plan.destination)) {
+                       plan.context.matches(try destinations.planningContext(workspace: workspace, destination: plan.destination)) {
                         return Prepared(workspace: workspace, source: source, location: location, destination: destination,
                             context: context, retainedBuild: (build, signature), reusesDestination: true,
                             inputRevision: inputRevision, reusedCertificate: nil)
@@ -328,7 +331,7 @@ final class NativePreviewTool {
             }
         }
         session.plan = nil
-        let destination = try await builder.selectDestination(workspace: workspace, source: location.source, resolution: resolution)
+        let destination = try await destinations.selectDestination(workspace: workspace, source: location.source, resolution: resolution)
         _ = try await builder.prepare(workspace: workspace)
         try Task.checkCancellation()
         return Prepared(workspace: workspace, source: source, location: location, destination: destination,
@@ -337,12 +340,12 @@ final class NativePreviewTool {
     }
 
     private func certifyBuild(_ build: NativePreviewBuild.Result, workspace: AnyObject,
-                             destination: NativePreviewBuild.DestinationSelection, source: URL,
+                             destination: NativePreviewDestinations.Selection, source: URL,
                              session: NativePreviewSession, inputRevision: UInt64) async throws -> NativePreviewSession.BuildCertificate? {
         guard let buildStartedAt = build.buildStartedAt, let buildCompletedAt = build.buildCompletedAt,
               let workspaceBuilder = build.workspaceBuilder else { return nil }
         let outputPaths = build.inputCaptureExclusions.union([session.artifactsRoot])
-        guard let inputsToCapture = try builder.inputRoots(workspace: workspace, build: build, source: source, excluding: outputPaths) else { return nil }
+        guard let inputsToCapture = try projectInputs.inputRoots(workspace: workspace, build: build, source: source, excluding: outputPaths) else { return nil }
         let exclusions = NativePreviewInputSnapshot.coalescedExclusions(outputPaths, roots: inputsToCapture.roots)
         let inputs = try await NativePreviewInputSnapshot.capture(roots: inputsToCapture.roots, excluding: exclusions,
             missingInputs: build.missingInputFiles.union(inputsToCapture.missing))
@@ -353,7 +356,7 @@ final class NativePreviewTool {
             excluding: build.generatedInputExclusions, missingInputs: build.generatedMissingInputFiles)
         // Generated inputs may be written by this build, but never after its native operation completed.
         guard generatedInputs.predates(buildCompletedAt) else { return nil }
-        let currentBuilder = try await builder.workspaceBuilder(for: destination)
+        let currentBuilder = try destination.workspaceBuilder()
         guard currentBuilder === workspaceBuilder, inputRevision == session.inputRevision else { return nil }
         return NativePreviewSession.BuildCertificate(build: build, workspaceBuilder: workspaceBuilder,
             inputs: inputs, generatedInputs: generatedInputs)
@@ -430,7 +433,7 @@ final class NativePreviewTool {
     }
 
     private func prepareStage(_ input: Input, prepared: Prepared, session: NativePreviewSession,
-                              build: NativePreviewBuild.Result, destination: NativePreviewBuild.DestinationSelection,
+                              build: NativePreviewBuild.Result, destination: NativePreviewDestinations.Selection,
                               platform: NativePreviewPlatform, process: NativePreviewProcess,
                               metadataOnly: Bool? = nil, isLegacyComplication: Bool? = nil,
                               nativeWidget: Bool = false) async throws -> NativePreviewSession.RendererStage {
@@ -480,7 +483,7 @@ final class NativePreviewTool {
     }
 
     private func prepareRenderer(_ input: Input, prepared: Prepared, directory: URL, build: NativePreviewBuild.Result,
-                                 destination: NativePreviewBuild.DestinationSelection,
+                                 destination: NativePreviewDestinations.Selection,
                                  platform: NativePreviewPlatform, process: NativePreviewProcess,
                                  digestCache: NativePreviewProductSignature.DigestCache,
                                  metadataOnly: Bool? = nil, isLegacyComplication: Bool? = nil,
@@ -503,7 +506,7 @@ final class NativePreviewTool {
             product = appProduct
             sourceProduct = nil
         } else {
-            product = try await builder.frameworkAgent(for: destination)
+            product = try await destinations.frameworkAgent(for: destination)
             sourceProduct = NativePreviewStaging.frameworkBundle(containing: output) ?? output
         }
         let app = directory.appendingPathComponent(sourceProduct == nil ? "Preview.app" : product.lastPathComponent, isDirectory: true)
@@ -691,12 +694,12 @@ final class NativePreviewTool {
         guard let metadata = metadataResponse.nativeMetadata else {
             throw NativeRuntimeError.invocation("The preview process returned no native metadata")
         }
-        let evaluated: NativePreviewBuild.DestinationSelection
+        let evaluated: NativePreviewDestinations.Selection
         if prepared.reusesDestination, session.plan != nil {
             evaluated = destination
         } else {
-            let resolution = try await builder.resolveDestination(workspace: workspace, input: input.nativeValue)
-            evaluated = try await builder.selectDestination(workspace: workspace, source: location.source,
+            let resolution = try await destinations.resolveDestination(workspace: workspace, input: input.nativeValue)
+            evaluated = try await destinations.selectDestination(workspace: workspace, source: location.source,
                 resolution: resolution, metadata: metadata,
                 providerDescription: metadataResponse.nativeProviderPreviewDescription)
         }
@@ -708,13 +711,13 @@ final class NativePreviewTool {
             platform = selectedPlatform
             try await session.update(build: build, source: prepared.source, platform: platform, process: process)
         }
-        let planContext = try builder.planningContext(workspace: workspace, destination: destination)
+        let planContext = try destinations.planningContext(workspace: workspace, destination: destination)
         let isLegacyComplication: Bool?
         if platform == .watchOS, location.providerPath != nil {
             let complication: Bool
             if let cached = metadataEntry.isComplicationPreview { complication = cached }
             else {
-                complication = try await builder.isComplicationPreview(metadata: metadata)
+                complication = try await destinations.isComplicationPreview(metadata: metadata)
                 metadataEntry.isComplicationPreview = complication
             }
             isLegacyComplication = complication ? true : nil
@@ -723,7 +726,7 @@ final class NativePreviewTool {
         if platform == .iOS || platform == .watchOS {
             if let cached = metadataEntry.isWidgetPreview { nativeWidget = cached }
             else {
-                nativeWidget = try await builder.isWidgetPreview(metadata: metadata)
+                nativeWidget = try await destinations.isWidgetPreview(metadata: metadata)
                 metadataEntry.isWidgetPreview = nativeWidget
             }
         } else { nativeWidget = false }
@@ -745,7 +748,7 @@ final class NativePreviewTool {
                 specification = try await definitions.registrySpecification(registry: registry, moduleName: moduleName)
             } else if let providerName = renderer.request.providerTypeName, let description = metadataResponse.nativeProviderPreviewDescription {
                 specification = try await definitions.providerSpecification(name: providerName,
-                    description: builder.decodePreviewValue(description, named: "PreviewDescription"))
+                    description: destinations.decodePreviewValue(description, named: "PreviewDescription"))
             } else { throw NativePipelineRequired() }
             if !stage.nativeWidgetPrepared {
                 let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/PreviewRenderer/\(platform.helperDirectory)")
@@ -848,8 +851,8 @@ final class NativePreviewTool {
                 }
             }
         }
-        if prepared.context.matches(try builder.planningContext(workspace: workspace)),
-           planContext.matches(try builder.planningContext(workspace: workspace, destination: destination)) {
+        if prepared.context.matches(try destinations.planningContext(workspace: workspace)),
+           planContext.matches(try destinations.planningContext(workspace: workspace, destination: destination)) {
             session.plan = NativePreviewSession.RetainedPlan(requestKey: input.requestKey, sourcePath: input.sourcePath,
                 source: prepared.source, location: prepared.location, index: input.index, localization: input.localization,
                 context: planContext, destination: destination, certificate: certificate)
