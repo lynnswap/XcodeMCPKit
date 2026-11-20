@@ -6,12 +6,12 @@ import Testing
 struct NativePreviewLocationTests {
     @Test func unicodePrefixUsesMacroByteCoordinates() throws {
         let source = "import SwiftUI\n/* 🌸 */ #Preview { Text(\"A\") }\n"
-        #expect(try NativePreviewTool.registryColumn(in: source, line: 2, utf16Column: 9) == 12)
+        #expect(try NativePreviewDefinitions.registryColumn(in: source, line: 2, utf16Column: 9) == 12)
     }
 
     @Test func changedSourceCannotUseStaleCoordinates() {
         #expect(throws: NativeRuntimeError.self) {
-            try NativePreviewTool.registryColumn(in: "#Preview {}", line: 1, utf16Column: 100)
+            try NativePreviewDefinitions.registryColumn(in: "#Preview {}", line: 1, utf16Column: 100)
         }
     }
 }

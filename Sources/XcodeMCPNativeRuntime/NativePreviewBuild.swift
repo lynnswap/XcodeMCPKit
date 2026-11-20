@@ -664,7 +664,7 @@ final class NativePreviewBuild {
         var result = records.map(\.target)
         var previewRoots: [Target] = []
         if let platform {
-            let selection = try NativePreviewTool.selectTarget(result, source: source, platform: platform)
+            let selection = try NativePreviewStaging.selectTarget(result, source: source, platform: platform)
             if let index = result.firstIndex(where: {
                 $0.outputURL == selection.host.outputURL && $0.sdkRoot == selection.host.sdkRoot
                     && $0.sdkVariant == selection.host.sdkVariant && $0.architecture == selection.host.architecture
@@ -681,7 +681,7 @@ final class NativePreviewBuild {
                     result[index].compileCommandLine = try await compileCommandLine(for: records[index], priorBuild: priorBuild,
                         workspace: workspace, source: source, image: image)
                 }
-                if let hostOutput = selection.host.outputURL, NativePreviewTool.productBundle(containing: hostOutput) == nil {
+                if let hostOutput = selection.host.outputURL, NativePreviewStaging.productBundle(containing: hostOutput) == nil {
                     let sourceRecord = (buildable: records[index].buildable, native: records[index].native, target: result[index])
                     let dependencies = try await dependencies(for: sourceRecord, records: records, buildables: buildables, image: image,
                         priorBuild: priorBuild, workspace: workspace, scheme: scheme, destination: destination)
